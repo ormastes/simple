@@ -9,6 +9,9 @@ use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
 use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
 use os.kernel.boot.dtb_parser.{parse_dtb, DtbDeviceInfo}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.riscv64.hal_smp.{hal_smp_init_from_dtb_info}
+use os.kernel.arch.riscv64.hal_cache.{hal_cache_init_from_dtb_info}
+use os.kernel.boot.riscv_noalloc_pmm.{riscv_noalloc_pmm_init}
 
 val QEMU_RAM_BASE: u64 = 0x80000000
 val QEMU_RAM_SIZE: u64 = 128 * 1024 * 1024
@@ -29,7 +32,10 @@ var g_dtb_info: DtbDeviceInfo = DtbDeviceInfo(
     plic_base: 0, plic_size: 0,
     clint_base: 0, clint_size: 0,
     ram_base: 0, ram_size: 0,
-    hart_count: 0, valid: false
+    hart_count: 0,
+    first_enabled_riscv_isa: "",
+    cbom_block_size: 0,
+    valid: false
 )
 var g_dtb_valid_cached: bool = false
 var g_uart_base_cached: u64 = QEMU_UART_BASE
@@ -37,6 +43,9 @@ var g_plic_base_cached: u64 = QEMU_PLIC_BASE
 var g_clint_base_cached: u64 = QEMU_CLINT_BASE
 var g_ram_base_cached: u64 = QEMU_RAM_BASE
 var g_ram_size_cached: u64 = QEMU_RAM_SIZE
+var g_hart_count_cached: u32 = 1u32
+var g_first_enabled_riscv_isa_cached: text = ""
+var g_cbom_block_size_cached: u32 = 64u32
 
 fn _uart_base() -> u64:
     return g_uart_base_cached
@@ -64,7 +73,10 @@ fn _empty_dtb_info() -> DtbDeviceInfo:
         plic_base: 0, plic_size: 0,
         clint_base: 0, clint_size: 0,
         ram_base: 0, ram_size: 0,
-        hart_count: 0, valid: false
+        hart_count: 0,
+        first_enabled_riscv_isa: "",
+        cbom_block_size: 0,
+        valid: false
     )
 
 fn _apply_dtb_info(dtb_info: DtbDeviceInfo):
@@ -75,6 +87,20 @@ fn _apply_dtb_info(dtb_info: DtbDeviceInfo):
     g_clint_base_cached = _pick_nonzero(dtb_info.valid, dtb_info.clint_base, QEMU_CLINT_BASE)
     g_ram_base_cached = _pick_nonzero(dtb_info.valid, dtb_info.ram_base, QEMU_RAM_BASE)
     g_ram_size_cached = _pick_nonzero(dtb_info.valid, dtb_info.ram_size, QEMU_RAM_SIZE)
+    if dtb_info.valid and dtb_info.hart_count > 0u32:
+        g_hart_count_cached = dtb_info.hart_count
+    else:
+        g_hart_count_cached = 1u32
+    if dtb_info.valid:
+        g_first_enabled_riscv_isa_cached = dtb_info.first_enabled_riscv_isa
+    else:
+        g_first_enabled_riscv_isa_cached = ""
+    if dtb_info.valid and dtb_info.cbom_block_size > 0u32:
+        g_cbom_block_size_cached = dtb_info.cbom_block_size
+    else:
+        g_cbom_block_size_cached = 64u32
+    hal_smp_init_from_dtb_info(dtb_info)
+    hal_cache_init_from_dtb_info(dtb_info)
 
 fn _parse_saved_dtb():
     if g_dtb_addr == 0:
@@ -166,6 +192,30 @@ fn rv64_boot_ram_size() -> u64:
     val ram_size = _ram_size()
     return ram_size
 
+fn rv64_boot_initialize_from_dtb_info(dtb_info: DtbDeviceInfo):
+    """Commit one parsed DTB snapshot and initialize dependent RV64 HAL state."""
+    _apply_dtb_info(dtb_info)
+
+fn rv64_boot_init_pmm_from_validated_dtb(reserved_end: u64, heap_start: u64) -> bool:
+    """Initialize PMM from committed DTB RAM only after validation succeeds.
+
+    Early entry remains on deterministic QEMU constants because DTB parsing
+    requires module initialization and heap-backed values. Higher boot stages
+    call this after rv64_boot_initialize_from_dtb_info/parse_boot_info.
+    """
+    if not g_dtb_valid_cached:
+        return false
+    riscv_noalloc_pmm_init(g_ram_base_cached, g_ram_size_cached, reserved_end, heap_start)
+
+fn rv64_boot_hart_count() -> u32:
+    g_hart_count_cached
+
+fn rv64_boot_first_enabled_riscv_isa() -> text:
+    g_first_enabled_riscv_isa_cached
+
+fn rv64_boot_cbom_block_size() -> u32:
+    g_cbom_block_size_cached
+
 impl Rv64Boot:
     static fn save_boot_args(hart_id: u64, dtb_addr: u64):
         _save_boot_args(hart_id, dtb_addr)
@@ -186,6 +236,18 @@ impl Rv64Boot:
         _parse_saved_dtb()
         val dtb_info = g_dtb_info
         return dtb_info
+
+    static fn initialize_from_dtb_info(dtb_info: DtbDeviceInfo):
+        _apply_dtb_info(dtb_info)
+
+    static fn hart_count() -> u32:
+        g_hart_count_cached
+
+    static fn first_enabled_riscv_isa() -> text:
+        g_first_enabled_riscv_isa_cached
+
+    static fn cbom_block_size() -> u32:
+        g_cbom_block_size_cached
 
     static fn dtb_valid() -> bool:
         _parse_saved_dtb()

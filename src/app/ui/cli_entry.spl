@@ -6,6 +6,7 @@
 
 use app.ui.detect.{detect_gui_backend}
 use app.ui.backend_loader.{run_ui_backend_dyn, run_ui_render_dyn}
+use app.ui.tui.app.{run_tui}
 use app.ui.backend_entry_args.{parse_ui_port_or_default}
 use app.ui.access_cli.{run_ui_access_cli}
 use app.io.cli_ops.{cli_get_args}
@@ -34,49 +35,49 @@ pub fn run_ui_cli_entry() -> i64:
         if arg_count < 2:
             print "Error: tui mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn("tui", file_path, port, access_db_path)
+        return dispatch_ui_backend("tui", file_path, port, access_db_path)
 
     if mode == "tauri":
         if arg_count < 2:
             print "Error: tauri mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn("tauri", file_path, port, access_db_path)
+        return dispatch_ui_backend("tauri", file_path, port, access_db_path)
 
     if mode == "web":
         if arg_count < 2:
             print "Error: web mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn("web", file_path, port, access_db_path)
+        return dispatch_ui_backend("web", file_path, port, access_db_path)
 
     if mode == "electron":
         if arg_count < 2:
             print "Error: electron mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn("electron", file_path, port, access_db_path)
+        return dispatch_ui_backend("electron", file_path, port, access_db_path)
 
     if mode == "browser":
         if arg_count < 2:
             print "Error: browser mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn("browser", file_path, port, access_db_path)
+        return dispatch_ui_backend("browser", file_path, port, access_db_path)
 
     if mode == "tui_web":
         if arg_count < 2:
             print "Error: tui_web mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn("tui_web", file_path, port, access_db_path)
+        return dispatch_ui_backend("tui_web", file_path, port, access_db_path)
 
     if mode == "headless" or mode == "none":
         if arg_count < 2:
             print "Error: headless mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn("headless", file_path, port, access_db_path)
+        return dispatch_ui_backend("headless", file_path, port, access_db_path)
 
     if mode == "gui" or mode == "desktop":
         if arg_count < 2:
             print "Error: gui mode requires a .ui.sdn file path"
             return 1
-        return run_ui_backend_dyn(detect_gui_backend(), file_path, port, access_db_path)
+        return dispatch_ui_backend(detect_gui_backend(), file_path, port, access_db_path)
 
     if mode == "render":
         return run_ui_render_dyn(collect_render_args())
@@ -137,7 +138,34 @@ fn parse_ui_cli() -> (i64, text, text, i32, text):
     return (arg_count, mode, file_path, port, access_db_path)
 
 fn run_detected_backend(backend: text, file_path: text, port: i32, access_db_path: text) -> i64:
-    run_ui_backend_dyn(backend, file_path, port, access_db_path)
+    dispatch_ui_backend(backend, file_path, port, access_db_path)
+
+# Name how the dispatcher launches a backend: "in-process" or "spawn".
+#
+# Only the interactive terminal TUI runs in-process. It must inherit this
+# process's stdin and tty, and no facade in
+# `std.nogc_sync_mut.io.process_ops` can give a child both: `process_run` (and
+# every sibling) pipes stdout and replays it after exit, while
+# `rt_process_spawn_async` inherits stdout/stderr but sets stdin to null
+# (`src/compiler_rust/runtime/src/value/sffi/env_process.rs:800-802`). A
+# runtime-boundary change is out of this lane's scope, so the TUI is imported
+# and called directly instead. That costs nothing in closure terms: the TUI
+# closure (`backend_entry_tui.spl`, 114 files) is already compositor-free, so
+# `check-ui-slim-closure.shs` still reports 0 forbidden entries.
+#
+# `tui_shared_wm` is deliberately NOT in-process: it drives a shared window
+# manager over IPC rather than this terminal, so it keeps the spawn path.
+pub fn ui_backend_launch_mode(backend: text) -> text:
+    if backend == "tui":
+        return "in-process"
+    "spawn"
+
+# Single dispatch point for every `simple ui <mode> <file>` backend launch.
+pub fn dispatch_ui_backend(backend: text, file_path: text, port: i32, access_db_path: text) -> i64:
+    val resolved = if backend == "gui" or backend == "desktop" or backend == "auto": detect_gui_backend() else: backend
+    if ui_backend_launch_mode(resolved) == "in-process":
+        return run_tui(file_path)
+    run_ui_backend_dyn(resolved, file_path, port, access_db_path)
 
 fn collect_render_args() -> [text]:
     val raw_args = cli_get_args()

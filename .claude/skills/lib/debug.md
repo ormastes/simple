@@ -1,5 +1,42 @@
 # Debug Skill
 
+## Bootstrap failure collection
+
+For bootstrap/build/test defects, collect independent failures, group root
+causes under bug IDs, and preserve repro commands and phase/producer/entry
+caches. Add faithful and similar regressions after each fix; stop after at most
+three verify/fix cycles and report unresolved rows. Follow the
+[shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
+## Evidence-Driven Workflow
+
+Run D0–D12: intake → preserve raw evidence/build identity → live doctor →
+classify → set perturbation/privacy/downtime/retention/token budgets → cheapest
+decisive observation → production-shaped reproduction → falsifiable hypothesis
+→ receipted probe/attach → root owner → justified test level → fix/verify →
+cleanup and knowledge extraction. Do not start with print statements or infer
+live support from source presence.
+
+Claim one bug record before editing. At completion persist provider-reported
+input/output/cache-read/cache-create token usage (or `unavailable`) per bug in
+the bug database and investigation log, then
+compare it with the rolling average for comparable completed bugs. If it exceeds
+2× average, update the owning feature/layer knowledge with the reusable lesson
+and link it from the bug. Never store prompt text or credentials.
+
+For externally visible bugs, reproduce the same mechanism first in a
+production-shaped System SSpec and then in the smallest owning-boundary
+Integration SSpec. If System reproduction cannot be faithful, debug the
+environment, evidence, and reachability; if Integration reproduction fails,
+debug the proposed boundary and hypothesis. Never substitute unrelated green
+tests. Only after faithful reproduction should adjacent tests expand the shared
+root-cause class.
+Then require a same-mechanism similar scenario at System, Integration, and Unit
+levels, 100% branch coverage for each changed unit owner, and one commit
+containing fix, tests, coverage evidence, and bug/token receipt.
+
 ## Logging & IR Export
 
 ```bash
@@ -83,6 +120,22 @@ Inspect: `debug_stack_trace`, `debug_get_variables`, `debug_evaluate`, `debug_wa
 Logging: `debug_log_enable(pattern)`, `debug_log_query`, `debug_log_tree`
 
 ## Bootstrap Debugging
+
+For temporary source workarounds, follow
+[bug-linked workarounds](../../../doc/07_guide/tooling/bug_linked_workarounds.md)
+(accepted contract; runtime qualification pending). Put
+`# @workaround bug=<canonical-id> [recover=<7..64hex>] [reason=<text>]`
+immediately before the affected block; `//` is also accepted. Ordinary
+`simple check-dbs bugs --bug=<canonical-id>` queries only the derived index.
+Missing coverage or HEAD mismatch requires `simple check-dbs --fullscan bugs`.
+Fix the owning bug first, review its linked blocks, then apply narrow recovery
+and the smallest justified build. A recovery hash is evidence, never automatic
+checkout/reset authority. Preserve producer/entry/dependency/ABI/options cache
+identities and defer the final clean gate to the required boundary.
+
+Start Phase 3 and Phase 4 diagnostics once their required compiler binary
+exists, alongside unfinished upstream admission. Isolate caches/outputs and
+record the exact producer; require admission before promoting those results.
 
 ```bash
 scripts/capture_bootstrap_debug.sh     # Capture output

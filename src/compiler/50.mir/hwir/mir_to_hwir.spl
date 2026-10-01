@@ -150,6 +150,7 @@ fn strict_mir_bit_width(type_: MirType) -> i32:
     match type_.kind:
         case Bool: 1
         case I32 | U32: 32
+        case I64 | U64: 64
         case Bits(width, _):
             if width > 0 and width <= 64:
                 width as i32
@@ -192,6 +193,9 @@ fn strict_mir_comb_op(op: MirBinOp) -> text:
     match op:
         case BitAnd: "and"
         case BitOr: "or"
+        case BitXor: "xor"
+        case Add: "add"
+        case Sub: "sub"
         case Shl: "shl"
         case Shr: "shr"
         case _: ""
@@ -228,6 +232,14 @@ fn strict_mir_same_type(left: MirType, right: MirType) -> bool:
         case I32:
             match right.kind:
                 case I32: true
+                case _: false
+        case I64:
+            match right.kind:
+                case I64: true
+                case _: false
+        case U64:
+            match right.kind:
+                case U64: true
                 case _: false
         case Bits(left_width, left_signed):
             match right.kind:
@@ -670,8 +682,12 @@ pub fn lower_strict_mir_function_to_hwir(func: MirFunction, config: CoreConfig) 
                 val width = strict_mir_bit_width(type_)
                 if width == 0 or value < 0:
                     return HwirStrictLowerResult.rejected("HWIR-E-MIR-CONSTANT: strict MIR supports non-negative fixed-width integer constants only")
+                # The inner binding must NOT be named `value`: it would shadow the
+                # matched constant payload of the same name, and the interpreter
+                # then passes the resolved TEXT name into HwConstant.bits where
+                # the i64 constant belongs ("cannot convert string to int").
                 val result = match strict_mir_local_name(func, dest, direct_output_id):
-                    case Ok(value): value
+                    case Ok(resolved_name): resolved_name
                     case Err(error): return HwirStrictLowerResult.rejected(error)
                 val constant_name = if result == "result_out": "constant_result" else: result
                 constants.push(HwConstant.bits(constant_name, width, value))

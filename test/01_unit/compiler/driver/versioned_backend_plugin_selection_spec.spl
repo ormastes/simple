@@ -1,0 +1,121 @@
+# Focused REQ-003/REQ-004/REQ-005/REQ-007 evidence for driver-owned backend
+# request projection. The existing compiler/JIT implementations do not yet
+# consume BackendSession operations, so this milestone does not open and then
+# discard a session on their startup paths.
+
+use std.spec
+use std.spec.step
+use compiler.common.backend_plugin.model.*
+use compiler.common.backend_plugin.receipt.{BackendPluginError}
+use compiler.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend_plugin.loader.{load_backend}
+use compiler.backend_plugin.session.{BackendSession}
+use compiler.driver.driver_backend_plugin_selection.{
+    driver_backend_plugin_request_v1, driver_aot_uses_versioned_backend,
+    driver_aot_backend_plugin_request_v1, driver_backend_plugin_error_text
+}
+
+fn projected_request(
+    role: BackendRole,
+    configured_backend: text = "auto",
+    plugin_path: text = ""
+) -> BackendPluginRequestV1:
+    driver_backend_plugin_request_v1(
+        role,
+        configured_backend,
+        "host",
+        "generic",
+        [],
+        "debug",
+        BUILTIN_MIR_ABI_DIGEST_V1,
+        [],
+        plugin_path
+    )
+
+fn selection_error_code(
+    result: Result<BackendSession, BackendPluginError>
+) -> text:
+    match result:
+        case Err(error): error.code()
+        case Ok(_): "ok"
+
+fn selection_error_text(
+    result: Result<BackendSession, BackendPluginError>
+) -> text:
+    match result:
+        case Err(error): driver_backend_plugin_error_text(error)
+        case Ok(_): "ok"
+
+describe "versioned backend plugin driver selection":
+    it "REQ-003 projects the interpreter JIT default to Cranelift":
+        step("project the default driver backend for the interpreter JIT role")
+        val request = projected_request(BackendRole.InterpreterJit)
+        expect(request.backend_name).to_equal("cranelift")
+        expect(request.role).to_equal(BackendRole.InterpreterJit)
+
+    it "REQ-004 projects the compiler AOT default to LLVM":
+        step("project the default driver backend for the compiler AOT role")
+        val request = projected_request(BackendRole.CompilerAot)
+        expect(request.backend_name).to_equal("llvm")
+        expect(request.role).to_equal(BackendRole.CompilerAot)
+
+    it "REQ-005 preserves explicit backend and plugin parameters":
+        step("copy explicit selection into one immutable startup request")
+        val request = projected_request(
+            BackendRole.CompilerAot,
+            "cranelift",
+            "/opt/simple/backend.so"
+        )
+        expect(request.backend_name).to_equal("cranelift")
+        expect(request.plugin_path).to_equal("/opt/simple/backend.so")
+        expect(request.has_plugin_path).to_equal(true)
+        expect(request.target).to_equal("host")
+        expect(request.cpu).to_equal("generic")
+        expect(request.optimization).to_equal("debug")
+
+    it "REQ-007 retains an unknown explicit backend and fails without substitution":
+        step("send the exact explicit provider name to the centralized loader")
+        val request = projected_request(BackendRole.CompilerAot, "missing")
+        expect(request.backend_name).to_equal("missing")
+        expect(selection_error_code(load_backend(request))).to_equal(
+            "BACKEND_PLUGIN_NOT_FOUND"
+        )
+
+    it "projects production AOT target CPU optimization and capability inputs":
+        step("project resolved driver inputs into the immutable AOT request")
+        val request = driver_aot_backend_plugin_request_v1(
+            "auto", "x86_64-unknown-linux-gnu", "znver4", 3)
+        expect(request.backend_name).to_equal("llvm")
+        expect(request.target).to_equal("x86_64")
+        expect(request.cpu).to_equal("znver4")
+        expect(request.optimization).to_equal("o3")
+        expect(request.required_capabilities.len()).to_equal(1)
+        expect(request.required_capabilities[0]).to_equal(
+            BackendCapability.ObjectEmit)
+
+    it "preserves non LLVM and Cranelift AOT lanes outside plugin routing":
+        step("classify only the two admitted production providers")
+        expect(driver_aot_uses_versioned_backend("auto")).to_equal(true)
+        expect(driver_aot_uses_versioned_backend("llvm")).to_equal(true)
+        expect(driver_aot_uses_versioned_backend("cranelift")).to_equal(true)
+        expect(driver_aot_uses_versioned_backend("native")).to_equal(false)
+        expect(driver_aot_uses_versioned_backend("wasm")).to_equal(false)
+        expect(driver_aot_uses_versioned_backend("missing")).to_equal(true)
+
+    it "opens the projected AOT provider fail closed and closes exactly once":
+        step("load one retained production session from the projected request")
+        var session = load_backend(driver_aot_backend_plugin_request_v1(
+            "auto", "", "", 0)).ok().unwrap()
+        expect(session.provider_name()).to_equal("llvm")
+        expect(session.is_open()).to_equal(true)
+        step("close the retained session through its idempotent owner boundary")
+        expect(session.close()).to_equal(true)
+        expect(session.close()).to_equal(true)
+        expect(session.close_count).to_equal(1)
+
+    it "formats explicit provider admission errors without substituting a backend":
+        step("retain the typed loader error in a stable driver diagnostic")
+        expect(selection_error_text(load_backend(
+            driver_aot_backend_plugin_request_v1(
+                "missing", "", "", 0)
+        ))).to_start_with("BACKEND_PLUGIN_NOT_FOUND:")

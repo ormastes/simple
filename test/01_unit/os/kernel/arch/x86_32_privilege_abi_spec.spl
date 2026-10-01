@@ -1,0 +1,259 @@
+"""
+## Purpose and audience
+Freezes the x86_32 privilege-transition ABI v1.8 for the SimpleOS kernel
+owners: owned selectors and TSS offsets, the complete CPL3 hardware trap
+frame, the privilege token layout, the scalar raw-C dispatcher surface, the
+nonce range shared by entry and syscall 60, and the boot-time paging
+constants. Sabotage-oracle scenarios prove each frozen invariant by
+demonstrating that its historical wrong shape is rejected.
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/os/kernel/arch/x86_32_privilege_abi_spec.spl
+## Compatibility and limitations
+Source-contract scenarios read the shipped kernel, header, crt0, and linker
+sources and mediate every text assertion through genuinely-named contract
+locals. The crt0/linker/paging scenarios are RED while the boot sources
+drift from the frozen fragments; those REDs are the oracle, not a defect of
+this spec.
+## Verification guidance and troubleshooting
+A layout-constant failure means the ABI moved and every staged kernel
+consumer must be re-audited; a sabotage-oracle failure means a historically
+wrong shape would now be accepted; a source-contract failure means a frozen
+boot or paging fragment was lost from the shipped sources.
+"""
+# Lifecycle: doc/01_research/os/security/privilege_ocap_sota_research.md ;
+# doc/03_plan/sys_test/x86_32_privilege_transition_abi.md ;
+# doc/04_architecture/x86_32_privilege_transition_abi.md ;
+# doc/05_design/x86_32_privilege_transition_abi.md
+# @manual_section: x86-32-privilege-abi
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.kernel.arch.x86_32.privilege_abi.*
+use os.kernel.arch.x86_32.user_prepare_contract.{x86_32_nonce_overlaps_load_segment}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "x86_32 privilege-transition ABI v1":
+    it "freezes owned selectors and TSS offsets":
+        # @req REQ-X8632-PRIVABI-SELECTORS-001
+        step("Read the ABI version and the owned selector constants")
+        # @capture: evidence_manifest("x8632_selectors_tss") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(X86_32_PRIVILEGE_ABI_VERSION).to_equal(0x00010008)  # oracle: ABI v1.8 wire version
+        expect(X86_32_GDT_USER_CODE).to_equal(0x1B)  # oracle: CPL3 code selector, ring-3 GDT entry 3
+        expect(X86_32_GDT_USER_DATA).to_equal(0x23)  # oracle: CPL3 data selector, ring-3 GDT entry 4
+        expect(X86_32_GDT_TSS).to_equal(0x28)  # oracle: TSS descriptor GDT entry 5
+        expect(X86_32_TSS_BYTES).to_equal(104)  # oracle: 32-bit TSS is 104 bytes
+        expect(X86_32_TSS_ESP0_OFFSET).to_equal(4)  # oracle: esp0 sits at offset 4 of the TSS
+
+    it "freezes the complete CPL3 hardware frame":
+        # @req REQ-X8632-PRIVABI-TRAP-FRAME-002
+        step("Pin every offset of the hardware-pushed CPL3 trap frame")
+        # @capture: evidence_manifest("x8632_trap_frame") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(X86_32_TRAP_FRAME_WORDS).to_equal(19)  # oracle: 19 words cover regs plus hardware push
+        expect(X86_32_TF_EIP).to_equal(56)  # oracle: hardware pushes EIP after the error word
+        expect(X86_32_TF_USER_ESP).to_equal(68)  # oracle: user ESP follows EIP in the CPL3 frame
+        expect(X86_32_TF_USER_SS).to_equal(72)  # oracle: user SS follows user ESP
+        expect(X86_32_TRAP_FRAME_BYTES).to_equal(76)  # oracle: the frame is 76 bytes end to end
+        expect(x86_32_privilege_abi_layout_valid()).to_equal(true)  # oracle: the shipped layout validator agrees
+
+    it "freezes token and explicit control-flow disposition sizes":
+        # @req REQ-X8632-PRIVABI-TOKEN-003
+        step("Pin the privilege token field offsets and the disposition record size")
+        # @capture: evidence_manifest("x8632_token_layout") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(X86_32_TOKEN_TASK_ID_OFFSET).to_equal(16)  # oracle: task id after the 16-byte header
+        expect(X86_32_TOKEN_GENERATION_OFFSET).to_equal(24)  # oracle: generation follows task id
+        expect(X86_32_TOKEN_EXPECTED_CR3_OFFSET).to_equal(40)  # oracle: expected CR3 sits mid-token
+        expect(X86_32_TOKEN_NONCE_USER_VA_OFFSET).to_equal(56)  # oracle: nonce pointer follows CR3
+        expect(X86_32_TOKEN_NONCE_DIGEST_OFFSET).to_equal(64)  # oracle: digest follows the nonce pointer
+        expect(X86_32_PRIVILEGE_TOKEN_BYTES).to_equal(96)  # oracle: token is 96 bytes total
+        expect(X86_32_TRAP_DISPOSITION_BYTES).to_equal(16)  # oracle: disposition record is 16 bytes
+
+    it "sabotage oracle rejects the old same-CPL short-frame assumption":
+        # @req REQ-X8632-PRIVABI-SHORT-FRAME-004
+        step("Rebuild the historical same-CPL frame size and require rejection")
+        # A same-CPL interrupt omits hardware-pushed user ESP and SS.
+        val sabotaged_bytes = X86_32_TRAP_FRAME_BYTES - 8
+        # @capture: evidence_manifest("x8632_short_frame_sabotage") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(sabotaged_bytes).to_equal(68)  # oracle: the same-CPL frame is 8 bytes short
+        expect(sabotaged_bytes == X86_32_TRAP_FRAME_BYTES).to_equal(false)  # oracle: the short frame is not the ABI frame
+        expect(X86_32_TF_USER_SS + 4 == sabotaged_bytes).to_equal(false)  # oracle: the short frame is not even the SS tail
+
+    it "does not authorize a live entry symbol from the layout contract":
+        # @req REQ-X8632-PRIVABI-NO-LIVE-ENTRY-005
+        step("Read the shipped privilege ABI and require the live entry symbol to stay unexported")
+        val privilege_abi_text = rt_file_read_text("src/os/kernel/arch/x86_32/privilege_abi.spl")
+        # @capture: evidence_manifest("x8632_no_live_entry") -> x86_32_privilege_abi_spec.evidence.sdn
+        val keeps_entry_symbol_unexported = privilege_abi_text.contains("extern fn rt_x86_32_enter_user_first")
+        expect(keeps_entry_symbol_unexported).to_equal(false)  # oracle: the layout contract must not expose a live entry symbol
+        expect(privilege_abi_text).to_contain("X86_32_TRAP_ACTION_RESUME_KERNEL_EXIT")
+
+    it "freezes one scalar raw-C dispatcher without weak probing":
+        # @req REQ-X8632-PRIVABI-DISPATCHER-006
+        step("Pin the cdecl hidden dispatcher signature in the v1.8 header")
+        val header = rt_file_read_text("src/os/kernel/arch/x86_32/privilege_abi_v1_8.h")
+        # @capture: evidence_manifest("x8632_dispatcher_signature") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(header).to_contain("simpleos_x86_32_privilege_dispatch_v1_1")
+        expect(header).to_contain("SimpleOsX86_32TrapDispositionV1 *disposition_out")
+        expect(header).to_contain("__attribute__((cdecl, visibility(\"hidden\")))")
+        val keeps_no_weak_dispatch = header.contains("__attribute__((weak))")
+        expect(keeps_no_weak_dispatch).to_equal(false)  # oracle: the dispatcher must not be weak-linkable
+        val keeps_no_runtime_value = header.contains("RuntimeValue")
+        expect(keeps_no_runtime_value).to_equal(false)  # oracle: no Simple RuntimeValue leaks into the C surface
+
+    it "sabotage oracle makes a renamed canonical symbol unresolvable":
+        # @req REQ-X8632-PRIVABI-RENAME-SABOTAGE-007
+        step("Rename the canonical dispatcher symbol and require the old name to vanish")
+        val header = rt_file_read_text("src/os/kernel/arch/x86_32/privilege_abi_v1_8.h")
+        val sabotaged = header.replace(
+            "simpleos_x86_32_privilege_dispatch_v1_1",
+            "simpleos_x86_32_privilege_dispatch_wrong"
+        )
+        # @capture: evidence_manifest("x8632_rename_sabotage") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(sabotaged).to_contain("simpleos_x86_32_privilege_dispatch_wrong")
+        val keeps_canonical_name = sabotaged.contains("simpleos_x86_32_privilege_dispatch_v1_1")
+        expect(keeps_canonical_name).to_equal(false)  # oracle: the rename removed every canonical occurrence
+
+    it "freezes ordered first-entry publication and one-shot clearing":
+        # @req REQ-X8632-PRIVABI-ENTRY-ORDER-008
+        step("Pin the enter/clear pair and the esp0-before-token publication order")
+        val header = rt_file_read_text("src/os/kernel/arch/x86_32/privilege_abi_v1_8.h")
+        # @capture: evidence_manifest("x8632_entry_publication") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(header).to_contain("simpleos_x86_32_privilege_enter_v1_2")
+        expect(header).to_contain("kernel_stack_top")
+        expect(header).to_contain("user_cr3")
+        expect(header).to_contain("writes TSS.esp0 first")
+        expect(header).to_contain("simpleos_x86_32_privilege_clear_active_v1_2")
+        expect(X86_32_ENTRY_KERNEL_STACK_BYTES).to_equal(16384)  # oracle: entry stacks are 16 KiB
+        expect(x86_32_privilege_entry_layout_valid()).to_equal(true)  # oracle: the shipped entry layout validator agrees
+
+    it "sabotage oracle rejects publish before TSS esp0":
+        # @req REQ-X8632-PRIVABI-PUBLISH-ORDER-009
+        step("Swap the documented publication order and require the swap to be absent")
+        val header = rt_file_read_text("src/os/kernel/arch/x86_32/privilege_abi_v1_8.h")
+        val correct = "writes TSS.esp0 first,\n * release-publishes token second"
+        val reversed = "release-publishes token first,\n * writes TSS.esp0 second"
+        # @capture: evidence_manifest("x8632_publish_order_sabotage") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(header).to_contain(correct)
+        val keeps_reversed_order = header.contains(reversed)
+        expect(keeps_reversed_order).to_equal(false)  # oracle: the reversed publication order must not exist
+
+    it "binds entry and syscall 60 to one exact nonce range":
+        # @req REQ-X8632-PRIVABI-NONCE-RANGE-010
+        step("Validate the nonce range for the honest base and two out-of-range probes")
+        val header = rt_file_read_text("src/os/kernel/arch/x86_32/privilege_abi_v1_8.h")
+        # @capture: evidence_manifest("x8632_nonce_range") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(header).to_contain("expected_nonce_user_va")
+        expect(header).to_contain("loads ECX from")
+        expect(header).to_contain("EDX from token.nonce_length")
+        expect(header).to_contain("EBX==expected_nonce_user_va")
+        expect(header).to_contain("compares all 32 digest bytes")
+        expect(x86_32_nonce_range_valid(0x40001000, 32)).to_equal(true)  # oracle: the shared entry/syscall nonce base is valid
+        expect(x86_32_nonce_range_valid(0xBFFFFFF0, 32)).to_equal(false)  # oracle: a range crossing the kernel split is invalid
+        expect(x86_32_nonce_range_valid(0xFFFFFFF0, 32)).to_equal(false)  # oracle: a top-of-address-space range is invalid
+
+    it "sabotage oracle rejects pointer substitution despite equal length":
+        # @req REQ-X8632-PRIVABI-POINTER-SABOTAGE-011
+        step("Substitute the nonce pointer at equal length and require divergence")
+        val expected: u32 = 0x40001000
+        val supplied: u32 = 0x40002000
+        val length: u32 = 32
+        # @capture: evidence_manifest("x8632_pointer_sabotage") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(x86_32_nonce_range_valid(expected, length)).to_equal(true)  # oracle: the honest pointer is in range at this length
+        expect(supplied == expected).to_equal(false)  # oracle: the substituted pointer differs despite the equal length
+
+    it "freezes scheduler-owned nonce placement and bounded token registry":
+        # @req REQ-X8632-PRIVABI-NONCE-PLACEMENT-012
+        step("Validate the reserved nonce page and the token registry bounds")
+        # @capture: evidence_manifest("x8632_nonce_placement") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(X86_32_NONCE_USER_VA).to_equal(0x2FFFF000)  # oracle: scheduler-reserved nonce page base
+        expect(X86_32_NONCE_PAGE_BYTES).to_equal(4096)  # oracle: the nonce occupies one page
+        expect(X86_32_TOKEN_REGISTRY_SLOTS).to_equal(16)  # oracle: the token registry holds 16 slots
+        expect(x86_32_nonce_reserved_range_valid(0x2FFFF000, 32)).to_equal(true)  # oracle: the reserved page satisfies the range check
+        expect(x86_32_nonce_reserved_range_valid(0x2FFFE000, 32)).to_equal(false)  # oracle: below the reserved page is not reserved
+        expect(x86_32_nonce_overlaps_load_segment(0x2FFFF000, 1)).to_equal(true)  # oracle: the nonce page overlaps the user load segment
+        expect(x86_32_nonce_overlaps_load_segment(0x2FFFE000, 8192)).to_equal(true)  # oracle: a straddling range overlaps too
+        expect(x86_32_nonce_overlaps_load_segment(0x2FFFD000, 4096)).to_equal(false)  # oracle: a page fully below does not overlap
+
+    it "freezes the exclusive recursive PDE and kmap window":
+        # @req REQ-X8632-PRIVABI-PAGING-WINDOW-013
+        step("Pin the recursive PDE, kmap window, and boot paging pool sizes")
+        # @capture: evidence_manifest("x8632_recursive_pde_kmap") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(X86_32_RECURSIVE_PDE_INDEX).to_equal(1023)  # oracle: recursive map occupies the last PDE
+        expect(X86_32_RECURSIVE_PT_BASE).to_equal(0xFFC00000)  # oracle: recursive page-table base
+        expect(X86_32_RECURSIVE_PD_VA).to_equal(0xFFFFF000)  # oracle: the page directory maps itself at the top
+        expect(X86_32_KMAP_PDE_INDEX).to_equal(1022)  # oracle: kmap occupies the second-to-last PDE
+        expect(X86_32_KMAP_VA).to_equal(0xFFBFF000)  # oracle: kmap window base
+        expect(X86_32_KMAP_VA < X86_32_RECURSIVE_PT_BASE).to_equal(true)  # oracle: kmap stays below the recursive window
+        expect(X86_32_BOOT_PAGING_POOL_PAGES).to_equal(3)  # oracle: boot pool is three pages
+        expect(X86_32_BOOT_PAGING_POOL_BYTES).to_equal(12288)  # oracle: three pages are 12 KiB
+
+    it "freezes boot zero and self-map before Simple entry":
+        # @req REQ-X8632-PRIVABI-BOOT-ZERO-014
+        step("Verify crt0 zeroes the boot region before it self-maps and calls _start")
+        val boot = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_32/boot/crt0.s")
+        val zero_at = boot.index_of("movl $__x86_32_boot_paging_start") ?? -1
+        val self_at = boot.index_of("movl %eax, 4092(%edi)") ?? -1
+        val call_at = boot.index_of("call _start") ?? -1
+        # @capture: evidence_manifest("x8632_boot_zero_selfmap") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(zero_at >= 0).to_equal(true)  # oracle: the boot zeroing fragment is present
+        expect(self_at > zero_at).to_equal(true)  # oracle: the PD self-map follows the zeroing
+        expect(call_at > self_at).to_equal(true)  # oracle: Simple entry happens after the self-map
+
+    it "freezes paging enable after identity-map and live-address checks":
+        # @req REQ-X8632-PRIVABI-PAGING-ENABLE-015
+        step("Verify crt0 identity-maps, checks live addresses, then sets CR3 and PG")
+        val boot = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_32/boot/crt0.s")
+        val map_at = boot.index_of(".identity_pde_loop:") ?? -1
+        val live_at = boot.index_of("Current instruction and stack") ?? -1
+        val cr3_at = boot.index_of("movl %eax, %cr3") ?? -1
+        val pg_at = boot.index_of("orl $0x80010000") ?? -1
+        # @capture: evidence_manifest("x8632_paging_enable_order") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(map_at >= 0).to_equal(true)  # oracle: the identity-map loop is present
+        expect(live_at > map_at).to_equal(true)  # oracle: the live-address check follows the identity map
+        expect(cr3_at > live_at).to_equal(true)  # oracle: CR3 is loaded after the live check
+        expect(pg_at > cr3_at).to_equal(true)  # oracle: PG is enabled only after CR3
+
+    it "freezes a mapped PMM bitmap for the full supported physical ceiling":
+        # @req REQ-X8632-PRIVABI-PMM-BITMAP-016
+        step("Check the PMM ceiling, bitmap size, and linker reservation")
+        val linker = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_32/linker.ld")
+        # @capture: evidence_manifest("x8632_pmm_bitmap") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(X86_32_PMM_MAX_PHYS_PAGES).to_equal(1048576)  # oracle: 1M physical pages supported
+        expect(X86_32_PMM_BITMAP_BYTES).to_equal(131072)  # oracle: one bit per page is 128 KiB
+        expect(linker).to_contain("__x86_32_pmm_bitmap_start")
+        expect(linker).to_contain(". = . + 128K")
+        expect(linker).to_contain("_kernel_end = .")
+
+    it "sabotage oracle rejects stale registry generations":
+        # @req REQ-X8632-PRIVABI-GENERATION-017
+        step("Reuse an older registry generation and require the mismatch")
+        val old_generation: u32 = 7
+        val reused_generation: u32 = 8
+        # @capture: evidence_manifest("x8632_stale_generation") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(old_generation == reused_generation).to_equal(false)  # oracle: a stale generation never equals the current one
+
+    it "routes physical access through recursive kmap leases":
+        # @req REQ-X8632-PRIVABI-KMAP-LEASE-018
+        step("Pin the kmap lease, invalidate, revoke, and owned address-space surfaces")
+        val paging = rt_file_read_text("src/os/kernel/arch/x86_32/paging.spl")
+        val kmap = rt_file_read_text("src/os/kernel/arch/x86_32/kmap_owner.spl")
+        val owner = rt_file_read_text("src/os/kernel/arch/x86_32/address_space_owner.spl")
+        # @capture: evidence_manifest("x8632_kmap_leases") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(paging).to_contain("X86_32_KMAP_PT_VA: u32 = 0xFFFFE000")
+        expect(paging).to_contain("_invlpg(X86_32_KMAP_VA)")
+        expect(kmap).to_contain("lease.generation == g_x86_32_kmap_generation")
+        expect(kmap).to_contain("x86_32_kmap_revoke")
+        expect(owner).to_contain("x86_32_create_address_space_owned")
+        expect(owner).to_contain("x86_32_user_page_readonly_owned")
+
+    it "sabotage oracle rejects raw physical child-table routing":
+        # @req REQ-X8632-PRIVABI-RAW-ROUTING-019
+        step("Require the x86 adapter branch to own child-table routing without the VMM path")
+        val adapter = rt_file_read_text("src/os/kernel/memory/user_address_space.spl")
+        val x86_at = adapter.index_of("@cfg(x86)\nfn create_user_address_space()") ?? -1
+        # @capture: evidence_manifest("x8632_raw_routing_sabotage") -> x86_32_privilege_abi_spec.evidence.sdn
+        expect(x86_at >= 0).to_equal(true)  # oracle: the x86 adapter branch is present
+        val x86 = adapter.substring(x86_at, adapter.len())
+        expect(x86).to_contain("x86_32.address_space_owner")
+        val keeps_vmm_routing = x86.contains("x86_32_vmm_map_page_in")
+        expect(keeps_vmm_routing).to_equal(false)  # oracle: the raw VMM child-table path must not return

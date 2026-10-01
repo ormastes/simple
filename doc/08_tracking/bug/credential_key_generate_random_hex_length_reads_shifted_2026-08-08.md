@@ -1,4 +1,9 @@
 # Fresh installs could never create a credential key — `.length()` on the `??`-unwrapped `rt_random_hex` result reads chars>>3
+## Closed 2026-09-16 — Status: FIXED; positive control, key generation round-trips
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (key generation impossible; encryption always failed closed)
@@ -103,3 +108,4 @@ Same shape applied to `iv_hex` in `credential_encrypt`. The guards are kept.
 - `doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md` (sibling shift defect, OPEN)
 - `doc/08_tracking/bug/credential_store_key_and_salt_corrupted_by_list_param_hex_2026-08-08.md`
 - `doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md`
+

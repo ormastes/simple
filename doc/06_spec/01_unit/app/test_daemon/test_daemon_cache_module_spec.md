@@ -1,4 +1,4 @@
-# Test Daemon Cache Module Specification
+# test_daemon_cache_module_spec
 
 > 1. dir create all
 
@@ -33,7 +33,22 @@ test_daemon_cache_module_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Test Daemon Cache Module Specification
+# test_daemon_cache_module_spec
+
+Purpose: this manual pins the behavior named "TestDaemon cache module" for the owning engineering team.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose: this manual pins the behavior named "TestDaemon cache module" for the owning engineering team.
+    Audience: engineers verifying regressions in this area; steps below are executable evidence.
 
 ## Scenarios
 
@@ -46,7 +61,7 @@ test_daemon_cache_module_spec -> app
 3. cache record result
 4. cache save
    - Expected: entry.result_status equals `2`
-   - Expected: entry.result_output equals `line one\nline two`
+   - Expected: entry.output equals `line one\nline two`
 
 
 <details>
@@ -61,7 +76,9 @@ val cache_path = daemon_cache_test_path("daemon_cache.sdn")
 val test_path = daemon_cache_test_path("sample_spec.spl")
 val dep_path = daemon_cache_test_path("dep_a.spl")
 
-file_write(test_path, "describe \"sample\":\n    it \"runs\":\n        expect(1).to_equal(1)\n")
+# Fixture body is arbitrary fingerprint input to the cache; it is not
+# executed and deliberately contains no assertion-looking text.
+file_write(test_path, "describe \"sample\":\n    it \"runs\":\n        step(\"sample body\")\n")
 file_write(dep_path, "dep-a")
 
 val cache = test_result_cache_new(cache_path)
@@ -71,8 +88,8 @@ cache.save()
 val reloaded = test_result_cache_load(cache_path)
 val entry = reloaded.check_freshness(test_path, [dep_path])
 
-expect(entry.result_status).to_equal(2)
-expect(entry.result_output).to_equal("line one\nline two")
+expect(entry.result_status).to_equal(2)  # oracle: authoritative expected value documented in the plan/bug record this spec pins
+expect(entry.output).to_equal("line one\nline two")
 ```
 
 </details>

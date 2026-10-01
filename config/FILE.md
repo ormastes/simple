@@ -6,17 +6,20 @@ Configuration files for build, test, packaging, and tooling.
 
 | Entry | Description |
 |---|---|
+| `api` | API group registry (`api_registry.sdn`) — one schema for every callable API surface |
 | `bootstrap.sdn` | Bootstrap configuration |
+| `cef` | CEF (Chromium Embedded Framework) binary-distribution pin (`cef_pin.sdn`) — version + per-platform archive digests for the Chrome render dynlib |
 | `critical_files.sdn` | Critical file guard configuration |
 | `critical_mode.sdn` | Mission-critical mode: dynamic-acquire lint severity + gpu.backend manifest pin |
 | `di.sdn` | Dependency injection configuration |
 | `dl.config.sdn` | Deep learning configuration |
 | `doc_coverage.sdn` | Documentation coverage configuration |
-| `freestanding_fabricated_stub_baseline.sdn` | Per-entry NEW-only ratchet for weak nil-returning freestanding stubs |
 | `docker-compose.test.yml` | Docker test compose |
 | `docker-compose.yml` | Docker compose |
+| `log_opt` | Toolchain build-log optimizer plugin descriptors |
 | `mcp` | MCP server configurations |
 | `packaging` | Packaging configurations |
+| `perf` | Entry-point import-closure baselines (`entry_closure_baselines.sdn`) frozen by check-entry-closure-ratchet.shs |
 | `process.sdn` | Process configuration |
 | `README_DOCKER.md` | Docker readme |
 | `resources` | Resource files |
@@ -25,7 +28,6 @@ Configuration files for build, test, packaging, and tooling.
 | `simple.test.sdn` | Test configuration |
 | `t32` | TRACE32 configurations |
 | `t32_stm_linux_hidden.t32` | TRACE32 STM configuration |
-| `theme` | Standalone WM/GUI theme CSS files (SIMPLE_WM_THEME_FILE) |
 | `themes` | Theme definitions |
 | `traceability.sdn` | Traceability configuration |
 | `FILE.md` | This manifest |

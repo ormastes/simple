@@ -1,4 +1,8 @@
 # The `collections.rs` clobber is ONE commit replayed 6 times — and it is still armed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-11
 - **Status (updated 2026-08-17):** ROOT CAUSE FOUND; tree is healthy
@@ -188,3 +192,4 @@ git rev-parse <sha>:src/compiler_rust/runtime/src/value/collections.rs  # 95b6ac
 cd /home/ormastes/dev/pub/simple && git rev-list --count origin/main..HEAD   # 44
 git show HEAD:src/compiler_rust/runtime/src/value/collections.rs | wc -l     # 4211
 ```
+

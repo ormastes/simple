@@ -1,0 +1,81 @@
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetTickCount64, Sleep}
+
+fn owner_fixture_request(kind: text) -> WindowsProcessRequestV1:
+    val root = "D:/wk-bootstrap-manager-resume-20260930"
+    var program = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    val script = root + "/test/fixtures/bootstrap_builder/windows_owner_child.ps1"
+    var args: [text] = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "space value", "quote\"value", "trailing\\", "", "한글😀"]
+    var inputs: [WindowsProcessInputV1] = [WindowsProcessInputV1(path: script, digest: windows_process_file_digest_v1(script))]
+    if kind != "normal":
+        program = "C:/Windows/System32/cmd.exe"
+        args = ["/d", "/c", "C:\\Windows\\System32\\ping.exe -n 30 127.0.0.1"]
+        inputs = []
+    var timeout_ms = 30000
+    if kind == "timeout":
+        timeout_ms = 200
+        program = "C:/Windows/System32/ping.exe"
+        args = ["-n", "30", "127.0.0.1"]
+    WindowsProcessRequestV1(program: program, producer_digest: windows_process_file_digest_v1(program),
+        args: args, environment: ["SystemRoot=C:\\Windows", "PATH=C:\\Windows\\System32", "BUILDER_PROOF=한글😀"],
+        directory: root + "/build/windows-owner/cwd", inputs: inputs,
+        stdout_path: root + "/build/windows-owner/" + kind + ".stdout.log",
+        stderr_path: root + "/build/windows-owner/" + kind + ".stderr.log", timeout_ms: timeout_ms)
+
+fn owner_fixture_case(kind: text) -> i64:
+    val request = owner_fixture_request(kind)
+    val lease = match windows_process_start_v1(request):
+        Ok(value): value
+        Err(message):
+            print "start failed {kind}: {message}"
+            return 61
+    val deadline = GetTickCount64() + 40000u64
+    var cancelled = false
+    while GetTickCount64() < deadline:
+        val observed = match windows_process_poll_v1(lease):
+            Ok(value): value
+            Err(message):
+                print "poll failed {kind}: {message}"
+                val _cancelled = windows_process_cancel_v1(lease)
+                return 62
+        if kind == "cancel" and not cancelled and observed.active_processes >= 2:
+            match windows_process_cancel_v1(lease):
+                Ok(_value): cancelled = true
+                Err(_message): return 63
+            cancelled = true
+        if observed.terminal:
+            print "observed {kind}: exit={observed.exit_code} timeout={observed.timed_out} cancel={observed.cancelled}"
+            val result = match windows_process_collect_v1(lease):
+                Ok(value): value
+                Err(message):
+                    print "collect failed {kind}: {message}"
+                    return 64
+            if not result.leader_reaped or not result.tree_empty or result.active_processes != 0: return 65
+            match windows_process_poll_v1(lease):
+                Ok(_value): return 66
+                Err(_message): cancelled = cancelled
+            match windows_process_cancel_v1(lease):
+                Ok(_value): return 67
+                Err(_message): cancelled = cancelled
+            match windows_process_collect_v1(lease):
+                Ok(_value): return 68
+                Err(_message): cancelled = cancelled
+            if kind == "normal":
+                if result.exit_code != 37:
+                    print "normal child exit={result.exit_code}"
+                    return 69
+            if kind == "cancel" and (not cancelled or not result.cancelled): return 72
+            if kind == "timeout" and not result.timed_out:
+                print "timeout receipt lost: exit={result.exit_code} timeout={result.timed_out} cancel={result.cancelled}"
+                return 73
+            print "{kind}: exact terminal tree receipt verified"
+            return 0
+        Sleep(10u32)
+    val _cancelled = windows_process_cancel_v1(lease)
+    return 74
+
+fn main() -> i64:
+    for kind in ["timeout"]:
+        val result = owner_fixture_case(kind)
+        if result != 0: return result
+    0

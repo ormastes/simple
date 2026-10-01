@@ -27,18 +27,28 @@
 # caller-supplied, already-decoded symbol list (`SmfLinkInputs`) instead of
 # an `SmfReaderImpl`/SFFI handle directly; the thin adapter from a live
 # `SmfReaderImpl.symbols` dict (or `exported_symbols()`) to
-# `[SmfSymbolInput]` is left to the L1-decode integration wave that wires a
-# real driver context.
+# `[SmfSymbolInput]` is still unwired. The L2-L8 driver
+# (smf_link_driver.spl) goes through the writer-side adapter
+# (smf_reader_adapter.spl); L1 decode from an on-disk `.smf` stays unwired.
 #
 # Composition only, no inheritance (repo rule): plain value structs, free
 # functions, same discipline as resolve_core.spl / resolve_frontier.spl.
 # ============================================================================
 
-use std.common.structural.identity.entity_id.{EntityRef, entity_ref}
+use std.common.structural.identity.entity_id.{EntityRef, SnapshotId, entity_ref}
 use std.common.structural.resolve.resolve_types.{
+    ConstraintBatch,
     DefinitionRecord,
+    DomainPlacementRef,
+    MutationPlanRef,
     ReferenceRecord,
     ResolutionRecord,
+    ResolveGroupResult,
+    ResolveGroupView,
+    ResolveInputRef,
+    ResolveKey,
+    ResolveProfile,
+    ResolveResultRef,
     definition_record,
     reference_record,
     resolution_record,
@@ -188,3 +198,68 @@ fn smf_resolve(defs: [DefinitionRecord], refs: [ReferenceRecord]) -> [Resolution
             ri = ri + 1
         vi = vi + 1
     results
+
+# ----------------------------------------------------------------------------
+# SmfLinkProfile — the frozen ResolveProfile v1 trait (resolve_types.spl,
+# design doc §6.1 / D3) implemented over the CPU-reference arenas above.
+#
+# The trait speaks in arena HANDLES (`ResolveInputRef`, `ResolveResultRef`,
+# ...: object_slot + generation). There is no Object VM descriptor table in
+# the CPU reference, so the profile value itself owns the arenas and each
+# handle's `object_slot` names one of them (SMF_PROFILE_ARENA_*), stamped
+# with the profile's `generation`. `ResolveMode` stays CpuReference and no
+# record shape, schema version or golden is touched: every step delegates to
+# the functions above or to GraphResolveCore unchanged.
+# ----------------------------------------------------------------------------
+
+val SMF_PROFILE_ARENA_INPUT: u32 = 0
+val SMF_PROFILE_ARENA_CONSTRAINTS: u32 = 1
+val SMF_PROFILE_ARENA_PLACEMENT: u32 = 2
+val SMF_PROFILE_ARENA_MUTATION: u32 = 3
+
+struct SmfLinkProfile:
+    """CPU-reference SmfLinkProfile: the `sort_definitions_stable`-ordered
+    definition arena one collect pass produced (the arena `resolve_group`
+    indexes), plus the handle generation."""
+    sorted_defs: [DefinitionRecord]
+    generation: u32
+
+fn smf_link_profile_new(defs: [DefinitionRecord]) -> SmfLinkProfile:
+    """Build a profile over already-collected records (smf_collect_records
+    output, any number of modules concatenated). Sorts once so
+    `resolve_group` can index the definition arena the way `reduce_group`
+    requires. Generation starts at 1 so a zero handle never aliases it."""
+    SmfLinkProfile(
+        sorted_defs: sort_definitions_stable(defs),
+        generation: 1)
+
+impl ResolveProfile for SmfLinkProfile:
+    fn collect(snapshot: SnapshotId) -> ResolveInputRef:
+        """The input arena was collected by `smf_collect_records` from
+        caller-supplied `SmfLinkInputs` (see file header — no snapshot-backed
+        L1 decode exists yet), so `snapshot` selects nothing here; the handle
+        names the profile's own record arena."""
+        ResolveInputRef(object_slot: SMF_PROFILE_ARENA_INPUT, generation: self.generation)
+
+    fn group_key(record: ReferenceRecord) -> ResolveKey:
+        """SMF groups by the interned (name, SMF_SPACE_SYMBOL) key as-is."""
+        record.key
+
+    fn resolve_group(group: ResolveGroupView) -> ResolveGroupResult:
+        """GraphResolveCore's deterministic reduction over this profile's
+        sorted definition arena (lowest-order winner, DuplicateDefinition
+        diagnostics). Strong/weak policy is applied by the driver, not here."""
+        reduce_group(group, self.sorted_defs)
+
+    fn derive_constraints(result: ResolveGroupResult) -> ConstraintBatch:
+        """SMF symbol resolution derives no propagation constraints in the
+        CPU reference: an empty batch."""
+        ConstraintBatch(object_slot: SMF_PROFILE_ARENA_CONSTRAINTS, generation: self.generation, count: 0)
+
+    fn plan_placement(result: ResolveResultRef) -> DomainPlacementRef:
+        """CPU-reference placement: every stage runs on the CPU."""
+        DomainPlacementRef(object_slot: SMF_PROFILE_ARENA_PLACEMENT, generation: self.generation)
+
+    fn emit(result: ResolveResultRef) -> MutationPlanRef:
+        """Handle to the (driver-owned) mutation plan for this resolve pass."""
+        MutationPlanRef(object_slot: SMF_PROFILE_ARENA_MUTATION, generation: self.generation)

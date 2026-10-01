@@ -99,6 +99,16 @@ thread_local! {
     // after_each hooks for current context (stack of hook lists for nesting)
     pub(crate) static BDD_AFTER_EACH: RefCell<Vec<Vec<Value>>> = RefCell::new(vec![vec![]]);
 
+    // after_all hooks for the current group (stack of hook lists for nesting).
+    //
+    // `describe`/`context` are intercepted by THIS builtin runner, so
+    // `std.spec`'s pure-Simple `describe` -- the only place that drained its
+    // own `after_all_hooks` list -- never runs in interpreter mode. A spec that
+    // registered `after_all` therefore parked the hook in a list nothing ever
+    // read, and the hook silently never fired. Registration is mirrored here so
+    // the drain happens where the group actually ends.
+    pub(crate) static BDD_AFTER_ALL: RefCell<Vec<Vec<Value>>> = RefCell::new(vec![vec![]]);
+
     // TEST-012: Memoized lazy values (name -> (block, Option<cached_value>))
     pub(crate) static BDD_LAZY_VALUES: RefCell<HashMap<String, (Value, Option<Value>)>> = RefCell::new(HashMap::new());
 
@@ -123,15 +133,17 @@ thread_local! {
 
 fn write_test_result_evidence(path: &Path) {
     let (passed, failed) = BDD_TEST_RESULTS.with(|cell| {
-        cell.borrow().iter().fold((0, 0), |(passed, failed), (_, _, ok, skipped)| {
-            if *skipped {
-                (passed, failed)
-            } else if *ok {
-                (passed + 1, failed)
-            } else {
-                (passed, failed + 1)
-            }
-        })
+        cell.borrow()
+            .iter()
+            .fold((0, 0), |(passed, failed), (_, _, ok, skipped)| {
+                if *skipped {
+                    (passed, failed)
+                } else if *ok {
+                    (passed + 1, failed)
+                } else {
+                    (passed, failed + 1)
+                }
+            })
     });
     let _ = std::fs::write(path, format!("simple-bdd-v1\n{passed}\n{failed}\n"));
 }
@@ -441,6 +453,73 @@ pub(crate) fn exec_block_value(
     }
 }
 
+fn localize_bdd_return(result: Result<Value, CompileError>) -> Result<Value, CompileError> {
+    match result {
+        Err(CompileError::BlockReturn(value)) => Ok(value),
+        other => other,
+    }
+}
+
+/// Execute a BDD block against the example environment itself.
+///
+/// Ordinary BDD bodies run from a captured snapshot so their local writes are
+/// isolated. A hook and its example must also share one current environment:
+/// before_each writes need to be visible to the body, and after_each writes to
+/// enclosing captures need to be available to the next example. The caller
+/// controls isolation by choosing when to copy dirty names back.
+fn exec_bdd_block_into(
+    block: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    use super::block_execution::exec_block_closure_into;
+
+    match block {
+        Value::Lambda {
+            params,
+            body,
+            env: captured,
+        } => {
+            if params.is_empty() {
+                if let Expr::DoBlock(nodes) = body.as_ref() {
+                    return localize_bdd_return(exec_block_closure_into(
+                        nodes,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ));
+                }
+            }
+            exec_block_value(
+                Value::Lambda {
+                    params,
+                    body,
+                    env: captured,
+                },
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
+        }
+        Value::BlockClosure { nodes, .. } => localize_bdd_return(exec_block_closure_into(
+            &nodes,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )),
+        other => exec_block_value(other, env, functions, classes, enums, impl_methods),
+    }
+}
+
 /// Short type name for a Value, for diagnostics.
 fn value_kind_name(v: &Value) -> &'static str {
     match v {
@@ -687,6 +766,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
             BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
             BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+            BDD_AFTER_ALL.with(|cell| cell.borrow_mut().push(vec![]));
             // Invalidate hook cache when entering new context
             invalidate_hook_caches();
 
@@ -697,6 +777,27 @@ pub(super) fn eval_bdd_builtin(
             }
 
             let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
+
+            // Drain this group's `after_all` hooks: the body (and therefore
+            // every example in it, which this runner executes eagerly) has
+            // finished, and the group has not been popped yet. Hooks run in
+            // registration order. A hook failure must not mask a body failure,
+            // so the body's result is kept and a hook error only surfaces when
+            // the body succeeded.
+            let after_all_hooks = BDD_AFTER_ALL.with(|cell| cell.borrow_mut().pop().unwrap_or_default());
+            let mut hook_err = None;
+            for hook in after_all_hooks {
+                if let Err(e) = exec_block_value(hook, env, functions, classes, enums, impl_methods) {
+                    if hook_err.is_none() {
+                        hook_err = Some(e);
+                    }
+                }
+            }
+            let result = match (result, hook_err) {
+                (Ok(v), None) => Ok(v),
+                (Ok(_), Some(e)) => Err(e),
+                (err, _) => err,
+            };
 
             BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().pop());
             BDD_AFTER_EACH.with(|cell| cell.borrow_mut().pop());
@@ -832,16 +933,20 @@ pub(super) fn eval_bdd_builtin(
             // Use cached hooks to avoid O(n²) performance with deeply nested contexts
             let before_hooks = get_before_each_hooks_cached();
             for hook in before_hooks {
-                exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods)?;
+                exec_bdd_block_into(hook, &mut test_env, functions, classes, enums, impl_methods)?;
             }
 
-            let result = exec_block_value(block, &mut test_env, functions, classes, enums, impl_methods);
+            let result = exec_bdd_block_into(block, &mut test_env, functions, classes, enums, impl_methods);
 
             // Use cached hooks to avoid O(n²) performance with deeply nested contexts
+            // and persist only writes made by after_each. The example body and
+            // before_each setup remain isolated in test_env.
+            test_env.clear_dirty();
             let after_hooks = get_after_each_hooks_cached();
             for hook in after_hooks {
-                let _ = exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods);
+                let _ = exec_bdd_block_into(hook, &mut test_env, functions, classes, enums, impl_methods);
             }
+            crate::interpreter::block_exec::copy_back_block_writes(&test_env, env);
             // test_env is dropped here, freeing memory used by this test
 
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
@@ -922,6 +1027,35 @@ pub(super) fn eval_bdd_builtin(
                 }
             }
         }
+        "step" => {
+            // Manual-only scenario marker consumed by spipe-docgen.  The runtime
+            // body is `pub fn step(description: text)` in
+            // src/lib/nogc_sync_mut/spec.spl, which is a documented no-op, and the
+            // native path supplies the same no-op via
+            // `spipe_inline_helpers()` in
+            // src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl.
+            //
+            // This table had no arm for it, so on the interpret path every
+            // example calling the documented `step(...)` DSL marker died with
+            // "semantic: function `step` not found" — the whole example was
+            // reported failed even though nothing it asserted was wrong.
+            //
+            // The description is deliberately NOT evaluated: `step` ignores it
+            // (spec.spl only early-returns on ""), and descriptions are free
+            // text that would otherwise hit FString interpolation errors, the
+            // same reason `describe` above uses `extract_desc_str`.
+            //
+            // BDD builtins are consulted at Priority 3 in
+            // interpreter_call/mod.rs, ahead of the user function registry at
+            // Priority 4, so a spec that defines its own `step` (for example
+            // test/05_perf/stress/multicore_green_fanout_spec.spl's
+            // `fn step(name: text) -> i64`) must keep winning.  Returning None
+            // falls through to that lookup instead of shadowing it with a no-op.
+            if functions.contains_key("step") {
+                return Ok(None);
+            }
+            Ok(Some(Value::Nil))
+        }
         "planned" => {
             // Future-implementation marker: a spec declared before its feature
             // exists. Bookkeeping mirrors `pending` (never pass, never fail,
@@ -945,6 +1079,15 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "pending" | "pending_it" => {
+            // The BDD table is consulted before regular function dispatch.  Keep
+            // the historical standalone marker only when no Simple definition
+            // owns this name; otherwise a user or stdlib DSL implementation
+            // would be silently bypassed and the enclosing example could pass
+            // without running its body.
+            if functions.contains_key(name) {
+                return Ok(None);
+            }
+
             let name_str = extract_desc_str(args, "unnamed");
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
@@ -1045,7 +1188,8 @@ pub(super) fn eval_bdd_builtin(
                             let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
                             if !value.truthy() {
                                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
-                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
+                                BDD_PROVISIONAL_SEQ
+                                    .with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                                 BDD_PROVISIONAL_MSG.with(|cell| {
                                     *cell.borrow_mut() = Some(format!(
                                         "expected {} {} {} to hold",
@@ -1074,7 +1218,7 @@ pub(super) fn eval_bdd_builtin(
                     // (mirrors the ordered-comparison and call-expr paths).
                     if !matched {
                         BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
-                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
+                        BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                         BDD_PROVISIONAL_MSG.with(|cell| {
                             *cell.borrow_mut() = Some(format!(
                                 "expected {} to {} {}",
@@ -1146,7 +1290,7 @@ pub(super) fn eval_bdd_builtin(
                 // may be exactly what the matcher expects). If no matcher follows,
                 // it stands as a hollow-expect failure at example end.
                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
-                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
+                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                 BDD_PROVISIONAL_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!(
                         "expected subject to be truthy, got {}",
@@ -1221,6 +1365,26 @@ pub(super) fn eval_bdd_builtin(
                     ))
                 }
             }
+        }
+        // Suite-scoped `after_all`. `before_all` is deliberately NOT intercepted
+        // here: `std.spec`'s own `before_all` already runs its block at the
+        // declaration point and that half worked, whereas intercepting it here
+        // ran the block against a different env and cost the LATER `after_all`
+        // hook its write-back to the module global.
+        //
+        // This runner has no separate collect-then-execute phase (a `describe`
+        // body EXECUTES as it is read), so `after_all` is deferred onto a
+        // per-group stack and drained when the enclosing group's body ends.
+        // Same contract as `std.spec` (src/lib/nogc_sync_mut/spec.spl).
+        "after_all" => {
+            let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            BDD_AFTER_ALL.with(|cell| {
+                let mut hooks = cell.borrow_mut();
+                if let Some(current) = hooks.last_mut() {
+                    current.push(block);
+                }
+            });
+            Ok(Some(Value::Nil))
         }
         "before_each" => {
             let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -1720,8 +1884,7 @@ pub(super) fn eval_bdd_builtin(
             if val.is_nil_like() {
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() =
-                        Some(format!("assert_not_nil failed: got {}", val.to_display_string()));
+                    *cell.borrow_mut() = Some(format!("assert_not_nil failed: got {}", val.to_display_string()));
                 });
             }
             Ok(Some(Value::Nil))
@@ -1994,6 +2157,7 @@ pub fn clear_bdd_state() {
     BDD_CONTEXT_DEFS.with(|cell| cell.borrow_mut().clear());
     BDD_BEFORE_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     BDD_AFTER_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
+    BDD_AFTER_ALL.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     // Clear hook caches when resetting BDD state
     invalidate_hook_caches();
     BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());

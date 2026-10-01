@@ -1,0 +1,39 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{
+    strict_hw_scalar_decoded_uop_interface}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+describe "frozen scalar decoded-uop interface":
+    it "binds the exact decoder plan, graph, config, and field schema":
+        val config = CoreConfig.rv64_zicsr_zifencei()
+        val plan = riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()
+        val decoder = strict_riscv_scalar_decoder_hwir("decoded_uop_decoder",
+            config, plan).unwrap()
+        val descriptor = strict_hw_scalar_decoded_uop_interface(config, plan, decoder).unwrap()
+        expect(descriptor.diagnostic_for_decoder(decoder, plan)).to_equal("")
+        expect(descriptor.fields.map(_.name)).to_contain("decoded_semantic_opcode")
+        expect(descriptor.fields.map(_.name)).to_contain("provider_event_id")
+        expect(descriptor.fields.any(_.name == "rs1_value" and _.bit_width == 64)).to_be(true)
+        expect(descriptor.structural_sha256().len()).to_equal(64)
+
+    it "rejects cross-plan and cross-graph substitution":
+        val rv32_plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val rv32_decoder = strict_riscv_scalar_decoder_hwir("decoded_uop_rv32",
+            CoreConfig.rv32(), rv32_plan).unwrap()
+        val descriptor = strict_hw_scalar_decoded_uop_interface(
+            CoreConfig.rv32(), rv32_plan, rv32_decoder).unwrap()
+        val other = strict_riscv_scalar_decoder_hwir("decoded_uop_other",
+            CoreConfig.rv32(), rv32_plan).unwrap()
+        expect(descriptor.diagnostic_for_decoder(other, rv32_plan)).to_contain(
+            "DECODED-UOP-DECODER")
+        val altered_config = CoreConfig(xlen: 32, physical_address_bits: 31,
+            register_count: 32, profile: CoreConfig.rv32().profile,
+            isa_profile: "rv32i", compressed_decode_profile: "none")
+        val altered = strict_riscv_scalar_decoder_hwir("decoded_uop_rv32",
+            altered_config, rv32_plan).unwrap()
+        expect(descriptor.diagnostic_for_decoder(altered, rv32_plan)).to_contain(
+            "DECODED-UOP-DECODER")
+        expect(descriptor.diagnostic_for_decoder(rv32_decoder,
+            riscv_scalar_decoder_plan("rv64i").unwrap())).to_contain("DECODED-UOP-PLAN")

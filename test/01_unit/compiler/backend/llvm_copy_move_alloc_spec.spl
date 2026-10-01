@@ -1,3 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
@@ -5,6 +13,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.*
+
 
 fn build_alloc_copy_module() -> MirModule:
     val i64_type = MirType.i64()
@@ -239,42 +248,32 @@ fn build_declared_undefined_copy_module() -> MirModule:
     functions[fn_.symbol] = fn_
     MirModule(name: "test.llvm.declared_undefined_copy", functions: functions, statics: {}, constants: {}, types: {})
 
-fn build_cross_block_string_const_module() -> MirModule:
-    val ptr_type = MirType(kind: MirTypeKind.Opaque("str"))
-    val bool_type = MirType.bool()
+fn build_local_string_print_module() -> MirModule:
+    val ptr_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+    val print_signature = MirSignature(params: [ptr_type], return_type: MirType.unit(), is_variadic: false)
     val fn_ = MirFunction(
-        symbol: SymbolId(id: 6),
-        name: "cross_block_string_const",
-        signature: MirSignature(params: [], return_type: ptr_type, is_variadic: false),
+        symbol: SymbolId(id: 5),
+        name: "local_string_print",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
         locals: [
-            MirLocal(id: LocalId(id: 0), name: Some("value"), type_: ptr_type, kind: LocalKind.Temp, is_ghost: false),
-            MirLocal(id: LocalId(id: 1), name: Some("cond"), type_: bool_type, kind: LocalKind.Temp, is_ghost: false)
+            MirLocal(id: LocalId(id: 1), name: Some("message"), type_: ptr_type, kind: LocalKind.Temp, is_ghost: false)
         ],
         blocks: [
             MirBlock(
                 id: BlockId.entry(),
                 label: Some("entry"),
                 instructions: [
-                    MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Str("v="), ptr_type), span: nil),
-                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Bool(true), bool_type), span: nil)
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Str("hello"), ptr_type), span: nil),
+                    MirInst(kind: MirInstKind.Call(
+                        nil,
+                        MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_print"),
+                            MirType(kind: MirTypeKind.FuncPtr(print_signature))
+                        )),
+                        [mir_operand_copy(LocalId(id: 1))]
+                    ), span: nil)
                 ],
-                terminator: MirTerminator.If(
-                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
-                    BlockId(id: 1),
-                    BlockId(id: 2)
-                )
-            ),
-            MirBlock(
-                id: BlockId(id: 1),
-                label: Some("then"),
-                instructions: [],
-                terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
-            ),
-            MirBlock(
-                id: BlockId(id: 2),
-                label: Some("else"),
-                instructions: [],
-                terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+                terminator: MirTerminator.Ret(nil)
             )
         ],
         entry_block: BlockId.entry(),
@@ -298,10 +297,13 @@ fn build_cross_block_string_const_module() -> MirModule:
 
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[fn_.symbol] = fn_
-    MirModule(name: "test.llvm.cross_block_string_const", functions: functions, statics: {}, constants: {}, types: {})
+    MirModule(name: "test.llvm.local_string_print", functions: functions, statics: {}, constants: {}, types: {})
 
 describe "LLVM alloc copy move":
+    # @manual scenario evidence
     it "keeps alloc results pointer-typed across copy and move chains":
+        # @req REQ-SSPEC-UNIT
+        step("keeps alloc results pointer-typed across copy and move chains")
         val translator = MirToLlvm.create("test.llvm.alloc_copy_move", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_alloc_copy_module())
 
@@ -311,6 +313,8 @@ describe "LLVM alloc copy move":
         expect(output.contains("add i64 %l2, 0")).to_equal(false)
 
     it "treats local id zero as a real SSA local":
+        # @req REQ-SSPEC-UNIT
+        step("treats local id zero as a real SSA local")
         val translator = MirToLlvm.create("test.llvm.local_zero_pointer_copy", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_local_zero_pointer_copy_module())
 
@@ -319,26 +323,45 @@ describe "LLVM alloc copy move":
         expect(output.contains("ptr 0, i64 0")).to_equal(false)
 
     it "compares pointer branch conditions against null":
+        # @req REQ-SSPEC-UNIT
+        step("compares pointer branch conditions against null")
         val translator = MirToLlvm.create("test.llvm.pointer_condition", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_pointer_condition_module())
 
         expect(output).to_contain("icmp ne ptr %l0, null")
 
     it "compares pointer unary not against null":
+        # @req REQ-SSPEC-UNIT
+        step("compares pointer unary not against null")
         val translator = MirToLlvm.create("test.llvm.pointer_not", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_pointer_not_module())
 
         expect(output).to_contain("icmp eq ptr %l0, null")
         expect(output.contains("icmp eq i1 %l0, 0")).to_equal(false)
 
-    it "does not reference declared locals before a definition":
+    it "keeps a missing MIR producer visible so LLVM rejects it":
+        # @req REQ-SSPEC-UNIT
+        step("Lower malformed MIR whose copied local has no producer")
         val translator = MirToLlvm.create("test.llvm.declared_undefined_copy", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_declared_undefined_copy_module())
 
-        expect(output).to_contain("%l3 = add i64 undef, 0  ; copy")
-        expect(output.contains("add i64 %l2, 0")).to_equal(false)
+        step("Preserve the missing SSA identity instead of masking it with undef")
+        expect(output).to_contain("%l3 = add i64 %l2, 0  ; copy")
+        expect(output.contains("add i64 undef, 0")).to_equal(false)
+
+    it "passes the defined hello local to rt_print":
+        step("Lower a local hello string followed by its print call")
+        val translator = MirToLlvm.create("test.llvm.local_string_print", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_local_string_print_module())
+
+        step("Keep the local SSA value across the call receiver boundary")
+        expect(output).to_contain("%l1 = getelementptr inbounds")
+        expect(output).to_contain("call void @rt_print(ptr %l1)")
+        expect(output.contains("call void @rt_print(ptr undef)")).to_equal(false)
 
     it "keeps a fresh slotted string constant pointer-typed":
+        # @req REQ-SSPEC-UNIT
+        step("keeps a fresh slotted string constant pointer-typed")
         val translator = MirToLlvm.create("test.llvm.cross_block_string_const", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_cross_block_string_const_module())
 

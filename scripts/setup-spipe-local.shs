@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+fi
+# Expand only the documented home prefix; never evaluate path contents.
+expand_home() {
+  case "$1" in
+    '{home}') printf '%s\n' "$HOME" ;;
+    '{home}/'*) printf '%s/%s\n' "$HOME" "${1#\{home\}/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+COMMON_HOME=$(expand_home "${SPIPE_HOME:-$HOME/.spipe}")
+PRIVATE_HOME=$(expand_home "${SPIPE_WORKSPACE:-$HOME/spipe}")
+PRIVATE_ROUTE="$PRIVATE_HOME/common"
+COMMON_ROUTE="$ROOT/.spipe/common"
+if [ -f "$COMMON_HOME/package.json" ] && grep -Eq '"name"[[:space:]]*:[[:space:]]*"@simple-lang/spipe"' "$COMMON_HOME/package.json"; then
+  link_core() {
+    route="$1"
+    target="$2"
+    mkdir -p "$(dirname -- "$route")"
+    if [ ! -e "$route" ] && [ ! -L "$route" ]; then
+      ln -s "$target" "$route"
+    fi
+    if [ ! -d "$route" ] || [ "$(CDPATH= cd -- "$route" && pwd -P)" != "$(CDPATH= cd -- "$COMMON_HOME" && pwd -P)" ]; then
+      echo "setup-spipe-local: $route does not resolve to $COMMON_HOME; preserve and migrate existing data explicitly" >&2
+      exit 3
+    fi
+  }
+  # Resolve existing symlinked ancestors even when the final directory is absent.
+  physical_path() {
+    if [ -d "$1" ]; then (CDPATH= cd -- "$1" && pwd -P); return; fi
+    parent=$(dirname -- "$1")
+    [ "$parent" != "$1" ] || return 1
+    base=$(basename -- "$1")
+    case "$base" in .|..) echo "setup-spipe-local: normalize explicit paths first" >&2; return 1;; esac
+    printf '%s/%s\n' "$(physical_path "$parent")" "$base"
+  }
+  core_path=$(physical_path "$COMMON_HOME")
+  private_path=$(physical_path "$PRIVATE_HOME")
+  case "$private_path/" in "$core_path/"*) echo "setup-spipe-local: private workspace is inside core" >&2; exit 3;; esac
+  case "$core_path/" in "$private_path/"*) echo "setup-spipe-local: core is inside private workspace" >&2; exit 3;; esac
+  if [ -f "$PRIVATE_HOME/package.json" ] && grep -Eq '"name"[[:space:]]*:[[:space:]]*"@simple-lang/spipe"' "$PRIVATE_HOME/package.json"; then
+    echo "setup-spipe-local: private workspace contains legacy core; migrate existing data explicitly" >&2
+    exit 3
+  fi
+  link_core "$PRIVATE_ROUTE" "$COMMON_HOME"
+  link_core "$COMMON_ROUTE" "$PRIVATE_ROUTE"
+  SPIPE_HOME="$COMMON_HOME" SPIPE_WORKSPACE="$PRIVATE_HOME" exec sh "$COMMON_HOME/scripts/setup-local-knowledge.sh" --mode project --destination "$ROOT" "$@"
+fi
+if git -C "$ROOT" ls-files --stage -- .spipe/spipe | grep -q '^160000 '; then
+  git -C "$ROOT" submodule update --init -- .spipe/spipe
+  exec sh "$ROOT/.spipe/spipe/scripts/setup-local-knowledge.sh" --mode project --destination "$ROOT" "$@"
+fi
+echo "setup-spipe-local: install canonical common at ${SPIPE_HOME:-$HOME/.spipe}; no usable legacy submodule is recorded" >&2
+exit 3

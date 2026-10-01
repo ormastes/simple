@@ -1,30 +1,36 @@
 # Static methods on a generic class are unresolvable: "unknown static method create on class GContainer"
 
-**Status:** RESOLVED — ALREADY-FIXED, re-verified 2026-08-17.
+## Closed 2026-09-13 — already fixed, verified by running the reported repro
 
-## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
+**Status: CLOSED (no longer reproduces).**
 
-The doc's own reproducer, run verbatim on the deployed seed
-(`bin/simple`, Rust seed dated 2026-08-16):
+Re-ran the entry's own spec verbatim (`use std.spipe.*`, the `GContainer<T>`
+class with `static fn create`, the `expect c.value to_equal 42` example)
+through the spec harness on the Rust seed
+`build/vt4/bootstrap/simple.exe`:
 
 ```
-bin/simple test <probe> --no-session-daemon --sequential --no-cache \
-    --no-cover-check --timeout 120
+$ SIMPLE_BINARY=<abs path>/simple.exe simple test /tmp/sp/gen_static_spec.spl
+  ✓ generic static method
+1 example, 0 failures
+SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0
 Results: 1 total, 1 passed, 0 failed
+PASS
 ```
 
-`GContainer.create(42)` resolves and `c.value` is `42`. The
-"semantic: unknown static method create on class GContainer" error does not
-occur. The status line above was stale, not the code. Nothing was changed to
-achieve this; the resolver fix landed in some earlier commit that did not
-update this file.
+versus the reported `✗ generic static method / semantic: unknown static method
+create on class GContainer / Results: 3 total, 0 passed, 3 failed`.
 
-NOT PROVED: which commit fixed it (not bisected), and the pure-Simple
-self-hosted lane (only the seed was exercised).
+Also confirmed outside the harness as a plain program — `GContainer.create(42)`
+then `print c.value` prints `42`, and the non-generic control `SmMath.add(5, 3)`
+prints `8` — on **both** the default JIT lane and
+`SIMPLE_EXECUTION_MODE=interpret`, the tree-walking interpreter this bug was
+originally PROVED on. Both lanes agree, so the fix is not lane-local.
 
---- original filing below, kept for history ---
+MEASURED, not inferred. The specific commit that fixed it was not bisected.
 
-**Status (original):** open
+
+**Status:** open
 **Found:** 2026-08-01, by de-vacuum-ing `test/unit/compiler/codegen/static_method_spec.spl`
 **Lane:** vacuous-spec audit
 **Engine:** tree-walking interpreter (`bin/simple_seed test`) — PROVED there; other lanes untested

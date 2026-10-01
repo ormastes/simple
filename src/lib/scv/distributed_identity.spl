@@ -1,0 +1,120 @@
+# codex-impl
+# Canonical offline and settled identities for textual SCV databases.
+
+use std.scv.lifecycle.model.{ChangeIdentity, RevisionIdentity}
+
+struct ActorIncarnation:
+    hex: text
+
+struct EntityUid:
+    database_namespace: text
+    entity_kind: text
+    actor: ActorIncarnation
+    counter: u64
+
+struct SettledAlias:
+    database_namespace: text
+    authority_epoch: u64
+    entity_kind: text
+    sequence: u64
+
+struct EntityRef:
+    provisional: EntityUid?
+    settled: SettledAlias?
+
+struct EntityIdentityValidation:
+    valid: bool
+    code: text
+
+fn _identity_valid() -> EntityIdentityValidation:
+    EntityIdentityValidation(valid: true, code: "valid")
+
+fn _identity_invalid(code: text) -> EntityIdentityValidation:
+    EntityIdentityValidation(valid: false, code: code)
+
+fn _lower_hex(value: text, minimum_length: i64, exact_length: i64) -> bool:
+    if value.len() < minimum_length or (exact_length > 0 and value.len() != exact_length):
+        return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _entity_kind_valid(value: text) -> bool:
+    if value == "":
+        return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val allowed = (code >= 97 and code <= 122) or (code >= 48 and code <= 57) or code == 45 or code == 95
+        if not allowed:
+            return false
+        index = index + 1
+    true
+
+fn actor_incarnation_validate(incarnation: ActorIncarnation) -> EntityIdentityValidation:
+    if not _lower_hex(incarnation.hex, 32, 0):
+        return _identity_invalid("SCVDB_ACTOR_INCARNATION")
+    _identity_valid()
+
+fn entity_uid_validate(uid: EntityUid) -> EntityIdentityValidation:
+    if not _lower_hex(uid.database_namespace, 32, 32):
+        return _identity_invalid("SCVDB_NAMESPACE")
+    if not _entity_kind_valid(uid.entity_kind):
+        return _identity_invalid("SCVDB_ENTITY_KIND")
+    val actor_result = actor_incarnation_validate(uid.actor)
+    if not actor_result.valid:
+        return actor_result
+    if uid.counter == 0:
+        return _identity_invalid("SCVDB_ACTOR_COUNTER")
+    _identity_valid()
+
+fn settled_alias_validate(alias: SettledAlias) -> EntityIdentityValidation:
+    if not _lower_hex(alias.database_namespace, 32, 32):
+        return _identity_invalid("SCVDB_NAMESPACE")
+    if alias.authority_epoch == 0:
+        return _identity_invalid("SCVDB_AUTHORITY_EPOCH")
+    if not _entity_kind_valid(alias.entity_kind):
+        return _identity_invalid("SCVDB_ENTITY_KIND")
+    if alias.sequence == 0:
+        return _identity_invalid("SCVDB_SETTLED_SEQUENCE")
+    _identity_valid()
+
+fn entity_ref_provisional(uid: EntityUid) -> EntityRef:
+    EntityRef(provisional: Some(uid), settled: nil)
+
+fn entity_ref_settled(alias: SettledAlias) -> EntityRef:
+    EntityRef(provisional: nil, settled: Some(alias))
+
+fn entity_ref_validate(ref: EntityRef) -> EntityIdentityValidation:
+    if val uid = ref.provisional:
+        if ref.settled != nil:
+            return _identity_invalid("SCVDB_ENTITY_REF_AMBIGUOUS")
+        return entity_uid_validate(uid)
+    if val alias = ref.settled:
+        return settled_alias_validate(alias)
+    _identity_invalid("SCVDB_ENTITY_REF_EMPTY")
+
+fn _frame(tag: text, payload: text) -> text:
+    tag + ":" + payload.len().to_text() + ":" + payload
+
+fn entity_ref_canonical(ref: EntityRef) -> text:
+    if not entity_ref_validate(ref).valid:
+        return ""
+    if val uid = ref.provisional:
+        return "scv-db/entity-ref/v1\0" + _frame("p", _frame("n", uid.database_namespace) + _frame("k", uid.entity_kind) + _frame("a", uid.actor.hex) + _frame("c", uid.counter.to_text()))
+    if val alias = ref.settled:
+        return "scv-db/entity-ref/v1\0" + _frame("s", _frame("n", alias.database_namespace) + _frame("e", alias.authority_epoch.to_text()) + _frame("k", alias.entity_kind) + _frame("q", alias.sequence.to_text()))
+    ""
+
+fn entity_ref_revision_binding(ref: EntityRef, change: ChangeIdentity, revision: RevisionIdentity) -> text:
+    if revision.change_id != change.change_id or entity_ref_canonical(ref) == "":
+        return ""
+    "scv-db/revision-binding/v1\0" + _frame("r", entity_ref_canonical(ref)) + _frame("c", change.change_id) + _frame("v", revision.revision_id)
+
+export ActorIncarnation, EntityUid, SettledAlias, EntityRef, EntityIdentityValidation
+export actor_incarnation_validate, entity_uid_validate, settled_alias_validate, entity_ref_validate
+export entity_ref_provisional, entity_ref_settled, entity_ref_canonical, entity_ref_revision_binding

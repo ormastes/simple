@@ -1,0 +1,52 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_delete, file_exists, file_read, getpid}
+use std.nogc_async_mut.io.process_ops.{process_wait, process_kill}
+use app.io.process_env_ops.{process_spawn_async_env, process_is_alive}
+
+describe "hosted process spawn with an environment map":
+    it "delivers a requested environment variable to the child":
+        step("spawn a child that writes the variable to a marker file")
+        val marker = "/tmp/simple_process_env_spawn_{getpid()}.marker"
+        if file_exists(marker): file_delete(marker)
+        val environment: {text: text} = {"SIMPLE_SOSIX_ENV_SENTINEL": "expected value"}
+        val pid = process_spawn_async_env("sh",
+            ["-c", "printf '%s' \"$SIMPLE_SOSIX_ENV_SENTINEL\" > " + marker], environment)
+        val status = process_wait(pid, 5000)
+        if status == -2: process_kill(pid)
+        expect(pid).to_be_greater_than(0)
+        expect(status).to_equal(0)
+        expect(file_read(marker)).to_equal("expected value")
+        if file_exists(marker): file_delete(marker)
+
+    it "keeps the returned pid as the child pid":
+        step("the child reports its own pid; it must equal the returned pid")
+        val marker = "/tmp/simple_process_env_pid_{getpid()}.marker"
+        if file_exists(marker): file_delete(marker)
+        val environment: {text: text} = {"SIMPLE_SOSIX_ENV_SENTINEL": "1"}
+        val pid = process_spawn_async_env("sh", ["-c", "printf '%s' $$ > " + marker], environment)
+        val status = process_wait(pid, 5000)
+        if status == -2: process_kill(pid)
+        expect(status).to_equal(0)
+        expect(file_read(marker)).to_equal("{pid}")
+        expect(process_is_alive(pid)).to_equal(false)
+        if file_exists(marker): file_delete(marker)
+
+    it "refuses an invalid variable name before creating a child":
+        step("a key containing '=' cannot be delivered")
+        val marker = "/tmp/simple_process_env_refusal_{getpid()}.marker"
+        if file_exists(marker): file_delete(marker)
+        val environment: {text: text} = {"BAD=KEY": "x"}
+        val pid = process_spawn_async_env("sh", ["-c", "touch " + marker], environment)
+        if pid > 0:
+            if process_wait(pid, 2000) == -2: process_kill(pid)
+        expect(pid).to_equal(-22)
+        expect(file_exists(marker)).to_equal(false)
+
+    it "delegates an empty environment to the hosted spawn owner":
+        step("spawn a child without environment overrides and wait for its exit")
+        val environment: {text: text} = {}
+        val pid = process_spawn_async_env("sh", ["-c", "exit 0"], environment)
+        val status = process_wait(pid, 2000)
+        if status == -2: process_kill(pid)
+        expect(pid).to_be_greater_than(0)
+        expect(status).to_equal(0)

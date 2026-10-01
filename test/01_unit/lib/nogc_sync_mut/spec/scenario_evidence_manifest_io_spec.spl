@@ -1,0 +1,65 @@
+use std.spec.*
+use std.spec.scenario_evidence_manifest_io.{
+    publish_scenario_evidence_status,
+    scenario_evidence_manifest_path_for_spec,
+    scenario_evidence_status_manifest
+}
+use std.spec.scenario_evidence_manifest.{
+    scenario_evidence_manifest_from_sdn
+}
+use std.io.{file_exists, file_read}
+
+describe "scenario evidence manifest persistence":
+    it "derives one canonical manifest path from a spec path":
+        step("Capture the source spec path")
+        val spec = "test/03_system/os/evidence/login_spec.spl"
+
+        step("Verify the deterministic mapping")
+        val path = scenario_evidence_manifest_path_for_spec(spec)
+        expect(path).to_equal(
+            "build/test-artifacts/03_system/os/evidence/login/evidence.sdn"
+        )
+
+        step("Render the path for review")
+        expect(path).to_contain("/evidence.sdn")
+
+        step("Publish the stable path contract")
+        expect(path).to_start_with("build/test-artifacts/")
+
+    it "persists an exact blocked result through the shared publisher":
+        step("Capture an explicit scenario blocker")
+        val spec = "test/01_unit/evidence/blocked_contract_spec.spl"
+        val manifest = scenario_evidence_status_manifest(
+            "evidence.blocked",
+            ["REQ-EVS-TEST"],
+            spec,
+            "blocked",
+            "missing-prerequisite:qemu",
+            "qemu-riscv64",
+            "serial",
+            "install qemu and rerun"
+        )
+
+        step("Verify the fail-closed status mapping")
+        expect(manifest.showcase_status).to_equal("blocked")
+        expect(manifest.blocker_prerequisite).to_equal(
+            "missing-prerequisite:qemu"
+        )
+
+        step("Render the versioned manifest atomically")
+        val path = publish_scenario_evidence_status(
+            manifest.feature_id,
+            manifest.requirement_ids,
+            spec,
+            manifest.result,
+            manifest.reason,
+            manifest.target,
+            manifest.backend,
+            manifest.resume_command
+        ).unwrap()
+        expect(file_exists(path)).to_be(true)
+
+        step("Publish and read back the canonical manifest")
+        val parsed = scenario_evidence_manifest_from_sdn(file_read(path)).unwrap()
+        expect(parsed.schema_major).to_equal(1)
+        expect(parsed.reason).to_equal("missing-prerequisite:qemu")

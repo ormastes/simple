@@ -8,8 +8,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    comprehension_iterate, create_range_object_opt, normalize_index, slice_collection, ClassDef, Enums, Env,
-    FunctionDef, ImplMethods,
+    comprehension_iterate, create_range_object_opt, normalize_index, shared_text_is_ascii, slice_collection,
+    ClassDef, Enums, Env, FunctionDef, ImplMethods,
 };
 
 /// Compute slice indices from start, end, length, and inclusive flag.
@@ -95,8 +95,12 @@ fn string_index_out_of_bounds(s: &str, raw_idx: i64, len: i64) -> CompileError {
     )
 }
 
-fn indexed_string_char(s: &str, raw_idx: i64) -> Result<Value, CompileError> {
-    if s.is_ascii() {
+fn indexed_string_char(s: &Arc<String>, raw_idx: i64) -> Result<Value, CompileError> {
+    // Shares the identity-keyed memo `char_code_at`/`char_at`/`substr` use
+    // (`interpreter_method/mod.rs`'s `shared_text_is_ascii`) instead of
+    // re-running `s.is_ascii()` -- an O(len) scan -- on every `s[i]` call,
+    // which made a `while i < s.len(): s[i]` loop superlinear.
+    if shared_text_is_ascii(s) {
         let len = s.len() as i64;
         let idx = if raw_idx < 0 { len + raw_idx } else { raw_idx };
         if (0..len).contains(&idx) {
@@ -870,6 +874,16 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::ByteArray(arr) | Value::FrozenByteArray(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
+                // Byte length for an already-raw-bytes text value, matching the
+                // `Value::Str` arm above (which is also byte-indexed) and the
+                // `Value::StrBytes` arm of the dispatch match further below.
+                // That dispatch arm was added on its own, leaving this length
+                // match without a StrBytes case, so a StrBytes receiver fell to
+                // the `_` arm here and errored "cannot slice value of type str
+                // with step" BEFORE it could ever reach the working arm — the
+                // very confusion that arm's own comment describes. Step-slicing
+                // the result of a step-slice therefore still failed.
+                Value::StrBytes(b) => b.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
                 Value::LabeledTuple { values, .. } => values.len() as i64,
                 Value::Object {
@@ -1025,6 +1039,30 @@ pub(super) fn eval_collection_expr(
                     }
                     Ok(Value::text_from_bytes(sliced))
                 }
+                Value::StrBytes(b) => {
+                    // Same BYTE-indexed slicing as the `Value::Str` arm above,
+                    // just over an already-raw-bytes text value (produced by
+                    // that very arm, or by any other mid-codepoint-preserving
+                    // path -- see `Value::text_from_bytes`). Before this arm
+                    // existed, a second step-slice applied to the result of a
+                    // first one (e.g. any expression that step-slices twice)
+                    // fell into the `_` arm below and errored
+                    // "cannot slice value of type str with step" -- a
+                    // confusing message since `StrBytes::type_name()` is also
+                    // "str", right below a working `Str` arm. Reproduced by a
+                    // one-line hello-world `native-build` on this checkout.
+                    let sliced = slice_collection(b.as_slice(), start_idx, end_idx, step_val);
+                    if simple_runtime::text_slice_audit::enabled() {
+                        simple_runtime::text_slice_audit::note(
+                            simple_runtime::text_slice_audit::site::INTERP_BRACKET,
+                            start_idx,
+                            end_idx,
+                            b.as_slice(),
+                            &sliced,
+                        );
+                    }
+                    Ok(Value::text_from_bytes(sliced))
+                }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
                 Value::LabeledTuple { values, .. } => {
                     Ok(Value::Tuple(slice_collection(&values, start_idx, end_idx, step_val)))
@@ -1082,7 +1120,7 @@ mod seed_regression_tests {
     //! path (`instantiate_class`) already pre-filled every declared field;
     //! this fix brought brace-form construction to parity.
 
-    use super::{codes, CompileError};
+    use crate::error::{codes, CompileError};
     use crate::interpreter::evaluate_module;
     use simple_parser::Parser;
 
@@ -1210,6 +1248,37 @@ main = result_
             let err = evaluate_module(&module.items).expect_err("direct indexing must reject OOB");
             let CompileError::SemanticWithContext(contextual) = err else {
                 panic!("direct indexing must report a contextual semantic error");
+            };
+            assert_eq!(contextual.context.code.as_deref(), Some(codes::INDEX_OUT_OF_BOUNDS));
+        }
+    }
+
+    // `indexed_string_char` (`s[i]`) now shares `shared_text_is_ascii`'s
+    // identity-keyed memo instead of re-scanning `s.is_ascii()` per call --
+    // see that function's doc comment above. These pin the ASCII fast path,
+    // the non-ASCII fallback, and negative-index wraparound all still agree
+    // with the pre-fix behavior.
+    #[test]
+    fn string_index_ascii_and_non_ascii_agree_with_negative_wraparound() {
+        let src = r#"
+val ascii = "abcd"
+val unicode = "héllo"
+var result_ = 1
+if ascii[0] == "a" and ascii[-1] == "d" and unicode[1] == "é" and unicode[-1] == "o":
+    result_ = 0
+main = result_
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn string_index_out_of_bounds_still_reports_the_same_contextual_error() {
+        for src in ["val s = \"abc\"\nmain = s[5].len()\n", "val s = \"abc\"\nmain = s[-5].len()\n"] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().expect("parse string index OOB fixture");
+            let err = evaluate_module(&module.items).expect_err("string indexing must reject OOB");
+            let CompileError::SemanticWithContext(contextual) = err else {
+                panic!("string indexing must report a contextual semantic error");
             };
             assert_eq!(contextual.context.code.as_deref(), Some(codes::INDEX_OUT_OF_BOUNDS));
         }

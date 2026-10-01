@@ -11,13 +11,8 @@
 #define SCHAR_MAX  127
 #define UCHAR_MAX  255
 
-#ifdef __CHAR_UNSIGNED__
-#define CHAR_MIN   0
-#define CHAR_MAX   UCHAR_MAX
-#else
 #define CHAR_MIN   SCHAR_MIN
 #define CHAR_MAX   SCHAR_MAX
-#endif
 
 #define SHRT_MIN   (-32768)
 #define SHRT_MAX   32767
@@ -41,6 +36,8 @@
 #define PAGESIZE   4096
 
 #define SSIZE_MAX  LONG_MAX
+#ifndef SIZE_MAX
 #define SIZE_MAX   ULONG_MAX
+#endif
 
 #endif /* _SIMPLEOS_LIMITS_H */

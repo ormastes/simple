@@ -5,39 +5,123 @@ alwaysApply: false
 ---
 # Version Control
 
-- Use **jj** (Jujutsu) as primary VCS, colocated with git.
-- Every mutating session requires one unique work branch and one unique linked
-  worktree/workspace. The registered main worktree is read-only for authoring.
-- Commit only session-owned paths: `jj commit -m "message" <owned-paths...>`.
-- Fetch GitHub before creating the session, and fetch again before integrating.
-  Rebase only the private work branch onto the exact protected target.
-- Push only the owned work branch, then submit it to the integration authority.
-  `main`, `release/*`, `candidate/*`, and `v*` are protected and may not be
-  updated directly by an authoring session.
-- The integration authority runs the committed-content rules.sdl and integrity
-  gates and updates the target with compare-and-swap semantics. Raw `jj git
-  push` bypasses Git hooks, so it is not an integration mechanism. See
-  `doc/08_tracking/bug/jj_push_bypasses_rules_sdl_gates_2026-08-11.md`.
+- Use **jj** (Jujutsu) as primary VCS, colocated with git (plain `git` when jj is absent)
+- **Land via pull request — direct pushes to `main` are rejected server-side.**
+  Since 2026-09-05 the `spipe-vcs-v3-main` ruleset (`.github/rulesets/`) requires a
+  PR and two required status checks: `git push origin <sha>:main` fails with GH013
+  even for a one-commit fast-forward. Auto-merge is disabled on the repo.
+  **Force-land = admin PR merge (since 2026-09-28).** The ruleset's only bypass
+  actor is the owner with `bypass_mode: pull_request`
+  (`admin_merge_bypass: owner_pull_request_only` in `.spipe/policy/vcs.sdn`,
+  pinned by `check-github-policy-projection.shs`). So `gh pr merge <n> --admin
+  --merge` lands a reviewed PR that is `BEHIND` or has pending checks, while a
+  direct push to `main` stays rejected. Recipe: see § "Force-landing" below.
+- **Topic branches exist only to carry a PR.** No long-lived feature branches; the
+  branch is deleted at merge. **`.spipe/policy/vcs.sdn` is the canonical source
+  for this** — read it, not this prose, when the two disagree. Its
+  `authoring.ordinary_change` block requires `branch_pattern: work/*`
+  (so name the branch `work/<topic>`, NOT `<area>/<topic>`),
+  `unique_branch: required`, `unique_workspace: required`, and
+  `main_worktree: read_only` — ordinary changes are authored in their own
+  workspace, not by committing in the shared main worktree.
+  `direct_protected_ref_update: deny` is the same rule the server enforces.
+  The `server_profiles.standard` block names the two required checks and
+  `approving_reviews: 0`, matching the ruleset.
+- Commit: `jj commit -m "message"` (auto-tracks all changes, no staging needed)
+- Push/land (`land.shs` still gates the rules.sdl quick-group against COMMITTED
+  content; run it first, then):
+
+  ```bash
+  git push origin <sha>:refs/heads/<topic>          # only YOUR commits — see "Scope" below
+  gh pr create --base main --head <topic> --title "..." --body-file <file>
+  gh pr edit <n> --body-file <file>                 # REQUIRED once: fires the admission check (below)
+  gh pr merge <n> --merge                           # when mergeStateStatus is CLEAN or UNSTABLE
+  git push origin --delete <topic>
+  ```
+
+  **Required checks:** `Code Idiom & Structural Ratchet Gates` (runs on
+  `pull_request`) and `SPipe Self Review Admission` (`.github/workflows/review-admission.yml`).
+  The admission workflow's `pull_request_target` types are `[synchronize, edited,
+  closed, reopened]` — **not `opened`** — so a freshly opened PR sits `BLOCKED` with
+  no admission check-run at all. Any `edited`/`synchronize` event creates it; for
+  that event the job is skipped, and a *skipped* check-run satisfies the ruleset
+  (how PR #375 and #379 landed). `publish` is NOT required and fails on every PR
+  (runner has no `bin/simple`) — `UNSTABLE` is mergeable.
+  **Timing:** the recipe above is correct and still fails repeatedly, because
+  strict up-to-date races `main`'s own advance rate. Measured 2026-09-06 the
+  admission check did NOT arrive as a skipped run and had to be dispatched —
+  read `gh pr checks` rather than assuming either behaviour. Auto-merge is off
+  repo-wide. The update-branch -> dispatch -> poll-both -> merge-now ->
+  retry-on-"base advanced" loop, with measurements, is in
+  `doc/07_guide/infra/vcs/pr_landing_timing_race.md`.
+  **(2026-09-12) `mergeable: MERGEABLE` is not enough — waiting for
+  `mergeStateStatus: CLEAN` before merging can hang forever under a busy
+  queue.** `CLEAN` requires the branch to be reported up to date AND every
+  required check green at the SAME poll, which a fast-moving `main` and a slow
+  admission dispatch may never both satisfy simultaneously. Do not spin on
+  `CLEAN`; merge as soon as `mergeable: MERGEABLE` holds together with
+  `mergeStateStatus` in `{CLEAN, UNSTABLE}` per `gh pr view <n> --json
+  mergeable,mergeStateStatus`, retry on a "base advanced" merge failure by
+  re-running the update-branch -> dispatch -> poll loop above — or skip the
+  loop entirely with the admin PR merge (§ "Force-landing").
+  **Reviewing someone else's PR:** a stale merge snapshot can DELETE landed work
+  with no merge conflict and no failing check. Detection recipe:
+  `doc/07_guide/infra/vcs/stale_merge_snapshot_rewind.md`.
+  **Scope:** with many sessions sharing one clone, local `main` carries other
+  sessions' unpushed commits. Do not push the branch tip; rebuild only your commit
+  on `origin/main` (`git read-tree origin/main` into a temp `GIT_INDEX_FILE`, add
+  your blobs, `git write-tree`, `git commit-tree -p origin/main`) and push that sha.
+- Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin` (git: `git fetch origin`)
+
+## Force-landing a PR (verified 2026-09-28)
+
+Measured: `bypass_actors: []` made every ready PR sit `BEHIND` forever (8 of 8
+green, none landable). The owner PR-only bypass fixes that without opening
+direct push. Proven on PR #1818 (merged while `BEHIND`, `242b168bef3`).
+
+```bash
+gh api repos/ormastes/simple/rulesets/21573643 --jq .bypass_actors   # expect owner, pull_request
+gh pr diff <n>                                    # 1. real review: bugs, swept-in files, rewinds
+git fetch origin main && git diff origin/main...<head> --stat   # 2. PR's own delta only
+gh pr review <n> --comment -b "..."               # 3. self-authored: --approve always fails
+gh pr merge <n> --admin --merge                   # 4. lands past BEHIND / pending checks
+git ls-remote origin refs/heads/main && git push origin --delete <branch>   # 5. verify + clean
+```
+
+**Release lines too (2026-09-28).** `spipe-vcs-v3-release-lines` (`release/*`)
+carries the same owner PR-only bypass. `SPipe Self Review Admission` is a
+user/LLM review, not a hard lock: every push to `main` or `release/**`
+invalidates it on ALL open PRs (`review-admission.yml` push trigger) and it
+expires after 10 min, so under parallel landing it never stays green. The owner
+reviews and overrides with `--admin` instead (first used on release PR #1863).
+
+Rules: never force-land a PR whose checks are **failing** (only stuck/behind),
+never ANOTHER session's active draft (newest commit < 20 min, or its body names
+an unmet evidence precondition) — your OWN finished draft: `gh pr ready`, then
+land it; and never without step 1-2 — a
+bypassed merge skips the strict up-to-date re-run, so the stale-snapshot class
+(`doc/07_guide/infra/vcs/stale_merge_snapshot_rewind.md`) is on you. If the
+projection ever drops the bypass, `github-policy.shs verify-live` shows the drift;
+re-apply with `github-policy.shs apply-live --yes`.
 
 ## When `jj git push` fails ("External git program failed")
 
-If HTTPS authentication fails, repair the credential path and retry the owned
-work branch. Authentication failure never authorizes bypassing protected
-integration or pushing a commit directly to `main`:
+Origin's HTTPS token is dead. Push the topic branch over SSH instead, then open the
+PR as above. **Do not push to `refs/heads/main` over SSH** — the ruleset rejects
+that path too (superseded 2026-09-05; the old direct-to-main recipe here no longer works).
 
 ```bash
-env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git
-env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark <work-branch>
+TIP=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id')
+GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
+  git push git@github.com:ormastes/simple.git "$TIP":refs/heads/<topic>
+GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" jj --ignore-working-copy git fetch
 ```
 
-Always verify with `git ls-remote` after — a clean-looking exit is not proof the content landed.
+Always verify with `git ls-remote` after a merge — a clean-looking exit is not proof the content landed.
 
 ## Rebase conflict loop (root-first)
 
-Parallel agent sessions may advance their private branches while the integration
-authority advances `main`; protected `main` is never force-pushed. A private
-rebase can conflict a whole chain. Resolve the root and let descendants
-auto-rebase, looping until empty:
+Parallel agent sessions force-push main continuously; a rebase can conflict a whole chain. Never resolve at the tip — resolve the ROOT and let descendants auto-rebase, looping until empty:
 
 ```bash
 jj --ignore-working-copy log -r 'roots((main@origin..@) & conflicts())'   # find root
@@ -46,7 +130,126 @@ jj --ignore-working-copy restore --from <chosen-side> --to <ROOT> <paths...>
 
 Side policy is per-path: paths whose latest truth is local restore from the pre-rebase local tip sha; paths already superseded upstream restore from `main@origin` (verify by symbol-grep on origin first). `--ignore-working-copy` is required — it skips the WC snapshot and dodges "Concurrent checkout" races.
 
+
+## Pushing a release tag
+
+`git push origin refs/tags/vX.Y.Z[-pre.N]` goes through the same pre-push hook
+as a branch push, and **needs no `--no-verify`** as of 2026-09-07.
+
+A tag push carries zero new commits, so every range-scoped gate is vacuous on
+it: the range resolves to 0 commits and the guards correctly answer `ERROR —
+nothing was checked` (exit 2) rather than a false pass. Until this was fixed the
+first blocking row killed the push — measured pushing `v1.0.1-beta.1`,
+`BLOCKING gate push-conflict-markers failed (exit 2)`, on a commit that was
+already on `origin/main` and had already passed those same gates through PRs
+#457 and #458. The only way through was `--no-verify`, which disables *every*
+gate rather than only the vacuous ones, on the one push where provenance matters
+most.
+
+`check-push-must-pass.shs` now recognises `refs/tags/*` and admits it **fail
+closed**, on one condition it verifies rather than assumes:
+
+```
+push-must-check: tag refs/tags/vX.Y.Z -> <commit> is already published on
+                 refs/remotes/<remote>/main; 0 new commits, range gates do not apply
+```
+
+The tag is admitted only when its target commit is already an ancestor of the
+push remote's `main` — i.e. the content was gated when it landed through a PR. A
+tag pointing at unpublished content is **refused**:
+
+```
+tag refs/tags/vX.Y.Z points at <commit>, which is not published on
+refs/remotes/<remote>/main; land the commit through a pull request first
+```
+
+That is deliberate. A tag push is not an admission path for content that has
+never been through the gates, and this is what stops "skip the checks for
+releases" from becoming a hole. The conflict-tree union still runs over the tag
+in every case, because it is not range-scoped.
+
+Consequences for the release flow:
+
+- fetch first — the check needs `refs/remotes/<remote>/main` to exist locally,
+  and says so instead of failing open if it does not;
+- tag the commit that is already on `main`, never a local-only commit;
+- if you see the refusal, the fix is to land the commit, not to bypass the hook.
+
+### Verified end to end, and one trap
+
+Proven on 2026-09-07 against the real remote through the installed hook, with
+no `--no-verify`:
+
+```
+push-must-check: tag refs/tags/<probe> -> fd22bf49c05 is already published on
+                 refs/remotes/origin/main; 0 new commits, range gates do not apply
+ * [new tag]     <probe> -> <probe>
+```
+
+**Never use a `v`-prefixed name for a throwaway or probe tag.** Two rulesets
+cover `refs/tags/v*`: `spipe-vcs-v3-version-tag-creation` (rule `creation`) and
+`spipe-vcs-v3-version-tags` (rules `update`, `deletion`, `non_fast_forward`).
+The second lists **no bypass actors**, so a `v*` tag is immutable the moment it
+exists — `git push origin --delete` returns:
+
+```
+remote: error: GH013: Repository rule violations found for refs/tags/<name>.
+remote: - Cannot delete this tag
+```
+
+Not even the repository owner can remove it without first editing or deleting
+that ruleset. A mistyped or throwaway `v*` tag is therefore permanent. The
+verification above was run with such a name and left
+`vgate-probe-004312` behind, which is why this paragraph exists; see
+`doc/08_tracking/bug/stray_vgate_probe_tag_2026-09-07.md`. Probe with a name
+that does not start with `v` (e.g. `probe-tag-gate`), which no ruleset covers
+and which deletes cleanly.
 ## Pre-push guards
+
+**(2026-09-28) Merging main into a stale PR branch no longer trips the 64-commit bound:** `check-push-must-pass.shs` excludes `refs/remotes/<remote>/main` from the conflict-tree union and uses the tip's merge-base with it as the per-ref range base, so only the branch's own commits count; `check-tree-size-push.shs` bands a merge against its closest parent. Missing remote main ⇒ NOTE on stderr and the old range (fail-closed); 65 genuinely new commits still FAIL.
+
+### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
+
+The installed hook is `scripts/check/pre-push-conflict-tree-guard.shs`. It runs
+`check-hook-installation.shs` (line 118) and then, at line 135,
+`exec sh "$repo_root/scripts/check/check-push-must-pass.shs" --from-pre-push-hook`.
+It runs no guard of its own. The single authoritative enforcement surface is
+therefore the `push,`-tier rows of `config/check/must_check_gates.sdn`, each of
+which must ALSO have an exact-match `'<id>:<mode>:<command>'` case in
+`run_manifest_push_gates` (`check-push-must-pass.shs`) — an unmatched row hits
+the fail-closed `*)` default and returns 2, so a manifest row alone is not
+wiring and a dispatch case alone is dead code.
+
+The blocking `push-no-direct-rt` row scans the exact pushed commit and compares
+its forbidden-site count with the committed base of the outgoing range. This
+is a branch-delta ratchet: stale frozen counts already exceeded by `main` do
+not block a zero-delta topic, but one newly introduced site does. The tracked
+baseline remains authoritative outside this push-specific comparison mode.
+The interpreter-extern registry gap ratchet likewise compares the pushed tip
+with the outgoing range base, so existing mainline gaps cannot be attributed
+to an unrelated topic while a branch-added gap remains blocking.
+The SFFI v2 aggregate applies this policy to child-guard identities: the tip
+must introduce zero newly failing guards relative to the outgoing base.
+
+Several per-guard bullets below end with "Wired into
+`pre-push-conflict-tree-guard.shs`". **That phrase is stale for at least
+`check-seed-builds-push.shs`, `check-c-runtime-compiles-push.shs` (it is a
+bootstrap-tier automated gate, not a push gate) and `check-no-direct-rt.shs`
+(dispatch case present, manifest row absent), and `check-unbacked-extern-ratchet.shs`
+has never appeared in the push tier at all.** The repo already admitted this
+class of drift in `run_push_gate`'s own comment: "That is why
+.claude/rules/vcs.md described several guards as 'wired into the pre-push hook'
+while they appeared in no enforcement surface". The bullets are retained for
+their mechanism and incident history, which remain accurate; treat the manifest,
+not the prose, as the source of truth for what enforces.
+
+Added to the push tier 2026-09-01 (rt_* dual-implementation directive):
+`push-rt-dual-implementation` (blocking — `check-rt-dual-implementation-ratchet.shs`,
+freezes the 2,488 single-lane `rt_*` symbols) and `push-dual-run-shadow`
+(advisory — `check-dual-run-shadow.shs` needs a runnable `bin/simple` and exits 2
+without one, which as a blocking gate would block every push from a
+binary-less host; `push_blocking: false` records the verdict on stderr instead).
+
 
 **Run them from the REPO ROOT of a real clone.** Until 2026-08-01 both guards
 failed open on the working directory: from a `git archive` worktree under
@@ -69,23 +272,101 @@ A bare revision (no `..`) is rejected rather than silently reinterpreted.
 Details and the fixture-based proofs:
 `doc/08_tracking/bug/pre_push_guards_fail_open_on_cwd_2026-08-01.md`.
 
-- **No `.jjconflict-*` trees in the outgoing range — run `sh scripts/check/check-no-conflict-tree-push.shs` (exit 0 = safe).** Supply the exact protected target SHA and owned work-branch tip used by the integration submission; the historical default `main@origin..@-` is only a compatibility range and never authorizes a direct `main` push. **`jj git push` does NOT block a conflict commit**; on 2026-07-25 one was pushed and `main` carried no source files at all across two commits until it was repaired. A jj conflict commit's git tree contains *only* `.jjconflict-base-0/` and `.jjconflict-side-N/`, so a clone gets an empty repo. Symptom to recognise: `git cat-file -p <sha>:<path>` says *"exists on disk, but not in <sha>"* — that reads like one missing file but means the whole tree is gone; confirm with `git ls-tree --name-only <sha>`. Range only — never `main@{0}` (that sweeps the whole reflog).
+- **No `.jjconflict-*` trees in the outgoing range — run `sh scripts/check/check-no-conflict-tree-push.shs` (exit 0 = safe).** With no argument it checks `main@origin..@-`, exactly what `jj git push --bookmark main` sends. **`jj git push` does NOT block a conflict commit**; on 2026-07-25 one was pushed and `main` carried no source files at all across two commits until it was repaired. A jj conflict commit's git tree contains *only* `.jjconflict-base-0/` and `.jjconflict-side-N/`, so a clone gets an empty repo. Symptom to recognise: `git cat-file -p <sha>:<path>` says *"exists on disk, but not in <sha>"* — that reads like one missing file but means the whole tree is gone; confirm with `git ls-tree --name-only <sha>`. Range only — never `main@{0}` (that sweeps the whole reflog).
 - **No literal conflict-marker text in pushed file content — run `sh scripts/check/check-no-conflict-markers-push.shs` (exit 0 = safe).** Same default range as the tree guard. This catches a different failure than the one above: a `jj rebase` can inject conflict-marker text into file CONTENT (both jj's `<<<<<<< conflict N of M` / `%%%%%%%` / `>>>>>>> ... ends` style and git's classic `<<<<<<< HEAD` / `=======` / `>>>>>>>` style) without the commit being tree-conflicted, so the tree guard misses it. On 2026-07-30 exactly this happened: a rebase wrote markers into 38 tracked files, including the Rust seed `src/compiler_rust/runtime/src/value/mod.rs`, breaking every seed build. The guard flags a file only when it has a matching open+close marker pair, so prose that merely mentions marker syntax (e.g. this file, jj's own vendored docs) doesn't false-positive.
 - **No structurally wrong tree in the outgoing range — run `sh scripts/check/check-tree-size-push.shs` (exit 0 = safe).** Same default range as the two guards above. This is the gate that the other two cannot be: they only recognise `.jjconflict*` entries and literal marker text, so a tree truncated for any OTHER reason — a git index truncated by ENOSPC, an API `base_tree` landing that silently inherited an already-wiped base — passes both. `main` was wiped to near-zero files **twice in 24 hours** that way (`118c636ead8`: 109,375 files → 4) with every guard green; the only thing that ever caught it was a human counting `git ls-tree -r --name-only $C | wc -l`. Four fail-closed checks: **size band** (±0.15% of the base the push replaces, *plus* an absolute 90,000/150,000 floor and ceiling — the absolute floor is the only check that fires when the BASE is itself already wiped and the delta is therefore zero); **duplicate tree entries** (a real corruption listed `src/lib` twice at **109,815 files — higher than the healthy 109,543** — so a floor-only check is blind to it; `git fsck` is authoritative but takes >2min here, use it for investigation not gating); **`src/` entry band** 13..25 (measured 15, the corruption showed 9 — the strongest single signal); and **load-bearing path floors** (`src/runtime ≥ 150` — measured 185, corruption showed 0, a proven canary. `src/std` is NOT a canary: it holds one file, so a non-empty test on it is vacuous). A lane that legitimately moves more than the band allows states `--expect-files <n>`, which RECORDS the expected post-count in the verdict and recentres the band — every other check still applies, and there is no flag or env var that turns one off. `--selftest` runs before every scan and is fatal (14 fixtures). Proofs, including a real `git push` where the duplicate-entry fixture was blocked by this guard ALONE: `doc/08_tracking/bug/no_automated_tree_size_gate_2026-08-01.md`.
 - **No unbaselined test-tree divergence in the pushed commit — run `sh scripts/check/check-test-tree-divergence.shs --ref <NEW>` (exit 0 = safe).** `<NEW>` is the exact commit being pushed — the guard reads COMMITTED content via `git ls-tree`/`cat-file`, never the shared working copy, so it works on a plumbing-built commit that was never checked out. This is the fourth mandatory pre-push check: it fences the LIVE duplicate test trees (`test/01_unit/` vs `test/unit/`, `test/02_integration/` vs `test/integration/`) against the baseline in `scripts/check/test_tree_divergence_baseline.txt`, failing on any NEW divergence or any baselined pair that is now identical (stale baseline). Until 2026-08-10 only the git pre-push hook (`pre-push-conflict-tree-guard.shs`) ran it — every plumbing landing bypassed it, which is exactly how divergence sat RED for days with nothing acting. Same verdict convention as the other three: `PASS — <n> pairs checked, ...` with n > 0, `FAIL` exit 1, `ERROR — nothing was checked` exit 2; a run that compares 0 pairs is an ERROR, not a pass. Do not "fix" a FAIL with `--generate-baseline` without reading the diff — that flag exists only for deliberate, reviewed baseline updates.
+  **Cost (rewritten 2026-09-12 — it is no longer a reason to step over the gate):**
+  `--ref` mode used to spawn two git processes per shadow file (`git cat-file -e`
+  + `git diff --quiet`) — ~12k processes per ref, ~24k for the delta helper, measured
+  **174 s** on an idle macOS host and 10-20+ minutes (often never returning) under
+  load ~20, which is why every landing on 2026-09-12 either waited on it or stepped
+  over it. It now reads the whole committed index in ONE `git ls-tree -r` per ref and
+  compares BLOB OBJECT IDS (git is content-addressed: equal blob id ⟺ byte-identical
+  content, exactly what `git diff --quiet` answered). Measured after: guard **<1 s**,
+  delta **7 s**, offender list byte-identical (3,943 lines) and verdict line identical
+  to the old implementation at the same ref. Both scripts now run a **fatal
+  `--selftest` before every scan** (guard: 4 fixtures, incl. batched-vs-legacy
+  equality on a 3-pair fixture repo; delta: 2 fixtures, orphan-free termination and
+  the killed-run ERROR verdict). The delta also runs the guard under job control and
+  signals its whole process group on SIGTERM — before this, `timeout 900` killed the
+  wrapper (exit 144) and left the guard's git processes running.
+
   **Scoped-delta escape (this guard ONLY — the other three have no escape, and "3 of 4 passed" is never a licence):** a pre-existing red left by another session must not block landings that introduce zero new divergence, but stepping over it silently is exactly how the divergence backlog accumulated. The escape is mechanical, not a judgement call: run `sh scripts/check/check-test-tree-divergence-delta.shs <BASE> <NEW>` (BASE = the origin tip your push replaces). It runs the guard in `--ref` mode for BOTH sides — never the working copy, which disagrees with committed content under concurrent load (910 vs 859 diverged measured 2026-08-10) — and diffs the offender lists byte-for-byte, verdict as the last stdout line: `PASS — <n> pre-existing offender(s), 0 introduced by this range` exit 0 / `FAIL — <n> newly introduced: <names>` exit 1 / `ERROR — nothing was checked` exit 2. Landing on a delta-PASS additionally REQUIRES recording the pre-existing offender list (the helper saves it and prints the path) in the commit message or a `doc/08_tracking/bug/` record — an unrecorded step-over is a violation even when the delta is clean. Any range that changes the offender list or any offender category (new divergence, mirror-only, stale allowlist, stale baseline) stays hard-blocked, including every range that touches the test trees non-identically; there is no flag that widens this, and no directory is exempt.
+  **(2026-09-12) Slow under load — run it in the foreground with a timeout, and list mirror pairs, don't guess them.** PR #594 measured the delta guard failing to return under host load ~20 within a normal interactive wait. Do not background it or let it silently time out uninspected: run `timeout 900 sh scripts/check/check-test-tree-divergence-delta.shs <BASE> <NEW>` and capture its exit code into a variable on the next line (never through a pipe). Before concluding "no mirror pair changed," enumerate the actual `test/01_unit/` ↔ `test/unit/` and `test/02_integration/` ↔ `test/integration/` mirror pairs your range touches (`git diff --name-only <BASE>..<NEW> -- test/01_unit test/unit test/02_integration test/integration`) rather than asserting it from memory — a new spec with no twin on either side is not automatically exempt, and the delta guard's own offender-list diff is the authority, not a manual guess.
 - **The Rust seed must still compile — run `sh scripts/check/check-seed-builds-push.shs` (exit 0 = safe).** Same default range as the guards above. This closes a gap none of them cover: they all check tree STRUCTURE (conflict trees, marker text, tree size, test-tree divergence, revert patterns) — none of them compiles anything. Incident 2026-08-11: `origin/main` was found unbuildable — `cargo build --release --bin simple` in `src/compiler_rust` failed with unresolved-import (E0432) and missing-enum-variant (E0599) errors from two independent incomplete changes that landed hours apart, and every existing guard passed because a structurally clean tree can still fail to compile. Mechanism **(changed 2026-08-18 — the old path filter was FAIL-OPEN; see below)**: the guard digests the seed's own CONTENT at the new tip (the git tree object ids of `src/compiler_rust` and `src/runtime` plus the `Cargo.lock` blob id) and skips compiling **only** when that exact content has already been recorded green by a previous run of this guard (marker dir `$SEED_GREEN_MARKER_DIR`, default `/mnt/data/.seed-build-guard-green`, written only after a genuine green compile; deleting it is always safe and merely forces recompilation). The files-changed count is still reported for non-vacuity — a docs-only push reports `n > 0`, never `n = 0` — but it no longer *decides* anything. Otherwise the guard materialises the NEW tip into an isolated `git worktree add --detach` (never the shared, contested working copy) and runs `cargo check --release --bin simple` — deliberately `check` not a full `build`: `check` runs the complete frontend (parse/resolve/type-check/borrow-check) and only skips codegen+link, so it catches E0432/E0599-class errors identically to `build` while being materially cheaper; the guard's own `--selftest` proves this by `cargo check`ing a fixture with a deliberate unresolved import and a nonexistent enum variant and asserting both the FAIL and the exact `E0432`/`unresolved import` text, plus a clean sibling fixture that must PASS. Uses a dedicated `CARGO_TARGET_DIR` under `/mnt/data` (fast NVMe, not the space-constrained root fs), reused warm across runs; `KEEP_BUILD_DIR=1` keeps the worktree for debugging. **Why the path filter had to go (incident 2026-08-18, `doc/08_tracking/bug/origin_main_unbuildable_missing_half_1e40de916bb_2026-08-18.md`):** `origin/main` sat unbuildable again — E0432 at `compiler/src/interpreter_call/core/function_exec.rs:10` (importing `module_globals_generation`, which existed nowhere at origin) and E0599 at `compiler/src/interpreter_sffi.rs:125` — while every push over it reported PASS, because origin's tip commits were docs-only and the filter short-circuited without compiling anything. The filter's inference ("the range didn't touch the seed, so buildability cannot have REGRESSED") is true and beside the point: it presumes the base was green, and nothing ever established that, so one broken base launders every later docs-only push into a green verdict. This is the same fail-open `check-c-runtime-compiles-push.shs` avoided by being tree-scoped. The fix keeps a fast path (a full `cargo check` is 1-2 min warm on this host and this guard runs on every push; a guard that is routed around with `--no-verify` protects nothing) but rests it on a **positive proof** — "this exact seed content was compiled and passed" — instead of an absence. Content-keying rather than commit-keying matters because shas churn constantly under rebase, so a per-commit green cache would almost always miss. Verified against reality: on the real broken tip the guard now says `FAIL — cargo check failed in e9e22a1230f: error[E0592]: duplicate definitions with name INLINE_INT_BITS` (exit 1) for the *docs-only* range `e9e22a1230f~1..e9e22a1230f`, and PASSes on the tree carrying the missing half `1e40de916bb`.
 
 Same verdict convention as the others: `PASS — <n> file(s) checked, seed bin + test targets compile cleanly at <sha> (seed content <digest> recorded green; ...)` (or `... seed content <digest> at <sha> byte-identical to a tree this guard already compiled green (<timestamp>)` on the fast path) exit 0 / `FAIL — cargo check failed in <sha>: <first error>` exit 1 / `ERROR — nothing was checked` exit 2; a 0-files range is always ERROR. `--selftest` runs before every scan and is fatal (**5 fixtures** as of 2026-08-18, up from 4: the new one replays the fail-open — a fixture repo whose seed carries an E0432 import and whose tip commit is docs-only must still be compiled and must FAIL, and it separately proves the range really is docs-only, that a fresh marker store excuses nothing, and that marker recording is live rather than dead code). Wired into `pre-push-conflict-tree-guard.shs` alongside the size/tree/markers guards. See `doc/08_tracking/bug/origin_main_unbuildable_rust_seed_2026-08-11.md`.
 - **No mass exported-runtime-API deletion — run `sh scripts/check/check-runtime-api-regression-push.shs` (exit 0 = safe).** Same default range as the guards above. Incident 2026-08-11: commit `6e2f613d302`, titled "fix(runtime): preserve u64 across erased values", was a stale-snapshot clobber that silently DELETED 44 runtime functions (-1896 lines from `value/collections.rs`, -156 from `value/sffi/value_ops.rs`) — the whole `rt_string_*` API, array ops (push/pop/sort/find/take/map/reduce/reverse), `rt_collection_remove`, `rt_value_unbox_int` — and every existing guard passed: the size guard bands on file COUNT, not symbols inside existing files; the revert guard needs an exact-blob match against ONE prior commit, and this was a stale-forward snapshot, not an exact revert. Mechanism: extracts the DEFINED `rt_*` symbol set from committed content only (`git show <rev>:<path>`) at both range endpoints, across the Rust runtime (`src/compiler_rust/runtime/src/**/*.rs`, `pub extern "C" fn rt_*` / `pub fn rt_*`) and the C runtime (`src/runtime/*.c`/`*.h`, incl. baremetal stubs, `rt_NAME(...) {` definitions) — evaluated as **separate** sets, never unioned, because they are parallel implementations of the same names and unioning them was tried and found to mask real Rust-only removals when a same-named C fallback still existed. FAILs when >=5 symbols are removed in one push (matches `check-no-revert-push.shs`'s `--min-files=5` precedent: a handful of intentional removals is routine, 44 is not), OR — no escape, ever — when a removed Rust symbol is still `pub use`-re-exported in `runtime/src/lib.rs` (unbuildable crate, detected statically without invoking cargo). Escape for the count check only: `--expect-removals <n>`, which RECORDS the accepted count in the verdict line and recentres the threshold for that push, same philosophy as the size guard's `--expect-files`. Verdict: `PASS — <n> symbol(s) checked, 0 removed` exit 0 / `FAIL — <n> symbol(s) checked in <range>, <k> symbol(s) removed: <names>[; <m> still re-exported in lib.rs (unbuildable): <names>]` exit 1 / `ERROR — nothing was checked` exit 2; a 0-symbol range is always ERROR. `--selftest` runs before every scan and is fatal (4 fixtures: incident-replay must FAIL naming the removed+unbuildable symbols, forward-progress must PASS, a single below-threshold removal must PASS, empty range is checked for `EV_CHECKED==0`). Validated directly against the real incident: `sh scripts/check/check-runtime-api-regression-push.shs '6e2f613d302~1..6e2f613d302'` FAILs, naming 45 removed `rt_*` symbols and flagging the unbuildable set. Wired into `pre-push-conflict-tree-guard.shs` alongside the size/tree/markers/seed-build guards.
 - **MANDATORY (promoted 2026-08-11): the C runtime must compile — run `sh scripts/check/check-c-runtime-compiles-push.shs` (exit 0 = safe).** This is the seventh guard and the first that runs a COMPILER. Incident 2026-08-11 (`doc/08_tracking/bug/runtime_native_c_uncompilable_unsigned_box_never_implemented_2026-08-11.md`): `src/runtime/runtime_native.c` used the type `RtCoreUInt` and the functions `rt_core_as_heap_uint` / `rt_value_u64` at 8 sites with **zero declarations anywhere in the tree** — `clang -fsyntax-only` fails outright, so that file had **never** compiled — and it sat in `main` looking green. It looked green because every other guard is a text-and-tree check: conflict-tree entries, conflict-marker text, file counts, test-tree diffs, blob-vs-history comparison, and `rt_*` symbol-set deltas. Source that is well-formed as BYTES, non-conflicted, correctly sized, forward-moving, and symbol-preserving passes all six while being complete nonsense to a compiler. Note especially that `check-runtime-api-regression-push.shs` greps for `rt_NAME(...) {` **definitions** and is therefore blind to a *use* of a symbol that was never defined — the exact defect here. Mechanism: `$CC -fsyntax-only` (parse + semantic analysis, no codegen, no linking, no CMake, no SDL/OpenSSL/SQLite dev packages, seconds not minutes) over every `*.c` under `src/runtime/` excluding vendored code per CLAUDE.md's Owned-Code Scope (`src/runtime/vendor/**`, `miniaudio.h`, `stb_image.h`, `stb_truetype.h`). **The compiler's exit status is read directly into a variable on the line after the invocation — never through a pipe**, since a pipeline's `$?` is `tail`/`grep`/`head`'s status and has produced false greens in this repo before. Three-way classification: exit 0 = compiled; exit≠0 where every error is a missing header that does **not** exist in the repo = SKIP (an external SDK such as `wasmtime.h` is not installed here — reported separately, never counted as compiled, never a pass); anything else = FAIL, including a missing header that DOES exist in-repo, because that is a broken include path and a real defect. Verdict: `PASS — <n> file(s) compiled, 0 errors` exit 0 / `FAIL — <n> file(s) failed to compile: <names>` exit 1 / `ERROR — nothing was checked` exit 2. Non-vacuity is absolute — a run that fed 0 files to a compiler is ERROR, and **a machine with no `clang`/`cc`/`gcc` is ERROR, never a pass**: absence of a compiler is absence of evidence. `--selftest` runs before every scan and is fatal (8 fixtures: well-formed must-PASS; undeclared-TYPE and undeclared-FUNCTION must-FAIL replaying the incident's exact shape; unknown external header must-SKIP; an in-repo header off the include path must-FAIL *not* skip; plain syntax error must-FAIL; an empty tree must yield 0 compiled so the caller is forced to ERROR; a deliberately broken `.c` under `vendor/` must not be scanned at all). Scope note: unlike the range-based guards this one checks a TREE (`--root DIR`, default the working tree), not a `BASE..NEW` delta — compilability is a property of a tree, since a push that edits only a header can break a `.c` it never touched, so a changed-files-only scan would be fail-open. Known limit, stated rather than papered over: `-fsyntax-only` does not link, so a declared-but-never-defined symbol still gets through. **Promotion history:** landed advisory 2026-08-11 at `04848434af0c` because it was honestly RED on `main` — `src/runtime/platform/async_linux_uring.c` failed with `use of undeclared identifier 'NULL'` at line 733 (missing `#include <stddef.h>` in its `!SPL_HAS_IO_URING` stub branch). Fixed same day by adding the include; the guard now reports `PASS — 96 file(s) compiled, 0 errors (2 skipped for unavailable external dependencies)` (the two skips are `counterpart_worker_runtime.c` and `scv_wasm_shim.c`, both genuine external-SDK-header SKIPs, never counted as compiled). Wired into `pre-push-conflict-tree-guard.shs` alongside the other guards.
-- **Direct `rt_*` call-site ratchet — run `sh scripts/check/check-no-direct-rt.shs` (exit 0 = safe).** Not a tree-structure guard like the others above — it is a RATCHET on Simple product code (`*.spl` under `src/`, excluding `vendor/`), not a hard zero-bar: it counts direct `rt_*(...)` call sites, splits them into allowlisted-provider vs. forbidden-product using `scripts/check/no_direct_rt_allowlist.txt`, and FAILs only when the forbidden count exceeds the recorded baseline in `scripts/check/no_direct_rt_baseline.txt`. Measured 2026-08-18: `PASS — 14796 file(s) scanned, forbidden=12948 (baseline 12948)`. `--critical` (or `SIMPLE_RT_CRITICAL=1`) switches to a stricter mode where ANY forbidden call site fails, for use on critical/mission-critical build lanes. Selftest runs first, unconditionally, and is fatal. Wired into `pre-push-conflict-tree-guard.shs` alongside the other full-scan (not range-bound) guards.
+- **Direct `rt_*` call-site ratchet — run `sh scripts/check/check-no-direct-rt.shs` (exit 0 = safe).** Not a tree-structure guard like the others above — it is a RATCHET on Simple product code (`*.spl` under `src/`, excluding `vendor/`), not a hard zero-bar: it counts direct `rt_*(...)` call sites, splits them into allowlisted-provider vs. forbidden-product using `scripts/check/no_direct_rt_allowlist.txt`, and FAILs only when the forbidden count exceeds the recorded baseline in `scripts/check/no_direct_rt_baseline.txt`. Measured 2026-09-07 in the ENFORCED scope (`--roots src`, the manifest row at `config/check/must_check_gates.sdn:10`): `PASS — 16342 file(s) scanned (roots=src, src=6072), forbidden=6072, extern_decls=6455 (baseline 6072)`. The baseline read **7776** until 2026-09-07 — 1,704 above the real count, i.e. the ratchet could absorb 1,704 NEW violations before noticing; tightened to the measured 6072. Scope matters and has caused two agents to report contradictory numbers: the DEFAULT roots (`src,examples,tools,scripts,test`) count **27320** forbidden sites and the gate FAILs there, but the push tier runs `--roots src` only, so the wider figure is not what enforces. The old 2026-08-18 figure (`forbidden=12948 (baseline 12948)`) predates both the 2026-08-28 roots widening and the migration work that shrank `src`. `--critical` (or `SIMPLE_RT_CRITICAL=1`) switches to a stricter mode where ANY forbidden call site fails, for use on critical/mission-critical build lanes. Selftest runs first, unconditionally, and is fatal. Wired into `pre-push-conflict-tree-guard.shs` alongside the other full-scan (not range-bound) guards.
 - **ADVISORY (added 2026-08-18, honestly RED — see below): tracked stage binaries must actually run — run `sh scripts/check/check-stage-binaries-runnable.shs` (exit 0 = safe).** This is the eighth guard and the first that EXECUTES a tracked artifact. Incident 2026-08-18 (`doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`): the git-tracked binary `bootstrap/stage3/simple` SEGVs (rc=139) on a three-line hello world, for **both** of the two commands it supports, while `--version` answers cleanly — which is exactly why it looked healthy. Every guard above passed over it, because every one of them checks trees, ranges, or source: conflict entries, marker text, file counts, test-tree diffs, blob-vs-history, `rt_*` symbol sets, and C that parses. Even `check-c-runtime-compiles-push.shs`, the only one that runs a compiler, runs it over SOURCE. A binary blob is opaque to all of them: correctly sized, non-conflicted, forward-moving, symbol-preserving — and stone dead when you run it. Mechanism: enumerates every git-**tracked** file named `simple` under `bootstrap/` via `git ls-files` (never a hardcoded list, so a new stage is covered the day it lands), materialises it (working-tree file by default; committed content via `git cat-file blob <rev>:<path>` when `--rev` is given **or** the tracked path has no working-tree file, so a locally-deleted artifact is exercised rather than silently skipped), and runs each supported command on a three-line hello world in a private temp dir under `timeout`. **The exit status is read DIRECTLY into a variable on the line after the invocation, never through a pipe** — a pipeline's `$?` is the last command's status and has produced false greens in this repo. Classification: rc 0 = OK; rc >= 128 or 124 = CRASH (139 = SEGV, 134 = abort, 124 = timed out); any other non-zero = FAIL; crashes and failures are both offenders, named separately in the verdict. **Command scope is exactly `compile` and `native-build`, and must stay that way:** stage binaries are the BOOTSTRAP cli (`src/app/cli/bootstrap_main.spl`, dispatch at lines 459-492), which deliberately exposes only those two — it has no `run`, `test`, `lint`, `fmt` or `build`, so probing for them is a category error that has already misled one investigation. `--version` is probed only as a liveness precondition; a passing `--version` is explicitly **not** a pass, since that is the exact thing that hid the incident. Verdict: `PASS — <n> invocation(s) executed across <k> binary(ies), 0 crashes` exit 0 / `FAIL — <n> invocation(s) executed across <k> binary(ies), <m> crashed/failed: <names>` exit 1 / `ERROR — nothing was checked (<reason>)` exit 2. Non-vacuity is absolute: a run that executed 0 binaries is ERROR, and **finding no tracked stage binary at all is ERROR, never a pass** — absence of an artifact to test is absence of evidence. A tracked path whose content cannot be materialised is likewise ERROR; a tracked artifact that is not executable is an offender, not a skip. `--selftest` runs before every scan and is fatal (6 fixtures, all built as real executables probed by the real scanner: a working fake must PASS; a fake that SEGVs on `compile` while `--version` succeeds must FAIL, replaying the incident's exact shape; a plain non-zero exit must FAIL; a fake whose `--version` itself crashes must FAIL; a non-executable tracked artifact must FAIL; a repo with no stage binary must execute 0 invocations so the caller is forced to ERROR). Scope note: like the C-runtime guard and unlike the range-based guards, this checks a TREE (`--root`/`--rev`), not a `BASE..NEW` delta — runnability is a property of an artifact, and the incident binary was untouched by the push that would have shipped it. Known limit, stated rather than papered over: it proves the commands do not crash, not that their output is correct. **Landed ADVISORY because it is honestly RED on `main`**: measured 2026-08-18, `FAIL — 12 invocation(s) executed across 4 binary(ies), 8 crashed/failed` — **all four** tracked stage binaries (`bootstrap/stage1/simple`, `stage2/simple`, `stage3/simple`, `stage3/x86_64-unknown-linux-gnu/simple`) SEGV on both commands, which is broader than the filed bug record's stage3-only scope. Repair needs a bootstrap redeploy, which is blocked separately; promote this guard to MANDATORY once that lands and it goes green.
-- **ADVISORY (added 2026-08-21): no unresolved runtime symbols — run `sh scripts/check/check-no-unresolved-runtime-symbols.shs` (exit 0 = safe).** Sibling of the stage-binaries guard above and the same incident (`doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`): codegen emitted a call to `rt_unwrap_or_trap`, the C runtime never defined it, the native link tolerated the undefined symbol (bootstrap logs even printed "Unresolved symbol preview: ...") and the NULL GOT slot became a SIGSEGV. `-fsyntax-only` never links, and the extern ratchet classifies Simple `extern` declarations, not codegen-emitted calls, so neither could see it. Two checks: undefined runtime-prefixed symbols in each tracked `bootstrap/**/simple` (`nm -u` + `nm -D`, minus what the binary's own `ldd`-resolved libs define, prefixes derived from `src/runtime/runtime.h`), and — before any link — every codegen-emitted runtime entry name missing from `build/simple-core/libsimple_runtime.a`. Same verdict convention; 0 artifacts, missing `nm`, a stripped artifact with no symbol table, or a STALE archive is ERROR, never a pass. `--selftest` fatal (5 fixtures). ADVISORY because it is honestly RED: 83 codegen-emitted names are undefined in the C runtime archive, and the tracked stage blobs are stripped so their symbol evidence is gone. Promote once a redeploy makes it green.
 - **No NEW unbacked extern declarations — run `sh scripts/check/check-unbacked-extern-ratchet.shs` (exit 0 = safe).** Stage 3 of `doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`: an extern with no runtime backing silently returns nil instead of failing, and the tree already carries 1,466 such symbols, so the population cannot be made fatal at once. This guard freezes them in `scripts/check/unbacked_extern_baseline.txt` and fails any push that ADDS one. Classification is delegated to `scripts/check/extern-backing-census.shs` (the single source of truth, which reads DEFINED symbol tables out of real link artifacts via `nm`, not text-grep), and the frozen set is the **union** of the census classes `GENUINELY_MISSING` and `DEAD_DECLARATION` — never `GENUINELY_MISSING` alone: Stage 2 verified all 262 `DEAD_DECLARATION` symbols and **zero** were dead (70 have a real `.spl` call site in another file, 41 have non-`.spl` references, 111 are documented public API), so baselining only the 1,203 would ratchet live public API straight to fatal. Same rule as the test-tree divergence guard in both directions: a baselined symbol that is no longer unbacked (became backed, or its declaration was removed) is a **stale baseline** and also FAILs, because a baseline that no longer describes the tree is how a ratchet silently stops ratcheting. Verdict convention identical to the guards above: `PASS — <n> unbacked extern symbol(s) checked, 0 new, 0 stale` exit 0 / `FAIL — <n> symbol(s) checked, ...` naming every offending symbol exit 1 / `ERROR — nothing was checked` exit 2; a 0-symbol comparison is always ERROR, and a missing deployed binary or a failed census is ERROR, never a pass. `--selftest` runs before every scan and is fatal (4 fixtures: clean must PASS; a new unbacked symbol must FAIL naming it; a baselined-but-now-backed symbol must FAIL as stale; an empty scan must ERROR). Deliberate-update path: `--generate-baseline` — **for reviewed updates only, exactly like the divergence baseline's `--generate-baseline`. Do not "fix" a FAIL with it without reading the diff**; a FAIL naming new symbols is real new debt, and regenerating hides it. Runtime ~20s. Does not flip any default and deletes no declaration — Stage 2 proved deletion unsafe.
 - No leaked markers in previously-conflicted files: `git grep -c '^<<<<<<<' $TIP -- <paths>` must be 0.
 - Stale `.git/index.lock` with no live holder: `find .git/index.lock -mmin +5 -delete`. Check `pgrep -af 'jj (rebase|restore)'` first — a D-state jj may still be progressing (verify via `/proc/PID/io` deltas) and must not be killed.
 - Edit-tool changes are not auto-snapshotted: commit immediately after editing, and re-verify file content (`grep`) after any `workspace update-stale` — a parallel-session reconcile can silently clobber uncommitted edits.
+
+## Push tier minimised to < 20 s; required CI check < 1 min (2026-09-23)
+
+User targets that day: the pre-push gate finishes in **< 20 s** for a typical
+push and the required GitHub check in **< 1 min**, so a PR can land that fast.
+Measured over 67 real pushes before the change, a push took median 171 s and
+p75 ~16 min with no per-gate timing anywhere in the logs. The dispatcher now
+prints `push-must-check: gate <id> exit=<rc> <n>s` per row, and the push tier
+was cut to nine diff-scoped, cached, committed-content rows: conflict-tree,
+tree-size, conflict-markers, sdn-crc32-sealed, rust-duplicate-reexport
+(touched .rs only), no-stale-snapshot-rewind, range-shs-hygiene (touched .shs
+parse + new guard wired), runtime-api-regression, rt-dual-implementation (delta
+vs base, content-keyed census cache). The required status context
+"Code Idiom & Structural Ratchet Gates" is now carried by the `fast-gates` job
+in `required-gates.yml` (its own one-job workflow since 2026-09-27; `repo-hygiene.yml` no longer runs per PR), which runs all 9 against the PR's base..head with a
+sparse checkout. `no-stale-snapshot-rewind` is included: it is BLOCKING at push
+and the push tier is bypassable, so a class with no automatic lane would be
+unenforced. It consults up to 40 first-parent ancestors as contributors, so that
+job fetches `PR_COMMITS + 41` rather than `PR_COMMITS + 1` — a shallower fetch
+would have left it exiting 0 over a near-empty window, which is a silent
+weakening rather than a FAIL. The extended job runs it too (`--range`, in the
+"Push-tier core gates" step). The 47-step ratchet lane is the non-required
+"(extended)" job and runs on every main push and on PRs labelled `ci:full`
+(since 2026-09-27 every non-required PR workflow triggers only on the
+`labeled` event and runs only for `ci:full`, so a plain PR push starts just
+"Required Gates" and the admission broker; see `doc/07_guide/infra/vcs/pr_landing_timing_race.md`
+§ "PR-path CI is required checks only"), including the FROZEN
+rt-dual comparison so main's own single-lane debt stays a red verdict there.
+Local-CI receipts now only affect the extended job. Classes that moved
+out of the blocking push tier (C runtime compile, whole-tree guard wiring,
+extern-registry gap, rules registry, module owners, source-list parity, etc.)
+are caught by the extended job on the PR and on main, and by the merge lane's
+own merge-tree + CRC + rt-delta checks. Details:
+
+- **Advisory rows (`push_blocking: false`) are skipped on an ordinary push.**
+  They never blocked, their verdicts sat red for weeks with nothing acting, and
+  they were ~80 % of the wall time (plan-acceptance sweep, llm-caret ~180 s,
+  main-test-runnable ~60 s). The rows stay in the manifest (wiring preserved,
+  exact dispatch arm still required, fail-closed) and `MUST_CHECK_ADVISORY=1`
+  runs all of them. The skip prints a count; it is never silent.
+- **New blocking rows:** `push-sdn-crc32-sealed` (every sealed `*.sdn` at the
+  pushed sha must verify — a stale `#sdn-crc32` header made the whole
+  `bug_db.sdn` load as nil), `push-rust-duplicate-reexport` (rustc E0252 class,
+  static, ~2 s; the full seed `cargo check` is outside the budget and belongs to
+  CI), `push-no-stale-snapshot-rewind` (the e274cd33719 class itself).
+- **`push-rt-dual-implementation` is a DELTA vs the commit the push replaces**
+  (`--baseline-rev`); frozen-baseline drift is printed as information. The
+  frozen comparison blocked 15 unrelated pushes in one day once main was red.
+- **Demoted to advisory (run with `MUST_CHECK_ADVISORY=1`, enforced by the
+  extended CI job):** guard-wiring, sffi-v2-authority, main-test-runnable,
+  no-direct-rt, windows-checkout-damage, orphan-part-files, the five
+  `*-spirv-pinned` rows and windows-msvc-toolchain-contract (blocking `tree`
+  rows read the working checkout), c-runtime-compiles, no-document-symlinks,
+  rules-quick, interpreter-module-owners, interpreter-extern-registry-gap,
+  type-walk-constructor-parity, runtime-source-list-parity,
+  transient-scope-text-field-promotion, port-io-single-owner,
+  no-mock-file-system-io. `check-c-runtime-compiles-push.shs` gained a
+  content-keyed green marker (6 s -> 0 s on a hit);
+  `check-no-mock-file-system-io.shs` went from 28 s to 1 s; the
+  plan-acceptance sweep's default job count is 2.
+- The extended CI job also re-runs the core classes (`Push-tier core gates`
+  step) with the C compile included, because the push tier is bypassable.
 
 ## Standalone origin-health watchdog (NOT an eighth pre-push guard)
 
@@ -143,19 +424,7 @@ origin versions". A sync that reverts is worse than no sync. Mandatory:
 Non-code artifacts (docs, skills, workflows, spipe state) may sync freely; the
 danger is only `src/**`, `scripts/**`, and other product code — hold those to the
 guards above. Upgrade path: a `scripts/check/` pre-push hook that fails when the
-outgoing range reverts a product file the committer didn't author. (The
-conflict-tree half of this is now implemented as
-`scripts/check/check-no-conflict-tree-push.shs`; the revert-detection half is
-still manual.)
-
-**Rebasing onto a parallel session's resolution: diff both directions.** When
-two sessions fix the same file, the newer origin version is not automatically a
-superset. On 2026-07-25 origin's resolution of `make_os_disk.c` kept most of the
-local fixes but replaced fixed-cluster geometry with dynamic sizing — so the
-local copy was *behind* on one axis and *ahead* on three. Overwriting either way
-would have reverted real work. Check `diff -u origin_version local_version` and
-read **both** the `-` and `+` sides before choosing; often the answer is that
-origin already supersedes you and the right move is to drop your commit.
+outgoing range reverts a product file the committer didn't author.
 
 ## LLM wiki before commit
 

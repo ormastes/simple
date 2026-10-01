@@ -503,7 +503,7 @@ For low-level TLS details (record framing, cipher suites, handshake state machin
 
 ## Security Lint Rules
 
-The compiler includes 6 security lint rules (run with `bin/simple lint <files>`):
+The compiler includes 6 security lint rules (activated by `bin/simple build lint`):
 
 | Rule | Code | Level | Detects |
 |------|------|-------|---------|

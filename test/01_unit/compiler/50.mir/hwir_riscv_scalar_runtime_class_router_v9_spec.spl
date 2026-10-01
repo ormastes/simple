@@ -1,0 +1,70 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_class_router_v9.{strict_riscv_scalar_runtime_class_router_v9}
+
+fn v9_router_config() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "rv64-im-zicsr-zifencei", isa_profile: "rv64im_zicsr_zifencei",
+        compressed_decode_profile: "none")
+
+fn v9_router_inputs(class_code: i64, legal: i64 = 1, illegal: i64 = 0,
+    busy: i64 = 0, pending_ready: i64 = 1, sticky_fault: i64 = 0, valid: i64 = 1) -> [HwHostInput]:
+    [HwHostInput.bits("uop_valid", valid), HwHostInput.bits("decode_legal", legal),
+        HwHostInput.bits("illegal_valid", illegal), HwHostInput.bits("decoded_execution_class", class_code),
+        HwHostInput.bits("alu_ready", 1), HwHostInput.bits("control_ready", 1),
+        HwHostInput.bits("system_ready", 1), HwHostInput.bits("illegal_ready", 1),
+        HwHostInput.bits("pending_ready", pending_ready), HwHostInput.bits("pending_busy", busy),
+        HwHostInput.bits("sticky_fault", sticky_fault)]
+
+describe("runtime pipeline v9 class router"):
+    it("admits legal class six through the CSR pending tag only"):
+        val module = strict_riscv_scalar_runtime_class_router_v9("pipeline_v9_router_csr", v9_router_config()).unwrap()
+        val result = evaluate_strict_comb_hwir(module, v9_router_inputs(6)).unwrap()
+        expect(result.value_of("pending_dispatch_valid").unwrap()).to_equal(1)
+        expect(result.value_of("pending_dispatch_tag").unwrap()).to_equal(3)
+        expect(result.value_of("uop_ready").unwrap()).to_equal(1)
+        expect(result.value_of("router_fault").unwrap()).to_equal(0)
+
+    it("keeps V6 stateful routes and admission fences unchanged"):
+        val module = strict_riscv_scalar_runtime_class_router_v9("pipeline_v9_router_routes", v9_router_config()).unwrap()
+        for row in [(3, 1), (4, 2), (7, 4)]:
+            val result = evaluate_strict_comb_hwir(module, v9_router_inputs(row[0])).unwrap()
+            expect(result.value_of("pending_dispatch_valid").unwrap()).to_equal(1)
+            expect(result.value_of("pending_dispatch_tag").unwrap()).to_equal(row[1])
+        val held = evaluate_strict_comb_hwir(module, v9_router_inputs(6, 1, 0, 0, 0)).unwrap()
+        expect(held.value_of("pending_dispatch_valid").unwrap()).to_equal(1)
+        expect(held.value_of("uop_ready").unwrap()).to_equal(0)
+        val busy = evaluate_strict_comb_hwir(module, v9_router_inputs(6, 1, 0, 1)).unwrap()
+        expect(busy.value_of("pending_dispatch_valid").unwrap()).to_equal(0)
+        expect(busy.value_of("uop_ready").unwrap()).to_equal(0)
+        val sticky = evaluate_strict_comb_hwir(module, v9_router_inputs(6, 1, 0, 0, 1, 1)).unwrap()
+        expect(sticky.value_of("pending_dispatch_valid").unwrap()).to_equal(0)
+        expect(sticky.value_of("uop_ready").unwrap()).to_equal(0)
+
+    it("keeps illegal routing, idle, immediate paths, and decoder skew fail closed"):
+        val module = strict_riscv_scalar_runtime_class_router_v9("pipeline_v9_router_closed", v9_router_config()).unwrap()
+        val illegal = evaluate_strict_comb_hwir(module, v9_router_inputs(6, 1, 1)).unwrap()
+        expect(illegal.value_of("illegal_lane_valid").unwrap()).to_equal(1)
+        expect(illegal.value_of("pending_dispatch_valid").unwrap()).to_equal(0)
+        expect(illegal.value_of("uop_ready").unwrap()).to_equal(1)
+        val idle = evaluate_strict_comb_hwir(module, v9_router_inputs(6, 1, 0, 0, 1, 0, 0)).unwrap()
+        expect(idle.value_of("pending_dispatch_valid").unwrap()).to_equal(0)
+        expect(idle.value_of("uop_ready").unwrap()).to_equal(0)
+        for class_code in [1, 2, 5]:
+            val immediate = evaluate_strict_comb_hwir(module, v9_router_inputs(class_code)).unwrap()
+            expect(immediate.value_of("pending_dispatch_valid").unwrap()).to_equal(0)
+            expect(immediate.value_of("uop_ready").unwrap()).to_equal(1)
+        val skew = evaluate_strict_comb_hwir(module, v9_router_inputs(6, 0, 0)).unwrap()
+        expect(skew.value_of("pending_dispatch_valid").unwrap()).to_equal(0)
+        expect(skew.value_of("uop_ready").unwrap()).to_equal(0)
+        expect(skew.value_of("router_fault").unwrap()).to_equal(1)
+        expect(module.shape_diagnostic()).to_equal("")
+
+    it("rejects standalone and IM profile configurations"):
+        expect(strict_riscv_scalar_runtime_class_router_v9("pipeline_v9_router_zicsr",
+            CoreConfig.rv64_zicsr_zifencei()).is_err()).to_be(true)
+        val im = CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+            profile: "rv64im", isa_profile: "rv64im", compressed_decode_profile: "none")
+        expect(strict_riscv_scalar_runtime_class_router_v9("pipeline_v9_router_im",
+            im).is_err()).to_be(true)

@@ -1,0 +1,438 @@
+# Stage-2 generation-pinned binding owner for environment variants.
+#
+# This module owns only publication, coarse session pins, and retirement.  It
+# never maps or invokes an artifact.  Provider handles are scalar identities
+# supplied by the loader owner; a session retains copied facet metadata while
+# ProviderGenerationManagerV1 retains the admitted generation.
+
+use std.nogc_sync_mut.composition.provider_generation.{
+    ProviderGenerationManagerV1, ProviderGenerationPinV1,
+    provider_generation_pin_active_v1, provider_generation_release_v1,
+    provider_generation_pin_active_preflight_v1,
+    provider_generation_active_matches_v1, provider_generation_pin_is_live_v1,
+    provider_generation_available_v1, provider_generation_sweep_v1,
+    SIMPLE_GENERATION_OK, SIMPLE_GENERATION_NOT_ACTIVE,
+    SIMPLE_GENERATION_COUNTER_OVERFLOW, SIMPLE_GENERATION_PIN_LIMIT_EXCEEDED,
+    SIMPLE_GENERATION_MAX_PINS_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentArenaRangeV1,
+    VariantFacetBindingV1, VariantRejectionV1, BindingPlanV1,
+    binding_plan_validate_v1, ENV_VARIANT_SCHEMA_V1
+}
+
+pub const BINDING_RUNTIME_OK_V1: i32 = 0
+pub const BINDING_RUNTIME_INVALID_PLAN_V1: i32 = 1
+pub const BINDING_RUNTIME_STALE_PLAN_V1: i32 = 2
+pub const BINDING_RUNTIME_STALE_GENERATION_V1: i32 = 3
+pub const BINDING_RUNTIME_PROVIDER_UNAVAILABLE_V1: i32 = 4
+pub const BINDING_RUNTIME_SESSION_UNKNOWN_V1: i32 = 5
+pub const BINDING_RUNTIME_CAPACITY_EXCEEDED_V1: i32 = 6
+pub const BINDING_RUNTIME_COUNTER_OVERFLOW_V1: i32 = 7
+
+pub const BINDING_RUNTIME_MAX_SESSIONS_V1: u64 = 256u64
+pub const BINDING_RUNTIME_MAX_FACETS_V1: u64 = 256u64
+pub const BINDING_RUNTIME_MAX_COUNTER_V1: u64 = 0xffffffffffffffffu64
+
+class BindingRuntimeReceiptV1:
+    status: i32
+    publication_generation: u64
+    previous_publication_generation: u64
+    session_id: u64
+    reason: text
+
+class BindingRuntimeSessionV1:
+    status: i32
+    session_id: u64
+    plan_digest: EnvironmentDigest256V1
+    publication_generation: u64
+    facet_bindings: [VariantFacetBindingV1]
+    provider_handles: [u64]
+    reason: text
+
+class _BindingRuntimeSessionRecordV1:
+    session_id: u64
+    plan_digest: EnvironmentDigest256V1
+    publication_generation: u64
+    pins: [ProviderGenerationPinV1]
+    facet_bindings: [VariantFacetBindingV1]
+    provider_handles: [u64]
+
+class BindingRuntimeV1:
+    var active_plan: BindingPlanV1
+    var active_bindings: [VariantFacetBindingV1]
+    var active_selected_variant_identities: [EnvironmentDigest256V1]
+    var active_rejections: [VariantRejectionV1]
+    var active_provider_handles: [u64]
+    var has_active_plan: bool
+    var active_publication_generation: u64
+    var next_session_id: u64
+    var sessions: [_BindingRuntimeSessionRecordV1]
+
+    static fn create() -> BindingRuntimeV1:
+        BindingRuntimeV1(
+            active_plan: BindingPlanV1(
+                descriptor_size: 0u32, schema_version: 0u16,
+                plan_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+                environment_identity: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+                environment_generation: 0u64, catalog_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+                catalog_generation: 0u64, policy_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+                dependency_lock_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+                publication_generation: 0u64,
+                facet_bindings: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32),
+                selected_variant_identities: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32),
+                rejections: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)),
+            active_bindings: [], active_selected_variant_identities: [], active_rejections: [],
+            active_provider_handles: [], has_active_plan: false,
+            active_publication_generation: 0u64, next_session_id: 1u64, sessions: [])
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _receipt(status: i32, publication: u64, previous: u64, session_id: u64, reason: text) -> BindingRuntimeReceiptV1:
+    BindingRuntimeReceiptV1(
+        status: status, publication_generation: publication,
+        previous_publication_generation: previous, session_id: session_id,
+        reason: reason)
+
+fn _empty_digest_v1() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn _copy_bindings_v1(bindings: [VariantFacetBindingV1]) -> [VariantFacetBindingV1]:
+    var copied: [VariantFacetBindingV1] = []
+    var i = 0
+    while i < bindings.len():
+        copied.push(bindings[i])
+        i = i + 1
+    copied
+
+fn _copy_handles_v1(handles: [u64]) -> [u64]:
+    var copied: [u64] = []
+    var i = 0
+    while i < handles.len():
+        copied.push(handles[i])
+        i = i + 1
+    copied
+
+fn _copy_digests_v1(values: [EnvironmentDigest256V1]) -> [EnvironmentDigest256V1]:
+    var copied: [EnvironmentDigest256V1] = []
+    var i = 0
+    while i < values.len():
+        copied.push(values[i])
+        i = i + 1
+    copied
+
+fn _copy_rejections_v1(values: [VariantRejectionV1]) -> [VariantRejectionV1]:
+    var copied: [VariantRejectionV1] = []
+    var i = 0
+    while i < values.len():
+        copied.push(values[i])
+        i = i + 1
+    copied
+
+fn _binding_equal_v1(left: VariantFacetBindingV1, right: VariantFacetBindingV1) -> bool:
+    left.facet_id == right.facet_id and left.interface_major == right.interface_major and
+        left.interface_minor == right.interface_minor and left.slot_index == right.slot_index and
+        _digest_equal_v1(left.provider_identity, right.provider_identity) and
+        _digest_equal_v1(left.variant_identity, right.variant_identity) and
+        left.provider_generation == right.provider_generation and
+        left.interface_handle == right.interface_handle and
+        left.provider_context == right.provider_context
+
+fn _copy_session_records_v1(values: [_BindingRuntimeSessionRecordV1]) -> [_BindingRuntimeSessionRecordV1]:
+    var copied: [_BindingRuntimeSessionRecordV1] = []
+    var i = 0
+    while i < values.len():
+        val value = values[i]
+        copied.push(_BindingRuntimeSessionRecordV1(
+            session_id: value.session_id, plan_digest: value.plan_digest,
+            publication_generation: value.publication_generation,
+            pins: value.pins, facet_bindings: value.facet_bindings,
+            provider_handles: value.provider_handles))
+        i = i + 1
+    copied
+
+fn _selected_identities_valid_v1(values: [EnvironmentDigest256V1]) -> bool:
+    var i = 0
+    while i < values.len():
+        val value = values[i]
+        if value.w0 == 0u64 and value.w1 == 0u64 and
+           value.w2 == 0u64 and value.w3 == 0u64:
+            return false
+        i = i + 1
+    true
+
+fn _selected_bindings_correlate_v1(
+    bindings: [VariantFacetBindingV1], selected_variant_identities: [EnvironmentDigest256V1]
+) -> bool:
+    if bindings.len() != selected_variant_identities.len():
+        return false
+    var i = 0
+    while i < bindings.len():
+        if not _digest_equal_v1(bindings[i].variant_identity, selected_variant_identities[i]):
+            return false
+        var prior = 0
+        while prior < i:
+            if _digest_equal_v1(selected_variant_identities[prior], selected_variant_identities[i]):
+                return false
+            prior = prior + 1
+        i = i + 1
+    true
+
+fn _dense_plan_valid_v1(
+    plan: BindingPlanV1, bindings: [VariantFacetBindingV1],
+    selected_variant_identities: [EnvironmentDigest256V1],
+    rejections: [VariantRejectionV1], handles: [u64]
+) -> bool:
+    if plan.schema_version != ENV_VARIANT_SCHEMA_V1 or
+       plan.facet_bindings.offset != 0u32 or
+       plan.facet_bindings.count != bindings.len() as u32 or
+       plan.selected_variant_identities.offset != 0u32 or
+       plan.selected_variant_identities.count != selected_variant_identities.len() as u32 or
+       plan.rejections.offset != 0u32 or
+       plan.rejections.count != rejections.len() as u32 or
+       handles.len() != bindings.len() or bindings.len() == 0 or
+       bindings.len() as u64 > BINDING_RUNTIME_MAX_FACETS_V1 or
+       not _selected_identities_valid_v1(selected_variant_identities):
+        return false
+    if not _selected_bindings_correlate_v1(bindings, selected_variant_identities):
+        return false
+    binding_plan_validate_v1(
+        plan, bindings, selected_variant_identities.len() as u32, rejections) == Ok(())
+
+fn _validate_active_generations_v1(
+    manager: ProviderGenerationManagerV1, bindings: [VariantFacetBindingV1],
+    handles: [u64]
+) -> i32:
+    var i = 0
+    while i < bindings.len():
+        if handles[i] == 0u64:
+            return BINDING_RUNTIME_INVALID_PLAN_V1
+        val identity = bindings[i].provider_identity
+        if identity.w1 != 0u64 or identity.w2 != 0u64 or identity.w3 != 0u64 or
+           not provider_generation_active_matches_v1(
+               manager, handles[i], bindings[i].provider_generation, identity.w0):
+            return BINDING_RUNTIME_STALE_GENERATION_V1
+        i = i + 1
+    BINDING_RUNTIME_OK_V1
+
+fn _session_index_v1(runtime: BindingRuntimeV1, session_id: u64) -> i64:
+    var i = 0
+    while i < runtime.sessions.len():
+        if runtime.sessions[i].session_id == session_id:
+            return i
+        i = i + 1
+    -1
+
+fn _session_handle_v1(
+    status: i32, session_id: u64, plan_digest: EnvironmentDigest256V1,
+    publication: u64, bindings: [VariantFacetBindingV1], handles: [u64], reason: text
+) -> BindingRuntimeSessionV1:
+    BindingRuntimeSessionV1(
+        status: status, session_id: session_id, plan_digest: plan_digest,
+        publication_generation: publication,
+        facet_bindings: _copy_bindings_v1(bindings),
+        provider_handles: _copy_handles_v1(handles), reason: reason)
+
+pub fn binding_runtime_publish_plan_v1(
+    runtime: BindingRuntimeV1, manager: ProviderGenerationManagerV1,
+    plan: BindingPlanV1, bindings: [VariantFacetBindingV1],
+    selected_variant_identities: [EnvironmentDigest256V1],
+    rejections: [VariantRejectionV1], handles: [u64]
+) -> BindingRuntimeReceiptV1:
+    if not _dense_plan_valid_v1(
+        plan, bindings, selected_variant_identities, rejections, handles):
+        return _receipt(BINDING_RUNTIME_INVALID_PLAN_V1, runtime.active_publication_generation,
+            runtime.active_publication_generation, 0u64, "plan-invalid")
+    if runtime.has_active_plan and plan.publication_generation <= runtime.active_publication_generation:
+        return _receipt(BINDING_RUNTIME_STALE_PLAN_V1, runtime.active_publication_generation,
+            runtime.active_publication_generation, 0u64, "plan-generation-stale")
+    val generation_check = _validate_active_generations_v1(manager, bindings, handles)
+    if generation_check != BINDING_RUNTIME_OK_V1:
+        return _receipt(generation_check, runtime.active_publication_generation,
+            runtime.active_publication_generation, 0u64, "provider-generation-stale")
+    val previous = runtime.active_publication_generation
+    runtime.active_plan = plan
+    runtime.active_bindings = _copy_bindings_v1(bindings)
+    runtime.active_selected_variant_identities = _copy_digests_v1(selected_variant_identities)
+    runtime.active_rejections = _copy_rejections_v1(rejections)
+    runtime.active_provider_handles = _copy_handles_v1(handles)
+    runtime.has_active_plan = true
+    runtime.active_publication_generation = plan.publication_generation
+    _receipt(BINDING_RUNTIME_OK_V1, plan.publication_generation, previous, 0u64, "plan-published")
+
+pub fn binding_runtime_plan_is_current_v1(runtime: BindingRuntimeV1, plan: BindingPlanV1) -> bool:
+    runtime.has_active_plan and
+        plan.publication_generation == runtime.active_publication_generation and
+        _digest_equal_v1(plan.plan_digest, runtime.active_plan.plan_digest)
+
+pub fn binding_runtime_open_session_v1(
+    runtime: BindingRuntimeV1, manager: ProviderGenerationManagerV1
+) -> BindingRuntimeSessionV1:
+    if not runtime.has_active_plan or runtime.active_bindings.len() == 0:
+        return _session_handle_v1(
+            BINDING_RUNTIME_INVALID_PLAN_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+            "no-active-plan")
+    if runtime.active_bindings.len() as u64 > BINDING_RUNTIME_MAX_FACETS_V1 or
+       runtime.active_provider_handles.len() != runtime.active_bindings.len() or
+       runtime.sessions.len() as u64 >= BINDING_RUNTIME_MAX_SESSIONS_V1:
+        return _session_handle_v1(
+            BINDING_RUNTIME_CAPACITY_EXCEEDED_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+            "session-capacity-exceeded")
+    if runtime.next_session_id == 0u64 or
+       runtime.next_session_id == BINDING_RUNTIME_MAX_COUNTER_V1:
+        return _session_handle_v1(
+            BINDING_RUNTIME_COUNTER_OVERFLOW_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+            "session-counter-exhausted")
+    if manager.pins.len() as u64 > SIMPLE_GENERATION_MAX_PINS_V1 - runtime.active_bindings.len() as u64:
+        return _session_handle_v1(
+            BINDING_RUNTIME_CAPACITY_EXCEEDED_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+            "provider-pin-capacity-exceeded")
+    var preflight_i = 0
+    while preflight_i < runtime.active_bindings.len():
+        val preflight = provider_generation_pin_active_preflight_v1(
+            manager, runtime.active_provider_handles[preflight_i])
+        if preflight == SIMPLE_GENERATION_NOT_ACTIVE:
+            return _session_handle_v1(
+                BINDING_RUNTIME_PROVIDER_UNAVAILABLE_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+                "provider-not-active")
+        if preflight == SIMPLE_GENERATION_COUNTER_OVERFLOW:
+            return _session_handle_v1(
+                BINDING_RUNTIME_COUNTER_OVERFLOW_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+                "pin-counter-exhausted")
+        if preflight == SIMPLE_GENERATION_PIN_LIMIT_EXCEEDED:
+            return _session_handle_v1(
+                BINDING_RUNTIME_CAPACITY_EXCEEDED_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+                "provider-pin-capacity-exceeded")
+        preflight_i = preflight_i + 1
+    var i = 0
+    var pins: [ProviderGenerationPinV1] = []
+    while i < runtime.active_bindings.len():
+        val pin = provider_generation_pin_active_v1(manager, runtime.active_provider_handles[i])
+        if pin.status != SIMPLE_GENERATION_OK:
+            var p = 0
+            while p < pins.len():
+                provider_generation_release_v1(manager, pins[p])
+                p = p + 1
+            return _session_handle_v1(
+                BINDING_RUNTIME_PROVIDER_UNAVAILABLE_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+                "provider-not-active")
+        if pin.generation != runtime.active_bindings[i].provider_generation:
+            provider_generation_release_v1(manager, pin)
+            var stale_p = 0
+            while stale_p < pins.len():
+                provider_generation_release_v1(manager, pins[stale_p])
+                stale_p = stale_p + 1
+            return _session_handle_v1(
+                BINDING_RUNTIME_STALE_GENERATION_V1, 0u64, _empty_digest_v1(), 0u64, [], [],
+                "active-plan-generation-stale")
+        pins.push(pin)
+        i = i + 1
+    val session_id = runtime.next_session_id
+    val record = _BindingRuntimeSessionRecordV1(
+        session_id: session_id, plan_digest: runtime.active_plan.plan_digest,
+        publication_generation: runtime.active_publication_generation, pins: pins,
+        facet_bindings: _copy_bindings_v1(runtime.active_bindings),
+        provider_handles: _copy_handles_v1(runtime.active_provider_handles))
+    var updated_sessions = _copy_session_records_v1(runtime.sessions)
+    updated_sessions.push(record)
+    runtime.sessions = updated_sessions
+    runtime.next_session_id = session_id + 1u64
+    _session_handle_v1(
+        BINDING_RUNTIME_OK_V1, session_id, runtime.active_plan.plan_digest,
+        runtime.active_publication_generation, runtime.active_bindings,
+        runtime.active_provider_handles, "session-pinned")
+
+pub fn binding_runtime_validate_session_v1(
+    runtime: BindingRuntimeV1, manager: ProviderGenerationManagerV1,
+    session: BindingRuntimeSessionV1
+) -> i32:
+    if session.status != BINDING_RUNTIME_OK_V1 or session.session_id == 0u64:
+        return BINDING_RUNTIME_SESSION_UNKNOWN_V1
+    val index = _session_index_v1(runtime, session.session_id)
+    if index < 0:
+        return BINDING_RUNTIME_SESSION_UNKNOWN_V1
+    val record = runtime.sessions[index]
+    if not _digest_equal_v1(record.plan_digest, session.plan_digest) or
+       record.publication_generation != session.publication_generation or
+       record.facet_bindings.len() != session.facet_bindings.len() or
+       record.provider_handles.len() != session.provider_handles.len():
+        return BINDING_RUNTIME_STALE_PLAN_V1
+    var metadata_i = 0
+    while metadata_i < record.facet_bindings.len():
+        if not _binding_equal_v1(record.facet_bindings[metadata_i], session.facet_bindings[metadata_i]) or
+           record.provider_handles[metadata_i] != session.provider_handles[metadata_i]:
+            return BINDING_RUNTIME_STALE_PLAN_V1
+        metadata_i = metadata_i + 1
+    var i = 0
+    while i < record.pins.len():
+        val pin = record.pins[i]
+        if not provider_generation_pin_is_live_v1(manager, pin):
+            return BINDING_RUNTIME_STALE_GENERATION_V1
+        i = i + 1
+    BINDING_RUNTIME_OK_V1
+
+pub fn binding_runtime_release_session_v1(
+    runtime: BindingRuntimeV1, manager: ProviderGenerationManagerV1,
+    session: BindingRuntimeSessionV1
+) -> BindingRuntimeReceiptV1:
+    val validation = binding_runtime_validate_session_v1(runtime, manager, session)
+    if validation != BINDING_RUNTIME_OK_V1:
+        return _receipt(validation, runtime.active_publication_generation,
+            runtime.active_publication_generation, session.session_id, "session-not-releasable")
+    val index = _session_index_v1(runtime, session.session_id)
+    val record = runtime.sessions[index]
+    # Validate every exact pin before releasing any one of them.  This is the
+    # transaction boundary: a stale/forged later pin leaves the session and all
+    # earlier pins untouched.
+    var i = 0
+    while i < record.pins.len():
+        if not provider_generation_pin_is_live_v1(manager, record.pins[i]):
+            return _receipt(BINDING_RUNTIME_STALE_GENERATION_V1,
+                runtime.active_publication_generation, runtime.active_publication_generation,
+                session.session_id, "session-pin-prevalidation-failed")
+        var prior = 0
+        while prior < i:
+            if record.pins[prior].pin_id == record.pins[i].pin_id:
+                return _receipt(BINDING_RUNTIME_STALE_GENERATION_V1,
+                    runtime.active_publication_generation, runtime.active_publication_generation,
+                    session.session_id, "session-pin-duplicate")
+            prior = prior + 1
+        i = i + 1
+    i = 0
+    while i < record.pins.len():
+        if provider_generation_release_v1(manager, record.pins[i]) != SIMPLE_GENERATION_OK:
+            # The prevalidation above makes this unreachable for an owner turn;
+            # retain the session rather than committing a partial release.
+            return _receipt(BINDING_RUNTIME_STALE_GENERATION_V1,
+                runtime.active_publication_generation, runtime.active_publication_generation,
+                session.session_id, "session-pin-release-failed")
+        i = i + 1
+    var retained: [_BindingRuntimeSessionRecordV1] = []
+    i = 0
+    while i < runtime.sessions.len():
+        if i != index:
+            retained.push(runtime.sessions[i])
+        i = i + 1
+    runtime.sessions = retained
+    _receipt(BINDING_RUNTIME_OK_V1, runtime.active_publication_generation,
+        runtime.active_publication_generation, session.session_id, "session-released")
+
+pub fn binding_runtime_drain_v1(
+    runtime: BindingRuntimeV1, manager: ProviderGenerationManagerV1
+) -> i64:
+    # The provider-generation owner is the retirement authority.  This call
+    # only observes its bounded sweep result; it does not execute a provider.
+    provider_generation_sweep_v1(manager)
+
+export BINDING_RUNTIME_OK_V1, BINDING_RUNTIME_INVALID_PLAN_V1
+export BINDING_RUNTIME_STALE_PLAN_V1, BINDING_RUNTIME_STALE_GENERATION_V1
+export BINDING_RUNTIME_PROVIDER_UNAVAILABLE_V1, BINDING_RUNTIME_SESSION_UNKNOWN_V1
+export BINDING_RUNTIME_CAPACITY_EXCEEDED_V1, BINDING_RUNTIME_COUNTER_OVERFLOW_V1
+export BINDING_RUNTIME_MAX_SESSIONS_V1, BINDING_RUNTIME_MAX_FACETS_V1
+export BINDING_RUNTIME_MAX_COUNTER_V1
+export BindingRuntimeReceiptV1, BindingRuntimeSessionV1, BindingRuntimeV1
+export binding_runtime_publish_plan_v1, binding_runtime_plan_is_current_v1
+export binding_runtime_open_session_v1, binding_runtime_validate_session_v1
+export binding_runtime_release_session_v1, binding_runtime_drain_v1

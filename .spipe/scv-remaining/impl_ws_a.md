@@ -1,68 +1,35 @@
 # SCV Workstream A — Implementation Notes
 
-## What Was Done
+This note records the diagnosis from the SCV WASM executor workstream. It was
+left with an unresolved revision conflict. The executable test and source at
+this revision, rather than either side of that conflict, determine current
+behavior.
 
-Three files were changed to fix the PROD-001 interpreter memory-pressure failures.
+## Recorded fixes
 
-### 1. `src/lib/scv/public_remote.spl` — Pre-existing parse error (root blocker)
+The earlier workstream corrected the invalid brace-form `ScvRemoteRef` struct
+in `src/lib/scv/public_remote.spl` to Simple's colon/indent form. The old
+syntax prevented the SCV CLI from compiling before the WASM assertions ran.
+It also added `SIMPLE_MEMORY_LIMIT_MB=1024` and
+`SIMPLE_SIBLING_PRELOAD_LIMIT=5` to the integration test's child compiler
+invocations to make memory pressure bounded and diagnosable. Those historical
+test results have not been rerun for this revision.
 
-The file used invalid Simple syntax for a struct definition:
-```
-struct ScvRemoteRef {
-    branch: text,
-    commit: text,
-    artifact_dir: text,
-}
-```
-Fixed to valid Simple struct syntax:
-```
-struct ScvRemoteRef:
-    branch: text
-    commit: text
-    artifact_dir: text
-```
-This was introduced in commit `4f67b0ae`. It caused `src/app/scv/main.spl` to fail
-compilation on every child invocation, making all 5 assertion tests return `exit=1`
-(not an OOM issue at all — a parse blocker).
+## AC-1e still needs a test fix
 
-### 2. `test/02_integration/app/scv_wasm_executor_spec.spl` — Memory env vars
+`test/02_integration/app/scv_wasm_executor_spec.spl` currently extracts
+`parser_hash=` from `parse-index`. The index row emitted by
+`scv_parse_index_line` is positional:
+`path|language|raw|syntax_hash|semantic_hash|kind|status|metric|node`.
+It has no `parser_hash=` field, so the current extraction is empty. The
+existing assertions expecting `hash1=sha256_` and `hash2=sha256_` are
+not established by this note.
 
-Added `SIMPLE_MEMORY_LIMIT_MB=1024 SIMPLE_SIBLING_PRELOAD_LIMIT=5` to every
-`bin/release/simple` invocation in all 6 `it` block shell scripts.
-
-- `SIMPLE_MEMORY_LIMIT_MB=1024` enables the watchdog, so RSS overruns produce a
-  clean diagnostic instead of a silent kernel OOM kill with truncated stdout.
-- `SIMPLE_SIBLING_PRELOAD_LIMIT=5` reduces sibling eager-loading from 20 to 5,
-  cutting the module explosion multiplier. SIMPLE_LIB remains `$REPO/src` (single
-  search root required by the path resolver).
-
-### 3. `test/02_integration/app/scv_wasm_executor_spec.spl` — AC-1e sed pattern fix
-
-The AC-1e script extracted the grammar hash via:
-```sh
-sed -n 's/.*|parser_hash=\([^|]*\).*/\1/p'
-```
-But `parse-index` output is positional pipe-delimited; there is no `parser_hash=`
-label. The grammar artifact hash lives in `parsers` output (field 7 of `parser|…`
-rows). Fixed to:
-```sh
-parsers 2>/dev/null | awk -F'|' '/^parser/{print $7}' | head -1
-```
-
-## Result
-
-All 6 tests pass consistently across two runs:
-- AC-1a: locked grammar bytes load from .scv/parsers by hash
-- AC-1b: parse results carry execution=fallback-line when wasmtime shim is absent
-- AC-1c: fallback execution is used when wasmtime dynlib is absent
-- AC-1d: parser failures allow private snapshot to proceed
-- AC-1d edge: corrupt WASM grammar produces execution=fallback-line not crash
-- AC-1e: grammar hash change invalidates parse-gate cache
-
-## Note on the Research Hypothesis
-
-The original research hypothesis (OOM-kill under concurrent load) was correct as a
-*potential* risk but was not the *actual* failure mode in the tests. The immediate
-cause was a parse error in `public_remote.spl` (invalid `struct { }` syntax) that
-blocked all child process compilations. The memory env vars are belt-and-suspenders
-for concurrent test environments and are correct to add regardless.
+A meaningful cache-invalidation test should register the `foo` extension
+without a leading dot, map it to each installed grammar version, run
+`parse-gate` after each mapping, and compare the nonempty field-4 syntax
+hashes for `sample.foo`. `scv_path_extension` returns `foo`, and the
+syntax hash includes parser kind, version, and locked parser artifact hash.
+Comparing the `parsers` artifact hashes alone would only prove that two
+installed grammar files differ. This is a proposed test repair, not a
+qualified AC-1e result.

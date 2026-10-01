@@ -1,8 +1,12 @@
 # GUI Showcase 4K 200 FPS JIT Lowering Blocker
+## Closed 2026-09-16 — Status fixed; rt_array_repeat fix landed, gate passes with resolved evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-06-22
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- Status: fixed
 - Gate: `scripts/check/check-widget-showcase-4k-200fps.shs`
 - Evidence: `build/widget-showcase-4k-200fps/status.env`
 
@@ -60,3 +64,4 @@ native codegen. It decoded tag-shaped raw counts with `rt_core_numeric_arg`, so
 `SoftwareBackend.read_pixels()` and records full-scan nonblank/checksum
 evidence. The gate remains the default 4K/200 FPS check and now also supports
 `RESOLUTION=8k` for retained 8K evidence through the same native alias path.
+

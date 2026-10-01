@@ -15,7 +15,7 @@ use cranelift_module::{Linkage, Module};
 use target_lexicon::Triple;
 use thiserror::Error;
 
-use simple_common::target::{Target, TargetArch, TargetCpu};
+use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirInst, MirModule};
@@ -45,6 +45,43 @@ pub enum BackendError {
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
+
+/// Generated module initialization is normally silent.  This gate is opt-in
+/// because a compiler-scale module can have thousands of runtime-backed
+/// initializers.
+fn module_init_trace_enabled_for(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value != "0")
+}
+
+fn module_init_trace_enabled() -> bool {
+    module_init_trace_enabled_for(std::env::var("SIMPLE_JIT_MODULE_INIT_TRACE").ok().as_deref())
+}
+
+fn emit_module_init_trace<M: Module>(
+    module: &mut M,
+    builder: &mut cranelift_frontend::FunctionBuilder,
+    trace_id: cranelift_module::FuncId,
+    index: usize,
+    label: &str,
+) -> BackendResult<()> {
+    let message = format!("[jit-module-init] before index={index} {label}\n");
+    let data_name = format!(".Ljit_module_init_trace_{index:06}");
+    let data_id = module
+        .declare_data(&data_name, Linkage::Local, false, false)
+        .map_err(|error| BackendError::ModuleError(format!("declare module-init trace data: {error}")))?;
+    let message_len = message.len() as i64;
+    let mut data = cranelift_module::DataDescription::new();
+    data.define(message.into_bytes().into_boxed_slice());
+    module
+        .define_data(data_id, &data)
+        .map_err(|error| BackendError::ModuleError(format!("define module-init trace data: {error}")))?;
+    let data_ref = module.declare_data_in_func(data_id, builder.func);
+    let pointer = builder.ins().global_value(types::I64, data_ref);
+    let length = builder.ins().iconst(types::I64, message_len);
+    let trace_ref = module.declare_func_in_func(trace_id, builder.func);
+    builder.ins().call(trace_ref, &[pointer, length]);
+    Ok(())
+}
 
 pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String> {
     let mut names = HashSet::new();
@@ -628,6 +665,39 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_enum_discriminant"
             | "rt_enum_id"
             | "rt_enum_payload"
+            // P1 fix (2026-09-06): the `.is_some()` / `.is_none()` /
+            // `.is_ok()` / `.is_err()` arms in
+            // codegen/instr/closures_structs.rs::try_compile_builtin_method_call
+            // synthesize these calls from a MIR `MethodCallStatic` whose
+            // `func_name` is the SIMPLE method name (`"is_some"`). The runtime
+            // symbol therefore never appears in `referenced_call_names`, so
+            // without an entry here `runtime_funcs.get("rt_is_some")` returns
+            // None, the arm bails to `Ok(None)`, and the caller emits
+            // `rt_function_not_found("is_some")` — the hard-stop shape of
+            // doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md
+            // ("Runtime error: Function 'is_some' not found", exit 70).
+            //
+            // It presented as INTERMITTENT, which is why it read as a dispatch
+            // bug rather than a declaration bug: a program that also pulls in
+            // stdlib naming `rt_is_some` in its own MIR (e.g. anything using
+            // `parse_i64`) gets the symbol declared as a side effect and the
+            // arm fires normally. Same class, same cure, as `rt_contains`
+            // above — which is precisely why `.contains()` never showed this.
+            //
+            // Scoped to these two, and measured that way. The sibling
+            // `is_ok`/`is_err` arm calls `rt_enum_check_discriminant` and has
+            // the same structural hazard, but it is NOT listed here: a genuine
+            // `Result` receiver is lowered earlier and emits
+            // `rt_enum_check_discriminant` as a real MIR `Call`
+            // (`SIMPLE_DUMP_MIR` confirms), so the symbol is already in
+            // `referenced_call_names` and an entry here would be dead. Whether
+            // an ERASED `is_ok` receiver can reach the Cranelift arm with the
+            // symbol undeclared was not established; if such a case is ever
+            // observed failing the same way, this is where it belongs.
+            | "rt_is_some"
+            | "rt_is_present"
+            | "rt_is_none"
+            | "rt_enum_check_variant"
             | "rt_value_as_u64"
             | "rt_string_eq"
             // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
@@ -976,8 +1046,19 @@ impl BackendSettings {
     /// `ObjectModule`, not `JITModule`, and never touches the PLT writer.
     pub fn jit() -> Self {
         // PLT entries needed by is_pic=true are only implemented for x86_64
-        // in cranelift-jit (vendor/cranelift-jit/src/backend.rs:297).
-        // On aarch64/riscv/etc., disable PIC so the assert never fires.
+        // in cranelift-jit (vendor/cranelift-jit/src/backend.rs:296,
+        // "PLT is currently only supported on x86_64").
+        //
+        // This does NOT make non-x86_64 safe — it picks which assert you get.
+        // With is_pic=false the aarch64 call path is a direct BL
+        // (Reloc::Aarch64Call), whose 26-bit signed word immediate reaches only
+        // +/-128 MB; when the JIT's allocations land further apart than that,
+        // vendor/cranelift-jit/src/compiled_blob.rs:90 asserts
+        // `(diff >> 26 == -1) || (diff >> 26 == 0)` and the process aborts.
+        // Reproduced deterministically 2026-09-06; see
+        // doc/08_tracking/bug/jit_aarch64_branch_relocation_out_of_range_abort_2026-09-05.md
+        // for the reproducer and the aarch64 PLT stub that would let is_pic be
+        // true here.
         let is_pic = cfg!(target_arch = "x86_64");
         Self {
             opt_level: "speed",
@@ -1693,7 +1774,7 @@ impl<M: Module> CodegenBackend<M> {
             let is_local = is_jit_module || local_globals.contains(name);
 
             // Linkage strategy for globals in per-module compilation:
-            // - Local globals: Preemptible + initialized data (if available)
+            // - Local globals: target-appropriate owner linkage + initialized data
             // - Imported globals: Import linkage, resolve symbol via use_map/import_map
             if !is_local {
                 if trace_global {
@@ -1741,7 +1822,17 @@ impl<M: Module> CodegenBackend<M> {
                     self.global_ids.insert(resolved_name, data_id);
                 }
             } else {
-                // Local global: define with Preemptible linkage.
+                // COFF data definitions need an ordinary external symbol. The
+                // object backend's weak definitions do not acquire PE base
+                // relocations for their .refptr slots under GNU ld, leaving
+                // preferred-image addresses behind when Windows applies ASLR.
+                // Imported globals still use Import above, so the defining
+                // module remains the single owner of each mangled data slot.
+                let linkage = if self.target.os == TargetOS::Windows {
+                    cranelift_module::Linkage::Export
+                } else {
+                    cranelift_module::Linkage::Preemptible
+                };
                 let local_symbol = self.mangle_name(name);
                 let needs_runtime_init = runtime_init_globals.contains(name);
                 let writable = *is_mutable || needs_runtime_init;
@@ -1753,7 +1844,7 @@ impl<M: Module> CodegenBackend<M> {
                 }
                 let data_id = self
                     .module
-                    .declare_data(&local_symbol, cranelift_module::Linkage::Preemptible, writable, false)
+                    .declare_data(&local_symbol, linkage, writable, false)
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
@@ -1837,6 +1928,8 @@ impl<M: Module> CodegenBackend<M> {
                 &self.function_return_types,
                 &self.enum_defs,
                 self.tag_runtime_pool_join_result,
+                self.target.is_baremetal(),
+                self.target.uses_fam_array_abi(),
             )
         }));
         match body_result {
@@ -1919,6 +2012,7 @@ impl<M: Module> CodegenBackend<M> {
     fn emit_vtable_data_objects(
         &mut self,
         vtable_impls: &[(crate::hir::TypeId, String, String, Vec<Option<String>>, bool)],
+        selfless_slots: &std::collections::HashSet<String>,
     ) -> BackendResult<()> {
         for (struct_type_id, struct_name, vtable_sym, method_fns, export_symbol) in vtable_impls {
             // `method_fns` is INDEXED BY CANONICAL TRAIT VTABLE SLOT (index i ==
@@ -1964,10 +2058,14 @@ impl<M: Module> CodegenBackend<M> {
                     continue;
                 };
                 // Look up the func_id — try both mangled and unmangled names.
-                let func_id_opt = self
-                    .func_ids
-                    .get(fn_name)
-                    .copied()
+                // A selfless body is reached through its `$vt` thunk, which
+                // accepts-and-drops the receiver the virtual call passes.
+                let thunk_name = super::closure_boxed_entry::vtable_selfless_entry_name(fn_name);
+                let func_id_opt = selfless_slots
+                    .contains(fn_name)
+                    .then(|| self.func_ids.get(&thunk_name).copied())
+                    .flatten()
+                    .or_else(|| self.func_ids.get(fn_name).copied())
                     .or_else(|| {
                         // Try with _dot_ mangling (StructName_dot_methodName)
                         let mangled = fn_name.replace('.', "_dot_");
@@ -2072,13 +2170,18 @@ impl<M: Module> CodegenBackend<M> {
         if native_trace {
             eprintln!("[rust-jit] compile_all references start functions={}", functions.len());
         }
-        let referenced_names = referenced_call_names(&functions);
+        let mut referenced_names = referenced_call_names(&functions);
+        if module_init_trace_enabled() {
+            // The generated trace runs from __module_init rather than a MIR
+            // body, so its stderr provider must be declared explicitly.
+            referenced_names.insert("rt_eprintln_str".to_string());
+        }
         let locally_defined_names: HashSet<String> = functions
             .iter()
             .filter(|func| !func.blocks.is_empty())
             .map(|func| func.name.clone())
             .collect();
-        if !Self::can_omit_runtime_imports(mir, &functions) {
+        if !Self::can_omit_runtime_imports(mir, &functions) || module_init_trace_enabled() {
             if native_trace {
                 eprintln!(
                     "[rust-jit] compile_all runtime declarations start referenced={}",
@@ -2124,7 +2227,13 @@ impl<M: Module> CodegenBackend<M> {
         // The pointer at slot i is the address of the i-th method function.
         // The struct_name entry in vtable_data_ids is used by compile_struct_init
         // to write vtable_ptr at offset 0.
-        self.emit_vtable_data_objects(&mir.vtable_impls)?;
+        let slot_fn_names: std::collections::HashSet<String> = mir
+            .vtable_impls
+            .iter()
+            .flat_map(|(_, _, _, fns, _)| fns.iter().flatten().cloned())
+            .collect();
+        let selfless_slots = self.emit_vtable_selfless_entries(&functions, &slot_fn_names)?;
+        self.emit_vtable_data_objects(&mir.vtable_impls, &selfless_slots)?;
 
         // Boxed entry thunks for the runtime-facing closure convention. Must
         // run after `declare_functions` (every outlined lambda must already be
@@ -2353,36 +2462,80 @@ impl<M: Module> CodegenBackend<M> {
         /// megabytes of dead .text (e.g. fd_table's seven [T; 65536] arrays).
         /// Semantics are identical: the array handle is still created and filled
         /// to length N; only the code size drops from O(N) to O(1).
+        ///
+        /// When `thread_push_result` is set (FAM freestanding push ABI), the
+        /// push's return — the possibly realloc-moved header — is carried
+        /// around the loop as a second block parameter and returned as the
+        /// final array handle; otherwise the created handle is returned
+        /// unchanged (hosted bool-return, stable-header push ABI).
         fn emit_zero_fill_push_loop(
             builder: &mut cranelift_frontend::FunctionBuilder,
             push_ref: cranelift_codegen::ir::FuncRef,
             array: cranelift_codegen::ir::Value,
             count: i64,
-        ) {
+            thread_push_result: bool,
+        ) -> cranelift_codegen::ir::Value {
             use cranelift_codegen::ir::condcodes::IntCC;
             use cranelift_codegen::ir::{types, InstBuilder};
             let header = builder.create_block();
             builder.append_block_param(header, types::I64);
+            if thread_push_result {
+                builder.append_block_param(header, types::I64);
+            }
             let body = builder.create_block();
             let exit = builder.create_block();
+            if thread_push_result {
+                builder.append_block_param(exit, types::I64);
+            }
             let start = builder.ins().iconst(types::I64, 0);
-            builder.ins().jump(header, &[start]);
+            if thread_push_result {
+                builder.ins().jump(header, &[start, array]);
+            } else {
+                builder.ins().jump(header, &[start]);
+            }
             builder.switch_to_block(header);
             let idx = builder.block_params(header)[0];
             let cond = builder.ins().icmp_imm(IntCC::SignedLessThan, idx, count);
-            builder.ins().brif(cond, body, &[], exit, &[]);
+            if thread_push_result {
+                let current = builder.block_params(header)[1];
+                builder.ins().brif(cond, body, &[], exit, &[current]);
+            } else {
+                builder.ins().brif(cond, body, &[], exit, &[]);
+            }
             builder.switch_to_block(body);
             builder.seal_block(body);
             let zero_elem = builder.ins().iconst(types::I64, 0);
-            builder.ins().call(push_ref, &[array, zero_elem]);
+            let push_target = if thread_push_result {
+                builder.block_params(header)[1]
+            } else {
+                array
+            };
+            let call = builder.ins().call(push_ref, &[push_target, zero_elem]);
             let next = builder.ins().iadd_imm(idx, 1);
-            builder.ins().jump(header, &[next]);
+            if thread_push_result {
+                let grown = builder.inst_results(call)[0];
+                builder.ins().jump(header, &[next, grown]);
+            } else {
+                builder.ins().jump(header, &[next]);
+            }
             builder.seal_block(header);
             builder.switch_to_block(exit);
             builder.seal_block(exit);
+            if thread_push_result {
+                builder.block_params(exit)[0]
+            } else {
+                array
+            }
         }
 
         let init_name = module_init_symbol(self.module_prefix.as_deref());
+        let module_init_trace_id = if module_init_trace_enabled() {
+            Some(*self.runtime_funcs.get("rt_eprintln_str").ok_or_else(|| {
+                BackendError::ModuleError("rt_eprintln_str not declared for module-init trace".into())
+            })?)
+        } else {
+            None
+        };
 
         // Declare the init function: fn() -> void
         let call_conv = super::shared::platform_call_conv();
@@ -2465,7 +2618,13 @@ impl<M: Module> CodegenBackend<M> {
         } else {
             None
         };
-        let alloc_id = if init_functions.is_empty() {
+        // Both function-valued globals and struct-literal globals allocate
+        // ordinary heap storage.  Keep them on the same `rt_alloc` ABI as
+        // MirInst::StructInit: `rt_struct_alloc` maintains the optional
+        // receiver-validation registry and is not a constructor primitive.
+        // Module init stores the same raw aggregate representation used by
+        // ordinary struct initialization.
+        let alloc_id = if init_functions.is_empty() && init_structs.is_empty() {
             None
         } else {
             Some(
@@ -2473,16 +2632,6 @@ impl<M: Module> CodegenBackend<M> {
                     .runtime_funcs
                     .get("rt_alloc")
                     .ok_or_else(|| BackendError::ModuleError("rt_alloc not declared".into()))?,
-            )
-        };
-        let struct_alloc_id = if init_structs.is_empty() {
-            None
-        } else {
-            Some(
-                *self
-                    .runtime_funcs
-                    .get("rt_struct_alloc")
-                    .ok_or_else(|| BackendError::ModuleError("rt_struct_alloc not declared".into()))?,
             )
         };
 
@@ -2495,12 +2644,28 @@ impl<M: Module> CodegenBackend<M> {
         let entry_block = builder.create_block();
         builder.switch_to_block(entry_block);
         builder.seal_block(entry_block);
+        let mut module_init_trace_index = 0usize;
+        macro_rules! trace_module_init {
+            ($label:expr) => {
+                if let Some(trace_id) = module_init_trace_id {
+                    emit_module_init_trace(
+                        &mut self.module,
+                        &mut builder,
+                        trace_id,
+                        module_init_trace_index,
+                        &$label,
+                    )?;
+                    module_init_trace_index += 1;
+                }
+            };
+        }
 
         // Sort by name for deterministic output
         let mut sorted_strings: Vec<_> = init_strings.iter().collect();
         sorted_strings.sort_by_key(|(name, _)| (*name).clone());
 
         for (global_name, string_val) in &sorted_strings {
+            trace_module_init!(format!("string:{global_name}"));
             // 1. Create static byte data for the string
             let bytes = string_val.as_bytes();
             let data_name = format!(".Linit_str_{:016x}", {
@@ -2558,7 +2723,12 @@ impl<M: Module> CodegenBackend<M> {
 
         let mut sorted_arrays: Vec<_> = init_arrays.iter().collect();
         sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
+        // FAM freestanding push ABI: the push returns the possibly
+        // realloc-moved header — thread it through every fill so the global
+        // store publishes the post-grow handle, not the created one.
+        let thread_push_result = self.target.array_push_returns_header();
         for (global_name, init) in &sorted_arrays {
+            trace_module_init!(format!("array:{global_name}"));
             // All-zero initializers ([0; N]) get a compact fill loop instead of
             // N unrolled push calls (code size O(1) instead of O(N)).
             let all_zero =
@@ -2573,7 +2743,7 @@ impl<M: Module> CodegenBackend<M> {
                 // String-literal elements: allocate each via rt_string_new and push.
                 let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
                 let string_new_ref = self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
                 for (idx, string_val) in strings.iter().enumerate() {
@@ -2606,7 +2776,10 @@ impl<M: Module> CodegenBackend<M> {
                     let str_len = builder.ins().iconst(types::I64, bytes.len() as i64);
                     let call_inst = builder.ins().call(string_new_ref, &[str_ptr, str_len]);
                     let string_rv = builder.inst_results(call_inst)[0];
-                    builder.ins().call(push_ref, &[array, string_rv]);
+                    let push_call = builder.ins().call(push_ref, &[array, string_rv]);
+                    if thread_push_result {
+                        array = builder.inst_results(push_call)[0];
+                    }
                 }
                 array
             } else if init.element_type == TypeId::U8 {
@@ -2614,44 +2787,65 @@ impl<M: Module> CodegenBackend<M> {
                     .module
                     .declare_func_in_func(byte_array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(byte_push_id.unwrap(), builder.func);
                 if all_zero {
-                    emit_zero_fill_push_loop(&mut builder, push_ref, array, element_count as i64);
+                    array = emit_zero_fill_push_loop(
+                        &mut builder,
+                        push_ref,
+                        array,
+                        element_count as i64,
+                        thread_push_result,
+                    );
                 } else {
                     for value in &init.values {
                         let byte = builder.ins().iconst(types::I64, (*value & 0xff) as i64);
-                        builder.ins().call(push_ref, &[array, byte]);
+                        let push_call = builder.ins().call(push_ref, &[array, byte]);
+                        if thread_push_result {
+                            array = builder.inst_results(push_call)[0];
+                        }
                     }
                 }
                 array
             } else if init.element_type == TypeId::BOOL {
                 let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
                 let bool_ref = self.module.declare_func_in_func(bool_value_id.unwrap(), builder.func);
                 for value in &init.values {
                     let raw = builder.ins().iconst(types::I64, i64::from(*value != 0));
                     let call_inst = builder.ins().call(bool_ref, &[raw]);
                     let boxed = builder.inst_results(call_inst)[0];
-                    builder.ins().call(push_ref, &[array, boxed]);
+                    let push_call = builder.ins().call(push_ref, &[array, boxed]);
+                    if thread_push_result {
+                        array = builder.inst_results(push_call)[0];
+                    }
                 }
                 array
             } else {
                 let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
                 if all_zero {
                     // Boxed zero is `0 << 3` == 0, so pushing raw 0 is identical.
-                    emit_zero_fill_push_loop(&mut builder, push_ref, array, element_count as i64);
+                    array = emit_zero_fill_push_loop(
+                        &mut builder,
+                        push_ref,
+                        array,
+                        element_count as i64,
+                        thread_push_result,
+                    );
                 } else {
                     for value in &init.values {
                         let raw = builder.ins().iconst(types::I64, *value);
                         let shift = builder.ins().iconst(types::I64, 3);
                         let boxed = builder.ins().ishl(raw, shift);
-                        builder.ins().call(push_ref, &[array, boxed]);
+                        let push_call = builder.ins().call(push_ref, &[array, boxed]);
+                        if thread_push_result {
+                            array = builder.inst_results(push_call)[0];
+                        }
                     }
                 }
                 array
@@ -2677,6 +2871,7 @@ impl<M: Module> CodegenBackend<M> {
         let mut sorted_functions: Vec<_> = init_functions.iter().collect();
         sorted_functions.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, func_name) in &sorted_functions {
+            trace_module_init!(format!("function:{global_name}"));
             let func_id = self
                 .func_ids
                 .get(func_name.as_str())
@@ -2722,14 +2917,15 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Struct-literal globals: rt_struct_alloc(n*8) + sequential field stores.
+        // Struct-literal globals: rt_alloc(n*8) + sequential field stores.
         // Field representation matches compile_struct_init: ints/bools raw,
         // nil tagged 3, strings rt_string_new handles, arrays rt_array_new
         // handles; the struct value itself is the registered raw allocation pointer.
         let mut sorted_structs: Vec<_> = init_structs.iter().collect();
         sorted_structs.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in &sorted_structs {
-            let alloc_ref = self.module.declare_func_in_func(struct_alloc_id.unwrap(), builder.func);
+            trace_module_init!(format!("struct:{global_name}"));
+            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
             let size = (init.fields.len().max(1) * 8) as i64;
             let size_val = builder.ins().iconst(types::I64, size);
             let call_inst = builder.ins().call(alloc_ref, &[size_val]);
@@ -2804,6 +3000,12 @@ impl<M: Module> CodegenBackend<M> {
         // already declared/compiled as an ordinary function above, so this is
         // just an inter-function call, identical to any other call site here.
         for dyn_func_id in dynamic_init_func_ids {
+            let dynamic_name = self
+                .func_ids
+                .iter()
+                .find_map(|(name, id)| (*id == *dyn_func_id).then_some(name.as_str()))
+                .unwrap_or("<unknown>");
+            trace_module_init!(format!("dynamic:{dynamic_name}"));
             let dyn_func_ref = self.module.declare_func_in_func(*dyn_func_id, builder.func);
             builder.ins().call(dyn_func_ref, &[]);
         }
@@ -2963,6 +3165,33 @@ mod tests {
         assert!(runtime_symbol_is_codegen_root("rt_string_bytes"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_discriminant"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_id"));
+    }
+
+    /// jit_is_some_is_none_method_dispatch_gap_2026-08-17, hard-stop shape.
+    ///
+    /// The `.is_some()`/`.is_none()`/`.is_ok()`/`.is_err()` Cranelift arms
+    /// synthesize these calls from a `MethodCallStatic` whose `func_name` is
+    /// the SIMPLE method name, so the runtime symbol never reaches
+    /// `referenced_call_names`. Without a codegen-root entry the arm bails and
+    /// the JIT aborts with `Function 'is_some' not found` (exit 70). The
+    /// `rt_contains` assertion is the CONTROL: it is the same shape and has
+    /// always been rooted, which is exactly why `.contains()` never failed.
+    #[test]
+    fn option_presence_predicate_runtime_symbols_are_retained() {
+        assert!(runtime_symbol_is_codegen_root("rt_is_some"));
+        // `.?` lowers to `rt_is_present`; if it is not a codegen root the LLVM
+        // and Cranelift lanes both fail to declare it and the whole module
+        // bails out to the interpreter.
+        // doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+        assert!(runtime_symbol_is_codegen_root("rt_is_present"));
+        assert!(runtime_symbol_is_codegen_root("rt_is_none"));
+        assert!(runtime_symbol_is_codegen_root("rt_contains"));
+        assert!(runtime_symbol_is_codegen_root("rt_enum_check_variant"));
+        // NOT rooted, on purpose: a genuine `Result` receiver emits
+        // `rt_enum_check_discriminant` as a real MIR Call, so it is already in
+        // `referenced_call_names`. Asserted so that adding it later is a
+        // deliberate act with a repro behind it.
+        assert!(!runtime_symbol_is_codegen_root("rt_enum_check_discriminant"));
     }
 
     #[test]
@@ -3437,5 +3666,12 @@ mod tests {
             "first struct registered under a colliding TypeId must keep the slot; the whole-program \
              map must not let a later unrelated struct's impl silently alias it"
         );
+    }
+
+    #[test]
+    fn module_init_trace_gate_is_opt_in() {
+        assert!(!module_init_trace_enabled_for(None));
+        assert!(!module_init_trace_enabled_for(Some("0")));
+        assert!(module_init_trace_enabled_for(Some("1")));
     }
 }

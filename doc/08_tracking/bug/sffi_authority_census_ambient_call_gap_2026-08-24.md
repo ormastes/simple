@@ -1,4 +1,8 @@
 # SFFI authority census omits ambient raw calls
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Observed:** 2026-08-24
@@ -46,3 +50,4 @@ HIR identity.
    resolved contract ID.
 5. The generator remains linear in resolved calls plus declarations and adds no
    per-call runtime lookup or allocation.
+

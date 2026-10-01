@@ -1,5 +1,25 @@
 # Stage4 macOS full-CLI deploy — COMPLETE 2026-07-25
 
+> **Current-source redeploy status (2026-09-08): BLOCKED, incumbent retained.**
+> A fresh `aarch64-apple-darwin` canonical build with
+> `SIMPLE_NO_STUB_FALLBACK=1` rebuilt all Rust authority artifacts. Two fixes
+> removed the 23-symbol `rt_simd_*` seed-link collision and reduced Stage2 LLVM
+> failures from 374 units to 3 files. The remaining calls are
+> `virtual_source_store` in `virtual_source_registration_v1.spl` and genuine
+> `str.split_whitespace` calls in `dirty_module_record.spl` and
+> `compile_source_inventory.spl`. The mandatory three-cycle cap stopped the
+> session there. No current-source Stage4 candidate exists, so the deployed
+> July incumbent and its rollback files were deliberately not modified.
+>
+> **Continuation evidence:** focused imported-trait MIR regression passed
+> (1/1). Two explicit `split_whitespace` imports and the canonical in-place
+> `Array.remove` form reduced the current Stage2 failure to one file:
+> `cache_gateway_v1.spl`, where a generic `T: CacheGatewayV1` receiver still
+> loses its trait-slot metadata and becomes bare `virtual_source_store`.
+> Three continuation verify/fix cycles are exhausted. Resume by carrying
+> project-wide imported trait definitions/signatures into per-file HIR/MIR;
+> do not rerun the unchanged facade attempt.
+
 **Status:** DEPLOYED. `bin/simple` → `bin/release/aarch64-apple-darwin-macho/simple`
 now runs the stage4 full-CLI self-hosted binary built from main `4ed680f5` by the
 fixed seed. Redeploy gate **11/11 PASS** on the live path; MCP stdio handshake

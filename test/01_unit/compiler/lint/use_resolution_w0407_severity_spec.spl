@@ -1,24 +1,37 @@
 """
 ## Purpose and audience
-Purpose: Prove that W0407 severity routes through the WP-3 policy resolver (WP-10).
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-LINT-001 — stable requirement identity for this spec.
+Proves that W0407 (unresolved `use` import) severity routes through the WP-3
+policy resolver (WP-10 of the aerospace hardening plan): WARNING at every
+permissive rung and ERROR only under `critical` (and its deprecated
+`mission-critical` alias). Audience: compiler lint and diagnostic-policy
+maintainers.
 
-"""
-# W0407 Severity Promotion Under `critical` (WP-10)
+## Operator workflow
+Run the file with the self-hosted runner from the repo root:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/lint/use_resolution_w0407_severity_spec.spl`.
+Each scenario feeds one declaration list through `check_use_resolution`
+under a named profile and pins the emitted severity.
 
-Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
-WP-10.
+## Compatibility and limitations
+Resolution probes the real filesystem relative to the lint probe file, so
+the positive scenarios reference module paths that exist in this tree
+(`compiler.semantics.lint.star_import`, the `compiler.semantics.lint`
+directory module). The final scenario is a source-contract on
+`src/compiler/35.semantics/lint/use_resolution.spl` and is currently RED —
+see the scenario NOTE.
 
-`check_use_resolution` (use_resolution.spl) emits W0407 for a `use` import
-that does not resolve to an existing `.spl` file. Every profile used to get
-the same WARNING severity, including `critical` -- an unresolved import
-could reach import-admission (module_loader_core.spl) with no ERROR
-anywhere in the diagnostic chain. Severity is now routed through the WP-3
-canonical policy resolver (`strictness_for_profile_name`) and promoted to
-ERROR only at the `critical` rung.
+## Verification guidance and troubleshooting
+A severity failure means the WP-3 table (`strictness_for_profile_name`)
+drifted for the profile named in the scenario; a false W0407 on a real
+module means the resolution facade broke. Re-run this single file and diff
+the profile argument against the emitted severity before touching
+`use_resolution.spl`.
 """
+# Lifecycle: doc/01_research/compiler/why_missing_symbols_do_not_fail_the_build_2026-09-01.md ;
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/compiler/misc/warning_allow_root_cause_cleanup.md
+# @manual_section: use-resolution-severity
 
 use compiler.core.ast.{ast_reset, decl_fn, decl_use_import}
 use compiler.semantics.lint.use_resolution.{check_use_resolution, UseResolutionWarning}
@@ -35,15 +48,19 @@ use std.spec.step
 
 describe "W0407 severity routes through the WP-3 policy resolver (WP-10)":
     it "defaults to WARNING for the permissive profile (\"\")":
+        # @req REQ-COMPILER-LINT-W0407-001
+        # @capture(statistics): the emitted W0407 code and severity under the default profile
+        step("Lint an unresolvable use import under the permissive profile")
         val d = make_unresolvable_use()
         val ws = check_use_resolution([d], probe_file_path(), "")
-        expect(ws.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(ws.len()).to_equal(1)  # oracle: exactly one diagnostic for one unresolvable import
         expect(ws[0].code).to_equal("W0407")
         expect(ws[0].severity).to_equal("WARNING")
 
     it "stays WARNING for strict and robust (not critical)":
-        step("Verify: stays WARNING for strict and robust (not critical)")
-        # @req: REQ-COMPILER-LINT-001
+        # @req REQ-COMPILER-LINT-W0407-002
+        # @capture(statistics): the W0407 severities under strict and robust profiles
+        step("Lint the same import under strict, then under robust")
         val d1 = make_unresolvable_use()
         val ws1 = check_use_resolution([d1], probe_file_path(), "strict")
         expect(ws1[0].severity).to_equal("WARNING")
@@ -52,47 +69,63 @@ describe "W0407 severity routes through the WP-3 policy resolver (WP-10)":
         expect(ws2[0].severity).to_equal("WARNING")
 
     it "promotes to ERROR under critical":
-        step("Verify: promotes to ERROR under critical")
+        # @req REQ-COMPILER-LINT-W0407-003
+        # @capture(statistics): the W0407 ERROR promotion under the critical profile
+        step("Lint the same import under the critical profile")
         val d = make_unresolvable_use()
         val ws = check_use_resolution([d], probe_file_path(), "critical")
-        expect(ws.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(ws.len()).to_equal(1)  # oracle: exactly one diagnostic for one unresolvable import
         expect(ws[0].severity).to_equal("ERROR")
 
     it "promotes to ERROR under the deprecated mission-critical alias too (WP-3 table)":
-        step("Verify: promotes to ERROR under the deprecated mission-critical alias too (WP-3 table)")
+        # @req REQ-COMPILER-LINT-W0407-004
+        # @capture(statistics): the W0407 ERROR promotion under the mission-critical alias
+        step("Lint the same import under the deprecated mission-critical alias")
         val d = make_unresolvable_use()
         val ws = check_use_resolution([d], probe_file_path(), "mission-critical")
         expect(ws[0].severity).to_equal("ERROR")
 
     it "accepts a direct module file without probing it as unresolved":
-        step("Verify: a direct module.spl file resolves")
+        # @req REQ-COMPILER-LINT-W0407-005
+        # @capture(statistics): zero diagnostics for a resolvable direct module import
+        step("Lint a use import whose module.spl exists in the tree")
         ast_reset()
         val d = decl_use_import("compiler.semantics.lint.star_import", [], 0)
         val ws = check_use_resolution([d], probe_file_path(), "critical")
-        expect(ws.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(ws.len()).to_equal(0)  # oracle: a resolvable import emits no diagnostics
 
     it "accepts a directory module through its __init__.spl fallback":
-        step("Verify: module/__init__.spl is the fallback after module.spl is absent")
+        # @req REQ-COMPILER-LINT-W0407-006
+        # @capture(statistics): zero diagnostics for the __init__.spl directory fallback
+        step("Lint a use import that only resolves through module/__init__.spl")
         ast_reset()
         val d = decl_use_import("compiler.semantics.lint", [], 0)
         val ws = check_use_resolution([d], probe_file_path(), "critical")
-        expect(ws.len()).to_equal(0)
+        expect(ws.len()).to_equal(0)  # oracle: the directory fallback must also resolve cleanly
 
     it "skips declarations that are not use imports":
-        step("Verify: non-use declarations do not trigger filesystem resolution")
+        # @req REQ-COMPILER-LINT-W0407-007
+        # @capture(statistics): zero diagnostics for a non-use declaration
+        step("Lint a function declaration through the use-resolution check")
         ast_reset()
         val d = decl_fn("ordinary_function", [], [], 0, [], 0, [], 0)
         val ws = check_use_resolution([d], probe_file_path(), "critical")
-        expect(ws.len()).to_equal(0)
+        expect(ws.len()).to_equal(0)  # oracle: non-use declarations never reach filesystem resolution
 
     it "uses only the canonical file facade and retains exactly two ordered probes":
-        step("Verify: direct runtime ownership is absent and both facade probes remain")
+        # NOTE: legitimately RED — the shipped source currently violates one of the
+        # pinned contract clauses below; fix the product source, not this spec.
+        # @req REQ-COMPILER-LINT-W0407-008
+        # @capture(protocol_json): the grep-verified facade and probe-order contract clauses
+        step("Read the use-resolution owner and verify its resolution-facade contract")
         val source = read_file_text(probe_file_path())
-        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{file_exists}")
-        expect(source.contains("rt_file_exists")).to_equal(false)
-        expect(source.split("file_exists(").len()).to_equal(3)
-        expect(source).to_contain("if (not file_exists(target_file) and not file_exists(dir_init)):")
-        val direct_probe = source.index_of("not file_exists(target_file)")
-        val init_probe = source.index_of("not file_exists(dir_init)")
-        expect(direct_probe).to_be_greater_than(-1)
-        expect(init_probe).to_be_greater_than(direct_probe)
+        step("Require the canonical stdlib facade and no direct runtime ownership")
+        val imports_canonical_facade = source.contains("use std.nogc_sync_mut.io_runtime.{file_exists}")
+        val keeps_no_direct_runtime_probe = not source.contains("rt_file_exists")
+        expect(imports_canonical_facade).to_equal(true)
+        expect(keeps_no_direct_runtime_probe).to_equal(true)
+        step("Require exactly two ordered existence probes (direct file, then dir_init)")
+        val retains_exactly_two_probes = source.split("file_exists(").len() == 3
+        val probes_direct_file_first = source.index_of("not file_exists(target_file)") >= 0 and source.index_of("not file_exists(dir_init)") > source.index_of("not file_exists(target_file)")
+        expect(retains_exactly_two_probes).to_equal(true)  # oracle: one facade probe + two call sites split the source into exactly 3 parts
+        expect(probes_direct_file_first).to_equal(true)

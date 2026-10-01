@@ -322,3 +322,7 @@ fixture. No code touched.
   still does not exist; that directory holds only
   `mlkem_avx2_reduce_selfcheck.c` and `mlkem_ntt_simd_c_test.c`. Keep open for
   the missing probe only.
+
+## Triage 2026-09-13
+
+Confirmed the missing probe is still missing: `test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_public_interface_probe.spl` does not exist (directory holds only `mlkem_avx2_reduce_selfcheck.c` and `mlkem_ntt_simd_c_test.c`). The alignment fix itself is already landed per the 2026-08-17 split. Writing the missing probe correctly (verdict line, `mlkem_ntt_simd_receipt().chunk_hits` SIMD-arm counting, GDB-instrument-equivalent discrimination) needs AVX2/x86-SIMD domain knowledge and a from-scratch spec beyond this pass's per-bug budget. Leaving OPEN for the missing probe only, no code change made.

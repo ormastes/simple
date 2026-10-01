@@ -15,7 +15,9 @@ use compiler.backend.backend.native.mach_inst.{EncodedFunction}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompiledModule}
 use compiler.backend.backend.native.isel_x86_64.{isel_module}
 use compiler.backend.backend.native.isel_x86_64.{isel_module_with_avx2_capability}
+use compiler.backend.backend.native.isel_x86_64.{isel_module_with_x86_simd_capability}
 use compiler.backend.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1}
+use compiler.backend.backend.native.native_avx512_capability.{NativeAvx512CapabilityV1}
 use compiler.backend.backend.native.isel_aarch64.{isel_module_aarch64}
 use compiler.backend.backend.native.isel_riscv64.{isel_module_riscv64}
 use compiler.backend.backend.native.isel_riscv32.{isel_module_riscv32}
@@ -23,7 +25,7 @@ use compiler.backend.backend.native.regalloc.{regalloc_module, regalloc_module_a
 use compiler.backend.backend.native.encode_x86_64.{encode_module}
 use compiler.backend.backend.native.encode_aarch64.{encode_module_aarch64}
 use compiler.backend.backend.native.encode_riscv64.{encode_module_riscv64}
-use compiler.backend.backend.native.encode_riscv32.{encode_module_rv32, rv32_elf32_header, rv32_elf32_phdr_load}
+use compiler.backend.backend.native.encode_riscv32.{encode_module_rv32, rv32_elf32_header, rv32_elf32_phdr_load, RV32_R_RISCV_CALL_PLT}
 use compiler.backend.backend.native.elf_writer.{elf_writer_x86_64, elf_add_section, new_text_section, write_elf64}
 use compiler.backend.backend.native.native_layout.{reorder_by_layout}
 use compiler.backend.backend.native.native_elf.{emit_elf_x86_64, emit_elf_aarch64, emit_elf_riscv64}
@@ -71,6 +73,12 @@ fn compile_native_x86_64_avx2(module: MirModule, capability: NativeAvx2Capabilit
     val encoded_funcs = encode_module(allocated)
     emit_elf_x86_64(encoded_funcs, allocated, module)
 
+fn compile_native_x86_64_simd(module: MirModule, avx2_capability: NativeAvx2CapabilityV1, avx512_capability: NativeAvx512CapabilityV1) -> [i64]:
+    val mach_module = isel_module_with_x86_simd_capability(module, avx2_capability, avx512_capability)
+    val allocated = regalloc_module(mach_module)
+    val encoded_funcs = encode_module(allocated)
+    emit_elf_x86_64(encoded_funcs, allocated, module)
+
 fn compile_native_aarch64(module: MirModule) -> [i64]:
     # Phase 1: Instruction Selection (MIR -> MachInst)
     val mach_module = isel_module_aarch64(module)
@@ -110,12 +118,86 @@ fn compile_native_riscv32(module: MirModule) -> [i64]:
     # Phase 4: ELF32 Emission (minimal: header + single PT_LOAD segment)
     emit_elf32_riscv32(encoded_funcs)
 
-fn emit_elf32_riscv32(encoded_funcs: [EncodedFunction]) -> [i64]:
-    # Concatenate all function code
+# Compile a MIR module into the exact RV32 instruction image uploaded by the
+# remote executor. Unlike compile_native_riscv32, this deliberately omits the
+# ELF header and program header: the target writes these bytes directly at the
+# caller-selected code base.
+fn compile_native_riscv32_raw(module: MirModule, base_addr: i64) -> Result<[i64], text>:
+    val mach_module = isel_module_riscv32(module)
+    val allocated = regalloc_module(mach_module)
+    val encoded_funcs = encode_module_rv32(allocated)
+    rv32_link_raw_image(encoded_funcs, base_addr)
+
+fn rv32_encoded_code(encoded_funcs: [EncodedFunction]) -> [i64]:
     var all_code: [i64] = []
     for func in encoded_funcs:
         for byte in func.code:
             all_code = all_code.push(byte)
+    all_code
+
+fn rv32_read_u32_le(code: [i64], offset: i64) -> i64:
+    code[offset] + code[offset + 1] * 256 + code[offset + 2] * 65536 + code[offset + 3] * 16777216
+
+fn rv32_write_u32_le(code: [i64], offset: i64, value: i64) -> [i64]:
+    var patched = code
+    var bits = value
+    if bits < 0:
+        bits = bits + 4294967296
+    patched[offset] = bits % 256
+    patched[offset + 1] = (bits / 256) % 256
+    patched[offset + 2] = (bits / 65536) % 256
+    patched[offset + 3] = (bits / 16777216) % 256
+    patched
+
+fn rv32_link_raw_image(encoded_funcs: [EncodedFunction], base_addr: i64) -> Result<[i64], text>:
+    if base_addr < 0 or base_addr % 4 != 0:
+        return Err("RV32 raw image base address must be non-negative and 4-byte aligned")
+
+    var function_offsets: Dict<text, i64> = {}
+    var image_size = 0
+    for func in encoded_funcs:
+        if function_offsets.contains(func.name):
+            return Err("duplicate RV32 raw image symbol: " + func.name)
+        function_offsets[func.name] = image_size
+        image_size = image_size + func.code.len()
+
+    var image = rv32_encoded_code(encoded_funcs)
+    var function_offset = 0
+    for func in encoded_funcs:
+        for reloc in func.relocations:
+            if reloc.reloc_type != RV32_R_RISCV_CALL_PLT:
+                return Err("unsupported RV32 raw image relocation")
+            if not function_offsets.contains(reloc.symbol_name):
+                return Err("undefined RV32 raw image symbol: " + reloc.symbol_name)
+
+            val place_offset = function_offset + reloc.offset
+            if place_offset < 0 or place_offset + 8 > image.len():
+                return Err("RV32 raw image call relocation is out of bounds")
+            val auipc = rv32_read_u32_le(image, place_offset)
+            val jalr = rv32_read_u32_le(image, place_offset + 4)
+            if auipc % 128 != 0x17 or jalr % 128 != 0x67:
+                return Err("RV32 raw image call relocation does not name an AUIPC/JALR pair")
+
+            val target_address = base_addr + function_offsets[reloc.symbol_name] + reloc.addend
+            val place_address = base_addr + place_offset
+            val displacement = target_address - place_address
+            if displacement < -2147483648 or displacement > 2147483647:
+                return Err("RV32 raw image call displacement exceeds 32 bits")
+            val high = (displacement + 2048) >> 12
+            val low = displacement - high * 4096
+            var high_bits = high % 1048576
+            if high_bits < 0:
+                high_bits = high_bits + 1048576
+            var low_bits = low
+            if low_bits < 0:
+                low_bits = low_bits + 4096
+            image = rv32_write_u32_le(image, place_offset, high_bits * 4096 + auipc % 4096)
+            image = rv32_write_u32_le(image, place_offset + 4, low_bits * 1048576 + jalr % 1048576)
+        function_offset = function_offset + func.code.len()
+    Ok(image)
+
+fn emit_elf32_riscv32(encoded_funcs: [EncodedFunction]) -> [i64]:
+    val all_code = rv32_encoded_code(encoded_funcs)
 
     # ELF32 layout: header(52) + phdr(32) + code
     val header_size = 52
@@ -172,6 +254,27 @@ fn native_compile_result_with_avx2_capability(
     val object_bytes = match target:
         case X86_64:
             compile_native_x86_64_avx2(module, capability)
+        case _:
+            compile_native(module, target)
+    CompiledModule(
+        name: module.name,
+        object_code: Some(object_bytes),
+        assembly: nil,
+        llvm_ir: nil,
+        mir_dump: nil,
+        symbols: [],
+        compile_time_ms: 0
+    )
+
+fn native_compile_result_with_x86_simd_capability(
+    module: MirModule,
+    target: CodegenTarget,
+    avx2_capability: NativeAvx2CapabilityV1,
+    avx512_capability: NativeAvx512CapabilityV1
+) -> CompiledModule:
+    val object_bytes = match target:
+        case X86_64:
+            compile_native_x86_64_simd(module, avx2_capability, avx512_capability)
         case _:
             compile_native(module, target)
     CompiledModule(

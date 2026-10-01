@@ -1,0 +1,169 @@
+use std.spec.*
+use compiler.mir_opt.mir_opt.collection_plan_selection.{
+    CollectionPlanAlgorithm, CollectionPlanFacts, collection_plan_select
+}
+
+fn safe_collection_facts() -> CollectionPlanFacts:
+    CollectionPlanFacts(
+        collection_kind: "set",
+        equality_pure: true,
+        duplicate_semantics_preserved: true,
+        order_insensitive: true,
+        mutation_epoch_stable: true,
+        key_hashable: true,
+        key_orderable: true,
+        target_has_hash: true,
+        target_has_ordered: true,
+        ordered_update_bound_proven: true,
+        p0_correctness_ready: true,
+        policy: "moderate",
+        attribute: "auto",
+        static_size: -1,
+        static_lookups: -1,
+        hard_size_bound: -1,
+        profile_admitted: false,
+        profile_size_p95: -1,
+        profile_lookups_p95: -1,
+        linear_size_limit: 8,
+        lookup_promotion_count: 32
+    )
+
+describe "guarded collection physical plan selection":
+    it "refuses all substitutions before P0 correctness gates":
+        var facts = safe_collection_facts()
+        facts.p0_correctness_ready = false
+        facts.attribute = "hash"
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("p0-correctness-gate")
+
+    it "requires semantic proof even when profile heat is high":
+        var facts = safe_collection_facts()
+        facts.equality_pure = false
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 1000
+        facts.profile_lookups_p95 = 10000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("semantic-proof-missing")
+
+    it "selects hash from an admitted hot profile under moderate policy":
+        var facts = safe_collection_facts()
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 1000
+        facts.profile_lookups_p95 = 10000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(decision.evidence).to_equal("admitted-profile")
+        expect(decision.linear_rejection).to_equal("size-exceeds-linear-limit")
+
+    it "uses measured hash collision pressure only for automatic selection":
+        var facts = safe_collection_facts()
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 100
+        facts.profile_lookups_p95 = 1000
+        facts.profile_hash_probes_p95 = 100
+        facts.profile_hash_collisions_p95 = 40
+        val automatic = collection_plan_select(facts)
+        expect(automatic.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        expect(automatic.reason).to_equal("hash-collision-pressure")
+        expect(automatic.hash_rejection).to_equal("profile-hash-collisions")
+        facts.attribute = "hash"
+        val explicit = collection_plan_select(facts)
+        expect(explicit.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        facts.attribute = "auto"
+        facts.profile_hash_collisions_p95 = 4
+        expect(collection_plan_select(facts).selected).to_equal(CollectionPlanAlgorithm.Hash)
+        facts.profile_hash_collisions_p95 = 40
+        facts.target_has_ordered = false
+        expect(collection_plan_select(facts).selected).to_equal(CollectionPlanAlgorithm.Hash)
+
+    it "rejects incomplete or contradictory paired hash metrics":
+        var facts = safe_collection_facts()
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 100
+        facts.profile_lookups_p95 = 1000
+        facts.profile_hash_probes_p95 = 10
+        expect(collection_plan_select(facts).reason).to_equal("invalid-profile-hash-facts")
+        facts.profile_hash_collisions_p95 = 11
+        expect(collection_plan_select(facts).reason).to_equal("invalid-profile-hash-facts")
+
+    it "uses linear storage for a measured small quiet set":
+        var facts = safe_collection_facts()
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 2
+        facts.profile_lookups_p95 = 3
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Linear)
+        expect(decision.reason).to_equal("small-quiet-collection")
+
+    it "does not invent cost evidence when static and profile facts are absent":
+        val decision = collection_plan_select(safe_collection_facts())
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("insufficient-cost-evidence")
+
+    it "uses the ordered candidate in critical mode and rejects hash":
+        var facts = safe_collection_facts()
+        facts.policy = "critical"
+        facts.static_size = 100
+        facts.static_lookups = 1000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        expect(decision.hash_rejection).to_equal("unbounded-hash-worst-case")
+
+    it "rejects explicit hash in critical mode instead of silently changing intent":
+        var facts = safe_collection_facts()
+        facts.policy = "critical"
+        facts.attribute = "hash"
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("explicit-hash-rejected")
+
+    it "does not treat a small p95 as a hard critical bound":
+        var facts = safe_collection_facts()
+        facts.policy = "critical"
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 2
+        facts.profile_lookups_p95 = 3
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        expect(decision.reason).to_equal("bounded-lookup-policy")
+        expect(decision.linear_rejection).to_equal("hard-size-bound-unproven")
+
+    it "rejects explicit linear storage without a proved critical size bound":
+        var facts = safe_collection_facts()
+        facts.policy = "critical"
+        facts.attribute = "linear"
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("explicit-linear-bound-unproven")
+        expect(decision.linear_rejection).to_equal("hard-size-bound-unproven")
+
+    it "rejects the sorted-vector ordered candidate when updates need a hard bound":
+        var facts = safe_collection_facts()
+        facts.policy = "critical"
+        facts.ordered_update_bound_proven = false
+        facts.static_size = 100
+        facts.static_lookups = 1000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.ordered_rejection).to_equal("ordered-update-bound-unproven")
+
+    it "falls back to ordered only when a hash candidate is unavailable":
+        var facts = safe_collection_facts()
+        facts.key_hashable = false
+        facts.static_size = 100
+        facts.static_lookups = 1000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        expect(decision.hash_rejection).to_equal("key-not-hashable")
+
+    it "keeps the original algorithm when no safe candidate exists":
+        var facts = safe_collection_facts()
+        facts.key_hashable = false
+        facts.key_orderable = false
+        facts.static_size = 100
+        facts.static_lookups = 1000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("no-proven-candidate")

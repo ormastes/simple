@@ -3,7 +3,20 @@ name: research
 description: Run local + domain research for a feature. Search src/ and doc/ for related code, web search for external knowledge, generate requirement options, ask user to select. Self-sufficient — does not depend on any prior step.
 ---
 
+
+## SPipe home routing
+
+Reusable core lives at `{home}/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `{home}/spipe` (`SPIPE_WORKSPACE`). `{home}/spipe/common` links to core and project
+`.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
+runtime state out of core. Preserve existing reversed layouts and pinned legacy
+submodules until explicit migration; never overwrite an occupied route.
+See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownership.
 # Research — Self-Sufficient
+
+Resolve exact feature-group plus longest-prefix layer-base knowledge through
+`doc/00_llm_process/knowledge_registry.sdn` and retain its receipt. Kernel and
+driver paths are always `mdsoc_only`.
 
 **Self-sufficient.** Does not depend on any prior step or other LLM.
 

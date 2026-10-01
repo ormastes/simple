@@ -44,10 +44,6 @@ void rt_sleep_nanos(int64_t nanos) {
 }
 
 /* Exact portable fallback signals. */
-int64_t rt_gui_blend_span4(int64_t xy, int64_t src, int64_t offset, int64_t count) {
-    (void)xy; (void)src; (void)offset; (void)count;
-    return 0;
-}
 int64_t rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color) {
     (void)count; (void)color;
     return SPL_NIL;

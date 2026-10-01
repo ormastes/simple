@@ -123,10 +123,12 @@ impl<'a> super::Lexer<'a> {
             "defer" => TokenKind::Defer,
             "errdefer" => TokenKind::Errdefer,
             "skip" => {
-                // Contextual keyword: only treat as keyword if NOT followed by '('
-                // This allows: fn skip(...) and obj.skip(...)
-                // while keeping: skip (statement) and skip: (label)
-                if self.check('(') {
+                // Contextual keyword: only treat as keyword if NOT followed by '(' or '['
+                // This allows: fn skip(...), obj.skip(...), and dict use skip[k] = v
+                // while keeping: skip (statement) and skip: (label). A skip statement
+                // is never followed by '[', so `skip[` is always an index expression.
+                // Bug: doc/08_tracking/bug/full_cli_selfhosted_native_build_blockers_2026-08-27.md
+                if self.check('(') || self.check('[') {
                     let pattern = NamePattern::detect(&name);
                     TokenKind::Identifier { name, pattern } // Method/function name
                 } else {
@@ -758,9 +760,10 @@ impl<'a> super::Lexer<'a> {
                         pre_lex_info: pre_lex,
                     };
                 } else {
-                    if let Some(open) = brace_stack.pop() {
-                        pre_lex.brace_pairs.push((open, pos));
-                    }
+                    let open = brace_stack
+                        .pop()
+                        .expect("nested custom-block close must have a matching open brace");
+                    pre_lex.brace_pairs.push((open, pos));
                     payload.push(ch);
                     self.advance();
                 }

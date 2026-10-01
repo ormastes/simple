@@ -1,0 +1,139 @@
+#!/bin/sh
+# Execute the real outer runners with deterministic compiler/verifier boundaries.
+# These contract fixtures do not claim a native platform/bootstrap PASS.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/source/scripts/resource" "$tmp/bin" "$tmp/runtime"
+cat >"$tmp/bin/uname" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$TEST_OS"
+EOF
+cat >"$tmp/source/scripts/resource/run_capped.shs" <<'EOF'
+#!/bin/sh
+[ "${CAP_REQUIRE:-}" = 1 ] || exit 10
+exec "$@"
+EOF
+cat >"$tmp/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<'EOF'
+#!/bin/sh
+for arg do case "$arg" in
+    --work-root=*) work=${arg#*=};;
+    --compiler-sha256=*) sha=${arg#*=};;
+esac; done
+mkdir -p "$work/outputs/compiler-tools/fixture"
+cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_cli"
+cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_test_runner"
+[ "$TEST_CASE" = no_base_receipt ] && exit 0
+phase=stage2
+[ "$TEST_CASE" != wrong_phase ] || phase=stage3
+[ "$TEST_CASE" != wrong_hash ] || sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+outcome=PASS
+[ "$TEST_CASE" != false_base_pass ] || outcome=FAIL
+# The Linux runner additionally requires a command-owner receipt; the
+# FreeBSD runner does not consume these fields, so emitting them
+# unconditionally is harmless for both.
+cli="$work/outputs/compiler-tools/fixture/simple_cli"
+runner="$work/outputs/compiler-tools/fixture/simple_test_runner"
+receipt="$work/outputs/compiler-tools/fixture/command-owners.env"
+cli_sha=$(sha256sum "$cli" | awk '{print $1}')
+runner_sha=$(sha256sum "$runner" | awk '{print $1}')
+{
+    echo schema=simple-bootstrap-command-owners-v3
+    echo status=frozen
+    echo "phase=$phase"
+    echo "compiler_cli_path=$cli"
+    echo "compiler_cli_sha256=$cli_sha"
+    echo "test_runner_path=$runner"
+    echo "test_runner_sha256=$runner_sha"
+} >"$receipt"
+receipt_sha=$(sha256sum "$receipt" | awk '{print $1}')
+{
+    echo "phase=$phase"
+    echo 'hash_policy=canonical'
+    echo "expected_compiler_sha256=$sha"
+    echo "actual_compiler_sha256=$sha"
+    echo 'task=compiler_cli_build|result=PASS|status=0'
+    echo 'task=test_runner_build|result=PASS|status=0'
+    echo 'terminal_failures=0'
+    echo "overall=$outcome"
+    echo "command_owner_receipt=$receipt"
+    echo "command_owner_receipt_sha256=$receipt_sha"
+} >"$work/summary.env"
+EOF
+cat >"$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+exec "$@"
+EOF
+cat >"$tmp/tool" <<'EOF'
+#!/bin/sh
+case "$1" in
+run) echo 42;;
+native-build)
+    [ "$TEST_CASE" != stale ] || exit 0
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = --output ]; then shift; printf '#!/bin/sh\necho 42\n' >"$1"; chmod +x "$1"; break; fi
+        shift
+    done;;
+*)
+    case "$TEST_CASE" in
+        zero) echo 'Results: 0 total, 0 passed, 0 failed';;
+        missing) :;;
+        failed) echo 'Results: 2 total, 1 passed, 1 failed';;
+        skipped) echo 'Results: 2 total, 2 passed, 0 failed, 1 skipped';;
+        inconsistent) echo 'Results: 3 total, 2 passed, 0 failed';;
+        duplicate) printf 'Results: 0 total, 0 passed, 0 failed\nResults: 2 total, 2 passed, 0 failed\n';;
+        nonzero) echo 'Results: 2 total, 2 passed, 0 failed'; exit 7;;
+        timeout) exit 124;;
+        binding)
+            case " $* " in *" --assert-ran "*) ;; *) exit 8;; esac
+            for option in --no-cache --no-db --no-session-daemon --sequential; do
+                case " $* " in *" $option "*) ;; *) exit 8;; esac
+            done
+            [ "${SIMPLE_BINARY:-}" = "${0%/*}/simple_cli" ] && [ "${SIMPLE_TEST_BINARY:-}" = "${0%/*}/simple_cli" ] || exit 8
+            echo 'Results: 2 total, 2 passed, 0 failed';;
+        *) echo 'Results: 2 total, 2 passed, 0 failed';;
+    esac;;
+esac
+EOF
+chmod +x "$tmp/tool" "$tmp/bin/uname" \
+    "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" \
+    "$tmp/source/scripts/resource/run_capped.shs"
+export TEST_TOOL="$tmp/tool"
+export PATH="$tmp/bin:$PATH"
+failed=0
+checks=0
+for os in Linux FreeBSD; do
+    export TEST_OS=$os
+    runner=$(printf '%s' "$os" | tr '[:upper:]' '[:lower:]')
+    for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout \
+        no_base_receipt wrong_phase wrong_hash false_base_pass; do
+        export TEST_CASE=$scenario
+        work="$tmp/$os-$scenario"
+        mkdir -p "$work/post-phase2-fixture"
+        printf '#!/bin/sh\necho 42\n' >"$work/post-phase2-fixture/phase2-module-probe"
+        chmod +x "$work/post-phase2-fixture/phase2-module-probe"
+        set -- "--compiler=$tmp/tool" --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "--runtime-path=$tmp/runtime" "--work-root=$work" "--source-root=$tmp/source"
+        if [ "$os" = FreeBSD ]; then
+            set -- "$@" --phase=stage2 --hash-policy=canonical
+        fi
+        status=0
+        sh "$root/scripts/bootstrap/run-$runner-phase2-tests.shs" "$@" >"$tmp/run.log" 2>&1 || status=$?
+        checks=$((checks + 1))
+        case "$scenario" in
+            good|binding) expected=0;;
+            *) expected=1;;
+        esac
+        if { [ "$expected" = 0 ] && [ "$status" != 0 ]; } || { [ "$expected" = 1 ] && [ "$status" = 0 ]; }; then
+            echo "FAIL: $os $scenario unexpected status $status"
+            failed=$((failed + 1))
+        fi
+        if [ "$expected" = 1 ] && grep -qx 'overall=PASS' "$work/post-phase2-summary.env" 2>/dev/null; then
+            echo "FAIL: $os $scenario published PASS"
+            failed=$((failed + 1))
+        fi
+    done
+done
+echo "$checks runner scenarios; $failed failures"
+[ "$failed" = 0 ]

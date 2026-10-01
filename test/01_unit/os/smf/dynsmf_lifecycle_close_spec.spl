@@ -1,0 +1,187 @@
+# dynSMF lifecycle-backed execution pin and session-close contract.
+# Real admitted aspect-pack bytes come from the shared startup fixture. The
+# failure/recovery and cancellation cases remain explicit owner-missing REDs;
+# this spec does not fabricate handles or fixture data.
+# @req REQ-DYNSMF-LIFECYCLE-CLOSE
+
+use std.spec.{describe, it, expect, step}
+use os.smf.dynsmf_session.{
+    DynSmfFacetRef,
+    DynSmfSession,
+    dynsmf_policy_default,
+    dynsmf_session_first_use_facet_admitted,
+    dynsmf_session_new,
+    dynsmf_session_symbol,
+    dynsmf_session_validate_facet_ref}
+use os.smf.dynsmf_lifecycle.{dynsmf_session_close}
+use test.helpers.dynsmf_admitted_startup_fixture.{
+    DynSmfAdmittedStartupFixture, dynsmf_admitted_startup_fixture}
+
+fn fixture() -> DynSmfAdmittedStartupFixture:
+    dynsmf_admitted_startup_fixture(
+        "lifecycle_close", "build/dynsmf/lifecycle_close.smf",
+        "test.lifecycle_close", "1", "render_lifecycle", false)
+
+fn facet_ref_matches(session: DynSmfSession, reference: DynSmfFacetRef?, expected: bool) -> bool:
+    if val ref = reference:
+        return dynsmf_session_validate_facet_ref(session, ref) == expected
+    not expected
+
+@cfg(x86_64)
+fn expected_fixture_arch_byte() -> u8: 0
+
+@cfg(arm64)
+fn expected_fixture_arch_byte() -> u8: 1
+
+@cfg(x86)
+fn expected_fixture_arch_byte() -> u8: 2
+
+@cfg(arm32)
+fn expected_fixture_arch_byte() -> u8: 3
+
+@cfg(riscv64)
+fn expected_fixture_arch_byte() -> u8: 4
+
+@cfg(riscv32)
+fn expected_fixture_arch_byte() -> u8: 5
+
+describe "dynSMF lifecycle close and execution pin":
+    it "uses host-target bytes for the admitted callable provider":
+        step("Build a target-correct provider with a return-42 body")
+        val f = fixture()
+        if f.artifact_bytes.len() < 128 or f.manifest.len() == 0:
+            fail("fixture-construction-failure: provider image has no SMF arch byte")
+        expect(f.artifact_bytes[f.artifact_bytes.len() - 128 + 7]).to_equal(expected_fixture_arch_byte())
+        expect(f.manifest[0].exports[0]).to_equal("render_lifecycle")
+
+    it "issues a lease on a real admitted cache hit without extra load evidence":
+        step("Load real admitted bytes, then issue a cache-hit lease")
+        val f = fixture()
+        if f.artifact_bytes.len() == 0:
+            fail("fixture-construction-failure: empty target-matching admitted artifact")
+        val first = dynsmf_session_first_use_facet_admitted(
+            dynsmf_session_new("lifecycle-hit", dynsmf_policy_default()),
+            "lifecycle_close", f.request, f.artifact_bytes)
+        if first.session.evidence.len() == 0:
+            fail("fixture-construction-failure: no first-use evidence")
+        val first_reason = first.session.evidence[0].reason
+        if first_reason != "smf_dlopen_admitted":
+            fail("missing target-matching admitted compiled fixture for aarch64-unknown-linux-gnu: " + first_reason)
+        expect(first_reason).to_equal("smf_dlopen_admitted")
+        expect(first.facet_ref != nil).to_equal(true)
+        if first.facet_ref == nil or first.session.loaded.len() == 0:
+            fail("owner-missing: real admitted callable fixture did not load")
+        val second = dynsmf_session_first_use_facet_admitted(
+            first.session, "lifecycle_close", f.request, [])
+        expect(second.facet_ref != nil).to_equal(true)
+        expect(second.session.loaded.len()).to_equal(1)
+        expect(second.session.evidence.len()).to_equal(1)
+        if first.facet_ref == nil or second.facet_ref == nil:
+            fail("admitted fixture did not issue facet leases")
+        expect(facet_ref_matches(
+            second.session, first.facet_ref, true)).to_equal(true)
+        expect(facet_ref_matches(
+            second.session, second.facet_ref, true)).to_equal(true)
+
+    it "EXPECTED RED: execution pin needs begin and complete lifecycle owners":
+        step("Require the owner-issued execution begin/complete lease API")
+        fail("owner-missing: dynsmf_session_begin_execution and dynsmf_session_complete_execution")
+
+    it "removes loaded indexes and revokes refs when close succeeds":
+        step("Close the real admitted session and inspect stale state")
+        val f = fixture()
+        if f.artifact_bytes.len() == 0:
+            fail("fixture-construction-failure: empty target-matching admitted artifact")
+        val first = dynsmf_session_first_use_facet_admitted(
+            dynsmf_session_new("lifecycle-close", dynsmf_policy_default()),
+            "lifecycle_close", f.request, f.artifact_bytes)
+        if first.session.evidence.len() == 0:
+            fail("fixture-construction-failure: no first-use evidence")
+        val first_reason = first.session.evidence[0].reason
+        if first_reason != "smf_dlopen_admitted":
+            fail("missing target-matching admitted compiled fixture for aarch64-unknown-linux-gnu: " + first_reason)
+        expect(first_reason).to_equal("smf_dlopen_admitted")
+        if first.facet_ref == nil or first.session.loaded.len() == 0:
+            fail("owner-missing: real admitted callable fixture did not load")
+        val historical = first.session.loaded[0]
+        val historical_evidence = first.session.evidence.len()
+        val closed = dynsmf_session_close(first.session)
+        expect(closed.loaded[0].status).to_equal("unloaded")
+        expect(closed.loaded[0].id).to_equal(historical.id)
+        expect(closed.loaded[0].handle).to_equal(historical.handle)
+        expect(closed.loaded[0].generation).to_equal(historical.generation)
+        expect(closed.loaded[0].path).to_equal(historical.path)
+        expect(closed.loaded[0].content_hash).to_equal(historical.content_hash)
+        expect(closed.evidence.len()).to_equal(historical_evidence + 1)
+        if first.facet_ref == nil:
+            fail("admitted fixture did not issue a facet lease")
+        expect(facet_ref_matches(
+            closed, first.facet_ref, false)).to_equal(true)
+        expect(dynsmf_session_symbol(
+            closed, "lifecycle_close", "render_lifecycle").status).to_equal("stale")
+        val repeated = dynsmf_session_close(closed)
+        expect(repeated.loaded[0].status).to_equal("unloaded")
+        expect(repeated.loaded[0].handle).to_equal(closed.loaded[0].handle)
+        expect(repeated.generation).to_equal(closed.generation)
+        expect(repeated.evidence.len()).to_equal(closed.evidence.len())
+
+    it "reloads a fresh generation after successful close":
+        step("Close and reload the same real admitted artifact")
+        val f = fixture()
+        if f.artifact_bytes.len() == 0:
+            fail("fixture-construction-failure: empty target-matching admitted artifact")
+        val first = dynsmf_session_first_use_facet_admitted(
+            dynsmf_session_new("lifecycle-reload", dynsmf_policy_default()),
+            "lifecycle_close", f.request, f.artifact_bytes)
+        if first.session.evidence.len() == 0:
+            fail("fixture-construction-failure: no first-use evidence")
+        val first_reason = first.session.evidence[0].reason
+        if first_reason != "smf_dlopen_admitted":
+            fail("missing target-matching admitted compiled fixture for aarch64-unknown-linux-gnu: " + first_reason)
+        expect(first_reason).to_equal("smf_dlopen_admitted")
+        if first.facet_ref == nil or first.session.loaded.len() == 0:
+            fail("owner-missing: real admitted callable fixture did not load")
+        val before_generation = first.session.loaded[0].generation
+        val historical_handle = first.session.loaded[0].handle
+        val closed = dynsmf_session_close(first.session)
+        expect(closed.loaded[0].status).to_equal("unloaded")
+        expect(closed.loaded[0].handle).to_equal(historical_handle)
+        val reloaded = dynsmf_session_first_use_facet_admitted(
+            closed, "lifecycle_close", f.request, f.artifact_bytes)
+        expect(reloaded.facet_ref != nil).to_equal(true)
+        expect(reloaded.session.loaded.len()).to_equal(1)
+        expect(reloaded.session.loaded[0].status).to_equal("loaded")
+        expect(reloaded.session.loaded[0].generation).to_be_greater_than(before_generation)
+
+    it "EXPECTED RED: failed close recovery needs an admitted failure owner":
+        step("Require an owner-issued recoverable close-failure fixture")
+        fail("owner-missing: admitted failed-close fixture and recovery API")
+
+    it "rejects a stale generation after the loaded generation changes":
+        step("Mutate the real lease generation and validate stale refusal")
+        val f = fixture()
+        if f.artifact_bytes.len() == 0:
+            fail("fixture-construction-failure: empty target-matching admitted artifact")
+        val first = dynsmf_session_first_use_facet_admitted(
+            dynsmf_session_new("lifecycle-stale", dynsmf_policy_default()),
+            "lifecycle_close", f.request, f.artifact_bytes)
+        if first.session.evidence.len() == 0:
+            fail("fixture-construction-failure: no first-use evidence")
+        val first_reason = first.session.evidence[0].reason
+        if first_reason != "smf_dlopen_admitted":
+            fail("missing target-matching admitted compiled fixture for aarch64-unknown-linux-gnu: " + first_reason)
+        expect(first_reason).to_equal("smf_dlopen_admitted")
+        if first.facet_ref == nil or first.session.loaded.len() == 0:
+            fail("owner-missing: real admitted callable fixture did not load")
+        var stale = first.session
+        var library = stale.loaded[0]
+        library.generation = library.generation + 1
+        stale.loaded[0] = library
+        if first.facet_ref == nil:
+            fail("admitted fixture did not issue a facet lease")
+        expect(facet_ref_matches(
+            stale, first.facet_ref, false)).to_equal(true)
+
+    it "EXPECTED RED: cancellation and partial-close recovery need an owner":
+        step("Require an owner-issued cancellation/partial-failure contract")
+        fail("owner-missing: cancellation and partial-close recovery owner API")

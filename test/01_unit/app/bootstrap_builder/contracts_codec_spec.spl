@@ -1,0 +1,159 @@
+# @req REQ-BBM-001 REQ-BBM-004 REQ-BBM-006
+# Pure protocol tests; these do not certify native workers or remote execution.
+use std.spec
+use std.common.build_manager.contracts.{
+    BuildTaskV1, BuildInputV1, BuildHostV1, BuildRunV1, BuildResultV1,
+    builder_validate_task_v1, builder_validate_run_v1, builder_validate_result_v1,
+    builder_task_identity_v1, builder_relative_path_valid_v1
+}
+use std.common.build_manager.codec.{
+    builder_wire_escape_v1, builder_wire_unescape_v1,
+    builder_encode_task_v1, builder_decode_task_v1,
+    builder_encode_run_v1, builder_decode_run_v1,
+    builder_encode_result_v1, builder_decode_result_v1
+}
+
+fn builder_contract_fixture_v1() -> BuildTaskV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    BuildTaskV1(id: "module_a", attempt: 1, phase: "codegen", producer_digest: digest,
+        source_digest: digest, toolchain_digest: digest, dependencies: [],
+        program: "bin/llc", args: ["input.ll", "-o", "output.o"],
+        inputs: [BuildInputV1(path: "input.ll", digest: digest)],
+        outputs: ["output.o"], cache_key: digest, timeout_ms: 0)
+
+fn builder_contract_host_v1() -> BuildHostV1:
+    BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: "build/worker",
+        worker_program: "bin/manager",
+        worker_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", slots: 2)
+
+fn builder_contract_decode_error_v1(payload: text) -> text:
+    match builder_decode_task_v1(payload):
+        case Ok(task): ""
+        case Err(reason): reason
+
+describe "Build manager immutable request and receipt contract":
+    it "escapes delimiters once and preserves literal percent sequences":
+        expect(builder_wire_escape_v1("a%0A\tb\nc\r")).to_equal("a%250A%09b%0Ac%0D")
+        match builder_wire_unescape_v1("a%250A%09b%0Ac%0D"):
+            case Ok(value): expect(value).to_equal("a%0A\tb\nc\r")
+            case Err(reason): fail(reason)
+
+    it "rejects unknown and truncated escapes":
+        match builder_wire_unescape_v1("bad%2"):
+            case Ok(value): fail("truncated escape accepted")
+            case Err(reason): expect(reason).to_equal("truncated escape")
+        match builder_wire_unescape_v1("bad%2F"):
+            case Ok(value): fail("unknown escape accepted")
+            case Err(reason): expect(reason).to_equal("unknown or noncanonical escape")
+
+    it "round trips shell metacharacters as opaque argument data":
+        var task = builder_contract_fixture_v1()
+        task.args = ["", "a b", "$(do-not-execute)", "x\ty\nz", "%0A"]
+        match builder_decode_task_v1(builder_encode_task_v1(task)):
+            case Ok(decoded):
+                expect(decoded.args).to_equal(["", "a b", "$(do-not-execute)", "x\ty\nz", "%0A"])
+                expect(decoded.inputs[0].path).to_equal("input.ll")
+                expect(decoded.timeout_ms).to_equal(0)
+            case Err(reason): fail(reason)
+
+    it "rejects truncated and trailing task records":
+        val encoded = builder_encode_task_v1(builder_contract_fixture_v1())
+        expect(builder_contract_decode_error_v1(encoded + "extra\n")).to_equal("trailing wire fields")
+        expect(builder_contract_decode_error_v1("SIMPLE-BUILD-TASK-1\nmodule_a\n")).to_equal("truncated wire record")
+
+    it "rejects noncanonical integers and count overflow before allocation":
+        val encoded = builder_encode_task_v1(builder_contract_fixture_v1())
+        expect(builder_contract_decode_error_v1(encoded.replace("module_a\n1\n", "module_a\n01\n"))).to_equal("noncanonical wire integer")
+        expect(builder_contract_decode_error_v1(encoded.replace("module_a\n1\n", "module_a\n99999999999999999\n"))).to_equal("wire integer exceeds bound")
+
+    it "rejects traversal and Windows path aliases on every host":
+        expect(builder_relative_path_valid_v1("../escape.o")).to_equal(false)
+        expect(builder_relative_path_valid_v1("C:/escape.o")).to_equal(false)
+        expect(builder_relative_path_valid_v1("a//b.o")).to_equal(false)
+        expect(builder_relative_path_valid_v1("obj/CON.o")).to_equal(false)
+        expect(builder_relative_path_valid_v1("obj/output.o ")).to_equal(false)
+        expect(builder_relative_path_valid_v1("obj/module one.o")).to_equal(true)
+
+    it "rejects overlapping input/output declarations":
+        var task = builder_contract_fixture_v1()
+        task.outputs = ["INPUT.LL"]
+        expect(builder_validate_task_v1(task)).to_equal("input/output overlap")
+
+    it "rejects missing and cyclic dependencies":
+        var task = builder_contract_fixture_v1()
+        task.dependencies = ["module_b"]
+        val missing = BuildRunV1(tasks: [task], hosts: [builder_contract_host_v1()], keep_going: true, max_attempts: 2)
+        expect(builder_validate_run_v1(missing)).to_equal("missing task dependency")
+        var other = builder_contract_fixture_v1()
+        other.id = "module_b"
+        other.outputs = ["other.o"]
+        other.dependencies = ["module_a"]
+        val cyclic = BuildRunV1(tasks: [task, other], hosts: [builder_contract_host_v1()], keep_going: true, max_attempts: 2)
+        expect(builder_validate_run_v1(cyclic)).to_equal("cyclic task dependencies")
+
+    it "binds retry attempts and opaque argv to different identities":
+        val first = builder_contract_fixture_v1()
+        var retry = builder_contract_fixture_v1()
+        retry.attempt = 2
+        expect(builder_task_identity_v1(first) == builder_task_identity_v1(retry)).to_equal(false)
+        retry.attempt = 1
+        retry.args = ["input.ll", "-o", "different.o"]
+        expect(builder_task_identity_v1(first) == builder_task_identity_v1(retry)).to_equal(false)
+
+    it "rejects case-fold task and host aliases before Windows state writes":
+        val task = builder_contract_fixture_v1()
+        var alias = builder_contract_fixture_v1()
+        alias.id = "MODULE_A"
+        alias.outputs = ["other.o"]
+        val task_collision = BuildRunV1(tasks: [task, alias], hosts: [builder_contract_host_v1()], keep_going: true, max_attempts: 2)
+        expect(builder_validate_run_v1(task_collision)).to_equal("duplicate task identifier")
+        val host = builder_contract_host_v1()
+        var alias_host = builder_contract_host_v1()
+        alias_host.id = "LOCAL"
+        val host_collision = BuildRunV1(tasks: [task], hosts: [host, alias_host], keep_going: true, max_attempts: 2)
+        expect(builder_validate_run_v1(host_collision)).to_equal("duplicate host identifier")
+
+    it "binds full run host configuration and keep-going policy":
+        val run = BuildRunV1(tasks: [builder_contract_fixture_v1()], hosts: [builder_contract_host_v1()], keep_going: true, max_attempts: 2)
+        match builder_decode_run_v1(builder_encode_run_v1(run)):
+            case Ok(decoded):
+                expect(decoded.hosts[0].slots).to_equal(2)
+                expect(decoded.hosts[0].workspace).to_equal("build/worker")
+                expect(decoded.max_attempts).to_equal(2)
+                expect(decoded.keep_going).to_equal(true)
+                expect(decoded.hosts[0].worker_digest).to_equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            case Err(reason): fail(reason)
+
+    it "rejects legacy manifests and absent compiled worker identity":
+        val run = BuildRunV1(tasks: [builder_contract_fixture_v1()], hosts: [builder_contract_host_v1()], keep_going: true, max_attempts: 2)
+        val legacy = builder_encode_run_v1(run).replace("SIMPLE-BUILD-RUN-2", "SIMPLE-BUILD-RUN-1")
+        match builder_decode_run_v1(legacy):
+            case Ok(decoded): fail("legacy host layout accepted")
+            case Err(reason): expect(reason).to_equal("invalid run wire header (compiled worker digest required)")
+        var host = builder_contract_host_v1()
+        host.worker_digest = ""
+        val missing = BuildRunV1(tasks: [builder_contract_fixture_v1()], hosts: [host], keep_going: true, max_attempts: 2)
+        expect(builder_validate_run_v1(missing)).to_equal("missing or invalid compiled worker digest")
+
+    it "preserves unknown telemetry and rejects stale result attempts":
+        val task = builder_contract_fixture_v1()
+        val result = BuildResultV1(task_id: task.id, attempt: 1,
+            identity_digest: builder_task_identity_v1(task), host_id: "local",
+            status: "OK", exit_code: 0,
+            outputs: [BuildInputV1(path: "output.o", digest: task.producer_digest)],
+            cache_hits: -1, cache_misses: -1, cache_stores: -1)
+        expect(builder_validate_result_v1(task, result)).to_equal("")
+        match builder_decode_result_v1(builder_encode_result_v1(result)):
+            case Ok(decoded): expect(decoded.cache_hits).to_equal(-1)
+            case Err(reason): fail(reason)
+        var retry = builder_contract_fixture_v1()
+        retry.attempt = 2
+        expect(builder_validate_result_v1(retry, result)).to_equal("stale or mismatched result identity")
+
+    it "never accepts a clean worker exit without every declared output":
+        val task = builder_contract_fixture_v1()
+        val result = BuildResultV1(task_id: task.id, attempt: 1,
+            identity_digest: builder_task_identity_v1(task), host_id: "local",
+            status: "OK", exit_code: 0, outputs: [],
+            cache_hits: -1, cache_misses: -1, cache_stores: -1)
+        expect(builder_validate_result_v1(task, result)).to_equal("OK requires outputs and exit zero")

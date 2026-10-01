@@ -1,0 +1,61 @@
+use app.compiler_entrypoint.index_compatibility.{
+    compiler_entrypoint_publish_index_compatibility_v1}
+use app.io.env_ops.{env_get, env_set}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.spec.{describe, it, expect, step}
+
+describe "entrypoint package-index compatibility markers":
+    it "should clear earlier compatibility markers when a graph is rejected":
+        step("Retain caller environment before testing rejected cache generations")
+        val old_producer = env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? ""
+        val old_root = env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? ""
+        val old_variant = env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? ""
+        val digest = sha256_text("rejected-index-compatibility-fixture")
+        val entry = PackageModuleIndexEntryV1(
+            "pkg", "mod", "src/mod.spl", digest, digest, digest, digest,
+            digest, digest, digest, digest, "scc", [], [])
+        step("Reject both an unsupported graph schema and a missing variant")
+        for schema in [1, 2]:
+            env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", digest)
+            env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", "old-root")
+            env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", digest)
+            val graph = PackageModuleIndexGenerationV1(
+                schema, digest, "new-root", "revision", "commit", "tree", digest,
+                [entry], if schema == 1: digest else: "")
+            expect(compiler_entrypoint_publish_index_compatibility_v1(graph)).to_equal(false)
+            expect(env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "").to_equal("")
+            expect(env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "").to_equal("")
+            expect(env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "").to_equal("")
+        env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", old_producer)
+        env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", old_root)
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", old_variant)
+
+    it "publishes an admitted graph and clears a later binding-only generation":
+        val old_producer = env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? ""
+        val old_root = env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? ""
+        val old_variant = env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? ""
+        val digest = sha256_text("index-compatibility-fixture")
+        val entry = PackageModuleIndexEntryV1(
+            "pkg", "mod", "src/mod.spl", digest, digest, digest, digest,
+            digest, digest, digest, digest, "scc", [], [])
+        val graph = PackageModuleIndexGenerationV1(
+            2, digest, "root", "revision", "commit", "tree", digest,
+            [entry], digest)
+        val binding = PackageModuleIndexGenerationV1(
+            1, digest, "binding", "revision", "commit", "tree", digest,
+            [])
+
+        expect(compiler_entrypoint_publish_index_compatibility_v1(graph)).to_equal(true)
+        expect(env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "").to_equal(digest)
+        expect(env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "").to_equal("root")
+        expect(env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "").to_equal(digest)
+
+        expect(compiler_entrypoint_publish_index_compatibility_v1(binding)).to_equal(true)
+        expect(env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "").to_equal("")
+        expect(env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "").to_equal("")
+        expect(env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "").to_equal("")
+        env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", old_producer)
+        env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", old_root)
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", old_variant)

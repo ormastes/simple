@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SOURCE="$ROOT/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+FIXTURE="$ROOT/test/01_unit/os/services/vfs/arm_fs_path_classifier_fixture.c"
+TMP=${TMPDIR:-/tmp}/simple-arm-fs-route-receipt-$$
+trap 'rm -f "$TMP"' EXIT HUP INT TERM
+
+cc -std=c11 -Wall -Wextra -Werror "$FIXTURE" -o "$TMP"
+"$TMP"
+
+# Sabotage gate: the Simple Cranelift caller passes one tagged RuntimeValue.
+# Reject any regression to the disproven synthetic `(char *, length)` ABI and
+# require the heap-bounded receipt classifier exercised by the fixture above.
+grep -qF 'RuntimeValue rt_arm_fs_classify_path(RuntimeValue path_value)' "$SOURCE"
+grep -qF '(uint64_t)path_value, heap_base, heap_used_end, HEAP_STRING' "$SOURCE"
+if grep -qF 'rt_arm_fs_classify_path(const char *' "$SOURCE"; then
+    echo 'ARM FS route ABI gate: rejected pointer-length wrapper' >&2
+    exit 1
+fi
+printf '%s\n' 'ARM FS tagged-runtime-string route ABI PASS'

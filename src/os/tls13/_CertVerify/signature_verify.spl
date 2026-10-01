@@ -29,7 +29,7 @@ use os.crypto.ed25519.{ed25519_verify}
 use os.crypto.ecdsa_p256.{ecdsa_p256_verify_fixed}
 use os.crypto.ecdsa_p384.{ecdsa_p384_verify_fixed}
 use os.crypto.ecdsa_p521.{ecdsa_p521_verify_fixed}
-use std.nogc_sync_mut.io.signature_sffi.{rsa_pss_sha256_verify_checked, rsa_pss_sha384_verify_checked, rsa_pss_sha512_verify_checked}
+use std.nogc_sync_mut.io.signature_sffi.{rsa_pss_sha256_verify_native, rsa_pss_sha384_verify_native, rsa_pss_sha512_verify_native}
 
 # ============================================================================
 # Result Type
@@ -260,22 +260,25 @@ fn verify_certificate_verify_msg_scheme(pubkey: [u8], sig_scheme: u16, transcrip
             CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ed25519: {verify_path})")
     elif sig_scheme == 0x0804:
         # rsa_pss_rsae_sha256
-        match rsa_pss_sha256_verify_checked(pubkey, content, sig):
-            case Ok(true): CertVerifyResult.Ok
-            case Ok(false): CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha256)")
-            case Err(error): CertVerifyResult.Err(msg: "CertificateVerify RSA-PSS SHA-256 provider error: {error}")
+        val ok = rsa_pss_sha256_verify_native(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha256)")
     elif sig_scheme == 0x0805:
         # rsa_pss_rsae_sha384
-        match rsa_pss_sha384_verify_checked(pubkey, content, sig):
-            case Ok(true): CertVerifyResult.Ok
-            case Ok(false): CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha384)")
-            case Err(error): CertVerifyResult.Err(msg: "CertificateVerify RSA-PSS SHA-384 provider error: {error}")
+        val ok = rsa_pss_sha384_verify_native(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha384)")
     elif sig_scheme == 0x0806:
         # rsa_pss_rsae_sha512
-        match rsa_pss_sha512_verify_checked(pubkey, content, sig):
-            case Ok(true): CertVerifyResult.Ok
-            case Ok(false): CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha512)")
-            case Err(error): CertVerifyResult.Err(msg: "CertificateVerify RSA-PSS SHA-512 provider error: {error}")
+        val ok = rsa_pss_sha512_verify_native(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha512)")
     elif sig_scheme == 0x0403:
         # ecdsa_secp256r1_sha256 — pubkey is DER SubjectPublicKeyInfo bytes (SPKI)
         # sig is DER-encoded SEQUENCE { INTEGER r, INTEGER s } per RFC 8446 §4.2.3
@@ -283,10 +286,11 @@ fn verify_certificate_verify_msg_scheme(pubkey: [u8], sig_scheme: u16, transcrip
         if fixed64.len() != 64:
             CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_p256: DER decode failed)")
         else:
-            match ecdsa_p256_verify_fixed(pubkey, content, fixed64):
-                case Ok(true): CertVerifyResult.Ok
-                case Ok(false): CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
-                case Err(error): CertVerifyResult.Err(msg: "CertificateVerify ECDSA P-256 provider error: {error}")
+            val ok = ecdsa_p256_verify_fixed(pubkey, content, fixed64)
+            if ok:
+                CertVerifyResult.Ok
+            else:
+                CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
     elif sig_scheme == 0x0503:
         # ecdsa_secp384r1_sha384 — P-384 pure-Simple engine (os.crypto.ecdsa_p384)
         # sig is DER-encoded SEQUENCE { INTEGER r, INTEGER s } per RFC 8446 §4.2.3
@@ -427,10 +431,7 @@ fn verify_cert_chain(chain: [[u8]], root_store: [[u8]]) -> CertChainResult:
                     if not root.is_ca:
                         return CertChainResult.Err(msg: "matched trust anchor is not a CA")
                     val verify_result = _verify_cert_signature_with_issuer(current, root_cert)
-                    val root_signature_valid = match verify_result:
-                        case CertVerifyResult.Ok: true
-                        case CertVerifyResult.Err(_): false
-                    if root_signature_valid:
+                    if val CertVerifyResult.Ok = verify_result:
                         matched_root = true
                     root_idx = root_store.len()
                 else:

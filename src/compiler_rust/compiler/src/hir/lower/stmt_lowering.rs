@@ -16,7 +16,6 @@ use super::lowerer::Lowerer;
 /// this must move with it.
 const OPTION_ENUM_ID: i64 = 1;
 
-
 /// Map an augmented-assignment operator to the binary operator it desugars to.
 ///
 /// Returns `None` for a plain `=` and for `~=` — neither carries an arithmetic
@@ -35,6 +34,69 @@ const OPTION_ENUM_ID: i64 = 1;
 /// along (`interpreter/node_exec.rs`, `exec_augmented_assignment`), where the
 /// `is_suspend` await decision is computed independently of `bin_op` — so this
 /// makes the JIT match the reference behaviour rather than inventing one.
+/// Design A.3.4: assembler directives a raw `asm { }` block may NOT carry
+/// because the item attributes (`@section`, `@global`, `@align`) express
+/// them. `.code32`/`.code64`, `.option`, `.arch`, `.cfi_*` stay allowed.
+/// Returns the offending directive for the E-ASM-DIRECTIVE message.
+pub(crate) fn raw_asm_rejected_directive(instructions: &[String]) -> Option<&'static str> {
+    const REJECTED: [&str; 8] = [
+        ".section", ".global", ".globl", ".type", ".size", ".align", ".p2align", ".balign",
+    ];
+    for instruction in instructions {
+        let text = instruction.trim_start();
+        for directive in REJECTED {
+            if let Some(rest) = text.strip_prefix(directive) {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    return Some(directive);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Design A.4: `clobbers(...)` accepts arch register names plus the pseudo
+/// names `memory` and `flags`/`cc`. The list is the union over the targets
+/// the seed can emit for (x86_64, aarch64, riscv, arm32); an unknown name is
+/// E-ASM-CLOBBER at lowering time.
+pub(crate) fn is_known_asm_clobber(name: &str) -> bool {
+    match name {
+        "memory" | "cc" | "flags" => return true,
+        _ => {}
+    }
+    const X86: [&str; 24] = [
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+    ];
+    if X86.contains(&name) {
+        return true;
+    }
+    let bytes = name.as_bytes();
+    let numbered = |prefix: u8, max: u32| -> bool {
+        bytes.len() >= 2
+            && bytes[0] == prefix
+            && name[1..].bytes().all(|b| b.is_ascii_digit())
+            && name[1..].parse::<u32>().is_ok_and(|n| n <= max)
+    };
+    // aarch64 x0..x30 / w0..w30 / v0..v31 / q,d,s registers; arm32 r0..r15;
+    // riscv x0..x31, f0..f31, a0..a7, t0..t6, s0..s11.
+    numbered(b'x', 31)
+        || numbered(b'w', 30)
+        || numbered(b'v', 31)
+        || numbered(b'q', 31)
+        || numbered(b'd', 31)
+        || numbered(b's', 31)
+        || numbered(b'r', 15)
+        || numbered(b'f', 31)
+        || numbered(b'a', 7)
+        || numbered(b't', 6)
+        || matches!(name, "lr" | "sp" | "fp" | "pc" | "ra" | "gp" | "tp" | "zero")
+        || name.starts_with("xmm")
+        || name.starts_with("ymm")
+        || name.starts_with("zmm")
+        || name.starts_with("st")
+}
+
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
     match op {
         ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(BinOp::Add),
@@ -49,6 +111,111 @@ fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
 }
 
 impl Lowerer {
+    /// The DECLARED return type name of a static call `Type.method(...)`, taken
+    /// from the whole-program `global_fn_return_types` map.
+    ///
+    /// Registration-independent on purpose: the map holds parser `Type`s (names),
+    /// so this answers even when `module.types.lookup(type_name)` is None — which
+    /// is exactly the state `driver_types.spl` is in for `CompilerConfig`. Note
+    /// that an unregistered callee type also stops `expr/mod.rs`'s static-call
+    /// routing (it is gated on `module.types.lookup(recv_name).is_some()`), so
+    /// only the `Expr::Path` form reaches static lowering there; both call shapes
+    /// are matched here regardless.
+    ///
+    /// Returns None unless a row exists. Never falls back to the callee type
+    /// name, which would mis-hint any non-factory static (`Foo.parse() -> text`).
+    fn static_call_return_type_name(&self, init: &Expr) -> Option<String> {
+        let (type_name, method) = match init {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Path(segments) if segments.len() == 2 => (segments[0].clone(), segments[1].clone()),
+                _ => return None,
+            },
+            Expr::MethodCall { receiver, method, .. } => match receiver.as_ref() {
+                Expr::Identifier(name) => (name.clone(), method.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // A local of the same spelling means this is an instance call, not a
+        // static one; there is no reliable receiver name to take here.
+        if !type_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return None;
+        }
+        let declared = self
+            .global_fn_return_types
+            .as_ref()?
+            .get(&format!("{}.{}", type_name, method))?;
+        Self::declared_type_struct_name(declared).map(|(name, _)| name)
+    }
+
+    /// Like `static_call_return_type_name`, but also reports whether the
+    /// declared return type WRAPPED the struct (`-> T?`, `-> mut T`, `-> *T`).
+    ///
+    /// The distinction is load-bearing and the caller must honour it: for an
+    /// unwrapped `-> T` the binding's TypeId may be upgraded to T outright, but
+    /// for `-> T?` the VALUE is an optional, so typing the local as bare `T`
+    /// makes every field read address the payload's slots through the wrapper
+    /// and return garbage. A wrapped return therefore contributes the NAME only.
+    fn static_call_return_type_name_parts(&self, init: &Expr) -> Option<(String, bool)> {
+        let (type_name, method) = match init {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Path(segments) if segments.len() == 2 => (segments[0].clone(), segments[1].clone()),
+                _ => return None,
+            },
+            Expr::MethodCall { receiver, method, .. } => match receiver.as_ref() {
+                Expr::Identifier(name) => (name.clone(), method.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if !type_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return None;
+        }
+        let declared = self
+            .global_fn_return_types
+            .as_ref()?
+            .get(&format!("{}.{}", type_name, method))?;
+        Self::declared_type_struct_name(declared)
+    }
+
+    /// The struct NAME a declared return type names, looking through the
+    /// wrappers that carry a payload of that type.
+    ///
+    /// `Type::Optional` had no arm here and fell to `_ => None`, so EVERY
+    /// `static fn ... -> T?` constructor silently lost its name. That is the
+    /// whole `FileFingerprint.from_file(path) -> FileFingerprint?` family: the
+    /// `val object_fp = FileFingerprint.from_file(...)` binding recorded no
+    /// `static_call_type_hints` row, so the later `if val fp = object_fp:`
+    /// binding had no name to inherit either, and `fp.size` reached
+    /// `get_field_info(TypeId::ANY, "size")`. That function's LOCAL-BEST scan
+    /// picks the SMALLEST index among every struct in `module.types` declaring
+    /// the name and returns Ok, so no receiver-aware fallback and no trace ever
+    /// ran. Measured in the 834-unit Stage 2 closure (2026-09-13):
+    /// `[FIELD-TRACE] ANY/size -> LOCAL-BEST idx=0 count=7 in
+    /// driver_aot_native_output.spl` — byte offset 0 instead of 24, returning
+    /// the struct's `path` text POINTER (34363944961 = 0x8_0010_2001) where a
+    /// 632-byte file size belonged. 15 structs in the tree declare `size` as
+    /// their FIRST field, so the decoy only enters `module.types` once the
+    /// closure is big enough — which is exactly why the 3-unit and 58-unit
+    /// reproducers pass and only the full closure fails.
+    /// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+    ///
+    /// Unwrapping is limited to payload-preserving wrappers (`T?`, `mut T`,
+    /// pointers): each names exactly one underlying struct, so the name is the
+    /// receiver's own and never a guess. Tuples, unions, arrays and functions
+    /// stay `None` — they name no single struct.
+    pub(crate) fn declared_type_struct_name(declared: &ast::Type) -> Option<(String, bool)> {
+        match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => {
+                (!name.is_empty()).then(|| (name.clone(), false))
+            }
+            ast::Type::Optional(inner) | ast::Type::Capability { inner, .. } | ast::Type::Pointer { inner, .. } => {
+                Self::declared_type_struct_name(inner).map(|(name, _)| (name, true))
+            }
+            _ => None,
+        }
+    }
+
     /// Lower a list of contract clauses to HIR contract clauses
     fn lower_contract_clauses(
         &mut self,
@@ -78,6 +245,12 @@ impl Lowerer {
     }
 
     pub(super) fn lower_block(&mut self, block: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+        // A block is a lexical name scope. Keep allocated local slots (HIR
+        // statements already refer to their indices), but restore the visible
+        // name-to-slot bindings after lowering so a local declared in one
+        // match/if arm cannot shadow an outer function or import in later
+        // code.
+        let saved_local_map = ctx.local_map.clone();
         // Enter block scope for lifetime tracking
         let span = block.statements.first().and_then(|n| match n {
             Node::Let(l) => Some(l.span),
@@ -94,6 +267,7 @@ impl Lowerer {
 
         // Exit block scope
         self.lifetime_context.exit_scope();
+        ctx.local_map = saved_local_map;
 
         Ok(stmts)
     }
@@ -130,13 +304,18 @@ impl Lowerer {
                 } else {
                     Mutability::Immutable
                 };
+                let previous_bindings: Vec<_> = bindings
+                    .iter()
+                    .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                    .collect();
                 for (name, ty) in &bindings {
                     ctx.add_local(name.clone(), *ty, mutability);
                 }
+                self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
                 let mut then_block = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                 then_block.extend(self.lower_block(body, ctx)?);
-                for (name, _) in &bindings {
-                    ctx.local_map.remove(name);
+                for (name, previous) in previous_bindings {
+                    ctx.restore_name_binding(&name, previous);
                 }
                 else_block = Some(vec![
                     store,
@@ -225,6 +404,27 @@ impl Lowerer {
                     });
                 }
 
+                // Keep an authored `Result<T, E>` annotation available to
+                // property projection.  On the Windows bootstrap path a
+                // generic local can arrive at expression lowering as i64;
+                // using the annotation here prevents `value.ok` / `value.err`
+                // from being mis-routed through struct-field lowering.
+                let result_projection_type = if let Some(ast::Type::Generic { name: family, args }) =
+                    let_stmt.ty.as_ref().or(pattern_type)
+                {
+                    if family == "Result" && args.len() == 2 {
+                        if let (Ok(ok_ty), Ok(err_ty)) = (self.resolve_type(&args[0]), self.resolve_type(&args[1])) {
+                            Some((ok_ty, err_ty))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 let is_untyped_empty_array_binding = !has_explicit_type
                     && value
                         .as_ref()
@@ -279,7 +479,69 @@ impl Lowerer {
                 };
                 self.lifetime_context.register_variable(&name, origin);
 
+                // When the binding's TypeId erased to ANY, recover the AUTHORED
+                // return type NAME of an initializing static call. This is the
+                // registration-INDEPENDENT counterpart to the parameter hint
+                // (`LocalVar::type_name_hint`): `expr/access.rs` resolves an
+                // ANY receiver on an ambiguous field BY NAME through the
+                // whole-program `global_struct_defs`, so a name is enough and no
+                // TypeId ever has to resolve. `var compiler_config =
+                // CompilerConfig.from_env()` in `CompileContext.create` was
+                // reading `mcdc_owner_bytes` at MirLowering's index 26 (0xd0,
+                // 96 bytes past a 112-byte object) instead of CompilerConfig's
+                // index 10 (0x50) for exactly this reason.
+                //
+                // The name comes from the callee's DECLARED return type, never
+                // from the callee type name itself: `Foo.parse() -> text` must
+                // NOT hint "Foo". No declared row means no hint — never a guess.
+                // When the authored return type is a type this module HAS
+                // registered, upgrade the binding's TypeId outright instead of
+                // stopping at the name hint. The name hint has exactly one
+                // consumer — `expr/access.rs`'s ambiguous-FIELD recovery — so on
+                // its own it leaves the local at ANY, and an ANY receiver makes
+                // MIR emit a BARE `MethodCallStatic{"find"}` whose name
+                // codegen's `is_bare_builtin_collection_method` heuristic routes
+                // to the builtin `rt_find` before any user-method resolution.
+                // That reads a type header class instances do not carry and
+                // traps the riscv64 guest.
+                //
+                // This reproduces exactly what annotating the local
+                // (`var reg: DispatchRegistry = DispatchRegistry.new_for_test()`)
+                // was measured to do in the bug record's controlled experiment:
+                // the local becomes a real TypeId and BOTH `reg.find(...)` and
+                // `reg.register(...)` lower qualified. Riding the existing
+                // TypeId path rather than teaching method-call lowering a second
+                // name-hint mechanism.
+                //
+                // Gated on `ty == TypeId::ANY`, so an authored type is never
+                // overridden: the only bindings affected are ones that were
+                // already erased. The name hint is still recorded when lookup
+                // finds nothing, preserving the registration-independent
+                // field-access recovery for unregistered cross-module types.
+                //
+                // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+                if ty == TypeId::ANY {
+                    if let Some(init) = &let_stmt.value {
+                        if let Some((hint, wrapped)) = self.static_call_return_type_name_parts(init) {
+                            // A WRAPPED return (`-> T?`) contributes the name
+                            // only: the value is an optional, so upgrading the
+                            // local's TypeId to bare `T` would make every field
+                            // read address the payload's slots through the
+                            // wrapper. Unwrapped `-> T` keeps the existing
+                            // TypeId upgrade.
+                            match self.module.types.lookup(&hint) {
+                                Some(resolved) if !wrapped && resolved != TypeId::ANY => ty = resolved,
+                                _ => {
+                                    ctx.static_call_type_hints.insert(name.clone(), hint);
+                                }
+                            }
+                        }
+                    }
+                }
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if let Some(result_payload_types) = result_projection_type {
+                    ctx.result_projection_types.insert(local_index, result_payload_types);
+                }
                 if is_untyped_empty_array_binding {
                     self.untyped_empty_array_locals.insert(local_index);
                 }
@@ -439,6 +701,7 @@ impl Lowerer {
                     // just laundered through a return. 42 owned `-> bool`
                     // functions in this repo return a bare `.?`.
                     let expr = self.lower_bool_return_expr(v, ctx)?;
+                    self.validate_declared_return_type(ctx.return_type, expr.ty)?;
 
                     // Check for returning local reference (E2005)
                     // If the return expression is a variable reference, check its origin
@@ -511,9 +774,14 @@ impl Lowerer {
                     } else {
                         Mutability::Immutable
                     };
+                    let previous_bindings: Vec<_> = bindings
+                        .iter()
+                        .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                        .collect();
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
+                    self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
 
                     // 5. Generate payload extraction stmts through the same owner
                     // used by match arms, including multi-field array typing.
@@ -526,8 +794,8 @@ impl Lowerer {
                     then_block.extend(self.lower_block(&if_stmt.then_block, ctx)?);
 
                     // 7. Clean up bindings from scope
-                    for (name, _) in &bindings {
-                        ctx.local_map.remove(name);
+                    for (name, previous) in previous_bindings {
+                        ctx.restore_name_binding(&name, previous);
                     }
 
                     // 8. Handle else block (elif branches + else)
@@ -645,16 +913,21 @@ impl Lowerer {
                     } else {
                         Mutability::Immutable
                     };
+                    let previous_bindings: Vec<_> = bindings
+                        .iter()
+                        .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                        .collect();
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
+                    self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
 
                     let mut then_block =
                         self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                     then_block.extend(self.lower_block(&while_stmt.body, ctx)?);
 
-                    for (name, _) in &bindings {
-                        ctx.local_map.remove(name);
+                    for (name, previous) in previous_bindings {
+                        ctx.restore_name_binding(&name, previous);
                     }
 
                     return Ok(vec![HirStmt::Loop {
@@ -932,9 +1205,73 @@ impl Lowerer {
                 }
             }
 
-            Node::Function(_f) => {
-                // Nested function definitions are ignored in native lowering for now.
-                Ok(vec![])
+            // A `fn` declared inside another function body is lowered as a local
+            // closure binding -- `val <name> = \<params>: <body>` -- and handed
+            // straight back to the `Node::Let` arm above.
+            //
+            // It used to answer `Ok(vec![])`, dropping the definition entirely.
+            // That is not a silent wrong answer, because the call site then
+            // lowers to an unresolved external symbol and the JIT drops the
+            // WHOLE module to the interpreter -- but it costs ~100-1000x on
+            // every module that contains one, and on the native lane (which has
+            // no interpreter to fall back to) it is a link error.
+            //
+            // Measured on the deployed seed before this change: a non-capturing
+            // nested fn, a capturing one, and a recursive one each answered
+            // `unresolved external symbol '<name>'`; the sibling shapes written
+            // as lambdas (`val f = \n: n + k`) compiled and ran, including
+            // capture of an enclosing local, a direct call, and being passed as
+            // a value. So the closure path already carries everything a nested
+            // fn needs -- it was only ever the AST shape that was unhandled.
+            //
+            // The one exception is SELF-RECURSION, and it is a correctness
+            // guard rather than a missing feature: HIR closures have no letrec,
+            // so inside the converted body the fn's own name is unbound. It
+            // would either fail to resolve or -- worse -- silently resolve to a
+            // module-level function of the same name and compile a call to the
+            // WRONG body. A recursive nested fn therefore keeps the old
+            // behaviour and falls back to the interpreter, which handles it
+            // correctly. That gap is the same one that makes a recursive
+            // *lambda* fail outright on both engines; it is tracked separately.
+            //
+            // Mutual recursion needs no guard: lowering `a`'s body hits `b`,
+            // which is unbound, so the module falls back exactly as it does
+            // today and the interpreter runs the original AST.
+            //
+            // Bug: doc/08_tracking/bug/
+            //      nested_fn_in_spec_block_loses_captured_local_2026-08-04.md
+            Node::Function(f) => {
+                let mut bound: Vec<String> = Vec::new();
+                let mut free_reads = std::collections::HashSet::new();
+                super::expr::control::collect_identifiers_function(f, &mut bound, &mut free_reads);
+                if free_reads.contains(&f.name) {
+                    return Ok(vec![]);
+                }
+
+                let lambda = Expr::Lambda {
+                    params: f
+                        .params
+                        .iter()
+                        .map(|p| ast::LambdaParam {
+                            name: p.name.clone(),
+                            ty: p.ty.clone(),
+                        })
+                        .collect(),
+                    body: Box::new(Expr::DoBlock(f.body.statements.clone())),
+                    move_mode: ast::MoveMode::Copy,
+                    capture_all: false,
+                };
+                let binding = ast::LetStmt {
+                    span: f.span,
+                    pattern: Pattern::Identifier(f.name.clone()),
+                    ty: None,
+                    value: Some(lambda),
+                    mutability: Mutability::Immutable,
+                    storage_class: ast::StorageClass::Auto,
+                    is_ghost: false,
+                    is_suspend: false,
+                };
+                self.lower_node(&Node::Let(binding), ctx)
             }
 
             // Module-level imports are resolved in module_pass.rs. Function-scope
@@ -1068,31 +1405,91 @@ impl Lowerer {
             }
 
             Node::InlineAsm(asm_stmt) => {
-                if asm_stmt.constraints.is_empty() && asm_stmt.target_match.is_empty() && asm_stmt.clobbers.is_empty() {
-                    Ok(vec![HirStmt::InlineAsm {
-                        instructions: asm_stmt.instructions.clone(),
-                        volatile: asm_stmt.volatile,
-                    }])
-                } else {
+                // `asm match` target arms are still not lowered here (the arm
+                // selection needs the build target, which HIR lowering does not
+                // see). Operand-bound blocks ARE lowered now: until 2026-08-28
+                // they were silently dropped, so every `csrr {r}, sstatus`
+                // style site compiled to `return 0` (see
+                // doc/03_plan/os/hal/asm_to_simple_migration_plan.md, 1.1).
+                if !asm_stmt.target_match.is_empty() {
                     if std::env::var("SIMPLE_DEBUG_ASM").as_deref() == Ok("1") {
-                        eprintln!(
-                            "[asm] skipping operand-bound or target-matched asm block at {:?}",
-                            asm_stmt.span
-                        );
+                        eprintln!("[asm] skipping target-matched asm block at {:?}", asm_stmt.span);
                     }
-                    Ok(vec![])
+                    return Ok(vec![]);
                 }
+                // Design A.3.4: a raw block (no operand constraints) must not
+                // carry directives the item attributes express (`.section`,
+                // `.global`, `.type`, `.size`, `.align`) — letting them through
+                // would silently split a function across sections.
+                if asm_stmt.constraints.is_empty() {
+                    if let Some(directive) = raw_asm_rejected_directive(&asm_stmt.instructions) {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-DIRECTIVE: `{directive}` is not allowed inside a raw asm block; \
+                             use @section/@global/@align on the item instead"
+                        )));
+                    }
+                }
+                use simple_parser::ast::AsmConstraintKind;
+                let mut operands = Vec::new();
+                let mut clobbers: Vec<String> = asm_stmt.clobbers.clone();
+                for c in &asm_stmt.constraints {
+                    let kind = match &c.kind {
+                        AsmConstraintKind::In => crate::hir::HirAsmOperandKind::In,
+                        AsmConstraintKind::Out | AsmConstraintKind::LateOut => crate::hir::HirAsmOperandKind::Out,
+                        AsmConstraintKind::InOut => crate::hir::HirAsmOperandKind::InOut,
+                        AsmConstraintKind::Clobber => {
+                            if let Some(reg) = &c.reg_class {
+                                clobbers.push(reg.clone());
+                            }
+                            continue;
+                        }
+                        // clobber_abi / options: no codegen support yet; the
+                        // block still lowers with a `memory` clobber, which is
+                        // the conservative side.
+                        AsmConstraintKind::ClobberAbi(_) | AsmConstraintKind::Options(_) => continue,
+                    };
+                    let Some(operand_expr) = &c.operand else { continue };
+                    let expr = self.lower_expr(operand_expr, ctx)?;
+                    operands.push(crate::hir::HirAsmOperand {
+                        name: c.name.clone(),
+                        kind,
+                        reg: c.reg_class.clone().unwrap_or_else(|| "reg".to_string()),
+                        expr,
+                    });
+                }
+                // Design A.4: an unknown clobber name would be emitted into
+                // the LLVM constraint string verbatim and fail deep inside the
+                // assembler; reject it here with a source-level error.
+                for clobber in &clobbers {
+                    if !is_known_asm_clobber(clobber) {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-CLOBBER: unknown clobber name `{clobber}` in clobbers(...)"
+                        )));
+                    }
+                }
+                Ok(vec![HirStmt::InlineAsm {
+                    instructions: asm_stmt.instructions.clone(),
+                    volatile: asm_stmt.volatile,
+                    operands,
+                    clobbers,
+                }])
             }
 
             // Context statement: context obj: body
             // Requires expression-level context tracking - mark as unsupported for native codegen
-            Node::Context(_) if !self.lenient_types => Err(LowerError::Unsupported(
+            // Unsupported in LENIENT mode too: the lenient catch-all below is
+            // `_ => Ok(vec![])`, which silently DELETED the whole block, so a
+            // `context obj:` body inside a function never ran on the JIT/native
+            // path (test/feature/usage/classes_spec.spl). Failing here makes the
+            // caller fall back to the interpreter, which implements it.
+            Node::Context(_) => Err(LowerError::Unsupported(
                 "Context statements require interpreter mode. Native codegen support is planned.".to_string(),
             )),
 
             Node::Extern(e) => {
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
                 Ok(vec![])
             }
@@ -1197,6 +1594,58 @@ impl Lowerer {
     /// both canonical boxed Option values and the raw migration form.
     /// Match-arm identifiers intentionally continue to bind their full subject
     /// through `build_pattern_binding_stmts` below.
+    /// Carry the SUBJECT's authored struct name onto pattern bindings whose
+    /// TypeId erased to ANY.
+    ///
+    /// `if val fp = object_fp:` registers `fp` with `ctx.add_local(name, ty, ..)`
+    /// — a TypeId and nothing else. When that TypeId is ANY (the payload type was
+    /// lost cross-unit), the binding carries NO name at all: not a
+    /// `type_name_hint` (that is set only for parameters) and no
+    /// `static_call_type_hints` row (that is keyed by the SUBJECT's name,
+    /// `object_fp`, never the binding's). So every later receiver-aware recovery
+    /// — `expr/access.rs`'s ambiguous-field guard and its by-name fallbacks —
+    /// asks `try_resolve_receiver_struct_name_from_expr(fp)`, gets None, and
+    /// declines. `get_field_info(TypeId::ANY, field)` then reaches its LOCAL-BEST
+    /// scan, which picks the SMALLEST index among every struct in `module.types`
+    /// that declares the name, and returns Ok — so no fallback and no trace ever
+    /// runs.
+    ///
+    /// Measured consequence (2026-09-13): in the 834-unit Stage 2 closure,
+    /// `fp.size` on a `FileFingerprint` (`size` at index 3) lowered to
+    /// `[FIELD-TRACE] ANY/size -> LOCAL-BEST idx=0 count=7`, i.e. byte offset 0,
+    /// and returned the struct's `path` text POINTER instead of the file size —
+    /// 34363944961 (0x8_0010_2001) for a 632-byte object. 15 structs in the tree
+    /// declare `size` as their FIRST field (FileStat, GcObjectHeader, TypeLayout,
+    /// BlockHeader, ...), so the decoy only enters `module.types` once the
+    /// closure is large enough — which is exactly why 3-unit and 58-unit
+    /// reproducers pass and only the full closure fails.
+    /// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+    ///
+    /// Recording the name into `static_call_type_hints` reuses the EXISTING
+    /// consumer (`expr/access.rs`'s Identifier arm) rather than adding a second
+    /// mechanism. Purely additive and fail-soft: a hint that names nothing simply
+    /// fails the subsequent lookup and leaves today's behaviour untouched. Only
+    /// bindings already erased to ANY are touched, so an authored type is never
+    /// overridden.
+    fn propagate_pattern_binding_type_name_hint(
+        &mut self,
+        subject_expr: &Expr,
+        bindings: &[(String, TypeId)],
+        ctx: &mut FunctionContext,
+    ) {
+        if !bindings.iter().any(|(_, ty)| *ty == TypeId::ANY) {
+            return;
+        }
+        let Some(struct_name) = self.try_resolve_receiver_struct_name_from_expr(subject_expr, ctx) else {
+            return;
+        };
+        for (name, ty) in bindings {
+            if *ty == TypeId::ANY {
+                ctx.static_call_type_hints.insert(name.clone(), struct_name.clone());
+            }
+        }
+    }
+
     pub(crate) fn build_if_let_binding_stmts(
         &mut self,
         pattern: &Pattern,
@@ -1211,9 +1660,24 @@ impl Lowerer {
                 let Some(&local_index) = ctx.local_map.get(name) else {
                     return binding_stmts;
                 };
+                // `if val n = optional:` binds the PAYLOAD. When the subject is
+                // an optional over a BoxInt-family scalar (`i64?` etc.), type
+                // the binding as the raw inner scalar so the name-keyed unbox
+                // in mir `lower_builtin_call_expr` fires; typed `subject_ty`
+                // (the tagged Pointer) the binding stayed a tagged word and
+                // `n + 1` computed on the shifted bits (337 instead of 43 on
+                // the JIT lane, silently). The local's declared type must
+                // agree, or the raw value would be stored into a tagged slot.
+                // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or(subject_ty);
+                if binding_ty != subject_ty {
+                    if let Some(local) = ctx.locals.get_mut(local_index) {
+                        local.ty = binding_ty;
+                    }
+                }
                 binding_stmts.push(HirStmt::Let {
                     local_index,
-                    ty: subject_ty,
+                    ty: binding_ty,
                     value: Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_unwrap_or_self".to_string(),
@@ -1222,7 +1686,7 @@ impl Lowerer {
                                 ty: subject_ty,
                             }],
                         },
-                        ty: subject_ty,
+                        ty: binding_ty,
                     }),
                 });
             }
@@ -1239,6 +1703,37 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
+        // An or-pattern whose alternatives destructure a payload must bind per
+        // alternative. Binding from the FIRST alternative only (the previous
+        // behaviour) emitted that alternative's extraction shape for every
+        // alternative: `case Array(inner, _) | Optional(inner):` read the
+        // one-field `Optional` payload -- which IS the inner value -- through
+        // `rt_tuple_get(payload, 0)`, so the runtime rejected the non-array
+        // handle and `inner` became nil (native stage-2 CLI, MIR pre-scan of
+        // `env_get_opt -> text?`, 0xC0000005). `bind_subpattern` already
+        // guards each alternative's bindings by its own discriminant test and
+        // derives the extraction from that alternative's arity.
+        if let Pattern::Or(alternatives) = arm_pattern {
+            let destructures = alternatives.iter().any(|alt| {
+                matches!(
+                    alt,
+                    Pattern::Enum { payload: Some(_), .. }
+                        | Pattern::Tuple(_)
+                        | Pattern::Array(_)
+                        | Pattern::Struct { .. }
+                )
+            });
+            if destructures {
+                let binding_type_map: std::collections::HashMap<String, TypeId> = bindings.iter().cloned().collect();
+                let subject_ref = HirExpr {
+                    kind: HirExprKind::Local(subject_idx),
+                    ty: subject_ty,
+                };
+                let mut or_binding_stmts = Vec::new();
+                self.bind_subpattern(&subject_ref, arm_pattern, &binding_type_map, ctx, &mut or_binding_stmts);
+                return or_binding_stmts;
+            }
+        }
         let binding_pattern: &Pattern = match arm_pattern {
             Pattern::Or(alternatives) => alternatives.first().unwrap_or(arm_pattern),
             other => other,
@@ -1431,6 +1926,19 @@ impl Lowerer {
                         // Use the binding's resolved type (from enum variant definition)
                         // instead of ANY, so MIR lowering can insert proper unboxing
                         let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
+                        // The local slot is allocated while pattern bindings are
+                        // collected, before generic enum fields have necessarily
+                        // been resolved.  MIR treats the slot's declared type as
+                        // authoritative (not only HirStmt::Let.ty), so leaving it
+                        // as ANY re-boxes an already-unboxed Result<i64> payload:
+                        // `6` is stored as the tagged word `48` and later used as
+                        // an ordinary integer.  Keep the slot and initializer in
+                        // agreement, as the struct/optional binder paths do.
+                        if binding_ty != TypeId::ANY {
+                            if let Some(local) = ctx.locals.get_mut(local_idx) {
+                                local.ty = binding_ty;
+                            }
+                        }
                         if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                             eprintln!(
                                 "[HIR-PAT-BIND] {}({}) subject_ty={:?} ({:?}) binding_ty={:?} ({:?})",
@@ -2230,7 +2738,7 @@ impl Lowerer {
             }
             Pattern::Identifier(name) => {
                 if self.subject_enum_has_variant(subject_ty, name) {
-                    // Treat as enum variant pattern using rt_enum_check_discriminant
+                    // Treat as an identity-aware enum variant pattern.
                     let expected_disc: i64 = {
                         use std::collections::hash_map::DefaultHasher;
                         use std::hash::{Hash, Hasher};
@@ -2246,8 +2754,15 @@ impl Lowerer {
 
                     Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
-                            name: "rt_enum_check_discriminant".to_string(),
-                            args: vec![subject_ref, expected_val],
+                            name: "rt_enum_check_variant".to_string(),
+                            args: vec![
+                                subject_ref,
+                                HirExpr {
+                                    kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                    ty: TypeId::I64,
+                                },
+                                expected_val,
+                            ],
                         },
                         ty: TypeId::BOOL,
                     })
@@ -2550,8 +3065,7 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
-                // All enums use hashed variant name discriminants consistently
+                // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -2567,8 +3081,15 @@ impl Lowerer {
 
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref.clone(), expected_val],
+                        name: "rt_enum_check_variant".to_string(),
+                        args: vec![
+                            subject_ref.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                ty: TypeId::I64,
+                            },
+                            expected_val,
+                        ],
                     },
                     ty: TypeId::BOOL,
                 };
@@ -2776,6 +3297,42 @@ impl Lowerer {
         }
     }
 
+    /// The subject of a bare `expect(<subject>)` call, or `None` for anything
+    /// else. Named/multiple arguments are rejected so a user-defined `expect`
+    /// with a different arity is never hijacked.
+    fn bare_expect_subject(expr: &Expr) -> Option<&Expr> {
+        let Expr::Call { callee, args } = expr else {
+            return None;
+        };
+        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect") || args.len() != 1 || args[0].name.is_some()
+        {
+            return None;
+        }
+        Some(&args[0].value)
+    }
+
+    /// Peel the optional negation link off a matcher-chain receiver:
+    /// `expect(x)` -> (x, false); `expect(x).not` / `expect(x).not_()` ->
+    /// (x, true). Returns `None` unless the innermost receiver really is a
+    /// bare `expect(..)` call, so a `not` FIELD on a user struct cannot be
+    /// captured.
+    fn peel_expect_matcher_receiver(expr: &Expr) -> Option<(&Expr, bool)> {
+        if let Some(subject) = Self::bare_expect_subject(expr) {
+            return Some((subject, false));
+        }
+        match expr {
+            Expr::FieldAccess { receiver, field } if field == "not" || field == "not_" => {
+                Self::bare_expect_subject(receiver).map(|s| (s, true))
+            }
+            Expr::MethodCall {
+                receiver, method, args, ..
+            } if (method == "not" || method == "not_") && args.is_empty() => {
+                Self::bare_expect_subject(receiver).map(|s| (s, true))
+            }
+            _ => None,
+        }
+    }
+
     /// Lower `expect(<subject>).<matcher>(<expected>)` into the same
     /// `rt_bdd_expect_*` builtins the operator form uses, by rewriting the
     /// matcher into its equivalent comparison expression.
@@ -2791,45 +3348,101 @@ impl Lowerer {
         expr: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<Vec<HirStmt>>> {
-        let Expr::MethodCall {
-            receiver, method, args, ..
-        } = expr
-        else {
+        // The statement is either `<recv>.<matcher>(<args>)` or the paren-less
+        // property form `<recv>.<matcher>` (e.g. `expect(x).to_be_nil`), which
+        // the parser produces as a plain FieldAccess.
+        const NO_ARGS: &[simple_parser::Argument] = &[];
+        let (receiver, method, args): (&Expr, &str, &[simple_parser::Argument]) = match expr {
+            Expr::MethodCall {
+                receiver, method, args, ..
+            } => (receiver.as_ref(), method.as_str(), args.as_slice()),
+            Expr::FieldAccess { receiver, field } => (receiver.as_ref(), field.as_str(), NO_ARGS),
+            _ => return Ok(None),
+        };
+        let Some((subject, negated)) = Self::peel_expect_matcher_receiver(receiver) else {
             return Ok(None);
         };
-        let Expr::Call {
-            callee,
-            args: recv_args,
-        } = receiver.as_ref()
-        else {
-            return Ok(None);
-        };
-        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
-            || recv_args.len() != 1
-            || recv_args[0].name.is_some()
-        {
+        if args.len() > 1 || args.first().is_some_and(|a| a.name.is_some()) {
             return Ok(None);
         }
-        let subject = &recv_args[0].value;
         let expected = args.first().map(|a| &a.value);
 
         use simple_parser::BinOp;
+        // `to_not_<x>` is sugar for a negated `to_<x>`, exactly as the test
+        // runner's textual pre-pass treats it
+        // (`execution.rs::rewrite_method_expect_line`).
+        let (negated, method) = match method.strip_prefix("to_not_") {
+            Some(rest) => (!negated, format!("to_{rest}")),
+            None => (negated, method.to_string()),
+        };
+
         // (op, needs_expected). `to_equal`/`to_be` map onto the dedicated
         // equality builtin; ordered comparisons lower through the generic
         // truthiness builtin over a synthesized comparison.
-        let cmp_op = match (method.as_str(), expected) {
-            ("to_equal" | "to_be", Some(_)) => Some(BinOp::Eq),
-            ("to_not_equal", Some(_)) => Some(BinOp::NotEq),
-            ("to_be_greater_than", Some(_)) => Some(BinOp::Gt),
-            ("to_be_less_than", Some(_)) => Some(BinOp::Lt),
-            ("to_be_greater_than_or_equal" | "to_be_gte", Some(_)) => Some(BinOp::GtEq),
-            ("to_be_less_than_or_equal" | "to_be_lte", Some(_)) => Some(BinOp::LtEq),
-            _ => None,
+        //
+        // An unknown matcher returns `None` so the previous (loud) lowering is
+        // kept — never a silently-dropped assertion.
+        enum Pred {
+            Cmp(BinOp, Expr),
+            Truthy(Expr),
+        }
+        let pred = match (method.as_str(), expected) {
+            ("to_equal" | "to_be", Some(e)) => Pred::Cmp(BinOp::Eq, e.clone()),
+            ("to_be_greater_than", Some(e)) => Pred::Cmp(BinOp::Gt, e.clone()),
+            ("to_be_less_than", Some(e)) => Pred::Cmp(BinOp::Lt, e.clone()),
+            ("to_be_greater_than_or_equal" | "to_be_gte", Some(e)) => Pred::Cmp(BinOp::GtEq, e.clone()),
+            ("to_be_less_than_or_equal" | "to_be_lte", Some(e)) => Pred::Cmp(BinOp::LtEq, e.clone()),
+            // `expect(x).to_be_nil` / `.to_be_none` — arg-less property form.
+            ("to_be_nil" | "to_be_none", None) => Pred::Cmp(BinOp::Eq, Expr::Nil),
+            // `expect(xs).to_contain(y)` lowers through the builtin `contains`
+            // method, which is registered for String/Array/Dict and returns
+            // bool (`method_registry/builtins.rs`).
+            ("to_contain", Some(e)) => Pred::Truthy(Expr::MethodCall {
+                receiver: Box::new(subject.clone()),
+                method: "contains".to_string(),
+                args: vec![simple_parser::Argument::new(None, e.clone())],
+                generic_args: vec![],
+            }),
+            _ => return Ok(None),
         };
-        let Some(op) = cmp_op else {
-            return Ok(None);
+
+        // Apply negation: comparisons invert their operator (keeping the
+        // existing single-comparison lowering); everything else is wrapped in
+        // a logical `not`.
+        let (op, expected) = match (pred, negated) {
+            (Pred::Cmp(op, e), false) => (op, e),
+            (Pred::Cmp(op, e), true) => {
+                let inverted = match op {
+                    BinOp::Eq => BinOp::NotEq,
+                    BinOp::NotEq => BinOp::Eq,
+                    BinOp::Gt => BinOp::LtEq,
+                    BinOp::Lt => BinOp::GtEq,
+                    BinOp::GtEq => BinOp::Lt,
+                    BinOp::LtEq => BinOp::Gt,
+                    _ => return Ok(None),
+                };
+                (inverted, e)
+            }
+            (Pred::Truthy(e), negated) => {
+                let e = if negated {
+                    Expr::Unary {
+                        op: simple_parser::UnaryOp::Not,
+                        operand: Box::new(e),
+                    }
+                } else {
+                    e
+                };
+                let hir = self.lower_expr(&e, ctx)?;
+                return Ok(Some(vec![HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_expect_truthy_rv".to_string(),
+                        args: vec![hir],
+                    },
+                    ty: TypeId::NIL,
+                })]));
+            }
         };
-        let expected = expected.expect("cmp_op only matches when an expected value is present");
+        let expected = &expected;
 
         if op == BinOp::Eq {
             let left_hir = self.lower_expr(subject, ctx)?;

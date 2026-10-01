@@ -1,0 +1,66 @@
+#!/bin/sh
+# Static ownership gate: positioned request tokens advance in exactly one owner.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_root=$repo_root
+
+fail() { echo "sosix-positioned-token-owner: $*" >&2; exit 1; }
+
+check_contract() {
+    root=$1
+    owner=$root/src/os/sosix/fs/positioned_dispatch_owner_v1.spl
+    kernel=$root/src/os/sosix/fs/kernel_positioned_dispatch_v1.spl
+    provider=$root/src/os/sosix/fs/positioned_syscall_provider_v1.spl
+    for file in "$owner" "$kernel" "$provider"; do [ -s "$file" ] || fail "missing source $file"; done
+
+    [ "$(grep -Fxc 'fn _next_nonzero_token_v1(token: u64) -> u64:' "$owner")" -eq 1 ] \
+        || fail "token successor must have one private owner"
+    [ "$(grep -Fc '_next_nonzero_token_v1(owner.next_request_token)' "$owner")" -eq 1 ] \
+        || fail "dispatch owner must advance the token exactly once"
+    grep -Fq 'request_token: owner.next_request_token' "$owner" \
+        || fail "provider facts do not consume the current owner token"
+    grep -Fq 'registry: dispatched.registry' "$owner" \
+        || fail "dispatch owner does not publish the returned registry"
+
+    grep -Fq 'owner: dispatched.owner' "$kernel" \
+        || fail "kernel does not publish the direct dispatched owner"
+    if grep -Eq '_next_nonzero_token_v1|next_request_token[[:space:]]*\+|registry:[[:space:]]*dispatched\.owner\.registry_owner\.registry' "$kernel"; then
+        fail "kernel duplicates token or registry reconstruction policy"
+    fi
+    if grep -Fq 'SosixFsPositionedDispatchOwnerV1(' "$kernel"; then
+        fail "kernel reconstructs the positioned owner instead of publishing it"
+    fi
+    if grep -Eq '_next_nonzero_token_v1|next_request_token[[:space:]]*\+' "$provider"; then
+        fail "provider duplicates request-token allocation policy"
+    fi
+}
+
+if [ "${1:-}" = --self-test ]; then
+    work=$(mktemp -d "${TMPDIR:-/tmp}/sosix-positioned-token-owner.XXXXXX")
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    mkdir -p "$work/src/os/sosix/fs"
+    for name in positioned_dispatch_owner_v1.spl kernel_positioned_dispatch_v1.spl positioned_syscall_provider_v1.spl; do
+        cp "$repo_root/src/os/sosix/fs/$name" "$work/src/os/sosix/fs/$name"
+    done
+    check_contract "$work"
+
+    kernel=$work/src/os/sosix/fs/kernel_positioned_dispatch_v1.spl
+    printf '%s\n' 'fn _duplicate_policy(owner: SosixFsPositionedDispatchOwnerV1) -> u64:' \
+        '    owner.next_request_token + 1' >> "$kernel"
+    if (check_contract "$work") >/dev/null 2>&1; then fail "accepted duplicate kernel token policy"; fi
+
+    cp "$repo_root/src/os/sosix/fs/kernel_positioned_dispatch_v1.spl" "$kernel"
+    sed 's/owner: dispatched.owner/owner: state.owner/' "$kernel" > "$work/kernel.tmp"
+    mv "$work/kernel.tmp" "$kernel"
+    if (check_contract "$work") >/dev/null 2>&1; then fail "accepted stale owner publication"; fi
+
+    cp "$repo_root/src/os/sosix/fs/kernel_positioned_dispatch_v1.spl" "$kernel"
+    provider=$work/src/os/sosix/fs/positioned_syscall_provider_v1.spl
+    printf '%s\n' '# invalid duplicate: next_request_token + 1' >> "$provider"
+    if (check_contract "$work") >/dev/null 2>&1; then fail "accepted provider token allocation"; fi
+    echo 'sosix_positioned_token_owner_self_test=pass'
+    exit 0
+fi
+[ "$#" -eq 0 ] || fail 'usage: check-sosix-positioned-token-owner.shs [--self-test]'
+check_contract "$source_root"
+echo 'sosix_positioned_token_owner=pass'

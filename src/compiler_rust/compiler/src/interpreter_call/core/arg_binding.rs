@@ -52,8 +52,67 @@ fn copy_value_type_in_place(value: &mut Value, classes: &HashMap<String, Arc<Cla
     }
 }
 
-fn copy_value_type_params(bound: &mut HashMap<String, Value>, classes: &HashMap<String, Arc<ClassDef>>) {
-    for value in bound.values_mut() {
+/// Declared array parameter types whose elements can never be a value-type
+/// object: `[text]`, `[i64]`, `[bool]`, ... A `[T]` of a scalar primitive is
+/// the only shape the per-call element scan below can skip EXACTLY -- it
+/// holds no `Value::Object` in any well-typed program, so the scan's answer
+/// is "no value-type element" by construction. Everything else (a named
+/// element type, `[Any]`, a nested array, no annotation) keeps the scan.
+fn array_param_has_scalar_elements(param: &Parameter) -> bool {
+    let Some(Type::Array { element, .. }) = param.ty.as_ref() else {
+        return false;
+    };
+    let Type::Simple(name) = element.as_ref() else {
+        return false;
+    };
+    matches!(
+        name.as_str(),
+        "text"
+            | "str"
+            | "String"
+            | "bool"
+            | "char"
+            | "int"
+            | "float"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
+}
+
+fn copy_value_type_params(
+    bound: &mut HashMap<String, Value>,
+    params: &[Parameter],
+    classes: &HashMap<String, Arc<ClassDef>>,
+) {
+    for (name, value) in bound.iter_mut() {
+        // SCALARARR (2026-08-22): the value-type element scan is O(len) per
+        // array argument per call. The lexer passes its whole `source_chars:
+        // [text]` (tens of thousands of entries) to `core_token_text_matches`
+        // once per token, which made interpreted lexing quadratic in the
+        // source (12,590 elements x 5,625 calls = 70M scans for three small
+        // fixture files). A declared scalar element type answers the scan
+        // without reading the array.
+        if let Value::Array(items) = value {
+            if params
+                .iter()
+                .any(|param| param.name == *name && array_param_has_scalar_elements(param))
+            {
+                continue;
+            }
+            crate::perf_counters::trace_array("vt_arg_scan", name, items.len());
+        }
         copy_value_type_in_place(value, classes);
     }
 }
@@ -107,6 +166,32 @@ fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Option<Value> 
     }
 }
 
+/// Name the callee (and, when the debug call stack is live, the calling
+/// `.spl` frames) in a binder error. The arity diagnostic alone carried NO
+/// location — "function expects 7 argument(s), but 8 were provided" inside a
+/// native-build of the self-hosted compiler took a whole lane to place. Every
+/// binder call site holds the `FunctionDef`, so the name is free; the caller
+/// chain is populated only under `SIMPLE_DEBUG_FIELD_ACCESS=1`.
+pub(crate) fn name_callee(err: CompileError, func: &FunctionDef) -> CompileError {
+    match err {
+        CompileError::SemanticWithContext(mut e) => {
+            let stack = crate::interpreter::debug_call_stack_snapshot();
+            let callers = if stack.is_empty() {
+                " (set SIMPLE_DEBUG_FIELD_ACCESS=1 for the calling frames)".to_string()
+            } else {
+                let tail = &stack[stack.len().saturating_sub(4)..];
+                format!(" (call stack: {})", tail.join(" -> "))
+            };
+            e.message = format!(
+                "in call to `{}` (declared at line {}): {}{}",
+                func.name, func.span.line, e.message, callers
+            );
+            CompileError::SemanticWithContext(e)
+        }
+        other => other,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn bind_args(
     params: &[Parameter],
@@ -151,7 +236,13 @@ pub(crate) fn bind_args_with_injected(
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
 
-    let mut bound = HashMap::new();
+    // Parameters claimed by a NAMED argument anywhere in this call. A positional
+    // argument must fill the next parameter that is not in this set, otherwise
+    // `f(x: 10, y)` rebinds `x` and leaves `y` unbound (struct-shorthand bug,
+    // test/feature/usage/struct_shorthand_spec.spl).
+    let named_params: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
+
+    let mut bound = HashMap::with_capacity(params_to_bind.len());
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
 
@@ -259,6 +350,11 @@ pub(crate) fn bind_args_with_injected(
                     }
                 } else {
                     // No variadic - bind to regular parameters
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
                     if positional_idx >= params_to_bind.len() {
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -342,6 +438,11 @@ pub(crate) fn bind_args_with_injected(
                     }
                 } else {
                     // No variadic parameter - normal positional binding
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
                     if positional_idx >= params_to_bind.len() {
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -396,8 +497,7 @@ pub(crate) fn bind_args_with_injected(
         bound.insert(param.name.clone(), Value::Tuple(variadic_values));
     }
 
-    let dbg_all_param_names_tmp: Vec<String> = params_to_bind.iter().map(|p| p.name.clone()).collect();
-    for param in params_to_bind {
+    for param in &params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
                 let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
@@ -412,10 +512,14 @@ pub(crate) fn bind_args_with_injected(
                 bound.insert(param.name.clone(), injected_val.clone());
             } else {
                 if std::env::var("SIMPLE_DEBUG_ARG_BINDING").is_ok() {
+                    // Built HERE, on the error path only: hoisted out of the
+                    // loop it allocated one Vec plus one String per parameter
+                    // on EVERY call, for a diagnostic that is off by default.
+                    let all_param_names: Vec<&str> = params_to_bind.iter().map(|p| p.name.as_str()).collect();
                     eprintln!(
                         "[DEBUG arg_binding TMP] missing param '{}'; full param list={:?}; args given={}",
                         param.name,
-                        dbg_all_param_names_tmp,
+                        all_param_names,
                         args.len()
                     );
                 }
@@ -433,7 +537,7 @@ pub(crate) fn bind_args_with_injected(
         }
     }
 
-    copy_value_type_params(&mut bound, classes);
+    copy_value_type_params(&mut bound, params, classes);
     Ok(bound)
 }
 
@@ -448,19 +552,62 @@ pub(crate) fn bind_args_with_values(
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
-    let params_to_bind: Vec<_> = params
-        .iter()
-        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
-        .collect();
+    bind_args_with_values_named(
+        params,
+        args,
+        &[],
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+    )
+}
 
-    if args.len() > params_to_bind.len() {
+/// Map already-evaluated argument VALUES onto parameters, honouring the call's
+/// named arguments.
+///
+/// `arg_exprs` is the parallel un-evaluated argument list (same length as
+/// `args`) whose `name` fields carry `f(b = 1, a = 2)` labels. The
+/// pre-evaluated method-dispatch paths used to drop those labels and bind
+/// purely by position, so `m.subtract(subtrahend = 15, minuend = 50)` computed
+/// `15 - 50`. Pass an empty slice for a call with no labels.
+#[allow(clippy::too_many_arguments)] // reason: mirrors bind_args_with_values' locked signature
+pub(crate) fn bind_args_with_values_named(
+    params: &[Parameter],
+    args: &[Value],
+    arg_exprs: &[Argument],
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: SelfMode,
+) -> Result<HashMap<String, Value>, CompileError> {
+    let skip_self = self_mode.should_skip_self();
+    let is_bindable = |p: &&Parameter| !(skip_self && p.name == METHOD_SELF);
+    // Counted without materialising the parameter list: the `Vec` below is
+    // needed only by the labelled/default routing path.
+    let bindable_len = params.iter().filter(|p| is_bindable(p)).count();
+
+    // A variadic parameter swallows every trailing positional argument, so the
+    // fixed arity is only an upper bound when there is none. Without this the
+    // pre-evaluated (method-dispatch) binder rejected `c.addall(1, 2, 3)` with
+    // "function expects 1 argument(s), but 3 were provided" while the
+    // expression binder `bind_args` bound the same call fine — the whole
+    // variadic-on-methods defect. Indexed over the BINDABLE parameters, and
+    // computed without materialising them, so the container budget the
+    // wholly-positional fast path below exists to protect is unchanged.
+    let variadic_idx = params.iter().filter(is_bindable).position(|p| p.variadic);
+    if variadic_idx.is_none() && args.len() > bindable_len {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("check the function signature and provide the correct number of arguments");
         return Err(CompileError::semantic_with_context(
             format!(
                 "function expects {} argument(s), but {} were provided",
-                params_to_bind.len(),
+                bindable_len,
                 args.len()
             ),
             ctx,
@@ -529,13 +676,118 @@ pub(crate) fn bind_args_with_values(
         eprintln!(
             "[DEBUG bind_args_with_values] called with {} args, {} params",
             args.len(),
-            params_to_bind.len()
+            bindable_len
         );
     }
+
+    // WHOLLY-POSITIONAL FAST PATH. When every argument is positional and there
+    // are exactly as many as there are bindable parameters, the routing below
+    // is an identity: argument `i` fills parameter `i`, no default is consulted,
+    // and no parameter is claimed by name. Taking that case directly saves the
+    // two `Vec`s the routing needs (the parameter list and the routed-value
+    // slots), neither of which outlives the call, on the most frequent
+    // interpreted call shape there is. Everything the general path does to each
+    // value — await, trait-object wrap, unit validation, coercion — is done
+    // here in the same order, against the same parameter, so a value that binds
+    // differently under the two paths is a bug in this equivalence and not a
+    // deliberate difference.
+    // A variadic parameter is excluded: its slot binds a TUPLE of the tail, not
+    // the one value sitting at its index, so the identity this fast path rests
+    // on does not hold for it (`c.addall(7)` must bind `(7,)`, not `7`).
+    if variadic_idx.is_none() && args.len() == bindable_len && arg_exprs.iter().all(|arg| arg.name.is_none()) {
+        for (param, value) in params.iter().filter(is_bindable).zip(args.iter()) {
+            let value = await_value(value.clone())?;
+            let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
+            validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+            crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
+            bound.insert(param.name.clone(), value);
+        }
+        copy_value_type_params(&mut bound, params, classes);
+        return Ok(bound);
+    }
+
+    let params_to_bind: Vec<_> = params.iter().filter(is_bindable).collect();
+    if bindable_len > 0 {
+        // The parameter list and the routed-value slots below; both die with
+        // the call.
+        crate::perf_counters::bump(&crate::perf_counters::MECALL_CONTAINER_ALLOCS, 2);
+    }
+
+    // Route each supplied value to the parameter it actually names. A named
+    // argument binds by name; a positional one fills the next parameter no
+    // named argument claims.
+    let mut value_for_param: Vec<Option<Value>> = vec![None; params_to_bind.len()];
+    let mut variadic_values: Vec<Value> = Vec::new();
+    {
+        let named_params: std::collections::HashSet<&str> =
+            arg_exprs.iter().filter_map(|a| a.name.as_deref()).collect();
+        let mut positional_idx = 0usize;
+        for (idx, value) in args.iter().enumerate() {
+            let slot = match arg_exprs.get(idx).and_then(|a| a.name.as_deref()) {
+                Some(name) => match params_to_bind.iter().position(|p| p.name == name) {
+                    Some(pos) if Some(pos) == variadic_idx => {
+                        // A label that names the variadic parameter contributes
+                        // one element to its tail, never a whole-slot bind.
+                        variadic_values.push(value.clone());
+                        continue;
+                    }
+                    Some(pos) => pos,
+                    None => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::UNDEFINED_VARIABLE)
+                            .with_help("check the function signature for valid parameter names");
+                        return Err(CompileError::semantic_with_context(
+                            format!("unknown argument '{}'", name),
+                            ctx,
+                        ));
+                    }
+                },
+                None => {
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
+                    // At or past the variadic slot every remaining positional
+                    // argument joins the tail — including the one that lands
+                    // exactly on it, which is why a 1-argument call binds a
+                    // 1-element tuple rather than the bare value.
+                    if variadic_idx.is_some_and(|vi| positional_idx >= vi) {
+                        variadic_values.push(value.clone());
+                        continue;
+                    }
+                    if positional_idx >= params_to_bind.len() {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("check the function signature and provide the correct number of arguments");
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "function expects {} argument(s), but more were provided",
+                                params_to_bind.len()
+                            ),
+                            ctx,
+                        ));
+                    }
+                    let slot = positional_idx;
+                    positional_idx += 1;
+                    slot
+                }
+            };
+            value_for_param[slot] = Some(value.clone());
+        }
+    }
+
     for (idx, param) in params_to_bind.iter().enumerate() {
-        let value = if idx < args.len() {
+        if Some(idx) == variadic_idx {
+            // Same representation the expression binder produces (`bind_args`):
+            // a Tuple of the collected tail, empty when nothing was supplied.
+            // Not coerced or unit-validated — `param.ty` describes an ELEMENT.
+            bound.insert(param.name.clone(), Value::Tuple(std::mem::take(&mut variadic_values)));
+            continue;
+        }
+        let value = if let Some(v) = value_for_param[idx].take() {
             // Automatically await Promise arguments
-            await_value(args[idx].clone())?
+            await_value(v)?
         } else if let Some(default_expr) = &param.default {
             evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
         } else {
@@ -553,9 +805,128 @@ pub(crate) fn bind_args_with_values(
 
         let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
         validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+        crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
         bound.insert(param.name.clone(), value);
     }
 
-    copy_value_type_params(&mut bound, classes);
+    copy_value_type_params(&mut bound, params, classes);
     Ok(bound)
+}
+
+#[cfg(test)]
+mod scalar_array_param_tests {
+    use super::*;
+    use simple_parser::ast::Mutability;
+    use simple_parser::token::Span;
+
+    fn param(name: &str, ty: Option<Type>) -> Parameter {
+        Parameter {
+            span: Span::new(0, 0, 1, 1),
+            name: name.to_string(),
+            ty,
+            default: None,
+            mutability: Mutability::Immutable,
+            inject: false,
+            variadic: false,
+            call_site_label: None,
+        }
+    }
+
+    fn array_of(elem: Type) -> Type {
+        Type::Array {
+            element: Box::new(elem),
+            size: None,
+        }
+    }
+
+    // SCALARARR: only a declared `[scalar]` element type may skip the
+    // per-call value-type element scan; a named element type, `[Any]`, a
+    // nested array, and an unannotated parameter must all keep it.
+    #[test]
+    fn scalar_element_arrays_skip_the_scan_everything_else_keeps_it() {
+        for scalar in [
+            "text", "str", "String", "bool", "char", "i64", "u8", "f64", "int", "float",
+        ] {
+            assert!(
+                array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple(scalar.into()))))),
+                "[{scalar}] must skip"
+            );
+        }
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(array_of(Type::Simple("Point".into())))
+        )));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(array_of(Type::Simple("Any".into())))
+        )));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(array_of(array_of(Type::Simple("text".into()))))
+        )));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(Type::Simple("text".into()))
+        )));
+        assert!(!array_param_has_scalar_elements(&param("xs", None)));
+    }
+
+    // The skip must be keyed by PARAMETER NAME: a `[Point]` value-type array
+    // bound next to a `[text]` one is still deep-copied.
+    #[test]
+    fn copy_value_type_params_skips_only_the_scalar_array() {
+        let mut classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
+        let point = ClassDef {
+            span: Span::new(0, 0, 0, 0),
+            name: "Point".to_string(),
+            generic_params: vec![],
+            where_clause: vec![],
+            fields: vec![],
+            methods: vec![],
+            parent: None,
+            visibility: simple_parser::ast::Visibility::Private,
+            effects: vec![],
+            attributes: vec![],
+            doc_comment: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
+            invariant: None,
+            macro_invocations: vec![],
+            mixins: vec![],
+            is_value_type: true,
+        };
+        classes.insert("Point".to_string(), Arc::new(point));
+        let fields = Arc::new(HashMap::from([("x".to_string(), Value::Int(1))]));
+        let pt = Value::Object {
+            class: "Point".to_string(),
+            fields: Arc::clone(&fields),
+        };
+        let params = vec![
+            param("chars", Some(array_of(Type::Simple("text".into())))),
+            param("pts", Some(array_of(Type::Simple("Point".into())))),
+        ];
+        let chars = Arc::new(vec![Value::text("a"), Value::text("b")]);
+        let pts = Arc::new(vec![pt]);
+        let mut bound: HashMap<String, Value> = HashMap::new();
+        bound.insert("chars".to_string(), Value::Array(Arc::clone(&chars)));
+        bound.insert("pts".to_string(), Value::Array(Arc::clone(&pts)));
+        copy_value_type_params(&mut bound, &params, &classes);
+        // `[text]`: same Arc, untouched.
+        match &bound["chars"] {
+            Value::Array(a) => assert!(Arc::ptr_eq(a, &chars)),
+            other => panic!("chars became {other:?}"),
+        }
+        // `[Point]`: copied (new array Arc, new field map Arc).
+        match &bound["pts"] {
+            Value::Array(a) => {
+                assert!(!Arc::ptr_eq(a, &pts));
+                match &a[0] {
+                    Value::Object { fields: f, .. } => assert!(!Arc::ptr_eq(f, &fields)),
+                    other => panic!("pts[0] became {other:?}"),
+                }
+            }
+            other => panic!("pts became {other:?}"),
+        }
+    }
 }

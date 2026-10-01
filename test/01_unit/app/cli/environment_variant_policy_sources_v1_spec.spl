@@ -1,0 +1,106 @@
+use std.spec.*
+use app.cli.environment_variant_policy_sources_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
+
+fn source(content: text, identity: text = "fixture") -> EnvironmentVariantConfigSourceV1:
+    EnvironmentVariantConfigSourceV1(present: true, source_identity: identity, content: content)
+
+fn no_source() -> EnvironmentVariantConfigSourceV1:
+    EnvironmentVariantConfigSourceV1(present: false, source_identity: "", content: "")
+
+fn no_admin() -> EnvironmentVariantAdminRestrictionsV1:
+    environment_variant_admin_restrictions_empty_v1()
+
+fn collect(args: [text], environment: [(text, text)], project: text = "", user: text = "") -> EnvironmentVariantPolicyCollectionV1:
+    environment_variant_policy_sources_collect_from_snapshot_v1(args, environment,
+        if project == "": no_source() else: source(project, "project-fixture"),
+        if user == "": no_source() else: source(user, "user-fixture"), no_admin()).unwrap()
+
+describe "environment variant product policy sources V1":
+    it "applies CLI environment project user and default precedence fieldwise":
+        val project = "environment_variants:\n  parser_prefer: simd\n  host_cpu_max: x86-64-v2\n"
+        val user = "environment_variants:\n  parser_prefer: scalar\n  frontend_offload: resident\n"
+        val result = collect(["--host-cpu-max", "x86-64-v3"],
+            [("SIMPLE_HOST_CPU_MAX", "x86-64-v4")], project, user)
+        val decision = environment_variant_policy_resolve_v1(result.policy_inputs).unwrap()
+        expect(decision.host_cpu_max).to_equal(EnvironmentVariantHostCpuMaxV1.X86_64V3)
+        expect(decision.host_cpu_source).to_equal("cli")
+        expect(decision.parser_prefer).to_equal(EnvironmentVariantParserProviderV1.Simd)
+        expect(decision.parser_source).to_equal("project")
+        expect(decision.frontend_offload_source).to_equal("user")
+
+    it "accepts inline and next-argument spellings consistently":
+        val inline = collect(["--parser-impl=require:simd", "--host-cpu-max=x86-64-v3",
+            "--frontend-offload=on", "--frontend-offload-fallback=require-requested"], [])
+        val split = collect(["--parser-impl", "require:simd", "--host-cpu-max", "x86-64-v3",
+            "--frontend-offload", "on", "--frontend-offload-fallback", "require-requested"], [])
+        val a = environment_variant_policy_resolve_v1(inline.policy_inputs).unwrap()
+        val b = environment_variant_policy_resolve_v1(split.policy_inputs).unwrap()
+        expect(a.policy_digest).to_equal(b.policy_digest)
+        expect(a.parser_require).to_equal(EnvironmentVariantParserRequirementV1.Simd)
+
+    it "retains explicit empty values so normalization rejects them":
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            ["--host-cpu-max="], [], no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            [], [("SIMPLE_PARSER_PREFER", "")], no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            [], [], source("environment_variants:\n  parser_require: \"\"\n"),
+            no_source(), no_admin()).is_err()).to_equal(true)
+
+    it "rejects missing values duplicate flags and malformed config independently":
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            ["--parser-prefer"], [], no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            ["--parser-prefer=simd", "--parser-prefer", "scalar"], [],
+            no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            [], [], source("environment_variants: ["), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            ["--parser-impl=simd", "--parser-prefer=scalar"], [],
+            no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+
+    it "keeps host execution policy independent from generated output target":
+        val result = collect(["--host-cpu-max=x86-64-v2", "--cpu", "znver4"],
+            [("SIMPLE_CPU_FEATURES", "+avx2,-avx512f")])
+        val decision = environment_variant_policy_resolve_v1(result.policy_inputs).unwrap()
+        expect(decision.host_cpu_max).to_equal(EnvironmentVariantHostCpuMaxV1.X86_64V2)
+        expect(result.target_cpu).to_equal("znver4")
+        expect(result.target_cpu_features).to_equal("+avx2,-avx512f")
+        expect(result.receipt.target_cpu_source).to_equal("cli")
+        expect(result.receipt.target_cpu_features_source).to_equal("env")
+
+    it "changes policy identity for effective policy changes but not source path changes":
+        val a = collect([], [], "environment_variants:\n  host_cpu_max: x86-64-v2\n")
+        val b = collect([], [], "environment_variants:\n  host_cpu_max: x86-64-v3\n")
+        val same = environment_variant_policy_sources_collect_from_snapshot_v1([], [],
+            source("environment_variants:\n  host_cpu_max: x86-64-v2\n", "moved-project"),
+            no_source(), no_admin()).unwrap()
+        val da = environment_variant_policy_resolve_v1(a.policy_inputs).unwrap()
+        val db = environment_variant_policy_resolve_v1(b.policy_inputs).unwrap()
+        val ds = environment_variant_policy_resolve_v1(same.policy_inputs).unwrap()
+        expect(da.policy_digest == db.policy_digest).to_equal(false)
+        expect(da.policy_digest).to_equal(ds.policy_digest)
+
+    it "rejects malformed values in every layer even when precedence shadows them":
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            ["--host-cpu-max=x86-64-v5"], [], no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            ["--host-cpu-max=x86-64-v2"], [("SIMPLE_HOST_CPU_MAX", "x86-64-v5")],
+            no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            [], [("SIMPLE_PARSER_PREFER", "simd")],
+            source("environment_variants:\n  parser_prefer: vector-magic\n"),
+            no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            [], [], source("environment_variants:\n  frontend_offload: off\n"),
+            source("environment_variants:\n  frontend_offload: teleport\n"), no_admin()).is_err()).to_equal(true)
+
+    it "rejects conflicting prefer and require values within one layer":
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            ["--parser-prefer=simd", "--parser-require=scalar"], [],
+            no_source(), no_source(), no_admin()).is_err()).to_equal(true)
+        expect(environment_variant_policy_sources_collect_from_snapshot_v1(
+            [], [], source("environment_variants:\n  parser_prefer: scalar\n  parser_require: simd\n"),
+            no_source(), no_admin()).is_err()).to_equal(true)

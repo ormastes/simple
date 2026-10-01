@@ -1,0 +1,135 @@
+# @cover src/lib/common/ui/draw_ir.spl 20%
+# @cover src/lib/common/ui/draw_ir_transform.spl 90%
+# @tag: unit, ui, draw_ir, transform
+
+use std.spec
+use common.ui.draw_ir.{
+    DrawIrCommand,
+    draw_ir_box_with_style,
+    draw_ir_no_rect,
+    draw_ir_rect,
+    draw_ir_rect_bounds,
+    draw_ir_style_prop,
+    draw_ir_text
+}
+use common.ui.draw_ir_transform.{
+    draw_ir_command_is_identity_transform,
+    draw_ir_cpu_rasterize_solid_rect,
+    draw_ir_cpu_transform_paint_rect
+}
+
+describe "DrawIR GAP-4T Stage 1: paint-time affine transform fields":
+
+    it "defaults every new field to the identity transform on all three existing construction shapes":
+        val rect_cmd = draw_ir_rect("body", 1, 2, 30, 40, 0xff202428u32)
+        val text_cmd = draw_ir_text("label", 4, 18, "Ready", 0xffffffffu32)
+        val boxed_cmd = draw_ir_box_with_style(
+            "button-bg", 10, 20, 100, 40, 0xffdceafbu32,
+            draw_ir_rect_bounds(10, 20, 100, 40),
+            draw_ir_rect_bounds(14, 24, 92, 32),
+            draw_ir_rect_bounds(8, 18, 104, 44),
+            draw_ir_no_rect(),
+            [draw_ir_style_prop("border-radius", "6")]
+        )
+
+        expect(rect_cmd.has_transform).to_equal(false)
+        expect(rect_cmd.transform_origin_x_pct).to_equal(50)
+        expect(rect_cmd.transform_origin_y_pct).to_equal(50)
+        expect(rect_cmd.rotation_deg_milli).to_equal(0)
+        expect(rect_cmd.scale_x_pct).to_equal(100)
+        expect(rect_cmd.scale_y_pct).to_equal(100)
+        expect(rect_cmd.skew_x_deg_milli).to_equal(0)
+        expect(rect_cmd.skew_y_deg_milli).to_equal(0)
+        expect(text_cmd.has_transform).to_equal(false)
+        expect(boxed_cmd.has_transform).to_equal(false)
+        assert_true(draw_ir_command_is_identity_transform(rect_cmd))
+        assert_true(draw_ir_command_is_identity_transform(text_cmd))
+        assert_true(draw_ir_command_is_identity_transform(boxed_cmd))
+
+    it "renders a command with no transform byte-identically to today's untransformed geometry":
+        val cmd = draw_ir_rect("panel", 12, 24, 64, 32, 0xffaa33ffu32)
+
+        val painted = draw_ir_cpu_transform_paint_rect(cmd)
+
+        expect(painted.present).to_equal(true)
+        expect(painted.x).to_equal(cmd.x)
+        expect(painted.y).to_equal(cmd.y)
+        expect(painted.width).to_equal(cmd.width)
+        expect(painted.height).to_equal(cmd.height)
+
+        val pixels = draw_ir_cpu_rasterize_solid_rect(cmd)
+        expect(pixels.len()).to_equal(cmd.width * cmd.height)
+        for pixel in pixels:
+            expect(pixel).to_equal(cmd.color)
+
+    it "renders a command whose transform fields are explicitly set to identity the same as no-transform":
+        var cmd = draw_ir_rect("panel-explicit", 5, 6, 8, 8, 0xff112233u32)
+        cmd.has_transform = true
+        # rotation/scale/skew left at their constructor defaults (0/100/100/0/0)
+
+        val painted = draw_ir_cpu_transform_paint_rect(cmd)
+
+        expect(painted.x).to_equal(cmd.x)
+        expect(painted.y).to_equal(cmd.y)
+        expect(painted.width).to_equal(cmd.width)
+        expect(painted.height).to_equal(cmd.height)
+
+    it "scales a rect about a top-left origin, keeping the anchor corner fixed":
+        var cmd = draw_ir_rect("scaled-tl", 0, 0, 10, 10, 0xff000000u32)
+        cmd.has_transform = true
+        cmd.transform_origin_x_pct = 0
+        cmd.transform_origin_y_pct = 0
+        cmd.scale_x_pct = 50
+        cmd.scale_y_pct = 50
+
+        val painted = draw_ir_cpu_transform_paint_rect(cmd)
+
+        expect(painted.x).to_equal(0)
+        expect(painted.y).to_equal(0)
+        expect(painted.width).to_equal(5)
+        expect(painted.height).to_equal(5)
+
+    it "renders a rotated (90 deg) and non-uniformly scaled rect as expected on the CPU backend":
+        # x:10..50 (width 40), y:20..40 (height 20), center origin (30,30).
+        # Scale 200% x / 150% y about the center -> 80x30 centered at (30,30),
+        # then a 90 deg quadrant rotation about that same center swaps the
+        # extents -> 30x80 centered at (30,30) => (x:15, y:-10, w:30, h:80).
+        # Hand-computed in the design doc's Stage 1 CPU-verifiable math (no
+        # trig float error: quadrant angles use exact -1/0/1 cos/sin).
+        var cmd = draw_ir_rect("rotated-scaled", 10, 20, 40, 20, 0xff44ccffu32)
+        cmd.has_transform = true
+        cmd.rotation_deg_milli = 90000
+        cmd.scale_x_pct = 200
+        cmd.scale_y_pct = 150
+
+        val painted = draw_ir_cpu_transform_paint_rect(cmd)
+
+        expect(painted.present).to_equal(true)
+        expect(painted.x).to_equal(15)
+        expect(painted.y).to_equal(-10)
+        expect(painted.width).to_equal(30)
+        expect(painted.height).to_equal(80)
+
+        val pixels = draw_ir_cpu_rasterize_solid_rect(cmd)
+        expect(pixels.len()).to_equal(30 * 80)
+        expect(pixels[0]).to_equal(cmd.color)
+        expect(pixels[pixels.len() - 1]).to_equal(cmd.color)
+
+    it "falls back to untransformed geometry for skew and non-quadrant rotation (deferred to a later stage)":
+        var skewed = draw_ir_rect("skewed", 0, 0, 10, 10, 0xff010203u32)
+        skewed.has_transform = true
+        skewed.skew_x_deg_milli = 15000
+
+        var arbitrary_angle = draw_ir_rect("angled", 0, 0, 10, 10, 0xff010203u32)
+        arbitrary_angle.has_transform = true
+        arbitrary_angle.rotation_deg_milli = 37000
+
+        val skewed_painted = draw_ir_cpu_transform_paint_rect(skewed)
+        val angled_painted = draw_ir_cpu_transform_paint_rect(arbitrary_angle)
+
+        expect(skewed_painted.x).to_equal(skewed.x)
+        expect(skewed_painted.width).to_equal(skewed.width)
+        expect(angled_painted.x).to_equal(arbitrary_angle.x)
+        expect(angled_painted.width).to_equal(arbitrary_angle.width)
+        assert_false(draw_ir_command_is_identity_transform(skewed))
+        assert_false(draw_ir_command_is_identity_transform(arbitrary_angle))

@@ -5,7 +5,7 @@ for adding a first-class `SimpleOS` toolchain class to the vendored LLVM
 fork used by the SimpleOS build.
 
 - **Upstream fork:** <https://github.com/ormastes/llvm-project>
-- **Source revision:** the pinned commit in `src/os/port/llvm/README.md`
+- **Branch:** `simpleos`
 - **Plan reference:** item A3 in the SimpleOS LLVM port plan.
 
 ## Why a ToolChain class
@@ -38,17 +38,14 @@ Under `clang/lib/Driver/ToolChains/` on the `simpleos` branch:
    (`return ToolChain::RLT_CompilerRT;`).
 
 2. **`SimpleOS.cpp`** — implements the above. Key points:
-   - `AddClangSystemIncludeArgs`: prepend `<sysroot>/include/c++/v1` and
-     `<sysroot>/include`. `sysroot.shs` stages libc++ headers into that
-     `c++/v1` directory from `$LLVM_SRC/libcxx/include`.
+   - `AddClangSystemIncludeArgs`: prepend `<sysroot>/include` and
+     `<sysroot>/include/c++/v1` (when libc++ is later enabled).
    - `getCompilerRTPath`: return `<resource-dir>/lib/<triple>/`, which
      matches what A5 stages into
      `build/os/sysroot/lib/clang/<ver>/lib/<triple>/`.
    - `Linker::ConstructJob`: add a private `Tool` that invokes `ld.lld`
-     with `-T <sysroot>/share/simpleos/simpleos.ld`, the crt0 object from the
-     sysroot, `-L <sysroot>/lib`,
-     `-L <sysroot>/lib/clang/<ver>/lib/<triple>`, and
-     `-lsimpleos_c -lclang_rt.builtins-<arch>`.
+     with `-T <sysroot>/lib/simpleos.lds`, the crt0 object from the
+     sysroot, and `-lsimpleos_c -lclang_rt.builtins-<arch>`.
    - Recognised triples: `x86_64-unknown-simpleos`,
      `aarch64-unknown-simpleos`, `riscv64gc-unknown-simpleos`,
      `riscv32imac-unknown-simpleos`.
@@ -82,7 +79,7 @@ SIMPLE_TARGET=x86_64-unknown-simpleos \
 With the ToolChain class in place, the resulting
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` auto-finds the
 staged builtins at
-`build/os/sysroot/lib/clang/20/lib/x86_64-unknown-simpleos/`.
+`build/os/sysroot/lib/clang/19/lib/x86_64-unknown-simpleos/`.
 
 ## Out-of-scope for this directory
 

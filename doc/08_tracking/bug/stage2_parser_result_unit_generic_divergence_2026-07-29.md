@@ -1,4 +1,8 @@
 # Stage-3 parse failure in vhdl_codegen_helpers.spl (2026-07-29)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** L7 bootstrap run 4 (stage-3 self-host, cranelift dynload).
 **Status:** RETRACTED diagnosis / no longer reproducible — see
@@ -87,3 +91,4 @@ bootstrap.)
 `src/compiler/backend/backend/` is a symlink-spelling module path (see
 memory: compiler symlink module spellings) — unrelated to the parse failure
 but worth normalizing when the file lands.
+

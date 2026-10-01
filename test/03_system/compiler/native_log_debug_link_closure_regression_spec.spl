@@ -1,0 +1,140 @@
+"""Native public log callable entry-closure link regression."""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
+
+val BUILD_DIR = "build/native_log_debug_link_closure_regression"
+val ENTRY_PATH = BUILD_DIR + "/main.spl"
+val BINARY_PATH = BUILD_DIR + "/main"
+val CACHE_DIR = BUILD_DIR + "/cache"
+
+fn entry_source() -> text:
+    r"""use std.log as canonical_log
+use std.nogc_sync_mut.log as legacy_log
+
+fn exercise_canonical() -> bool:
+    canonical_log.clear_scopes()
+    canonical_log.set_level(canonical_log.LOG_OFF)
+    canonical_log.set_scope_level("test", canonical_log.LOG_OFF)
+    canonical_log.log(canonical_log.LOG_OFF, "test", "log")
+    canonical_log.fatal("test", "fatal")
+    canonical_log.error("test", "error")
+    canonical_log.warn("test", "warn")
+    canonical_log.info("test", "info")
+    canonical_log.debug("test", "debug")
+    canonical_log.trace("test", "trace")
+    canonical_log.verbose("test", "verbose")
+    canonical_log.log_info("info")
+    canonical_log.log_error("error")
+    canonical_log.log_debug("debug")
+    canonical_log.log_verbose("verbose")
+    canonical_log.get_log_level() == canonical_log.LOG_OFF and
+        canonical_log.get_global_level() == canonical_log.LOG_OFF and
+        canonical_log.get_level("test") == canonical_log.LOG_OFF and
+        canonical_log.parse_level("off") == canonical_log.LOG_OFF and
+        canonical_log.level_name(canonical_log.LOG_OFF) == "off" and
+        not canonical_log.is_enabled(canonical_log.LOG_DEBUG, "test")
+
+fn exercise_legacy() -> bool:
+    legacy_log.clear_scopes()
+    legacy_log.set_level(legacy_log.LOG_OFF)
+    legacy_log.set_scope_level("test", legacy_log.LOG_OFF)
+    legacy_log.log(legacy_log.LOG_OFF, "test", "log")
+    legacy_log.log_dispatch_text(6, 18, "dispatch")
+    legacy_log.fatal("test", "fatal")
+    legacy_log.error("test", "error")
+    legacy_log.warn("test", "warn")
+    legacy_log.info("test", "info")
+    legacy_log.debug("test", "debug")
+    legacy_log.trace("test", "trace")
+    legacy_log.verbose("test", "verbose")
+    legacy_log.log_info("info")
+    legacy_log.log_error("error")
+    legacy_log.log_debug("debug")
+    legacy_log.log_verbose("verbose")
+    legacy_log.get_log_level() == legacy_log.LOG_OFF and
+        legacy_log.get_global_level() == legacy_log.LOG_OFF and
+        legacy_log.get_level("test") == legacy_log.LOG_OFF and
+        legacy_log.parse_level("off") == legacy_log.LOG_OFF and
+        legacy_log.level_name(legacy_log.LOG_OFF) == "off" and
+        not legacy_log.is_enabled(legacy_log.LOG_DEBUG, "test")
+
+fn main():
+    if exercise_canonical() and exercise_legacy():
+        print("linked")
+    else:
+        print("bad")
+"""
+
+fn public_callable_symbols() -> [text]:
+    [
+        "lib__log__log", "lib__log__fatal", "lib__log__error",
+        "lib__log__warn", "lib__log__info", "lib__log__debug",
+        "lib__log__trace", "lib__log__verbose",
+        "lib__log__get_log_level", "lib__log__set_scope_level",
+        "lib__log__get_level", "lib__log__clear_scopes",
+        "lib__log__log_info", "lib__log__log_error",
+        "lib__log__log_debug", "lib__log__log_verbose",
+        "lib__log__parse_level", "lib__log__level_name",
+        "lib__log__set_level", "lib__log__get_global_level",
+        "lib__log__is_enabled",
+        "lib__nogc_sync_mut__log__log",
+        "lib__nogc_sync_mut__log__log_dispatch_text",
+        "lib__nogc_sync_mut__log__fatal",
+        "lib__nogc_sync_mut__log__error",
+        "lib__nogc_sync_mut__log__warn",
+        "lib__nogc_sync_mut__log__info",
+        "lib__nogc_sync_mut__log__debug",
+        "lib__nogc_sync_mut__log__trace",
+        "lib__nogc_sync_mut__log__verbose",
+        "lib__nogc_sync_mut__log__log_info",
+        "lib__nogc_sync_mut__log__log_error",
+        "lib__nogc_sync_mut__log__log_debug",
+        "lib__nogc_sync_mut__log__log_verbose",
+        "lib__nogc_sync_mut__log__get_log_level",
+        "lib__nogc_sync_mut__log__set_level",
+        "lib__nogc_sync_mut__log__get_global_level",
+        "lib__nogc_sync_mut__log__set_scope_level",
+        "lib__nogc_sync_mut__log__get_level",
+        "lib__nogc_sync_mut__log__clear_scopes",
+        "lib__nogc_sync_mut__log__is_enabled",
+        "lib__nogc_sync_mut__log__parse_level",
+        "lib__nogc_sync_mut__log__level_name"
+    ]
+
+describe "native public log callable link closure":
+    it "provides callable canonical and legacy symbols without fallback stubs":
+        step("Write an entry that calls every public compatibility wrapper")
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(file_write(ENTRY_PATH, entry_source())).to_equal(true)
+        expect(remove_file_if_exists(BINARY_PATH)).to_equal(true)
+
+        step("Compile the real std.log entry closure without fallback stubs")
+        val compiled = shell(
+            "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 " +
+            "bin/simple native-build --backend llvm --entry " + ENTRY_PATH +
+            " --entry-closure --cache-dir " + CACHE_DIR + " -o " + BINARY_PATH
+        )
+        expect(compiled.exit_code).to_equal(0)
+        expect(compiled.stderr.contains("undefined reference to `lib__log__debug")).to_be(false)
+        expect(compiled.stderr.contains("generated stub")).to_be(false)
+
+        step("Confirm every public callable is text, not object data")
+        val symbols = shell("nm -g --defined-only " + BINARY_PATH)
+        expect(symbols.exit_code).to_equal(0)
+        for symbol in public_callable_symbols():
+            expect(symbols.stdout.contains(" T " + symbol + "\n")).to_be(true)
+            expect(symbols.stdout.contains(" R " + symbol + "\n")).to_be(false)
+            expect(symbols.stdout.contains(" D " + symbol + "\n")).to_be(false)
+            expect(symbols.stdout.contains(" B " + symbol + "\n")).to_be(false)
+
+        step("Confirm no suffixed public log callable remains undefined")
+        val undefineds = shell("nm -u " + BINARY_PATH)
+        expect(undefineds.exit_code).to_equal(0)
+        expect(undefineds.stdout.contains("lib__log__")).to_be(false)
+        expect(undefineds.stdout.contains("lib__nogc_sync_mut__log__")).to_be(false)
+
+        step("Run the linked native artifact")
+        val result = shell(BINARY_PATH)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_equal("linked")

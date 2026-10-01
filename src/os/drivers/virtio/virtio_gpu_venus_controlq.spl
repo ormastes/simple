@@ -1,0 +1,108 @@
+"""Bounded VirtIO-GPU controlq seam for staged Venus messages.
+
+The pure wire owner prepares commands. This MDSOC-only adapter copies one
+bounded request into the existing DMA buffer, submits it synchronously, and
+validates the response header. Callers must independently prove Venus feature,
+capset, and host-visible shared-memory readiness; this module never promotes a
+transport completion to native Vulkan evidence.
+"""
+
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8}
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use os.drivers.virtio.virtio_gpu_venus_protocol.{
+    VenusResponseValidation, VIRTIO_GPU_CURRENT_DMA_BYTES,
+    venus_validate_response
+}
+
+struct VenusControlqAdmission:
+    admitted: bool
+    reason: text
+    request_bytes: i64
+    response_capacity: i64
+
+struct VenusControlqResult:
+    completed: bool
+    reason: text
+    validation: VenusResponseValidation
+
+fn _venus_controlq_blocked(reason: text, command_len: i64,
+        response_capacity: i64) -> VenusControlqAdmission:
+    VenusControlqAdmission(admitted: false, reason: reason,
+        request_bytes: command_len, response_capacity: response_capacity)
+
+fn venus_controlq_admit(command_len: i64, response_capacity: i64,
+        driver_initialized: bool, buffers_ready: bool,
+        queue_ready: bool) -> VenusControlqAdmission:
+    # @decision VQ_DRIVER
+    if not driver_initialized:
+        return _venus_controlq_blocked("blocked:driver-uninitialized",
+            command_len, response_capacity)
+    # @decision VQ_BUFFERS
+    if not buffers_ready:
+        return _venus_controlq_blocked("blocked:dma-buffers-missing",
+            command_len, response_capacity)
+    # @decision VQ_QUEUE
+    if not queue_ready:
+        return _venus_controlq_blocked("blocked:controlq-unavailable",
+            command_len, response_capacity)
+    # @decision VQ_REQUEST_SIZE
+    if command_len <= 0 or command_len > VIRTIO_GPU_CURRENT_DMA_BYTES:
+        return _venus_controlq_blocked("blocked:request-size-invalid",
+            command_len, response_capacity)
+    # @decision VQ_RESPONSE_SIZE
+    if response_capacity < 24 or response_capacity > VIRTIO_GPU_CURRENT_DMA_BYTES:
+        return _venus_controlq_blocked("blocked:response-size-invalid",
+            command_len, response_capacity)
+    VenusControlqAdmission(admitted: true, reason: "ready:venus-controlq",
+        request_bytes: command_len, response_capacity: response_capacity)
+
+fn _venus_transport_validation(reason: text) -> VenusResponseValidation:
+    VenusResponseValidation(accepted: false, reason: reason,
+        response_type: 0u32, fence_id: 0u64)
+
+fn _venus_controlq_result_blocked(reason: text) -> VenusControlqResult:
+    VenusControlqResult(completed: false, reason: reason,
+        validation: _venus_transport_validation(reason))
+
+fn virtio_gpu_venus_submit(drv: VirtioGpuDriver, command: [u8],
+        response_capacity: i64, expected_type: u32, expected_fence_id: u64,
+        venus_environment_ready: bool) -> VenusControlqResult:
+    if not venus_environment_ready:
+        return _venus_controlq_result_blocked("blocked:venus-environment-not-admitted")
+    val admission = venus_controlq_admit(command.len().to_i64(), response_capacity,
+        drv.initialized, drv.cmd_buf_virt != 0u64 and drv.resp_buf_virt != 0u64,
+        drv.ctrl_queue_size >= 2u16 and drv.ctrl_desc_virt != 0u64 and
+            drv.ctrl_avail_virt != 0u64 and drv.ctrl_used_virt != 0u64)
+    if not admission.admitted:
+        return _venus_controlq_result_blocked(admission.reason)
+
+    var index: i64 = 0
+    while index < command.len():
+        mmio_write8(drv.cmd_buf_virt + index.to_u64(), command[index])
+        index = index + 1
+    index = 0
+    while index < response_capacity:
+        mmio_write8(drv.resp_buf_virt + index.to_u64(), 0u8)
+        index = index + 1
+
+    val response_type = drv._send_command(command.len().to_u64(),
+        response_capacity.to_u64())
+    if response_type == 0u32:
+        return _venus_controlq_result_blocked("blocked:controlq-timeout-or-sync")
+
+    var response: [u8] = []
+    index = 0
+    while index < 24:
+        response.push(mmio_read8(drv.resp_buf_virt + index.to_u64()))
+        index = index + 1
+    val validation = venus_validate_response(response, expected_type, expected_fence_id)
+    if not validation.accepted:
+        return VenusControlqResult(completed: false, reason: validation.reason,
+            validation: validation)
+    VenusControlqResult(completed: true, reason: "ok:venus-controlq-complete",
+        validation: validation)
+
+export VenusControlqAdmission, VenusControlqResult
+export venus_controlq_admit, virtio_gpu_venus_submit
+
+# @req REQ-001 REQ-003 REQ-004 NFR-001 NFR-002 NFR-007

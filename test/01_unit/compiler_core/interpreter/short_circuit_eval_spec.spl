@@ -1,0 +1,103 @@
+# Executable proof for doc/08_tracking/bug/interp_logical_short_circuit_2026-07-15.md
+#
+# The record has said since 2026-07-15: "source fixed; executable interpreter
+# proof pending a runnable pure-Simple compiler artifact". This spec IS that
+# proof. It does not shell out to a compiler binary; it imports the
+# pure-Simple tree-walking interpreter's own modules and drives
+# `eval_expr` over an AST built by hand, so the code under test is
+# src/compiler/10.frontend/core/interpreter/eval.spl `eval_binary`.
+#
+# Discrimination is proven, not assumed: removing the two short-circuit
+# lines from eval_binary turns the first two `it` blocks red while the
+# control stays green (measured 2026-09-06: Passed 1 / Failed 2).
+
+use compiler.frontend.core.ast_expr.{expr_int_lit, expr_bool_lit, expr_binary, expr_reset}
+use compiler.core.interpreter.eval.{eval_expr, eval_reset, eval_get_error}
+use compiler.core.interpreter.value.{val_reset, val_get_bool}
+use compiler.core.interpreter.ops.{ops_get_error, ops_clear_error}
+
+# Binary operators are token kinds (see ops.spl val_binary_op).
+val OP_AND: i64 = 55      # TOK_KW_AND
+val OP_OR: i64 = 56       # TOK_KW_OR
+val OP_DIV: i64 = 63      # TOK_SLASH
+
+describe "Interpreter logical short-circuit":
+    fn fresh():
+        expr_reset()
+        val_reset()
+        eval_reset()
+        ops_clear_error()
+
+    # A division by zero is the observable: ops.spl records
+    # "division by zero" only if the operand is actually evaluated, so a
+    # clean error slot is direct evidence the right operand was skipped.
+    fn div_by_zero() -> i64:
+        expr_binary(OP_DIV, expr_int_lit(1, -1), expr_int_lit(0, -1), -1)
+
+    # ---- reproduction: the exact defect the record describes ----
+
+    it "does not evaluate the right operand of `and` when the left is false":
+        fresh()
+        val e = expr_binary(OP_AND, expr_bool_lit(0, -1), div_by_zero(), -1)
+        val r = eval_expr(e)
+        expect(val_get_bool(r)).to_equal(false)
+        expect(ops_get_error()).to_equal("")
+        expect(eval_get_error()).to_equal("")
+
+    it "does not evaluate the right operand of `or` when the left is true":
+        fresh()
+        val e = expr_binary(OP_OR, expr_bool_lit(1, -1), div_by_zero(), -1)
+        val r = eval_expr(e)
+        expect(val_get_bool(r)).to_equal(true)
+        expect(ops_get_error()).to_equal("")
+        expect(eval_get_error()).to_equal("")
+
+    # ---- control: the observable really does fire when it should ----
+
+    it "still evaluates the right operand of `and` when the left is true":
+        fresh()
+        val e = expr_binary(OP_AND, expr_bool_lit(1, -1), div_by_zero(), -1)
+        eval_expr(e)
+        expect(ops_get_error()).to_contain("division by zero")
+
+    it "still evaluates the right operand of `or` when the left is false":
+        fresh()
+        val e = expr_binary(OP_OR, expr_bool_lit(0, -1), div_by_zero(), -1)
+        eval_expr(e)
+        expect(ops_get_error()).to_contain("division by zero")
+
+    # ---- generalization: adjacent shapes in the same code path ----
+
+    it "keeps both operands required when neither side short-circuits":
+        fresh()
+        val e = expr_binary(OP_AND, expr_bool_lit(1, -1), expr_bool_lit(1, -1), -1)
+        expect(val_get_bool(eval_expr(e))).to_equal(true)
+
+    it "short-circuits a nested chain at the first false conjunct":
+        fresh()
+        # (false and 1/0) and 1/0 — neither bomb may run
+        val inner = expr_binary(OP_AND, expr_bool_lit(0, -1), div_by_zero(), -1)
+        val outer = expr_binary(OP_AND, inner, div_by_zero(), -1)
+        expect(val_get_bool(eval_expr(outer))).to_equal(false)
+        expect(ops_get_error()).to_equal("")
+
+    it "short-circuits a nested chain at the first true disjunct":
+        fresh()
+        val inner = expr_binary(OP_OR, expr_bool_lit(1, -1), div_by_zero(), -1)
+        val outer = expr_binary(OP_OR, inner, div_by_zero(), -1)
+        expect(val_get_bool(eval_expr(outer))).to_equal(true)
+        expect(ops_get_error()).to_equal("")
+
+    it "uses truthiness, not just bools, to decide `or` short-circuit":
+        fresh()
+        # 7 or 1/0 — a non-zero int is truthy, so the bomb must be skipped
+        val e = expr_binary(OP_OR, expr_int_lit(7, -1), div_by_zero(), -1)
+        eval_expr(e)
+        expect(ops_get_error()).to_equal("")
+
+    it "uses truthiness, not just bools, to decide `and` short-circuit":
+        fresh()
+        # 0 and 1/0 — a zero int is falsy, so the bomb must be skipped
+        val e = expr_binary(OP_AND, expr_int_lit(0, -1), div_by_zero(), -1)
+        eval_expr(e)
+        expect(ops_get_error()).to_equal("")

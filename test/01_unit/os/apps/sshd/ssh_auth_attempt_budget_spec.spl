@@ -1,0 +1,51 @@
+"""State coverage for connection-owned SSH authentication work bounds."""
+
+# @cover src/os/apps/sshd/ssh_auth.spl 10%
+use std.spipe.*
+use os.apps.sshd.ssh_auth.{SshAuthAttemptBudgetV1, MAX_AUTH_ATTEMPTS, MAX_AUTH_EMPTY_POLLS}
+
+describe "SSH authentication attempt budget":
+    it "charges username service and method switching uniformly":
+        var budget = SshAuthAttemptBudgetV1.create()
+        # Labels are intentionally not retained by the owner. Every request,
+        # including RFC-compatible identity/method switching, costs one slot.
+        expect(budget.charge_request()).to_be(true)
+        expect(budget.charge_request()).to_be(true)
+        expect(budget.charge_request()).to_be(true)
+        expect(budget.attempts_used).to_equal(3u32)
+
+    it "charges malformed requests before their parser can run":
+        var budget = SshAuthAttemptBudgetV1.create()
+        expect(budget.charge_request()).to_be(true)
+        expect(budget.attempts_used).to_equal(1u32)
+        expect(budget.request_capacity_remaining()).to_be(true)
+
+    it "terminally rejects work after exact cap exhaustion":
+        var budget = SshAuthAttemptBudgetV1.create()
+        var charged: u32 = 0u32
+        while charged < MAX_AUTH_ATTEMPTS:
+            expect(budget.charge_request()).to_be(true)
+            charged = charged + 1u32
+        expect(budget.request_capacity_remaining()).to_be(false)
+        expect(budget.charge_request()).to_be(false)
+        expect(budget.terminal).to_be(true)
+
+    it "bounds idle authentication polls independently":
+        var budget = SshAuthAttemptBudgetV1.create()
+        var polls: u32 = 0u32
+        while polls < MAX_AUTH_EMPTY_POLLS:
+            expect(budget.note_empty_poll()).to_be(true)
+            polls = polls + 1u32
+        expect(budget.note_empty_poll()).to_be(false)
+        expect(budget.terminal).to_be(true)
+
+    it "clears counters and seals state on success":
+        var budget = SshAuthAttemptBudgetV1.create()
+        expect(budget.charge_request()).to_be(true)
+        expect(budget.note_empty_poll()).to_be(true)
+        budget.mark_success()
+        expect(budget.attempts_used).to_equal(0u32)
+        expect(budget.empty_polls).to_equal(0u32)
+        expect(budget.authenticated).to_be(true)
+        expect(budget.terminal).to_be(true)
+        expect(budget.charge_request()).to_be(false)

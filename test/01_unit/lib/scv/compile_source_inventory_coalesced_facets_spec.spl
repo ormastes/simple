@@ -1,0 +1,33 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_event_from_content_v1, compile_source_inventory_strip_comments_v1, compile_source_inventory_facet_rows_from_canonical_v1}
+
+describe "coalesced inventory facet construction":
+    it "preserves each existing facet and event field across normalization boundaries":
+        val samples = ["", "# comment\n \t\r\n", "abc", "pub fn one(): 1", "val x = 1", "use alpha.beta", "\t# ignored\r\n pub  fn one():  1\r\nexport one\n val  x = 2\nvar y = 3\ninit boot\nuse alpha.beta\nimpl Thing\nprovider Owner\nfn tail(): \"é\"\n", "exported name\npublic name\nvalue item\nvariable item\ninitial item\nused item\nimplementation item\nproviders item\n"]
+        for content in samples:
+            val event = compile_source_inventory_event_from_content_v1(
+                "git", "create", "src/fixture.spl", content)
+            val canonical = compile_source_inventory_strip_comments_v1(content)
+            expect(event.source).to_equal("git")
+            expect(event.operation).to_equal("create")
+            expect(event.source_identity).to_equal("src/fixture.spl")
+            expect(event.byte_count).to_equal(content.len())
+            expect(event.content_digest).to_equal(sha256_text(content))
+            expect(event.semantic_digest).to_equal(sha256_text(canonical))
+            expect(event.export_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "export")))
+            expect(event.initializer_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "initializer")))
+            expect(event.provider_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "provider")))
+
+    it "preserves deletion without content work":
+        val event = compile_source_inventory_event_from_content_v1(
+            "filesystem", "delete", "src/gone.spl", "pub fn ignored(): 1")
+        expect(event.source).to_equal("filesystem")
+        expect(event.operation).to_equal("delete")
+        expect(event.source_identity).to_equal("src/gone.spl")
+        expect(event.byte_count).to_equal(0)
+        expect(event.content_digest).to_equal("")
+        expect(event.semantic_digest).to_equal("")
+        expect(event.export_digest).to_equal("")
+        expect(event.initializer_digest).to_equal("")
+        expect(event.provider_digest).to_equal("")

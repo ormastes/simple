@@ -1,0 +1,213 @@
+# Purpose and audience: executable specification evidence for the Engine2D and
+# browser-engine maintainers who own the rounded-rect corner rasterizer.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""Rounded-rect corner AA: coalesced sprite paints the same pixels
+
+@tag: gpu, engine2d, rendering, rounded_rect
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 6%
+
+`_emu_corner_box_aa` used to emit ONE `draw_rect_filled(.., 1, 1, c)` per
+anti-aliased corner pixel. On the Vulkan lane a colour with alpha < 255 is
+turned by `draw_rect_filled` into a full `draw_image_blend`, i.e. a staging
+buffer acquire + host pack + upload + compute dispatch -- PER PIXEL. The corner
+partials are now gathered into one r x r sprite and composited with a single
+`draw_image_blend`.
+
+That is a throughput change, not a rendering change, and this spec is the
+ABSOLUTE oracle for it: the expected frame is built here from an INDEPENDENT
+re-derivation of the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA v1 (the two
+helpers below are written out rather than imported, so a formula bug cannot
+cancel itself out), replayed through the OLD per-pixel call shape. The two
+frames must be equal pixel for pixel.
+
+The full-coverage run is deliberately NOT moved into the sprite: that path packs
+the clip rectangle into its dispatch, so moving it would change which pixels a
+clipped rounded rect may touch. The clipped case is asserted below.
+
+doc/08_tracking/bug/web_catalog_vulkan_lane_raster_term_2026-09-12.md
+"""
+
+use std.spec.step
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+val BG: u32 = 0xFF102030u32
+val VIEW: i32 = 64
+
+# --- Independent re-derivation of the shared corner formula -----------------
+# Deliberately NOT imported from backend_emu.spl: an oracle that shares the
+# implementation it checks proves only self-consistency.
+
+fn ref_isqrt(v: i64) -> i64:
+    if v <= 0:
+        return 0
+    var guess = v
+    var next = (guess + 1) / 2
+    while next < guess:
+        guess = next
+        next = (guess + v / guess) / 2
+    guess
+
+fn ref_cov256(dx: i32, dy: i32, r: i32) -> i32:
+    val ex = (2 * dx + 1) as i64
+    val ey = (2 * dy + 1) as i64
+    val dist256 = ref_isqrt((ex * ex + ey * ey) * 16384)
+    val cov = ((r as i64) * 256 + 128 - dist256) as i32
+    if cov < 0: return 0
+    if cov > 256: return 256
+    cov
+
+fn ref_modulate(color: u32, cov: i32) -> u32:
+    val a = ((color >> 24) & 0xFFu32) as i32
+    val a_eff = (a * cov) / 256
+    (color & 0x00FFFFFFu32) | ((a_eff as u32) << 24)
+
+fn ref_min(a: i32, b: i32) -> i32:
+    if a < b: a else: b
+
+# The OLD call shape, replayed verbatim: full-coverage run as one span, then
+# every partial pixel as its own 1x1 alpha fill.
+fn ref_corner(mut b: SoftwareBackend, r: i32, color: u32, ax: i32, ay: i32, sx: i32, sy: i32):
+    var dy = 0
+    while dy < r:
+        val py = ay + sy * dy
+        var full = 0
+        while full < r and ref_cov256(full, dy, r) >= 256:
+            full = full + 1
+        if full > 0:
+            b.draw_rect_filled(ref_min(ax, ax + sx * (full - 1)), py, full, 1, color)
+        var dx = full
+        while dx < r:
+            val cov = ref_cov256(dx, dy, r)
+            if cov <= 0:
+                dx = r
+            else:
+                val c = ref_modulate(color, cov)
+                if ((c >> 24) & 0xFFu32) != 0u32:
+                    b.draw_rect_filled(ax + sx * dx, py, 1, 1, c)
+                dx = dx + 1
+        dy = dy + 1
+
+fn ref_rounded(mut b: SoftwareBackend, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+    if w <= 0 or h <= 0:
+        return
+    var r = radius
+    if r > w / 2: r = w / 2
+    if r > h / 2: r = h / 2
+    b.draw_rect_filled(x + r, y, w - 2 * r, h, color)
+    b.draw_rect_filled(x, y + r, r, h - 2 * r, color)
+    b.draw_rect_filled(x + w - r, y + r, r, h - 2 * r, color)
+    if r <= 0:
+        return
+    ref_corner(b, r, color, x + r - 1, y + r - 1, -1, -1)
+    ref_corner(b, r, color, x + w - r, y + r - 1, 1, -1)
+    ref_corner(b, r, color, x + r - 1, y + h - r, -1, 1)
+    ref_corner(b, r, color, x + w - r, y + h - r, 1, 1)
+
+fn first_mismatch(actual: [u32], expected: [u32]) -> i32:
+    if actual.len() != expected.len():
+        return -2
+    var i = 0
+    while i < actual.len():
+        if actual[i] != expected[i]:
+            return i
+        i = i + 1
+    -1
+
+# Renders the SHIPPING rounded rect and the reference replay into two fresh
+# framebuffers and returns the index of the first differing pixel, or -1.
+fn compare(x: i32, y: i32, w: i32, h: i32, r: i32, color: u32, clip: bool) -> i32:
+    var actual = SoftwareBackend.create()
+    var want = SoftwareBackend.create()
+    if not actual.init(VIEW, VIEW):
+        return -3
+    if not want.init(VIEW, VIEW):
+        return -3
+    actual.clear(BG)
+    want.clear(BG)
+    if clip:
+        actual.set_clip(8, 8, 30, 30)
+        want.set_clip(8, 8, 30, 30)
+    actual.draw_rounded_rect(x, y, w, h, r, color)
+    ref_rounded(want, x, y, w, h, r, color)
+    val got = actual.read_pixels()
+    val exp = want.read_pixels()
+    val idx = first_mismatch(got, exp)
+    actual.shutdown()
+    want.shutdown()
+    idx
+
+describe "Coalescing the corner AA pixels changes throughput, not pixels":
+    # @manual scenario evidence
+    it "AC-1: an OPAQUE rounded rect is pixel-identical to the per-pixel replay":
+        # @req REQ-SSPEC-UNIT
+        step("opaque colour, radius 8")
+        expect(compare(10, 10, 40, 30, 8, 0xFFFF2040u32, false)).to_equal(-1)
+
+    it "AC-2: a TRANSLUCENT rounded rect is pixel-identical (the blend path)":
+        # @req REQ-SSPEC-UNIT
+        step("alpha 0x80, radius 8 -- every corner pixel blends, not just the partials")
+        expect(compare(10, 10, 40, 30, 8, 0x80FF2040u32, false)).to_equal(-1)
+
+    it "AC-3: a tiny radius is pixel-identical":
+        # @req REQ-SSPEC-UNIT
+        step("radius 3: the full-coverage run is short, so partials dominate")
+        expect(compare(10, 10, 40, 30, 3, 0xFF20FF40u32, false)).to_equal(-1)
+
+    it "AC-4: a large radius is pixel-identical":
+        # @req REQ-SSPEC-UNIT
+        step("radius 20 on a 44x44 box -- r is clamped to w/2 and the sprite is largest here")
+        expect(compare(10, 10, 44, 44, 20, 0xC02040FFu32, false)).to_equal(-1)
+
+    it "AC-5: a corner straddling the framebuffer edge is pixel-identical":
+        # @req REQ-SSPEC-UNIT
+        step("negative origin: the sprite is partly out of bounds, the 1x1 calls were not")
+        expect(compare(-6, -6, 40, 30, 8, 0xFF40A0FFu32, false)).to_equal(-1)
+
+    it "AC-6: a CLIPPED rounded rect is pixel-identical":
+        # @req REQ-SSPEC-UNIT
+        step("set_clip(8,8,30,30): proves the sprite is clipped exactly as the 1x1 fills were")
+        expect(compare(4, 4, 40, 30, 8, 0xFFFFC020u32, true)).to_equal(-1)
+
+    it "AC-7: SABOTAGE -- a deliberately wrong reference is detected":
+        # @req REQ-SSPEC-UNIT
+        step("a comparison against a DIFFERENT radius must report a mismatch, so AC-1..6 are not vacuous")
+        var actual = SoftwareBackend.create()
+        var want = SoftwareBackend.create()
+        if actual.init(VIEW, VIEW) and want.init(VIEW, VIEW):
+            actual.clear(BG)
+            want.clear(BG)
+            actual.draw_rounded_rect(10, 10, 40, 30, 8, 0xFFFF2040u32)
+            ref_rounded(want, 10, 10, 40, 30, 12, 0xFFFF2040u32)
+            expect(first_mismatch(actual.read_pixels(), want.read_pixels()) >= 0).to_equal(true)
+            actual.shutdown()
+            want.shutdown()
+
+    it "AC-8: SABOTAGE -- a wrong colour is detected":
+        # @req REQ-SSPEC-UNIT
+        step("same geometry, different colour must mismatch")
+        var actual = SoftwareBackend.create()
+        var want = SoftwareBackend.create()
+        if actual.init(VIEW, VIEW) and want.init(VIEW, VIEW):
+            actual.clear(BG)
+            want.clear(BG)
+            actual.draw_rounded_rect(10, 10, 40, 30, 8, 0xFFFF2040u32)
+            ref_rounded(want, 10, 10, 40, 30, 8, 0xFF00FF00u32)
+            expect(first_mismatch(actual.read_pixels(), want.read_pixels()) >= 0).to_equal(true)
+            actual.shutdown()
+            want.shutdown()
+
+    it "AC-9: SABOTAGE -- an empty frame is not accepted as a match":
+        # @req REQ-SSPEC-UNIT
+        step("a cleared frame with nothing drawn must differ from the reference")
+        var blank = SoftwareBackend.create()
+        var want = SoftwareBackend.create()
+        if blank.init(VIEW, VIEW) and want.init(VIEW, VIEW):
+            blank.clear(BG)
+            want.clear(BG)
+            ref_rounded(want, 10, 10, 40, 30, 8, 0xFFFF2040u32)
+            expect(first_mismatch(blank.read_pixels(), want.read_pixels()) >= 0).to_equal(true)
+            blank.shutdown()
+            want.shutdown()

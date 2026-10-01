@@ -1,0 +1,55 @@
+# @cover src/lib/common/api_registry.spl 80%
+use std.spec
+use std.common.api_registry.*
+
+val REGISTRY = "api_groups |surface, group, symbols, sites, provider, access|\n" +
+    "    rt, file, 2, 5, \"src/lib/nogc_sync_mut/sffi/\", group\n" +
+    "    rt, orphan, 1, 0, \"-\", unowned\n" +
+    "    sosix, process, 1, 0, \"src/lib/nogc_async_mut/sosix/\", sosix\n" +
+    "\n" +
+    "api_symbols |surface, group, symbol, lane, backing, class, sites, twin, alias, desc|\n" +
+    "    rt, file, rt_file_exists, both, nm, same, 3, no, std.nogc_sync_mut.io.file_exists, \"file: exists\"\n" +
+    "    rt, file, rt_file_read_text, both, nm, same, 2, yes, -, \"file: read text\"\n" +
+    "    rt, orphan, rt_orphan_poke, rust, text, unclassified, 0, no, -, \"orphan: poke\"\n" +
+    "    sosix, process, sosix_run, none, simple, provider, 0, no, std.nogc_async_mut.sosix.sosix_run, \"sosix: run a process\"\n"
+
+describe "API group registry reader":
+    it "reads both tables and every column of a symbol row":
+        val reg = api_registry_parse(REGISTRY).unwrap()
+        expect(reg.groups.len()).to_equal(3)
+        expect(reg.symbols.len()).to_equal(4)
+        val first = reg.symbols[0]
+        expect(first.symbol).to_equal("rt_file_exists")
+        expect(first.group).to_equal("file")
+        expect(first.lane).to_equal("both")
+        expect(first.backing).to_equal("nm")
+        expect(first.sites).to_equal(3)
+        expect(first.alias).to_equal("std.nogc_sync_mut.io.file_exists")
+        expect(first.desc).to_equal("file: exists")
+
+    it "answers which group a symbol belongs to, and reports an unregistered one as empty":
+        val reg = api_registry_parse(REGISTRY).unwrap()
+        expect(api_registry_group_of(reg, "rt_file_read_text")).to_equal("file")
+        expect(api_registry_group_of(reg, "rt_never_registered")).to_equal("")
+
+    it "gives a group's provider, and gives none for an unowned group":
+        val reg = api_registry_parse(REGISTRY).unwrap()
+        expect(api_registry_provider_of(reg, "rt", "file")).to_equal("src/lib/nogc_sync_mut/sffi/")
+        # `unowned` means no provider has been named — the reader must not
+        # hand back the placeholder as if it were a real one.
+        expect(api_registry_provider_of(reg, "rt", "orphan")).to_equal("")
+
+    it "keeps surfaces apart under one schema":
+        val reg = api_registry_parse(REGISTRY).unwrap()
+        expect(api_registry_groups(reg, "rt").len()).to_equal(2)
+        expect(api_registry_groups(reg, "sosix").len()).to_equal(1)
+        expect(api_registry_symbols_in(reg, "rt", "file").len()).to_equal(2)
+        expect(api_registry_provider_of(reg, "sosix", "process"))
+            .to_equal("src/lib/nogc_async_mut/sosix/")
+
+    it "refuses a registry with no symbol rows instead of returning an empty one":
+        val empty = "api_groups |surface, group, symbols, sites, provider, access|\n" +
+            "    rt, file, 0, 0, \"-\", unowned\n" +
+            "\n" +
+            "api_symbols |surface, group, symbol, lane, backing, class, sites, twin, alias, desc|\n"
+        expect(api_registry_parse(empty).is_err()).to_equal(true)

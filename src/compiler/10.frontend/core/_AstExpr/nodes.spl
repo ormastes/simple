@@ -10,6 +10,7 @@ use compiler.frontend.core.ast_expr.*
 use std.string_core.{char_code}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
@@ -117,10 +118,6 @@ var expr_trace_tags_cached: bool = false
 var ast_gen_slot: [i64] = [0]
 var ast_gen_last_report_slot: [i64] = [-1]
 
-extern fn rt_env_get(key: text) -> text
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_remove(key: text) -> bool
-
 # High-water mark of the largest expr index ever mirrored into the environment
 # since the last expr_reset().  expr_count_set(0) inside expr_reset() would
 # otherwise erase the only record of how far the mirror reaches, and a SMALLER
@@ -186,25 +183,25 @@ fn expr_env_mirror_enabled() -> bool:
         return expr_env_mirror_cached
     # Interpreter module variables may not persist between calls. Preserve its
     # compatibility mirror while compiled Stage4 uses the cached fast path.
-    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
+    (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
 
 fn expr_trace_tags_enabled() -> bool:
     if expr_mode_slots_ready:
         if not expr_trace_tags_cached:
             return false
         return not frontend_trace_suppressed()
-    ((rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != "" and
+    ((env_get_nullable("SIMPLE_TRACE_EXPR_TAGS") ?? "") != "" and
      not frontend_trace_suppressed())
 
 fn expr_env_read(idx: i64, field: text) -> text:
     if not expr_env_mirror_enabled():
         return ""
-    rt_env_get(expr_key(idx, field)) ?? ""
+    env_get_nullable(expr_key(idx, field)) ?? ""
 
 fn expr_mode_slots_refresh():
-    val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
-    expr_env_mirror_cached = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
-    expr_trace_tags_cached = (rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != ""
+    val native_arena = (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
+    expr_env_mirror_cached = (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
+    expr_trace_tags_cached = (env_get_nullable("SIMPLE_TRACE_EXPR_TAGS") ?? "") != ""
     expr_mode_slots_ready = true
 
 fn expr_count_slot_ensure():
@@ -215,7 +212,7 @@ fn expr_count_env() -> i64:
     expr_count_slot_ensure()
     if not expr_env_mirror_enabled():
         return expr_count_slot[0]
-    val env_count = expr_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "")
+    val env_count = expr_parse_i64(env_get_nullable("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "")
     if env_count > 0:
         return env_count
     expr_count_slot[0]
@@ -231,7 +228,7 @@ fn expr_count_set(value: i64):
         expr_env_mirror_high_ensure()
         if value > expr_env_mirror_high_slot[0]:
             expr_env_mirror_high_slot[0] = value
-        rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
+        env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
 
 # Fields mirrored per expr index. Keep in sync with the expr_*_set writers
 # below; a field missing here leaks its entry and can be read back stale.
@@ -271,7 +268,7 @@ fn expr_env_mirror_clear():
     var i: i64 = 0
     while i < upto:
         for field in fields:
-            rt_env_remove(expr_key(i, field))
+            env_remove_process(expr_key(i, field))
         i = i + 1
     expr_env_mirror_high_slot[0] = 0
 
@@ -287,7 +284,7 @@ fn expr_key(idx: i64, field: text) -> text:
 # ast_env_var_quadratic_parse_2026-06-13.
 fn expr_i64_set(idx: i64, field: text, value: i64):
     if expr_env_mirror_enabled():
-        rt_env_set(expr_key(idx, field), int_to_str(value))
+        env_set(expr_key(idx, field), int_to_str(value))
 
 fn expr_i64_get(idx: i64, field: text) -> i64:
     expr_parse_i64(expr_env_read(idx, field))
@@ -311,14 +308,14 @@ fn env_value_nul_free(value: text) -> bool:
 
 fn expr_text_set(idx: i64, field: text, value: text):
     if expr_env_mirror_enabled() and env_value_nul_free(value):
-        rt_env_set(expr_key(idx, field), value)
+        env_set(expr_key(idx, field), value)
 
 fn expr_text_get(idx: i64, field: text) -> text:
     expr_env_read(idx, field)
 
 fn expr_list_set(idx: i64, field: text, values: [i64]):
     if expr_env_mirror_enabled():
-        rt_env_set(expr_key(idx, field), expr_i64_list_join(values))
+        env_set(expr_key(idx, field), expr_i64_list_join(values))
 
 fn expr_list_get(idx: i64, field: text) -> [i64]:
     expr_i64_list_split(expr_env_read(idx, field))
@@ -327,7 +324,7 @@ fn expr_text_list_set(idx: i64, field: text, values: [text]):
     if expr_env_mirror_enabled():
         val joined: text = values.join("\n")
         if env_value_nul_free(joined):
-            rt_env_set(expr_key(idx, field), joined)
+            env_set(expr_key(idx, field), joined)
 
 fn expr_call_args_set(idx: i64, call_args: [i64], arg_names: [text]):
     expr_args[idx] = call_args
@@ -397,9 +394,9 @@ fn ast_generation_bump() -> i64:
 fn ast_gen_check_enabled() -> bool:
     # Default OFF => zero hot-path cost. Enable via the dedicated knob or the
     # stage-4 bootstrap lane.
-    if (rt_env_get("SIMPLE_AST_GEN_CHECK") ?? "") == "1":
+    if (env_get_nullable("SIMPLE_AST_GEN_CHECK") ?? "") == "1":
         return true
-    (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
+    (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
 
 fn ast_gen_stale_message(kind: text, idx: i64, minted_gen: i64) -> text:
     "stale " + kind + " " + int_to_str(idx) + ": produced at generation " + int_to_str(minted_gen) + ", arena now at " + int_to_str(ast_generation())
@@ -613,7 +610,7 @@ fn expr_call(callee: i64, call_args: [i64], span_id: i64) -> i64:
 fn expr_call_named(callee: i64, call_args: [i64], arg_names: [text], span_id: i64) -> i64:
     # One policy/env decision per call allocation. The former six identical
     # environment probes sat directly on a common expression hot path.
-    val trace_calls = ((rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1" and
+    val trace_calls = ((env_get_nullable("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1" and
         not frontend_trace_suppressed())
     if trace_calls:
         eprint("[ast-expr] call-alloc:start callee={callee} argc={call_args.len()}")
@@ -906,6 +903,13 @@ fn expr_lambda(param_names: [i64], body_stmts: [i64], span_id: i64) -> i64:
     expr_list_set(idx, "STMTS", body_stmts)
     idx
 
+# Mark a lambda as a trailing colon-block (`describe "x":`, `it "y":`). Lambdas
+# never use i_val otherwise; the marker lets the captured-write check treat a
+# colon-block as a scope, not a closure (Rust seed twin: MoveMode::ColonBlock).
+fn expr_mark_colon_block(idx: i64):
+    expr_i_val[idx] = 1
+    expr_i64_set(idx, "I", 1)
+
 fn expr_struct_lit(type_name: text, field_names: [i64], field_values: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_STRUCT_LIT, span_id)
     expr_s_val[idx] = type_name
@@ -1065,37 +1069,37 @@ pub fn flat_expr_pools_dump() -> text:
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_expr_pools_restore(r: FlatPoolReader) -> bool:
-    asm_arm_abi = flat_pool_dec_text(r)
-    asm_arm_archs = flat_pool_dec_text_list(r)
-    asm_arm_asm_text = flat_pool_dec_text(r)
-    asm_arm_backend = flat_pool_dec_text(r)
-    asm_arm_error_msg = flat_pool_dec_text(r)
-    asm_arm_is_compile_error = flat_pool_dec_bool(r)
-    asm_arm_is_wildcard = flat_pool_dec_bool(r)
-    asm_arm_os = flat_pool_dec_text(r)
-    asm_arm_ver_ops = flat_pool_dec_text_list(r)
-    asm_arm_ver_vals = flat_pool_dec_i64_list(r)
-    ast_gen_last_report_slot = flat_pool_dec_i64(r)
-    ast_gen_slot = flat_pool_dec_i64(r)
-    expr_arg_names = flat_pool_dec_text_list(r)
-    expr_args = flat_pool_dec_i64_list(r)
-    expr_asm_clobbers = flat_pool_dec_text_list(r)
-    expr_asm_kinds = flat_pool_dec_text_list(r)
-    expr_asm_locations = flat_pool_dec_text_list(r)
-    expr_asm_outputs = flat_pool_dec_i64_list(r)
-    expr_count_slot = flat_pool_dec_i64(r)
-    expr_empty_i64 = flat_pool_dec_i64(r)
-    expr_empty_text = flat_pool_dec_text(r)
-    expr_env_mirror_high_slot = flat_pool_dec_i64(r)
-    expr_extra = flat_pool_dec_i64(r)
-    expr_f_val = flat_pool_dec_text(r)
-    expr_i_val = flat_pool_dec_i64(r)
-    expr_left = flat_pool_dec_i64(r)
-    expr_right = flat_pool_dec_i64(r)
-    expr_s_val = flat_pool_dec_text(r)
-    expr_span = flat_pool_dec_i64(r)
-    expr_stmts = flat_pool_dec_i64_list(r)
-    expr_tag = flat_pool_dec_i64(r)
+    asm_arm_abi = flat_pool_dec_text_into(asm_arm_abi, r)
+    asm_arm_archs = flat_pool_dec_text_list_into(asm_arm_archs, r)
+    asm_arm_asm_text = flat_pool_dec_text_into(asm_arm_asm_text, r)
+    asm_arm_backend = flat_pool_dec_text_into(asm_arm_backend, r)
+    asm_arm_error_msg = flat_pool_dec_text_into(asm_arm_error_msg, r)
+    asm_arm_is_compile_error = flat_pool_dec_bool_into(asm_arm_is_compile_error, r)
+    asm_arm_is_wildcard = flat_pool_dec_bool_into(asm_arm_is_wildcard, r)
+    asm_arm_os = flat_pool_dec_text_into(asm_arm_os, r)
+    asm_arm_ver_ops = flat_pool_dec_text_list_into(asm_arm_ver_ops, r)
+    asm_arm_ver_vals = flat_pool_dec_i64_list_into(asm_arm_ver_vals, r)
+    ast_gen_last_report_slot = flat_pool_dec_i64_into(ast_gen_last_report_slot, r)
+    ast_gen_slot = flat_pool_dec_i64_into(ast_gen_slot, r)
+    expr_arg_names = flat_pool_dec_text_list_into(expr_arg_names, r)
+    expr_args = flat_pool_dec_i64_list_into(expr_args, r)
+    expr_asm_clobbers = flat_pool_dec_text_list_into(expr_asm_clobbers, r)
+    expr_asm_kinds = flat_pool_dec_text_list_into(expr_asm_kinds, r)
+    expr_asm_locations = flat_pool_dec_text_list_into(expr_asm_locations, r)
+    expr_asm_outputs = flat_pool_dec_i64_list_into(expr_asm_outputs, r)
+    expr_count_slot = flat_pool_dec_i64_into(expr_count_slot, r)
+    expr_empty_i64 = flat_pool_dec_i64_into(expr_empty_i64, r)
+    expr_empty_text = flat_pool_dec_text_into(expr_empty_text, r)
+    expr_env_mirror_high_slot = flat_pool_dec_i64_into(expr_env_mirror_high_slot, r)
+    expr_extra = flat_pool_dec_i64_into(expr_extra, r)
+    expr_f_val = flat_pool_dec_text_into(expr_f_val, r)
+    expr_i_val = flat_pool_dec_i64_into(expr_i_val, r)
+    expr_left = flat_pool_dec_i64_into(expr_left, r)
+    expr_right = flat_pool_dec_i64_into(expr_right, r)
+    expr_s_val = flat_pool_dec_text_into(expr_s_val, r)
+    expr_span = flat_pool_dec_i64_into(expr_span, r)
+    expr_stmts = flat_pool_dec_i64_list_into(expr_stmts, r)
+    expr_tag = flat_pool_dec_i64_into(expr_tag, r)
     r.ok
 
 export flat_expr_pools_dump, flat_expr_pools_restore

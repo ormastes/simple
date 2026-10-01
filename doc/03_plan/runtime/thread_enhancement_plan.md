@@ -56,7 +56,10 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
 2. Add `rt_pool_submit(closure_ptr) -> i64` — submit to pre-created worker pool
    - Status: implemented as a runtime-owned closure pool exported by `src/runtime/runtime_pool.c` for native core archives, with matching declarations in `src/runtime/runtime_thread.h`/`runtime_thread.c` for the hosted runtime lane. The Simple facade calls `rt_pool_submit` first and falls back to the existing registry path when the runtime returns `0` (interpreter/unavailable runtime).
 3. Fix: `runtime_native.c` channel `send()` silently drops when buffer full (line ~2581)
-   - Status: native channel now grows beyond the old 1024-slot ring and is covered by `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl` in native mode using the runtime's raw `i64` channel ABI.
+   - Status: native channel uses a fixed 1024-slot ring and returns explicit
+     backpressure at capacity+1; covered by
+     `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl` in
+     native mode using the runtime's raw `i64` channel ABI.
 
 **Simple Stdlib**:
 4. Fix `thread_pool.spl` — replace `thread_sleep(1)` poll loop with condvar-based blocking

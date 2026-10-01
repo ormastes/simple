@@ -1,0 +1,425 @@
+# Loader-side adapter for the frontend-owned advisory port. It executes only
+# candidate-byte classification; the unchanged reference frontend remains the
+# semantic parser. No GPU, AST, HIR, or cache ownership is claimed.
+use std.common.crypto.sha256.sha256_bytes
+use std.common.string_core.text_to_bytes
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{
+    FrontendAdvisoryPreprocessPolicyV1, frontend_transformed_source_identity_v1}
+use compiler.driver.environment_variant_sealed_activation_owner_v1.*
+use compiler.loader.parser_structural_package_owner_v1.*
+use compiler.loader.parser_lexical_mapping_authorization_v1.{
+    parser_lexical_abi_identity_v1, parser_lexical_mask_schema_identity_v1,
+    parser_lexical_tail_policy_identity_v1}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.LexicalBlockStateV1
+
+pub enum FrontendLexicalAdvisoryAdapterErrorV1:
+    InvalidSource
+    InvalidFrontendBinding
+    InvalidSession
+    RequiredProviderFailed
+    InvalidBatch
+    CleanupFailed
+
+pub enum FrontendLexicalAdvisoryAdapterStatusV1:
+    ReferenceNoOp
+    SimdExecuted
+    ScalarFallback
+
+pub struct FrontendLexicalAdvisoryAdapterReceiptV1:
+    transformed_source_identity: EnvironmentDigest256V1
+    transformed_source_length: u64
+    source_byte_digest: EnvironmentDigest256V1
+    source_snapshot_identity: u64
+    package_session_handle: u64
+    execution_environment_identity: EnvironmentDigest256V1
+    execution_environment_generation: u64
+    execution_feature_words_digest: EnvironmentDigest256V1
+    policy: FrontendAdvisoryPreprocessPolicyV1
+    status: FrontendLexicalAdvisoryAdapterStatusV1
+    sealed_authority_digest: EnvironmentDigest256V1
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    provider_generation: u64
+    lexical_abi_identity: EnvironmentDigest256V1
+    lexical_mask_schema_identity: EnvironmentDigest256V1
+    lexical_tail_policy_identity: EnvironmentDigest256V1
+    complete_block_count: u64
+    complete_byte_count: u64
+    scalar_tail_byte_count: u64
+    native_mask_calls: u64
+    operation_handle: u64
+    operation_cleanup_terminal: bool
+    fallback: ParserLexicalPackageFallbackV1
+    requested_simd: bool
+    admitted_simd: bool
+    executed_simd: bool
+    classifier_only: bool
+    scalar_lexical_resolution: bool
+    reference_frontend_required: bool
+    gpu_registry_initialized: bool
+    batch_result_digest: EnvironmentDigest256V1
+    authority_digest: EnvironmentDigest256V1
+
+pub struct FrontendLexicalAdvisoryAdapterResultV1:
+    parse_source: text
+    batches: [ParserLexicalPackageBatchV1]
+    receipt: FrontendLexicalAdvisoryAdapterReceiptV1
+
+fn _same_fla(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _read64_fla(raw: [i64], at: i64) -> u64:
+    var value = 0u64
+    for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    value
+fn _source_digest_fla(bytes: [u8]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes([value as i64 for value in bytes])
+    EnvironmentDigest256V1(w0: _read64_fla(raw, 0), w1: _read64_fla(raw, 8),
+        w2: _read64_fla(raw, 16), w3: _read64_fla(raw, 24))
+fn _feature_words_digest_fla(words: [u64]) -> EnvironmentDigest256V1:
+    var encoded: [i64] = []
+    _push64_fla(encoded, 0x54414546u64); _push64_fla(encoded, 1u64)
+    _push64_fla(encoded, words.len() as u64)
+    for word in words: _push64_fla(encoded, word)
+    val raw = sha256_bytes(encoded)
+    EnvironmentDigest256V1(w0: _read64_fla(raw, 0), w1: _read64_fla(raw, 8),
+        w2: _read64_fla(raw, 16), w3: _read64_fla(raw, 24))
+fn _push64_fla(out: [i64], value: u64):
+    for i in 0..8: out.push(((value >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _pushd_fla(out: [i64], value: EnvironmentDigest256V1):
+    _push64_fla(out, value.w0); _push64_fla(out, value.w1)
+    _push64_fla(out, value.w2); _push64_fla(out, value.w3)
+fn _quote_fla(value: LexicalQuoteKindV1) -> u64:
+    if value == LexicalQuoteKindV1.Single: return 1u64
+    if value == LexicalQuoteKindV1.Double: return 2u64
+    0u64
+fn _state_fla(out: [i64], value: LexicalBlockStateV1):
+    for field in [_quote_fla(value.quote_kind), if value.escape_parity: 1u64 else: 0u64,
+                  if value.in_line_comment: 1u64 else: 0u64,
+                  if value.in_block_comment: 1u64 else: 0u64,
+                  value.pending_quote_byte as u64, value.pending_quote_run as u64,
+                  if value.pending_raw_prefix: 1u64 else: 0u64,
+                  if value.pending_identifier: 1u64 else: 0u64,
+                  if value.pending_slash: 1u64 else: 0u64,
+                  if value.after_newline: 1u64 else: 0u64]: _push64_fla(out, field)
+fn _batch_digest_fla(batch: ParserLexicalPackageBatchV1) -> EnvironmentDigest256V1:
+    var out: [i64] = []; _push64_fla(out, 0x5441424cu64); _push64_fla(out, 1u64)
+    _push64_fla(out, batch.offset); _push64_fla(out, batch.count)
+    _push64_fla(out, batch.candidate_masks.len() as u64)
+    for masks in batch.candidate_masks:
+        for value in [masks.single_quote, masks.double_quote, masks.backslash, masks.hash,
+                      masks.newline, masks.slash, masks.star, masks.braces,
+                      masks.structural_delimiters]: _push64_fla(out, value as u64)
+    _push64_fla(out, batch.summaries.len() as u64)
+    for summary in batch.summaries:
+        _state_fla(out, summary.input_state); _state_fla(out, summary.output_state)
+        for value in [summary.byte_count as u64, summary.quote_mask as u64,
+                      summary.escape_mask as u64, summary.line_comment_mask as u64,
+                      summary.newline_mask as u64, summary.delimiter_mask as u64,
+                      summary.fallback_bits, if summary.canonical_usable: 1u64 else: 0u64]:
+            _push64_fla(out, value)
+    _state_fla(out, batch.output_state)
+    val raw = sha256_bytes(out)
+    EnvironmentDigest256V1(w0: _read64_fla(raw, 0), w1: _read64_fla(raw, 8),
+        w2: _read64_fla(raw, 16), w3: _read64_fla(raw, 24))
+fn _authority_digest_fla(source_digest: EnvironmentDigest256V1, source_length: u64,
+    snapshot_identity: u64, session_handle: u64, policy_code: u64,
+    sealed_digest: EnvironmentDigest256V1, provider: EnvironmentDigest256V1,
+    variant: EnvironmentDigest256V1, artifact: EnvironmentDigest256V1,
+    lexical_abi: EnvironmentDigest256V1, lexical_schema: EnvironmentDigest256V1,
+    lexical_tail: EnvironmentDigest256V1,
+    execution_environment: EnvironmentDigest256V1, execution_generation: u64,
+    feature_words_digest: EnvironmentDigest256V1,
+    generation: u64, blocks: u64, calls: u64, executed: bool,
+    operation_handle: u64, operation_cleanup_terminal: bool,
+    complete_bytes: u64, tail_bytes: u64, admitted: bool, fallback_code: u64,
+    batch_digest: EnvironmentDigest256V1
+) -> EnvironmentDigest256V1:
+    var out: [i64] = []; _push64_fla(out, 0x56444146u64); _push64_fla(out, 1u64)
+    for value in [source_length, snapshot_identity, session_handle, policy_code,
+                  generation, blocks, calls, if executed: 1u64 else: 0u64,
+                  operation_handle, if operation_cleanup_terminal: 1u64 else: 0u64]:
+        _push64_fla(out, value)
+    for value in [complete_bytes, tail_bytes, if admitted: 1u64 else: 0u64,
+                  fallback_code, execution_generation]:
+        _push64_fla(out, value)
+    for value in [source_digest, sealed_digest, provider, variant, artifact,
+                  lexical_abi, lexical_schema, lexical_tail, batch_digest]:
+        _pushd_fla(out, value)
+    _pushd_fla(out, execution_environment); _pushd_fla(out, feature_words_digest)
+    val raw = sha256_bytes(out)
+    EnvironmentDigest256V1(w0: _read64_fla(raw, 0), w1: _read64_fla(raw, 8),
+        w2: _read64_fla(raw, 16), w3: _read64_fla(raw, 24))
+fn _zero_fla() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+fn _policy_fla(policy: FrontendAdvisoryPreprocessPolicyV1) -> ParserLexicalPackagePolicyV1:
+    if policy == FrontendAdvisoryPreprocessPolicyV1.RequireSimd:
+        return ParserLexicalPackagePolicyV1.RequireSimd
+    if policy == FrontendAdvisoryPreprocessPolicyV1.PreferSimd:
+        return ParserLexicalPackagePolicyV1.PreferSimd
+    ParserLexicalPackagePolicyV1.Reference
+fn _policy_code_fla(policy: FrontendAdvisoryPreprocessPolicyV1) -> u64:
+    if policy == FrontendAdvisoryPreprocessPolicyV1.Reference: return 1u64
+    if policy == FrontendAdvisoryPreprocessPolicyV1.PreferSimd: return 2u64
+    3u64
+fn _fallback_code_fla(value: ParserLexicalPackageFallbackV1) -> u64:
+    if value == ParserLexicalPackageFallbackV1.ProviderNotAdmitted: return 1u64
+    if value == ParserLexicalPackageFallbackV1.CapabilityUnavailable: return 2u64
+    if value == ParserLexicalPackageFallbackV1.ExecutionFailed: return 3u64
+    0u64
+
+pub fn frontend_lexical_advisory_adapter_run_v1(
+    source: text,
+    policy: FrontendAdvisoryPreprocessPolicyV1,
+    sealed_owner: EnvironmentVariantSealedActivationOwnerV1,
+    activation: EnvironmentVariantSealedActivationOwnerTokenV1,
+    package_owner: ParserStructuralPackageOwnerV1,
+    session: ParserStructuralPackageV2SessionV1,
+    snapshot: EnvironmentSnapshotV1,
+    feature_words: [u64],
+    input_state: LexicalBlockStateV1
+) -> Result<FrontendLexicalAdvisoryAdapterResultV1,
+            FrontendLexicalAdvisoryAdapterErrorV1>:
+    val bytes = text_to_bytes(source)
+    val source_identity = frontend_transformed_source_identity_v1(source)
+    val source_digest = _source_digest_fla(bytes)
+    if bytes.len() as u64 > PARSER_STRUCTURAL_PACKAGE_MAX_INPUT_V1:
+        return Err(FrontendLexicalAdvisoryAdapterErrorV1.InvalidSource)
+    if policy == FrontendAdvisoryPreprocessPolicyV1.Reference:
+        val empty_digest = _zero_fla()
+        val receipt_digest = _authority_digest_fla(source_digest, bytes.len() as u64,
+            0u64, 0u64, _policy_code_fla(policy), empty_digest, empty_digest,
+            empty_digest, empty_digest, empty_digest, empty_digest, empty_digest,
+            empty_digest, 0u64, empty_digest,
+            0u64, 0u64, 0u64, false, 0u64, false,
+            0u64, bytes.len() as u64, false, 0u64, empty_digest)
+        return Ok(FrontendLexicalAdvisoryAdapterResultV1(parse_source: source, batches: [],
+            receipt: FrontendLexicalAdvisoryAdapterReceiptV1(
+                transformed_source_identity: source_identity, transformed_source_length: bytes.len() as u64,
+                source_byte_digest: source_digest, source_snapshot_identity: 0u64,
+                package_session_handle: 0u64,
+                execution_environment_identity: empty_digest,
+                execution_environment_generation: 0u64,
+                execution_feature_words_digest: empty_digest,
+                policy: policy, status: FrontendLexicalAdvisoryAdapterStatusV1.ReferenceNoOp,
+                sealed_authority_digest: _zero_fla(), provider_identity: _zero_fla(),
+                variant_identity: _zero_fla(), artifact_identity: _zero_fla(), provider_generation: 0u64,
+                lexical_abi_identity: empty_digest, lexical_mask_schema_identity: empty_digest,
+                lexical_tail_policy_identity: empty_digest,
+                complete_block_count: 0u64, complete_byte_count: 0u64,
+                scalar_tail_byte_count: bytes.len() as u64, native_mask_calls: 0u64,
+                operation_handle: 0u64, operation_cleanup_terminal: false,
+                fallback: ParserLexicalPackageFallbackV1.None, requested_simd: false,
+                admitted_simd: false, executed_simd: false, classifier_only: true,
+                scalar_lexical_resolution: false, reference_frontend_required: true,
+                gpu_registry_initialized: false, batch_result_digest: empty_digest,
+                authority_digest: receipt_digest)))
+    val build_use = match environment_variant_sealed_build_use_acquire_v1(sealed_owner, activation):
+        case Ok(value): value
+        case Err(_): return Err(FrontendLexicalAdvisoryAdapterErrorV1.InvalidFrontendBinding)
+    val sealed = environment_variant_sealed_build_use_project_v1(sealed_owner, activation, build_use)
+    val source_authority = parser_structural_package_v2_session_source_authority_v1(package_owner, session)
+    var invalid = sealed.is_err() or source_authority.is_err()
+    if not invalid:
+        val authority = sealed.unwrap(); val session_source = source_authority.unwrap()
+        invalid = authority.facet_id != ENV_FACET_FRONTEND_V1 or authority.interface_major != 1u16 or
+            not authority.root_artifact_authenticated or
+            not _same_fla(authority.pin_authority.provider_identity, session_source.provider_identity) or
+            not _same_fla(authority.pin_authority.variant_identity, session_source.variant_identity) or
+            not _same_fla(authority.pin_authority.artifact_identity, session_source.artifact_identity) or
+            authority.pin_authority.provider_generation != session_source.publication_generation or
+            not _same_fla(authority.pin_authority.environment_identity,
+                snapshot.snapshot_identity) or
+            authority.pin_authority.environment_generation != snapshot.snapshot_generation or
+            not _same_fla(session_source.lexical_abi_identity, parser_lexical_abi_identity_v1()) or
+            not _same_fla(session_source.lexical_mask_schema_identity,
+                parser_lexical_mask_schema_identity_v1()) or
+            not _same_fla(session_source.lexical_tail_policy_identity,
+                parser_lexical_tail_policy_identity_v1()) or
+            session_source.source_length != bytes.len() as u64 or
+            not _same_fla(session_source.source_digest, source_digest)
+    if invalid:
+        if environment_variant_sealed_build_use_release_v1(sealed_owner, activation, build_use).is_err():
+            return Err(FrontendLexicalAdvisoryAdapterErrorV1.CleanupFailed)
+        return Err(FrontendLexicalAdvisoryAdapterErrorV1.InvalidSession)
+    val authority = sealed.unwrap(); val complete_count = ((bytes.len() as u64) / 32u64) * 32u64
+    val feature_words_digest = _feature_words_digest_fla(feature_words)
+    if complete_count == 0u64:
+        if environment_variant_sealed_build_use_release_v1(sealed_owner, activation, build_use).is_err():
+            return Err(FrontendLexicalAdvisoryAdapterErrorV1.CleanupFailed)
+        if policy == FrontendAdvisoryPreprocessPolicyV1.RequireSimd:
+            return Err(FrontendLexicalAdvisoryAdapterErrorV1.RequiredProviderFailed)
+        val empty_digest = _zero_fla()
+        val session_source = source_authority.unwrap()
+        val receipt_digest = _authority_digest_fla(source_digest, bytes.len() as u64,
+            session_source.source_snapshot_identity, session_source.session_handle,
+            _policy_code_fla(policy), authority.authority_digest,
+            authority.pin_authority.provider_identity, authority.pin_authority.variant_identity,
+            authority.pin_authority.artifact_identity, session_source.lexical_abi_identity,
+            session_source.lexical_mask_schema_identity, session_source.lexical_tail_policy_identity,
+            snapshot.snapshot_identity, snapshot.snapshot_generation, feature_words_digest,
+            authority.pin_authority.provider_generation,
+            0u64, 0u64, false, 0u64, false, 0u64, bytes.len() as u64, true,
+            _fallback_code_fla(ParserLexicalPackageFallbackV1.CapabilityUnavailable), empty_digest)
+        return Ok(FrontendLexicalAdvisoryAdapterResultV1(parse_source: source, batches: [],
+            receipt: FrontendLexicalAdvisoryAdapterReceiptV1(
+                transformed_source_identity: source_identity, transformed_source_length: bytes.len() as u64,
+                source_byte_digest: source_digest,
+                source_snapshot_identity: session_source.source_snapshot_identity,
+                package_session_handle: session_source.session_handle,
+                execution_environment_identity: snapshot.snapshot_identity,
+                execution_environment_generation: snapshot.snapshot_generation,
+                execution_feature_words_digest: feature_words_digest,
+                policy: policy, status: FrontendLexicalAdvisoryAdapterStatusV1.ScalarFallback,
+                sealed_authority_digest: authority.authority_digest,
+                provider_identity: authority.pin_authority.provider_identity,
+                variant_identity: authority.pin_authority.variant_identity,
+                artifact_identity: authority.pin_authority.artifact_identity,
+                provider_generation: authority.pin_authority.provider_generation,
+                lexical_abi_identity: session_source.lexical_abi_identity,
+                lexical_mask_schema_identity: session_source.lexical_mask_schema_identity,
+                lexical_tail_policy_identity: session_source.lexical_tail_policy_identity,
+                complete_block_count: 0u64, complete_byte_count: 0u64,
+                scalar_tail_byte_count: bytes.len() as u64, native_mask_calls: 0u64,
+                operation_handle: 0u64, operation_cleanup_terminal: false,
+                fallback: ParserLexicalPackageFallbackV1.CapabilityUnavailable,
+                requested_simd: true,
+                admitted_simd: true, executed_simd: false, classifier_only: true,
+                scalar_lexical_resolution: false, reference_frontend_required: true,
+                gpu_registry_initialized: false, batch_result_digest: empty_digest,
+                authority_digest: receipt_digest)))
+    val batch_result = parser_structural_package_lexical_batch_v1(package_owner, session,
+        snapshot, feature_words, 0u64, complete_count, input_state, _policy_fla(policy))
+    if environment_variant_sealed_build_use_release_v1(sealed_owner, activation, build_use).is_err():
+        return Err(FrontendLexicalAdvisoryAdapterErrorV1.CleanupFailed)
+    if batch_result.is_err():
+        if policy == FrontendAdvisoryPreprocessPolicyV1.RequireSimd:
+            return Err(FrontendLexicalAdvisoryAdapterErrorV1.RequiredProviderFailed)
+        return Err(FrontendLexicalAdvisoryAdapterErrorV1.InvalidBatch)
+    val batch = batch_result.unwrap(); val blocks = complete_count / 32u64; val receipt = batch.receipt
+    if batch.offset != 0u64 or batch.count != complete_count or
+       batch.candidate_masks.len() as u64 != blocks or batch.summaries.len() as u64 != blocks or
+       not receipt.classifier_only or not receipt.scalar_lexical_resolution or
+       not receipt.reference_frontend_required:
+        return Err(FrontendLexicalAdvisoryAdapterErrorV1.InvalidBatch)
+    if receipt.executed_simd:
+        val complete_execution = receipt.fallback == ParserLexicalPackageFallbackV1.None
+        if receipt.operation_handle == 0u64 or not receipt.operation_cleanup_terminal or
+           receipt.native_mask_calls == 0u64 or
+           (complete_execution and receipt.native_mask_calls != blocks * 15u64) or
+           (not complete_execution and receipt.native_mask_calls >= blocks * 15u64) or
+           not _same_fla(receipt.executed_provider_identity, authority.pin_authority.provider_identity) or
+           not _same_fla(receipt.executed_variant_identity, authority.pin_authority.variant_identity) or
+           receipt.executed_provider_generation != authority.pin_authority.provider_generation:
+            return Err(FrontendLexicalAdvisoryAdapterErrorV1.InvalidBatch)
+    if policy == FrontendAdvisoryPreprocessPolicyV1.RequireSimd and not receipt.executed_simd:
+        return Err(FrontendLexicalAdvisoryAdapterErrorV1.RequiredProviderFailed)
+    val batch_digest = _batch_digest_fla(batch)
+    val session_source = source_authority.unwrap()
+    val receipt_digest = _authority_digest_fla(source_digest, bytes.len() as u64,
+        session_source.source_snapshot_identity, session_source.session_handle,
+        _policy_code_fla(policy), authority.authority_digest,
+        authority.pin_authority.provider_identity, authority.pin_authority.variant_identity,
+        authority.pin_authority.artifact_identity, session_source.lexical_abi_identity,
+        session_source.lexical_mask_schema_identity, session_source.lexical_tail_policy_identity,
+        snapshot.snapshot_identity, snapshot.snapshot_generation, feature_words_digest,
+        authority.pin_authority.provider_generation,
+        blocks, receipt.native_mask_calls, receipt.executed_simd,
+        receipt.operation_handle, receipt.operation_cleanup_terminal, complete_count,
+        bytes.len() as u64 - complete_count, receipt.admitted_simd,
+        _fallback_code_fla(receipt.fallback), batch_digest)
+    Ok(FrontendLexicalAdvisoryAdapterResultV1(parse_source: source, batches: [batch],
+        receipt: FrontendLexicalAdvisoryAdapterReceiptV1(
+            transformed_source_identity: source_identity, transformed_source_length: bytes.len() as u64,
+            source_byte_digest: source_digest,
+            source_snapshot_identity: session_source.source_snapshot_identity,
+            package_session_handle: session_source.session_handle,
+            execution_environment_identity: snapshot.snapshot_identity,
+            execution_environment_generation: snapshot.snapshot_generation,
+            execution_feature_words_digest: feature_words_digest,
+            policy: policy, status: if receipt.executed_simd and
+                receipt.fallback == ParserLexicalPackageFallbackV1.None:
+                FrontendLexicalAdvisoryAdapterStatusV1.SimdExecuted
+            else: FrontendLexicalAdvisoryAdapterStatusV1.ScalarFallback,
+            sealed_authority_digest: authority.authority_digest,
+            provider_identity: authority.pin_authority.provider_identity,
+            variant_identity: authority.pin_authority.variant_identity,
+            artifact_identity: authority.pin_authority.artifact_identity,
+            provider_generation: authority.pin_authority.provider_generation,
+            lexical_abi_identity: session_source.lexical_abi_identity,
+            lexical_mask_schema_identity: session_source.lexical_mask_schema_identity,
+            lexical_tail_policy_identity: session_source.lexical_tail_policy_identity,
+            complete_block_count: blocks, complete_byte_count: complete_count,
+            scalar_tail_byte_count: bytes.len() as u64 - complete_count,
+            native_mask_calls: receipt.native_mask_calls, fallback: receipt.fallback,
+            operation_handle: receipt.operation_handle,
+            operation_cleanup_terminal: receipt.operation_cleanup_terminal,
+            requested_simd: receipt.requested_simd, admitted_simd: receipt.admitted_simd,
+            executed_simd: receipt.executed_simd, classifier_only: true,
+            scalar_lexical_resolution: true, reference_frontend_required: true,
+            gpu_registry_initialized: false, batch_result_digest: batch_digest,
+            authority_digest: receipt_digest)))
+
+# Consumer-side publication gate. A copied receipt is evidence only when its
+# unchanged source, batch payload, coverage, status, and canonical authority
+# digest all recompute exactly.
+pub fn frontend_lexical_advisory_adapter_result_valid_v1(
+    result: FrontendLexicalAdvisoryAdapterResultV1
+) -> bool:
+    val receipt = result.receipt
+    val bytes = text_to_bytes(result.parse_source)
+    val source_digest = _source_digest_fla(bytes)
+    val source_identity = frontend_transformed_source_identity_v1(result.parse_source)
+    if bytes.len() as u64 != receipt.transformed_source_length or
+       not _same_fla(source_digest, receipt.source_byte_digest) or
+       not _same_fla(source_identity, receipt.transformed_source_identity) or
+       receipt.complete_byte_count + receipt.scalar_tail_byte_count != bytes.len() as u64 or
+       receipt.complete_byte_count != receipt.complete_block_count * 32u64 or
+       not receipt.classifier_only or not receipt.reference_frontend_required or
+       receipt.gpu_registry_initialized:
+        return false
+    var batch_digest = _zero_fla()
+    if result.batches.len() == 1:
+        val batch = result.batches[0]
+        if batch.offset != 0u64 or batch.count != receipt.complete_byte_count or
+           batch.candidate_masks.len() as u64 != receipt.complete_block_count or
+           batch.summaries.len() as u64 != receipt.complete_block_count:
+            return false
+        batch_digest = _batch_digest_fla(batch)
+    elif result.batches.len() != 0 or receipt.complete_byte_count != 0u64:
+        return false
+    if not _same_fla(batch_digest, receipt.batch_result_digest): return false
+    if receipt.status == FrontendLexicalAdvisoryAdapterStatusV1.ReferenceNoOp:
+        if receipt.policy != FrontendAdvisoryPreprocessPolicyV1.Reference or
+           receipt.requested_simd or receipt.admitted_simd or receipt.executed_simd or
+           receipt.operation_handle != 0u64 or receipt.operation_cleanup_terminal or
+           receipt.complete_byte_count != 0u64 or receipt.scalar_lexical_resolution:
+            return false
+    elif receipt.status == FrontendLexicalAdvisoryAdapterStatusV1.SimdExecuted:
+        if not receipt.requested_simd or not receipt.admitted_simd or not receipt.executed_simd or
+           receipt.fallback != ParserLexicalPackageFallbackV1.None or
+           receipt.operation_handle == 0u64 or not receipt.operation_cleanup_terminal or
+           receipt.native_mask_calls != receipt.complete_block_count * 15u64 or
+           not receipt.scalar_lexical_resolution:
+            return false
+    else:
+        if receipt.policy == FrontendAdvisoryPreprocessPolicyV1.Reference or
+           not receipt.requested_simd or receipt.fallback == ParserLexicalPackageFallbackV1.None or
+           (receipt.executed_simd and (receipt.operation_handle == 0u64 or
+               not receipt.operation_cleanup_terminal or receipt.native_mask_calls == 0u64 or
+               receipt.native_mask_calls >= receipt.complete_block_count * 15u64)):
+            return false
+    val expected = _authority_digest_fla(receipt.source_byte_digest,
+        receipt.transformed_source_length, receipt.source_snapshot_identity,
+        receipt.package_session_handle, _policy_code_fla(receipt.policy),
+        receipt.sealed_authority_digest, receipt.provider_identity,
+        receipt.variant_identity, receipt.artifact_identity, receipt.lexical_abi_identity,
+        receipt.lexical_mask_schema_identity, receipt.lexical_tail_policy_identity,
+        receipt.execution_environment_identity, receipt.execution_environment_generation,
+        receipt.execution_feature_words_digest, receipt.provider_generation,
+        receipt.complete_block_count, receipt.native_mask_calls, receipt.executed_simd,
+        receipt.operation_handle, receipt.operation_cleanup_terminal,
+        receipt.complete_byte_count, receipt.scalar_tail_byte_count,
+        receipt.admitted_simd, _fallback_code_fla(receipt.fallback), batch_digest)
+    _same_fla(expected, receipt.authority_digest)

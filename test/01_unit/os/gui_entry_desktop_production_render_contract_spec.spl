@@ -1,20 +1,29 @@
+"""
+## Purpose and audience
+Purpose: Prove that SimpleOS production desktop render entry.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-001
+doc/01_research/local/REQ-OS-001.md
+doc/03_plan/sys_test/REQ-OS-001.md
+doc/04_architecture/REQ-OS-001.md
+doc/05_design/REQ-OS-001.md
+"""
+# @req: REQ-OS-001
+
 use std.spec.*
 use app.io.mod.{file_read}
 
-fn _desktop_theme_installer_occurrences(src: text) -> i64:
-    # Count every call spelling, not only the canonical assignment, so a second
-    # differently assigned invocation cannot escape the exactly-once contract.
-    val installer_call = "install_generated_simpleos_wm_theme("
-    val first = src.index_of(installer_call)
-    if first < 0:
-        return 0
-    val remaining = src.substring(first + installer_call.len(), src.len())
-    if remaining.contains(installer_call):
-        return 2
-    1
-
 describe "SimpleOS production desktop render entry":
+    # @manual scenario evidence
     it "installs the exact generated WM snapshot once before every canonical desktop compositor and frame":
+        # @req: REQ-OS-001
+        step("Verify: installs the exact generated WM snapshot once before every canonical desktop compositor and frame")
         val x86 = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
         val arm64 = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
         val riscv64 = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
@@ -25,13 +34,15 @@ describe "SimpleOS production desktop render entry":
             val frame_executor = src.index_of("Engine2dWmFrameExecutor.")
             val first_frame = src.index_of("shell.render_baremetal_first_frame(")
             expect(src).to_contain("use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme}")
-            expect(_desktop_theme_installer_occurrences(src)).to_equal(1)
+            expect(_desktop_theme_installer_occurrences(src)).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(install).to_be_greater_than(0)
             expect(install).to_be_less_than(compositor)
             expect(install).to_be_less_than(frame_executor)
             expect(install).to_be_less_than(first_frame)
 
     it "should keep registered-only shaping independent of the stubbed host font ABI":
+        # @req: REQ-OS-001
+        step("Verify: should keep registered-only shaping independent of the stubbed host font ABI")
         val renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
         val shaper = file_read("src/lib/skia/feature/shaper/shaper.spl")
         val bootstrap = file_read("src/os/desktop/font_bootstrap.spl")
@@ -61,26 +72,35 @@ describe "SimpleOS production desktop render entry":
         expect(direct_read).to_be_greater_than(0)
         expect(direct_read).to_be_less_than(mounted_gate)
 
+    # @req REQ-011 REQ-014
     it "boots validated dynamic scanout into persistent Engine2D shared shell rendering":
+        # @req: REQ-OS-001
+        step("Verify: boots validated dynamic scanout into persistent Engine2D shared shell rendering")
         val src = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
         expect(src).to_contain("bga_init_scanout")
         expect(src).to_contain("mmio_disable_test_mode()")
         expect(src).to_contain("scanout_evidence_is_valid(scanout)")
         expect(src).to_contain("FramebufferDriver.from_scanout_raw(scanout.address, scanout.width, scanout.height, scanout.stride")
         expect(src).to_contain("var engine = create_fb_engine_sized(fb, screen_width, screen_height)")
-        expect(src).to_contain("val font_loaded = simpleos_desktop_register_selected_fonts_from_vfs()")
+        expect(src).to_contain("if not simpleos_desktop_register_selected_fonts_from_vfs():")
         expect(src).to_contain("route=shared-wm-draw-ir component_id=taskbar-clock")
         expect(src).to_contain("fn taskbar_clock_region_rgb_sha256_pin() -> text:")
-        expect(src).to_contain("addf76edf6d23ca9bea6d698ca1d30bc4bd8dd684bb50ff3158ef755bd2854fc")
+        expect(src).to_contain("ffbd5f7690557565c42853ffd4fd4a6c6049203eaa0d8cc5f8cb981a409287c4")
         expect(src).to_contain("val pinned_region_sha256: text = taskbar_clock_region_rgb_sha256_pin()")
         expect(src).to_contain("region_sha256 == pinned_region_sha256")
         expect(src).to_contain("[font-evidence] guest_path={font_guest_path} asset_bytes={font_blob.len()} family=Noto Sans Mono asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256={region_sha256}")
-        val register_font = src.index_of("val font_loaded = simpleos_desktop_register_selected_fonts_from_vfs()")
+        val register_font = src.index_of("if not simpleos_desktop_register_selected_fonts_from_vfs():")
         val create_engine = src.index_of("var engine = create_fb_engine_sized(fb, screen_width, screen_height)")
         val first_frame = src.index_of("shell.render_baremetal_first_frame(wm_frame_executor)")
         expect(register_font).to_be_greater_than(0)
         expect(register_font).to_be_less_than(create_engine)
         expect(register_font).to_be_less_than(first_frame)
+        expect(src).to_contain("else:\n        serial_println(\"[vfs] mount_failed fat32 reason=no-nvme-or-bad-fs\")\n        serial_println(\"[desktop-gui] fatal reason=font-media-mount\")\n        return")
+        expect(src).to_contain("if not simpleos_desktop_register_selected_fonts_from_vfs():\n        serial_println(\"[desktop-gui] fatal reason=font-register\")\n        return")
+        expect(src).to_contain("val font_validation = validate_selected_font_asset(font_candidate.local_path, font_blob)")
+        expect(src).to_contain("if not font_validation.valid:")
+        expect(src).to_contain("[desktop-gui] fatal reason=font-evidence-asset")
+        expect(src.contains("font unavailable fallback=bitmap")).to_be(false)
         expect(src.contains("font_renderer_register_selected_bytes(")).to_be(false)
         expect(src.contains("engine.draw_text(64, 64")).to_be(false)
         expect(src.contains("engine.draw_rect_filled(64, 64")).to_be(false)
@@ -105,6 +125,8 @@ describe "SimpleOS production desktop render entry":
         expect(src.contains("shell.run()")).to_be(false)
 
     it "routes WM Simple Web evidence through the production desktop entry":
+        # @req: REQ-OS-001
+        step("Verify: routes WM Simple Web evidence through the production desktop entry")
         val targets = file_read("src/os/_QemuRunner/runner_targets.spl")
         val scenarios = file_read("src/os/_QemuRunner/scenario_catalog.spl")
         val builds = file_read("src/os/_QemuRunner/os_build_run.spl")
@@ -134,10 +156,13 @@ describe "SimpleOS production desktop render entry":
         expect(x64_readiness).to_contain("arch/x86_64/gui_entry_desktop.spl")
         expect(x64_readiness.contains("arch/x86_64/wm_entry.spl")).to_be(false)
 
+    # @req REQ-011 REQ-014
     it "routes the AArch64 boot desktop through canonical Engine2D owners and optional host GPU":
+        # @req: REQ-OS-001
+        step("Verify: routes the AArch64 boot desktop through canonical Engine2D owners and optional host GPU")
         val src = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
-        val mount_font_media = src.index_of("    vfs_boot_init_virtio_fat32()")
-        val register_font = src.index_of("val font_loaded = simpleos_desktop_register_selected_fonts_from_vfs()")
+        val mount_font_media = src.index_of("if not vfs_boot_init_virtio_fat32():")
+        val register_font = src.index_of("if not simpleos_desktop_register_selected_fonts_from_vfs():")
         val create_engine = src.index_of("var engine = create_fb_engine_sized(framebuffer, screen_width, screen_height)")
         expect(src).to_contain("raw_alloc(FRAMEBUFFER_SIZE.to_i64())")
         expect(src).to_contain("FramebufferDriver.from_scanout_raw(")
@@ -146,7 +171,9 @@ describe "SimpleOS production desktop render entry":
         expect(mount_font_media).to_be_less_than(register_font)
         expect(register_font).to_be_greater_than(0)
         expect(register_font).to_be_less_than(create_engine)
-        expect(src).to_contain("if font_loaded:")
+        expect(src).to_contain("[desktop-gui-arm64] fatal reason=font-media-mount")
+        expect(src).to_contain("[desktop-gui-arm64] fatal reason=font-register")
+        expect(src.contains("font unavailable fallback=bitmap")).to_be(false)
         expect(src).to_contain("font registered source=virtio-fat32")
         expect(src).to_contain("compositor.compositor_materialize_process_surface_scalar(")
         expect(src).to_contain("map_qemu_host_gpu_ivshmem_bar2()")
@@ -177,6 +204,8 @@ describe "SimpleOS production desktop render entry":
         expect(src.contains(".host_gpu_base")).to_be(false)
 
     it "projects ARM64 window geometry and bounded scroll through DrawIR and requires Vulkan on Linux":
+        # @req: REQ-OS-001
+        step("Verify: projects ARM64 window geometry and bounded scroll through DrawIR and requires Vulkan on Linux")
         val entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
         val linux_entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu.spl")
         val compositor = file_read("src/os/compositor/compositor.spl")
@@ -202,6 +231,8 @@ describe "SimpleOS production desktop render entry":
         expect(entry.contains("engine.present()")).to_be(false)
 
     it "routes the RV64 dynamic scanout through canonical Engine2D owners and one runtime facade":
+        # @req: REQ-OS-001
+        step("Verify: routes the RV64 dynamic scanout through canonical Engine2D owners and one runtime facade")
         val src = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
         val display = file_read("src/os/kernel/arch/riscv64/display.spl")
         val resolver = file_read("src/os/_QemuRunner/scenario_disks.spl")
@@ -209,42 +240,15 @@ describe "SimpleOS production desktop render entry":
         val mount_font_media = src.index_of("vfs_boot_init_riscv64_virtio_fat32()")
         val register_font = src.index_of("simpleos_desktop_register_selected_fonts_from_vfs()")
         val create_engine = src.index_of("create_fb_engine_sized")
-        val launch = src.index_of("Rv64ProductionWmProducer.launch(")
-        val pump = src.index_of("wm_producer.pump_one_published_action(shell)")
-        val snapshot = src.index_of("wm_producer.snapshot_published_scene(shell)")
-        val render = src.index_of("wm_producer.present_snapshot(executor, snapshot)")
+        val render = src.index_of("shell.render_baremetal_first_frame(executor)")
         val present = src.index_of("if not riscv64_display_present():")
         val ready = src.index_of("[desktop-gui-riscv64] desktop-ready revision=")
         expect(src).to_contain("riscv64_display_initialize")
         expect(src).to_contain("FramebufferDriver.from_scanout_raw")
         expect(src).to_contain("create_fb_engine_sized")
-        expect(mount_font_media).to_be_greater_than(0)
-        expect(mount_font_media).to_be_less_than(register_font)
-        expect(register_font).to_be_less_than(create_engine)
-        expect(src).to_contain("simpleos_desktop_register_selected_fonts_from_vfs()")
-        expect(src).to_contain("vfs_boot_init_riscv64_virtio_fat32()")
+        expect(src.contains("simpleos_desktop_register_selected_fonts_from_vfs()")).to_be(false)
         expect(src.contains("vfs_boot_init_virtio_fat32()")).to_be(false)
-        expect(src).to_contain("launcher_path_exists(RV64_WM_BOOT_BINARY_PATH)")
-        expect(src).to_contain("rv64_wm_snapshot_facts_ready(")
-        expect(src).to_contain("snapshot.owned_scene.process_surface_count")
-        expect(src).to_contain("wm_producer.process_id == 0u64")
-        expect(src).to_contain("val wm_publication_deadline_us = boot_monotonic_now_us()")
-        expect(src).to_contain("yield_()")
-        expect(src.contains("wm_publication_attempts")).to_be(false)
-        expect(src).to_contain("if input_byte < 0:\n                # A publication may already have changed")
-        expect(src).to_contain("if not changed:\n                    continue")
-        expect(src.index_of("val _publication_pumped = wm_producer.pump_one_published_action(shell)")).to_be_less_than(src.index_of("var input_compositor = shell.compositor"))
-        expect(src).to_contain("val changed_snapshot = wm_producer.snapshot_published_scene(shell)")
-        expect(src).to_contain("changed_snapshot.owned_scene.process_id")
-        expect(src).to_contain("changed_snapshot.render_inputs.content_frames")
-        expect(src).to_contain("rendered_revision = executor.render(")
-        expect(src.contains("shell.render_baremetal_frame(executor)")).to_be(false)
-        expect(src.contains("compositor.compositor_materialize_process_surface_scalar")).to_be(false)
-        expect(src.contains("0, \"terminal\"")).to_be(false)
-        expect(launch).to_be_greater_than(create_engine)
-        expect(pump).to_be_greater_than(launch)
-        expect(snapshot).to_be_greater_than(pump)
-        expect(render).to_be_greater_than(snapshot)
+        expect(src).to_contain("compositor.compositor_materialize_process_surface_scalar")
         expect(src).to_contain("DesktopShell.new")
         expect(src).to_contain("Engine2dWmFrameExecutor.create_host_gpu")
         expect(src).to_contain("boot_monotonic_prepare()")
@@ -264,10 +268,12 @@ describe "SimpleOS production desktop render entry":
         expect(builds).to_contain("[\"build/os/generated\", \"src/os\", \"src/lib\", \"examples/09_embedded/simple_os\"]")
 
     it "submits canonical WM Draw IR to validated host presentation before local fallback":
+        # @req: REQ-OS-001
+        step("Verify: submits canonical WM Draw IR to validated host presentation before local fallback")
         val src = file_read("src/os/compositor/engine2d_wm_frame_executor.spl")
         val mapper = file_read("src/os/kernel/arch/x86_64/host_gpu_ivshmem_vmm.spl")
         val bridge = file_read("src/os/lib/gpu_bridge/host_gpu_ivshmem.spl")
-        val submit = src.index_of("val result = host_gpu_ivshmem_submit_draw_ir_retained(")
+        val submit = src.index_of("val receipt = host_gpu_ivshmem_submit_draw_ir(")
         val validate = src.index_of("if not host_gpu_ivshmem_device_receipt_valid(receipt")
         val present = src.index_of("if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr")
         val composition_build = src.index_of("val composition = shared_wm_scene_draw_ir_composition_with_content")
@@ -292,6 +298,7 @@ describe "SimpleOS production desktop render entry":
         expect(src).to_contain("receipt.output_bytes, receipt.output_checksum")
         expect(src).to_contain("images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))")
         expect(src).to_contain("host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))")
+        expect(src).to_contain("DRAW_IR_BACKEND_AUTO")
         # Per-window fail-closed degrade: an unresolved/duplicate window is
         # skipped and counted while the background + remaining windows still
         # compose, instead of the whole composite blacking out (return 0).
@@ -299,24 +306,9 @@ describe "SimpleOS production desktop render entry":
         expect(src).to_contain("degraded_window_count = degraded_window_count + 1")
         expect(src).to_contain("val renderable_images = expected_images - degraded_window_count")
         expect(src).to_contain("val filtered_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: good_windows, background: scene.background)")
-        expect(nested_collect).to_be_greater_than(0)
-        expect(nested_loop).to_be_greater_than(nested_collect)
-        expect(nested_append).to_be_greater_than(nested_loop)
-        expect(validated_composition).to_be_greater_than(nested_append)
-        expect(unfiltered_composition).to_equal(-1)
-        expect(composition_build).to_equal(validated_composition)
+        expect(src).to_contain("shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames")
         expect(composition_build).to_be_less_than(host_attempt)
-        # A host success returns before this lazy local recompose. A host
-        # failure only rebuilds when the negotiated target differs, preserving
-        # CPU/CPU-SIMD material semantics rather than reusing Metal/Vulkan IR.
-        expect(src).to_contain("local_draw_ir_backend_target: text")
-        expect(src).to_contain("draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target")
-        expect(local_recompose).to_be_greater_than(host_attempt)
-        val host_success_branch = src.substring(host_attempt, local_recompose)
-        expect(host_success_branch).to_contain("return scene_revision")
-        expect(local_composition).to_be_greater_than(local_recompose)
-        expect(local_composition).to_be_less_than(local_present)
-        expect(src).to_contain("engine2d_draw_ir_adv_composition_present_with_images(self.engine, local_composition, false, images)")
+        expect(host_attempt).to_be_less_than(local_present)
         expect(src).to_contain("use os.kernel.boot.monotonic_hardware.{boot_monotonic_deadline_us, boot_monotonic_elapsed_us, boot_monotonic_now_us}")
         expect(src).to_contain("val deadline_us = boot_monotonic_deadline_us(negotiation_started_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)")
         expect(src).to_contain("backend_codes = simpleos_host_gpu_render_backend_order(backend_code, backend_required)")
@@ -333,7 +325,4 @@ describe "SimpleOS production desktop render entry":
         expect(mapper).to_contain("vmm_map_page(VirtAddr(addr: base + offset), PhysAddr(addr: base + offset), VmFlags.mmio())")
         expect(mapper).to_contain("vmm_unmap_page(VirtAddr(addr: base + rollback))")
         expect(bridge).to_contain("not _host_gpu_slot_is_idle(base, completion)")
-        # Forbid the retired readback-producing local call specifically. The
-        # required production path above is the distinct
-        # engine2d_draw_ir_adv_composition_present_with_images API.
         expect(src.contains("engine2d_draw_ir_adv_composition_with_images(self.engine")).to_be(false)

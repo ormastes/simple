@@ -1,0 +1,100 @@
+# Standalone native scheduler evidence. No std.spec or assert runtime dependency.
+use std.common.build_manager.contracts.{BuildInputV1, BuildTaskV1, BuildHostV1, BuildRunV1, BuildResultV1, builder_task_identity_v1}
+use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_ready, builder_manager_host_slots, builder_manager_dispatch, builder_manager_reap, builder_manager_accept, builder_manager_resume, builder_manager_done, builder_manager_succeeded, builder_manager_unresolved, builder_manager_encode_v1, builder_manager_decode_v1}
+
+fn manager_native_check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print "FAIL {label}"
+    1
+
+fn manager_native_task(id: text, dependencies: [text]) -> BuildTaskV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    BuildTaskV1(id: id, attempt: 1, phase: "object", producer_digest: digest,
+        source_digest: digest, toolchain_digest: digest, dependencies: dependencies,
+        program: "bin/llc", args: ["-o", "{id}.o", "input.ll"],
+        inputs: [BuildInputV1(path: "input.ll", digest: digest)],
+        outputs: ["{id}.o"], cache_key: digest, timeout_ms: 0)
+
+fn manager_native_run(tasks: [BuildTaskV1]) -> BuildRunV1:
+    val host = BuildHostV1(id: "local", transport: "local", endpoint: "",
+        workspace: "build/worker", worker_program: "bin/manager",
+        worker_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", slots: 2)
+    BuildRunV1(tasks: tasks, hosts: [host], keep_going: true, max_attempts: 2)
+
+fn manager_native_result(task: BuildTaskV1, status: text) -> BuildResultV1:
+    var outputs: [BuildInputV1] = []
+    var code = 1
+    if status == "OK":
+        code = 0
+        outputs = [BuildInputV1(path: task.outputs[0],
+            digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
+    BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: "local",
+        status: status, exit_code: code, outputs: outputs,
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+
+fn main() -> i64:
+    var failures: i64 = 0
+    val parent = manager_native_task("parent", [])
+    val child = manager_native_task("child", ["parent"])
+    val other = manager_native_task("other", [])
+    val run = manager_native_run([parent, child, other])
+    var state = builder_manager_start(run)
+    failures = failures + manager_native_check(state.error == "", "valid manifest")
+    val ready = builder_manager_ready(state)
+    failures = failures + manager_native_check(ready.len() == 2, "two independent roots")
+    if ready.len() != 2: return failures + 1
+    failures = failures + manager_native_check(ready[0] == 0 and ready[1] == 2, "manifest ordering")
+    state = builder_manager_dispatch(state, 0, "local")
+    state = builder_manager_dispatch(state, 2, "local")
+    failures = failures + manager_native_check(builder_manager_host_slots(state, "local") == 0, "bounded host")
+    failures = failures + manager_native_check(builder_manager_ready(state).len() == 0, "child not ready before admission")
+    state = builder_manager_reap(state, "parent", 1)
+    val parent_result = manager_native_result(parent, "OK")
+    state = builder_manager_accept(state, parent_result, parent_result.outputs)
+    failures = failures + manager_native_check(state.error == "" and state.statuses[0] == "SUCCEEDED", "parent admitted")
+    failures = failures + manager_native_check(builder_manager_ready(state).len() == 1, "child becomes ready")
+    failures = failures + manager_native_check(not builder_manager_done(state), "live independent worker not done")
+
+    var cached = builder_manager_start(manager_native_run([parent]))
+    cached = builder_manager_resume(cached, parent_result, parent_result.outputs)
+    failures = failures + manager_native_check(builder_manager_succeeded(cached), "verified cache admission")
+    match builder_manager_decode_v1(cached.run, builder_manager_encode_v1(cached)):
+        case Ok(restored):
+            failures = failures + manager_native_check(restored.statuses[0] == "PENDING", "restart demands fresh cache verification")
+        case Err(reason):
+            print "FAIL cache journal: {reason}"
+            failures = failures + 1
+    var corrupt = builder_manager_start(manager_native_run([parent]))
+    corrupt = builder_manager_resume(corrupt, parent_result, [])
+    failures = failures + manager_native_check(corrupt.error != "" and corrupt.statuses[0] == "PENDING", "missing cached output rejected")
+
+    var retry = builder_manager_start(manager_native_run([parent]))
+    retry = builder_manager_dispatch(retry, 0, "local")
+    retry = builder_manager_reap(retry, "parent", 1)
+    retry = builder_manager_accept(retry, manager_native_result(parent, "ERROR"), [])
+    failures = failures + manager_native_check(retry.tasks[0].attempt == 2 and retry.statuses[0] == "PENDING", "reaped failure retry")
+    retry = builder_manager_dispatch(retry, 0, "local")
+    retry = builder_manager_accept(retry, parent_result, parent_result.outputs)
+    failures = failures + manager_native_check(retry.error == "" and retry.statuses[0] == "RUNNING" and retry.tasks[0].attempt == 2, "stale delivery does not poison live retry")
+    retry = builder_manager_reap(retry, "parent", 2)
+    val retried_result = manager_native_result(retry.tasks[0], "OK")
+    retry = builder_manager_accept(retry, retried_result, retried_result.outputs)
+    failures = failures + manager_native_check(builder_manager_succeeded(retry), "current retry can finish")
+
+    var unresolved = builder_manager_start(run)
+    unresolved = builder_manager_dispatch(unresolved, 0, "local")
+    unresolved = builder_manager_reap(unresolved, "parent", 1)
+    unresolved = builder_manager_unresolved(unresolved, "parent", 1)
+    failures = failures + manager_native_check(unresolved.statuses[0] == "UNRESOLVED" and unresolved.tasks[0].attempt == 1, "unknown receipt does not fabricate retry")
+    failures = failures + manager_native_check(unresolved.statuses[1] == "BLOCKED" and unresolved.statuses[2] == "PENDING", "unresolved blocks only descendants")
+    failures = failures + manager_native_check(builder_manager_host_slots(unresolved, "local") == 2, "reaped unresolved frees slots")
+    match builder_manager_decode_v1(run, builder_manager_encode_v1(unresolved)):
+        case Ok(restored):
+            failures = failures + manager_native_check(restored.statuses[0] == "RUNNING" and restored.tasks[0].attempt == 1, "restart reattaches exact unresolved attempt")
+            failures = failures + manager_native_check(restored.statuses[1] == "PENDING", "restart reopens unresolved descendants")
+        case Err(reason):
+            print "FAIL unresolved journal: {reason}"
+            failures = failures + 1
+    if failures == 0: print "PASS manager native fixture"
+    failures

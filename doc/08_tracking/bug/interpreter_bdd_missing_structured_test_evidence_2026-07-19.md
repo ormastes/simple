@@ -1,7 +1,10 @@
 # interpreter BDD omitted structured test evidence
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** PRODUCER FIXED / PURE-SIMPLE CONSUMER DEPLOYMENT PENDING
 **Severity:** P1 — `--assert-ran` could not authenticate interpreter results
 
 ## Root cause
@@ -24,3 +27,4 @@ the exact payload `simple-bdd-v1\n1\n1\n`: PASS.
 
 The pure-Simple environment bridge and fail-closed consumer still require an
 admitted Stage 4 integration run.
+

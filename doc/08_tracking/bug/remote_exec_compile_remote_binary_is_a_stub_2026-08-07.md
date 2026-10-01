@@ -1,4 +1,13 @@
-# `compile_remote_binary` is a fixed stub, not a compiler (blocks Notebook RemoteExec cross-cell VALUE state)
+# `compile_remote_binary` lacks a target compiler (blocks Notebook RemoteExec cross-cell VALUE state)
+
+**Mitigation 2026-09-27:** The two mirrored bridges now fail closed for Arm32
+and RiscV32 instead of returning fixed return-zero instructions. This removes
+the false-success and false remote-test PASS path, but does not satisfy the
+unblock condition below: a source-derived target compiler is still required.
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-07
 **Context:** Stream K, task K4 (`RemoteExec` NotebookExecutor) —

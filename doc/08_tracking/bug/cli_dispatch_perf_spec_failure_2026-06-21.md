@@ -1,7 +1,16 @@
 # CLI Dispatch Perf Spec Still Fails
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: new, different failure mode; not closable
+- **measured** — `bin/simple run test/05_perf/cli_dispatch_perf_spec.spl` (Rust seed
+  v1.0.0-rc.1, Windows) does not reach any benchmark: it fails to parse with
+  `Unexpected token: expected expression, found Indent`. So the "one failing benchmark
+  case" this entry reports can be neither confirmed nor cleared here.
+- **inferred** — the spec is now blocked earlier in the pipeline than the defect it tracks.
+  Left OPEN, with the parse failure recorded as the current state on this host.
 
 Date: 2026-06-21
 
@@ -31,16 +40,3 @@ syntax or fix the benchmark target.
 Do not use this spec as release evidence until the failing benchmark case is
 identified and made deterministic.
 
-## Verification 2026-08-17 (content classification, fleet lane I)
-STILL-OPEN, and NOT re-measured — stated plainly rather than guessed.
-`test/05_perf/cli_dispatch_perf_spec.spl` is present and still encodes the
-budgets in prose and in the example names: :5 "targets are met: <10ms dispatch
-overhead, <25ms startup, <2x total time", :80-84 the <25ms startup budget with
-its ~15ms Rust baseline, :87 `slow_it "executes in under 25ms"`. The rt_*
-direct-call half noted as fixed in this doc is unrelated to the budget failure,
-which carries no FIXED marker anywhere in the file.
-WHY NOT MEASURED: a self-hosted stage-3 bootstrap was running at ~98% CPU on
-this host for the whole session (the user`s stated top priority). Any latency
-number taken under that load would be meaningless, and a green reading would be
-actively misleading. This row needs a re-run on an idle box; it is explicitly
-one of the things this lane could not prove.

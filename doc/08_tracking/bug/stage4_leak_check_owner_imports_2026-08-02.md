@@ -1,4 +1,8 @@
 # Stage4 leak-check owner imports
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler/tools/leak_check/main.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Reproduction
 
@@ -20,3 +24,4 @@ implemented public facade.
 
 `leak_check_owner_imports_spec.spl` locks the concrete call/type owners and
 rejects the two former facade import shapes.
+

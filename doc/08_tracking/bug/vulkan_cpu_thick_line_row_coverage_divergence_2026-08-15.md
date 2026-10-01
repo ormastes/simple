@@ -1,19 +1,8 @@
 # Vulkan vs CPU thick-line row coverage divergence — 2026-08-15
+## Open 2026-09-16 — needs owner triage
 
-**RESOLVED 2026-08-15.** Root cause: two different even-thickness conventions.
-The Vulkan line kernel (`backend_vulkan_glsl.spl::_glsl_line`) stamps a full
-`(2*(thickness/2)+1)^2` square at every Bresenham point of the center line —
-including square end caps that extend `half` pixels beyond both endpoints —
-while `SoftwareBackend.draw_line` drew `2*half+1` parallel offset Bresenham
-lines with no end-cap extension. For the repro line the extra Vulkan pixels
-were exactly the 6 end-cap pixels at columns `x=1` and `x=30`, rows 28–30.
-Fix: `SoftwareBackend.draw_line`'s thick branch now walks the center-line
-Bresenham and stamps the same square per point (the Vulkan kernel is the
-canonical rule). Verified on a GPU-PROVEN lavapipe run of
-`engine2d_vulkan_cpu_render_diff_spec.spl`: `vulkan vs cpu: 0/1024 mismatched`
-(was 6/1024), `software vs oracle: 0/1024`, 4/4 passed; the spec's `<= 6`
-tolerance was deleted and `expect(mism).to_equal(0)` restored.
-`engine2d_backend_matrix_spec.spl` stays 16/16.
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 Rendering the SAME scene through the same `Engine2D` draw API on the strict
@@ -86,7 +75,7 @@ strict create fails, the spec discloses the skip and this bug is not
 exercised.
 
 ## Status
-RESOLVED (2026-08-15) — `SoftwareBackend.draw_line` thick branch unified onto
-the Vulkan kernel's per-Bresenham-point square-stamp rule; spec tolerance
-removed, exact `== 0` restored; measured `vulkan vs cpu: 0/1024 mismatched`
-on a GPU-PROVEN run. See header note for details.
+OPEN — divergence measured and fenced; fix is to unify thick-line coverage
+between `SoftwareBackend.draw_line` and the vulkan line path, then remove the
+spec tolerance.
+

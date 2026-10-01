@@ -1,7 +1,6 @@
 # Engine2D Compositor.add_layer insertion-sort double-decrement
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: Open.
 
 Date: 2026-07-20
 

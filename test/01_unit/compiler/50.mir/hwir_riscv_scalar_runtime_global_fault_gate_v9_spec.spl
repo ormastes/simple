@@ -1,0 +1,30 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_global_fault_gate_v9.{strict_riscv_scalar_runtime_global_fault_gate_v9}
+
+describe("runtime pipeline V9 global fault gate"):
+    it("uses the exact twelve V9 fault owners and blocks every externally visible effect"):
+        val module = strict_riscv_scalar_runtime_global_fault_gate_v9("v9_gate", CoreConfig.rv64im_zicsr_zifencei()).unwrap()
+        val faults = ["router_fault", "decoded_uop_skid_fault", "adapter_fault", "selector_fault", "pending_fault", "projection_fault", "m_fault", "csr_fault", "lsu_fault", "fence_fault", "merge_fault", "completion_skid_fault"]
+        val gated = ["input_valid", "input_ready", "completion_valid", "completion_ready", "bus_request_valid", "bus_response_ready", "fence_effect_valid", "bus_request_ready", "bus_response_valid", "fence_effect_ready", "csr_lookup_valid", "csr_lookup_read_enable", "csr_commit_valid"]
+        expect(module.ports.filter(_.name == "muldiv_fault").len()).to_equal(0)
+        for fault in faults:
+            var inputs: [HwHostInput] = []
+            for port in module.ports:
+                if port.direction == "in":
+                    inputs.push(HwHostInput.bits(port.name, if port.name.starts_with("raw_") or port.name == fault: 1 else: 0))
+            val result = evaluate_strict_comb_hwir(module, inputs).unwrap()
+            expect(result.value_of("fault_in").unwrap()).to_equal(1)
+            for output in gated: expect(result.value_of(output).unwrap()).to_equal(0)
+
+    it("permits all effects only with all child and sticky faults clear"):
+        val module = strict_riscv_scalar_runtime_global_fault_gate_v9("v9_clear", CoreConfig.rv32im_zicsr_zifencei()).unwrap()
+        val gated = ["input_valid", "input_ready", "completion_valid", "completion_ready", "bus_request_valid", "bus_response_ready", "fence_effect_valid", "bus_request_ready", "bus_response_valid", "fence_effect_ready", "csr_lookup_valid", "csr_lookup_read_enable", "csr_commit_valid"]
+        var clear_inputs: [HwHostInput] = []
+        for port in module.ports:
+            if port.direction == "in": clear_inputs.push(HwHostInput.bits(port.name, if port.name.starts_with("raw_"): 1 else: 0))
+        val clear = evaluate_strict_comb_hwir(module, clear_inputs).unwrap()
+        expect(clear.value_of("fault_in").unwrap()).to_equal(0)
+        for output in gated: expect(clear.value_of(output).unwrap()).to_equal(1)
+        expect(strict_riscv_scalar_runtime_global_fault_gate_v9("wrong", CoreConfig.rv64im()).is_err()).to_be(true)

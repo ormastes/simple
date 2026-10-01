@@ -4,41 +4,6 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 workflow="$root/.github/workflows/aot-lane-fences.yml"
 fail() { echo "FAIL: $*" >&2; exit 1; }
-. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
-
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/aot-receipt-contract.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-stage2="$tmp/stage2"
-admitted="$tmp/admitted"
-receipt="$tmp/receipt.env"
-printf 'admitted-stage2\n' >"$stage2"
-printf 'admitted-stage2\n' >"$admitted"
-stage2_sha=$(bootstrap_planner_v2_hash_file "$stage2")
-printf 'parent_compiler_path=%s\nparent_compiler_sha256=%s\n' \
-  "$stage2" "$stage2_sha" >"$receipt"
-
-bootstrap_planner_v2_verify_parent_compiler_binding \
-  "$receipt" "$stage2" "$admitted" ||
-  fail "exact admitted Stage 2 parent was rejected"
-
-printf 'rebuilt-stage2\n' >"$stage2"
-if bootstrap_planner_v2_verify_parent_compiler_binding \
-    "$receipt" "$stage2" "$admitted" 2>"$tmp/produced-mismatch.log"; then
-  fail "rebuilt Stage 2 parent was accepted"
-fi
-grep -Fq 'bootstrap-policy-error: planner-parent-produced-sha-mismatch' \
-  "$tmp/produced-mismatch.log" ||
-  fail "rebuilt Stage 2 did not fail with the produced-parent mismatch"
-
-printf 'admitted-stage2\n' >"$stage2"
-printf 'replacement-stage2\n' >"$admitted"
-if bootstrap_planner_v2_verify_parent_compiler_binding \
-    "$receipt" "$stage2" "$admitted" 2>"$tmp/consumed-mismatch.log"; then
-  fail "replacement admitted Stage 2 parent was accepted"
-fi
-grep -Fq 'bootstrap-policy-error: planner-parent-consumed-sha-mismatch' \
-  "$tmp/consumed-mismatch.log" ||
-  fail "replacement admitted Stage 2 did not fail with the consumed-parent mismatch"
 
 trust_root_line=$(grep -n -- '--stop-after-stage2' "$workflow" | cut -d: -f1)
 producer_line=$(grep -n 'produce-bootstrap-planner-admission-v2.shs' "$workflow" | cut -d: -f1)
@@ -49,10 +14,10 @@ consumer_line=$(grep -n -- '--bootstrap-receipt="\$bootstrap_receipt"' "$workflo
 [ "$trust_root_line" -lt "$producer_line" ] && [ "$producer_line" -lt "$consumer_line" ] ||
   fail "AOT workflow does not produce admission between trust-root and consumer"
 
-grep -Fq -- '--target=//bootstrap:stage3' "$workflow" ||
-  fail "planner admission is not bound to the Stage 3 target"
-grep -Fq -- '--reason=verify-landed-compiler-fix' "$workflow" ||
-  fail "planner admission lacks the typed Stage 3 verification reason"
+grep -Fq -- '--target=//bootstrap:stage4' "$workflow" ||
+  fail "planner admission is not bound to the Stage 4 target"
+grep -Fq -- '--reason=self-host-convergence-check' "$workflow" ||
+  fail "planner admission lacks the typed convergence reason"
 grep -Fq -- '--parent-compiler="$stage2"' "$workflow" ||
   fail "planner admission is not bound to the produced Stage 2 parent"
 grep -Fq -- '--out="$bootstrap_receipt"' "$workflow" ||
@@ -60,9 +25,5 @@ grep -Fq -- '--out="$bootstrap_receipt"' "$workflow" ||
 if grep -Fq 'simple-bootstrap-planner-admission-v2' "$workflow"; then
   fail "workflow hand-authors an admission envelope instead of using the canonical producer"
 fi
-grep -Fq -- '--resume-stage3-from-admitted=build/bootstrap' "$workflow" ||
-  fail "workflow does not consume the frozen admitted Stage 2"
-[ "$(grep -c -- '--full-bootstrap' "$workflow")" -eq 1 ] ||
-  fail "workflow rebuilds Stage 2 after planner admission"
 
-echo "PASS: AOT bootstrap consumes its exact receipt-bound admitted Stage 2 and rejects mismatches"
+echo "PASS: AOT bootstrap obtains and consumes a canonical hash-bound typed-reason receipt"

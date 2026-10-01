@@ -1,4 +1,13 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use std.common.structural.transfer.transfer_contracts.{
     PARALLEL_DOMAIN_COUNT,
     PARALLEL_TRANSFER_MODE_COUNT,
@@ -12,6 +21,7 @@ use std.common.structural.transfer.transfer_contracts.{
     parallel_transfer_payload_allows_raw_pointer,
     transfer_envelope_v1,
     transfer_envelope_v1_boundary_allowed,
+    transfer_envelope_v1_immutable_capability_shape_valid,
     transfer_envelope_v1_well_formed
 }
 use std.common.structural.transfer.transfer_codec.{
@@ -30,8 +40,12 @@ use std.common.structural.transfer.process_frame_codec.{
 }
 use std.common.structural.wire.{wire_to_hex}
 
+
 describe "TransferEnvelopeV1 contract":
+    # @manual scenario evidence
     it "pins the v1 vocabulary and has no raw pointer payload":
+        # @req REQ-SSPEC-UNIT
+        step("pins the v1 vocabulary and has no raw pointer payload")
         assert_equal(TRANSFER_SCHEMA_VERSION, 1)
         assert_equal(PARALLEL_DOMAIN_COUNT, 6)
         assert_equal(PARALLEL_TRANSFER_MODE_COUNT, 5)
@@ -42,6 +56,8 @@ describe "TransferEnvelopeV1 contract":
         assert_false(parallel_transfer_payload_allows_raw_pointer())
 
     it "requires a consuming owned move to invalidate its source":
+        # @req REQ-SSPEC-UNIT
+        step("requires a consuming owned move to invalidate its source")
         val moved = transfer_envelope_v1(7, 2,
             ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
             ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
@@ -55,6 +71,8 @@ describe "TransferEnvelopeV1 contract":
         assert_false(transfer_envelope_v1_well_formed(invalid))
 
     it "restricts scoped mutable loans to thread object handles":
+        # @req REQ-SSPEC-UNIT
+        step("restricts scoped mutable loans to thread object handles")
         val loan = transfer_envelope_v1(8, 0,
             ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
             ParallelTransferMode.ScopedLoan, ParallelTransferPayload.ObjectHandle,
@@ -68,6 +86,8 @@ describe "TransferEnvelopeV1 contract":
         assert_false(transfer_envelope_v1_well_formed(process_loan))
 
     it "rejects an owned heap region at process and device boundaries":
+        # @req REQ-SSPEC-UNIT
+        step("rejects an owned heap region at process and device boundaries")
         val process_move = transfer_envelope_v1(9, 0,
             ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
             ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
@@ -80,7 +100,48 @@ describe "TransferEnvelopeV1 contract":
             0, false)
         assert_true(transfer_envelope_v1_boundary_allowed(encoded))
 
+    it "requires a generation-scoped immutable capability for process handles":
+        val missing = transfer_envelope_v1(10, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.FrozenShare, ParallelTransferPayload.ObjectHandle,
+            0, false)
+        assert_false(transfer_envelope_v1_immutable_capability_shape_valid(missing))
+        assert_false(transfer_envelope_v1_boundary_allowed(missing))
+        val remote_missing = transfer_envelope_v1(10, 1,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Remote,
+            ParallelTransferMode.FrozenShare, ParallelTransferPayload.ObjectHandle,
+            0, false)
+        assert_false(transfer_envelope_v1_boundary_allowed(remote_missing))
+
+        val capability = transfer_envelope_v1(10, 4,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.FrozenShare, ParallelTransferPayload.ObjectHandle,
+            77, false)
+        assert_true(transfer_envelope_v1_immutable_capability_shape_valid(capability))
+        assert_true(transfer_envelope_v1_well_formed(capability))
+        assert_true(transfer_envelope_v1_boundary_allowed(capability))
+
+        val remote_capability = transfer_envelope_v1(10, 4,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Remote,
+            ParallelTransferMode.FrozenShare, ParallelTransferPayload.ObjectHandle,
+            77, false)
+        assert_true(transfer_envelope_v1_boundary_allowed(remote_capability))
+
+    it "keeps inline and encoded copy modes available":
+        val inline = transfer_envelope_v1(11, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
+            ParallelTransferMode.Copy, ParallelTransferPayload.InlineCopy,
+            0, false)
+        assert_true(transfer_envelope_v1_boundary_allowed(inline))
+        val encoded = transfer_envelope_v1(12, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
+            0, false)
+        assert_true(transfer_envelope_v1_boundary_allowed(encoded))
+
     it "round trips the canonical owned-move wire vector":
+        # @req REQ-SSPEC-UNIT
+        step("round trips the canonical owned-move wire vector")
         val moved = transfer_envelope_v1(7, 2,
             ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
             ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
@@ -96,6 +157,8 @@ describe "TransferEnvelopeV1 contract":
         assert_true(decoded.value.source_invalidated)
 
     it "rejects reserved bytes and process-local owned regions":
+        # @req REQ-SSPEC-UNIT
+        step("rejects reserved bytes and process-local owned regions")
         val process_move = transfer_envelope_v1(9, 0,
             ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
             ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
@@ -111,6 +174,8 @@ describe "TransferEnvelopeV1 contract":
         assert_false(decode_transfer_envelope(malformed).ok)
 
     it "matches the native bounded process-frame golden vector":
+        # @req REQ-SSPEC-UNIT
+        step("matches the native bounded process-frame golden vector")
         val envelope = transfer_envelope_v1(7, 2,
             ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
             ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
@@ -129,6 +194,8 @@ describe "TransferEnvelopeV1 contract":
         assert_equal(decoded.value.payload[4], 100)
 
     it "rejects wrong routes corruption trailing bytes and oversize":
+        # @req REQ-SSPEC-UNIT
+        step("rejects wrong routes corruption trailing bytes and oversize")
         val envelope = transfer_envelope_v1(7, 2,
             ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
             ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
@@ -151,6 +218,8 @@ describe "TransferEnvelopeV1 contract":
             process_transfer_frame_v1(envelope, huge)).len(), 0)
 
     it "round trips a canonical ASCII piped-process frame line":
+        # @req REQ-SSPEC-UNIT
+        step("round trips a canonical ASCII piped-process frame line")
         val envelope = transfer_envelope_v1(7, 2,
             ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
             ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
@@ -167,6 +236,8 @@ describe "TransferEnvelopeV1 contract":
                 envelope, [116, 121, 112, 101, 100])))
 
     it "rejects noncanonical stdout armor before process-frame decode":
+        # @req REQ-SSPEC-UNIT
+        step("rejects noncanonical stdout armor before process-frame decode")
         val envelope = transfer_envelope_v1(7, 2,
             ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
             ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,

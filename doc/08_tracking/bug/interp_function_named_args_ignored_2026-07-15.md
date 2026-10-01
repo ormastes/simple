@@ -1,7 +1,10 @@
 # Interpreter function calls ignored named argument order
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** Source fixed; pure-Simple execution pending  
 **Component:** compiler/core interpreter call evaluation  
 **Found:** 2026-07-15
 
@@ -33,3 +36,4 @@ and instance-method calls alongside constructor named arguments.
 Static source gates and independent high-level review are required before
 landing. Runtime execution remains pending because this lane has no valid
 pure-Simple executable; the Rust seed is bootstrap-only and is not an oracle.
+

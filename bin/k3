@@ -1,26 +1,62 @@
 #!/bin/sh
-# Launch Claude Code through Kimi's Anthropic-compatible K3 endpoint.
+# Launch Claude Code on Kimi K3.
+#
+# Credential order:
+#   1. MOONSHOT_API_KEY            -> platform.kimi.ai Open Platform key
+#   2. Kimi Code login (~/.kimi-code, made by `kimi`) -> subscription endpoint;
+#      the 900s OAuth token is refreshed by bin/kimi-code-token via apiKeyHelper
+#   3. ~/.config/kimi/token        -> platform.kimi.ai Open Platform key
 set -eu
 
-token=${MOONSHOT_API_KEY:-}
-if [ -z "${token}" ] && [ -r "${HOME}/.config/kimi/token" ]; then
-    token=$(sed -n '1p' "${HOME}/.config/kimi/token")
-fi
-if [ -z "${token}" ]; then
-    printf '%s\n' \
-        'error: set MOONSHOT_API_KEY or create ~/.config/kimi/token (mode 600)' >&2
-    exit 78
-fi
+bin_dir=$(cd "$(dirname "$0")" && pwd)
+kimi_home=${KIMI_CODE_HOME:-${HOME}/.kimi-code}
 
-export ANTHROPIC_BASE_URL="https://api.moonshot.ai/anthropic"
-export ANTHROPIC_AUTH_TOKEN="${token}"
-export ANTHROPIC_MODEL="kimi-k3[1m]"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="kimi-k3[1m]"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="kimi-k3[1m]"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="kimi-k3[1m]"
-export ANTHROPIC_DEFAULT_FABLE_MODEL="kimi-k3[1m]"
-export CLAUDE_CODE_SUBAGENT_MODEL="kimi-k3[1m]"
 export CLAUDE_CODE_AUTO_COMPACT_WINDOW="1048576"
 export CLAUDE_CODE_EFFORT_LEVEL="max"
 
-exec claude "$@"
+use_model() {
+    export ANTHROPIC_MODEL="$1"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL="$1"
+    export ANTHROPIC_DEFAULT_SONNET_MODEL="$1"
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL="$1"
+    export ANTHROPIC_DEFAULT_FABLE_MODEL="$1"
+    export CLAUDE_CODE_SUBAGENT_MODEL="$1"
+}
+
+use_platform_key() {
+    export ANTHROPIC_BASE_URL="https://api.moonshot.ai/anthropic"
+    export ANTHROPIC_AUTH_TOKEN="$1"
+    shift
+    use_model "kimi-k3[1m]"
+    exec claude "$@"
+}
+
+if [ -n "${MOONSHOT_API_KEY:-}" ]; then
+    use_platform_key "${MOONSHOT_API_KEY}" "$@"
+fi
+
+if ls "${kimi_home}"/credentials/kimi-code*.json >/dev/null 2>&1; then
+    # Global (.ai) logins persist oauth_host in config.toml; mainland (.com) ones do not.
+    if grep -q 'oauth_host *= *"https://auth.kimi.ai' "${kimi_home}/config.toml" 2>/dev/null; then
+        base="https://api.kimi.ai/coding/"
+    else
+        base="https://api.kimi.com/coding/"
+    fi
+    helper="${bin_dir}/kimi-code-token"
+    command -v cygpath >/dev/null 2>&1 && helper=$(cygpath -m "${helper}")
+    sh "${helper}" >/dev/null || exit 1  # fail here, not inside Claude Code
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+    export ANTHROPIC_BASE_URL="${KIMI_CODE_ANTHROPIC_BASE_URL:-${base}}"
+    export CLAUDE_CODE_API_KEY_HELPER_TTL_MS="600000"
+    use_model "k3[1m]"
+    exec claude --settings "{\"apiKeyHelper\": \"sh '${helper}'\"}" "$@"
+fi
+
+if [ -r "${HOME}/.config/kimi/token" ]; then
+    use_platform_key "$(sed -n '1p' "${HOME}/.config/kimi/token")" "$@"
+fi
+
+printf '%s\n' \
+    "error: no Kimi credential. Run 'kimi' and log in, or set MOONSHOT_API_KEY," \
+    '       or create ~/.config/kimi/token (mode 600)' >&2
+exit 78

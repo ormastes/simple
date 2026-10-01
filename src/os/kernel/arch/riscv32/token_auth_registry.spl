@@ -1,0 +1,94 @@
+# RV32 scheduler-owned authentication-key registry.
+#
+# The registry retains only an opaque lease to packed C storage. Message loans
+# are synchronous and wiped before this owner returns to its caller.
+
+use os.kernel.arch.common.packed_auth_storage.{PACKED_AUTH_SECRET, PACKED_AUTH_MESSAGE, packed_auth_claim, packed_auth_write_bytes, packed_auth_address, packed_auth_release}
+use os.kernel.arch.riscv32.privilege_transition_abi.{RV32_PRIVILEGE_ABI_VERSION, RV32_TOKEN_MAC_INPUT_BYTES, Rv32ExecutionTokenV1, rt_rv32_token_siphash24}
+use os.kernel.arch.riscv32.secure_entropy.{Rv32SecureEntropyReceipt}
+
+var g_rv32_token_key_lease: u64 = 0
+
+fn _append_le16(out: [u8], value: u16):
+    out.push((value & 0xffu16).to_u8())
+    out.push(((value >> 8u16) & 0xffu16).to_u8())
+
+fn _append_le32(out: [u8], value: u32):
+    var shift: u32 = 0
+    while shift < 32:
+        out.push(((value >> shift) & 0xffu32).to_u8())
+        shift = shift + 8
+
+fn _append_le64(out: [u8], value: u64):
+    var shift: u64 = 0
+    while shift < 64:
+        out.push(((value >> shift) & 0xffu64).to_u8())
+        shift = shift + 8
+
+fn _rv32_token_mac_message(token: Rv32ExecutionTokenV1) -> [u8]:
+    var out: [u8] = []
+    # Exactly 16 ASCII bytes, without a runtime string header or terminator.
+    val domain: [u8] = [83u8, 79u8, 83u8, 73u8, 88u8, 45u8, 82u8, 86u8,
+        51u8, 50u8, 45u8, 84u8, 79u8, 75u8, 49u8, 0u8]
+    var i: u32 = 0
+    while i < 16:
+        out.push(domain[i])
+        i = i + 1
+    _append_le32(out, RV32_PRIVILEGE_ABI_VERSION)
+    _append_le64(out, token.task_id)
+    _append_le64(out, token.task_generation)
+    _append_le64(out, token.address_space_generation)
+    _append_le64(out, token.root_phys)
+    _append_le64(out, token.nonce_token)
+    _append_le32(out, token.expected_satp)
+    _append_le16(out, token.asid)
+    _append_le16(out, token.reserved_zero)
+    _append_le32(out, token.supervisor_stack_bottom)
+    _append_le32(out, token.supervisor_stack_top)
+    _append_le32(out, token.hart_id)
+    out
+
+fn rv32_token_auth_registry_initialize(entropy: Rv32SecureEntropyReceipt) -> bool:
+    if g_rv32_token_key_lease != 0:
+        return false
+    val lease = packed_auth_claim(PACKED_AUTH_SECRET)
+    if lease == 0:
+        return false
+    if not packed_auth_write_bytes(lease, entropy.bytes, 16):
+        packed_auth_release(lease)
+        return false
+    g_rv32_token_key_lease = lease
+    true
+
+fn rv32_token_auth_tag(token: Rv32ExecutionTokenV1) -> u64:
+    if g_rv32_token_key_lease == 0 or token.task_id == 0 or token.task_generation == 0 or
+            token.address_space_generation == 0 or token.hart_id >= 8:
+        return 0
+    val message = _rv32_token_mac_message(token)
+    if message.len() != RV32_TOKEN_MAC_INPUT_BYTES:
+        return 0
+    val message_lease = packed_auth_claim(PACKED_AUTH_MESSAGE)
+    if message_lease == 0:
+        return 0
+    if not packed_auth_write_bytes(message_lease, message, RV32_TOKEN_MAC_INPUT_BYTES.to_u32()):
+        packed_auth_release(message_lease)
+        return 0
+    val key_address = packed_auth_address(g_rv32_token_key_lease)
+    val message_address = packed_auth_address(message_lease)
+    var tag: u64 = 0
+    if key_address != 0 and message_address != 0 and key_address <= 0xffffffffu64 and message_address <= 0xffffffffu64:
+        tag = rt_rv32_token_siphash24(
+            key_address.to_u32(), message_address.to_u32(), RV32_TOKEN_MAC_INPUT_BYTES.to_u32()
+        )
+    packed_auth_release(message_lease)
+    tag
+
+fn rv32_token_auth_registry_shutdown() -> bool:
+    if g_rv32_token_key_lease == 0:
+        return false
+    val lease = g_rv32_token_key_lease
+    g_rv32_token_key_lease = 0
+    packed_auth_release(lease)
+
+export rv32_token_auth_registry_initialize, rv32_token_auth_tag
+export rv32_token_auth_registry_shutdown

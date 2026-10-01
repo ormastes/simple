@@ -1,0 +1,196 @@
+# @cover src/compiler/70.backend/backend/llvm_native_link.spl
+#
+# Executable fence for doc/08_tracking/bug/native_link_fabricates_weak_empty_extern_definitions_2026-08-01.md
+# (pure-Simple hosted link path half). The bug record's "Fix needed" names the
+# UNFENCED pure-Simple host link path (`link_llvm_native`): an `@extern fn`
+# with no implementation was emitted as a weak, empty (zero-size) definition,
+# linked clean, and silently returned garbage on every call. The Rust-seed
+# guard `check_no_fabricated_extern_definitions`
+# (src/compiler_rust/compiler/src/linker/native_binary/stubs.rs) was the
+# accepted contract; this spec pins the pure-Simple port
+# (`hosted_check_no_fabricated_extern_definitions`, wired into the
+# `link_llvm_native` facade wrapper so the link fails CLOSED before any link
+# attempt).
+#
+# Lane note: `bin/simple test --mode=interpreter` cannot run the pure-Simple
+# AOT lane, so the predicate and the guard are exercised directly with
+# synthetic `nm --defined-only -S` text and with real cc-built probe objects.
+# The strong, non-empty (T, size-3) fabrication variant confirmed live on the
+# SEED lane (2026-08-08 record update) is out of this fence's contract: at the
+# link layer it is indistinguishable from a real tiny constant-return function
+# without front-end extern metadata; it stays fenced by
+# scripts/check/check-native-extern-fabrication.shs. One example below pins
+# that boundary so any future widening is deliberate.
+
+use compiler.backend.backend.llvm_native_link.{
+    hosted_nm_fabricated_extern_names,
+    hosted_check_no_fabricated_extern_definitions,
+    link_llvm_native,
+    NativeLinkOptions,
+}
+use std.io_runtime.{process_run, file_write, file_delete, file_exists, dir_create_all, getpid}
+use std.platform.{is_macos}
+use std.spec.*
+
+describe "nm fabrication classifier (pure predicate)":
+    it "accuses a weak symbol with a zero size column on a size-reporting platform":
+        # The original 2026-08-01 evidence shape: `W`, zero size, defined --
+        # never in `nm -u`, so no undefined-symbol guard can ever see it.
+        val names = hosted_nm_fabricated_extern_names(
+            "0000000000000000 0000000000000000 W lane_definitely_absent\n" +
+            "000000000000000a 000000000000000a T spl_main\n", true)
+        expect(names).to_equal(["lane_definitely_absent"])
+
+    it "accuses a weak symbol with no size column at all (the seed's !has_size predicate)":
+        # GNU nm without usable size info prints three tokens; the column's
+        # ABSENCE is itself the fabrication evidence, on every platform.
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 W lane_definitely_absent\n", true)).to_equal(["lane_definitely_absent"])
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 W lane_definitely_absent\n", false)).to_equal(["lane_definitely_absent"])
+
+    it "accuses an rt_-prefixed fabricated extern too (the family member guard #97 missed)":
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 0000000000000000 W rt_lane_absent_probe\n", true)).to_equal(["rt_lane_absent_probe"])
+
+    it "accuses weak object classes w and v, not just W":
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 0000000000000000 w lane_weak_local\n" +
+            "0000000000000000 0000000000000000 V lane_weak_undef_object\n", true)).to_equal(
+            ["lane_weak_local", "lane_weak_undef_object"])
+
+    it "does NOT accuse a weak symbol that carries a real body size":
+        # Weak linkage alone is not fabrication: Cranelift Preemptible-style
+        # and weak-alias real functions still carry a non-zero size.
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 0000000000000010 W real_weak_fn\n", true)).to_equal([])
+
+    it "does NOT accuse the strong non-empty variant, pinning the fence boundary":
+        # 2026-08-08 live evidence was STRONG (`T`), 3 bytes, on the SEED
+        # lane. A strong tiny body is indistinguishable from a real tiny
+        # constant-return function at the link layer, so this fence does not
+        # claim it; the record and check-native-extern-fabrication.shs own it.
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000002650 0000000000000003 T lane_definitely_absent_probe\n", true)).to_equal([])
+
+    it "does NOT accuse real strong functions, data, or the correct undefined state":
+        # `U` (undefined) is what an unimplemented extern SHOULD look like:
+        # the system linker then reports it natively. Flagging it would punish
+        # the honest state.
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 000000000000000a T spl_main\n" +
+            "0000000000000000 0000000000000008 D some_data\n" +
+            "                 U lane_absent_decl\n", true)).to_equal([])
+
+    it "treats all-zero reported sizes as meaningless on a blind platform (Darwin)":
+        # Measured: Mach-O `nm -S` prints "warning: sizes with --print-size for
+        # Mach-O files are always zero" -- every size is 0, so a zero size
+        # accuses nobody; only an absent column does (previous example).
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 0000000000000000 W _lane_weak_real\n", false)).to_equal([])
+        expect(hosted_nm_fabricated_extern_names(
+            "0000000000000000 0000000000000000 T _main\n", false)).to_equal([])
+
+    it "fails open on empty or non-nm input":
+        expect(hosted_nm_fabricated_extern_names("", true)).to_equal([])
+        expect(hosted_nm_fabricated_extern_names("no symbols\n", true)).to_equal([])
+        expect(hosted_nm_fabricated_extern_names("\n\n", true)).to_equal([])
+
+describe "hosted extern fabrication guard over link inputs":
+    it "allows an empty link closure (nothing to inspect)":
+        match hosted_check_no_fabricated_extern_definitions([], "fence_probe.bin"):
+            case Ok(_): expect(true).to_be(true)
+            case Err(message): expect(message).to_equal("")
+
+    it "skips missing object files instead of failing (fail open, seed policy)":
+        match hosted_check_no_fabricated_extern_definitions(
+            ["build/definitely_not_present_fence_probe_xyz.o"], "fence_probe.bin"):
+            case Ok(_): expect(true).to_be(true)
+            case Err(message): expect(message).to_equal("")
+
+describe "hosted extern fabrication fence against real objects":
+    # Real cc-built probes. `lane_weak_real_probe` is a weak function WITH a
+    # body: it must never be accused, on any platform -- this is the
+    # no-false-positive control without which a guard that rejected every
+    # weak symbol would look green.
+    fn compile_c_probe(dir: text) -> text:
+        dir_create_all(dir)
+        val src = dir + "/weak_real_probe.c"
+        val obj = dir + "/weak_real_probe.o"
+        file_write(src,
+            "__attribute__((weak)) int lane_weak_real_probe(void) { return 7; }\n" +
+            "int lane_strong_real_probe(void) { return 41; }\n")
+        val (out, err, code) = process_run("cc", ["-c", src, "-o", obj])
+        expect(code).to_equal(0)
+        obj
+
+    it "does not accuse a real weak function with a body (no false positives)":
+        val dir = "build/hosted_extern_fence_spec_" + getpid().to_text()
+        val obj = compile_c_probe(dir)
+        match hosted_check_no_fabricated_extern_definitions([obj], "fence_probe.bin"):
+            case Ok(_): expect(true).to_be(true)
+            case Err(message): expect(message).to_equal("")
+        file_delete(obj)
+        file_delete(dir + "/weak_real_probe.c")
+
+    it "rejects a weak sizeless definition through the real guard on ELF hosts":
+        if is_macos():
+            # Mach-O nm cannot show a sizeless weak function (every size
+            # prints as zero and the column is always present), so the
+            # rejecting branch needs an ELF toolchain to build the probe.
+            pending("weak-empty rejection probe requires an ELF host (Mach-O nm sizes are blind)")
+        else:
+            val dir = "build/hosted_extern_fence_spec_" + getpid().to_text()
+            dir_create_all(dir)
+            val src = dir + "/weak_empty_probe.s"
+            val obj = dir + "/weak_empty_probe.o"
+            file_write(src,
+                "    .text\n" +
+                "    .weak lane_weak_empty_probe\n" +
+                "    .type lane_weak_empty_probe, @function\n" +
+                "lane_weak_empty_probe:\n" +
+                "    .weak lane_weak_real_asm_probe\n" +
+                "    .type lane_weak_real_asm_probe, @function\n" +
+                "lane_weak_real_asm_probe:\n" +
+                "    movl $7, %eax\n" +
+                "    retq\n" +
+                "    .size lane_weak_real_asm_probe, .-lane_weak_real_asm_probe\n")
+            val (out, err, code) = process_run("cc", ["-c", src, "-o", obj])
+            expect(code).to_equal(0)
+            match hosted_check_no_fabricated_extern_definitions([obj], "fence_probe.bin"):
+                case Err(message):
+                    expect(message).to_contain("lane_weak_empty_probe")
+                    expect(message).to_contain("NO implementation")
+                    expect_not(message.contains("lane_weak_real_asm_probe"))
+                case Ok(_): expect(false).to_equal(true)
+            file_delete(obj)
+            file_delete(src)
+
+    it "fails CLOSED through the public link_llvm_native before any link attempt on ELF hosts":
+        if is_macos():
+            pending("weak-empty rejection probe requires an ELF host (Mach-O nm sizes are blind)")
+        else:
+            val dir = "build/hosted_extern_fence_spec_" + getpid().to_text()
+            dir_create_all(dir)
+            val src = dir + "/weak_empty_probe.s"
+            val obj = dir + "/weak_empty_probe.o"
+            val out_bin = dir + "/fence_probe.bin"
+            file_write(src,
+                "    .text\n" +
+                "    .weak lane_weak_empty_probe\n" +
+                "    .type lane_weak_empty_probe, @function\n" +
+                "lane_weak_empty_probe:\n")
+            val (cc_out, cc_err, cc_code) = process_run("cc", ["-c", src, "-o", obj])
+            expect(cc_code).to_equal(0)
+            # The guard fires pre-link: the error is the fence's own message,
+            # not a linker failure, and no output binary is produced.
+            match link_llvm_native([obj], out_bin, NativeLinkOptions.default()):
+                case Err(message):
+                    expect(message).to_contain("native link refused")
+                    expect(message).to_contain("lane_weak_empty_probe")
+                    expect(message).to_contain("weak, empty")
+                    expect_not(message.contains("Linking failed"))
+                case Ok(_): expect(false).to_equal(true)
+            expect(file_exists(out_bin)).to_be(false)
+            file_delete(obj)
+            file_delete(src)

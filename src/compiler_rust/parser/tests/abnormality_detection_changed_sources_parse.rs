@@ -38,8 +38,7 @@ fn changed_simple_sources_parse() {
     let mut failures = Vec::new();
     for relative in paths {
         let path = root.join(relative);
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         if let Err(error) = Parser::new(&source).parse() {
             failures.push(format!("{relative}: {error}"));
         }

@@ -1,0 +1,92 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_v4.{
+    strict_riscv_scalar_runtime_pipeline_v4}
+
+describe "runtime scalar pipeline v4 typed closure":
+    it "closes decoder, four completion lanes, selector, and sequential owners":
+        val result = strict_riscv_scalar_runtime_pipeline_v4(
+            "runtime_scalar_v4", CoreConfig.rv32())
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val pipeline = result.ok().unwrap()
+            expect(pipeline.local_diagnostic()).to_equal("")
+            expect(pipeline.diagnostic()).to_equal("")
+            expect(pipeline.control.children.len()).to_equal(2)
+            expect(pipeline.bindings.any(\row:
+                row.source_owner == "uop_skid" and
+                    row.source_port == "decoded_execution_class" and
+                    row.destination_owner == "control")).to_be(true)
+            expect(pipeline.bindings.any(\row:
+                row.source_owner == "control" and
+                    row.source_port == "completion_redirect_target" and
+                    row.destination_owner == "selector" and
+                    row.destination_port == "control_redirect_target")).to_be(true)
+            expect(pipeline.bindings.any(\row:
+                row.source_owner == "uop_skid" and
+                    row.source_port == "decoded_semantic_opcode" and
+                    row.destination_owner == "system" and
+                    row.destination_port == "decoded_semantic_opcode")).to_be(true)
+            expect(pipeline.bindings.any(\row:
+                row.source_owner == "system" and
+                    row.source_port == "completion_execute_trap_cause" and
+                    row.destination_owner == "selector" and
+                    row.destination_port == "system_execute_trap_cause")).to_be(true)
+            for lane in ["alu", "control", "system", "illegal"]:
+                expect(pipeline.bindings.any(\row:
+                    row.destination_owner == "selector" and
+                        row.destination_port == lane + "_valid")).to_be(true)
+                expect(pipeline.bindings.any(\row:
+                    row.destination_owner == "selector" and
+                        row.destination_port == lane + "_fault")).to_be(true)
+            for field in ["privilege", "original_instruction", "canonical_instruction",
+                    "instruction_length_bytes", "pc_before", "pc_after", "rd", "rd_write",
+                    "rd_value", "memory_address", "memory_read_mask", "memory_write_mask",
+                    "memory_read_data", "memory_write_data", "execute_trap_valid",
+                    "execute_trap_cause", "execute_trap_tval", "memory_trap_valid",
+                    "memory_trap_cause", "memory_trap_tval", "redirect_valid",
+                    "redirect_target", "provider_event_id", "decode_event_id", "illegal_valid"]:
+                expect(pipeline.bindings.any(\row:
+                    row.source_owner == "system" and
+                        row.destination_port == "system_" + field)).to_be(true)
+            expect(pipeline.bindings.any(\row:
+                row.source_owner == "selector" and
+                    row.source_port == "selected_valid" and
+                    row.destination_owner == "completion_skid")).to_be(true)
+            expect(pipeline.bindings.any(\row:
+                row.source_owner == "selector" and row.source_port == "selector_fault" and
+                    row.destination_owner == "fault_owner")).to_be(true)
+
+    it "is deterministic for RV32 and RV64 and preserves the v4 identity":
+        for config in [CoreConfig.rv32(), CoreConfig.rv64()]:
+            val first = strict_riscv_scalar_runtime_pipeline_v4(
+                "runtime_scalar_v4_exact", config).unwrap()
+            val second = strict_riscv_scalar_runtime_pipeline_v4(
+                "runtime_scalar_v4_exact", config).unwrap()
+            expect(first.structural_sha256()).to_equal(second.structural_sha256())
+            expect(first.structural_sha256().len()).to_equal(64)
+            expect(first.node_id.value).to_equal("runtime_scalar_v4_exact:module")
+
+    it "rejects missing bindings through local and canonical closure":
+        val locally_broken = strict_riscv_scalar_runtime_pipeline_v4(
+            "runtime_scalar_v4_local", CoreConfig.rv32()).unwrap()
+        locally_broken.bindings.pop()
+        expect(locally_broken.local_diagnostic()).to_contain(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V4-TOP")
+        val noncanonical = strict_riscv_scalar_runtime_pipeline_v4(
+            "runtime_scalar_v4_canonical", CoreConfig.rv32()).unwrap()
+        val first = noncanonical.bindings[0]
+        noncanonical.bindings[0] = noncanonical.bindings[1]
+        noncanonical.bindings[1] = first
+        expect(noncanonical.local_diagnostic()).to_equal("")
+        expect(noncanonical.diagnostic()).to_contain(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V4-CANONICAL")
+
+    it "rejects absent identity and noncanonical compressed lineage":
+        expect(strict_riscv_scalar_runtime_pipeline_v4(
+            "", CoreConfig.rv32()).is_err()).to_be(true)
+        val compressed = CoreConfig(profile: "rv32", xlen: 32,
+            physical_address_bits: 32, register_count: 32,
+            isa_profile: "rv32i", compressed_decode_profile: "rvc")
+        expect(strict_riscv_scalar_runtime_pipeline_v4(
+            "runtime_scalar_v4_rvc", compressed).is_err()).to_be(true)

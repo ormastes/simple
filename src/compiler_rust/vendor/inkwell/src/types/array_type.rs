@@ -2,13 +2,13 @@
 use llvm_sys::core::LLVMGetArrayLength;
 use llvm_sys::prelude::LLVMTypeRef;
 
+use crate::AddressSpace;
 use crate::context::ContextRef;
 use crate::support::LLVMString;
 use crate::types::enums::BasicMetadataTypeEnum;
 use crate::types::traits::AsTypeRef;
 use crate::types::{BasicTypeEnum, FunctionType, PointerType, Type};
 use crate::values::{ArrayValue, IntValue};
-use crate::AddressSpace;
 
 use std::fmt::{self, Display};
 
@@ -24,10 +24,12 @@ impl<'ctx> ArrayType<'ctx> {
     /// # Safety
     /// Undefined behavior, if referenced type isn't array type
     pub unsafe fn new(array_type: LLVMTypeRef) -> Self {
-        assert!(!array_type.is_null());
+        unsafe {
+            assert!(!array_type.is_null());
 
-        ArrayType {
-            array_type: Type::new(array_type),
+            ArrayType {
+                array_type: Type::new(array_type),
+            }
         }
     }
 
@@ -48,22 +50,6 @@ impl<'ctx> ArrayType<'ctx> {
         self.array_type.size_of()
     }
 
-    /// Gets the alignment of this `ArrayType`. Value may vary depending on the target architecture.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use inkwell::context::Context;
-    ///
-    /// let context = Context::create();
-    /// let i8_type = context.i8_type();
-    /// let i8_array_type = i8_type.array_type(3);
-    /// let i8_array_type_alignment = i8_array_type.get_alignment();
-    /// ```
-    pub fn get_alignment(self) -> IntValue<'ctx> {
-        self.array_type.get_alignment()
-    }
-
     /// Creates a `PointerType` with this `ArrayType` for its element type.
     ///
     /// # Example
@@ -77,27 +63,20 @@ impl<'ctx> ArrayType<'ctx> {
     /// let i8_array_type = i8_type.array_type(3);
     /// let i8_array_ptr_type = i8_array_type.ptr_type(AddressSpace::default());
     ///
-    /// #[cfg(any(
-    ///     feature = "llvm4-0",
-    ///     feature = "llvm5-0",
-    ///     feature = "llvm6-0",
-    ///     feature = "llvm7-0",
-    ///     feature = "llvm8-0",
-    ///     feature = "llvm9-0",
-    ///     feature = "llvm10-0",
-    ///     feature = "llvm11-0",
-    ///     feature = "llvm12-0",
-    ///     feature = "llvm13-0",
-    ///     feature = "llvm14-0"
-    /// ))]
+    /// #[cfg(feature = "typed-pointers")]
     /// assert_eq!(i8_array_ptr_type.get_element_type().into_array_type(), i8_array_type);
     /// ```
     #[cfg_attr(
         any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
+            all(feature = "llvm15-0", not(feature = "typed-pointers")),
+            all(feature = "llvm16-0", not(feature = "typed-pointers")),
             feature = "llvm17-0",
-            feature = "llvm18-0"
+            feature = "llvm18-1",
+            feature = "llvm19-1",
+            feature = "llvm20-1",
+            feature = "llvm21-1",
+            feature = "llvm22-1",
+            feature = "llvm23-1",
         ),
         deprecated(
             note = "Starting from version 15.0, LLVM doesn't differentiate between pointer types. Use Context::ptr_type instead."

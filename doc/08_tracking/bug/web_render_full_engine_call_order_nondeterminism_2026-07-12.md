@@ -1,4 +1,8 @@
 # Full HTML layout engine produces different pixels for identical input depending on call order
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -70,3 +74,4 @@ convert to NOTE without approval.
   stage's output differs between the two calls.
 - Check for any module-level `var`/static registry read or mutated during
   rendering that isn't reset per-call or per-cache-instance.
+

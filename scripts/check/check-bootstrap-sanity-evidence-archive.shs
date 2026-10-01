@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+evidence=$(mktemp -d "${TMPDIR:-/tmp}/simple-sanity-archive.XXXXXX")
+awk '/^bootstrap_stage2_sanity_output_preflight\(\) \(/ { active=1 } active { print } active && /^\)$/ { exit }' \
+  "${repo}/scripts/bootstrap/bootstrap-from-scratch.sh" > "${evidence}/owner.sh"
+. "${evidence}/owner.sh"
+date() { printf '%s\n' fixed; }
+base=${evidence}/stage2-sanity.env
+printf 'old log\n' > "${base}.frontend-bootstrap-0.log.scv-inventory-prime"
+printf 'old receipt\n' > "${base}.frontend-bootstrap-0.log.scv-inventory-prime.bounded.env"
+printf 'unfinished\n' > "${evidence}/.stage2-sanity.env.frontend-bootstrap-0.log.scv-inventory-prime.tmp.123"
+mkdir "${base}.superseded-previous"
+printf 'preserved\n' > "${base}.superseded-previous/prior"
+before=$(cat "${base}.frontend-bootstrap-0.log.scv-inventory-prime" "${base}.frontend-bootstrap-0.log.scv-inventory-prime.bounded.env" "${evidence}/.stage2-sanity.env.frontend-bootstrap-0.log.scv-inventory-prime.tmp.123" | sha256sum)
+bootstrap_stage2_sanity_output_preflight "${base}"
+archive=${base}.superseded-fixed-$$
+after=$(cat "${archive}/stage2-sanity.env.frontend-bootstrap-0.log.scv-inventory-prime" "${archive}/stage2-sanity.env.frontend-bootstrap-0.log.scv-inventory-prime.bounded.env" "${archive}/.stage2-sanity.env.frontend-bootstrap-0.log.scv-inventory-prime.tmp.123" | sha256sum)
+[ "${before}" = "${after}" ]
+[ ! -e "${base}.frontend-bootstrap-0.log.scv-inventory-prime.bounded.env" ]
+[ ! -e "${evidence}/.stage2-sanity.env.frontend-bootstrap-0.log.scv-inventory-prime.tmp.123" ]
+[ "$(cat "${base}.superseded-previous/prior")" = preserved ]
+# Simulate the next bounded writer: both exclusive leaf creations must succeed.
+(set -C; printf 'new log\n' > "${base}.frontend-bootstrap-0.log.scv-inventory-prime"; printf 'new receipt\n' > "${base}.frontend-bootstrap-0.log.scv-inventory-prime.bounded.env")
+# Existing archive refuses before a child can start and preserves new leaves.
+if bootstrap_stage2_sanity_output_preflight "${base}" && touch "${evidence}/child-started"; then exit 1; fi
+[ ! -e "${evidence}/child-started" ]
+[ "$(cat "${base}.frontend-bootstrap-0.log.scv-inventory-prime")" = 'new log' ]
+linked=${evidence}/linked.env
+ln -s "${base}.frontend-bootstrap-0.log.scv-inventory-prime" "${linked}.frontend-driver.log"
+if bootstrap_stage2_sanity_output_preflight "${linked}" && touch "${evidence}/linked-child-started"; then exit 1; fi
+[ ! -e "${evidence}/linked-child-started" ]
+[ -L "${linked}.frontend-driver.log" ]
+printf 'PASS: complete evidence family, byte preservation, next writer, collision and symlink before child; evidence=%s\n' "${evidence}"

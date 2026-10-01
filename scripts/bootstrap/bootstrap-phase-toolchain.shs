@@ -1,0 +1,156 @@
+#!/bin/sh
+# Phase verification owns the native-build toolchain boundary. Generated
+# sources are C: use clang on Unix-like hosts, never a gcc/g++/cl.exe fallback.
+bootstrap_phase_toolchain_error() {
+    echo "bootstrap-phase-toolchain: $1" >&2
+    return 1
+}
+
+# The receipt writer and executor resolve the same C driver. Keep the spelling
+# native on Windows; the canonical authority helper hashes its physical file.
+bootstrap_phase_c_compiler_path() (
+    case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        case "${LLVM_SYS_231_PREFIX:-}" in
+            /*|[A-Za-z]:[\\/]*) ;;
+            *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX'; exit 1 ;;
+        esac
+        phase_resolved_cc="$LLVM_SYS_231_PREFIX/bin/clang-cl.exe"
+        [ -f "$phase_resolved_cc" ] && [ -x "$phase_resolved_cc" ] || exit 1
+        cygpath -am "$phase_resolved_cc"
+        ;;
+    *)
+        phase_resolved_cc=${CC:-clang}
+        case "${phase_resolved_cc##*/}" in
+            clang|clang-[0-9]*) ;;
+            *) bootstrap_phase_toolchain_error 'Unix phase C compiler must be clang'; exit 1 ;;
+        esac
+        command -v "$phase_resolved_cc"
+        ;;
+    esac
+)
+
+bootstrap_phase_c_target_platform() {
+    case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) printf '%s\n' x86_64-pc-windows-msvc ;;
+    *) bootstrap_stage3_host_platform ;;
+    esac
+}
+
+bootstrap_phase_run_command() (
+    phase_executor=$1
+    shift
+    [ "${2:-}" = native-build ] || { "$phase_executor" "$@"; exit $?; }
+    case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        # Git Bash MSYSTEM otherwise selects GNU even for an MSVC compiler.
+        # Keep LLVM 23.1.1 clang-cl, MSVC ABI and CL=/TC together. Do not change
+        # this to gcc, g++, cl.exe, or ambient PATH discovery on another host.
+        case "${LLVM_SYS_231_PREFIX:-}" in
+            /*|[A-Za-z]:[\\/]*) ;;
+            *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX'; exit 1 ;;
+        esac
+        phase_cc=$(bootstrap_phase_c_compiler_path) || exit 1
+        if [ -n "${CC:-}" ]; then
+            phase_requested_cc=$(cygpath -am "$CC") || exit 1
+            [ "$phase_requested_cc" = "$phase_cc" ] || {
+                bootstrap_phase_toolchain_error 'CC must match the pinned LLVM clang-cl.exe'; exit 1;
+            }
+        fi
+        case "${SIMPLE_WINDOWS_ABI:-msvc}:${SIMPLE_LINKER_FLAVOR:-msvc}" in
+            msvc:msvc) ;;
+            *) bootstrap_phase_toolchain_error 'Windows phase requires MSVC ABI and linker flavor'; exit 1 ;;
+        esac
+        case "${CL:-/TC}" in
+            /TC) ;;
+            *) bootstrap_phase_toolchain_error 'Windows phase requires CL=/TC'; exit 1 ;;
+        esac
+        phase_target_seen=0
+        phase_target_next=0
+        for phase_arg in "$@"; do
+            if [ "$phase_target_next" = 1 ]; then
+                [ "$phase_arg" = x86_64-pc-windows-msvc ] || {
+                    bootstrap_phase_toolchain_error 'Windows phase requires the MSVC target'; exit 1;
+                }
+                phase_target_next=0
+                continue
+            fi
+            case "$phase_arg" in
+                --target) phase_target_seen=1; phase_target_next=1 ;;
+                --target=x86_64-pc-windows-msvc) phase_target_seen=1 ;;
+                --target=*) bootstrap_phase_toolchain_error 'Windows phase requires the MSVC target'; exit 1 ;;
+            esac
+        done
+        [ "$phase_target_next" = 0 ] || {
+            bootstrap_phase_toolchain_error 'missing native-build target'; exit 1;
+        }
+        # Reuse the matrix's bounded executor for the version probe too.
+        phase_version=$("$phase_executor" "$phase_cc" --version) || exit 1
+        printf '%s\n' "$phase_version" | grep -Eq '^clang version 23\.1\.1([[:space:]]|$)' || {
+            bootstrap_phase_toolchain_error 'Windows phase requires LLVM clang-cl 23.1.1'; exit 1;
+        }
+        CC=$phase_cc
+        SIMPLE_WINDOWS_ABI=msvc
+        SIMPLE_LINKER_FLAVOR=msvc
+        CL=/TC
+        export CC SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CL
+        bootstrap_windows_preserve_cl_mode
+        [ "$phase_target_seen" = 1 ] || set -- "$@" --target x86_64-pc-windows-msvc
+        ;;
+    *)
+        CC=$(bootstrap_phase_c_compiler_path) || {
+            bootstrap_phase_toolchain_error 'Unix phase requires executable clang'; exit 1;
+        }
+        # Some admitted compilers still route generated source through CXX.
+        # Bind that driver too; the compiler owner decides the source language.
+        phase_cxx=${CXX:-clang++}
+        case "${phase_cxx##*/}" in
+            clang++|clang++-[0-9]*) ;;
+            *) bootstrap_phase_toolchain_error 'Unix phase C++ compiler must be clang++'; exit 1 ;;
+        esac
+        CXX=$(command -v "$phase_cxx") || {
+            bootstrap_phase_toolchain_error 'Unix phase requires executable clang++'; exit 1;
+        }
+        export CC CXX
+        ;;
+    esac
+    # Pure-Simple runtime compilation reads SIMPLE_CC rather than CC. Reject an
+    # ambient override so the target receipt cannot describe a different tool.
+    if [ -n "${SIMPLE_CC:-}" ]; then
+        case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            phase_simple_cc=$(command -v "$SIMPLE_CC") || exit 1
+            phase_simple_cc=$(cygpath -am "$phase_simple_cc") || exit 1
+            ;;
+        *) phase_simple_cc=$(command -v "$SIMPLE_CC") || exit 1 ;;
+        esac
+        [ "$phase_simple_cc" = "$CC" ] || {
+            bootstrap_phase_toolchain_error 'SIMPLE_CC must match the pinned C compiler'; exit 1;
+        }
+    fi
+    SIMPLE_CC=$CC
+    export SIMPLE_CC
+    if [ -n "${source_root:-}" ]; then
+        if [ -n "${SIMPLE_PROJECT_ROOT:-}" ]; then
+            phase_project_root=$(CDPATH= cd -- "$SIMPLE_PROJECT_ROOT" && pwd -P) || exit 1
+            [ "$phase_project_root" = "$source_root" ] || {
+                bootstrap_phase_toolchain_error 'SIMPLE_PROJECT_ROOT must match the matrix source root'; exit 1;
+            }
+        fi
+        case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) SIMPLE_PROJECT_ROOT=$(cygpath -am "$source_root") || exit 1 ;;
+        *) SIMPLE_PROJECT_ROOT=$source_root ;;
+        esac
+        export SIMPLE_PROJECT_ROOT
+    fi
+    if [ -n "${tmp:-}" ]; then
+        case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            TMP=$(cygpath -am "$tmp") || exit 1
+            TEMP=$TMP
+            export TMP TEMP
+            ;;
+        esac
+    fi
+    "$phase_executor" "$@"
+)

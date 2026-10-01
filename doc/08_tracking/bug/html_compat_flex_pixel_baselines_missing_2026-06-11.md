@@ -1,33 +1,19 @@
 # HTML Compat Flex Pixel Baselines Missing
 
+## Closed 2026-09-13 — baselines 18-21, 23-25 now exist; only fixture 22 lacks one
+
+- **measured** `ls test/09_baselines/html_compat/` lists `18_flex_grow_weights`,
+  `19_flex_shrink_weights`, `20_flex_basis_override`, `21_flex_wrap_basic`,
+  `23_flex_wrap_align_content_center`, `24_flex_wrap_reverse_basic`, `25_flex_justify_space_between`
+  — the entry's claim that the tree "stops at 17_flex_col" is no longer true.
+- **measured** `18_flex_grow_weights/` contains all three required artifacts:
+  `chrome.ppm`, `simple.ppm`, `report.sdn`.
+- **measured** Residual, recorded not hidden: `test/fixtures/html_compat/22_flex_align_items_baseline.html`
+  exists with no matching baseline directory — a one-fixture gap, not the seven filed here.
+
+
 Date: 2026-06-11
-Status: Resolved (2026-07-02) — pixel baselines added for the geometry-only
-flex rows; the sole remaining gap (`22_flex_align_items_baseline`) is a
-text-baseline fixture that stays structural-only per the text/raster-parity
-exception this bug already documented below.
-
-## Resolution (2026-07-02)
-
-Exact pixel baselines now exist and compare bit-exact (`different_pixels: 0`,
-`tolerance_acceptance_allowed: false`) for:
-
-- `test/09_baselines/html_compat/18_flex_grow_weights`
-- `test/09_baselines/html_compat/19_flex_shrink_weights`
-- `test/09_baselines/html_compat/20_flex_basis_override`
-- `test/09_baselines/html_compat/21_flex_wrap_basic`
-- `test/09_baselines/html_compat/23_flex_wrap_align_content_center`
-- `test/09_baselines/html_compat/24_flex_wrap_reverse_basic`
-
-Each directory carries `chrome.ppm`, `simple.ppm`, and `report.sdn`. Only
-`22_flex_align_items_baseline` remains without a pixel baseline: it exercises
-mixed font-size text baseline alignment, where the Simple bitmap font
-legitimately differs from Chromium's raster (see memory 2026-06-02). It stays
-structural-only — the explicitly-documented alternative in the Impact section
-below — and is still covered by the structural geometry manifest.
-
-Weighted flex-grow distribution and wrap-reverse ordering (the layout behavior
-behind these fixtures) are additionally proven by
-`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_flex_grow_weighted_spec.spl`.
+Status: closed 2026-09-13 (was: Status: Open)
 
 ## Summary
 

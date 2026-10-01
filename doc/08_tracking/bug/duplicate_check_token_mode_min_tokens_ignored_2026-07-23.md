@@ -1,7 +1,11 @@
 # Duplicate-check token mode ignored `min_tokens` — 2026-07-23
+## Closed 2026-09-16 — SOURCE FIXED; threshold regression passed via temporary Rust bootstrap interpreter
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
+
+**Status:** SOURCE FIXED / PURE-SIMPLE QUALIFICATION PENDING
 
 ## Reproduction
 
@@ -24,3 +28,4 @@ The threshold regression passed through the temporary Rust bootstrap
 interpreter, which also measured 22 tokens for the retained-count assertion.
 A fresh pure-Simple Stage 4 candidate must run the complete focused spec before
 qualification.
+

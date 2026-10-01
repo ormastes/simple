@@ -1,8 +1,6 @@
-<!-- codex-research -->
 # Simple Formal Verification 2.0 — Domain Research
 
 **Date:** 2026-08-12
-**Recovered:** 2026-08-14
 **Status:** Consolidated from the user-provided research brief; external version claims require compatibility-lane revalidation
 
 ## Findings adopted
@@ -23,4 +21,5 @@ No engine is accepted by brand or exit code alone. Every result carries a typed 
 
 ## Tool/version note
 
-The proposal supplied a Lean 4.30-to-4.33 migration recommendation dated 2026-08-12. This recovered document does not promote that historical recommendation to a current compatibility claim. Implementation must verify repository pins, release availability, Mathlib compatibility, checker compatibility, and tactic/BitVec/Float behavior in a dedicated lane before changing the pinned toolchain. The architecture depends on pinned reproducible versions, not on a particular unvalidated version number.
+The proposal supplied a Lean 4.30-to-4.33 migration recommendation dated 2026-08-12. Implementation must verify repository pins, release availability, Mathlib compatibility, checker compatibility, and tactic/BitVec/Float behavior in a dedicated lane before changing the pinned toolchain. The architecture depends on pinned reproducible versions, not on a particular unvalidated version number.
+

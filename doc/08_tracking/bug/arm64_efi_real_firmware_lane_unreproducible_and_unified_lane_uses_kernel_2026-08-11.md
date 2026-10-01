@@ -1,4 +1,8 @@
 # aarch64 real-firmware EFI lane was unreproducible; unified arm64 lane still uses QEMU `-kernel`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-11
 - Status: OPEN (P2)
@@ -497,3 +501,36 @@ EFI-application half is fixed and gated; the `-kernel` half of
 `scripts/check/check-simpleos-arm64-unified-live.shs` is explicitly blocked on a
 self-hosted `bin/simple` that can build the unified kernel. Not actionable by this
 lane — a bootstrap is live at ~98% CPU and this lane is forbidden from running one.
+
+## Re-verification 2026-08-31 (boot-lane audit)
+
+Blocker for the lane migration is STILL TRUE. Measured on this host:
+
+- `bin/release/x86_64-unknown-linux-gnu/simple --version` answers
+  "WARNING: this Rust-built Simple binary is a bootstrap seed only" — the lane's
+  own admission (`compiler-is-bootstrap-seed` /
+  `pure-simple-compiler-missing`) rejects it before any build, and no
+  `simple.provenance.env` with `artifact_kind=pure-simple-bootstrap-compiler`
+  exists. Prior receipt at
+  `build/verify/simpleos-arm64-unified-live/evidence.env`:
+  `status=fail reason=compiler-is-bootstrap-seed`.
+- Kernel-side half remains green:
+  `sh scripts/check/check-simpleos-arm64-unified-boot-contract.shs` →
+  `PASS — 10 marker(s) checked in each of 2 boot paths ... via Limine
+  BOOTAA64.EFI `protocol: linux` (no -kernel, no isa-debug-exit)`.
+- The EFI real-firmware lane
+  (`check-simpleos-arm64-efi-real-firmware-boot.shs`) also PASSes on this host
+  (4 boot-stage markers, 76 serial lines).
+
+The lane-script edit (swap `-kernel "$kernel"` for the AAVMF pflash + Limine
+ESP chain, embedding the unified kernel with `protocol: linux`) remains the
+only open piece, and deliberately was NOT made blind: the unified kernel
+artifact cannot be produced until a pure-Simple bootstrap compiler is
+deployed, so an edited lane could not be verified end-to-end and would risk
+masking the real blocker behind a plumbing failure. Migrate the QEMU argv the
+day `pure-simple-bootstrap-compiler` provenance lands.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: EFI/QEMU real-firmware boot-chain migration, needs a self-hosted bin/simple to build the unified kernel (per .claude/rules/board-runnable.md), which this host does not have. No change made.
+

@@ -1630,3 +1630,200 @@ optimizer review pass (19 MIR-only, zero general patterns). Focused Rust tests
 are blocked by unrelated missing imports in `interpreter/expr/collections.rs`,
 and the deployed bootstrap binary remains stale, so this is not a completed
 cross-lane verification or signed-admission claim.
+
+### MIR actor and synchronization ABI follow-up (2026-08-26)
+
+The MIR runtime actor bridge now matches the Rust provider ABI for `spawn`
+(handler plus context) and `recv` (no timeout argument), and the direct mutex
+and read/write-lock owners retain their actual `i64` release/store status rather
+than declaring it as `Any`. Every direct raw call in these narrow owners is
+lexical `unsafe(ffi)`. The synchronization static authority audit records the
+status ABI and prevents a silent `Any` regression.
+
+This is declaration/call containment, not a global safety conclusion. In
+particular, the higher-level `actor_hooks.spl` facade still declares an
+incompatible actor ABI (`spawn(Any)` and `recv(actor_id)`) relative to the Rust
+runtime provider. It must be migrated to the scheduler-owned pure-Simple actor
+boundary or a separately generated contract; tagging it alone would be a
+cosmetic and unsafe workaround. No provider artifact is signed/admitted by
+this follow-up.
+
+### Legacy actor-hook ABI retirement (2026-08-27)
+
+A direct `extern fn rt_*` scan of owned `src` still finds 5,337 declarations.
+The broader source-only contract ledger records 12,739 foreign declarations
+(11,115 `rt_*` rows): 3,407 explicitly unsafe-tagged, zero signed-admitted,
+and 8,940 untouched. It observes no provider implementation language because
+it intentionally avoids loading binaries. The repository is therefore not
+globally SFFI-safe, verified, or signed. One especially unsafe legacy island
+was removed: `nogc_sync_mut.concurrent.actor_hooks` used an `Any`
+handler/message plus actor-id ABI that does not match the only Rust provider
+(`function_pointer + context`, current-inbox receive). The module now contains
+no raw actor declaration or call and fails closed with the stable
+`E-SFFI-ACTOR-LEGACY-ABI` diagnostic. Migration is to the scheduler-owned
+pure-Simple `std.actor.spawn`/`ActorRef` API.
+
+The static authority guard and affected-source check pass. Full optimizer
+analysis finds no opportunity in the retired module. The change removes an
+invalid call path; it adds no hot-path allocation, copy, lookup, hash, loop, or
+dispatch. It remains a targeted containment repair, not evidence that the
+remaining inventory has artifact-bound signature or semantic proof.
+
+### Canonical I/O ambiguous-return scope repair (2026-08-27)
+
+The canonical `std.nogc_sync_mut.sffi.io` owner retains four deliberately
+unsafe facades for raw runtime-owned text/hash results: their ABI has no
+separate failure or ownership state, so they cannot be promoted to safe
+`text` APIs. Each raw call is now nevertheless inside a smallest lexical
+`unsafe(ffi)` scope. The authority audit ratchets all 28 lexical owners and
+checks these four direct call shapes. Source check and full optimizer analysis
+pass with no reported optimization opportunity. No return type, allocation,
+copy, loop, lookup, hash, or dispatch changed; this is visibility and boundary
+containment, not signed admission.
+
+### Compiler CAS raw-owner consolidation (2026-08-27)
+
+The compiler cache CAS store had six filesystem/process/time raw declarations
+invoked from 31 source sites. They are now six private `@always_inline` helpers
+with minimal lexical FFI scopes, preserving the existing boolean, timestamp,
+and process-id contracts. Direct callers retain one ABI call after inlining;
+the change adds no retry, lock, lookup, heap allocation, copy, or dispatch.
+The new CAS authority audit and source check pass.
+
+Full optimizer analysis reports 70 opportunities in this existing cache module
+(64 MIR and six general: preallocation/length-hoisting). They are not caused by
+the wrapper consolidation, whose diff adds no collection or loop. They remain a
+separate cache-performance backlog and must be measured against a representative
+CAS workload before an optimization claim is made. This containment does not
+provide provider signing or global verification.
+
+### Compiler fast-GC raw-owner consolidation (2026-08-27)
+
+The cache fast-GC owner now isolates its twelve filesystem/directory/time raw
+contracts in private `@always_inline` lexical wrappers. The raw calls were
+previously spread through expiry, trash, traversal, and eviction paths. Their
+nullable size, boolean status, and runtime-owned list/walk representations are
+unchanged, while direct callers retain one ABI call after inlining. The static
+authority guard and source check pass; no retry, allocation, copy, lock,
+lookup, or dispatch was added.
+
+The focused GC spec executes nine functional examples successfully but its
+tenth, `Lease nullable-read facade ownership`, fails with
+`semantic: variable dir not found`. That test reads `lease.spl` source text and
+does not import or call `fast_gc.spl`; its failure is an existing test/compiler
+semantic issue, not evidence for this patch. It is recorded as WARN, not PASS.
+Optimizer analysis reports 58 existing fast-GC opportunities (including the
+pre-existing selection sweep); no throughput claim is made without a bounded
+CAS benchmark. This remains unsigned boundary containment.
+
+### Compiler cache-admission raw-owner consolidation (2026-08-27)
+
+The cache admission owner now contains four unsafe-tagged raw
+filesystem/directory contracts, each reached through a private always-inline
+lexical helper. Its pins read no longer declares a duplicate raw text ABI; it
+uses the canonical nullable read owner. This retains the existing missing-pin
+policy (`nil` normalizes to an empty pin set), so it is not a new signed or
+fail-closed ownership proof. A future contract migration must distinguish
+missing pins from an unreadable existing pins file before it can claim
+mission-critical admission safety.
+
+The new static authority audit and source check pass. Full optimizer analysis
+reports 22 existing opportunities (21 MIR, one collection preallocation); no
+loop, allocation, copy, lookup, or dispatch was added by the wrapper change.
+The already-recorded `gc_spec` lease-source-text test failure prevents claiming
+a full cache-GC test pass for this adjacent module.
+
+### Compiler mark-sweep raw-owner consolidation (2026-08-27)
+
+The cache mark-sweep owner now has seven unsafe-tagged raw
+filesystem/directory/process/time declarations, isolated behind private
+always-inline lexical wrappers. Its two raw text reads were removed in favor
+of the canonical nullable file-read facade. This preserves the existing mark
+and trash policy and its direct ABI-call shape, without adding retries, locks,
+allocations, copies, lookups, or dispatch.
+
+The authority audit and source check pass. Optimizer analysis reports 46
+existing opportunities (42 MIR, four preallocation) for separate benchmarked
+work. `nil` still normalizes to empty pin/manifest content, so unreadable
+existing input remains an explicit unverified contract limitation; this change
+does not mark mark-sweep or global SFFI safe/signed.
+
+### Cache unreadable-input fail-closed repair (2026-08-27)
+
+The prior nullable read handling in cache admission and mark-sweep normalized
+an unreadable existing pins/manifest file to empty text. That could hide
+protected pins or treat a read failure as a malformed manifest eligible for
+trash. Both owners now keep normal missing-file behavior but fail closed on an
+unreadable existing pins file with `E-SFFI-CACHE-PINS-READ`, and mark-sweep
+fails closed on an unreadable existing manifest with
+`E-SFFI-CACHE-MANIFEST-READ`. The values are unwrapped only after the explicit
+nil guard; no empty fallback remains on those paths.
+
+Both authority audits and the affected two-file source check pass. Optimizer
+findings remain 22 (admission) and 46 (mark-sweep), unchanged from the prior
+review. The new branches execute only on foreign-read failure; normal paths
+retain their direct call shape and add no allocation, copy, loop, lookup, lock,
+or dispatch. This is fail-closed contract repair, not artifact signing or
+global provider verification.
+
+### Compiler cache-lease raw-owner and unreadable-read repair (2026-08-27)
+
+The cache lease owner now isolates eight raw filesystem/directory/process/time
+contracts in private always-inline lexical wrappers. Existing unreadable lease
+files fail closed with `E-SFFI-CACHE-LEASE-READ` for heartbeat/read/list paths;
+the reclaim path conservatively leaves an unreadable lease in place rather than
+deleting it. Normal missing leases retain their existing API behavior. The
+authority audit and source check pass. Optimizer analysis reports 49 existing
+opportunities (48 MIR, one preallocation); no normal-path allocation, copy,
+lookup, lock, retry, or dispatch was added. This remains unsigned containment.
+
+### Authority census after cache-family containment (2026-08-27)
+
+The source authority census now records 14,064 missing raw call sites, 2,298
+lexical FFI scopes, and 1,625 function-wide unsafe scopes. The cache-family
+repairs reduced missing call sites by 96 from the previous 14,160 snapshot and
+increased lexical scopes by 37. This is source classification only—not ABI,
+provider-language, artifact, or signature proof. The next largest unresolved
+production families are SSH session (136 missing call sites) and Torch dynamic
+operations (129); both need provider-specific ABI/ownership design rather than
+bulk annotation.
+
+### SSH AES-GCM contract defect recorded before migration (2026-08-27)
+
+The first SSH-family contract review found that
+`rt_ssh_aes256_gcm_decrypt_packet` maps invalid input and GCM authentication
+failure to an empty byte array in both the Rust native export and the Rust
+interpreter handler.  The Simple SSH wrapper then treats empty as failure.  It
+is a cross-lane fabricated-value contract and cannot be repaired by consulting
+the companion payload-length symbol: that would decrypt/authenticate every
+packet twice on the hot path.  The required one-pass status/out v2 migration,
+cross-lane owners, and performance acceptance criteria are tracked in
+`doc/08_tracking/bug/sffi_ssh_aes256_gcm_decrypt_empty_failure_2026-08-27.md`.
+No code was changed in this review, so the provider remains unsafe, unsigned,
+and unverified.
+
+### SSH AES-GCM v2 tagged carrier containment (2026-08-27)
+
+The SSH packet decrypt migration now uses
+`rt_ssh_aes256_gcm_decrypt_packet_v2` consistently in the Simple wrapper,
+native Rust runtime, interpreter dispatch, runtime-symbol inventory, and JIT
+runtime-function table.  It returns a mandatory trailing tag: `0x00` invalid
+input, `0x01` authentication failure, or `0x02` success.  The Simple wrapper
+removes the trailing tag with in-place `pop()`, preserving the owned payload
+array with no second decrypt, per-call lookup/hash, or payload copy.  Legacy
+interpreter handlers that fabricated an empty array or `-1` are no longer
+registered.  The dedicated source authority audit passes and the focused
+Simple check passes under the bootstrap seed.  Focused Rust test execution is
+blocked by unrelated missing imports in `interpreter/expr/collections.rs`; do
+not claim full cross-lane verification, signing, or global SFFI safety.
+
+### Dynamic Torch lexical-owner gap (2026-08-27)
+
+The next unresolved family is the optional libtorch facade. Its canonical raw
+declarations are unsafe-tagged, and its result wrappers reject unavailable
+providers and nonpositive handles, but 129 shared-facade calls bypass lexical
+`unsafe(ffi)` ownership. The provider has no signed artifact or ABI/evidence
+admission path. This requires private inline raw owners that retain the current
+one availability decision plus one typed provider call, not bulk annotation.
+The detailed migration and acceptance criteria are tracked in
+`doc/08_tracking/bug/sffi_torch_dynamic_facade_lexical_owner_gap_2026-08-27.md`.

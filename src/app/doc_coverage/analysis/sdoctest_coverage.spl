@@ -1,35 +1,10 @@
 # SDoctest coverage helpers.
 
-use app.io.mod (shell)
-use app.doc_coverage.types.doc_item.{DocItem}
 use app.doc_coverage.types.coverage_result.{CoverageReport, FileCoverage}
+use app.doc_coverage.types.doc_item.{DocItem}
+use app.io.mod (shell)
 use std.test_runner.sdoctest.extractor (extract_sdoctest_blocks)
-
-# Markdown roots scanned for embedded `simple` code blocks. README.md is
-# included explicitly because it sits outside doc/.
-fn _sdoctest_markdown_files() -> [text]:
-    var files: [text] = []
-    val result = shell("find doc README.md -name '*.md' -type f 2>/dev/null || true")
-    val trimmed = result.stdout.trim()
-    if trimmed == "":
-        return files
-    for line in trimmed.split("\n"):
-        val path = line.trim()
-        if path != "":
-            files.push(path)
-    files
-
-# Load every SDoctest code block reachable from the repository's markdown.
-# Returns (source_paths, code_bodies) — parallel arrays, one entry per block.
-# Callers index `.0` for provenance and `.1` for the code itself.
-fn load_sdoctest_blocks() -> ([text], [text]):
-    var names: [text] = []
-    var codes: [text] = []
-    for path in _sdoctest_markdown_files():
-        for block in extract_sdoctest_blocks(path):
-            names.push(path)
-            codes.push(block.code)
-    (names, codes)
+use std.text.{NL}
 
 fn validate_tag_format(tag: text) -> bool:
     val parts = tag.split(":")
@@ -65,8 +40,8 @@ fn suggest_missing_tags(path: text) -> [text]:
 
 fn _decl_name_after_prefix(line: text, prefix: text) -> text:
     var rest = line.trim()[prefix.len():].trim()
-    val paren = rest.index_of("(")
-    val colon = rest.index_of(":")
+    val paren = rest.index_of("(") ?? -1
+    val colon = rest.index_of(":") ?? -1
     var end = rest.len()
     if paren >= 0 and paren < end:
         end = paren
@@ -110,58 +85,98 @@ fn match_functions_to_sdoctest(public_funcs: [text], blocks: [text]) -> ([text],
             missing.push(func)
     (matched, missing)
 
-# Aggregate documentation + sdoctest coverage over already-scanned items.
-# `blocks` is the code-body array from `load_sdoctest_blocks().1`.
-fn compute_sdoctest_coverage(items: [DocItem], blocks: [text]) -> CoverageReport:
-    var block_names: [text] = []
+# ---------------------------------------------------------------------------
+# Repo-wide SDoctest loading and coverage aggregation.
+#
+# These two names are re-exported by analysis/mod.spl and consumed by
+# cli/doc_coverage_command.spl and compiler_warnings.spl; they were missing
+# for months (doc/08_tracking/bug/sdoctest_coverage_loader_never_implemented_2026-07-28.md).
+# ---------------------------------------------------------------------------
+
+fn load_sdoctest_blocks() -> ([text], [text]):
+    """Load every fenced markdown code block that can document public API.
+
+    Usage examples live in root README files and under doc/ (see the
+    `format_group_warning` help text: "add usage example in README.md or
+    doc/guide/*.md"), so that is the scan surface — repo-wide `*.md` would
+    drag in tens of thousands of generated and vendored files.
+
+    Returns parallel arrays: provenance ("{path}#{line}") and block source.
+    """
+    val find_res = shell("find . -maxdepth 1 -name 'README*.md' -type f; find doc -maxdepth 1 -name '*.md' -type f; find doc/07_guide -name '*.md' -type f 2>/dev/null")
+    var names: [text] = []
+    var codes: [text] = []
+    val listing = find_res.stdout.trim()
+    if listing == "":
+        return (names, codes)
+    for raw_path in listing.split(NL):
+        val path = raw_path.trim()
+        if path == "":
+            continue
+        for block in extract_sdoctest_blocks(path):
+            names.push("{block.source_file}#{block.line_number}")
+            codes.push(block.code)
+    (names, codes)
+
+fn _path_index(paths: [text], path: text) -> i64:
+    var i = 0
+    while i < paths.len():
+        if paths[i] == path:
+            return i
+        i = i + 1
+    -1
+
+fn _item_in_blocks(name: text, blocks: [text]) -> bool:
     for block in blocks:
-        for name in extract_function_names_from_code(block):
-            block_names.push(name)
+        if block.contains(name):
+            return true
+    false
 
+fn compute_sdoctest_coverage(items: [DocItem], blocks: [text]) -> CoverageReport:
+    """Aggregate per-file and overall SDoctest coverage for scanned items.
+
+    An item counts as covered when its name appears in any loaded block;
+    the item is annotated (`has_sdoctest`) so reporters can list it.
+    """
     var report = CoverageReport.create()
-    var files: [FileCoverage] = []
+    # Per-file accumulators in parallel arrays; the seed compiler rejects
+    # nested indexed field assignment (report.files[idx].x = ...), so files
+    # are assembled once at the end.
     var paths: [text] = []
-
+    var per_total: [i64] = []
+    var per_covered: [i64] = []
+    var per_missed: [i64] = []
+    var per_items: [[DocItem]] = []
     for item in items:
-        var covered = false
-        for name in block_names:
-            if name == item.name:
-                covered = true
-        val documented = item.has_docstring or item.has_inline_comment
-
-        var idx = -1
-        var i = 0
-        while i < paths.len():
-            if paths[i] == item.file_path:
-                idx = i
-            i = i + 1
-        if idx < 0:
-            paths.push(item.file_path)
-            files.push(FileCoverage.create(item.file_path))
-            idx = paths.len() - 1
-
-        var fc = files[idx]
-        fc.total_items = fc.total_items + 1
-        if documented:
-            fc.documented_items = fc.documented_items + 1
-        else:
-            fc.missing_docs = fc.missing_docs + 1
-        if covered:
-            fc.has_sdoctest = fc.has_sdoctest + 1
-        else:
-            fc.missing_sdoctest = fc.missing_sdoctest + 1
-        fc.items.push(item)
-        files[idx] = fc
-
         report.total_items = report.total_items + 1
-        if documented:
+        if item.has_docstring or item.has_inline_comment:
             report.documented_items = report.documented_items + 1
         else:
             report.missing_docs = report.missing_docs + 1
-        if covered:
+        var idx = _path_index(paths, item.file_path)
+        if idx < 0:
+            paths = paths + [item.file_path]
+            per_total = per_total + [0]
+            per_covered = per_covered + [0]
+            per_missed = per_missed + [0]
+            per_items = per_items + [[]]
+            idx = paths.len() - 1
+        per_total[idx] = per_total[idx] + 1
+        per_items[idx] = per_items[idx] + [item]
+        if _item_in_blocks(item.name, blocks):
+            item.has_sdoctest = true
             report.sdoctest_coverage = report.sdoctest_coverage + 1
+            per_covered[idx] = per_covered[idx] + 1
         else:
             report.missing_sdoctest = report.missing_sdoctest + 1
-
-    report.files = files
+            per_missed[idx] = per_missed[idx] + 1
+    var fi = 0
+    while fi < paths.len():
+        var file_cov = FileCoverage.create(paths[fi])
+        file_cov.total_items = per_total[fi]
+        file_cov.has_sdoctest = per_covered[fi]
+        file_cov.missing_sdoctest = per_missed[fi]
+        file_cov.items = per_items[fi]
+        report.files = report.files + [file_cov]
+        fi = fi + 1
     report

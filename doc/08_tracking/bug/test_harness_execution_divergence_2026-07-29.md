@@ -1,4 +1,8 @@
 # `bin/simple test` gives wrong results for code that `bin/simple <file>.spl` computes correctly
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (2026-07-29, interpreter pass). The interpreter defect was
 NOT recursion/branch-related: the tree-walking interpreter's bracket-slice
@@ -341,3 +345,4 @@ bin/simple probe.spl                                # RESULT=true (correct)
 SIMPLE_EXECUTION_MODE=interpret bin/simple probe.spl # RESULT=false (WRONG)
 SIMPLE_RUNTIME_MODE=interpreter bin/simple probe.spl # RESULT=true (correct -- isolates the trigger var)
 ```
+

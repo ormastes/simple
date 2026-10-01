@@ -1,0 +1,24 @@
+#!/bin/sh
+# Run the natively compiled fixture; an interpreter run is not ABI evidence.
+set -eu
+candidate=${1:?usage: checker NATIVE_FIXTURE NEW_EVIDENCE_DIR}
+evidence=${2:?usage: checker NATIVE_FIXTURE NEW_EVIDENCE_DIR}
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+[ -x "$candidate" ]
+[ ! -e "$evidence" ]
+mkdir -p "$evidence"
+shasum -a 256 "$candidate" > "$evidence/candidate.sha256"
+set +e
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000 \
+perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --rss-cap-mode=enforce --max-rss-kib=5859375 --interval-ms=100 \
+    --timeout-seconds=60 --session-mode=new --receipt="$evidence/run.rss.env" -- \
+    /usr/bin/time -l "$candidate" > "$evidence/run.log" 2>&1
+status=$?
+set -e
+printf 'exit_status=%s\n' "$status" > "$evidence/status.env"
+[ "$status" = 0 ] || exit "$status"
+grep -Fx 'conditional-empty-symbol-keys: PASS cases=4' "$evidence/run.log" >/dev/null
+grep -Fx 'quiescent=1' "$evidence/run.rss.env" >/dev/null
+grep -Fx 'rss_cap_enforced=1' "$evidence/run.rss.env" >/dev/null
+printf 'conditional_empty_symbol_keys_native=PASS\n'

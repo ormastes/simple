@@ -22,6 +22,21 @@ static HOSTED_ALLOC_SIZES: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::ne
 /// Live bytes currently held by hosted `rt_alloc` allocations.
 static HOSTED_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum WindowsRawMappingKind {
+    Anonymous,
+    File,
+}
+
+#[cfg(windows)]
+static WINDOWS_RAW_MAPPINGS: OnceLock<Mutex<HashMap<usize, WindowsRawMappingKind>>> = OnceLock::new();
+
+#[cfg(windows)]
+fn windows_raw_mappings() -> &'static Mutex<HashMap<usize, WindowsRawMappingKind>> {
+    WINDOWS_RAW_MAPPINGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn hosted_alloc_sizes() -> &'static Mutex<HashMap<usize, usize>> {
     HOSTED_ALLOC_SIZES.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -148,9 +163,7 @@ fn harden_quarantine_free(ptr: usize, size: usize) {
 /// Callable from Simple as: `rt_mem_harden_check() -> i64`
 pub fn rt_mem_harden_check(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_harden_check requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_harden_check requires 0 arguments"));
     }
     if !harden_enabled() {
         return Ok(Value::Int(0));
@@ -180,9 +193,7 @@ pub fn rt_mem_harden_check(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_mem_guard_stats() -> i64`
 pub fn rt_mem_guard_stats(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_guard_stats requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_guard_stats requires 0 arguments"));
     }
     Ok(Value::Int(mem_guard::guard_sampled_count()))
 }
@@ -207,9 +218,7 @@ pub const MEM_PROFILE_FEATURE_OWNER_ATTRIBUTION: i64 = 1 << 3;
 /// Callable from Simple as: `rt_mem_profile_abi_version() -> i64`
 pub fn rt_mem_profile_abi_version(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_profile_abi_version requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_profile_abi_version requires 0 arguments"));
     }
     Ok(Value::Int(MEM_PROFILE_ABI_VERSION))
 }
@@ -220,9 +229,7 @@ pub fn rt_mem_profile_abi_version(args: &[Value]) -> Result<Value, CompileError>
 /// bit0 = header-bytes, bit1 = hosted-alloc-metadata, bit2 = real-memory-usage.
 pub fn rt_mem_profile_features(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_profile_features requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_profile_features requires 0 arguments"));
     }
     let mut features = MEM_PROFILE_FEATURE_HEADER_BYTES | MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA;
     if process_rss_bytes().is_some() {
@@ -239,9 +246,7 @@ pub fn rt_mem_profile_features(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_mem_attr_enabled() -> i64`
 pub fn rt_mem_attr_enabled(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_attr_enabled requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_attr_enabled requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_mem_attr_enabled()))
 }
@@ -257,9 +262,7 @@ pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let Value::Str(name) = &args[0] else {
-        return Err(CompileError::runtime(
-            "rt_mem_attr_set_owner requires a text name",
-        ));
+        return Err(CompileError::runtime("rt_mem_attr_set_owner requires a text name"));
     };
     simple_runtime::value::heap::set_current_owner(name.as_ref());
     Ok(Value::Nil)
@@ -270,11 +273,12 @@ pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_mem_attr_report(n: i64) -> text`
 pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_mem_attr_report requires 1 argument (n)",
-        ));
+        return Err(CompileError::runtime("rt_mem_attr_report requires 1 argument (n)"));
     }
-    let n = args[0].as_int()?.max(0) as usize;
+    let Value::Int(n) = args[0] else {
+        return Err(CompileError::runtime("rt_mem_attr_report requires an i64 n"));
+    };
+    let n = n.max(0) as usize;
     Ok(Value::Str(simple_runtime::value::heap::owner_report(n).into()))
 }
 
@@ -311,9 +315,7 @@ pub fn memory_usage(_args: &[Value]) -> Result<Value, CompileError> {
 /// Return the hosted runtime's live heap-registry entry count.
 pub fn rt_heap_registry_count(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_heap_registry_count requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_heap_registry_count requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
 }
@@ -323,11 +325,43 @@ pub fn rt_heap_registry_count(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_heap_live_bytes() -> i64`
 pub fn rt_heap_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_heap_live_bytes requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_heap_live_bytes requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes()))
+}
+
+/// Return the process-monotonic count of registered heap allocations.
+///
+/// Diagnostic only. Paired with `rt_heap_free_count`, this is the cheapest way
+/// to see whether a transient scope actually reclaimed anything: a region that
+/// allocates but never frees leaves `alloc - free` climbing monotonically.
+///
+/// Callable from Simple as: `rt_heap_alloc_count() -> i64`
+pub fn rt_heap_alloc_count(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_heap_alloc_count requires 0 arguments"));
+    }
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_alloc_count()))
+}
+
+/// Return the process-monotonic count of unregistered (freed) heap allocations.
+///
+/// Callable from Simple as: `rt_heap_free_count() -> i64`
+pub fn rt_heap_free_count(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_heap_free_count requires 0 arguments"));
+    }
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_free_count()))
+}
+
+/// Return the peak of `rt_heap_live_bytes` for this process.
+///
+/// Callable from Simple as: `rt_heap_peak_bytes() -> i64`
+pub fn rt_heap_peak_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_heap_peak_bytes requires 0 arguments"));
+    }
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_peak_bytes()))
 }
 
 /// Return live container backing-buffer bytes.
@@ -335,9 +369,7 @@ pub fn rt_heap_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_heap_aux_live_bytes() -> i64`
 pub fn rt_heap_aux_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_heap_aux_live_bytes requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_heap_aux_live_bytes requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_aux_live_bytes()))
 }
@@ -363,7 +395,9 @@ pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError>
             "rt_heap_live_bytes_by_kind requires 1 argument (kind)",
         ));
     }
-    let kind = args[0].as_int()?;
+    let Value::Int(kind) = args[0] else {
+        return Err(CompileError::runtime("rt_heap_live_bytes_by_kind requires an i64 kind"));
+    };
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(
         kind,
     )))
@@ -378,7 +412,9 @@ pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError>
             "rt_heap_live_count_by_kind requires 1 argument (kind)",
         ));
     }
-    let kind = args[0].as_int()?;
+    let Value::Int(kind) = args[0] else {
+        return Err(CompileError::runtime("rt_heap_live_count_by_kind requires an i64 kind"));
+    };
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(
         kind,
     )))
@@ -859,7 +895,142 @@ pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFileEx, UnmapViewOfFile, VirtualAlloc, VirtualProtect, FILE_MAP_COPY,
+        FILE_MAP_EXECUTE, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE, PAGE_EXECUTE_READ,
+        PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+    };
+
+    if args.len() != 6 {
+        return Err(CompileError::runtime("rt_mmap_raw requires 6 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    let prot = args[2].as_int()?;
+    let flags = args[3].as_int()?;
+    let fd = args[4].as_int()?;
+    let offset = args[5].as_int()?;
+    if length <= 0 || offset < 0 || (prot & 0x6) == 0x6 || (prot & !0x7) != 0 {
+        return Ok(Value::Int(-1));
+    }
+
+    let (pointer, kind) = if fd == -1 {
+        let protection = match prot {
+            0 => PAGE_NOACCESS,
+            1 => PAGE_READONLY,
+            2 | 3 => PAGE_READWRITE,
+            4 => PAGE_EXECUTE,
+            5 => PAGE_EXECUTE_READ,
+            _ => return Ok(Value::Int(-1)),
+        };
+        let pointer = unsafe {
+            VirtualAlloc(
+                if addr == 0 {
+                    std::ptr::null()
+                } else {
+                    addr as usize as *const _
+                },
+                length as usize,
+                MEM_COMMIT | MEM_RESERVE,
+                protection,
+            )
+        };
+        (pointer, WindowsRawMappingKind::Anonymous)
+    } else {
+        let shared = (flags & 0x1) != 0;
+        let private_map = (flags & 0x2) != 0;
+        if fd < 0 || shared == private_map {
+            return Ok(Value::Int(-1));
+        }
+        let Some(file) = super::file_io::windows_raw_fd_file(fd) else {
+            return Ok(Value::Int(-1));
+        };
+        let (section_protection, view_access) = if (prot & 0x2) != 0 {
+            if private_map {
+                (PAGE_WRITECOPY, FILE_MAP_COPY)
+            } else {
+                (PAGE_READWRITE, FILE_MAP_WRITE)
+            }
+        } else if (prot & 0x4) != 0 {
+            (PAGE_EXECUTE_READ, FILE_MAP_READ | FILE_MAP_EXECUTE)
+        } else {
+            (PAGE_READONLY, FILE_MAP_READ)
+        };
+        let section = unsafe {
+            CreateFileMappingW(
+                file.as_raw_handle() as _,
+                std::ptr::null(),
+                section_protection,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if section.is_null() {
+            return Ok(Value::Int(-1));
+        }
+        let view = unsafe {
+            MapViewOfFileEx(
+                section,
+                view_access,
+                ((offset as u64) >> 32) as u32,
+                (offset as u64 & 0xffff_ffff) as u32,
+                length as usize,
+                if addr == 0 {
+                    std::ptr::null()
+                } else {
+                    addr as usize as *const _
+                },
+            )
+        };
+        unsafe { CloseHandle(section) };
+        if view.Value.is_null() {
+            return Ok(Value::Int(-1));
+        }
+        let final_protection = match prot {
+            0 => Some(PAGE_NOACCESS),
+            2 => Some(if private_map { PAGE_WRITECOPY } else { PAGE_READWRITE }),
+            4 => Some(PAGE_EXECUTE),
+            _ => None,
+        };
+        if let Some(protection) = final_protection {
+            let mut old_protection = 0;
+            if unsafe { VirtualProtect(view.Value, length as usize, protection, &mut old_protection) } == 0 {
+                unsafe { UnmapViewOfFile(view) };
+                return Ok(Value::Int(-1));
+            }
+        }
+        if (prot & 0x4) != 0
+            && unsafe {
+                FlushInstructionCache(
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    view.Value,
+                    length as usize,
+                )
+            } == 0
+        {
+            unsafe { UnmapViewOfFile(view) };
+            return Ok(Value::Int(-1));
+        }
+        (view.Value, WindowsRawMappingKind::File)
+    };
+
+    if pointer.is_null() {
+        return Ok(Value::Int(-1));
+    }
+    windows_raw_mappings()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(pointer as usize, kind);
+    Ok(Value::Int(pointer as usize as i64))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_mmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_mmap_raw is unavailable on this host"))
 }
@@ -874,16 +1045,50 @@ pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
     if addr <= 0 || length <= 0 {
         return Ok(Value::Int(-1));
     }
-    let result = unsafe {
-        libc::munmap(
-            addr as usize as *mut libc::c_void,
-            length as usize,
-        )
-    };
+    let result = unsafe { libc::munmap(addr as usize as *mut libc::c_void, length as usize) };
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
+    use windows_sys::Win32::System::Memory::{UnmapViewOfFile, VirtualFree, MEM_RELEASE, MEMORY_MAPPED_VIEW_ADDRESS};
+
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_munmap_raw requires 2 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let address = addr as usize;
+    let kind = windows_raw_mappings()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&address);
+    let Some(kind) = kind else {
+        return Ok(Value::Int(-1));
+    };
+    let status = unsafe {
+        match kind {
+            WindowsRawMappingKind::Anonymous => VirtualFree(address as *mut _, 0, MEM_RELEASE),
+            WindowsRawMappingKind::File => UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: address as *mut _,
+            }),
+        }
+    };
+    if status == 0 {
+        windows_raw_mappings()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(address, kind);
+        Ok(Value::Int(-1))
+    } else {
+        Ok(Value::Int(0))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_munmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_munmap_raw is unavailable on this host"))
 }
@@ -910,9 +1115,96 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+/// Windows `rt_mprotect`: POSIX `PROT_*` bits (1 read, 2 write, 4 exec) mapped
+/// onto `VirtualProtect`, with the same W^X refusal as the Unix arm. A
+/// copy-on-write file view (`rt_mmap_raw` MAP_PRIVATE) rejects PAGE_READWRITE,
+/// so a writable request falls back to PAGE_WRITECOPY. Execute grants flush the
+/// instruction cache, mirroring `rt_mmap_raw`.
+#[cfg(windows)]
+pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
+    use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+    use windows_sys::Win32::System::Memory::{
+        VirtualProtect, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+        PAGE_WRITECOPY,
+    };
+
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_mprotect requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    let prot = args[2].as_int()?;
+    if addr <= 0 || length <= 0 || (prot & 0x6) == 0x6 || (prot & !0x7) != 0 {
+        return Ok(Value::Int(-1));
+    }
+    let protection = match prot {
+        0 => PAGE_NOACCESS,
+        1 => PAGE_READONLY,
+        2 | 3 => PAGE_READWRITE,
+        4 => PAGE_EXECUTE,
+        5 => PAGE_EXECUTE_READ,
+        _ => return Ok(Value::Int(-1)),
+    };
+    let pointer = addr as usize as *const core::ffi::c_void;
+    let mut old_protection = 0;
+    let mut ok = unsafe { VirtualProtect(pointer, length as usize, protection, &mut old_protection) } != 0;
+    if !ok && protection == PAGE_READWRITE {
+        ok = unsafe { VirtualProtect(pointer, length as usize, PAGE_WRITECOPY, &mut old_protection) } != 0;
+    }
+    if !ok {
+        return Ok(Value::Int(-1));
+    }
+    if (prot & 0x4) != 0
+        && unsafe {
+            FlushInstructionCache(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                pointer,
+                length as usize,
+            )
+        } == 0
+    {
+        return Ok(Value::Int(-1));
+    }
+    Ok(Value::Int(0))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_mprotect(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_mprotect is unavailable on this host"))
+}
+
+/// Hosted interpreter bridge for the canonical runtime page-size query.
+///
+/// Loader code uses this value to align W^X protection transitions.  Keeping
+/// the query in the same hosted memory family as mmap/mprotect prevents the
+/// interpreter from accepting those operations but rejecting their required
+/// alignment primitive as an unknown extern.
+pub fn rt_page_size(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_page_size requires 0 arguments"));
+    }
+    #[cfg(unix)]
+    {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return Err(CompileError::runtime("rt_page_size is unavailable on this host"));
+        }
+        Ok(Value::Int(page_size as i64))
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+        let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
+        unsafe { GetSystemInfo(&mut info) };
+        if info.dwPageSize == 0 {
+            return Err(CompileError::runtime("rt_page_size is unavailable on this host"));
+        }
+        Ok(Value::Int(i64::from(info.dwPageSize)))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(CompileError::runtime("rt_page_size is unavailable on this host"))
+    }
 }
 
 macro_rules! unix_address_length_status {
@@ -971,7 +1263,22 @@ pub fn rt_madvise_raw(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+/// Windows `rt_madvise_raw`: parity with the C runtime
+/// (src/runtime/platform/platform_win.h) — Windows has no madvise equivalent,
+/// so the call reports failure (-1) instead of an interpreter error and never
+/// fabricates success. Callers treat advice as best-effort.
+#[cfg(windows)]
+pub fn rt_madvise_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_madvise_raw requires 3 arguments"));
+    }
+    args[0].as_int()?;
+    args[1].as_int()?;
+    args[2].as_int()?;
+    Ok(Value::Int(-1))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_madvise_raw(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_madvise_raw is unavailable on this host"))
 }
@@ -996,14 +1303,32 @@ pub fn rt_msync_flags(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+/// Windows `rt_msync_flags`: parity with the C runtime
+/// (src/runtime/platform/platform_win.h) — `FlushViewOfFile`, flags ignored.
+#[cfg(windows)]
+pub fn rt_msync_flags(args: &[Value]) -> Result<Value, CompileError> {
+    use windows_sys::Win32::System::Memory::FlushViewOfFile;
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_msync_flags requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    args[2].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let ok = unsafe { FlushViewOfFile(addr as usize as *const core::ffi::c_void, length as usize) } != 0;
+    Ok(Value::Int(if ok { 0 } else { -1 }))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_msync_flags(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_msync_flags is unavailable on this host"))
 }
 
 #[cfg(test)]
 mod ptr_read_u8_tests {
-    use super::{rt_mmap_raw, rt_mprotect, rt_munmap_raw, rt_ptr_read_u8};
+    use super::{rt_mmap_raw, rt_mprotect, rt_munmap_raw, rt_page_size, rt_ptr_read_u8};
     use crate::value::Value;
 
     #[cfg(unix)]
@@ -1023,6 +1348,13 @@ mod ptr_read_u8_tests {
         assert!(rt_ptr_read_u8(&[Value::Int(1)]).is_err());
     }
 
+    #[test]
+    fn page_size_bridge_is_positive_and_rejects_arguments() {
+        assert!(rt_page_size(&[]).unwrap().as_int().unwrap() > 0);
+        assert!(rt_page_size(&[Value::Int(1)]).is_err());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn maps_protects_and_unmaps_host_memory() {
         let mapped = rt_mmap_raw(&[
@@ -1089,6 +1421,46 @@ mod ptr_read_u8_tests {
                 .unwrap(),
             -1
         );
+        assert_eq!(
+            rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Regression: the Windows seed had no `rt_mprotect` ("unavailable on this
+    /// host"), so the module loader's W^X transitions failed and
+    /// module_loader_relocation_spec could not load any SMF on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn windows_mprotect_transitions_and_rejects_write_execute() {
+        const PROT_READ: i64 = 1;
+        const PROT_WRITE: i64 = 2;
+        const PROT_EXEC: i64 = 4;
+        let rw = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int(PROT_READ | PROT_WRITE),
+            Value::Int(0x2 | 0x20),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_ne!(rw, -1);
+        let mprotect = |prot: i64| {
+            rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(prot)])
+                .expect("rt_mprotect must be available on Windows")
+                .as_int()
+                .unwrap()
+        };
+        assert_eq!(mprotect(PROT_READ), 0);
+        assert_eq!(mprotect(PROT_READ | PROT_EXEC), 0);
+        assert_eq!(mprotect(PROT_READ | PROT_WRITE), 0);
+        assert_eq!(mprotect(PROT_WRITE | PROT_EXEC), -1, "W^X must be refused");
         assert_eq!(
             rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)])
                 .unwrap()
@@ -1492,6 +1864,64 @@ pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
         Value::ByteArray(v) | Value::FrozenByteArray(v) if !v.is_empty() => v.as_ptr() as i64,
         _ => 0,
     }))
+}
+
+/// Hosted `unsafe_addr_of(ref: any) -> u64` — baremetal SimpleOS code (e.g.
+/// `src/os/kernel/fd_io.spl::_vfs_ipc_request`) declares this extern with no
+/// interpreter binding, so any hosted spec that reaches it died with
+/// `unknown extern function: unsafe_addr_of`. See
+/// doc/08_tracking/bug/interpreter_extern_registry_gap_blocks_os_specs_2026-08-04.md.
+///
+/// A hosted interpreter cannot take the true machine address of a boxed
+/// `Value` the way freestanding codegen can, so this returns the real data
+/// pointer only for the variants that have contiguous backing storage
+/// (`ByteArray`/`FrozenByteArray`/`Str`), mirroring `rt_array_data_ptr`
+/// immediately above, and `0` for every other variant. Callers that then feed
+/// the result straight into a real syscall (as `_vfs_ipc_request` does) never
+/// dereference it hosted, because the paired `rt_x86_syscall` stub below
+/// fails closed before any kernel would read the pointer — see that
+/// function's doc comment. Non-contiguous variants intentionally return 0
+/// rather than a fabricated address: 0 is a safe, recognizable "no real
+/// pointer" sentinel that callers already treat as invalid.
+pub fn unsafe_addr_of(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("unsafe_addr_of requires 1 argument (ref)"));
+    }
+    let addr: u64 = match &args[0] {
+        Value::ByteArray(v) | Value::FrozenByteArray(v) if !v.is_empty() => v.as_ptr() as u64,
+        Value::Str(s) => {
+            let bytes = s.as_str().as_bytes();
+            if bytes.is_empty() {
+                0
+            } else {
+                bytes.as_ptr() as u64
+            }
+        }
+        _ => 0,
+    };
+    Ok(Value::UInt { value: addr, width: 64 })
+}
+
+/// Hosted `rt_x86_syscall(id, arg0, arg1, arg2, arg3, arg4) -> i64` —
+/// baremetal SimpleOS userland (`src/os/userlib/syscall_raw.spl::syscall`)
+/// declares this `@cfg(x86_64)` extern to emit a real `syscall` instruction
+/// on freestanding builds; it had no interpreter binding at all, so any
+/// hosted spec that reached it (e.g. `posix_dup2` -> `posix_close` ->
+/// `_vfs_ipc_request`) died with `unknown extern function: rt_x86_syscall`.
+/// See doc/08_tracking/bug/interpreter_extern_registry_gap_blocks_os_specs_2026-08-04.md.
+///
+/// There is no real SimpleOS kernel to trap into from a hosted process, and
+/// issuing the literal `syscall` instruction here would invoke the HOST
+/// OS's syscall table with attacker-controlled register contents — not a
+/// safe stub. The honest hosted double is ENOSYS (-38): every caller in
+/// `src/os/**` already treats a negative return as "this operation is
+/// unavailable" and degrades gracefully (`_vfs_ipc_request` returns a
+/// transport-failure reply; `fd_dup2`'s local table update does not depend
+/// on the syscall succeeding), so specs that only assert local-state
+/// effects pass unchanged.
+pub fn rt_x86_syscall(_args: &[Value]) -> Result<Value, CompileError> {
+    const ENOSYS: i64 = 38;
+    Ok(Value::Int(-ENOSYS))
 }
 
 /// All-i64 bulk copy: `memcpy(addr + offset, src, len)`.

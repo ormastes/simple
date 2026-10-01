@@ -1,0 +1,581 @@
+# Source-linked replay for the bounded L7 three-payload formal model.
+#
+# This leaf invokes existing compiler/cache owners. Receipt issuance remains
+# NotChecked until owner-authenticated proof, runner, fixture, and mutant
+# receipts exist. It never promotes to SourceRefined, activates a worker, grants semantic
+# authority, publishes a generation, or claims crash durability.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_write_bytes}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, PhysicalTldHeaderV1, PhysicalTldObjectV1,
+    physical_tld_section_table_digest_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1}
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadFallbackV1}
+use compiler.frontend.cache_artifact.physical_tld_codec_v1.{
+    encode_physical_tld_v1}
+use compiler.frontend.cache_artifact.three_payload_semantic_closure.{
+    ThreePayloadSemanticBindBounds, bind_three_payload_semantic_inputs,
+    resolve_three_payload_semantic_input}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    ThreePayloadSnapshotV2, ThreePayloadParentGenerationV2,
+    ThreePayloadModuleClosureV2, ThreePayloadVerifiedObjectsV2,
+    ThreePayloadPackBoundsV2, PreparedThreePayloadV2,
+    seal_three_payload_closure_v2, verify_prepared_three_payload_v2}
+use compiler.driver.cache.worker.three_payload_worker_io_v1.{
+    ThreePayloadWorkerPolicyV1, three_payload_worker_confinement_available_v1}
+use compiler.driver.cache.worker.three_payload_physical_file_broker_v1.{
+    ThreePayloadPhysicalFileSetV1, read_three_payload_physical_files_v1}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    ChangedSemanticFacetV1, seed_reverse_shards_v1, stage_reverse_delta_v1,
+    stage_reverse_shards_v1, plan_affected_queries_v1,
+    affected_query_domain_authority_available_v1}
+use compiler.driver.cache.journal.action_root_journal_v1.{
+    ActionRootJournalV1, recover_action_root_journal_v1}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedCasTypedIdentityV1, VerifiedGenerationRootV1,
+    VerifiedGenerationPinV1, VerifiedGenerationSweepDecisionV1,
+    verified_generation_pin_snapshot_v1, verified_generation_sweep_decision_v1}
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{
+    semantic_scope_authority_available_v1}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    three_payload_generation_publication_available_v1}
+
+pub struct ThreePayloadSourceBindingV1:
+    source_path: text
+    source_symbol: text
+    source_bytes_hash: text
+    dependency_bytes_hash: text
+    model_hash: text
+    checker_hash: text
+    toolchain_identity: text
+
+pub struct ThreePayloadFormalObservationV1:
+    case_id: text
+    source_symbol: text
+    actual: text
+    expected: text
+    matched: bool
+
+pub struct ThreePayloadFormalReceiptV1:
+    source_bindings: [ThreePayloadSourceBindingV1]
+    theorem_roots: [text]
+    axiom_audit_hash: text
+    checked_case_count: i64
+    counterexample_count: i64
+    killed_mutant_count: i64
+    status: FormalStatus
+    diagnostic: text
+
+fn _formal_digest_v1(label: text) -> text: sha256_text(label)
+
+fn _formal_bool_v1(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _formal_join_path_v1(root: text, relative: text) -> text:
+    if root == "" or root == ".": return relative
+    if root.ends_with("/"): return root + relative
+    root + "/" + relative
+
+fn _formal_source_path_valid_v1(path: text) -> bool:
+    (path.starts_with("src/") and not path.contains("..") and
+        not path.contains("\\") and not path.contains("\u0000") and
+        not path.contains("\n"))
+
+fn _formal_toolchain_identity_valid_v1(value: text) -> bool:
+    val prefix = "lean-toolchain-sha256:"
+    (value.starts_with(prefix) and
+        sha256_lower_hex_valid(value.substring(prefix.len())))
+
+fn _formal_source_binding_shape_valid_v1(
+    value: ThreePayloadSourceBindingV1,
+) -> bool:
+    (_formal_source_path_valid_v1(value.source_path) and
+        value.source_symbol != "" and not value.source_symbol.contains("\u0000") and
+        not value.source_symbol.contains("\n") and
+        sha256_lower_hex_valid(value.source_bytes_hash) and
+        sha256_lower_hex_valid(value.dependency_bytes_hash) and
+        sha256_lower_hex_valid(value.model_hash) and
+        sha256_lower_hex_valid(value.checker_hash) and
+        _formal_toolchain_identity_valid_v1(value.toolchain_identity))
+
+pub fn validate_three_payload_source_binding_v1(
+    expected: ThreePayloadSourceBindingV1,
+    actual: ThreePayloadSourceBindingV1,
+) -> bool:
+    (_formal_source_binding_shape_valid_v1(expected) and
+        _formal_source_binding_shape_valid_v1(actual) and
+        expected.source_path == actual.source_path and
+        expected.source_symbol == actual.source_symbol and
+        expected.source_bytes_hash == actual.source_bytes_hash and
+        expected.dependency_bytes_hash == actual.dependency_bytes_hash and
+        expected.model_hash == actual.model_hash and
+        expected.checker_hash == actual.checker_hash and
+        expected.toolchain_identity == actual.toolchain_identity)
+
+pub fn compare_three_payload_formal_observation_v1(
+    case_id: text,
+    source_symbol: text,
+    actual: text,
+    expected: text,
+) -> ThreePayloadFormalObservationV1:
+    ThreePayloadFormalObservationV1(case_id: case_id,
+        source_symbol: source_symbol, actual: actual, expected: expected,
+        matched: actual == expected)
+
+fn _formal_coverage_roots_v1() -> [ClosureCoverageRootV1]:
+    val dimensions = ["membership", "resolution_absence",
+        "trait_candidates_coherence", "macro_ctfe_inputs", "generic_bodies",
+        "extensions", "aspects_pointcuts", "initialization",
+        "configuration_overlays"]
+    var roots: [ClosureCoverageRootV1] = []
+    for dimension in dimensions:
+        roots.push(ClosureCoverageRootV1(dimension: dimension,
+            root_digest: _formal_digest_v1("formal-coverage-" + dimension),
+            coverage: SemanticCoverageV1.Complete))
+    roots
+
+fn _formal_tld_header_v1(role: TldPayloadRoleV1,
+                         label: text) -> PhysicalTldHeaderV1:
+    PhysicalTldHeaderV1(schema: 1, role: role,
+        semantic_record_digest: _formal_digest_v1(label),
+        section_table_digest: physical_tld_section_table_digest_v1([]),
+        payload_bytes: 0, sections: [])
+
+pub fn three_payload_formal_prepared_case_v1(
+    warm: bool,
+) -> PreparedThreePayloadV2:
+    val source = text_to_bytes("fn formal_value() -> i64: 7\n")
+    val init_header = _formal_tld_header_v1(
+        TldPayloadRoleV1.PackageInitTld, "formal-init")
+    val init_bytes = encode_physical_tld_v1(init_header, []).unwrap()
+    var prior_digest: text? = nil
+    var prior_bytes: [u8]? = nil
+    var prior_header: PhysicalTldHeaderV1? = nil
+    if warm:
+        val header = _formal_tld_header_v1(
+            TldPayloadRoleV1.PriorModuleTld, "formal-prior")
+        val bytes = encode_physical_tld_v1(header, []).unwrap()
+        prior_digest = Some(sha256_u8_hex(bytes))
+        prior_bytes = Some(bytes)
+        prior_header = Some(header)
+    seal_three_payload_closure_v2(
+        ThreePayloadSnapshotV2(
+            snapshot_digest: _formal_digest_v1("formal-snapshot"),
+            source_digest: sha256_u8_hex(source), source_bytes: source),
+        ThreePayloadParentGenerationV2(
+            generation_digest: _formal_digest_v1("formal-generation"),
+            prior_tld_digest: prior_digest, prior_tld_bytes: prior_bytes,
+            prior_tld_header: prior_header),
+        ThreePayloadModuleClosureV2(module_id: "formal-fixture",
+            init_tld_digest: sha256_u8_hex(init_bytes), init_tld_bytes: init_bytes,
+            init_tld_header: init_header, semantic_refs: [],
+            coverage_roots: _formal_coverage_roots_v1()),
+        ThreePayloadVerifiedObjectsV2(
+            compiler_semantics_digest: _formal_digest_v1("formal-semantics"),
+            consumed_inputs_digest: _formal_digest_v1("formal-inputs"),
+            verified_semantic_object_digests: []),
+        ThreePayloadPackBoundsV2(max_sections: 64,
+            max_payload_bytes: 1048576, max_decode_bytes: 1048576)).unwrap()
+
+fn _formal_worker_policy_v1() -> ThreePayloadWorkerPolicyV1:
+    ThreePayloadWorkerPolicyV1(
+        executor_digest: _formal_digest_v1("formal-executor"),
+        max_read_bytes: 1048576, max_decode_bytes: 1048576,
+        max_decoded_sections: 64, request_external_input: false,
+        request_reverse_reference: false)
+
+fn _formal_write_physical_v1(root: text,
+    prepared: PreparedThreePayloadV2) -> ThreePayloadPhysicalFileSetV1:
+    if not dir_create_all(root): fail("formal fixture directory unavailable")
+    val source_path = _formal_join_path_v1(root, "module.spl")
+    val prior_path = _formal_join_path_v1(root, "module.tld")
+    val init_path = _formal_join_path_v1(root, "__init__.tld")
+    if not file_write_bytes(source_path, prepared.source_bytes):
+        fail("formal source fixture write failed")
+    match prepared.prior_tld_bytes:
+        case Some(bytes):
+            if not file_write_bytes(prior_path, bytes):
+                fail("formal prior TLD fixture write failed")
+        case nil: pass
+    if not file_write_bytes(init_path, prepared.init_tld_bytes):
+        fail("formal initializer TLD fixture write failed")
+    ThreePayloadPhysicalFileSetV1(source_path: source_path,
+        prior_tld_path: if prepared.prior_tld_bytes.is_some(): Some(prior_path) else: nil,
+        effective_init_tld_path: init_path)
+
+fn _formal_query_v1(label: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "resolve", stable_entity_id: label,
+        semantic_profile_digest: _formal_digest_v1("formal-profile"),
+        parameter_digest: _formal_digest_v1("formal-parameters"))
+
+fn _formal_read_v1(producer: SemanticQueryKeyV1,
+    consumer: SemanticQueryKeyV1, fingerprint: text) -> SemanticQueryReadV1:
+    SemanticQueryReadV1(producer: producer, consumer: consumer,
+        facet: "membership", ordinal: 0, consumed_fingerprint: fingerprint,
+        witness_digest: _formal_digest_v1("formal-witness"),
+        partition_id: "formal-partition", completeness: SemanticCoverageV1.Complete)
+
+fn _formal_replay_broker_v1(case_id: text, root: text,
+                            warm: bool) -> ThreePayloadFormalObservationV1:
+    val prepared = three_payload_formal_prepared_case_v1(warm)
+    val evidence = read_three_payload_physical_files_v1(
+        _formal_write_physical_v1(root, prepared), prepared, prepared.seal,
+        _formal_worker_policy_v1()).unwrap()
+    val actual = "reads={evidence.physical.successful_bounded_facade_read_operations}" +
+        "|ordinary={evidence.physical.ordinary_input_count}" +
+        "|bytes={evidence.physical.successful_file_read_bytes}" +
+        "|rr={evidence.physical.rr_file_reads}" +
+        "|external={evidence.physical.external_file_reads}"
+    val count = if warm: 3 else: 2
+    val expected = "reads={count}|ordinary={count}|bytes={prepared.seal.payload_bytes}" +
+        "|rr=0|external=0"
+    compare_three_payload_formal_observation_v1(case_id,
+        "read_three_payload_physical_files_v1", actual, expected)
+
+fn _formal_replay_external_rejected_v1(
+    root: text,
+) -> ThreePayloadFormalObservationV1:
+    val prepared = three_payload_formal_prepared_case_v1(false)
+    val files = _formal_write_physical_v1(root, prepared)
+    var policy = _formal_worker_policy_v1()
+    policy.request_external_input = true
+    val broker_rejected = match read_three_payload_physical_files_v1(
+            files, prepared, prepared.seal, policy):
+        case Err(ThreePayloadFallbackV1.ExternalFacetRequired): true
+        case _: false
+    val producer = _formal_query_v1("producer")
+    val plan = plan_affected_queries_v1([
+        ChangedSemanticFacetV1(producer: producer, facet: "membership",
+            dimension: "membership",
+            old_fingerprint: Some(_formal_digest_v1("old")),
+            new_fingerprint: Some(_formal_digest_v1("new")))], [], [], [])
+    val actual = "broker_rejected={_formal_bool_v1(broker_rejected)}" +
+        "|plan={plan.rejection_reason}" +
+        "|domain_authority={_formal_bool_v1(affected_query_domain_authority_available_v1())}"
+    compare_three_payload_formal_observation_v1("broker_external_rejected",
+        "read_three_payload_physical_files_v1+plan_affected_queries_v1", actual,
+        "broker_rejected=true|plan=affected_evidence_incomplete|domain_authority=false")
+
+fn _formal_replay_prepared_corrupt_v1() -> ThreePayloadFormalObservationV1:
+    val prepared = three_payload_formal_prepared_case_v1(false)
+    var corrupt = prepared
+    corrupt.source_bytes = text_to_bytes("fn formal_value() -> i64: 8\n")
+    val prepared_valid = verify_prepared_three_payload_v2(corrupt)
+    val init_object = PhysicalTldObjectV1(header: prepared.init_tld_header,
+        canonical_sections: [])
+    val owner = _formal_digest_v1("formal-semantic-owner")
+    val bounds = ThreePayloadSemanticBindBounds(max_bindings: 0,
+        max_sections: 64, max_retained_bytes: 1048576,
+        max_decoded_bytes: 1048576,
+        expected_input_generation_digest: prepared.seal.input_generation_digest,
+        expected_access_policy_digest: _formal_digest_v1("formal-access"),
+        expected_owner_receipt_digest: owner,
+        presented_owner_receipt_digest: owner,
+        expected_module_id: "formal-fixture", presented_module_id: "formal-fixture")
+    val bound = bind_three_payload_semantic_inputs(prepared.seal, nil,
+        init_object, [], bounds)
+    var body_refused = false
+    match bound:
+        case Ok(view):
+            match resolve_three_payload_semantic_input(view,
+                    _formal_query_v1("consumer"),
+                    ThreePayloadSemanticRefKindV1.MacroExpansion, "missing"):
+                case Err(ThreePayloadFallbackV1.ExternalBodyRequired): body_refused = true
+                case _: pass
+        case Err(_): pass
+    val actual = "prepared_valid={_formal_bool_v1(prepared_valid)}" +
+        "|bind_ok={_formal_bool_v1(bound.is_ok())}" +
+        "|body_refused={_formal_bool_v1(body_refused)}" +
+        "|semantic_authority={_formal_bool_v1(semantic_scope_authority_available_v1())}" +
+        "|worker={_formal_bool_v1(three_payload_worker_confinement_available_v1())}" +
+        "|publication={_formal_bool_v1(three_payload_generation_publication_available_v1())}"
+    compare_three_payload_formal_observation_v1("prepared_source_corrupt",
+        "verify_prepared_three_payload_v2+bind_three_payload_semantic_inputs+resolve_three_payload_semantic_input",
+        actual, "prepared_valid=false|bind_ok=true|body_refused=true|semantic_authority=false|worker=false|publication=false")
+
+fn _formal_replay_rr_replace_v1() -> ThreePayloadFormalObservationV1:
+    val producer = _formal_query_v1("producer")
+    val consumer = _formal_query_v1("consumer")
+    val old_manifest = SemanticQueryReadManifestV1(schema: 1,
+        consumer: consumer, ordered_reads: [_formal_read_v1(producer, consumer,
+            _formal_digest_v1("old-fingerprint"))])
+    val new_manifest = SemanticQueryReadManifestV1(schema: 1,
+        consumer: consumer, ordered_reads: [_formal_read_v1(producer, consumer,
+            _formal_digest_v1("new-fingerprint"))])
+    val delta = stage_reverse_delta_v1(Some(old_manifest), new_manifest)
+    val changed = (delta.inserted.len() == 1 and delta.removed.len() == 1 and
+        delta.inserted[0].consumed_fingerprint != delta.removed[0].consumed_fingerprint and
+        delta.inserted[0].forward_manifest_digest != delta.removed[0].forward_manifest_digest)
+    val actual = "inserted={delta.inserted.len()}|removed={delta.removed.len()}" +
+        "|rebound={_formal_bool_v1(changed)}"
+    compare_three_payload_formal_observation_v1("rr_replace_fingerprint",
+        "stage_reverse_delta_v1", actual, "inserted=1|removed=1|rebound=true")
+
+fn _formal_replay_rr_consumer_mismatch_v1() -> ThreePayloadFormalObservationV1:
+    val producer = _formal_query_v1("producer")
+    val old_consumer = _formal_query_v1("old-consumer")
+    val new_consumer = _formal_query_v1("new-consumer")
+    val old_manifest = SemanticQueryReadManifestV1(schema: 1,
+        consumer: old_consumer, ordered_reads: [_formal_read_v1(producer,
+            old_consumer, _formal_digest_v1("fingerprint"))])
+    val new_manifest = SemanticQueryReadManifestV1(schema: 1,
+        consumer: new_consumer, ordered_reads: [_formal_read_v1(producer,
+            new_consumer, _formal_digest_v1("fingerprint"))])
+    val delta = stage_reverse_delta_v1(Some(old_manifest), new_manifest)
+    val actual = "new_manifest_empty={_formal_bool_v1(delta.new_manifest_digest == "")}" +
+        "|inserted={delta.inserted.len()}|removed={delta.removed.len()}"
+    compare_three_payload_formal_observation_v1("rr_consumer_mismatch",
+        "stage_reverse_delta_v1", actual,
+        "new_manifest_empty=true|inserted=0|removed=0")
+
+fn _formal_replay_rr_nil_history_v1() -> ThreePayloadFormalObservationV1:
+    val producer = _formal_query_v1("nil-history-producer")
+    val consumer = _formal_query_v1("nil-history-consumer")
+    val empty_history = SemanticQueryReadManifestV1(schema: 1,
+        consumer: consumer, ordered_reads: [])
+    val new_manifest = SemanticQueryReadManifestV1(schema: 1,
+        consumer: consumer, ordered_reads: [_formal_read_v1(producer, consumer,
+            _formal_digest_v1("first-fingerprint"))])
+    val genesis = seed_reverse_shards_v1(empty_history)
+    val missing = stage_reverse_shards_v1(genesis.shards, nil,
+        new_manifest, true)
+    val explicit = stage_reverse_shards_v1(genesis.shards,
+        Some(empty_history), new_manifest, true)
+    val actual = "nil_refused={_formal_bool_v1(not missing.accepted)}" +
+        "|reason={missing.rejection_reason}" +
+        "|explicit_empty_accepted={_formal_bool_v1(explicit.accepted)}"
+    compare_three_payload_formal_observation_v1("rr_nil_history_refused",
+        "seed_reverse_shards_v1+stage_reverse_shards_v1", actual,
+        "nil_refused=true|reason=rr_old_history_missing|explicit_empty_accepted=true")
+
+fn _formal_replay_journal_exact_v1() -> ThreePayloadFormalObservationV1:
+    val journal = ActionRootJournalV1.empty(7)
+    val prepared = journal.prepare(_formal_digest_v1("action"),
+        "compile_snapshot", _formal_digest_v1("object"),
+        _formal_digest_v1("manifest")).unwrap()
+    journal.accept_durable(prepared).unwrap()
+    val after = journal.bytes
+    journal.accept_durable(prepared).unwrap()
+    val recovery = recover_action_root_journal_v1(journal.bytes, 7)
+    val actual = "same={_formal_bool_v1(after == journal.bytes)}" +
+        "|sequence={journal.next_sequence}|records={recovery.records.len()}" +
+        "|quarantined={_formal_bool_v1(recovery.quarantined_tail)}"
+    compare_three_payload_formal_observation_v1("journal_exact_replay",
+        "ActionRootJournalV1.accept_durable+recover_action_root_journal_v1",
+        actual, "same=true|sequence=1|records=1|quarantined=false")
+
+fn _formal_replay_journal_conflict_v1() -> ThreePayloadFormalObservationV1:
+    val journal = ActionRootJournalV1.empty(7)
+    val prepared = journal.prepare(_formal_digest_v1("action"),
+        "compile_snapshot", _formal_digest_v1("object"),
+        _formal_digest_v1("manifest")).unwrap()
+    journal.bytes = "conflicting-prefix"
+    val conflict = journal.accept_durable(prepared).is_err()
+    val unsupported_journal = ActionRootJournalV1.empty(7)
+    val unsupported = unsupported_journal.prepare(
+        _formal_digest_v1("action"), "generation_manifest",
+        _formal_digest_v1("object"), _formal_digest_v1("manifest")).is_err()
+    val actual = "conflict={_formal_bool_v1(conflict)}" +
+        "|generation_manifest_unsupported={_formal_bool_v1(unsupported)}"
+    compare_three_payload_formal_observation_v1("journal_conflicting_prefix",
+        "ActionRootJournalV1.prepare+accept_durable", actual,
+        "conflict=true|generation_manifest_unsupported=true")
+
+fn _formal_replay_journal_torn_v1() -> ThreePayloadFormalObservationV1:
+    val journal = ActionRootJournalV1.empty(7)
+    val prepared = journal.prepare(_formal_digest_v1("action"),
+        "compile_snapshot", _formal_digest_v1("object"),
+        _formal_digest_v1("manifest")).unwrap()
+    val torn = prepared.append_bytes.substring(0, prepared.append_bytes.len() - 1)
+    val recovery = recover_action_root_journal_v1(torn, 7)
+    val actual = "records={recovery.records.len()}" +
+        "|accepted={recovery.accepted_bytes}|input={torn.len()}" +
+        "|accepted_gt_input={_formal_bool_v1(recovery.accepted_bytes > torn.len())}" +
+        "|quarantined={_formal_bool_v1(recovery.quarantined_tail)}"
+    val expected = "records=1|accepted={torn.len() + 1}|input={torn.len()}" +
+        "|accepted_gt_input=true|quarantined=true"
+    compare_three_payload_formal_observation_v1("journal_torn_final_newline",
+        "recover_action_root_journal_v1", actual, expected)
+
+fn _formal_replay_gc_stale_v1() -> ThreePayloadFormalObservationV1:
+    val root = VerifiedGenerationRootV1(generation: 7,
+        manifest_digest: _formal_digest_v1("generation-manifest"))
+    val pins = verified_generation_pin_snapshot_v1(11,
+        [VerifiedGenerationPinV1(pin_id: "formal-pin", root: root)], []).unwrap()
+    val candidate = VerifiedCasTypedIdentityV1(kind: "compile_snapshot",
+        digest: _formal_digest_v1("candidate"))
+    val decision = verified_generation_sweep_decision_v1(
+        pins, [], candidate, 12)
+    val refused = match decision:
+        case VerifiedGenerationSweepDecisionV1.Refused: true
+        case _: false
+    compare_three_payload_formal_observation_v1("gc_stale_epoch",
+        "verified_generation_pin_snapshot_v1+verified_generation_sweep_decision_v1",
+        "refused={_formal_bool_v1(refused)}", "refused=true")
+
+fn _formal_read_hash_v1(path: text) -> Result<text, text>:
+    match file_read_regular_no_follow_bounded(path, 8388608):
+        case Ok(content): Ok(sha256_u8_hex(content.bytes()))
+        case Err(_): Err("source binding file unavailable: " + path)
+
+pub fn current_three_payload_source_binding_v1(
+    repo_root: text,
+) -> Result<ThreePayloadSourceBindingV1, text>:
+    val source = "src/compiler/80.driver/cache/worker/three_payload_physical_file_broker_v1.spl"
+    val dependencies = [
+        "src/lib/nogc_sync_mut/io/file_ops.spl",
+        "src/compiler/00.common/cache_contract/physical_tld_v1.spl",
+        "src/compiler/00.common/cache_contract/semantic_query_read_manifest_v1.spl",
+        "src/compiler/00.common/cache_contract/reverse_reference_shard_v1.spl",
+        "src/compiler/00.common/cache_contract/generation_manifest_v1.spl",
+        "src/compiler/00.common/cache_contract/three_payload_compile_v1.spl",
+        "src/compiler/00.common/cache_contract/three_payload_compile_v2.spl",
+        "src/compiler/80.driver/cache/closure/three_payload_closure_packer_v2.spl",
+        "src/compiler/10.frontend/cache_artifact/three_payload_semantic_closure.spl",
+        "src/compiler/80.driver/cache/worker/three_payload_worker_io_v1.spl",
+        "src/compiler/80.driver/cache/reference/reverse_reference_coordinator_v1.spl",
+        "src/compiler/80.driver/cache/journal/action_root_journal_v1.spl",
+        "src/compiler/80.driver/cache/gc/verified_generation_reachability_v1.spl"]
+    var dependency_material = "three-payload-source-dependencies-v1\n"
+    for dependency in dependencies:
+        val digest = _formal_read_hash_v1(_formal_join_path_v1(
+            repo_root, dependency))?
+        dependency_material = dependency_material + dependency + "=" + digest + "\n"
+    val source_hash = _formal_read_hash_v1(_formal_join_path_v1(repo_root, source))?
+    val model_paths = [
+        "src/verification/three_payload_compile/lakefile.toml",
+        "src/verification/three_payload_compile/src/ThreePayloadCompile.lean",
+        "src/verification/three_payload_compile/src/ThreePayloadCompile/Model.lean",
+        "src/verification/three_payload_compile/src/ThreePayloadCompile/Broker.lean",
+        "src/verification/three_payload_compile/src/ThreePayloadCompile/ReverseReferences.lean",
+        "src/verification/three_payload_compile/src/ThreePayloadCompile/Publication.lean",
+        "src/verification/three_payload_compile/src/ThreePayloadCompile/SourceLink.lean",
+        "src/verification/three_payload_compile/src/ThreePayloadCompile/Audit.lean"]
+    var model_material = "three-payload-lean-capsule-v1\n"
+    for path in model_paths:
+        val digest = _formal_read_hash_v1(_formal_join_path_v1(repo_root, path))?
+        model_material = model_material + path + "=" + digest + "\n"
+    val model_hash = sha256_text(model_material)
+    val checker_hash = _formal_read_hash_v1(_formal_join_path_v1(repo_root,
+        "src/verification/three_payload_compile_refinement.spl"))?
+    val toolchain_hash = _formal_read_hash_v1(_formal_join_path_v1(repo_root,
+        "src/verification/three_payload_compile/lean-toolchain"))?
+    Ok(ThreePayloadSourceBindingV1(source_path: source,
+        source_symbol: "read_three_payload_physical_files_v1",
+        source_bytes_hash: source_hash,
+        dependency_bytes_hash: sha256_text(dependency_material),
+        model_hash: model_hash, checker_hash: checker_hash,
+        toolchain_identity: "lean-toolchain-sha256:" + toolchain_hash))
+
+fn _formal_replay_source_binding_stale_v1(
+    repo_root: text,
+) -> ThreePayloadFormalObservationV1:
+    val actual_binding = match current_three_payload_source_binding_v1(repo_root):
+        case Ok(value): value
+        case Err(error):
+            return compare_three_payload_formal_observation_v1(
+                "source_binding_stale", "validate_three_payload_source_binding_v1",
+                "read_error:" + error, "stale_rejected=true")
+    val stale = ThreePayloadSourceBindingV1(
+        source_path: actual_binding.source_path,
+        source_symbol: actual_binding.source_symbol,
+        source_bytes_hash: _formal_digest_v1("stale-source"),
+        dependency_bytes_hash: actual_binding.dependency_bytes_hash,
+        model_hash: actual_binding.model_hash, checker_hash: actual_binding.checker_hash,
+        toolchain_identity: actual_binding.toolchain_identity)
+    val rejected = not validate_three_payload_source_binding_v1(stale, actual_binding)
+    compare_three_payload_formal_observation_v1("source_binding_stale",
+        "validate_three_payload_source_binding_v1",
+        "stale_rejected={_formal_bool_v1(rejected)}", "stale_rejected=true")
+
+pub fn replay_three_payload_formal_case_v1(
+    case_id: text,
+    fixture_root: text,
+) -> ThreePayloadFormalObservationV1:
+    if case_id == "broker_cold2":
+        return _formal_replay_broker_v1(case_id, fixture_root + "/cold", false)
+    if case_id == "broker_warm3":
+        return _formal_replay_broker_v1(case_id, fixture_root + "/warm", true)
+    if case_id == "broker_external_rejected":
+        return _formal_replay_external_rejected_v1(fixture_root + "/external")
+    if case_id == "prepared_source_corrupt":
+        return _formal_replay_prepared_corrupt_v1()
+    if case_id == "rr_replace_fingerprint":
+        return _formal_replay_rr_replace_v1()
+    if case_id == "rr_consumer_mismatch":
+        return _formal_replay_rr_consumer_mismatch_v1()
+    if case_id == "rr_nil_history_refused":
+        return _formal_replay_rr_nil_history_v1()
+    if case_id == "journal_exact_replay":
+        return _formal_replay_journal_exact_v1()
+    if case_id == "journal_conflicting_prefix":
+        return _formal_replay_journal_conflict_v1()
+    if case_id == "journal_torn_final_newline":
+        return _formal_replay_journal_torn_v1()
+    if case_id == "gc_stale_epoch":
+        return _formal_replay_gc_stale_v1()
+    if case_id == "source_binding_stale":
+        return _formal_replay_source_binding_stale_v1(fixture_root)
+    compare_three_payload_formal_observation_v1(case_id,
+        "replay_three_payload_formal_case_v1", "unknown_case", "known_case")
+
+fn _three_payload_formal_roots_v1() -> [text]:
+    ["ThreePayloadCompile.broker_prefix_read_bound",
+        "ThreePayloadCompile.broker_success_read_count",
+        "ThreePayloadCompile.broker_prefix_byte_bound",
+        "ThreePayloadCompile.reverse_delta_reconstructs",
+        "ThreePayloadCompile.reverse_delta_unrelated_consumer_preserved",
+        "ThreePayloadCompile.journal_exact_replay_idempotent",
+        "ThreePayloadCompile.journal_conflicting_prefix_rejected",
+        "ThreePayloadCompile.protected_pin_not_swept",
+        "ThreePayloadCompile.changed_source_binding_stale"]
+
+pub fn make_three_payload_formal_receipt_v1(
+    source_bindings: [ThreePayloadSourceBindingV1],
+    observations: [ThreePayloadFormalObservationV1],
+    mutant_observations: [ThreePayloadFormalObservationV1],
+    axiom_report: text,
+) -> ThreePayloadFormalReceiptV1:
+    val roots = _three_payload_formal_roots_v1()
+    val audit = audit_lean_axiom_report(axiom_report, roots, [])
+    var counterexamples: i64 = 0
+    for observation in observations:
+        if not observation.matched or observation.actual != observation.expected:
+            counterexamples = counterexamples + 1
+    # These values are caller DTOs, not owner-authenticated runner receipts.
+    # Until exact fixture and mutant execution identities exist, no mismatch
+    # can be admitted as a killed mutant.
+    val killed_mutants: i64 = 0
+    var bindings_valid = source_bindings.len() > 0
+    for binding in source_bindings:
+        if not _formal_source_binding_shape_valid_v1(binding): bindings_valid = false
+    var diagnostic = "FV2-E-L7-EXECUTION-AUTHORITY: admitted owner replay and exact mutant receipts are unavailable"
+    if not audit.permits_closed_verification():
+        diagnostic = "FV2-E-L7-AXIOMS: complete closed theorem audit required"
+    elif not bindings_valid:
+        diagnostic = "FV2-E-L7-SOURCE: canonical current source bindings required"
+    elif observations.len() == 0 or counterexamples != 0:
+        diagnostic = "FV2-E-L7-REPLAY: bounded source replay mismatch"
+    elif mutant_observations.len() == 0 or killed_mutants != mutant_observations.len():
+        diagnostic = "FV2-E-L7-MUTATION: executable mutant evidence required"
+    ThreePayloadFormalReceiptV1(source_bindings: source_bindings,
+        theorem_roots: roots,
+        axiom_audit_hash: if audit.permits_closed_verification():
+            sha256_text(axiom_report) else: "",
+        checked_case_count: observations.len(),
+        counterexample_count: counterexamples,
+        killed_mutant_count: killed_mutants,
+        status: FormalStatus.NotChecked,
+        diagnostic: diagnostic)

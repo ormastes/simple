@@ -83,6 +83,7 @@ fn host_import_capability_id(name: &str) -> Option<u64> {
     match name {
         "rt_file_read_text"
         | "rt_file_read_regular_no_follow_bounded"
+        | "rt_file_read_regular_no_follow_bounded_bytes"
         | "rt_file_read_text_rv"
         | "rt_file_canonicalize"
         | "rt_file_exists"
@@ -98,6 +99,7 @@ fn host_import_capability_id(name: &str) -> Option<u64> {
         | "rt_file_mmap_read_bytes_rv"
         | "rt_file_mmap_len"
         | "rt_file_read_text_at"
+        | "rt_fd_pread"
         | "rt_read_file"
         | "doctest_read_file"
         | "doctest_path_exists"
@@ -117,6 +119,7 @@ fn host_import_capability_id(name: &str) -> Option<u64> {
         | "rt_file_rename"
         | "rt_file_write_bytes"
         | "rt_file_write_text_at"
+        | "rt_fd_pwrite"
         | "rt_file_write_text_at_cached"
         | "rt_file_write_text_at_cached_repeat"
         | "rt_write_file"

@@ -240,6 +240,47 @@ fn rt_dma_sync_for_cpu__fallback(handle: i64, dir_raw: i32): memory_barrier()
 # 64 B is safe floor — correct on x86/arm64, over-aligns elsewhere.
 fn rt_dma_cache_line_size__fallback() -> i64: 64
 
+# --- Raw handle API (this module owns the rt_dma_* boundary) ---
+#
+# The typed DmaBuffer / SharedDmaBuffer API above is the preferred surface.
+# Ten kernel drivers, however, work at the opaque-handle level: they allocate
+# once at probe time and then sync the same handle per request. Until 2026-09-06
+# every one of them redeclared the rt_dma_* externs itself — 47 direct call
+# sites across 10 files, none of them picking up the __fallback stubs above, so
+# an interpreted run got nil instead of the hosted fallback. These wrappers give
+# those drivers the same handle-level operations through this owner, so this
+# file stays the only rt_dma_* call site in the tree.
+
+extern fn rt_dma_bytes_to_array(addr: u64, len: u64) -> [u8]
+
+fn dma_raw_alloc(size: i64, dir_raw: i32) -> i64:
+    """Allocate a coherent DMA region; returns an opaque handle, or < 0."""
+    rt_dma_alloc(size, dir_raw)
+
+fn dma_raw_free(handle: i64):
+    """Release a handle returned by dma_raw_alloc."""
+    rt_dma_free(handle)
+
+fn dma_raw_virt_of(handle: i64) -> i64:
+    """CPU-visible address of a handle's region."""
+    rt_dma_virt_of(handle)
+
+fn dma_raw_phys_of(handle: i64) -> i64:
+    """Device-visible physical address of a handle's region."""
+    rt_dma_phys_of(handle)
+
+fn dma_raw_sync_for_device(handle: i64, dir_raw: i32):
+    """Publish CPU writes before the device reads the region."""
+    rt_dma_sync_for_device(handle, dir_raw)
+
+fn dma_raw_sync_for_cpu(handle: i64, dir_raw: i32):
+    """Invalidate stale CPU cache before reading device-written data."""
+    rt_dma_sync_for_cpu(handle, dir_raw)
+
+fn dma_raw_bytes_to_array(addr: u64, len: u64) -> [u8]:
+    """Copy len bytes out of a DMA region into an owned array."""
+    rt_dma_bytes_to_array(addr, len)
+
 # --- Public API ---
 
 fn dma_alloc(size: i64, dir: DmaDir) -> Result<DmaBuffer, DriverError>:

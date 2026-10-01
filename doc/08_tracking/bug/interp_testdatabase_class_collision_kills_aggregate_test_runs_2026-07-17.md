@@ -1,9 +1,12 @@
 # Interp TestDatabase class-name collision kills every aggregate `simple test` run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** P1 (directory runs, sdoctest/md phase, and test_result.md generation all die)
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** fix in progress (runner-side rename), interpreter root cause remains open
 
 ## Symptom
 
@@ -67,26 +70,3 @@ Fixed by renaming the core-struct cluster to `RunnerTestDbCore`
 green single-file and md-lane probes pass). The underlying interpreter
 defect (global struct registry not module-scoped) remains open seed-side.
 
-## Verification 2026-08-17 (content classification) — mitigation landed, root cause LIVE
-
-Confirmed by content, not by commit ancestry:
-
-- Runner side is clean. `src/lib/nogc_sync_mut/test_runner/test_db_compat.spl`
-  now declares `RunnerTestDb` (line 25) over `TestDatabaseExtended`
-  (`src/lib/nogc_sync_mut/database/test_extended/database.spl:19`);
-  `git grep TestDatabase -- src/lib/nogc_sync_mut/test_runner/` returns only
-  those two `TestDatabaseExtended` references. No runner symbol is named
-  `TestDatabase` any more, so aggregate runs no longer collide.
-- The collision itself still exists in the stdlib. Two declarations of the same
-  class name remain live:
-  `src/lib/nogc_sync_mut/database/test.spl:143` and
-  `src/lib/nogc_async_mut/database/test.spl:123`.
-
-So this is a **rename-based mitigation, not a fix**: the interpreter's global
-(non-module-scoped) class registry will still resolve the wrong `TestDatabase`
-for any code that imports both. Root cause stays open seed-side and is outside
-`src/lib/**` — it belongs to the Rust interpreter's symbol registry, which is
-claimed by another lane.
-
-Not proven: no aggregate-run reproduction was attempted (a full `simple test`
-sweep is barred while the bootstrap holds the host).

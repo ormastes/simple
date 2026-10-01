@@ -1,0 +1,58 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-EDITOR-MD-009
+# plan: doc/03_plan/app/editor/editor_markdown_editing_subsystem.md
+
+# Markdown block recognition inside the editing subsystem.
+#
+# Distinct from test/01_unit/lib/editor/block_model_spec.spl, which covers the
+# render-side BlockModel. This file covers the block PREDICATES md_editing uses
+# to decide what the cursor is standing in: table rows, separator rows, callout
+# headers and headings.
+
+use std.spec
+use std.spec.step
+use std.editor.view.md_editing.{
+    md_table_is_row, md_table_is_separator_row, md_table_cell_start_columns,
+    md_table_column_at, md_vim_next_heading, md_callout_toggle_fold
+}
+
+describe "markdown editing block model":
+
+    it "recognises table rows and separator rows":
+        # @req REQ-EDITOR-MD-009
+        step("Classify each line of a three-line table fixture")
+        expect(md_table_is_row("| A | B |")).to_equal(true)
+        expect(md_table_is_row("| --- | --- |")).to_equal(true)
+        expect(md_table_is_row("plain paragraph")).to_equal(false)
+        step("Only the dashed line is the separator row")
+        expect(md_table_is_separator_row("| --- | --- |")).to_equal(true)
+        expect(md_table_is_separator_row("| A | B |")).to_equal(false)
+
+    it "reports the cell start column of every table cell":
+        # @req REQ-EDITOR-MD-009
+        step("Hand-count the cell starts of `| A | B |`")
+        # "| A | B |" -- 'A' is at index 2, 'B' at index 6.
+        val starts = md_table_cell_start_columns("| A | B |")
+        expect(starts.len()).to_equal(2)
+        expect(starts[0]).to_equal(2)
+        expect(starts[1]).to_equal(6)
+        step("A cursor inside the second cell reports column index 1")
+        expect(md_table_column_at("| A | B |", 6)).to_equal(1)
+        expect(md_table_column_at("| A | B |", 2)).to_equal(0)
+
+    it "finds the next heading block from a paragraph":
+        # @req REQ-EDITOR-MD-009
+        step("Scan forward from line 0 of a document whose second heading is line 3")
+        val content = "# One\nbody\n\n## Two\nmore"
+        val next = md_vim_next_heading(content, 0)
+        expect(next.found).to_equal(true)
+        expect(next.line).to_equal(3)
+
+    it "identifies the callout header owning the cursor line":
+        # @req REQ-EDITOR-MD-009
+        step("Fold from inside the callout body, not from its header line")
+        val callout = "> [!note]\n> body text"
+        val folded = md_callout_toggle_fold(callout, 1)
+        expect(folded.changed).to_equal(true)
+        expect(folded.line).to_equal(0)
+        expect(folded.content.contains("[!note]-")).to_equal(true)

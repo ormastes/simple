@@ -1,12 +1,12 @@
 use llvm_sys::core::{LLVMConstVector, LLVMGetVectorSize};
 use llvm_sys::prelude::{LLVMTypeRef, LLVMValueRef};
 
+use crate::AddressSpace;
 use crate::context::ContextRef;
 use crate::support::LLVMString;
 use crate::types::enums::BasicMetadataTypeEnum;
-use crate::types::{traits::AsTypeRef, ArrayType, BasicTypeEnum, FunctionType, PointerType, Type};
+use crate::types::{ArrayType, BasicTypeEnum, FunctionType, PointerType, Type, traits::AsTypeRef};
 use crate::values::{ArrayValue, BasicValue, IntValue, VectorValue};
-use crate::AddressSpace;
 
 use std::fmt::{self, Display};
 
@@ -22,10 +22,12 @@ impl<'ctx> VectorType<'ctx> {
     /// # Safety
     /// Undefined behavior, if referenced type isn't vector type
     pub unsafe fn new(vector_type: LLVMTypeRef) -> Self {
-        assert!(!vector_type.is_null());
+        unsafe {
+            assert!(!vector_type.is_null());
 
-        VectorType {
-            vec_type: Type::new(vector_type),
+            VectorType {
+                vec_type: Type::new(vector_type),
+            }
         }
     }
 
@@ -46,22 +48,6 @@ impl<'ctx> VectorType<'ctx> {
     /// ```
     pub fn size_of(self) -> Option<IntValue<'ctx>> {
         self.vec_type.size_of()
-    }
-
-    /// Gets the alignment of this `VectorType`. Value may vary depending on the target architecture.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use inkwell::context::Context;
-    ///
-    /// let context = Context::create();
-    /// let f32_type = context.f32_type();
-    /// let f32_vec_type = f32_type.vec_type(7);
-    /// let f32_type_alignment = f32_vec_type.get_alignment();
-    /// ```
-    pub fn get_alignment(self) -> IntValue<'ctx> {
-        self.vec_type.get_alignment()
     }
 
     /// Gets the size of this `VectorType`.
@@ -200,27 +186,20 @@ impl<'ctx> VectorType<'ctx> {
     /// let f32_vec_type = f32_type.vec_type(3);
     /// let f32_vec_ptr_type = f32_vec_type.ptr_type(AddressSpace::default());
     ///
-    /// #[cfg(any(
-    ///     feature = "llvm4-0",
-    ///     feature = "llvm5-0",
-    ///     feature = "llvm6-0",
-    ///     feature = "llvm7-0",
-    ///     feature = "llvm8-0",
-    ///     feature = "llvm9-0",
-    ///     feature = "llvm10-0",
-    ///     feature = "llvm11-0",
-    ///     feature = "llvm12-0",
-    ///     feature = "llvm13-0",
-    ///     feature = "llvm14-0"
-    /// ))]
+    /// #[cfg(feature = "typed-pointers")]
     /// assert_eq!(f32_vec_ptr_type.get_element_type().into_vector_type(), f32_vec_type);
     /// ```
     #[cfg_attr(
         any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
+            all(feature = "llvm15-0", not(feature = "typed-pointers")),
+            all(feature = "llvm16-0", not(feature = "typed-pointers")),
             feature = "llvm17-0",
-            feature = "llvm18-0"
+            feature = "llvm18-1",
+            feature = "llvm19-1",
+            feature = "llvm20-1",
+            feature = "llvm21-1",
+            feature = "llvm22-1",
+            feature = "llvm23-1",
         ),
         deprecated(
             note = "Starting from version 15.0, LLVM doesn't differentiate between pointer types. Use Context::ptr_type instead."

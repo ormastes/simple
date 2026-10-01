@@ -1,0 +1,202 @@
+# @cover src/lib/nogc_sync_mut/tiny/engine2d/software.spl 80%
+"""
+## Purpose and audience
+The Tiny software 2D backend rasterises every window, panel and glyph of the
+slim-kernel UI on hosts with no GPU, so the cost of one filled rectangle is the
+cost of the whole desktop. This manual is for the rendering engineers who own
+`std.tiny.engine2d.software`: it shows that the row-span fill introduced for
+P10 paints exactly the same pixels as the per-pixel fill it replaces, that it
+does so while performing the bounds and pixel-format work once per fill instead
+of once per pixel, and that neither draw-stream validation nor the surface
+receipt was weakened to buy that speed.
+## Operator workflow
+bin/simple test test/01_unit/lib/tiny/tiny_software_span_spec.spl
+## Compatibility and limitations
+Host-independent: the backend is pure Simple over an `[i32]` pixel buffer and
+needs no window system. The work oracles read module-level counters inside the
+backend, so they measure calls, not wall time, and are stable under load.
+## Verification guidance and troubleshooting
+A RED in the parity scenarios names the rectangle case that diverged; compare
+the reference buffer, which is rebuilt inside this spec from the historical
+per-pixel logic, against the span buffer. A RED in the work oracles means the
+span path fell back to per-pixel stores or re-converted the colour per pixel.
+A RED in the receipt scenario means the checksum was cached or shortened —
+P11 is investigate-only and the checksum must still hash every word.
+"""
+# Lifecycle: doc/01_research/ui/perf/render_perf_diagnosis_2026-08-06.md ;
+# doc/03_plan/ui/slim_kernel_plugin/plan.md ;
+# doc/05_design/ui/slim_kernel_plugin/design.md
+# @manual_section: tiny-software-span-fill
+
+use std.spec
+use std.tiny.common.abi.{TinyDrawStreamV1, TINY_2D_CAP_DRAW_STREAM_V1}
+use std.tiny.common.status.{TINY_OK, TINY_ERR_MALFORMED, TINY_ERR_UNSUPPORTED}
+use std.tiny.common.types.{TinyRect, tiny_intersect}
+use std.tiny.draw.opcode.{TINY_DRAW_FILL_RECT, TINY_DRAW_END}
+use std.tiny.engine2d.pixel_format.{TINY_PIXEL_ARGB8888, TINY_PIXEL_RGB565}
+use std.tiny.engine2d.software.{TinySoftware2D, tiny_software_store_pixel_count, tiny_software_format_convert_count, tiny_software_checksum_word_count, tiny_software_counters_reset}
+
+val SPAN_W = 7
+val SPAN_H = 5
+
+fn _corpus_x() -> [i32]: [2, -2, 5, 1, 1, 20, 2, 3, 0, 2147483646, -2147483647]
+fn _corpus_y() -> [i32]: [1, 1, 1, -2, 4, 20, 2, 3, 0, 0, 0]
+fn _corpus_w() -> [i32]: [3, 4, 4, 3, 3, 3, 0, 1, 7, 4, 3]
+fn _corpus_h() -> [i32]: [2, 2, 2, 3, 3, 3, 0, 1, 5, 2, 2]
+
+# Independent RGB565 packing, written with division rather than the shifts the
+# product code uses, so the two cannot agree by sharing a mistake.
+fn _spec_rgb565(argb: i32) -> i32:
+    val red = ((argb / 65536) % 256 + 256) % 256
+    val green = ((argb / 256) % 256 + 256) % 256
+    val blue = (argb % 256 + 256) % 256
+    (red / 8) * 2048 + (green / 4) * 32 + (blue / 8)
+
+describe "Tiny software 2D row-span fill":
+    it "paints byte-identical pixels to the historical per-pixel fill in both formats":
+        """The span fill is a pure speed change: every rectangle shape, including the
+        clipped and degenerate ones, must land the same bytes as the old loop."""
+        # @req REQ-UI-SLIM-009
+        # @capture(statistics): per-case pixel and checksum divergence counts
+        step("Rasterise a corpus of eleven rectangles through both fills and compare")
+        val xs = _corpus_x()
+        val ys = _corpus_y()
+        val ws = _corpus_w()
+        val hs = _corpus_h()
+        val clip = TinyRect(x: 0, y: 0, width: SPAN_W, height: SPAN_H)
+        val color = 301959236
+        var formats = [TINY_PIXEL_ARGB8888, TINY_PIXEL_RGB565]
+        var mismatches = 0
+        var checksum_mismatches = 0
+        var cases = 0
+        var f = 0
+        while f < formats.len():
+            val fmt = formats[f]
+            var i = 0
+            while i < xs.len():
+                val rect = TinyRect(x: xs[i], y: ys[i], width: ws[i], height: hs[i])
+                var reference = TinySoftware2D.create(SPAN_W, SPAN_H, fmt)
+                var span = TinySoftware2D.create(SPAN_W, SPAN_H, fmt)
+                # Reference oracle: the historical fill_clipped + store_pixel logic.
+                val area = tiny_intersect(rect, clip)
+                var y = area.y
+                while y < area.bottom():
+                    var x = area.x
+                    while x < area.right():
+                        reference.store_pixel(x, y, color)
+                        x = x + 1
+                    y = y + 1
+                span.fill_clipped(rect, clip, color)
+                var k = 0
+                while k < SPAN_W * SPAN_H:
+                    if span.pixels[k] != reference.pixels[k]:
+                        mismatches = mismatches + 1
+                    k = k + 1
+                if span.checksum() != reference.checksum():
+                    checksum_mismatches = checksum_mismatches + 1
+                cases = cases + 1
+                i = i + 1
+            f = f + 1
+        expect(cases).to_equal(22)  # oracle: 11 rectangle shapes x 2 pixel formats
+        expect(mismatches).to_equal(0)  # oracle: 0 — a span fill that differs anywhere is a regression
+        expect(checksum_mismatches).to_equal(0)  # oracle: 0 — receipts must agree with the pixels
+
+    it "writes the exact packed colour inside the rectangle and leaves the outside untouched":
+        """Parity alone could pass on two identically wrong buffers, so the manual pins
+        absolute values: the interior is the requested colour, the exterior is background."""
+        # @req REQ-UI-SLIM-009
+        # @capture(bit_table): packed interior value in ARGB8888 and RGB565
+        step("Fill a 3x2 rectangle at (2,1) on a 7x5 surface in ARGB8888")
+        val clip = TinyRect(x: 0, y: 0, width: SPAN_W, height: SPAN_H)
+        val rect = TinyRect(x: 2, y: 1, width: 3, height: 2)
+        val color = 301959236
+        var argb = TinySoftware2D.create(SPAN_W, SPAN_H, TINY_PIXEL_ARGB8888)
+        argb.fill_clipped(rect, clip, color)
+        expect(argb.pixel_at(3, 1)).to_equal(301959236)  # oracle: 301959236 — the requested ARGB word is stored unchanged
+        expect(argb.pixel_at(1, 1)).to_equal(0)  # oracle: 0 — the column left of the rect keeps the cleared background
+        expect(argb.pixel_at(5, 1)).to_equal(0)  # oracle: 0 — the column right of the rect keeps the cleared background
+        expect(argb.pixel_at(3, 3)).to_equal(0)  # oracle: 0 — the row below the rect keeps the cleared background
+
+        step("Fill the same rectangle in RGB565 and compare against an independently packed value")
+        var rgb = TinySoftware2D.create(SPAN_W, SPAN_H, TINY_PIXEL_RGB565)
+        rgb.fill_clipped(rect, clip, color)
+        expect(_spec_rgb565(color)).to_equal(64584)  # oracle: 64584 — r=0xFF,g=0x88,b=0x44 packed as 5:6:5
+        expect(rgb.pixel_at(3, 1)).to_equal(64584)  # oracle: 64584 — the span path converts once and stores the same word
+        expect(rgb.pixel_at(1, 1)).to_equal(0)  # oracle: 0 — conversion must not leak outside the clipped span
+
+    it "does the bounds and format work once per fill instead of once per pixel":
+        """This is the whole point of P10: a 100x100 interior fill used to cost ten
+        thousand bounds checks and ten thousand colour conversions."""
+        # @req REQ-UI-SLIM-010
+        # @capture(statistics): store_pixel calls and format conversions per fill
+        step("Fill a 100x100 RGB565 surface through the historical per-pixel oracle")
+        val clip = TinyRect(x: 0, y: 0, width: 100, height: 100)
+        val rect = TinyRect(x: 0, y: 0, width: 100, height: 100)
+        val color = 301959236
+        var reference = TinySoftware2D.create(100, 100, TINY_PIXEL_RGB565)
+        tiny_software_counters_reset()
+        val area = tiny_intersect(rect, clip)
+        var y = area.y
+        while y < area.bottom():
+            var x = area.x
+            while x < area.right():
+                reference.store_pixel(x, y, color)
+                x = x + 1
+            y = y + 1
+        val ref_stores = tiny_software_store_pixel_count()
+        val ref_converts = tiny_software_format_convert_count()
+        expect(ref_stores).to_equal(10000)  # oracle: 10000 — one guarded store per pixel of a 100x100 fill
+        expect(ref_converts).to_equal(10000)  # oracle: 10000 — the old path re-converted the colour per pixel
+
+        step("Fill the identical rectangle through the span path and read the same counters")
+        var span = TinySoftware2D.create(100, 100, TINY_PIXEL_RGB565)
+        tiny_software_counters_reset()
+        span.fill_clipped(rect, clip, color)
+        val span_stores = tiny_software_store_pixel_count()
+        val span_converts = tiny_software_format_convert_count()
+        expect(span_stores).to_equal(0)  # oracle: 0 — the clip proves the bounds, so no per-pixel guard runs
+        expect(span_converts).to_equal(1)  # oracle: 1 — exactly one hoisted colour conversion per fill
+        expect(span.pixel_at(50, 50)).to_equal(64584)  # oracle: 64584 — cheaper, and still the right pixel
+        expect(span.checksum()).to_equal(reference.checksum())  # oracle: identical buffers hash identically
+
+    it "keeps validating draw streams and pixel-format capabilities":
+        """Speed must not be bought by skipping validation: the error receipts are
+        unchanged and a rejected stream still mutates nothing."""
+        # @req REQ-UI-SLIM-009
+        # @capture(protocol_json): status codes for a truncated stream and a bad format
+        step("Submit a truncated fill-rect stream and confirm the malformed receipt")
+        var backend = TinySoftware2D.create(SPAN_W, SPAN_H, TINY_PIXEL_ARGB8888)
+        val before = backend.checksum()
+        val truncated = TinyDrawStreamV1.create([TINY_DRAW_FILL_RECT, 0, 0], TINY_2D_CAP_DRAW_STREAM_V1)
+        expect(backend.execute_stream(truncated).code).to_equal(TINY_ERR_MALFORMED)  # oracle: TINY_ERR_MALFORMED — the envelope is short
+        expect(backend.checksum()).to_equal(before)  # oracle: unchanged — a rejected stream paints nothing
+        expect(backend.frame_id).to_equal(0)  # oracle: 0 — no frame is published for a rejected stream
+
+        step("Submit a well-formed stream to a surface declaring an unknown pixel format")
+        var unsupported = TinySoftware2D.create(SPAN_W, SPAN_H, 99)
+        val good = TinyDrawStreamV1.create([TINY_DRAW_FILL_RECT, 0, 0, 2, 2, 5, TINY_DRAW_END], TINY_2D_CAP_DRAW_STREAM_V1)
+        expect(unsupported.execute_stream(good).code).to_equal(TINY_ERR_UNSUPPORTED)  # oracle: TINY_ERR_UNSUPPORTED — format 99 has no raster path
+        expect(unsupported.pixel_at(0, 0)).to_equal(0)  # oracle: 0 — nothing was rasterised
+
+        step("Submit the same well-formed stream to a supported surface")
+        var ok = TinySoftware2D.create(SPAN_W, SPAN_H, TINY_PIXEL_ARGB8888)
+        expect(ok.execute_stream(good).code).to_equal(TINY_OK)  # oracle: TINY_OK — the happy path still renders
+        expect(ok.pixel_at(1, 1)).to_equal(5)  # oracle: 5 — the fill colour reached the surface
+
+    it "still hashes every pixel word when it builds a surface receipt":
+        """P11 is investigate-only. There is no mutation tracking for the public
+        `pixels` array, so the checksum must not be cached or shortened."""
+        # @req REQ-UI-SLIM-010
+        # @capture(statistics): pixel words hashed per receipt
+        step("Build one surface receipt from a 7x5 surface and count the words hashed")
+        var backend = TinySoftware2D.create(SPAN_W, SPAN_H, TINY_PIXEL_ARGB8888)
+        tiny_software_counters_reset()
+        val receipt = backend.surface_receipt()
+        expect(tiny_software_checksum_word_count()).to_equal(35)  # oracle: 35 — every word of a 7x5 surface is hashed
+        expect(receipt.pixel_count).to_equal(35)  # oracle: 35 — the receipt publishes the whole buffer
+
+        step("Build a second receipt and confirm the work repeats rather than being cached")
+        tiny_software_counters_reset()
+        val again = backend.surface_receipt()
+        expect(tiny_software_checksum_word_count()).to_equal(35)  # oracle: 35 — a cached checksum would report 0
+        expect(again.checksum).to_equal(receipt.checksum)  # oracle: equal — same pixels, same hash

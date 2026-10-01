@@ -1,4 +1,8 @@
 # Interpreter: `substring` dispatch fails on chained str receiver with nested call argument
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-19
 **Status:** OPEN (workaround landed; root cause not fixed)
@@ -36,3 +40,4 @@ failure is recorded here rather than silently normalized.
 Reproduce in a minimal interpreter unit spec (`str.trim().substring(f())`) and
 fix method dispatch on chained receivers with nested call arguments in the
 interpreter call path.
+

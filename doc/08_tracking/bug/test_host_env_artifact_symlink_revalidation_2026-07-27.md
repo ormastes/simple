@@ -1,4 +1,9 @@
 # Test-host artifact symlink revalidation
+## Closed 2026-09-16 — ...d framebuffer PPM bindings. ## Resolution Implemented `file_is_regular_no_follow` in the c
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 `test_host_env` re-hashes retained RenderDoc and framebuffer artifacts through
 `file_exists`/`file_hash_sha256`, which follow symlinks. Replacing a previously
@@ -35,3 +40,4 @@ open/fstat/hash-on-fd operation.
   layout-opaque platform bridge: POSIX `lstat`/`S_ISREG` and a Windows
   reparse-aware equivalent. Do not guess `struct stat` layouts, depend on the
   hosted runtime, or treat `fopen` as proof.
+

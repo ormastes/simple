@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/os/port/nvfs_image.spl
 
 """
@@ -7,11 +11,18 @@ Checks that the compatibility image carries NVFS selection metadata at LBA
 0/1, validated DBFS backing metadata at LBA 2/3, and a device-backed seed.
 """
 
+use std.spec.step
+
 use std.spec
 use os.port.nvfs_image.{
     NvfsImageConfig, NvfsImageSeed, _nvfs_image_mem_device,
-    NVFS_IMAGE_PROVIDER
+    _nvfs_image_byte_identity_v1,
+    build_nvfs_rootfs_image_with_receipt_v1,
+    NVFS_IMAGE_PROVIDER, NVFS_IMAGE_CARRIER_FORMAT_V1
 }
+use std.io_runtime.{file_delete, file_read_bytes, getpid}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.nvfs_superblock.{
     nvfs_superblock_set_device, nvfs_superblock_probe_disk
 }
@@ -40,12 +51,17 @@ fn _seeded_nvfs_cfg() -> NvfsImageConfig:
     )
 
 describe "NVFS POSIX DBFS-backed image layout":
-    # @req: REQ-SQ-023
+    # @manual scenario evidence
+        # @req: REQ-SSPEC-INTEGRATION
     it "rejects images too small for both superblocks and the backing arena":
+        # @req REQ-SSPEC-INTEGRATION
+        step("rejects images too small for both superblocks and the backing arena")
         val cfg = NvfsImageConfig(size_sectors: 7u64, seeds: [])
         expect(_nvfs_image_mem_device(cfg).is_err()).to_equal(true)
 
     it "formats both NVFS and DBFS replica regions":
+        # @req REQ-SSPEC-INTEGRATION
+        step("formats both NVFS and DBFS replica regions")
         val dev = _nvfs_image_mem_device(_small_nvfs_cfg()).unwrap()
         nvfs_superblock_set_device(dev)
         dbfs_superblock_set_device(dev)
@@ -53,6 +69,8 @@ describe "NVFS POSIX DBFS-backed image layout":
         expect(dbfs_superblock_probe_disk()).to_equal(true)
 
     it "serializes the exact DBFS backing arena count":
+        # @req REQ-SSPEC-INTEGRATION
+        step("serializes the exact DBFS backing arena count")
         val dev = _nvfs_image_mem_device(_small_nvfs_cfg()).unwrap()
         dbfs_superblock_set_device(dev)
         val backing = dbfs_superblock_read_from_disk()
@@ -60,6 +78,8 @@ describe "NVFS POSIX DBFS-backed image layout":
         expect(backing.block_count).to_equal(252u64)
 
     it "places NVFS and DBFS magic in their assigned sectors":
+        # @req REQ-SSPEC-INTEGRATION
+        step("places NVFS and DBFS magic in their assigned sectors")
         val raw = _nvfs_image_mem_device(_small_nvfs_cfg()).unwrap().bytes()
         expect(raw[0]).to_equal(0x53u8)
         expect(raw[1]).to_equal(0x46u8)
@@ -72,8 +92,10 @@ describe "NVFS POSIX DBFS-backed image layout":
         expect(raw[lba2 + 3]).to_equal(0x53u8)
 
 describe "NVFS POSIX DBFS-backed image seeds":
-    # @req: REQ-SQ-023
+        # @req: REQ-SSPEC-INTEGRATION
     it "reopens a seeded file through the canonical device-backed NVFS driver":
+        # @req REQ-SSPEC-INTEGRATION
+        step("reopens a seeded file through the canonical device-backed NVFS driver")
         val dev = _nvfs_image_mem_device(_seeded_nvfs_cfg()).unwrap()
         val opened_driver = NvfsDriver.new_on_device(
             NVFS_IMAGE_PROVIDER, dev, DBFS_ARENA_BASE_LBA, 252
@@ -88,3 +110,56 @@ describe "NVFS POSIX DBFS-backed image seeds":
         val content = driver.read_handle(handle, 5).unwrap()
         expect(driver.close_handle(handle).is_ok()).to_equal(true)
         expect(content).to_equal("hello")
+
+describe "NVFS image materialization identity":
+    it "hashes the exact geometry-sized single-volume bytes deterministically":
+        step("derive identity twice from independently built equivalent images")
+        val first = _nvfs_image_byte_identity_v1(
+            _nvfs_image_mem_device(_small_nvfs_cfg()).unwrap()).unwrap()
+        val second = _nvfs_image_byte_identity_v1(
+            _nvfs_image_mem_device(_small_nvfs_cfg()).unwrap()).unwrap()
+        expect(first.byte_length).to_equal(131072u64)
+        expect(first.digest).to_equal(second.digest)
+
+        step("change persisted seed bytes and observe a different identity")
+        val seeded = _nvfs_image_byte_identity_v1(
+            _nvfs_image_mem_device(_seeded_nvfs_cfg()).unwrap()).unwrap()
+        expect(seeded.digest == first.digest).to_equal(false)
+
+    it "rejects devices outside the NVFS image geometry contract":
+        step("reject zero sectors and a non-512-byte sector geometry")
+        expect(_nvfs_image_byte_identity_v1(
+            MemBlockDevice.new(0u64, 512u32)).is_err()).to_equal(true)
+        expect(_nvfs_image_byte_identity_v1(
+            MemBlockDevice.new(8u64, 4096u32)).is_err()).to_equal(true)
+
+    it "returns carrier and root identity only after writing those exact bytes":
+        step("materialize a small DBFS-backed NVFS raw image")
+        val output = "/tmp/simple_nvfs_materialization_receipt_v1_" +
+            getpid().to_text() + ".img"
+        file_delete(output)
+        val result = build_nvfs_rootfs_image_with_receipt_v1(
+            _small_nvfs_cfg(), output)
+        expect(result.is_ok()).to_equal(true)
+        val receipt = result.unwrap()
+        val written = file_read_bytes(output)
+        expect(receipt.provider_id).to_equal(NVFS_IMAGE_PROVIDER)
+        expect(receipt.carrier_format_id).to_equal(NVFS_IMAGE_CARRIER_FORMAT_V1)
+        expect(receipt.bytes_verified_before_write).to_equal(true)
+        expect(receipt.write_completed).to_equal(true)
+        expect(receipt.carrier_byte_length).to_equal(written.len() as u64)
+        expect(receipt.carrier_digest).to_equal(sha256_u8_hex(written))
+        expect(receipt.root_byte_length).to_equal(receipt.carrier_byte_length)
+        expect(receipt.root_digest).to_equal(receipt.carrier_digest)
+        file_delete(output)
+
+    it "returns no materialization receipt when host file output fails":
+        step("attempt to write an image over the existing temporary directory")
+        val output = "/tmp"
+        val result = build_nvfs_rootfs_image_with_receipt_v1(
+            _small_nvfs_cfg(), output)
+        expect(result.is_err()).to_equal(true)
+
+        step("reject an empty output path before image construction")
+        expect(build_nvfs_rootfs_image_with_receipt_v1(
+            _small_nvfs_cfg(), "").is_err()).to_equal(true)

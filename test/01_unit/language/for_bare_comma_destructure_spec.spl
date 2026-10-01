@@ -1,0 +1,123 @@
+# Regression spec for
+# doc/08_tracking/bug/seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md
+#
+# LANGUAGE RULE (decided by the user; the Rust seed follows the pure-Simple
+# compiler, never the other way round): a bare comma pattern in a for loop
+# is ALWAYS a tuple destructure, of any arity, regardless of what the
+# iterable is. `for a, b in xs:` means exactly what `for (a, b) in xs:`
+# means. There is no "enumerate shorthand" -- enumerate intent is spelled
+# `for i, x in xs.enumerate():`.
+#
+# This is what the pure-Simple compiler has always done:
+# `parse_for_stmt`/`encode_for_tuple_binding`
+# (src/compiler/10.frontend/core/parser_stmts.spl) joins an arbitrary bare
+# name list into the SAME `"(a,b,c)"` pattern the parenthesized spelling
+# produces, unconditionally, without ever looking at the iterable; the HIR
+# lowering (src/compiler/20.hir/hir_lowering/statements.spl, `StmtKind.For`)
+# then emits one `let name = __for_tuple_elem[i]` per name. The seed's JIT
+# already agreed. Only the seed's tree-walk interpreter diverged, by
+# index-wrapping every bare two-name loop.
+#
+# WHY A SUBPROCESS: a spec body runs on the tree-walk interpreter under the
+# spec runner's own engine and structurally cannot observe what the JIT
+# does. The probe is therefore run twice, once per engine, and both engines
+# must return byte-identical answers -- engine agreement is half the point
+# of this spec.
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_for_bare_comma_destructure.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn field(raw: text, key: text) -> text:
+    val prefix = key + "="
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with(prefix):
+            val parts = t.split("=")
+            return parts[1]
+    "MISSING"
+
+describe "bare comma for-pattern is always a tuple destructure (interpreter)":
+    it "destructures an array of 2-tuples exactly like the parenthesized spelling":
+        step("interpreter: for a, b in [(1,2),(3,4)] binds a=1,b=2 then a=3,b=4")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        # Absolute-literal oracle first, so a crashed probe (every field
+        # reads "MISSING") cannot vacuously satisfy the agreement check.
+        expect(field(out, "BARE_PAIRS")).to_equal("1|2;3|4;")
+        expect(field(out, "PAREN_PAIRS")).to_equal(field(out, "BARE_PAIRS"))
+
+    it "gives index and item with no double wrap for an explicit .enumerate()":
+        step("interpreter: for i, x in [10,20,30].enumerate() binds i=position, x=element")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "ENUM_REPR")).to_equal("0|10;1|20;2|30;")
+
+    it "destructures .items(), .entries() and direct dict iteration alike":
+        step("interpreter: all three dict-pair spellings sum to the same total")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "ITEMS_TOTAL")).to_equal("6")
+        expect(field(out, "ENTRIES_TOTAL")).to_equal("6")
+        expect(field(out, "DICT_TOTAL")).to_equal("6")
+
+    it "destructures a three-name pattern over 3-tuples":
+        step("interpreter: for p, q, r in [(1,2,3),(4,5,6)] binds element-wise")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "TRIPLES")).to_equal("123;456;")
+
+    it "treats `_` in a bare comma pattern as a wildcard":
+        step("interpreter: for k, _ in d.items() binds only k")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "WILD_LEN")).to_equal("3")
+
+    it "binds nil for a bare comma pattern over non-tuples":
+        step("interpreter: for a, b in [10,20,30] is a mis-typed destructure, not a shorthand")
+        # This is the shape the removed "enumerate shorthand" used to claim.
+        # The pure-Simple compiler has no special case for it: the lowering
+        # indexes each element, and a non-tuple has no element 0/1, so both
+        # names bind nil. The seed JIT already answered exactly this; the
+        # interpreter now matches instead of silently enumerating.
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "NONTUPLE")).to_equal("nil|nil;nil|nil;nil|nil;")
+
+describe "bare comma for-pattern under the JIT agrees with the interpreter":
+    it "gives byte-identical answers for every shape the interpreter pins":
+        step("jit: same probe, same answers")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PROBE_DONE")
+        expect(field(jit, "BARE_PAIRS")).to_equal("1|2;3|4;")
+        expect(field(jit, "PAREN_PAIRS")).to_equal("1|2;3|4;")
+        expect(field(jit, "ENUM_REPR")).to_equal("0|10;1|20;2|30;")
+        expect(field(jit, "ITEMS_TOTAL")).to_equal("6")
+        expect(field(jit, "ENTRIES_TOTAL")).to_equal("6")
+        expect(field(jit, "DICT_TOTAL")).to_equal("6")
+        expect(field(jit, "TRIPLES")).to_equal("123;456;")
+        expect(field(jit, "WILD_LEN")).to_equal("3")
+        expect(field(jit, "NONTUPLE")).to_equal("nil|nil;nil|nil;nil|nil;")
+
+    it "matches the interpreter field for field":
+        step("jit vs interpreter: engine agreement, not just per-engine correctness")
+        val jit = run_probe_in_mode("jit")
+        val interp = run_probe_in_mode("interpreter")
+        expect(jit).to_contain("PROBE_DONE")
+        expect(interp).to_contain("PROBE_DONE")
+        expect(field(jit, "BARE_PAIRS")).to_equal(field(interp, "BARE_PAIRS"))
+        expect(field(jit, "ENUM_REPR")).to_equal(field(interp, "ENUM_REPR"))
+        expect(field(jit, "ITEMS_TOTAL")).to_equal(field(interp, "ITEMS_TOTAL"))
+        expect(field(jit, "TRIPLES")).to_equal(field(interp, "TRIPLES"))
+        expect(field(jit, "NONTUPLE")).to_equal(field(interp, "NONTUPLE"))

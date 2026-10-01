@@ -1,6 +1,6 @@
 # GPU Rendering Tests: Gap Analysis & Implementation Status
 
-**Last Updated:** 2026-07-06
+**Last Updated:** 2026-07-02
 **Status:** Implemented — Core functional tests complete; current Linux `.rdc` evidence linked
 
 ## Executive Summary
@@ -38,9 +38,7 @@ intensive coverage plan was written. Full plan + honest backend baseline:
   dispatches to the existing `draw_shadow_rect` / `draw_gradient_rect` /
   `draw_rounded_rect*` / border primitives; transparent-bg boxes with a
   border/shadow no longer vanish. (Updates the "Styling: borders, shadows,
-  gradients" row below — no longer 0.) External PNG `<img>` now uses the
-  broker, bounded decode, `SBRF5`, and the canonical Draw-IR image executor.
-  CSS `background-image: url(...)` remains tracked in
+  gradients" row below — no longer 0.) `<img>`/background-image is still blocked:
   `doc/08_tracking/bug/engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`.
 - **`cpu_simd` is a real SIMD-instrumented CPU lane, not a GPU fallback.**
   `scripts/check/check-cpu-simd-engine2d-evidence.shs` proves fill/copy/alpha/
@@ -222,7 +220,7 @@ describe "Event Handling":
 | **Images & Media** | img, picture, video, audio, canvas | 1* | ⚠️ |
 | **Tables** | table, tr, td, th, thead, tbody, tfoot | 0 | ❌ |
 | **Layout** | grid, flexbox, float, position | 0 | ❌ |
-| **Styling** | borders, shadows, gradients, transforms | 1* | ⚠️ |
+| **Styling** | borders, shadows, gradients, transforms | 0 | ❌ |
 | **Interactions** | hover, active, focus, disabled states | 0 | ❌ |
 
 *Web rendering has image test, but not combinations with other items

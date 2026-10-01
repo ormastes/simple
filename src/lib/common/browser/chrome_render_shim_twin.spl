@@ -1,0 +1,113 @@
+"""Simple twin of the pure logic in src/runtime/browser/chrome_render_shim.c.
+
+The C shim exists only because CEF delivers offscreen frames by calling BACK into the
+host and the repo's FFI is forward-only (research 2026-09-11 §3.1). Everything in the
+shim that is NOT a CEF callback — the frame state machine, the buffer-bounds arithmetic,
+the request-payload bound, and the status-code mapping — is mirrored here 1:1 so the
+dual-run shadow gate (`scripts/check/check-dual-run-shadow.shs`) has a twin to compare
+against. Keep the two files in lockstep: any edit to one is an edit to both.
+"""
+
+# Status codes — mirror of the CHROME_RENDER_* macros in chrome_render_shim.h.
+fn chrome_render_ok() -> i64: 0
+fn chrome_render_e_invalid_request() -> i64: 1
+fn chrome_render_e_invalid_handle() -> i64: 2
+fn chrome_render_e_buffer_too_small() -> i64: 3
+fn chrome_render_e_backend_unavailable() -> i64: 4
+fn chrome_render_e_timeout() -> i64: 5
+fn chrome_render_e_released_handle() -> i64: 6
+fn chrome_render_e_no_frame() -> i64: 7
+
+# Frame states — mirror of CHROME_RENDER_STATE_*.
+fn chrome_render_state_new() -> i64: 0
+fn chrome_render_state_sized() -> i64: 1
+fn chrome_render_state_loaded() -> i64: 2
+fn chrome_render_state_frame() -> i64: 3
+fn chrome_render_state_released() -> i64: 4
+
+# Transition events — mirror of CHROME_RENDER_EV_*.
+fn chrome_render_ev_resize() -> i64: 0
+fn chrome_render_ev_load() -> i64: 1
+fn chrome_render_ev_frame() -> i64: 2
+fn chrome_render_ev_read() -> i64: 3
+fn chrome_render_ev_destroy() -> i64: 4
+
+# Bounds — mirror of CHROME_RENDER_MAX_*.
+fn chrome_render_max_request_bytes() -> i64: 1048576
+fn chrome_render_max_pixel_bytes() -> i64: 268435456
+fn chrome_render_max_dimension() -> i64: 8192
+
+"""Next frame state for `event`, or -1 when the transition is illegal."""
+fn chrome_render_state_next(state: i64, event: i64) -> i64:
+    if state == chrome_render_state_released():
+        return -1
+    if event == chrome_render_ev_destroy():
+        return chrome_render_state_released()
+    if event == chrome_render_ev_resize():
+        if state == chrome_render_state_new() or state == chrome_render_state_sized() or
+           state == chrome_render_state_loaded() or state == chrome_render_state_frame():
+            return chrome_render_state_sized()
+        return -1
+    if event == chrome_render_ev_load():
+        if state == chrome_render_state_sized() or state == chrome_render_state_loaded() or
+           state == chrome_render_state_frame():
+            return chrome_render_state_loaded()
+        return -1
+    if event == chrome_render_ev_frame():
+        if state == chrome_render_state_loaded() or state == chrome_render_state_frame():
+            return chrome_render_state_frame()
+        return -1
+    if event == chrome_render_ev_read():
+        if state == chrome_render_state_frame():
+            return chrome_render_state_frame()
+        return -1
+    -1
+
+"""Byte count of one BGRA frame, or 0 when the geometry is out of bounds."""
+fn chrome_render_frame_bytes(width: i64, height: i64) -> i64:
+    if width <= 0 or height <= 0:
+        return 0
+    if width > chrome_render_max_dimension() or height > chrome_render_max_dimension():
+        return 0
+    val need = width * height * 4
+    if need > chrome_render_max_pixel_bytes():
+        return 0
+    need
+
+"""Admits a caller-supplied readback buffer against the frame geometry."""
+fn chrome_render_readback_status(width: i64, height: i64, capacity: i64) -> i64:
+    val need = chrome_render_frame_bytes(width, height)
+    if need == 0:
+        return chrome_render_e_invalid_request()
+    if capacity < need:
+        return chrome_render_e_buffer_too_small()
+    chrome_render_ok()
+
+"""A bounded request payload is present and no larger than 1 MiB.
+
+`present` mirrors the C shim's `data != NULL` test; Simple never sees the raw pointer.
+"""
+fn chrome_render_request_status(present: bool, length: i64) -> i64:
+    if not present or length <= 0:
+        return chrome_render_e_invalid_request()
+    if length > chrome_render_max_request_bytes():
+        return chrome_render_e_invalid_request()
+    chrome_render_ok()
+
+"""Status code to its stable receipt text — mirror of chrome_render_status_text()."""
+fn chrome_render_status_text(code: i64) -> text:
+    if code == chrome_render_ok(): return "ok"
+    if code == chrome_render_e_invalid_request(): return "invalid-request"
+    if code == chrome_render_e_invalid_handle(): return "invalid-handle"
+    if code == chrome_render_e_buffer_too_small(): return "buffer-too-small"
+    if code == chrome_render_e_backend_unavailable(): return "backend-unavailable"
+    if code == chrome_render_e_timeout(): return "timeout"
+    if code == chrome_render_e_released_handle(): return "released-handle"
+    if code == chrome_render_e_no_frame(): return "no-frame"
+    "unknown-status"
+
+"""create() returns a positive handle or the negated status code; map it back."""
+fn chrome_render_create_status(result: i64) -> i64:
+    if result > 0:
+        return chrome_render_ok()
+    0 - result

@@ -1,4 +1,9 @@
 # Assigning to a scalar field of a `class` fails native/AOT MIR lowering
+## Closed 2026-09-16 — Status FIXED with resolution section; suffixed-literal root, revert-proof spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **STATUS 2026-08-10 (later): FIXED — and the title above is a MIS-ATTRIBUTION.**
 > The trigger is not `class`, not a field, and not the assignment. It is the
@@ -156,3 +161,4 @@ interpolated `print` with an embedded call is silently dropped in native
 binaries, and the original table's `PASS` rows were build-success-only and never
 checked output. Filed separately as
 `native_interpolated_print_with_call_silently_drops_output_2026-08-10.md`.
+

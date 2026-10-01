@@ -1,4 +1,8 @@
 # Bug: wm-lane-boundary ratchet has 7 new uncaught violations
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found**: 2026-08-08, via `scripts/check/check-wm-lane-boundary.shs` (an
 unwired guard under triage in the guard-wiring campaign — currently nothing
@@ -106,3 +110,4 @@ for the same reason: it is not a `doc/08_tracking/bug/` doc and the doc
 itself frames re-baselining as requiring "an explicit, reviewed
 justification for each new entry" — a judgment call outside this pass's
 remit. Status remains open; violation count updated 7 -> 11 in this note.
+

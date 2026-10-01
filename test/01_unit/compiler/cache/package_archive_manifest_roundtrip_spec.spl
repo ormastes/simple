@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, package_archive_manifest_v1
+}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.hir.archive.interface_action_archive.{
+    interface_action_archive_manifest_decode_v1
+}
+
+fn roundtrip_entry() -> PackageModuleIndexEntryV1:
+    val digest = sha256_text("entry")
+    PackageModuleIndexEntryV1(
+        "pkg.archive", "pkg.archive.main", "src/main.spl", digest,
+        digest, digest, digest, digest, digest, digest, digest,
+        "scc.archive", [], [])
+
+fn roundtrip_authority() -> PackageArchiveAuthorityV1:
+    PackageArchiveAuthorityV1(
+        sha256_text("producer"), "root", sha256_text("variant"),
+        "revision", "tree", sha256_text("inventory"))
+
+describe "package archive producer and warm decoder manifest contract":
+    it "admits an archive without dependencies":
+        val manifest = package_archive_manifest_v1(
+            roundtrip_entry(), roundtrip_authority(), [],
+            sha256_text("interface"), sha256_text("action"))
+        expect(manifest).to_contain("dependencies=0;")
+        match interface_action_archive_manifest_decode_v1(manifest):
+            case Err(error): fail("zero-dependency manifest rejected: {error}")
+            case Ok(decoded):
+                expect(decoded.dependencies.len()).to_equal(0)
+                expect(decoded.package_key).to_equal("pkg.archive")
+
+    it "sorts multiple dependencies and rejects a forged count":
+        val first = sha256_text("first")
+        val second = sha256_text("second")
+        val manifest = package_archive_manifest_v1(
+            roundtrip_entry(), roundtrip_authority(), [second, first],
+            sha256_text("interface"), sha256_text("action"))
+        match interface_action_archive_manifest_decode_v1(manifest):
+            case Err(error): fail("multi-dependency manifest rejected: {error}")
+            case Ok(decoded):
+                expect(decoded.dependencies).to_equal([first, second].sorted())
+        val forged = manifest.replace("dependencies=2;", "dependencies=1;")
+        expect(interface_action_archive_manifest_decode_v1(forged).is_err()).to_equal(true)

@@ -1,0 +1,199 @@
+#!/bin/sh
+# check-rv64-wm-kernel-symbols-resolved.shs
+#
+# The riscv64 WM kernel must LINK with every runtime symbol really defined in
+# the image -- not merely "the build said OK".
+#
+# WHY THIS EXISTS
+# ---------------
+# On 2026-09-01 the rv64 WM render-smoke lane died in ld.lld on undefined
+# symbols. lld stops at its default 20 errors, so the failure reported
+# "too many errors emitted, stopping now" and hid the rest: the real count was
+# 66. Four root causes, none of them "a missing function":
+#   1. The entry imported os.kernel.arch.riscv64.console purely for
+#      serial_init(). console.spl also hosts the interactive console SHELL, so
+#      it drags in fs_exec_spawn, vfs_write_ops and ssh_auth -- and with them
+#      the scheduler, VFS, IPC syscall table, PCI, fat32 and the compression
+#      stack. 22 of the 66 symbols have NO definition anywhere in the tree and
+#      were reachable only through that one import edge.
+#   2. The entry named its boot function boot_main(); the whole boot chain
+#      calls spl_start().
+#   3. The VirtIO-GPU display backend existed only in
+#      src/os/kernel/arch/riscv64/boot/freestanding_runtime.c. native-build
+#      derives its boot dir as <entry>.parent()/boot, so no lane whose entry
+#      lives under examples/ ever linked it -- and that file does not compile
+#      at all, so it had never been built by anything.
+#   4. @export("C", name: ...) and @extern("runtime", ...) are silently ignored
+#      by the seed's native backend, so two Simple<->C bridge symbols never got
+#      their C names.
+#
+# WHY A CLEAN BUILD IS NOT THE EVIDENCE
+# -------------------------------------
+# An unresolved symbol tolerated at link becomes a NULL GOT slot and then a
+# SIGSEGV at first call -- exactly how bootstrap/stage3/simple came to crash on
+# a three-line hello world while --version answered cleanly
+# (doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md).
+# A WEAK nil stub is the same failure wearing a green hat: it links, returns 0,
+# and reads as a non-error Result. So this guard reads the SYMBOL TABLE of the
+# actual ELF and fails on any UNDEFINED runtime symbol and on any required
+# bridge symbol that resolved WEAK rather than strong. Source greps prove
+# nothing here: this tree has duplicate same-named boot files in two
+# directories, and a tree-wide grep finds the GOOD sibling while the link uses
+# the other one. That is the trap that burned four sessions on this exact file
+# set, so verification is nm on the image, never grep on the sources.
+#
+# SCOPE, stated rather than implied: this proves the image has no unresolved or
+# weak-stubbed runtime symbol. It does NOT prove the guest boots or renders --
+# that is check-simpleos-riscv64-wm-render-smoke-opensbi.shs, which boots real
+# OpenSBI and compares scanout pixels host-side.
+#
+# VERDICT is always the LAST line of stdout:
+#   PASS  — <n> symbol(s) checked, 0 undefined, 0 weak       exit 0
+#   FAIL  — ...                                              exit 1
+#   ERROR — nothing was checked (<reason>)                   exit 2
+# A run that examined 0 symbols is ERROR, never a pass.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ELF_DEFAULT=$ROOT/build/os/riscv64_wm/wm/kernel.elf
+BUILDER=$ROOT/scripts/os/build-simpleos-riscv64-wm-kernel.shs
+
+# The Simple<->C bridge symbols this lane needs. Each was undefined in the
+# 2026-09-01 incident; each must now be present and STRONG.
+REQUIRED_SYMS="rt_display_init rt_display_width rt_display_height rt_display_pitch rt_display_bpp rt_display_framebuffer_address rt_display_present rt_riscv_uart_put spl_riscv_noalloc_alloc_page"
+
+pass() { printf 'PASS — %s\n' "$1"; exit 0; }
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+nothing() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+# --- core analysis: operates on an `nm` listing, so selftest fixtures can be
+#     real ELFs run through the real code path ------------------------------
+# Prints "<undefined-runtime-syms>|<weak-required-syms>|<missing-required>|<checked-count>"
+analyze_nm() {
+    _nm_file=$1
+    # `grep -c` exits 1 on zero matches, so its status must not be allowed to
+    # append a second count via `|| echo 0` -- that produced a two-line value.
+    _checked=$(grep -cE '^[0-9a-fA-F ]* [A-Za-z] ' "$_nm_file" 2>/dev/null)
+    [ -n "$_checked" ] || _checked=0
+    # Undefined symbols of any kind: a freestanding image must have none.
+    _undef=$(awk '$1=="U"{print $2} NF==2 && $1=="U"{print $2}' "$_nm_file" 2>/dev/null \
+             | sort -u | tr '\n' ' ' | sed 's/ $//')
+    _weak=''
+    _missing=''
+    for _s in $REQUIRED_SYMS; do
+        _line=$(awk -v s="$_s" '$NF==s{print $(NF-1)}' "$_nm_file" 2>/dev/null | head -1)
+        if [ -z "$_line" ]; then
+            _missing="$_missing $_s"
+        else
+            case "$_line" in
+                [TtDdRrBb]) ;;                       # strong definition
+                [wWvV]) _weak="$_weak $_s" ;;        # weak / weak-object nil stub
+                U) _missing="$_missing $_s" ;;
+                *) _weak="$_weak $_s" ;;
+            esac
+        fi
+    done
+    printf '%s|%s|%s|%s\n' "$_undef" "${_weak# }" "${_missing# }" "$_checked"
+}
+
+# --- selftest: runs FIRST, unconditionally, and is FATAL --------------------
+selftest() {
+    _t=$(mktemp -d) || { printf 'ERROR — nothing was checked (selftest tmpdir)\n'; exit 2; }
+    _rc=0
+
+    # fixture 1: clean image -- strong defs for every required symbol, no undefined
+    : > "$_t/clean.nm"
+    for _s in $REQUIRED_SYMS; do printf '0000000080200000 T %s\n' "$_s" >> "$_t/clean.nm"; done
+    _r=$(analyze_nm "$_t/clean.nm")
+    case "$_r" in
+        '||'*) ;;
+        *) printf 'selftest FAIL: clean fixture should be clean, got [%s]\n' "$_r" >&2; _rc=1 ;;
+    esac
+
+    # fixture 2: the REAL 2026-09-01 incident shape -- an undefined runtime symbol
+    cp "$_t/clean.nm" "$_t/undef.nm"
+    printf '                 U rt_value_u64\n' >> "$_t/undef.nm"
+    _r=$(analyze_nm "$_t/undef.nm")
+    case "$_r" in
+        rt_value_u64'|'*) ;;
+        *) printf 'selftest FAIL: undefined symbol not detected, got [%s]\n' "$_r" >&2; _rc=1 ;;
+    esac
+
+    # fixture 3: WEAK nil stub -- links green, faults at runtime. Must FAIL.
+    sed 's/^0000000080200000 T rt_display_present$/0000000080200000 W rt_display_present/' \
+        "$_t/clean.nm" > "$_t/weak.nm"
+    _r=$(analyze_nm "$_t/weak.nm")
+    case "$_r" in
+        '|rt_display_present|'*) ;;
+        *) printf 'selftest FAIL: weak stub not detected, got [%s]\n' "$_r" >&2; _rc=1 ;;
+    esac
+
+    # fixture 4: a required bridge symbol absent entirely. Must FAIL.
+    grep -v 'rt_display_init' "$_t/clean.nm" > "$_t/miss.nm"
+    _r=$(analyze_nm "$_t/miss.nm")
+    case "$_r" in
+        '||rt_display_init|'*) ;;
+        *) printf 'selftest FAIL: missing symbol not detected, got [%s]\n' "$_r" >&2; _rc=1 ;;
+    esac
+
+    # fixture 5: empty listing must yield 0 checked, so the caller is forced to
+    # ERROR rather than reading a vacuous run as a pass.
+    : > "$_t/empty.nm"
+    _r=$(analyze_nm "$_t/empty.nm")
+    _n=$(printf '%s' "$_r" | cut -d'|' -f4)
+    if [ "$_n" != "0" ]; then
+        printf 'selftest FAIL: empty fixture must report 0 checked, got [%s]\n' "$_r" >&2; _rc=1
+    fi
+
+    rm -rf "$_t"
+    [ "$_rc" -eq 0 ] || { printf 'ERROR — nothing was checked (selftest failed)\n'; exit 2; }
+}
+
+ELF=$ELF_DEFAULT
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --elf) shift; ELF=${1:-} ;;
+        *) printf 'ERROR — nothing was checked (unknown argument %s)\n' "$1"; exit 2 ;;
+    esac
+    shift
+done
+
+selftest
+[ "$SELFTEST_ONLY" -eq 1 ] && { printf 'PASS — 5 selftest fixture(s) checked, 0 failures\n'; exit 0; }
+
+command -v nm >/dev/null 2>&1 || nothing "no nm available; absence of a symbol reader is absence of evidence, never a pass"
+
+# Build on demand: a missing artifact must not silently downgrade this to a skip.
+if [ ! -s "$ELF" ]; then
+    [ -x "$BUILDER" ] || [ -f "$BUILDER" ] || nothing "missing $ELF and no builder at $BUILDER"
+    sh "$BUILDER" >"$ROOT/build-rv64-wm-guard.log" 2>&1
+    build_rc=$?
+    [ "$build_rc" -eq 0 ] || fail "the rv64 WM kernel does not build (rc=$build_rc); see $ROOT/build-rv64-wm-guard.log"
+fi
+[ -s "$ELF" ] || nothing "no ELF at $ELF even after building"
+
+NMOUT=$(mktemp) || nothing "could not create temp file"
+nm "$ELF" > "$NMOUT" 2>/dev/null || { rm -f "$NMOUT"; nothing "nm could not read $ELF"; }
+
+RESULT=$(analyze_nm "$NMOUT")
+rm -f "$NMOUT"
+
+UNDEF=$(printf '%s' "$RESULT" | cut -d'|' -f1)
+WEAK=$(printf '%s' "$RESULT" | cut -d'|' -f2)
+MISSING=$(printf '%s' "$RESULT" | cut -d'|' -f3)
+CHECKED=$(printf '%s' "$RESULT" | cut -d'|' -f4)
+
+[ "${CHECKED:-0}" -gt 0 ] 2>/dev/null || nothing "the symbol table of $ELF listed 0 symbols"
+
+PROBLEM=''
+[ -n "$UNDEF" ] && PROBLEM="$PROBLEM undefined: $UNDEF;"
+[ -n "$WEAK" ] && PROBLEM="$PROBLEM resolved WEAK (a nil stub links green and faults at runtime): $WEAK;"
+[ -n "$MISSING" ] && PROBLEM="$PROBLEM absent from the image: $MISSING;"
+
+[ -z "$PROBLEM" ] \
+    || fail "$CHECKED symbol(s) checked in $ELF -- $(printf '%s' "$PROBLEM" | sed 's/^ //')"
+
+pass "$CHECKED symbol(s) checked in $ELF, 0 undefined, 0 weak, all $(printf '%s' "$REQUIRED_SYMS" | wc -w | tr -d ' ') required Simple<->C bridge symbol(s) strongly defined"

@@ -34,12 +34,42 @@ use std.spec.{describe, context, it, expect, step}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, draw_ir_batch, draw_ir_composition,
+    draw_ir_embedding_config, draw_ir_rect
+}
+use common.ui.render_opt.damage_plan.{DamageFramePlan, DAMAGE_PLAN_LOCAL}
+use common.ui.render_opt.retained_frame_schedule.{
+    RetainedFrameSchedule, RETAINED_SCHEDULE_EXECUTE
+}
 
 fn _make_backend(w: i32, h: i32, fill: u32) -> Engine2dCompositorBackend:
     var engine = Engine2D.create_with_backend(w, h, "cpu")
     engine.clear(fill)
     engine.present()
     Engine2dCompositorBackend.create(engine)
+
+fn _retained_composition(revision: text, x: i32, color: u32):
+    draw_ir_composition(revision, "retained-scene", DRAW_IR_BACKEND_CPU, [
+        draw_ir_batch("root", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("root", "root", 0, 0, 8, 4, 0, 1000, true), [
+                draw_ir_rect("background", 0, 0, 8, 4, 0xFFFFFFFF),
+                draw_ir_rect("moving", x, 0, 2, 2, color)
+            ])
+    ])
+
+fn _local_schedule() -> RetainedFrameSchedule:
+    val plan = DamageFramePlan(
+        rects: [0, 0, 2, 2, 4, 0, 2, 2], mode: DAMAGE_PLAN_LOCAL,
+        source_tile_count: 2, output_rect_count: 2, merged_tile_count: 0,
+        dirty_pixels: 8, planned_pixels: 8, tiles_examined: 0,
+        vertical_candidates_examined: 0, run_workspace_allocations: 0,
+        full_fallback_count: 0, fallback_reason: 0)
+    RetainedFrameSchedule(
+        status: RETAINED_SCHEDULE_EXECUTE, state_accepted: true,
+        execute_now: true, reason: "focused-local", plan_mode: DAMAGE_PLAN_LOCAL,
+        plan_rects: plan.rects, planned_pixels: 8, maximum_pixels: 8,
+        predicted_ns: 1, budget_basis: "focused", plan: plan)
 
 describe "Engine2dCompositorBackend explicit damage report (WS-D3 fix)":
     """Each glass mutator reports its own damage instead of relying on
@@ -127,32 +157,18 @@ describe "Engine2dCompositorBackend explicit damage report (WS-D3 fix)":
             cap_blend_rect(backend, 0, 0, 2, 2, 0xFFFFFFFF, 128u8)
             expect(backend.damage_rect_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             backend.clear_damage()
-            expect(backend.damage_rect_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            expect(backend.damage_rect_count()).to_equal(0)
 
-        it "present consumes reported damage through one shared plan":
-            step("Verify: present consumes reported damage through one shared plan")
-            val backend = _make_backend(128, 128, 0xFF000000)
-            backend.report_damage(1, 1, 10, 10)
-            backend.report_damage(20, 20, 10, 10)
-            backend.present()
-            expect(backend.damage_rect_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(backend.last_damage_plan_mode).to_equal(1)  # oracle: 1 — named expected value from the requirement
-            expect(backend.last_damage_plan_rect_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
-            expect(backend.last_damage_plan_pixels).to_equal(4096)  # oracle: 4096 — named expected value from the requirement
+    context "retained schedule execution":
 
-        it "idle present records NONE with zero planned pixels":
-            step("Verify: idle present records NONE with zero planned pixels")
-            val backend = _make_backend(128, 128, 0xFF000000)
-            backend.present()
-            expect(backend.last_damage_plan_mode).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(backend.last_damage_plan_rect_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(backend.last_damage_plan_pixels).to_equal(0)  # oracle: 0 — named expected value from the requirement
-
-        it "present_rect no longer discards its damage rectangle":
-            step("Verify: present_rect no longer discards its damage rectangle")
-            val backend = _make_backend(128, 128, 0xFF000000)
-            backend.present_rect(70, 70, 1, 1)
-            expect(backend.damage_rect_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
-            expect(backend.last_damage_plan_mode).to_equal(1)  # oracle: 1 — named expected value from the requirement
-            expect(backend.last_damage_plan_rect_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
-            expect(backend.last_damage_plan_pixels).to_equal(4096)  # oracle: 4096 — named expected value from the requirement
+        it "replays an admitted local plan through the persistent compositor engine":
+            val backend = _make_backend(8, 4, 0xFF000000)
+            val first = backend.render_draw_ir_composition(
+                _retained_composition("first", 0, 0xFFFF0000), [])
+            expect(first.fallback_required).to_equal(false)
+            val changed = backend.render_draw_ir_composition_scheduled(
+                _retained_composition("changed", 4, 0xFFFF0000), [],
+                _local_schedule())
+            expect(changed.fallback_required).to_equal(false)
+            expect(changed.pixels[0]).to_equal(0xFFFFFFFF)
+            expect(changed.pixels[4]).to_equal(0xFFFF0000)

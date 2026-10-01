@@ -1,10 +1,16 @@
 # BUG: `interface` as dotted module-path segment trips TsInterface common-mistake error
 
+## Closed 2026-09-13 — Fixed; `interface` as a dotted module-path segment now imports cleanly
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `use std.common.torch.interface.{TorchBackend}` in a hello-world compiles and runs — output `ok`, exit 0. No `Common mistake detected: Replace 'interface' with 'trait'`.
+- **inferred**: the entry's own status line already recorded "fixed + seed redeployed (2026-06-12)"; the recovery guard is present in both parsers per the Fix section.
+- Note: the "adjacent latent cases" paragraph (`const`, `function`, `namespace`, `template`, `this` arms) is a separate hardening idea, not this defect; it was never observed firing.
+
 - id: parser-interface-path-segment-false-positive
 - date: 2026-06-12
 - area: parser / error recovery
 - severity: medium (blocks interpreter import of any module path containing `interface`)
-- status: fixed + seed redeployed (2026-06-12); verified — `use std.common.torch.interface.{TorchBackend}` and the full `std.nogc_async_mut.gpu.*` chain now import cleanly in interpreter mode
+- status: closed 2026-09-13 (fixed; verified). Originally: fixed + seed redeployed (2026-06-12); verified — `use std.common.torch.interface.{TorchBackend}` and the full `std.nogc_async_mut.gpu.*` chain now import cleanly in interpreter mode
 
 ## Symptom
 
@@ -69,3 +75,14 @@ token is preceded and followed by `.`.
 no-context check and would also fire on a module named e.g. `template.spl`.
 Only `interface` is fixed here because it is the only segment name in use;
 apply the same guard if another segment name collides.
+
+## 2026-09-13 follow-up — the predicted `namespace` case has now been hit
+
+The "Adjacent latent cases" section above proved correct. **measured** (Rust seed
+`bin/simple` v1.0.0-rc.1, Windows): `src/app/ui.browser/dom_bridge.spl:119:89` uses
+`namespace` as a named argument — `Element(node_id: nid, tag_name: tag_name,
+attributes: attrs, namespace: "")` — and the unguarded TsNamespace arm rejects the
+whole module with `Common mistake detected ... Use 'mod' for modules instead of
+'namespace'.` This makes `app.ui.browser.dom_bridge` unloadable. Tracked under
+`browser_dom_bridge_css_runtime_blocker_2026-06-14.md`; the guard needed is the same
+shape as the `interface` one, keyed on named-argument position rather than `Dot`.

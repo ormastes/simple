@@ -1,4 +1,9 @@
 # Cross-module type-name collision: `ContractExpr`/`ContractExprKind` resolve to the wrong module
+## Closed 2026-09-16 — Status FIXED 2026-08-17; spec re-run 5/5 green; row declared CLOSED in body
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-17. **Status:** FIXED 2026-08-17 (verified by execution — see "Verification 2026-08-17" at the bottom). The narrower interpreter hardening described under "Unblock condition" remains a separate, still-open hazard.
 
@@ -131,3 +136,4 @@ only.
 
 All 5 examples GREEN on the rebuilt seed (previously 2 of 5 RED). FIXED status
 re-confirmed by execution.
+

@@ -1,0 +1,131 @@
+"""Cortex-M pure-Simple shell access-policy specification.
+
+AN505 and STM32U585 are Cortex-M33/PMSAv8-M boards.  RA4M1 is deliberately
+identified as Cortex-M4/PMSAv7-M.  The receipt mask exposes which semantic
+decisions the matrix reached; it is not compiler/runtime branch coverage and
+does not claim physical-board execution.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use os.kernel.arch.cortex_m33.access_policy.{
+    cortex_m_policy_read_receipt,
+    cortex_m_policy_write_receipt,
+    cortex_m_policy_receipt_outcome,
+    cortex_m_policy_receipt_decision_mask
+}
+
+const AN505_FLASH_BASE: u32 = 0x10000000
+const AN505_FLASH_SIZE: u32 = 0x00400000
+const AN505_RAM_BASE: u32 = 0x20000000
+const AN505_RAM_SIZE: u32 = 0x00008000
+
+const STM32U585_FLASH_BASE: u32 = 0x08000000
+const STM32U585_FLASH_SIZE: u32 = 0x00200000
+const STM32U585_RAM_BASE: u32 = 0x20000000
+const STM32U585_RAM_SIZE: u32 = 0x000C0000
+
+const RA4M1_FLASH_BASE: u32 = 0x00000000
+const RA4M1_FLASH_SIZE: u32 = 0x00040000
+const RA4M1_RAM_BASE: u32 = 0x20000000
+const RA4M1_RAM_SIZE: u32 = 0x00008000
+
+fn read_outcome(addr: u32, flash_base: u32, flash_size: u32, ram_base: u32, ram_size: u32) -> u32:
+    cortex_m_policy_receipt_outcome(cortex_m_policy_read_receipt(addr, flash_base, flash_size, ram_base, ram_size))
+
+fn write_outcome(addr: u32, ram_base: u32, ram_size: u32) -> u32:
+    cortex_m_policy_receipt_outcome(cortex_m_policy_write_receipt(addr, ram_base, ram_size))
+
+fn expect_address_boundary_matrix(flash_base: u32, flash_size: u32, ram_base: u32, ram_size: u32):
+    expect(read_outcome(flash_base + 1, flash_base, flash_size, ram_base, ram_size)).to_equal(1)
+    expect(write_outcome(flash_base + 1, ram_base, ram_size)).to_equal(1)
+    expect(read_outcome(flash_base, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(flash_base, ram_base, ram_size)).to_equal(3)
+    expect(read_outcome(flash_base + flash_size - 4, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(flash_base + flash_size - 4, ram_base, ram_size)).to_equal(3)
+    expect(read_outcome(flash_base + flash_size, flash_base, flash_size, ram_base, ram_size)).to_equal(2)
+    expect(write_outcome(flash_base + flash_size, ram_base, ram_size)).to_equal(3)
+    expect(read_outcome(ram_base, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(ram_base, ram_base, ram_size)).to_equal(0)
+    expect(read_outcome(ram_base + ram_size - 4, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(ram_base + ram_size - 4, ram_base, ram_size)).to_equal(0)
+    expect(read_outcome(ram_base + ram_size, flash_base, flash_size, ram_base, ram_size)).to_equal(2)
+    expect(write_outcome(ram_base + ram_size, ram_base, ram_size)).to_equal(3)
+    expect(read_outcome(0x40000000, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(0x40000000, ram_base, ram_size)).to_equal(0)
+    expect(read_outcome(0x5FFFFFFC, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(0x5FFFFFFC, ram_base, ram_size)).to_equal(0)
+    expect(read_outcome(0x60000000, flash_base, flash_size, ram_base, ram_size)).to_equal(2)
+    expect(write_outcome(0x60000000, ram_base, ram_size)).to_equal(3)
+    expect(read_outcome(0xE000E000, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(0xE000E000, ram_base, ram_size)).to_equal(3)
+    expect(read_outcome(0xE00FFFFC, flash_base, flash_size, ram_base, ram_size)).to_equal(0)
+    expect(write_outcome(0xE00FFFFC, ram_base, ram_size)).to_equal(3)
+    expect(read_outcome(0xE0100000, flash_base, flash_size, ram_base, ram_size)).to_equal(2)
+    expect(write_outcome(0xE0100000, ram_base, ram_size)).to_equal(3)
+
+describe "Cortex-M pure-Simple shell access policy":
+    """Freeze per-board boundaries, semantic receipts, and object admission."""
+    it "applies the AN505 Cortex-M33 address and boundary matrix":
+        expect_address_boundary_matrix(AN505_FLASH_BASE, AN505_FLASH_SIZE, AN505_RAM_BASE, AN505_RAM_SIZE)
+
+    it "applies the STM32U585 Cortex-M33 address and boundary matrix":
+        expect_address_boundary_matrix(STM32U585_FLASH_BASE, STM32U585_FLASH_SIZE, STM32U585_RAM_BASE, STM32U585_RAM_SIZE)
+
+    it "applies the RA4M1 Cortex-M4 address and boundary matrix":
+        expect_address_boundary_matrix(RA4M1_FLASH_BASE, RA4M1_FLASH_SIZE, RA4M1_RAM_BASE, RA4M1_RAM_SIZE)
+
+    it "records semantic decisions without claiming compiler branch coverage":
+        var decisions: u32 = 0
+        for addr in [AN505_FLASH_BASE + 1, AN505_FLASH_BASE, AN505_RAM_BASE, 0x40000000, 0xE000E000, 0x60000000]:
+            val read = cortex_m_policy_read_receipt(addr, AN505_FLASH_BASE, AN505_FLASH_SIZE, AN505_RAM_BASE, AN505_RAM_SIZE)
+            val write = cortex_m_policy_write_receipt(addr, AN505_RAM_BASE, AN505_RAM_SIZE)
+            decisions = decisions | cortex_m_policy_receipt_decision_mask(read)
+            decisions = decisions | cortex_m_policy_receipt_decision_mask(write)
+        expect(decisions).to_equal(1023)
+
+    it "owns exactly two header-backed C ABI functions in the pure policy":
+        val shim = file_read("src/os/kernel/arch/cortex_m33/cm33_shim.c")
+        val header = file_read("src/os/kernel/arch/cortex_m33/access_policy.h")
+        expect(shim).to_contain("#include \"access_policy.h\"")
+        expect(shim.contains("extern uint32_t cortex_m_policy_")).to_equal(false)
+        expect(header).to_contain("uint32_t cortex_m_policy_read_receipt")
+        expect(header).to_contain("uint32_t cortex_m_policy_write_receipt")
+        expect(shim.contains("static int addr_readable")).to_equal(false)
+        expect(shim.contains("static int addr_writable")).to_equal(false)
+        val admission = file_read("scripts/check/check-cortex-m-policy-object.shs")
+        expect(admission).to_contain("Format: elf32-littlearm")
+        expect(admission).to_contain("Machine: EM_ARM")
+        expect(admission).to_contain("llvm-nm --defined-only --extern-only")
+        expect(admission).to_contain("llvm-nm --undefined-only")
+        expect(admission).to_contain("ra4m1)")
+        expect(admission).to_contain("CORE=\"cortex-m4\"")
+        expect(admission).to_contain("TARGET=\"thumbv7em-none-eabi\"")
+        expect(admission).to_contain("c_abi_exports=2 object_globals=6 undefined=0")
+
+        val an505_build = file_read("scripts/os/run_simpleos_cortex_m33_qemu.shs")
+        expect(an505_build).to_contain("--target thumbv8m.main-none-eabi --emit-object")
+        expect(an505_build).to_contain("an505 \"$POLICY_OBJ\"")
+        val stm32_build = file_read("scripts/os/run_simpleos_stm32u585.shs")
+        expect(stm32_build).to_contain("--target thumbv8m.main-none-eabi --emit-object")
+        expect(stm32_build).to_contain("stm32u585 \"$POLICY_OBJ\"")
+        val ra4m1_build = file_read("scripts/os/run_simpleos_ra4m1.shs")
+        expect(ra4m1_build).to_contain("Building SimpleOS Lite for RA4M1 (Cortex-M4)")
+        expect(ra4m1_build).to_contain("--target thumbv7em-none-eabi --emit-object")
+        expect(ra4m1_build).to_contain("ra4m1 \"$POLICY_OBJ\"")
+
+    it "pins eight source decisions and sixteen compiler branch outcomes":
+        val policy = file_read("src/os/kernel/arch/cortex_m33/access_policy.spl")
+        for decision in ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08"]:
+            expect(policy).to_contain("CORTEX-M-ACCESS-{decision}")
+        val pin = file_read("test/fixture/os/cortex_m_access_policy_coverage_pin.env")
+        expect(pin).to_contain("decision_sites=8")
+        expect(pin).to_contain("branch_outcomes_total=16")
+        val source_gate = file_read("scripts/check/check-cortex-m-access-policy-source-contract.shs")
+        expect(source_gate).to_contain("BRANCH_OUTCOMES=$((DECISION_SITES * 2))")
+        expect(source_gate).to_contain("pure-owner-c-export-count")
+        val coverage_gate = file_read("scripts/check/check-cortex-m-access-policy.shs")
+        expect(coverage_gate).to_contain("stage4_verify_candidate_provenance")
+        expect(coverage_gate).to_contain("compiler-runtime-coverage-artifact-missing")
+        expect(coverage_gate).to_contain("branch-outcomes-incomplete")
+        expect(coverage_gate).to_contain("physical_board_evidence=not-included")

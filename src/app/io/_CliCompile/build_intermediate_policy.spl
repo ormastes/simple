@@ -1,0 +1,60 @@
+use app.io.file_ops.{file_exists, file_modified_time, file_remove}
+use app.io.time_ops.{current_time_unix}
+
+extern fn rt_dir_list(path: text) -> [text]
+
+const NATIVE_BUILD_STALE_INTERMEDIATE_AGE_SECONDS: i64 = 86400
+
+pub fn native_build_output_parent(path: text) -> text:
+    val slash = path.rfind("/")
+    if slash > 0:
+        path.substring(0, slash)
+    else:
+        "."
+
+pub fn native_build_output_name(path: text) -> text:
+    val slash = path.rfind("/")
+    if slash >= 0:
+        path.substring(slash + 1)
+    else:
+        path
+
+pub fn native_build_intermediate_name(output_name: text, pid: i64, micros: i64) -> text:
+    "{output_name}.simple-native-build-{pid}-{micros}.tmp"
+
+pub fn native_build_is_managed_intermediate(entry: text, output_name: text) -> bool:
+    entry.starts_with(output_name + ".simple-native-build-") and entry.ends_with(".tmp")
+
+pub fn native_build_intermediate_is_stale(
+    entry: text, output_name: text, modified_seconds: i64, now_seconds: i64
+) -> bool:
+    native_build_is_managed_intermediate(entry, output_name) and modified_seconds > 0 and
+        modified_seconds <= now_seconds - NATIVE_BUILD_STALE_INTERMEDIATE_AGE_SECONDS
+
+pub fn native_build_stale_intermediate_paths(output: text, now_seconds: i64) -> [text]:
+    val parent = native_build_output_parent(output)
+    val output_name = native_build_output_name(output)
+    var paths: [text] = []
+    for entry in rt_dir_list(parent):
+        if native_build_is_managed_intermediate(entry, output_name):
+            val path = if parent == ".": entry else: parent + "/" + entry
+            val modified = file_modified_time(path)
+            if native_build_intermediate_is_stale(
+                entry, output_name, modified, now_seconds):
+                paths.push(path)
+    paths
+
+pub fn native_build_cleanup_stale_intermediates(output: text) -> Result<[text], text>:
+    var removed: [text] = []
+    for path in native_build_stale_intermediate_paths(output, current_time_unix()):
+        if file_exists(path) and not file_remove(path):
+            return Err("could not remove stale native-build intermediate {path}")
+        removed.push(path)
+    Ok(removed)
+
+pub fn native_build_finish_intermediate(path: text, keep: bool, print_path: bool) -> bool:
+    if keep:
+        if print_path:
+            eprint("[native-build] retained intermediate: {path}")
+        return true
+    not file_exists(path) or file_remove(path)

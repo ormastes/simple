@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+adapter=$repo_root/scripts/check/prepare-sosix-qemu-linux-diagnostic-blocked-bundles.shs
+work=$(mktemp -d "${TMPDIR:-/tmp}/sosix-linux-adapter-test.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+for guest in x86_32 x86_64 arm32 arm64 riscv32 riscv64; do
+    for stamp in 20260811T010000Z 20260811T020000Z; do
+        dir=$work/source/$guest/$stamp
+        mkdir -p "$dir"
+        printf 'serial guest=%s stamp=%s\n' "$guest" "$stamp" > "$dir/serial.log"
+        dirty=false
+        [ "$guest" = x86_32 ] && dirty=true
+        cat > "$dir/evidence.env" <<EOF
+status=diagnostic-guest-flow-complete
+host=linux
+guest=$guest
+source_revision=0123456789abcdef0123456789abcdef01234567
+source_worktree_dirty=$dirty
+compiler_provenance=rust-bootstrap-seed-cross-target
+compiler_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+kernel_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+image_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+qemu_version=fixture-qemu
+argv=-machine fixture
+accelerator=tcg
+program_path=/sys/apps/hello.smf
+serial_log=$dir/serial.log
+resume_command=rerun-$guest
+EOF
+    done
+done
+
+if "$adapter" --source "$work/source" --output "$work/out" > "$work/run.out" 2>&1; then
+    echo 'FAIL: diagnostic adapter promoted blockers to success' >&2
+    exit 1
+fi
+[ "$(find "$work/out/linux" -name evidence.env -type f | wc -l | tr -d ' ')" -eq 6 ]
+for guest in x86_32 x86_64 arm32 arm64 riscv32 riscv64; do
+    bundle=$work/out/linux/$guest/blocked-diagnostic
+    grep -qx 'status=blocked' "$bundle/evidence.env"
+    grep -q 'compiler-lineage:rust-bootstrap-seed-cross-target' "$bundle/evidence.env"
+    grep -q 'dirty-source:' "$bundle/evidence.env"
+    grep -q 'nonce:missing-from-original-transcript' "$bundle/evidence.env"
+    cmp "$work/source/$guest/20260811T020000Z/evidence.env" "$bundle/original-evidence.env"
+    cmp "$work/source/$guest/20260811T020000Z/serial.log" "$bundle/serial.log"
+    serial_hash=$(sha256sum "$bundle/serial.log" | awk '{print $1}')
+    grep -qx "artifact_3_sha256=$serial_hash" "$bundle/evidence.env"
+done
+
+if "$adapter" --source "$work/source" --output "$work/out" > "$work/duplicate.out" 2>&1; then
+    echo 'FAIL: adapter overwrote existing bundles' >&2
+    exit 1
+fi
+grep -q 'destination already exists' "$work/duplicate.out"
+echo 'prepare-sosix-qemu-linux-diagnostic-blocked-bundles self-test: PASS'

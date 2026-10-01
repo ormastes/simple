@@ -1,0 +1,161 @@
+# Focused REQ-001/REQ-007/REQ-008/REQ-010 built-in compile adapter evidence.
+
+use std.spec
+use std.spec.step
+use compiler.common.backend_plugin.model.*
+use compiler.common.backend_plugin.receipt.*
+use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend.backend_plugin.loader.{load_backend}
+use compiler.backend.backend_plugin.session.{BackendSession}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use std.io_runtime.{file_exists, file_size_raw}
+use app.io.{shell}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.backend.backend.backend_types.{BackendKind}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.backend.backend.static_backend_registry.{
+    BackendLinkClass, install_k1_static_backend_table_v1, static_backend_entry_v1
+}
+use compiler.backend.backend.static_backend_cranelift_port.{cranelift_backend_port_v1}
+use compiler.backend.backend.static_backend_interpreter_port.{interpreter_backend_port_v1}
+use compiler.backend.backend.static_backend_llvm_port.{llvm_backend_port_v1}
+
+# `simple test` runs under the interpreter, where the K1 composition root
+# (src/compositions/kernel_llvm_cranelift) is not shadowed in and
+# compiler.driver.bootstrap_k1_selected is the fail-closed stub. Install the
+# same "llvm-cranelift" table the CLI composition root installs so the
+# compile adapter's CodegenFactory can select LLVM/Cranelift; repeat calls
+# with the same policy are idempotent.
+fn install_adapter_k1_table() -> bool:
+    install_k1_static_backend_table_v1("llvm-cranelift", [
+        static_backend_entry_v1(BackendKind.Cranelift,
+            BackendLinkClass.KernelLinked, cranelift_backend_port_v1(),
+            CodegenOutputKind.ObjectCode),
+        static_backend_entry_v1(BackendKind.Interpreter,
+            BackendLinkClass.KernelLinked, interpreter_backend_port_v1(),
+            CodegenOutputKind.InterpretedResult),
+        static_backend_entry_v1(BackendKind.Llvm,
+            BackendLinkClass.KernelLinked, llvm_backend_port_v1(),
+            CodegenOutputKind.ObjectCode)
+    ])
+
+fn builtin_compile_request(provider: text, target: text = "host") -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        BackendRole.CompilerAot, provider, target, "generic", [], "debug",
+        BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit], "", false)
+
+fn representative_plugin_mir() -> MirModule:
+    val function = MirFunction(
+        symbol: SymbolId(id: 1),
+        name: "plugin_probe",
+        signature: MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [],
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"), instructions: [],
+            terminator: MirTerminator.Ret(nil)
+        )],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(
+        name: "backend_plugin_builtin_probe",
+        functions: functions,
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+fn load_error_code(result: Result<BackendSession, BackendPluginError>) -> text:
+    match result:
+        case Err(error): error.code()
+        case Ok(_): "ok"
+
+describe "built-in backend compile adapter":
+    it "compiles representative MIR through retained LLVM and Cranelift providers":
+        step("Install the composition-root K1 backend table so the providers exist")
+        expect(install_adapter_k1_table()).to_equal(true)
+        step("Load each explicit provider through the common admission boundary")
+        val module = representative_plugin_mir()
+        val llvm_session = load_backend(builtin_compile_request("llvm")).ok().unwrap()
+        val cranelift_session = load_backend(
+            builtin_compile_request("cranelift")
+        ).ok().unwrap()
+
+        step("Compile the same MIR through each retained session adapter")
+        val llvm_output = llvm_session.compile_module(module).ok().unwrap()
+        val cranelift_output = cranelift_session.compile_module(module).ok().unwrap()
+        expect(llvm_output.has_object_code).to_equal(true)
+        expect(llvm_output.object_code.len()).to_be_greater_than(0)
+        expect(cranelift_output.has_object_code).to_equal(true)
+        expect(cranelift_output.object_code.len()).to_be_greater_than(0)
+
+    it "publishes an object through a retained Cranelift session's object-path AOT":
+        step("Install the composition-root K1 backend table so the providers exist")
+        expect(install_adapter_k1_table()).to_equal(true)
+        # Regression fence for the positional native-build blocker (2026-09-06).
+        #
+        # `BuiltinBackendCompileAdapter.compile_aot_into_path` used to refuse
+        # EVERY non-LLVM backend outright -- "scalar object-path AOT is
+        # available only for builtin LLVM", status 1, no object written. That
+        # is a statement about the emitter, not about the backend: the very
+        # same adapter's `compile_aot_module` (exercised by the case above)
+        # produces Cranelift object code happily.
+        #
+        # It mattered because an admitted BackendSession makes the pure-Simple
+        # driver take the object-path branch UNCONDITIONALLY
+        # (driver_aot_native_output.spl, `_compile_selected_module`), so
+        # `native-build --backend cranelift <file>.spl` in its POSITIONAL form
+        # -- the only form that runs the pure-Simple driver at all, since
+        # `--entry` delegates to the Rust seed extern at
+        # bootstrap_main.spl:378-382 -- failed with no object and, because the
+        # Err payload does not survive the compiled stage-2 crossing, no
+        # readable reason either.
+        #
+        # Measured against the pre-fix adapter (2026-09-06): this example FAILS
+        # -- `3 examples, 1 failure`, reported as `expected -1 to be greater
+        # than 0`, the -1 being `file_size_raw` on the object that was never
+        # written. Post-fix: `3 examples, 0 failures`. The other two examples
+        # pass in both states, so the discrimination is this case alone.
+        step("Stage a private directory for the object and its diagnostic")
+        val stage_dir = "/tmp/unit_builtin_adapter_cranelift_object_path"
+        _ = shell("rm -rf '{stage_dir}' && mkdir -p '{stage_dir}'")
+        val object_path = "{stage_dir}/probe.o"
+        val diagnostic_path = "{stage_dir}/message"
+
+        step("Compile representative MIR straight into an object path")
+        val session = load_backend(builtin_compile_request("cranelift")).ok().unwrap()
+        val status = session.compile_aot_into_path(
+            representative_plugin_mir(), false, 0, "generic", [],
+            object_path, diagnostic_path)
+
+        step("The object-path route succeeds and publishes a non-empty object")
+        expect(status).to_equal(0)
+        expect(file_exists(object_path)).to_equal(true)
+        expect(file_size_raw(object_path)).to_be_greater_than(0)
+        _ = shell("rm -rf '{stage_dir}'")
+
+    it "rejects unknown target text before factory creation without fallback":
+        step("Request a target with no exact built-in target mapping")
+        expect(load_error_code(load_backend(
+            builtin_compile_request("llvm", "x86_64-unknown-linux-gnu")
+        ))).to_equal("BACKEND_PLUGIN_TARGET")

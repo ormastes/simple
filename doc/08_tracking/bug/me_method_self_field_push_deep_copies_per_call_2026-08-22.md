@@ -1,4 +1,9 @@
 # `self.field.push(x)` inside a `me` method deep-copied the array on EVERY call (seed interpreter)
+## Closed 2026-09-16 — Status FIXED 2026-08-22; cargo pins 0 COW clones, linear scaling verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-22 (seed interpreter, `src/compiler_rust/compiler`).
 **Class:** value-semantics COW + accidental aliasing = O(n) per write
@@ -100,3 +105,4 @@ the callee, so no alias ever exists. The `release_receiver` path described above
 dropped before landing. What lands here: the `SELF_FIELD_ARR_*` counters, the four-test cargo
 pin (which passes unchanged on `f8681a7afa6`: 0 clones / 2,000 pushes; linear scaling),
 the `let` Type-annotation clone removal in `node_exec.rs`, and the perf-regression gate row.
+

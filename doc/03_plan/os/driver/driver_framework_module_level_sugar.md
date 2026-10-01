@@ -20,8 +20,13 @@ Current state:
 - Synthetic codegen (`src/compiler/50.mir/synthetic_driver_codegen.spl`) emits
   `register_static_driver(manifest, ops)` for functions marked `ReadyToSynthesize`
 - Rust seed mirrors function-level synthesis in HIR lowering
-- `sffi_lint.spl` has driver-shim conformance rule
-- Example `null_block.spl` uses function-level `@driver(...)` and passes tests
+- `src/compiler/35.semantics/lint/sffi_lint.spl` has driver-shim conformance rule (SFFI007, `check_sffi007_driver_shim`)
+- Example `src/lib/nogc_sync_mut/driver/null_block_driver.spl` uses function-level `@driver(...)` (:73, :79) and passes tests
+- Refresh 2026-09-05: `parse_driver_manifest_attrs` now lives in
+  `src/compiler/00.common/_Attributes/decl_attrs.spl:376`; the parser layer is
+  `src/compiler/10.frontend/` (no `10.parser/`); synthetic registration planning
+  is `src/compiler/50.mir/synthetic_driver_registration.spl`. No `ModuleAttr` /
+  `collect_module_driver_ops` exists anywhere under `src/compiler/` or the Rust seed.
 - Module-level / impl-level: **NOT implemented** -- `ModuleAttr` does not exist
 
 Related completed FRs:
@@ -109,7 +114,7 @@ Mirror the module/impl-level sugar in the Rust seed for immediate usability.
    a warning (not error, since the module may re-export ops from sub-modules)
 3. Add diagnostic: "impl-level @driver on a non-Driver-conforming impl" as error
 
-**Files to modify:** `src/app/build/sffi_lint.spl`
+**Files to modify:** `src/compiler/35.semantics/lint/sffi_lint.spl`
 
 ### Phase 5: Tests and Migration (S)
 
@@ -118,13 +123,13 @@ Mirror the module/impl-level sugar in the Rust seed for immediate usability.
    - Module-level `@driver(...)` with explicit `ops=...`
    - Impl-level `@driver(...)` on a `impl Driver for MyBlock`
    - Error case: `@driver(...)` on module with no matching functions
-2. Migrate `examples/09_embedded/simple_os/src/drivers/null_block.spl` to use module-level
+2. Migrate `src/lib/nogc_sync_mut/driver/null_block_driver.spl` to use module-level
    `@driver(...)` instead of function-level, verify test still passes
 3. Write migration guide snippet in
    `doc/07_guide/driver_attribute_migration.md` (optional, only if requested)
 
 **Files to create:** `test/01_unit/compiler/driver_module_attr_spec.spl`
-**Files to modify:** `examples/09_embedded/simple_os/src/drivers/null_block.spl`
+**Files to modify:** `src/lib/nogc_sync_mut/driver/null_block_driver.spl`
 
 ## Acceptance Criteria
 
@@ -138,8 +143,8 @@ Mirror the module/impl-level sugar in the Rust seed for immediate usability.
 - [ ] `sffi_lint` warns on module `@driver(...)` with no matching ops
 - [ ] `null_block.spl` example works with module-level attribute
 - [ ] Both Rust seed and self-hosted paths support the sugar
-- [ ] Procedural registration path (`register_static_driver(m, ops)`) continues
-      to compile for legacy drivers
+- [x] Procedural registration path (`register_static_driver(m, ops)`) continues
+      to compile for legacy drivers — verified src/lib/nogc_sync_mut/driver/static_table.spl:37 `register_static_driver`; call site src/lib/nogc_sync_mut/driver/null_block_driver.spl:77; spec test/01_unit/lib/driver/null_block_driver_test.spl
 
 ## Risk Factors
 
@@ -157,3 +162,9 @@ Mirror the module/impl-level sugar in the Rust seed for immediate usability.
   re-exported ops
 - **Backward compatibility (Low):** Function-level `@driver(...)` must continue
   working; the module-level sugar is strictly additive
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/driver_framework_module_level_sugar_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

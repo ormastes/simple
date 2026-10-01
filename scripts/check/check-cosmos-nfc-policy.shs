@@ -1,0 +1,292 @@
+#!/bin/sh
+# Fail-closed host parity, runtime-decision, C ABI, and ARM object gate for the
+# pure-Simple Cosmos NFC policy. Physical NAND/board evidence is out of scope.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SOURCE_DIR="$ROOT/src/os/kernel/arch/arm32/cosmos"
+SIMPLE_SOURCE="$SOURCE_DIR/cosmos_nfc_policy.spl"
+POLICY_HEADER="$SOURCE_DIR/cosmos_nfc_policy.h"
+C_BRIDGE="$SOURCE_DIR/cosmos_nfc.c"
+C_ORACLE="$ROOT/test/02_integration/os/cosmos/cosmos_nfc_policy_oracle_test.c"
+ABI_GUARD="$ROOT/test/02_integration/os/cosmos/cosmos_nfc_policy_abi_guard_test.c"
+SIMPLE_SPEC="$ROOT/test/01_unit/os/arch/arm32/cosmos_nfc_policy_spec.spl"
+PROFILE="$SOURCE_DIR/cosmos_profile_openssd2_8ch8way_v300.h"
+EVIDENCE_DIR="$ROOT/build/coverage/cosmos-nfc-policy"
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-nfc-policy.XXXXXX")
+RECEIPT="$EVIDENCE_DIR/receipt.sdn"
+RECEIPT_TMP="$EVIDENCE_DIR/.receipt.sdn.tmp.$$"
+trap 'case ${SCRATCH:-} in /tmp/cosmos-nfc-policy.*|${TMPDIR:-/tmp}/cosmos-nfc-policy.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac; rm -f "$RECEIPT_TMP"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cosmos-nfc-policy: $*" >&2
+    exit 1
+}
+
+blocked() {
+    echo "BLOCKED cosmos-nfc-policy: $*" >&2
+    exit 2
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+verify_hash() {
+    [ "$(hash_file "$1")" = "$2" ] || fail "$3 changed during evidence run"
+}
+
+pick_llvm_toolchain() {
+    for version in 20 19 18; do
+        if command -v "clang-$version" >/dev/null 2>&1 &&
+           command -v "llvm-profdata-$version" >/dev/null 2>&1 &&
+           command -v "llvm-cov-$version" >/dev/null 2>&1; then
+            CLANG="clang-$version"
+            LLVM_PROFDATA="llvm-profdata-$version"
+            LLVM_COV="llvm-cov-$version"
+            return
+        fi
+    done
+    fail "matching clang, llvm-profdata, and llvm-cov are required"
+}
+
+EXPECTED_EXPORTS='cosmos_nfc_policy_channel_base
+cosmos_nfc_policy_channel_result_faults
+cosmos_nfc_policy_completion_valid
+cosmos_nfc_policy_contract_status
+cosmos_nfc_policy_data_valid
+cosmos_nfc_policy_decode_status
+cosmos_nfc_policy_dma_finish_releases
+cosmos_nfc_policy_dma_range_valid
+cosmos_nfc_policy_dma_reserve_args_valid
+cosmos_nfc_policy_erase_row_valid
+cosmos_nfc_policy_error_info_valid
+cosmos_nfc_policy_init_contract_status
+cosmos_nfc_policy_init_selftest_status
+cosmos_nfc_policy_init_state_status
+cosmos_nfc_policy_initialized_status
+cosmos_nfc_policy_io_valid
+cosmos_nfc_policy_locked_channel_status
+cosmos_nfc_policy_nand_status
+cosmos_nfc_policy_ranges_overlap
+cosmos_nfc_policy_raw_completion_status
+cosmos_nfc_policy_raw_data_valid
+cosmos_nfc_policy_raw_io_valid
+cosmos_nfc_policy_row_valid
+cosmos_nfc_policy_spare_valid
+cosmos_nfc_policy_status_report_valid
+cosmos_nfc_policy_target_valid
+cosmos_nfc_policy_toggle_payload_word
+cosmos_nfc_policy_toggle_valid'
+
+check_policy_object() {
+    object=$1
+    expected_class=$2
+    expected_machine=$3
+    symbols=$("$READELF" -sW "$object")
+    actual_exports=$(printf '%s\n' "$symbols" |
+        awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+             $8 ~ /^cosmos_nfc_policy_/ { print $8 }' |
+        LC_ALL=C sort -u)
+    [ "$actual_exports" = "$EXPECTED_EXPORTS" ] || {
+        echo "expected policy exports:" >&2
+        printf '%s\n' "$EXPECTED_EXPORTS" >&2
+        echo "actual policy exports:" >&2
+        printf '%s\n' "$actual_exports" >&2
+        fail "pure-Simple object export set is not exact"
+    }
+    undefined=$(printf '%s\n' "$symbols" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+    [ -z "$undefined" ] || {
+        printf '%s\n' "$undefined" >&2
+        fail "pure-Simple object has an open undefined-symbol closure"
+    }
+    printf '%s\n' "$symbols" |
+        awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+             $8 == "__simple_main" || $8 ~ /^rt_/ ||
+             $8 ~ /(^|_)malloc$/ || $8 ~ /(^|_)calloc$/ ||
+             $8 ~ /(^|_)realloc$/ || $8 ~ /(^|_)free$/) { bad = 1 }
+             END { exit bad }' ||
+        fail "pure-Simple object defines a forbidden entry/runtime/allocator"
+    header=$("$READELF" -hW "$object")
+    printf '%s\n' "$header" | grep -Eq \
+        "Class:[[:space:]]+$expected_class" &&
+        printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL' &&
+        printf '%s\n' "$header" | grep -Eq \
+            "Machine:[[:space:]]+$expected_machine" ||
+        fail "unexpected policy object class/type/machine"
+}
+
+emit_policy_object() {
+    target=$1
+    object=$2
+    cache=$3
+    SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" native-build \
+        --backend llvm \
+        --source "$SOURCE_DIR" \
+        --entry-closure \
+        --entry "$SIMPLE_SOURCE" \
+        --target "$target" \
+        --emit-object \
+        --no-mangle \
+        --cache-dir "$cache" \
+        -o "$object"
+}
+
+[ "${SIMPLE_STAGE4_BIN+x}" = x ] && [ -n "$SIMPLE_STAGE4_BIN" ] ||
+    blocked "set SIMPLE_STAGE4_BIN to an admitted Stage-4 compiler"
+[ -x "$SIMPLE_STAGE4_BIN" ] || blocked "Stage-4 compiler is not executable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_STAGE4_BIN") ||
+    blocked "cannot resolve pure-Simple compiler canonically"
+SIMPLE_PROVENANCE="${SIMPLE_CANONICAL}.provenance.env"
+[ -f "$SIMPLE_PROVENANCE" ] || blocked "adjacent Stage-4 provenance is missing"
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    blocked "admitted Stage-4 provenance is required"
+case "$("$SIMPLE_CANONICAL" --version 2>&1 || true)" in
+    *"Rust-built Simple binary is a bootstrap seed"*)
+        blocked "a bootstrap seed cannot prove the pure-Simple NFC policy" ;;
+esac
+SIMPLE_SHA256=$(hash_file "$SIMPLE_CANONICAL")
+PROVENANCE_SHA256=$(hash_file "$SIMPLE_PROVENANCE")
+SIMPLE_SOURCE_SHA256=$(hash_file "$SIMPLE_SOURCE")
+POLICY_HEADER_SHA256=$(hash_file "$POLICY_HEADER")
+C_BRIDGE_SHA256=$(hash_file "$C_BRIDGE")
+C_ORACLE_SHA256=$(hash_file "$C_ORACLE")
+ABI_GUARD_SHA256=$(hash_file "$ABI_GUARD")
+SIMPLE_SPEC_SHA256=$(hash_file "$SIMPLE_SPEC")
+
+[ "$(grep -c '@export("C", name: "cosmos_nfc_policy_' "$SIMPLE_SOURCE")" -eq 28 ] ||
+    fail "expected exactly 28 scalar policy exports"
+grep -Fq '#include "cosmos_nfc_policy.h"' "$C_BRIDGE" ||
+    fail "cosmos_nfc.c does not bind the pure-Simple policy ABI"
+
+mkdir -p "$EVIDENCE_DIR"
+rm -f "$RECEIPT" "$RECEIPT_TMP"
+pick_llvm_toolchain
+READELF=${READELF:-readelf}
+
+emit_policy_object x86_64-unknown-linux-gnu \
+    "$SCRATCH/cosmos_nfc_policy_host.o" "$SCRATCH/host-cache"
+check_policy_object "$SCRATCH/cosmos_nfc_policy_host.o" ELF64 \
+    'Advanced Micro Devices X86-64'
+
+"$CLANG" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -I"$SOURCE_DIR" \
+    "$C_ORACLE" "$SCRATCH/cosmos_nfc_policy_host.o" \
+    -o "$SCRATCH/cosmos_nfc_policy_oracle"
+"$SCRATCH/cosmos_nfc_policy_oracle" > "$EVIDENCE_DIR/c-oracle-output.txt"
+oracle_cases=$(awk '$1 == "COSMOS_NFC_POLICY_C_ORACLE_CASES" { print $2 }' \
+    "$EVIDENCE_DIR/c-oracle-output.txt")
+[ "$oracle_cases" = 5005 ] ||
+    fail "unexpected independent C-oracle case count: ${oracle_cases:-missing}"
+
+SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" test "$SIMPLE_SPEC" \
+    --quick --no-limits --no-session-daemon \
+    > "$EVIDENCE_DIR/simple-decision-output.txt"
+simple_pair=$(awk '$1 == "COSMOS_NFC_SIMPLE_DECISIONS" { print $2 }' \
+    "$EVIDENCE_DIR/simple-decision-output.txt" | tail -n 1)
+simple_hit=${simple_pair%/*}
+simple_total=${simple_pair#*/}
+[ -n "$simple_hit" ] && [ "$simple_total" -gt 0 ] ||
+    fail "pure-Simple decision denominator is missing"
+[ "$simple_hit" -eq "$simple_total" ] ||
+    fail "pure-Simple decision outcomes are incomplete"
+[ "$simple_total" -eq 29 ] ||
+    fail "unexpected pure-Simple decision count"
+
+"$CLANG" -std=c11 -O0 -g -fprofile-instr-generate \
+    -fcoverage-mapping -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -Wno-int-to-pointer-cast \
+    -DCOSMOS_MMIO_TEST -include "$PROFILE" -I"$SOURCE_DIR" \
+    -c "$C_BRIDGE" -o "$SCRATCH/cosmos_nfc_bridge.o"
+"$CLANG" -std=c11 -O0 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -DCOSMOS_MMIO_TEST -I"$SOURCE_DIR" \
+    -c "$ABI_GUARD" -o "$SCRATCH/cosmos_nfc_abi_guard.o"
+
+bridge_symbols=$("$READELF" -sW "$SCRATCH/cosmos_nfc_bridge.o")
+for symbol in $EXPECTED_EXPORTS; do
+    [ "$symbol" = cosmos_nfc_policy_dma_range_valid ] && continue
+    printf '%s\n' "$bridge_symbols" |
+        awk -v symbol="$symbol" '$7 == "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' ||
+        fail "cosmos_nfc.c does not delegate through $symbol"
+done
+for symbol in cosmos_nfc_read_page cosmos_nfc_read_page_raw \
+    cosmos_nfc_program_page cosmos_nfc_erase_block cosmos_nfc_status \
+    cosmos_nfc_init cosmos_nfc_selftest; do
+    printf '%s\n' "$bridge_symbols" |
+        awk -v symbol="$symbol" '$4 == "FUNC" && $5 == "GLOBAL" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' ||
+        fail "public NFC C ABI definition missing or duplicated: $symbol"
+done
+
+emit_policy_object armv7-unknown-none-eabi \
+    "$SCRATCH/cosmos_nfc_policy_arm.o" "$SCRATCH/arm-cache"
+check_policy_object "$SCRATCH/cosmos_nfc_policy_arm.o" ELF32 ARM
+attributes=$("$READELF" -AW "$SCRATCH/cosmos_nfc_policy_arm.o")
+printf '%s\n' "$attributes" | grep -Fq 'Tag_CPU_arch: v7' &&
+    printf '%s\n' "$attributes" | grep -Fq 'Tag_CPU_name: "cortex-a9"' &&
+    printf '%s\n' "$attributes" |
+        grep -Fq 'Tag_CPU_arch_profile: Application' ||
+    fail "ARM policy object is not the Cortex-A9 application ABI"
+
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    blocked "Stage-4 provenance changed during policy emission"
+verify_hash "$SIMPLE_CANONICAL" "$SIMPLE_SHA256" compiler
+verify_hash "$SIMPLE_PROVENANCE" "$PROVENANCE_SHA256" provenance
+verify_hash "$SIMPLE_SOURCE" "$SIMPLE_SOURCE_SHA256" simple-source
+verify_hash "$POLICY_HEADER" "$POLICY_HEADER_SHA256" policy-header
+verify_hash "$C_BRIDGE" "$C_BRIDGE_SHA256" c-bridge
+verify_hash "$C_ORACLE" "$C_ORACLE_SHA256" c-oracle
+verify_hash "$ABI_GUARD" "$ABI_GUARD_SHA256" abi-guard
+verify_hash "$SIMPLE_SPEC" "$SIMPLE_SPEC_SHA256" simple-spec
+
+umask 077
+{
+    echo "schema=cosmos-nfc-policy-evidence-v1"
+    echo "claim_scope=nfc-scalar-policy-state-and-c-hardware-bridge-only"
+    echo "board_evidence=separate-not-included"
+    echo "whole_nand_ftl_claim=false"
+    echo "c_oracle=independent-frozen-pre-migration-policy"
+    echo "c_oracle_cases=$oracle_cases"
+    echo "simple_manifest_id=cosmos-nfc-pure-policy-v1"
+    echo "simple_decisions_hit=$simple_hit"
+    echo "simple_decisions_total=$simple_total"
+    echo "policy_exports=28"
+    echo "policy_abi=scalar-u32-i32-only"
+    echo "policy_object_undefined_symbols=0"
+    echo "per_operation_allocation=false"
+    echo "host_object=ELF64-x86_64-REL"
+    echo "target_object=ELF32-ARMv7-cortex-a9-REL"
+    echo "stage4_compiler_path=$SIMPLE_CANONICAL"
+    echo "stage4_compiler_sha256=$SIMPLE_SHA256"
+    echo "stage4_provenance_path=$SIMPLE_PROVENANCE"
+    echo "stage4_provenance_sha256=$PROVENANCE_SHA256"
+    echo "simple_source_sha256=$SIMPLE_SOURCE_SHA256"
+    echo "policy_header_sha256=$POLICY_HEADER_SHA256"
+    echo "c_bridge_sha256=$C_BRIDGE_SHA256"
+    echo "c_oracle_sha256=$C_ORACLE_SHA256"
+    echo "abi_guard_sha256=$ABI_GUARD_SHA256"
+    echo "simple_spec_sha256=$SIMPLE_SPEC_SHA256"
+    echo "c_oracle_output_sha256=$(hash_file "$EVIDENCE_DIR/c-oracle-output.txt")"
+    echo "simple_decision_output_sha256=$(hash_file "$EVIDENCE_DIR/simple-decision-output.txt")"
+} > "$RECEIPT_TMP"
+mv -f -- "$RECEIPT_TMP" "$RECEIPT"
+
+echo "cosmos_nfc_policy_c_oracle_cases=$oracle_cases"
+echo "cosmos_nfc_policy_simple_decisions=$simple_hit/$simple_total"
+echo "cosmos_nfc_policy_exports=28"
+echo "cosmos_nfc_policy_host_object=ELF64-x86_64-REL-closed"
+echo "cosmos_nfc_policy_target_object=ELF32-ARMv7-cortex-a9-REL-closed"
+echo "cosmos_nfc_policy_board_evidence=separate-not-included"
+echo "cosmos_nfc_policy_receipt=$RECEIPT"
+echo "cosmos_nfc_policy_receipt_sha256=$(hash_file "$RECEIPT")"
+echo "STATUS: PASS cosmos-nfc pure-policy migration"

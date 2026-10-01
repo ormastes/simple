@@ -57,24 +57,3 @@ Root-fix (1) in the pure-Simple HIR import binder (test: the three
 `test/01_unit/lib/hardware/link_mux/*_probe.spl` under the native in-process
 path). For (2), make `run` delegation depend only on sibling presence, not on
 binary location/name.
-
-## Content re-verification 2026-08-17 (app-rest lane) — PATH DRIFT
-
-Classified by CONTENT only. This row is filed against `src/app/io/cli_ops.spl`,
-but that file contains **no** `std.hardware` reference and **no** brace-import
-handling at all — import resolution has moved elsewhere. The file attribution is
-stale, so the record cannot be actioned as written.
-The underlying symptom (unresolved brace-imports being only a warning, then
-failing at runtime) belongs to the known unresolved-import-is-only-a-warning
-class and should be re-filed against the import resolver with a current
-file:line. **Recommend RE-FILE, not fix-here.**
-
-## Re-verification 2026-08-17 (app-rest lane) — LIVE class, wrong file
-
-`src/app/io/cli_ops.spl` contains no `std.hardware` reference and no
-brace-import handling at all (lines 162-321 are delegation logic only), so the
-claimed owner file is wrong. The probe file still uses brace imports
-(`test/01_unit/lib/hardware/link_mux/jtag_route_probe.spl:7-13`) and the
-underlying class — an unresolved `use` being only a warning — remains live.
-Concurring with the earlier re-verification note: RE-FILE against the import
-resolver, not `cli_ops.spl`.

@@ -1,0 +1,193 @@
+# codex-impl
+
+use app.llm_caret.multimodal_types.*
+use std.text.{escape_json}
+
+val IMAGE_TO_MARKDOWN_RENDERER_VERSION_V1: text = "image-to-markdown-markdown/3"
+
+fn _md_escape_cell_v1(value: text) -> text:
+    val pipe_escaped = value.replace("|", "\\|")
+    pipe_escaped.replace("\n", "<br>")
+
+fn region_has_typed_renderer_v1(category: text) -> bool:
+    for typed in ["printed_text", "handwriting", "table", "form",
+            "single_chart", "multiple_charts", "cell_distribution", "histogram",
+            "line_chart", "bar_chart", "scatter_plot", "area_chart", "pie_chart",
+            "donut_chart", "box_plot", "violin_plot", "heatmap", "contour_plot",
+            "scientific_plot", "radar_chart", "bubble_chart", "candlestick_chart",
+            "waterfall_chart", "treemap", "sunburst", "funnel_chart", "polar_chart",
+            "choropleth", "density_plot", "error_bar_chart"]:
+        if category == typed: return true
+    false
+
+fn _region_after_v1(left: ExtractionRegionV1, right: ExtractionRegionV1) -> bool:
+    if left.source_box.page_index != right.source_box.page_index:
+        return left.source_box.page_index > right.source_box.page_index
+    if left.reading_order != right.reading_order:
+        return left.reading_order > right.reading_order
+    left.region_id > right.region_id
+
+fn ordered_extraction_regions_v1(regions: [ExtractionRegionV1]) -> [ExtractionRegionV1]:
+    var ordered = regions
+    var i: i64 = 0
+    while i < ordered.len():
+        var j = i + 1
+        while j < ordered.len():
+            if _region_after_v1(ordered[i], ordered[j]):
+                val temporary = ordered[i]
+                ordered[i] = ordered[j]
+                ordered[j] = temporary
+            j = j + 1
+        i = i + 1
+    ordered
+
+fn render_table_v1(table: TableV1) -> text:
+    var out = "### " + (if table.title == "": table.table_id else: table.title) + "\n\n"
+    out = out + "Source box: page " + table.source_box.page_index.to_text() +
+        " [" + table.source_box.x.to_text() + "," + table.source_box.y.to_text() +
+        "," + table.source_box.width.to_text() + "," + table.source_box.height.to_text() + "]\n\n"
+    var row = 0
+    while row < table.row_count:
+        out = out + "|"
+        var column = 0
+        while column < table.column_count:
+            var content = ""
+            for cell in table.cells:
+                if cell.row == row and cell.column == column:
+                    content = _md_escape_cell_v1(cell.content)
+                    if cell.status != "observed": content = content + " [" + cell.status + "]"
+                    if cell.highlighted: content = "==" + content + "=="
+                    if cell.handwritten: content = content + " *(handwritten)*"
+            out = out + " " + content + " |"
+            column = column + 1
+        out = out + "\n"
+        if row == 0:
+            out = out + "|"
+            column = 0
+            while column < table.column_count:
+                out = out + " --- |"
+                column = column + 1
+            out = out + "\n"
+        row = row + 1
+    out = out + "\nCell metadata:\n\n```json\n["
+    var cell_index = 0
+    for cell in table.cells:
+        if cell_index > 0: out = out + ","
+        out = out + "{\"row\":" + cell.row.to_text() + ",\"column\":" + cell.column.to_text() + ",\"row_span\":" + cell.row_span.to_text() + ",\"column_span\":" + cell.column_span.to_text() + ",\"status\":\"" + escape_json(cell.status) + "\",\"confidence_milli\":" + cell.confidence_milli.to_text() + ",\"highlighted\":" + cell.highlighted.to_text() + ",\"handwritten\":" + cell.handwritten.to_text() + ",\"source_box\":[" + cell.source_box.page_index.to_text() + "," + cell.source_box.x.to_text() + "," + cell.source_box.y.to_text() + "," + cell.source_box.width.to_text() + "," + cell.source_box.height.to_text() + "]}"
+        cell_index = cell_index + 1
+    out + "]\n```\n\n"
+
+fn render_chart_v1(chart: ChartPanelV1) -> text:
+    var out = "### " + chart.panel_id
+    if chart.title != "": out = out + ": " + chart.title
+    out = out + "\n\n- Type: " + chart.chart_type + "\n- X axis: " + chart.x_axis + " (" + chart.x_scale + ")\n- Y axis: " + chart.y_axis + " (" + chart.y_scale + ")\n"
+    if chart.x_range_present: out = out + "- X range: " + chart.x_min.to_text() + " … " + chart.x_max.to_text() + "\n"
+    if chart.y_range_present: out = out + "- Y range: " + chart.y_min.to_text() + " … " + chart.y_max.to_text() + "\n"
+    if chart.shared_legend_id != "": out = out + "- Shared legend: " + chart.shared_legend_id + "\n"
+    out = out + "\n```json\n{\"panel_id\":\"" + escape_json(chart.panel_id) +
+        "\",\"source_page\":" + chart.source_box.page_index.to_text() +
+        ",\"source_box\":[" + chart.source_box.x.to_text() + "," +
+        chart.source_box.y.to_text() + "," + chart.source_box.width.to_text() +
+        "," + chart.source_box.height.to_text() + "],\"x_range\":{" +
+        "\"present\":" + chart.x_range_present.to_text() + ",\"min\":" + chart.x_min.to_text() + ",\"max\":" + chart.x_max.to_text() +
+        "},\"y_range\":{\"present\":" + chart.y_range_present.to_text() + ",\"min\":" + chart.y_min.to_text() + ",\"max\":" + chart.y_max.to_text() + "},\"x_ticks\":["
+    var tick_index = 0
+    for tick in chart.x_ticks:
+        if tick_index > 0: out = out + ","
+        out = out + "{\"lexeme\":\"" + escape_json(tick.lexeme) + "\",\"value\":" +
+            (if tick.value_present: tick.value.to_text() else: "null") + ",\"source_box\":[" +
+            tick.source_box.page_index.to_text() + "," + tick.source_box.x.to_text() + "," + tick.source_box.y.to_text() + "," +
+            tick.source_box.width.to_text() + "," + tick.source_box.height.to_text() + "]}"
+        tick_index = tick_index + 1
+    out = out + "],\"y_ticks\":["
+    tick_index = 0
+    for tick in chart.y_ticks:
+        if tick_index > 0: out = out + ","
+        out = out + "{\"lexeme\":\"" + escape_json(tick.lexeme) + "\",\"value\":" +
+            (if tick.value_present: tick.value.to_text() else: "null") + ",\"source_box\":[" +
+            tick.source_box.page_index.to_text() + "," + tick.source_box.x.to_text() + "," + tick.source_box.y.to_text() + "," +
+            tick.source_box.width.to_text() + "," + tick.source_box.height.to_text() + "]}"
+        tick_index = tick_index + 1
+    out = out + "],\"legend_entries\":["
+    var legend_index = 0
+    for legend in chart.legend_entries:
+        if legend_index > 0: out = out + ","
+        out = out + "{\"label\":\"" + escape_json(legend.label) + "\",\"series_name\":\"" +
+            escape_json(legend.series_name) + "\",\"marker\":\"" + escape_json(legend.marker) +
+            "\",\"source_box\":[" + legend.source_box.page_index.to_text() + "," + legend.source_box.x.to_text() + "," + legend.source_box.y.to_text() +
+            "," + legend.source_box.width.to_text() + "," + legend.source_box.height.to_text() + "]}"
+        legend_index = legend_index + 1
+    out = out + "],\"annotations\":["
+    var annotation_index = 0
+    for annotation in chart.annotations:
+        if annotation_index > 0: out = out + ","
+        out = out + "{\"annotation_id\":\"" + escape_json(annotation.annotation_id) +
+            "\",\"text\":\"" + escape_json(annotation.text_content) + "\",\"target_series\":\"" +
+            escape_json(annotation.target_series) + "\",\"target_point_index\":" +
+            annotation.target_point_index.to_text() + ",\"relation\":\"" + escape_json(annotation.relation) +
+            "\",\"source_box\":[" + annotation.source_box.page_index.to_text() + "," + annotation.source_box.x.to_text() + "," + annotation.source_box.y.to_text() +
+            "," + annotation.source_box.width.to_text() + "," + annotation.source_box.height.to_text() + "]}"
+        annotation_index = annotation_index + 1
+    out = out + "],\"series\":["
+    var series_index = 0
+    for series in chart.series:
+        if series_index > 0: out = out + ","
+        out = out + "{\"name\":\"" + escape_json(series.name) + "\",\"unit\":\"" + escape_json(series.unit) + "\",\"points\":["
+        var point_index = 0
+        for point in series.points:
+            if point_index > 0: out = out + ","
+            val x_json = if point.x_present: point.x_value.to_text() else: "null"
+            val y_json = if point.y_present: point.y_value.to_text() else: "null"
+            out = out + "{\"x_lexeme\":\"" + escape_json(point.x_lexeme) + "\",\"y_lexeme\":\"" + escape_json(point.y_lexeme) + "\",\"x\":" + x_json + ",\"y\":" + y_json + ",\"status\":\"" + image_value_status_name_v1(point.status) + "\",\"uncertainty_milli\":" + point.uncertainty_milli.to_text() + ",\"uncertainty_low\":" + point.uncertainty_low.to_text() + ",\"uncertainty_high\":" + point.uncertainty_high.to_text() + ",\"calibration_method\":\"" + escape_json(point.calibration_method) + "\",\"source_box\":[" + point.source_box.page_index.to_text() + "," + point.source_box.x.to_text() + "," + point.source_box.y.to_text() + "," + point.source_box.width.to_text() + "," + point.source_box.height.to_text() + "]}"
+            point_index = point_index + 1
+        out = out + "]}"
+        series_index = series_index + 1
+    out + "]}\n```\n\n"
+
+fn render_extraction_markdown_v1(document: ExtractionDocumentV1) -> text:
+    val ordered_regions = ordered_extraction_regions_v1(document.regions)
+    var out = "# Image dataset\n\n## Source and provenance\n\n- Artifact: `" + document.source_artifact_id + "`\n- SHA-256: `" + document.source_sha256 + "`\n- Dimensions: " + document.width.to_text() + " × " + document.height.to_text() + "\n- Schema: `" + document.schema_version + "`\n\n## Page inventory\n\n"
+    for category in document.categories:
+        out = out + "- " + category + "\n"
+    out = out + "\n### Regions\n\n"
+    for region in ordered_regions:
+        out = out + "- `" + region.region_id + "` — " + region.category +
+            "; order " + region.reading_order.to_text() + "; confidence " +
+            region.confidence_milli.to_text() + "/1000; source page " +
+            region.source_box.page_index.to_text() + " [" + region.source_box.x.to_text() +
+            "," + region.source_box.y.to_text() + "," + region.source_box.width.to_text() +
+            "," + region.source_box.height.to_text() + "]\n"
+    out = out + "\n## Text and handwriting\n\n"
+    for span in document.text_spans:
+        out = out + "- "
+        if span.highlighted: out = out + "=="
+        out = out + span.text_content
+        if span.highlighted: out = out + "=="
+        if span.handwritten: out = out + " *(handwritten; " + span.language + "/" + span.script + ")*"
+        out = out + " — confidence " + span.confidence_milli.to_text() +
+            "/1000; source page " + span.source_box.page_index.to_text() + " [" +
+            span.source_box.x.to_text() + "," + span.source_box.y.to_text() + "," +
+            span.source_box.width.to_text() + "," + span.source_box.height.to_text() + "]"
+        out = out + "\n"
+    out = out + "\n## Tables and forms\n\n"
+    for table in document.tables: out = out + render_table_v1(table)
+    out = out + "## Charts and graphs\n\n"
+    for chart in document.charts: out = out + render_chart_v1(chart)
+    out = out + "## Additional region content\n\n"
+    for region in ordered_regions:
+        if not region_has_typed_renderer_v1(region.category):
+            out = out + "### " + region.region_id + " — " + region.category + "\n\n" + region.markdown + "\n\n"
+    out = out + "## Unresolved content\n\n"
+    if document.unresolved.len() == 0: out = out + "None.\n"
+    for item in document.unresolved: out = out + "- " + item + "\n"
+    if document.warnings.len() > 0:
+        out = out + "\n## Warnings\n\n"
+        for warning in document.warnings: out = out + "- " + warning + "\n"
+    out
+
+fn render_audited_json_markdown_v1(source_artifact_id: text, source_sha256: text, width: i64, height: i64, audited_json: text) -> text:
+    "# Image dataset\n\n" +
+    "## Source and provenance\n\n- Artifact: `" + source_artifact_id + "`\n- SHA-256: `" + source_sha256 + "`\n- Dimensions: " + width.to_text() + " × " + height.to_text() + "\n\n" +
+    "## Page inventory and extracted content\n\nThe audited structured extraction below preserves text, tables, handwriting, highlights, chart panels, numeric arrays, uncertainty, and unresolved values.\n\n" +
+    "```json\n" + audited_json + "\n```\n\n" +
+    "## Uncertainty and unresolved content\n\nReview every `missing`, `ambiguous`, or `calibrated` value in the structured extraction. Calibrated graph samples are estimates, not exact observations.\n"

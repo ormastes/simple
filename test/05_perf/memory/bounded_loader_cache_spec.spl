@@ -1,0 +1,60 @@
+"""The seed interpreter's loader caches must have a retention bound.
+
+`PARSED_SOURCE_CACHE`, `PROBE_SOURCE_CACHE` and `PATH_KEY_CACHE` were plain
+`HashMap`s that only ever grew: one process that walks a large import graph
+retained every source string and every parsed AST until exit, and nothing in
+the tree could give a byte back.
+
+The bound is only worth having if three things hold together, so this spec
+asserts all three from one real run of the seed binary:
+
+  - at the DEFAULT limit nothing is evicted -- the bound is a ceiling for a big
+    import graph, not a change to the normal path;
+  - at a tiny limit entries ARE evicted, and the eviction is counted;
+  - the program's stdout is byte-identical across the two, i.e. eviction and
+    reload change no result.
+
+Vacuity is a failure, not a pass: the probe fails closed on a missing binary,
+an empty stdout capture, an empty counter dump, and -- the RED this was written
+against -- a counter name that is ABSENT rather than zero, which is exactly what
+a binary without the bound reports.
+
+Design: doc/05_design/compiler/interpreter/bounded_seed_interpreter_caches_2026-09-12.md
+"""
+
+use std.spec.*
+use std.fs.{read_file}
+use std.io_runtime.{process_run}
+
+val PROBE: text = "test/05_perf/memory/bounded_loader_cache_probe.shs"
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+describe "bounded loader caches":
+    it "proves the probe discriminates before it is trusted":
+        val (out, code) = run_sh("sh " + PROBE + " --selftest 2>&1")
+        expect(out).to_contain("PASS — 4 selftest fixture(s) checked, 0 failures")
+        expect(code).to_equal(0)
+
+    it "bounds the parsed-source cache with a pin-safe eviction policy":
+        val source = read_file("src/compiler_rust/compiler/src/module_cache.rs")
+        expect(source).to_contain("BoundedCache<PathBuf, SharedSource>")
+        expect(source).to_contain("fn shared_source_pinned(")
+        expect(source).to_contain("SIMPLE_PARSED_SOURCE_CACHE_MAX")
+
+    it "never evicts an entry that is still borrowed":
+        val source = read_file("src/compiler_rust/compiler/src/bounded_cache.rs")
+        # The failed-release rule: when every over-limit candidate is pinned the
+        # cache stays OVER its limit and counts the skip, rather than freeing a
+        # live entry.
+        expect(source).to_contain("self.stats.pinned_skips += 1;")
+        expect(source).to_contain("filter(|(_, e)| !(self.pinned)(&e.value))")
+
+    it "evicts past a tiny bound, evicts nothing at the default, and keeps stdout identical":
+        val (out, code) = run_sh("sh " + PROBE + " 2>&1")
+        print "[perf] bounded-loader-cache: " + out
+        expect(out).to_contain("stdout byte-identical")
+        expect(out).to_contain("PASS — 2 run(s) executed")
+        expect(code).to_equal(0)

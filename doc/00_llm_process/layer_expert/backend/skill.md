@@ -11,7 +11,7 @@ Default backend is LLVM llc; Cranelift JIT is opt-in.
 ## Pipeline Links
 
 - [verify skill](../../../../.claude/skills/verify/SKILL.md)
-- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+- [impl skill](../../../../.claude/skills/impl.md)
 
 ## Layer Links
 
@@ -21,9 +21,6 @@ Default backend is LLVM llc; Cranelift JIT is opt-in.
   (struct/array/enum lowering, dispatch).
 - Native linker: [src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl](../../../../src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl)
   (link order, external symbol resolution).
-- LINK lane (GraphResolveCore + SmfLinkProfile, `src/compiler/70.backend/linker/gpu_smf/`):
-  see [link_manager](../../feature_expert/link_manager/skill.md) for the
-  frozen resolve contract v1, stage ids L0–L12, and parity-oracle decisions.
 - LLVM bridge: `src/compiler_rust/compiler/src/backend/llvm/` (seed LLVM codegen,
   not production after stage3).
 - Unit specs: `test/01_unit/compiler/70.backend/` (e.g. `core_codegen_spec.spl`).
@@ -243,3 +240,64 @@ After backend regressions, FFI fixes, or linker changes, refresh this skill
 with new issue links and concrete marshalling patterns.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## Cranelift inline `.len()` reads the wrong heap tag space (2026-09-06)
+
+The inline `.len()` fast path in
+`src/compiler_rust/compiler/src/codegen/instr/helpers.rs` dispatches on the
+header byte and carries BOTH heap numbering schemes at once: `:74` treats
+`object_type == 3` as `RuntimeDict` (len @8), `:81` treats `object_type == 6` as
+freestanding `SplDict` (len @16). Hosted and freestanding SWAP dict and closure
+(`Dict 0x03` / `Closure 0x06` hosted; `CLOSURE 0x03` / `DICT 0x06` in
+`src/runtime/runtime_native.c:250,252`), and `:81` is scoped to freestanding in
+its comment only — so `.len()` on a *hosted* closure returns
+`RuntimeClosure.capture_count` (offset 16) instead of the `-1` sentinel, i.e.
+`0` for a non-capturing lambda.
+
+Do NOT "fix" this by gating on the target triple: the same binary links both
+runtimes (`linker.rs:1642`, ~514 duplicate `rt_*` symbols at `:1649` resolved by
+archive order + `/FORCE:MULTIPLE` at `:1654-1668`). Full write-up, table and
+landmine: [runtime layer expert](../runtime/skill.md) § Session update
+2026-09-06. Tracking PR: <https://github.com/ormastes/simple/pull/403>.
+
+## Session update 2026-09-26 — seed cranelift Stage-2 admission blockers + ARM32 M-profile triples
+
+Two Rust-seed defects that every Stage-2 candidate hit. Neither reproduces in
+the interpreter, which is why both were chased as self-hosted bugs for a
+session before the seed was suspected:
+
+- **Bare `return` in an inferred-`ANY` function lowered to `ud2`.** A function
+  with no declared return type whose body ends in a value expression is
+  inferred `ANY`; a bare `return` inside it fell through `Return(None)`
+  lowering into the AOT fail-fast trap
+  (`src/compiler_rust/compiler/src/codegen/instr/body.rs` ~:1299-1315). It now
+  returns tagged nil as the **constant `3`** (`TAG_SPECIAL 0b011 |
+  SPECIAL_NIL 0`, same as `helpers.rs`/`pattern.rs`) — no runtime call, because
+  the AOT ObjectModule backend does not register `rt_value_nil` in
+  `runtime_funcs`. First victim was `current_core_lexer_save`'s
+  `if not flag[0]: return`, so every candidate SIGILL'd mid-`phase=parse` on
+  its first token and the failure was attributed to the candidate's parser.
+  Record: [seed_cranelift_bare_return_in_inferred_any_fn_traps_2026-09-26](../../../08_tracking/bug/seed_cranelift_bare_return_in_inferred_any_fn_traps_2026-09-26.md).
+- **Cross-module selfless method calls dropped the receiver.** `method_arity`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/imports.rs:132`) now
+  counts the implicit receiver — `params.len() + 1` when the method is not
+  static and declares no `self` param — so the callee no longer reads its
+  arguments one slot off. Record:
+  [seed_cross_module_selfless_method_drops_receiver_2026-09-26](../../../08_tracking/bug/seed_cross_module_selfless_method_drops_receiver_2026-09-26.md);
+  spec `test/01_unit/compiler/backend/cross_module_selfless_method_receiver_spec.spl`
+  (shells out — it honours `SIMPLE_SPEC_COMPILER`, see the spipe skill).
+
+Diagnostic rule from both: **a candidate that dies with SIGILL where the
+interpreter is fine is a SEED codegen bug until proven otherwise** — check for
+`ud2` at the faulting pc before reading candidate source.
+
+**ARM32 bare-metal LLVM triples keep the M-profile arch** (`03553bcb5f6`,
+[llvm_target.spl](../../../../src/compiler/70.backend/backend/llvm_target.spl)
+`llvm_arm32_baremetal_arch` :29): `thumbv8m.main`/`.base`, `thumbv7em`/`v7m`/`v6m`
+are preserved instead of collapsing to `armv7`, which emitted A32 on a
+Thumb-only Cortex-M (UsageFault UNDEFINSTR at the first instruction).
+Board-side consequences: [os layer expert](../os/skill.md).
+
+The MIR-side member of the same admission family — `starts_with`/`ends_with`
+returning the wrong boolean on the native path — is written up once in
+[mir_lowering](../mir_lowering/skill.md) § 2026-09-26.

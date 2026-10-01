@@ -1,0 +1,38 @@
+use std.spec.{describe, it, expect}
+use app.bootstrap_adhoc.policy.{
+    bootstrap_adhoc_decide, bootstrap_adhoc_output_has_exact_marker,
+    bootstrap_adhoc_path_lane
+}
+
+describe "bootstrap ad-hoc policy":
+    it "classifies compiler phases and widens mixed changes":
+        expect(bootstrap_adhoc_path_lane("src/compiler/10.frontend/core/parser.spl")).to_equal("frontend")
+        expect(bootstrap_adhoc_path_lane("src/compiler/20.hir/hir_lowering.spl")).to_equal("hir")
+        expect(bootstrap_adhoc_path_lane("src/compiler/50.mir/mir_data.spl")).to_equal("mir")
+        expect(bootstrap_adhoc_path_lane("src/compiler/70.backend/backend.spl")).to_equal("backend")
+        val decision = bootstrap_adhoc_decide([
+            "src/compiler/10.frontend/core/parser.spl",
+            "src/compiler/50.mir/mir_data.spl"
+        ], "auto")
+        expect(decision.admitted).to_equal(true)
+        expect(decision.lane).to_equal("mir")
+
+    it "fails closed for global owners and narrow overrides":
+        val loader = bootstrap_adhoc_decide([
+            "src/compiler/99.loader/module_resolver/main.spl"
+        ], "auto")
+        expect(loader.admitted).to_equal(false)
+        expect(loader.lane).to_equal("full")
+        val narrow = bootstrap_adhoc_decide([
+            "src/compiler/60.mir_opt/pipeline.spl"
+        ], "frontend")
+        expect(narrow.admitted).to_equal(false)
+        expect(narrow.lane).to_equal("mir")
+
+    it "requires an exact runtime pass marker":
+        expect(bootstrap_adhoc_output_has_exact_marker(
+            "noise\nBOOTSTRAP_ADHOC_PASS lane=hir\n", "hir"
+        )).to_equal(true)
+        expect(bootstrap_adhoc_output_has_exact_marker(
+            "BOOTSTRAP_ADHOC_PASS lane=hir extra", "hir"
+        )).to_equal(false)

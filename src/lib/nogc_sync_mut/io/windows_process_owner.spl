@@ -1,0 +1,586 @@
+# Windows x64 owner. Direct documented kernel32 calls; no replacement C runtime.
+# Ownership is represented by a nonreused slot, not an OS PID. Copied leases
+# refer to the same slot, so collecting one invalidates every copy before handles
+# can be recycled. This owner is single-threaded and bounded to 1024 starts.
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
+
+struct WindowsProcessInputV1:
+    path: text
+    digest: text
+
+struct WindowsProcessRequestV1:
+    program: text
+    producer_digest: text
+    args: [text]
+    environment: [text]
+    directory: text
+    inputs: [WindowsProcessInputV1]
+    stdout_path: text
+    stderr_path: text
+    timeout_ms: i64
+
+struct WindowsProcessPollV1:
+    terminal: bool
+    leader_reaped: bool
+    tree_empty: bool
+    active_processes: i64
+    exit_code: i64
+    timed_out: bool
+    cancelled: bool
+
+class WindowsProcessLeaseV1:
+    slot: i64
+
+# Admission is a lifetime fact, separate from an error message. In particular,
+# a zero HANDLE after an attempted CreateProcess is not a no-child certificate.
+enum WindowsProcessAdmissionV1:
+    Started(lease: WindowsProcessLeaseV1)
+    RejectedBeforeStart(reason: text)
+    FailedAfterCleanup(reason: text)
+    Unknown(reason: text)
+
+struct WindowsProcessStateV1:
+    job: i64
+    process: i64
+    heap: i64
+    accounting: i64
+    exit_slot: i64
+    pins: [i64]
+    deadline: u64
+    closed: bool
+    timed_out: bool
+    cancelled: bool
+
+var _windows_process_slots_v1: [WindowsProcessStateV1] = []
+
+# MEMORYSTATUSEX is 64 bytes on Win64; ullAvailPhys begins at byte 16.
+@unsafe(reason: "reads a bounded native host memory snapshot and releases its buffer", capabilities: [ffi, raw_ptr])
+fn windows_available_physical_memory_v1() -> Result<i64, text>:
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows process heap unavailable for memory check")
+    val status = HeapAlloc(heap, 8u32, 64u64)
+    if status == 0: return Err("Windows memory status allocation failed")
+    volatile_write_u32(status, 64u32)
+    val queried = GlobalMemoryStatusEx(status)
+    val available = if queried != 0: volatile_read_u64(status + 16) else: 0u64
+    val released = HeapFree(heap, 0u32, status)
+    if queried == 0 or released == 0: return Err("Windows available memory query failed")
+    if available > 9223372036854775807u64: return Err("Windows available memory exceeds supported bound")
+    Ok(available as i64)
+
+fn _windows_scalar_utf8_width_v1(scalar: i64) -> i64:
+    if scalar < 128: return 1
+    if scalar < 2048: return 2
+    if scalar < 65536: return 3
+    4
+
+# @workaround bug=bootstrap-builder-owner-native-string-methods-2026-09-30
+# reason=60b93 producer cannot lower text.to_upper or for-in text.chars.
+fn _windows_upper_ascii_v1(value: text) -> text:
+    val upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    var result = ""
+    var ordinal = 0
+    var offset = 0
+    while offset < value.len():
+        val scalar = value.char_code_at(ordinal)
+        val width = _windows_scalar_utf8_width_v1(scalar)
+        if scalar >= 97 and scalar <= 122:
+            val index = scalar - 97
+            result = result + upper[index:index + 1]
+        else:
+            result = result + value[offset:offset + width]
+        ordinal = ordinal + 1
+        offset = offset + width
+    result
+
+# Microsoft CRT argv decoding: quote each argument, double a run of backslashes
+# before a quote, and double trailing backslashes before the closing quote.
+fn windows_process_quote_arg_v1(argument: text) -> text:
+    var quoted = "\""
+    var slashes = 0
+    var ordinal = 0
+    var offset = 0
+    while offset < argument.len():
+        val width = _windows_scalar_utf8_width_v1(argument.char_code_at(ordinal))
+        val character = argument[offset:offset + width]
+        if character == "\\":
+            slashes = slashes + 1
+        else:
+            var copies = slashes
+            if character == "\"": copies = slashes * 2 + 1
+            var index = 0
+            while index < copies:
+                quoted = quoted + "\\"
+                index = index + 1
+            quoted = quoted + character
+            slashes = 0
+        ordinal = ordinal + 1
+        offset = offset + width
+    var index = 0
+    while index < slashes * 2:
+        quoted = quoted + "\\"
+        index = index + 1
+    quoted + "\""
+
+fn windows_process_path_valid_v1(path: text) -> bool:
+    if path.len() < 4 or path[1:2] != ":" or (path[2:3] != "/" and path[2:3] != "\\") or path.contains("\0"):
+        return false
+    val drive = path[0:1]
+    if not ((drive >= "A" and drive <= "Z") or (drive >= "a" and drive <= "z")): return false
+    for part in path.replace("\\", "/").split("/"):
+        if part == "." or part == "..": return false
+    true
+
+fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
+    if not windows_process_path_valid_v1(request.program) or not windows_process_path_valid_v1(request.directory):
+        return "Windows owner requires absolute drive-rooted program and cwd"
+    if not windows_process_path_valid_v1(request.stdout_path) or not windows_process_path_valid_v1(request.stderr_path) or request.stdout_path == request.stderr_path:
+        return "Windows owner requires separate absolute stream paths"
+    # Match the builder contract: zero explicitly means no process deadline;
+    # positive declared budgets extend through seven days. Cancellation remains
+    # separately bounded and authoritative through the retained JobObject.
+    if request.timeout_ms < 0 or request.timeout_ms > 604800000 or request.args.len() > 4096 or request.inputs.len() > 100000:
+        return "Windows owner request exceeds bounds"
+    for arg in request.args:
+        if arg.contains("\0"): return "NUL in argument"
+    var names: [text] = []
+    for assignment in request.environment:
+        if assignment.contains("\0"): return "NUL in environment"
+        val parts = assignment.split("=")
+        if parts.len() < 2 or parts[0] == "": return "invalid environment assignment"
+        var key_index = 0
+        while key_index < parts[0].len():
+            if parts[0].char_code_at(key_index) > 127: return "Windows environment names currently require ASCII"
+            key_index = key_index + 1
+        val name = _windows_upper_ascii_v1(parts[0])
+        if names.contains(name): return "duplicate Windows environment name"
+        names = names.push(name)
+    for input in request.inputs:
+        if not windows_process_path_valid_v1(input.path) or input.digest.len() != 64:
+            return "invalid immutable input"
+    ""
+
+@unsafe(reason: "bounds checked UTF16 writes into a zeroed owned allocation", capabilities: [ffi, raw_ptr])
+fn _windows_process_wide_v1(heap: i64, value: text) -> i64:
+    # UTF8 byte length bounds UTF16 code units, including supplementary scalars.
+    val buffer = HeapAlloc(heap, 8u32, ((value.len() + 1) * 2) as u64)
+    if buffer == 0: return 0
+    var offset = 0
+    var ordinal = 0
+    var byte_offset = 0
+    while byte_offset < value.len():
+        val scalar = value.char_code_at(ordinal)
+        if scalar < 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+            val _free = HeapFree(heap, 0u32, buffer)
+            return 0
+        if scalar < 65536:
+            volatile_write_u16(buffer + offset * 2, scalar)
+            offset = offset + 1
+        else:
+            val supplementary = scalar - 65536
+            volatile_write_u16(buffer + offset * 2, 55296 + (supplementary >> 10))
+            volatile_write_u16(buffer + (offset + 1) * 2, 56320 + (supplementary & 1023))
+            offset = offset + 2
+        ordinal = ordinal + 1
+        byte_offset = byte_offset + _windows_scalar_utf8_width_v1(scalar)
+    buffer
+
+@unsafe(reason: "caller owns file handle and temporary UTF16 storage", capabilities: [ffi, raw_ptr])
+fn _windows_process_file_v1(heap: i64, path: text, access: u32, sharing: u32, security: i64, disposition: u32) -> i64:
+    val wide = _windows_process_wide_v1(heap, path)
+    if wide == 0: return 0
+    var attributes = 128u32
+    if disposition == 3u32 and path != "NUL": attributes = 2097280u32
+    val handle = CreateFileW(wide, access, sharing, security, disposition, attributes, 0)
+    val _free = HeapFree(heap, 0u32, wide)
+    if handle == -1: return 0
+    handle
+
+@unsafe(reason: "opens exact directory metadata without following reparse points and closes all native resources", capabilities: [ffi, raw_ptr])
+fn windows_process_directory_no_follow_v1(path: text) -> bool:
+    val heap = GetProcessHeap()
+    if heap == 0: return false
+    val wide = _windows_process_wide_v1(heap, path)
+    val metadata = HeapAlloc(heap, 8u32, 8u64)
+    if wide == 0 or metadata == 0:
+        if wide != 0:
+            val _free = HeapFree(heap, 0u32, wide)
+        if metadata != 0:
+            val _free = HeapFree(heap, 0u32, metadata)
+        return false
+    # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
+    val handle = CreateFileW(wide, 128u32, 7u32, 0, 3u32, 35651584u32, 0)
+    var valid = false
+    if handle != -1 and handle != 0:
+        if GetFileInformationByHandleEx(handle, 9, metadata, 8u32) != 0:
+            val attributes = volatile_read_u32(metadata)
+            valid = (attributes & 16) != 0 and (attributes & 1024) == 0
+        val _closed = CloseHandle(handle)
+    val _free_path = HeapFree(heap, 0u32, wide)
+    val _free_metadata = HeapFree(heap, 0u32, metadata)
+    valid
+
+export windows_process_directory_no_follow_v1
+
+@unsafe(reason: "read-only share prevents writes, renames and replacement while digest is checked", capabilities: [ffi])
+fn _windows_process_pin_v1(heap: i64, path: text, digest: text) -> i64:
+    if digest.len() != 64: return 0
+    val handle = _windows_process_file_v1(heap, path, 2147483648u32, 1u32, 0, 3u32)
+    if handle == 0: return 0
+    if _windows_process_hash_handle_v1(heap, handle) != digest:
+        val _closed = CloseHandle(handle)
+        return 0
+    handle
+
+# Hash the exact pinned file handle, not a second path lookup. Reparse points
+# and directories are rejected from handle metadata before any data is read.
+@unsafe(reason: "streaming SHA256 retains file and hash identities until finalization", capabilities: [ffi, raw_ptr])
+fn _windows_process_hash_handle_v1(heap: i64, file: i64) -> text:
+    val metadata = HeapAlloc(heap, 8u32, 8u64)
+    val provider_slot = HeapAlloc(heap, 8u32, 8u64)
+    val hash_slot = HeapAlloc(heap, 8u32, 8u64)
+    val count_slot = HeapAlloc(heap, 8u32, 8u64)
+    val buffer = HeapAlloc(heap, 8u32, 65536u64)
+    val digest_buffer = HeapAlloc(heap, 8u32, 32u64)
+    val algorithm = _windows_process_wide_v1(heap, "SHA256")
+    val allocations = [metadata, provider_slot, hash_slot, count_slot, buffer, digest_buffer, algorithm]
+    var valid = true
+    for address in allocations:
+        if address == 0: valid = false
+    var provider: i64 = 0
+    var hash: i64 = 0
+    var digest = ""
+    if valid:
+        if GetFileInformationByHandleEx(file, 9, metadata, 8u32) == 0:
+            valid = false
+        elif (volatile_read_u32(metadata) & 1040) != 0:
+            valid = false
+    if valid:
+        if BCryptOpenAlgorithmProvider(provider_slot, algorithm, 0, 0u32) != 0:
+            valid = false
+        else:
+            provider = volatile_read_u64(provider_slot)
+    if valid:
+        if BCryptCreateHash(provider, hash_slot, 0, 0u32, 0, 0u32, 0u32) != 0:
+            valid = false
+        else:
+            hash = volatile_read_u64(hash_slot)
+    while valid:
+        if ReadFile(file, buffer, 65536u32, count_slot, 0) == 0:
+            valid = false
+            break
+        val count = volatile_read_u32(count_slot)
+        if count == 0: break
+        if count > 65536 or BCryptHashData(hash, buffer, count as u32, 0u32) != 0:
+            valid = false
+            break
+    if valid:
+        if BCryptFinishHash(hash, digest_buffer, 32u32, 0u32) != 0:
+            valid = false
+        else:
+            val hex = "0123456789abcdef"
+            var i = 0
+            while i < 32:
+                val byte = volatile_read_u8(digest_buffer + i)
+                val high = byte / 16
+                val low = byte % 16
+                digest = digest + hex[high:high + 1] + hex[low:low + 1]
+                i = i + 1
+    if hash != 0:
+        if BCryptDestroyHash(hash) != 0: valid = false
+    if provider != 0:
+        if BCryptCloseAlgorithmProvider(provider, 0u32) != 0: valid = false
+    for address in allocations:
+        if address != 0:
+            if HeapFree(heap, 0u32, address) == 0: valid = false
+    if not valid: return ""
+    digest
+
+@unsafe(reason: "bounded Windows file hashing owns and closes its exact file handle", capabilities: [ffi])
+fn windows_process_file_digest_v1(path: text) -> text:
+    val heap = GetProcessHeap()
+    if heap == 0: return ""
+    val file = _windows_process_file_v1(heap, path, 2147483648u32, 1u32, 0, 3u32)
+    if file == 0: return ""
+    val digest = _windows_process_hash_handle_v1(heap, file)
+    if CloseHandle(file) == 0: return ""
+    digest
+
+@unsafe(reason: "observes owned JobObject membership with bounded cleanup wait", capabilities: [ffi, raw_ptr])
+fn _windows_process_empty_v1(job: i64, accounting: i64, budget_ms: u64) -> bool:
+    val deadline = GetTickCount64() + budget_ms
+    while true:
+        if QueryInformationJobObject(job, 1, accounting, 48u32, 0) == 0: return false
+        if volatile_read_u32(accounting + 40) == 0: return true
+        if GetTickCount64() >= deadline: return false
+        Sleep(10u32)
+    false
+
+@unsafe(reason: "closed handles never escape admission failure", capabilities: [ffi, raw_ptr])
+fn _windows_process_failed_child_v1(job: i64, process: i64, accounting: i64) -> bool:
+    if process == 0: return true
+    val _job_killed = TerminateJobObject(job, 125u32)
+    val _child_killed = TerminateProcess(process, 125u32)
+    val reaped = WaitForSingleObject(process, 10000u32) == 0u32
+    val empty = _windows_process_empty_v1(job, accounting, 10000u64)
+    reaped and empty
+
+@unsafe(reason: "single-threaded owner admits exact environment and suspended child into an owned JobObject", capabilities: [ffi, raw_ptr])
+fn windows_process_start_v1(request: WindowsProcessRequestV1) -> Result<WindowsProcessLeaseV1, text>:
+    windows_process_start_with_memory_v1(request, 0)
+
+@unsafe(reason: "configures an aggregate committed-memory limit before suspended child admission", capabilities: [ffi, raw_ptr])
+fn windows_process_start_with_memory_v1(request: WindowsProcessRequestV1, memory_limit_bytes: i64) -> Result<WindowsProcessLeaseV1, text>:
+    match windows_process_admit_v1(request, memory_limit_bytes):
+        WindowsProcessAdmissionV1.Started(lease): Ok(lease)
+        WindowsProcessAdmissionV1.RejectedBeforeStart(reason): Err(reason)
+        WindowsProcessAdmissionV1.FailedAfterCleanup(reason): Err(reason)
+        WindowsProcessAdmissionV1.Unknown(reason): Err(reason + "; cleanup unproven")
+
+@unsafe(reason: "tracks whether native process creation was attempted and preserves authoritative cleanup evidence", capabilities: [ffi, raw_ptr])
+fn windows_process_admit_v1(request: WindowsProcessRequestV1, memory_limit_bytes: i64) -> WindowsProcessAdmissionV1:
+    windows_process_admit_with_reserve_v1(request, memory_limit_bytes, 0)
+
+@unsafe(reason: "checks current physical headroom after input pins and before child creation", capabilities: [ffi, raw_ptr])
+fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memory_limit_bytes: i64,
+        required_available_bytes: i64) -> WindowsProcessAdmissionV1:
+    if memory_limit_bytes < 0 or memory_limit_bytes > 1125899906842624:
+        return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows job memory limit exceeds bound")
+    if required_available_bytes < 0 or required_available_bytes > 1125899906842624 or
+            (required_available_bytes > 0 and required_available_bytes < memory_limit_bytes):
+        return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows pre-spawn memory requirement invalid")
+    val invalid = windows_process_request_valid_v1(request)
+    if invalid != "": return WindowsProcessAdmissionV1.RejectedBeforeStart(invalid)
+    if _windows_process_slots_v1.len() >= 1024: return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows owner slot lifetime bound reached")
+    val heap = GetProcessHeap()
+    if heap == 0: return WindowsProcessAdmissionV1.RejectedBeforeStart("GetProcessHeap failed")
+    var pins: [i64] = []
+    var handles: [i64] = []
+    var allocations: [i64] = []
+    var error = ""
+    val executable_pin = _windows_process_pin_v1(heap, request.program, request.producer_digest)
+    if executable_pin == 0: return WindowsProcessAdmissionV1.RejectedBeforeStart("producer pin/digest mismatch")
+    pins = pins.push(executable_pin)
+    for input in request.inputs:
+        val pin = _windows_process_pin_v1(heap, input.path, input.digest)
+        if pin == 0:
+            error = "input pin/digest mismatch: " + input.path
+            break
+        pins = pins.push(pin)
+    var command = windows_process_quote_arg_v1(request.program)
+    for arg in request.args: command = command + " " + windows_process_quote_arg_v1(arg)
+    var environment = ""
+    var ordered = request.environment
+    var i = 1
+    while i < ordered.len():
+        var j = i
+        while j > 0 and _windows_upper_ascii_v1(ordered[j]) < _windows_upper_ascii_v1(ordered[j - 1]):
+            val before = ordered[j - 1]
+            ordered[j - 1] = ordered[j]
+            ordered[j] = before
+            j = j - 1
+        i = i + 1
+    for assignment in ordered: environment = environment + assignment + "\0"
+    # wide() appends the second terminating NUL; the empty block needs two too.
+    if environment == "": environment = "\0"
+    val app = _windows_process_wide_v1(heap, request.program)
+    val argv = _windows_process_wide_v1(heap, command)
+    val cwd = _windows_process_wide_v1(heap, request.directory)
+    val env = _windows_process_wide_v1(heap, environment)
+    val startup = HeapAlloc(heap, 8u32, 112u64)
+    val process_info = HeapAlloc(heap, 8u32, 24u64)
+    val limits = HeapAlloc(heap, 8u32, 144u64)
+    val security = HeapAlloc(heap, 8u32, 24u64)
+    val size_slot = HeapAlloc(heap, 8u32, 8u64)
+    val allowed_handles = HeapAlloc(heap, 8u32, 24u64)
+    val accounting = HeapAlloc(heap, 8u32, 48u64)
+    val exit_slot = HeapAlloc(heap, 8u32, 8u64)
+    allocations = [app, argv, cwd, env, startup, process_info, limits, security, size_slot, allowed_handles]
+    for allocation in allocations:
+        if allocation == 0: error = "Windows process request allocation failed"
+    if accounting == 0 or exit_slot == 0: error = "Windows process observation allocation failed"
+    var attributes: i64 = 0
+    var attributes_initialized = false
+    var job: i64 = 0
+    var process: i64 = 0
+    var thread: i64 = 0
+    var creation_attempted = false
+    if error == "" and required_available_bytes > 0:
+        match windows_available_physical_memory_v1():
+            Ok(available):
+                if available < required_available_bytes:
+                    error = "pre-spawn available memory below required bytes: available={available} required={required_available_bytes}"
+            Err(reason): error = reason
+    if error == "":
+        volatile_write_u32(security, 24)
+        volatile_write_u32(security + 16, 1)
+        val stdin_handle = _windows_process_file_v1(heap, "NUL", 2147483648u32, 3u32, security, 3u32)
+        val stdout_handle = _windows_process_file_v1(heap, request.stdout_path, 1073741824u32, 1u32, security, 1u32)
+        val stderr_handle = _windows_process_file_v1(heap, request.stderr_path, 1073741824u32, 1u32, security, 1u32)
+        handles = [stdin_handle, stdout_handle, stderr_handle]
+        for handle in handles:
+            if handle == 0: error = "cannot create exact inherited stream handles"
+        if error == "":
+            volatile_write_u32(startup, 112)
+            volatile_write_u32(startup + 60, 256)
+            volatile_write_u64(startup + 80, stdin_handle)
+            volatile_write_u64(startup + 88, stdout_handle)
+            volatile_write_u64(startup + 96, stderr_handle)
+            volatile_write_u64(allowed_handles, stdin_handle)
+            volatile_write_u64(allowed_handles + 8, stdout_handle)
+            volatile_write_u64(allowed_handles + 16, stderr_handle)
+            val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, size_slot)
+            val required = volatile_read_u64(size_slot)
+            if required <= 0 or required > 1048576:
+                error = "invalid Windows attribute-list size"
+            else:
+                attributes = HeapAlloc(heap, 8u32, required as u64)
+                if attributes == 0:
+                    error = "attribute-list allocation failed"
+                elif InitializeProcThreadAttributeList(attributes, 1u32, 0u32, size_slot) == 0:
+                    error = "attribute-list initialization failed"
+                else:
+                    attributes_initialized = true
+                    if UpdateProcThreadAttribute(attributes, 0u32, 131074u64, allowed_handles, 24u64, 0, 0) == 0:
+                        error = "handle allowlist admission failed"
+                    volatile_write_u64(startup + 104, attributes)
+    if error == "":
+        volatile_write_u32(limits + 16, 8192)
+        if memory_limit_bytes > 0:
+            # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY.
+            volatile_write_u32(limits + 16, 8704)
+            volatile_write_u64(limits + 120, memory_limit_bytes)
+        job = CreateJobObjectW(0, 0)
+        if job == 0 or SetInformationJobObject(job, 9, limits, 144u32) == 0:
+            error = "JobObject admission failed"
+    if error == "":
+        # CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW.
+        creation_attempted = true
+        if CreateProcessW(app, argv, 0, 0, 1, 134743044u32, env, cwd, startup, process_info) == 0:
+            error = "CreateProcessW failed: " + str(GetLastError())
+        else:
+            process = volatile_read_u64(process_info)
+            thread = volatile_read_u64(process_info + 8)
+            if AssignProcessToJobObject(job, process) == 0:
+                error = "suspended process job assignment failed"
+            elif ResumeThread(thread) == 4294967295u32:
+                error = "owned primary thread resume failed"
+    var admission_released = true
+    if attributes_initialized: DeleteProcThreadAttributeList(attributes)
+    if attributes != 0:
+        if HeapFree(heap, 0u32, attributes) == 0: admission_released = false
+    for allocation in allocations:
+        if allocation != 0:
+            if HeapFree(heap, 0u32, allocation) == 0: admission_released = false
+    for handle in handles:
+        if handle != 0:
+            if CloseHandle(handle) == 0: admission_released = false
+    if not admission_released and error == "": error = "native admission temporary resource cleanup failed"
+    if error != "":
+        val cleanup = _windows_process_failed_child_v1(job, process, accounting)
+        var released = admission_released
+        if thread != 0:
+            if CloseHandle(thread) == 0: released = false
+        if process != 0:
+            if CloseHandle(process) == 0: released = false
+        if job != 0:
+            if CloseHandle(job) == 0: released = false
+        for pin in pins:
+            if CloseHandle(pin) == 0: released = false
+        if accounting != 0:
+            if HeapFree(heap, 0u32, accounting) == 0: released = false
+        if exit_slot != 0:
+            if HeapFree(heap, 0u32, exit_slot) == 0: released = false
+        if not creation_attempted and released: return WindowsProcessAdmissionV1.RejectedBeforeStart(error)
+        if process != 0 and cleanup and released: return WindowsProcessAdmissionV1.FailedAfterCleanup(error)
+        if not released: return WindowsProcessAdmissionV1.Unknown(error + "; admission cleanup unproven")
+        return WindowsProcessAdmissionV1.Unknown(error)
+    val _thread_closed = CloseHandle(thread)
+    val slot = _windows_process_slots_v1.len()
+    _windows_process_slots_v1 = _windows_process_slots_v1.push(WindowsProcessStateV1(
+        job: job, process: process, heap: heap, accounting: accounting,
+        exit_slot: exit_slot, pins: pins, deadline: if request.timeout_ms == 0: 0u64 else: GetTickCount64() + (request.timeout_ms as u64),
+        closed: false, timed_out: false, cancelled: false))
+    WindowsProcessAdmissionV1.Started(WindowsProcessLeaseV1(slot: slot))
+
+@unsafe(reason: "cancels only the JobObject retained by a live owner slot", capabilities: [ffi])
+fn windows_process_cancel_v1(lease: WindowsProcessLeaseV1) -> Result<bool, text>:
+    if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
+    var state = _windows_process_slots_v1[lease.slot]
+    if state.closed: return Err("Windows owner already collected")
+    if state.cancelled: return Ok(true)
+    if TerminateJobObject(state.job, 125u32) == 0: return Err("JobObject termination failed")
+    state.cancelled = true
+    _windows_process_slots_v1[lease.slot] = state
+    Ok(true)
+
+@unsafe(reason: "observes exact leader handle and JobObject, never a PID lookup", capabilities: [ffi, raw_ptr])
+fn windows_process_poll_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsProcessPollV1, text>:
+    if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
+    var state = _windows_process_slots_v1[lease.slot]
+    if state.closed: return Err("Windows owner already collected")
+    if not state.cancelled and state.deadline != 0u64 and GetTickCount64() >= state.deadline:
+        if TerminateJobObject(state.job, 124u32) == 0: return Err("deadline job termination failed")
+        state.timed_out = true
+        state.cancelled = true
+        _windows_process_slots_v1[lease.slot] = state
+    val waited = WaitForSingleObject(state.process, 0u32)
+    if waited != 0u32 and waited != 258u32: return Err("owned process wait failed")
+    if QueryInformationJobObject(state.job, 1, state.accounting, 48u32, 0) == 0:
+        return Err("owned JobObject membership query failed")
+    val active = volatile_read_u32(state.accounting + 40)
+    var exit_code: i64 = -1
+    if waited == 0u32:
+        if GetExitCodeProcess(state.process, state.exit_slot) == 0: return Err("owned exit status unavailable")
+        exit_code = volatile_read_u32(state.exit_slot)
+    Ok(WindowsProcessPollV1(terminal: waited == 0u32 and active == 0,
+        leader_reaped: waited == 0u32, tree_empty: active == 0,
+        active_processes: active, exit_code: exit_code,
+        timed_out: state.timed_out, cancelled: state.cancelled))
+
+@unsafe(reason: "invalidates owner slot before releasing terminal process/job/file identities", capabilities: [ffi, raw_ptr])
+fn windows_process_collect_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsProcessPollV1, text>:
+    val receipt = windows_process_poll_v1(lease)?
+    if not receipt.terminal or not receipt.leader_reaped or not receipt.tree_empty:
+        return Err("Windows process tree is not terminal")
+    var state = _windows_process_slots_v1[lease.slot]
+    state.closed = true
+    _windows_process_slots_v1[lease.slot] = state
+    var released = CloseHandle(state.process) != 0
+    if CloseHandle(state.job) == 0: released = false
+    for pin in state.pins:
+        if CloseHandle(pin) == 0: released = false
+    if HeapFree(state.heap, 0u32, state.accounting) == 0: released = false
+    if HeapFree(state.heap, 0u32, state.exit_slot) == 0: released = false
+    if not released: return Err("terminal Windows owner cleanup failed")
+    Ok(receipt)
+
+export WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessPollV1, WindowsProcessLeaseV1
+export windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1
+export windows_process_quote_arg_v1, windows_process_path_valid_v1, windows_process_request_valid_v1
+export windows_process_file_digest_v1
+# Shared only with the sibling Windows launcher platform owner. The caller owns
+# the returned allocation/file handle; application facades never expose these.
+export _windows_process_wide_v1, _windows_process_pin_v1
+
+# Microsoft JOBOBJECT_EXTENDED_LIMIT_INFORMATION Win64 layout: 144 bytes,
+# JobMemoryLimit at120, PeakJobMemoryUsed at136. This measures aggregate committed
+# memory, not resident working-set bytes. Query while the native owner is live.
+@unsafe(reason: "queries actual retained JobObject aggregate memory accounting", capabilities: [ffi, raw_ptr])
+fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, text>:
+    if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
+    val state = _windows_process_slots_v1[lease.slot]
+    if state.closed: return Err("Windows owner already collected")
+    val information = HeapAlloc(state.heap, 8u32, 144u64)
+    if information == 0: return Err("job memory query allocation failed")
+    val queried = QueryInformationJobObject(state.job, 9, information, 144u32, 0)
+    val peak = if queried != 0: volatile_read_u64(information + 136) else: -1
+    val released = HeapFree(state.heap, 0u32, information)
+    if queried == 0 or released == 0 or peak < 0: return Err("job memory accounting unavailable")
+    Ok(peak)
+
+export windows_process_start_with_memory_v1, windows_process_peak_memory_v1
+export WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_admit_with_reserve_v1
+export windows_available_physical_memory_v1

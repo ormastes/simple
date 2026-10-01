@@ -1,0 +1,325 @@
+# Immutable build requests shared by compiler producer and application manager.
+use std.common.crypto.sha256.{sha256_text}
+
+# Repo-sized isolated snapshots; other collection and wire limits are unchanged.
+val BUILDER_MAX_INPUTS_V1: i64 = 32768
+
+struct BuildInputV1:
+    path: text
+    digest: text
+
+struct BuildTaskV1:
+    id: text
+    attempt: i64
+    phase: text
+    producer_digest: text
+    source_digest: text
+    toolchain_digest: text
+    dependencies: [text]
+    program: text
+    args: [text]
+    inputs: [BuildInputV1]
+    outputs: [text]
+    cache_key: text
+    timeout_ms: i64
+
+struct BuildHostV1:
+    id: text
+    transport: text
+    endpoint: text
+    workspace: text
+    worker_program: text
+    worker_digest: text
+    slots: i64
+
+struct BuildResultV1:
+    task_id: text
+    attempt: i64
+    identity_digest: text
+    host_id: text
+    status: text
+    exit_code: i64
+    outputs: [BuildInputV1]
+    cache_hits: i64
+    cache_misses: i64
+    cache_stores: i64
+
+struct BuildRunV1:
+    tasks: [BuildTaskV1]
+    hosts: [BuildHostV1]
+    keep_going: bool
+    max_attempts: i64
+
+fn builder_identifier_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128:
+        return false
+    var i = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                (c >= "0" and c <= "9") or c == "-" or c == "_"):
+            return false
+        i = i + 1
+    true
+
+fn builder_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        if not ((c >= "a" and c <= "f") or (c >= "0" and c <= "9")):
+            return false
+        i = i + 1
+    true
+
+fn builder_text_valid_v1(value: text) -> bool:
+    value.len() <= 65536 and not value.contains("\0")
+
+fn builder_relative_path_valid_v1(path: text) -> bool:
+    if path.len() == 0 or path.len() > 4096 or not builder_text_valid_v1(path):
+        return false
+    if path.starts_with("/") or path.contains("\\") or path.contains(":") or
+            path.contains("\n") or path.contains("\r") or path.contains("\t"):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == ".." or part.ends_with(".") or
+                part.ends_with(" ") or part.contains("*") or part.contains("?") or
+                part.contains("\"") or part.contains("<") or part.contains(">") or
+                part.contains("|"):
+            return false
+        val stem = part.split(".")[0].lower()
+        if stem == "con" or stem == "prn" or stem == "aux" or stem == "nul" or
+                stem == "com1" or stem == "com2" or stem == "com3" or
+                stem == "com4" or stem == "com5" or stem == "com6" or
+                stem == "com7" or stem == "com8" or stem == "com9" or
+                stem == "lpt1" or stem == "lpt2" or stem == "lpt3" or
+                stem == "lpt4" or stem == "lpt5" or stem == "lpt6" or
+                stem == "lpt7" or stem == "lpt8" or stem == "lpt9":
+            return false
+    true
+
+fn builder_paths_overlap_v1(left: text, right: text) -> bool:
+    val a = left.lower()
+    val b = right.lower()
+    a == b or a.starts_with(b + "/") or b.starts_with(a + "/")
+
+fn builder_path_prefixes_v1(normalized: text) -> [text]:
+    val components = normalized.split("/")
+    var prefixes: [text] = []
+    var prefix = ""
+    var index = 0
+    while index + 1 < components.len():
+        if index > 0: prefix = prefix + "/"
+        prefix = prefix + components[index]
+        prefixes.push(prefix)
+        index = index + 1
+    prefixes
+
+fn builder_indexed_path_overlap_v1(path: text, prefixes: [text], files: {text: bool},
+    ancestors: {text: bool}) -> bool:
+    if files.contains_key(path) or ancestors.contains_key(path): return true
+    for prefix in prefixes:
+        if files.contains_key(prefix): return true
+    false
+
+fn builder_validate_task_v1(task: BuildTaskV1) -> text:
+    if not builder_identifier_valid_v1(task.id) or not builder_identifier_valid_v1(task.phase):
+        return "invalid task or phase identifier"
+    if task.attempt < 1 or task.attempt > 100 or task.timeout_ms < 0 or task.timeout_ms > 604800000:
+        return "invalid attempt or timeout"
+    if not builder_digest_valid_v1(task.producer_digest) or
+            not builder_digest_valid_v1(task.source_digest) or
+            not builder_digest_valid_v1(task.toolchain_digest) or
+            not builder_digest_valid_v1(task.cache_key):
+        return "invalid task identity digest"
+    if task.program == "" or not builder_text_valid_v1(task.program):
+        return "missing or invalid compiler program"
+    if task.args.len() > 1024 or task.inputs.len() > BUILDER_MAX_INPUTS_V1 or
+            task.outputs.len() == 0 or task.outputs.len() > 4096 or task.dependencies.len() > 4096:
+        return "task exceeds collection bounds or declares no outputs"
+    for arg in task.args:
+        if not builder_text_valid_v1(arg): return "invalid argument"
+    var i = 0
+    while i < task.dependencies.len():
+        val dep = task.dependencies[i]
+        if not builder_identifier_valid_v1(dep) or dep == task.id:
+            return "invalid self dependency"
+        var j = 0
+        while j < i:
+            if task.dependencies[j] == dep: return "duplicate dependency"
+            j = j + 1
+        i = i + 1
+    var input_files: {text: bool} = {}
+    var input_ancestors: {text: bool} = {}
+    i = 0
+    while i < task.inputs.len():
+        val item = task.inputs[i]
+        if not builder_relative_path_valid_v1(item.path) or not builder_digest_valid_v1(item.digest):
+            return "invalid declared input"
+        val normalized = item.path.lower()
+        val prefixes = builder_path_prefixes_v1(normalized)
+        if builder_indexed_path_overlap_v1(normalized, prefixes, input_files, input_ancestors):
+            return "overlapping inputs"
+        input_files[normalized] = true
+        for prefix in prefixes: input_ancestors[prefix] = true
+        i = i + 1
+    var output_files: {text: bool} = {}
+    var output_ancestors: {text: bool} = {}
+    i = 0
+    while i < task.outputs.len():
+        val output = task.outputs[i]
+        if not builder_relative_path_valid_v1(output): return "invalid declared output"
+        val normalized = output.lower()
+        val prefixes = builder_path_prefixes_v1(normalized)
+        if builder_indexed_path_overlap_v1(normalized, prefixes, input_files, input_ancestors):
+            return "input/output overlap"
+        if builder_indexed_path_overlap_v1(normalized, prefixes, output_files, output_ancestors):
+            return "overlapping outputs"
+        output_files[normalized] = true
+        for prefix in prefixes: output_ancestors[prefix] = true
+        i = i + 1
+    ""
+
+fn builder_validate_host_v1(host: BuildHostV1) -> text:
+    if not builder_identifier_valid_v1(host.id) or host.slots < 1 or host.slots > 1024:
+        return "invalid host identifier or slots"
+    if host.workspace == "" or host.worker_program == "" or
+            not builder_text_valid_v1(host.workspace) or not builder_text_valid_v1(host.worker_program):
+        return "missing host workspace or compiled worker"
+    if not builder_digest_valid_v1(host.worker_digest):
+        return "missing or invalid compiled worker digest"
+    if host.transport == "local":
+        if host.endpoint != "": return "local host has remote endpoint"
+    elif host.transport == "ssh":
+        if host.endpoint == "" or host.endpoint.len() > 255 or host.endpoint.starts_with("-"):
+            return "missing or invalid configured SSH endpoint"
+        var i = 0
+        while i < host.endpoint.len():
+            val c = host.endpoint[i:i + 1]
+            if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                    (c >= "0" and c <= "9") or c == "@" or c == "." or c == "-" or c == "_"):
+                return "invalid configured SSH endpoint"
+            i = i + 1
+    else:
+        return "unsupported host transport"
+    ""
+
+# Length-delimited identity fields avoid delimiter ambiguity in opaque argv.
+fn builder_identity_field_v1(value: text) -> text:
+    "{value.len()}:" + value
+
+fn builder_task_identity_v1(task: BuildTaskV1) -> text:
+    if builder_validate_task_v1(task) != "": return ""
+    var pieces: [text] = ["simple-build-task-identity-v1"]
+    for field in [task.id, "{task.attempt}", task.phase, task.producer_digest,
+            task.source_digest, task.toolchain_digest, task.program, task.cache_key,
+            "{task.timeout_ms}", "{task.dependencies.len()}"]:
+        pieces.push(builder_identity_field_v1(field))
+    for dep in task.dependencies:
+        pieces.push(builder_identity_field_v1(dep))
+    pieces.push(builder_identity_field_v1("{task.args.len()}"))
+    for arg in task.args:
+        pieces.push(builder_identity_field_v1(arg))
+    pieces.push(builder_identity_field_v1("{task.inputs.len()}"))
+    for item in task.inputs:
+        pieces.push(builder_identity_field_v1(item.path))
+        pieces.push(builder_identity_field_v1(item.digest))
+    pieces.push(builder_identity_field_v1("{task.outputs.len()}"))
+    for output in task.outputs:
+        pieces.push(builder_identity_field_v1(output))
+    sha256_text(pieces.join(""))
+
+fn builder_validate_result_shape_v1(result: BuildResultV1) -> text:
+    if not builder_identifier_valid_v1(result.task_id) or not builder_identifier_valid_v1(result.host_id) or
+            result.attempt < 1 or result.attempt > 100 or not builder_digest_valid_v1(result.identity_digest):
+        return "invalid result identity"
+    # -1 is unobserved compiler telemetry, never an inferred hit/miss count.
+    if result.cache_hits < -1 or result.cache_misses < -1 or result.cache_stores < -1 or
+            result.cache_hits > 1000000000000 or result.cache_misses > 1000000000000 or
+            result.cache_stores > 1000000000000 or result.outputs.len() > 4096 or
+            result.exit_code < -4294967295 or result.exit_code > 4294967295:
+        return "invalid result counters"
+    if result.status == "OK":
+        if result.exit_code != 0 or result.outputs.len() == 0: return "OK requires outputs and exit zero"
+    elif result.status == "ERROR" or result.status == "CRASHED" or result.status == "TIMEOUT" or
+            result.status == "BLOCKED" or result.status == "NOT_RUN":
+        if result.exit_code == 0 or result.outputs.len() != 0: return "failed result may not admit outputs or exit zero"
+    else:
+        return "unknown terminal result status"
+    var i = 0
+    while i < result.outputs.len():
+        val item = result.outputs[i]
+        if not builder_relative_path_valid_v1(item.path) or not builder_digest_valid_v1(item.digest):
+            return "invalid result output"
+        var j = 0
+        while j < i:
+            if builder_paths_overlap_v1(item.path, result.outputs[j].path): return "duplicate result output"
+            j = j + 1
+        i = i + 1
+    ""
+
+fn builder_validate_result_v1(task: BuildTaskV1, result: BuildResultV1) -> text:
+    val task_error = builder_validate_task_v1(task)
+    if task_error != "": return task_error
+    val shape_error = builder_validate_result_shape_v1(result)
+    if shape_error != "": return shape_error
+    if result.task_id != task.id or result.attempt != task.attempt or
+            result.identity_digest != builder_task_identity_v1(task):
+        return "stale or mismatched result identity"
+    if result.status == "OK":
+        if result.outputs.len() != task.outputs.len(): return "incomplete output set"
+        for output in task.outputs:
+            var found = false
+            for item in result.outputs:
+                if item.path == output: found = true
+            if not found: return "undeclared or missing output"
+    ""
+
+fn builder_validate_run_v1(run: BuildRunV1) -> text:
+    if run.tasks.len() == 0 or run.tasks.len() > 4096 or run.hosts.len() == 0 or
+            run.hosts.len() > 64 or run.max_attempts < 1 or run.max_attempts > 3:
+        return "invalid run bounds"
+    var i = 0
+    while i < run.hosts.len():
+        val reason = builder_validate_host_v1(run.hosts[i])
+        if reason != "": return reason
+        var j = 0
+        while j < i:
+            if run.hosts[i].id.lower() == run.hosts[j].id.lower(): return "duplicate host identifier"
+            j = j + 1
+        i = i + 1
+    i = 0
+    while i < run.tasks.len():
+        val task = run.tasks[i]
+        val reason = builder_validate_task_v1(task)
+        if reason != "": return reason
+        if task.attempt > run.max_attempts: return "attempt exceeds run retry budget"
+        var j = 0
+        while j < i:
+            if task.id.lower() == run.tasks[j].id.lower(): return "duplicate task identifier"
+            for output in task.outputs:
+                for prior in run.tasks[j].outputs:
+                    if builder_paths_overlap_v1(output, prior): return "tasks share writable output"
+            j = j + 1
+        for dep in task.dependencies:
+            var found = false
+            for candidate in run.tasks:
+                if candidate.id == dep: found = true
+            if not found: return "missing task dependency"
+        i = i + 1
+    # Bounded Kahn walk; topological order alone never authorizes execution.
+    var admitted: [text] = []
+    var changed = true
+    while changed:
+        changed = false
+        for task in run.tasks:
+            if admitted.contains(task.id): continue
+            var ready = true
+            for dep in task.dependencies:
+                if not admitted.contains(dep): ready = false
+            if ready:
+                admitted = admitted.push(task.id)
+                changed = true
+    if admitted.len() != run.tasks.len(): return "cyclic task dependencies"
+    ""

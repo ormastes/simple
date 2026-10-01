@@ -1,0 +1,229 @@
+"""
+## Purpose and audience
+Purpose: Executable specification evidence for P4 of the SPipe search-providers
+slice — deterministic `rrf-fixed-v1` fusion over already-ordered source rankings
+(design §3.5, frozen plan §5.5).
+Audience: compiler and tooling engineers maintaining `src/app/spipe/fusion/`.
+
+## Lifecycle
+- Research: doc/01_research/infra/spipe/
+- Plan: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md
+- Architecture: doc/04_architecture/infra/spipe/
+- Design: doc/05_design/infra/spipe/ (if available)
+"""
+
+# @req REQ-SSPEC-LIB
+# plan: doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md
+# @manual_section: RRF fusion and adjustments
+
+use std.spec
+
+use lib.common.search.fusion_types.{FusionSourceV1, SourceCandidateV1, SourceRankingV1, MatchTierV1, RRF_MAX_SOURCE_K}
+use app.spipe.fusion.rrf.{RRF_SCALE, FusionErrorV1, fuse, fuse_raw, remove_document_from_sources, max_possible_raw_scaled}
+use app.spipe.fusion.adjustments.{AdjustmentV1, ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, ADJUSTMENT_STALE_DEPRECATED_PENALTY, apply_adjustments}
+use app.spipe.fusion.explanation.{build_fusion_explanation}
+
+fn ranking(source: FusionSourceV1, ids: [text]) -> SourceRankingV1:
+    var candidates: [SourceCandidateV1] = []
+    var i = 0
+    while i < ids.len():
+        candidates.push(SourceCandidateV1(document_id: ids[i], source_rank: i + 1, source_score_milli: 0))
+        i = i + 1
+    SourceRankingV1(source: source, source_contract: "test", snapshot_id: "snap-1",
+        scope_digest: "sha256:0", candidates: candidates, complete: true, source_digest: "sha256:0")
+
+describe "rrf-fixed-v1 core fusion":
+    it "sums fixed-point contributions across sources and ranks by adjusted desc then document ID":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): RRF raw scores and final ranks
+        step("Fuse a lexical-only ranking of three documents with default k")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-a", "doc-b", "doc-c"])]
+        val fused = fuse(sources, 60, 1000, 1).unwrap()
+
+        step("Verify each row's raw score equals the exact fixed-point RRF term")
+        expect(fused.len()).to_equal(3)  # oracle: three documents provided
+        expect(fused[0].document_id).to_equal("doc-a")  # oracle: first rank
+        expect(fused[0].rrf_raw_scaled).to_equal(RRF_SCALE / 61)  # oracle: RRF formula for rank 1
+        expect(fused[1].rrf_raw_scaled).to_equal(RRF_SCALE / 62)  # oracle: RRF formula for rank 2
+        expect(fused[2].rrf_raw_scaled).to_equal(RRF_SCALE / 63)  # oracle: RRF formula for rank 3
+        expect(fused[0].final_rank).to_equal(1)  # oracle: first document rank
+        expect(fused[2].final_rank).to_equal(3)  # oracle: third document rank
+
+    it "sums contributions across multiple sources for the same document, never comparing raw provider scores":
+        # @capture(bit_table): per-source contributions and combined scores
+        step("Rank doc-x first in lexical and second in graph")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-x", "doc-y"]),
+            ranking(FusionSourceV1.Graph, ["doc-y", "doc-x"]),
+        ]
+        val fused = fuse(sources, 60, 1000, 1).unwrap()
+
+        step("Both documents receive the sum of their per-source contributions")
+        val expected = (RRF_SCALE / 61) + (RRF_SCALE / 62)
+        expect(fused.len()).to_equal(2)  # oracle: two documents total
+        expect(fused[0].rrf_raw_scaled).to_equal(expected)  # oracle: sum of per-source contributions
+        expect(fused[1].rrf_raw_scaled).to_equal(expected)  # oracle: equal contributions
+        # Equal raw sums: tie-break is ascending document ID.
+        expect(fused[0].document_id).to_equal("doc-x")  # oracle: lexical tie-break order
+        expect(fused[1].document_id).to_equal("doc-y")  # oracle: lexical tie-break order
+
+    it "treats an absent source as simply not contributing (never a zero-score participant)":
+        # @capture(bit_table): partial source participation in fusion
+        step("Fuse a document present only in the graph source")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-only-graph-not-here"]),
+            ranking(FusionSourceV1.Graph, ["doc-solo"]),
+        ]
+        val fused = fuse(sources, 60, 1000, 1).unwrap()
+        val solo = fused[1]
+        expect(solo.document_id).to_equal("doc-solo")
+        expect(solo.rrf_raw_scaled).to_equal(RRF_SCALE / 61)  # oracle: single source contribution
+
+    it "numbers fused ranks starting at the caller-supplied start_rank (2 when identity is pinned)":
+        # @capture(bit_table): fused ranks starting from start_rank
+        step("Fuse two documents starting at rank 2")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1", "doc-2"])]
+        val fused = fuse(sources, 60, 1000, 2).unwrap()
+        expect(fused[0].final_rank).to_equal(2)  # oracle: start_rank parameter respected
+        expect(fused[1].final_rank).to_equal(3)  # oracle: sequential rank increment
+        expect(fused[0].match_tier).to_equal(MatchTierV1.Fused)
+
+    it "rejects k outside [1, 10000]":
+        # @capture(protocol_json): error results for invalid k
+        step("Call fuse with k = 0")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1"])]
+        val result = fuse(sources, 0, 1000, 1)  # oracle: k must be >= 1
+        expect(result.is_err()).to_equal(true)  # oracle: k=0 is invalid
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.InvalidK)  # oracle: InvalidK error
+
+        step("Call fuse with k = 10001")
+        val over = fuse(sources, 10001, 1000, 1)  # oracle: k must be <= 10000
+        expect(over.unwrap_err()).to_equal(FusionErrorV1.InvalidK)  # oracle: InvalidK error
+
+    it "rejects source_k outside [1, 1000]":
+        # @capture(protocol_json): error results for invalid source_k
+        step("Call fuse with source_k = 0")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1"])]
+        val result = fuse(sources, 60, 0, 1)  # oracle: source_k must be >= 1
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.InvalidSourceK)  # oracle: InvalidSourceK error
+
+        step("Call fuse with source_k above the frozen maximum")
+        val over = fuse(sources, 60, RRF_MAX_SOURCE_K + 1, 1)  # oracle: exceeds max
+        expect(over.unwrap_err()).to_equal(FusionErrorV1.InvalidSourceK)  # oracle: InvalidSourceK error
+
+    it "rejects duplicate source IDs (two rankings claiming the same FusionSourceV1)":
+        # @capture(protocol_json): error response for duplicate sources
+        step("Supply two lexical rankings")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-1"]), ranking(FusionSourceV1.Lexical, ["doc-2"])]
+        val result = fuse(sources, 60, 1000, 1)  # oracle: duplicate source rejected
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.DuplicateSource)  # oracle: DuplicateSource error
+
+    it "rejects a duplicate document ID within one source's candidate list":
+        # @capture(protocol_json): error response for duplicate document IDs
+        step("Build a lexical ranking with the same document ID twice")
+        val dup = SourceRankingV1(source: FusionSourceV1.Lexical, source_contract: "test", snapshot_id: "snap-1",
+            scope_digest: "sha256:0",
+            candidates: [SourceCandidateV1(document_id: "doc-1", source_rank: 1, source_score_milli: 0),
+                         SourceCandidateV1(document_id: "doc-1", source_rank: 2, source_score_milli: 0)],
+            complete: true, source_digest: "sha256:0")
+        val result = fuse([dup], 60, 1000, 1)
+        expect(result.unwrap_err()).to_equal(FusionErrorV1.DuplicateDocumentId)
+
+    it "produces byte-identical output across repeated runs (determinism)":
+        # @capture(statistics): fused document sequences and scores
+        step("Fuse the same three-source input twice")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-a", "doc-b"]),
+            ranking(FusionSourceV1.Graph, ["doc-b", "doc-a"]),
+            ranking(FusionSourceV1.Semantic, ["doc-a", "doc-b"]),
+        ]
+        val first = fuse(sources, 60, 1000, 1).unwrap()
+        val second = fuse(sources, 60, 1000, 1).unwrap()
+        expect(first.len()).to_equal(second.len())
+        var i = 0
+        while i < first.len():
+            expect(first[i].document_id).to_equal(second[i].document_id)
+            expect(first[i].rrf_raw_scaled).to_equal(second[i].rrf_raw_scaled)
+            expect(first[i].final_rank).to_equal(second[i].final_rank)
+            i = i + 1
+
+describe "bounded deterministic adjustments":
+    it "caps total positive boost at 25% of the max possible raw score":
+        # @capture(statistics): boost cap computation and application
+        step("Compute the max raw for two sources at k=60")
+        val max_raw = max_possible_raw_scaled(60, 2)
+        val cap = (max_raw * 250) / 1000  # oracle: 25% cap calculation
+        step("Apply a single boost far larger than the cap")
+        val adjustments = [AdjustmentV1(name: ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, delta_scaled: max_raw)]
+        val result = apply_adjustments(1000, adjustments, max_raw).unwrap()  # oracle: base score 1000
+        expect(result.boost_cap_scaled).to_equal(cap)  # oracle: cap enforced
+        expect(result.adjusted_scaled).to_equal(1000 + cap)  # oracle: capped boost applied
+
+    it "scales multiple positive adjustments down proportionally when their sum exceeds the cap":
+        # @capture(statistics): scaled adjustments and cap enforcement
+        step("Apply two equal boosts whose sum is 4x the cap")
+        val max_raw = max_possible_raw_scaled(60, 1)
+        val cap = (max_raw * 250) / 1000  # oracle: 25% cap
+        val half = cap * 2  # oracle: each boost 2x cap
+        val adjustments = [
+            AdjustmentV1(name: ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, delta_scaled: half),
+            AdjustmentV1(name: ADJUSTMENT_ACCEPTED_TRACE_PROXIMITY_BOOST, delta_scaled: half),
+        ]
+        val result = apply_adjustments(0, adjustments, max_raw).unwrap()  # oracle: base score 0
+
+        step("The total never exceeds the cap, within integer-truncation rounding of the two equal shares")
+        expect(result.adjusted_scaled).to_be_less_than(cap + 1)  # oracle: cap boundary
+        expect(result.adjusted_scaled).to_be_greater_than(cap - 3)  # oracle: rounding tolerance
+
+        step("The sum of the individually recorded applied deltas equals the total adjustment")
+        expect(result.applied_deltas_scaled[0] + result.applied_deltas_scaled[1]).to_equal(result.adjusted_scaled)  # oracle: sum of deltas matches total
+
+    it "applies penalties in full but floors the adjusted score at zero":
+        # @capture(statistics): penalty application and zero floor
+        step("Apply a penalty larger than the raw score")
+        val adjustments = [AdjustmentV1(name: ADJUSTMENT_STALE_DEPRECATED_PENALTY, delta_scaled: 0 - 5000)]  # oracle: penalty -5000
+        val result = apply_adjustments(1000, adjustments, 1000000).unwrap()  # oracle: base 1000
+        expect(result.adjusted_scaled).to_equal(0)  # oracle: floored at zero
+
+    it "rejects an adjustment with an unnamed/unversioned identifier":
+        # @capture(protocol_json): error response for invalid adjustment
+        step("Apply an adjustment whose name is not one of the four frozen adjustments")
+        val adjustments = [AdjustmentV1(name: "totally_made_up_boost", delta_scaled: 100)]
+        val result = apply_adjustments(1000, adjustments, 1000000)
+        expect(result.is_err()).to_equal(true)
+
+describe "fusion explanation":
+    it "records exact per-source contributions and lets the reader recompute the sum":
+        # @capture(protocol_json): per-source contributions and explanation structure
+        step("Fuse and then explain a two-source document")
+        val sources = [
+            ranking(FusionSourceV1.Lexical, ["doc-a"]),
+            ranking(FusionSourceV1.Graph, ["doc-a"]),
+        ]
+        val rows = fuse_raw(sources, 60, 1000).unwrap()
+        val row = rows[0]
+        val adj = apply_adjustments(row.raw_scaled, [], max_possible_raw_scaled(60, 2)).unwrap()
+        val explanation = build_fusion_explanation(row, ["lexical", "graph", "semantic"], 60, 1000, adj)
+
+        step("Recompute raw_sum_scaled from the recorded per-source contributions")
+        var recomputed = 0
+        var i = 0
+        while i < explanation.source_contributions_scaled.len():
+            recomputed = recomputed + explanation.source_contributions_scaled[i]
+            i = i + 1
+        expect(recomputed).to_equal(explanation.raw_sum_scaled)  # oracle: sum matches recorded
+        expect(explanation.source_ranks[2]).to_equal(0 - 1)  # oracle: absent source rank -1
+        expect(explanation.contract).to_equal("rrf-fixed-v1")  # oracle: contract version
+        expect(explanation.tie_break_document_id).to_equal("doc-a")  # oracle: document identity
+
+describe "removing a pinned identity from source lists preserves remaining ranks":
+    it "keeps the untouched candidates' source_rank values unchanged (no renumbering)":
+        # @capture(bit_table): filtered candidates and rank preservation
+        step("Remove doc-pinned from a three-document lexical ranking")
+        val sources = [ranking(FusionSourceV1.Lexical, ["doc-pinned", "doc-second", "doc-third"])]
+        val filtered = remove_document_from_sources(sources, "doc-pinned")
+        expect(filtered[0].candidates.len()).to_equal(2)  # oracle: two remaining candidates
+        expect(filtered[0].candidates[0].document_id).to_equal("doc-second")  # oracle: first remaining
+        expect(filtered[0].candidates[0].source_rank).to_equal(2)  # oracle: rank unchanged
+        expect(filtered[0].candidates[1].source_rank).to_equal(3)  # oracle: rank unchanged
+

@@ -1,0 +1,416 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, draw_ir, corpus
+"""Execute the pinned HTML/CSS inputs through the Web layout producer.
+
+The receipt is producer evidence. Its Vulkan fields stay blocked until a
+physical Linux device supplies completed final-output captures for both
+backends. A DrawIR command count never stands in for a pixel verdict.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.fs.{read_file}
+use std.io_runtime.{mkdir_p, write_file}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_to_string, json_to_number}
+use std.common.crypto.sha256.{sha256_text, sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE}
+use common.ui.ui_ir.{draw_ir_to_ui_ir}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    SimpleWebElementScrollReason,
+    simple_web_element_scroll_reason_text,
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_render_html_draw_ir_result_at_time,
+    simple_web_layout_render_html_draw_ir_result_with_images,
+    simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll
+}
+
+val CORPUS: text = "test/fixtures/html_css/corpus/"
+val RECEIPT: text = "build/test-artifacts/simple_2d/html_css_corpus_producer.sdn"
+val CHECKER_SOURCE_SHA256: text =
+    "b18637420e995e12f4a4278d6f7480d6b32e2c80fefea86c302dfad44eeaa758"
+val CHECKER_RGBA_SHA256: text =
+    "480bfdbc06fe203dea2a18f19375447eac71d1997a966c48eac5b70aa0983e13"
+
+fn field(value: any, name: text) -> text:
+    json_to_string(json_object_get(value, name)) ?? ""
+
+fn command_count(result: SimpleWebLayoutDrawIrResult) -> i64:
+    var count: i64 = 0
+    for batch in result.composition.batches:
+        count = count + batch.commands.len()
+    count
+
+fn command_kind_count(result: SimpleWebLayoutDrawIrResult, kind: text) -> i64:
+    var count: i64 = 0
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.kind == kind:
+                count = count + 1
+    count
+
+fn image_uri_count(result: SimpleWebLayoutDrawIrResult, uri: text) -> i64:
+    var count: i64 = 0
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_IMAGE and
+                command.image_uri == uri:
+                count = count + 1
+    count
+
+fn requires_feature(entry: any, feature: text) -> bool:
+    val features = json_object_get(entry, "required_features")
+    var index = 0
+    while index < json_array_length(features):
+        val required = json_to_string(json_array_get(features, index)) ?? ""
+        if required == feature:
+            return true
+        index = index + 1
+    false
+
+fn pinned_checker_resource() -> SimpleOsHostGpuImageResource:
+    # The exact SVG bytes are checked before this authored 80x80 derivative
+    # enters Web layout. This is image-resource binding, not SVG parser proof.
+    var pixels: [u32] = []
+    var y = 0
+    while y < 80:
+        var x = 0
+        while x < 80:
+            val color = if y < 40:
+                if x < 40: 0xFFFF0000u32 else: 0xFF00FF00u32
+            else:
+                if x < 40: 0xFF0000FFu32 else: 0xFFFFFF00u32
+            pixels.push(color)
+            x = x + 1
+        y = y + 1
+    SimpleOsHostGpuImageResource(
+        image_uri: "../assets/checker.svg", width: 80, height: 80,
+        pixels: pixels, pixel_checksum: 0)
+
+fn checker_rgba_sha256(resource: SimpleOsHostGpuImageResource) -> text:
+    var bytes: [i64] = []
+    for pixel in resource.pixels:
+        bytes.push(((pixel >> 16) & 255u32).to_i64())
+        bytes.push(((pixel >> 8) & 255u32).to_i64())
+        bytes.push((pixel & 255u32).to_i64())
+        bytes.push(((pixel >> 24) & 255u32).to_i64())
+    bytes_to_hex(sha256_bytes(bytes))
+
+fn node_index_by_id(result: SimpleWebLayoutDrawIrResult, id: text) -> i32:
+    var i = 0
+    while i < result.hit_index.nodes.len():
+        if result.hit_index.nodes[i].id_attr == id:
+            return i
+        i = i + 1
+    -1
+
+fn command_y_by_id(result: SimpleWebLayoutDrawIrResult, id: text) -> i32:
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.component_id == id:
+                return command.y
+    -1
+
+fn command_clip_top_by_id(result: SimpleWebLayoutDrawIrResult, id: text) -> i32:
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.component_id == id and command.clip_rect.present:
+                return command.clip_rect.y
+    -1
+
+describe "pinned HTML/CSS Web producer corpus":
+    it "executes all 48 source pages and records blocked Vulkan evidence":
+        step("Read the authoritative manifest and check each source before layout")
+        val parsed = json_parse_with_error(read_file(CORPUS + "manifest.json"))
+        expect(parsed.1).to_equal("")
+        val assets = json_object_get(parsed.0, "assets")
+        expect(json_array_length(assets)).to_equal(1)
+        val checker_asset = json_array_get(assets, 0)
+        expect(field(checker_asset, "file")).to_equal("assets/checker.svg")
+        val checker_source_sha = field(checker_asset, "sha256")
+        expect(checker_source_sha).to_equal(CHECKER_SOURCE_SHA256)
+        expect(sha256_text(read_file(CORPUS + "assets/checker.svg"))).to_equal(
+            checker_source_sha)
+        val checker = pinned_checker_resource()
+        expect(checker.pixels.len()).to_equal(6400)
+        expect(checker_rgba_sha256(checker)).to_equal(CHECKER_RGBA_SHA256)
+        val cases = json_object_get(parsed.0, "cases")
+        expect(json_array_length(cases)).to_equal(48)
+        var receipt = "schema: simple-2d-web-producer/v1\n"
+        receipt = receipt + "requirement: REQ-2D-006\nnonfunctional_requirement: NFR-2D-002\n"
+        receipt = receipt + "vulkan_device_status: blocked\nreason: physical-linux-device-capture-absent\n"
+        receipt = receipt + "cases:\n"
+        var attempted = 0
+        var i = 0
+        while i < 48:
+            val entry = json_array_get(cases, i)
+            val id = field(entry, "id")
+            val path = field(entry, "file")
+            val source_sha = field(entry, "source_sha256")
+            val html = read_file(CORPUS + path)
+            expect(sha256_text(html)).to_equal(source_sha)
+            val viewport = json_object_get(entry, "viewport")
+            expect(json_to_number(json_array_get(viewport, 0))).to_equal(640.0)
+            expect(json_to_number(json_array_get(viewport, 1))).to_equal(480.0)
+            val state = json_object_get(entry, "state")
+            val scroll_selector = field(state, "scroll_selector")
+            val scroll_id = if scroll_selector.starts_with("#"):
+                scroll_selector.substring(1, scroll_selector.len())
+            else:
+                ""
+            val requested_scroll_top = (json_to_number(
+                json_object_get(state, "scroll_top")) ?? 0.0) as i32
+            if id == "41-sticky-scroll":
+                expect(scroll_selector).to_equal("#scroller")
+                expect(json_to_number(json_object_get(state, "scroll_top"))).to_equal(125.0)
+            if id == "43-paused-animation":
+                expect(json_to_number(json_object_get(state, "animation_time_ms"))).to_equal(500.0)
+            val result = if id == "43-paused-animation":
+                simple_web_layout_render_html_draw_ir_result_at_time(
+                    html, 640, 480, 500)
+            elif scroll_selector != "":
+                simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+                    html, 640, 480, -1, scroll_id, requested_scroll_top)
+            elif id == "29-image-sampling" or id == "30-object-fit":
+                simple_web_layout_render_html_draw_ir_result_with_images(
+                    html, 640, 480, [checker])
+            else:
+                simple_web_layout_render_html_draw_ir_result(html, 640, 480)
+            val count = command_count(result)
+            val image_count = command_kind_count(result, DRAW_IR_COMMAND_IMAGE)
+            val checker_command_count = image_uri_count(
+                result, "../assets/checker.svg")
+            if (id == "29-image-sampling" or id == "30-object-fit") and
+                not result.render_degraded:
+                expect(checker_command_count).to_be_greater_than(1)
+            val lowered = draw_ir_to_ui_ir(result.composition)
+            expect(result.document_html).to_equal(html)
+            val scroll_state_applied = scroll_selector == "" or (
+                result.element_scroll.status == "applied" and
+                result.element_scroll.resolved_id == scroll_id and
+                result.element_scroll.resolved_top == requested_scroll_top
+            )
+            val producer_status = if result.render_degraded or not lowered.accepted or
+                lowered.commands.len() != count or count == 0 or
+                result.base_styles.len() == 0 or result.raw_boxes.bx.len() == 0 or
+                not scroll_state_applied or requires_feature(entry, "svg") or
+                requires_feature(entry, "subpixel") or
+                requires_feature(entry, "transform") or
+                (requires_feature(entry, "image") and image_count == 0):
+                "blocked"
+            else:
+                "produced"
+            val producer_reason = if result.render_degraded:
+                result.degrade_reason
+            elif not lowered.accepted:
+                "ui-ir-rejected:{lowered.rejection_reason}"
+            elif lowered.commands.len() != count:
+                "ui-ir-command-count-mismatch"
+            elif count == 0:
+                "no-draw-commands"
+            elif result.base_styles.len() == 0:
+                "no-computed-styles"
+            elif result.raw_boxes.bx.len() == 0:
+                "no-layout-boxes"
+            elif not scroll_state_applied:
+                "element-scroll:{result.element_scroll.status}:" +
+                simple_web_element_scroll_reason_text(result.element_scroll.reason)
+            elif requires_feature(entry, "svg"):
+                "inline-svg-semantics-not-verified"
+            elif requires_feature(entry, "subpixel"):
+                "fractional-css-layout-not-preserved"
+            elif requires_feature(entry, "transform"):
+                "css-transform-raster-semantics-not-preserved"
+            elif requires_feature(entry, "image") and image_count == 0:
+                "required-image-command-missing"
+            else:
+                ""
+            if id == "02-fractional-edges":
+                expect(producer_status).to_equal("blocked")
+            val state_status = if scroll_selector == "":
+                "applied-or-default"
+            elif scroll_state_applied and lowered.accepted and
+                 lowered.commands.len() == count:
+                "applied-element-scroll"
+            else:
+                "blocked-element-scroll"
+            val asset_status = if requires_feature(entry, "image") and image_count == 0:
+                "blocked-local-image-not-bound"
+            elif requires_feature(entry, "image"):
+                "image-command-emitted"
+            elif requires_feature(entry, "svg"):
+                "blocked-inline-svg-not-verified"
+            else:
+                "none-or-inline"
+            val font_status = if field(entry, "font_requirement") == "pin-and-hash-fonts-before-parity":
+                "blocked-fonts-not-pinned"
+            else:
+                "none"
+            receipt = receipt + "  - id: \"{id}\"\n"
+            receipt = receipt + "    source_sha256: \"{source_sha}\"\n"
+            receipt = receipt + "    viewport: [640, 480]\n    dpr: 1\n"
+            receipt = receipt + "    command_count: {count}\n"
+            receipt = receipt + "    image_command_count: {image_count}\n"
+            if id == "29-image-sampling" or id == "30-object-fit":
+                receipt = receipt +
+                    "    image_source_sha256: \"{CHECKER_SOURCE_SHA256}\"\n" +
+                    "    image_rgba_sha256: \"{CHECKER_RGBA_SHA256}\"\n" +
+                    "    image_resource_extent: [80, 80]\n" +
+                    "    image_bound_command_count: {checker_command_count}\n"
+            receipt = receipt + "    ui_ir_accepted: {lowered.accepted}\n"
+            receipt = receipt + "    ui_ir_command_count: {lowered.commands.len()}\n"
+            receipt = receipt + "    ui_ir_rejection: \"{lowered.rejection_reason}\"\n"
+            receipt = receipt + "    computed_style_count: {result.base_styles.len()}\n"
+            receipt = receipt + "    layout_box_count: {result.raw_boxes.bx.len()}\n"
+            receipt = receipt + "    producer_status: {producer_status}\n"
+            receipt = receipt + "    producer_reason: \"{producer_reason}\"\n"
+            receipt = receipt + "    state_status: {state_status}\n"
+            if id == "43-paused-animation":
+                receipt = receipt + "    animation_time_ms: 500\n"
+            if scroll_selector != "":
+                receipt = receipt + "    requested_scroll_selector: \"{scroll_selector}\"\n"
+                receipt = receipt + "    requested_scroll_top: {requested_scroll_top}\n"
+                receipt = receipt + "    resolved_scroll_id: \"{result.element_scroll.resolved_id}\"\n"
+                receipt = receipt + "    resolved_scroll_top: {result.element_scroll.resolved_top}\n"
+                receipt = receipt + "    max_scroll_top: {result.element_scroll.max_top}\n"
+                receipt = receipt + "    element_scroll_status: \"{result.element_scroll.status}\"\n"
+                receipt = receipt + "    element_scroll_reason: \"{simple_web_element_scroll_reason_text(result.element_scroll.reason)}\"\n"
+                receipt = receipt + "    element_scroll_degrade_detail: \"{result.element_scroll.degrade_detail}\"\n"
+            receipt = receipt + "    asset_status: {asset_status}\n"
+            receipt = receipt + "    font_status: {font_status}\n"
+            receipt = receipt + "    engine2d_vulkan_status: blocked-no-final-pixels\n"
+            receipt = receipt + "    upstream_skia_ganesh_vulkan_status: blocked-no-final-pixels\n"
+            attempted = attempted + 1
+            i = i + 1
+        step("Write a producer receipt with no invented Vulkan golden")
+        expect(mkdir_p("build/test-artifacts/simple_2d")).to_equal(true)
+        expect(write_file(RECEIPT, receipt)).to_equal(true)
+        expect(attempted).to_equal(48)
+
+    it "preserves an explicit animation time and layout source for a simple page":
+        step("Render the pinned solid-box page through computed Web layout")
+        val html = read_file(CORPUS + "cases/01-solid-boxes.html")
+        val result = simple_web_layout_render_html_draw_ir_result_at_time(html, 640, 480, 500)
+        expect(result.document_html).to_equal(html)
+        expect(result.render_degraded).to_equal(false)
+        expect(result.base_styles.len()).to_be_greater_than(0)
+        expect(result.raw_boxes.bx.len()).to_be_greater_than(0)
+        expect(command_count(result)).to_be_greater_than(1)
+        val lowered = draw_ir_to_ui_ir(result.composition)
+        expect(lowered.accepted).to_equal(true)
+        expect(lowered.commands.len()).to_equal(command_count(result))
+
+    it "applies the pinned nested scroll with sticky and scrollbar geometry":
+        step("Apply nested scroll to the selected Web element")
+        val html = read_file(CORPUS + "cases/41-sticky-scroll.html")
+        val baseline = simple_web_layout_render_html_draw_ir_result(html, 640, 480)
+        val scrolled = simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+            html, 640, 480, -1, "scroller", 125)
+        expect(scrolled.render_degraded).to_equal(false)
+        expect(scrolled.element_scroll.status).to_equal("applied")
+        expect(scrolled.element_scroll.reason).to_equal(
+            SimpleWebElementScrollReason.None)
+        expect(scrolled.element_scroll.resolved_id).to_equal("scroller")
+        expect(scrolled.element_scroll.resolved_top).to_equal(125)
+        expect(scrolled.element_scroll.max_top).to_be_greater_than(125)
+        expect(scrolled.resolved_scroll_y).to_equal(0)
+        val scroll_index = node_index_by_id(scrolled, "scroller")
+        expect(scroll_index).to_be_greater_than(-1)
+        val first_child = scrolled.hit_index.child_index.first_child[scroll_index]
+        expect(first_child).to_be_greater_than(-1)
+        expect(scrolled.hit_index.boxes.by[scroll_index]).to_equal(
+            baseline.hit_index.boxes.by[scroll_index])
+        expect(scrolled.hit_index.boxes.by[first_child]).to_equal(
+            baseline.hit_index.boxes.by[first_child] - 125)
+        expect(scrolled.raw_boxes.by[first_child]).to_equal(
+            baseline.raw_boxes.by[first_child])
+        var sticky_index = -1
+        var i = 0
+        while i < scrolled.hit_index.nodes.len():
+            if (scrolled.hit_index.nodes[i].parent.to_i32() == scroll_index and
+                scrolled.hit_index.styles[i].position_sticky):
+                sticky_index = i
+                break
+            i = i + 1
+        expect(sticky_index).to_be_greater_than(-1)
+        expect(scrolled.hit_index.boxes.by[sticky_index]).to_equal(
+            scrolled.hit_index.boxes.by[scroll_index])
+        val track_y = command_y_by_id(scrolled, "scroller_scrollbar_track")
+        val thumb_y = command_y_by_id(scrolled, "scroller_scrollbar_thumb")
+        expect(track_y).to_be_greater_than(-1)
+        expect(thumb_y).to_be_greater_than(track_y)
+        expect(track_y).to_equal(command_y_by_id(
+            baseline, "scroller_scrollbar_track"))
+        val lowered = draw_ir_to_ui_ir(scrolled.composition)
+        expect(lowered.accepted).to_equal(true)
+        expect(lowered.commands.len()).to_equal(command_count(scrolled))
+
+    it "resolves a different scroll container and reports unsupported targets":
+        step("Apply nested scroll to the selected Web element")
+        val html = "<style>#panel{width:120px;height:100px;overflow:auto}" +
+            "#lead{height:80px;background:red}#pin{position:sticky;top:0;" +
+            "height:20px;background:blue}#tail{height:240px;background:green}</style>" +
+            "<div id='panel'><div id='lead'></div><div id='pin'></div>" +
+            "<div id='tail'></div></div>"
+        val baseline = simple_web_layout_render_html_draw_ir_result(html, 320, 240)
+        val scrolled = simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+            html, 320, 240, -1, "panel", 90)
+        expect(scrolled.element_scroll.status).to_equal("applied")
+        expect(scrolled.element_scroll.resolved_top).to_equal(90)
+        val panel = node_index_by_id(scrolled, "panel")
+        val lead = node_index_by_id(scrolled, "lead")
+        val pin = node_index_by_id(scrolled, "pin")
+        expect(panel).to_be_greater_than(-1)
+        expect(lead).to_be_greater_than(-1)
+        expect(pin).to_be_greater_than(-1)
+        expect(scrolled.hit_index.boxes.by[lead]).to_equal(
+            baseline.hit_index.boxes.by[lead] - 90)
+        expect(scrolled.hit_index.boxes.by[pin]).to_equal(
+            scrolled.hit_index.boxes.by[panel])
+        expect(command_clip_top_by_id(scrolled, "tail")).to_equal(
+            scrolled.hit_index.boxes.by[panel])
+        val absent = simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+            html, 320, 240, -1, "missing", 75)
+        expect(absent.element_scroll.status).to_equal("unsupported")
+        expect(absent.element_scroll.reason).to_equal(
+            SimpleWebElementScrollReason.ElementNotFound)
+        val not_scrollable = simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+            html, 320, 240, -1, "lead", 75)
+        expect(not_scrollable.element_scroll.status).to_equal("unsupported")
+        expect(not_scrollable.element_scroll.reason).to_equal(
+            SimpleWebElementScrollReason.ElementNotScrollContainer)
+        val clamped = simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+            html, 320, 240, -1, "panel", 999)
+        expect(clamped.element_scroll.status).to_equal("applied")
+        expect(clamped.element_scroll.resolved_top).to_equal(
+            clamped.element_scroll.max_top)
+        expect(clamped.element_scroll.reason).to_equal(
+            SimpleWebElementScrollReason.ClampedToScrollRange)
+
+    it "rejects element scroll when border or viewport-fixed content cannot scroll":
+        step("Distinguish border chrome from content and preserve fixed positioning")
+        val border_only = "<style>#panel{width:120px;height:100px;" +
+            "border:8px solid red;overflow:auto}</style><div id='panel'></div>"
+        val border_result = simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+            border_only, 320, 240, -1, "panel", 1)
+        expect(border_result.element_scroll.status).to_equal("unsupported")
+        expect(border_result.element_scroll.reason).to_equal(
+            SimpleWebElementScrollReason.NoScrollRange)
+        expect(border_result.element_scroll.max_top).to_equal(0)
+        val fixed_html = "<style>#panel{width:120px;height:100px;" +
+            "overflow:auto}#flow{height:300px}#fixed{position:fixed;" +
+            "top:0;height:20px}</style><div id='panel'><div id='flow'></div>" +
+            "<div id='fixed'></div></div>"
+        val fixed_result = simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+            fixed_html, 320, 240, -1, "panel", 40)
+        expect(fixed_result.element_scroll.status).to_equal("unsupported")
+        expect(fixed_result.element_scroll.reason).to_equal(
+            SimpleWebElementScrollReason.FixedDescendantUnsupported)

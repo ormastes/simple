@@ -1,4 +1,9 @@
 # SIMPLE_WEB_RENDER_BUDGET_MS override silently ignored by stage rearm in the software layout renderer — FIXED
+## Closed 2026-09-16 — ...budget_rearm` and were unaffected. ## Fix Mirror `_web_budget_begin`'s env-override resolu
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -90,3 +95,4 @@ var themselves.
 Actually shortening the real compute time (e.g. an
 `extract_css_vw`/`build_ancestor_clip_cache`/paint-pass optimization for
 large canvases) is a separate, larger perf effort and out of scope here.
+

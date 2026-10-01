@@ -1,0 +1,146 @@
+# Versioned per-module native object cache witness.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{
+    ActionDep, ResolutionProbe, action_key_sort_texts,
+    canon_field, canon_nat, canon_seq, canon_str,
+    dependency_interface_fold, resolution_witness_digest
+}
+
+struct NativeModuleResolutionFactV1:
+    import_id: text
+    probes: [ResolutionProbe]
+    selected: text
+    selected_count: i64
+    dir_generation: text
+    resolver_version: text
+
+struct NativeModuleLayoutFactV1:
+    owner_module_id: text
+    type_id: text
+    layout_digest: text
+    owner_count: i64
+
+struct NativeModuleConfigFactV1:
+    compiler_identity: text
+    target_identity: text
+    options_identity: text
+    provider_identity: text
+
+struct NativeModuleCacheWitnessV1:
+    schema_version: i64
+    module_id: text
+    mir_identity: text
+    dependency_fold: text
+    resolution_fold: text
+    cross_module_layout_fingerprint: text
+    config_fingerprint: text
+    valid: bool
+    reason: text
+
+    fn canonical_text() -> text:
+        if not self.valid:
+            return ""
+        canon_field("simple/native-module-cache-witness/v1", canon_seq([
+            canon_field("schemaVersion", canon_nat(self.schema_version)),
+            canon_field("moduleId", canon_str(self.module_id)),
+            canon_field("mirIdentity", canon_str(self.mir_identity)),
+            canon_field("dependencyFold", canon_str(self.dependency_fold)),
+            canon_field("resolutionFold", canon_str(self.resolution_fold)),
+            canon_field("crossModuleLayoutFingerprint",
+                canon_str(self.cross_module_layout_fingerprint)),
+            canon_field("configFingerprint", canon_str(self.config_fingerprint)),
+        ]))
+
+    fn digest() -> text:
+        val encoded = self.canonical_text()
+        if encoded == "": "" else: sha256_text(encoded)
+
+fn native_module_cache_witness_invalid_v1(reason: text) -> NativeModuleCacheWitnessV1:
+    NativeModuleCacheWitnessV1(
+        schema_version: 1, module_id: "", mir_identity: "",
+        dependency_fold: "", resolution_fold: "",
+        cross_module_layout_fingerprint: "", config_fingerprint: "",
+        valid: false, reason: reason)
+
+fn native_module_cache_witness_v1(
+    module_id: text, mir_identity: text, dependencies: [ActionDep],
+    resolutions: [NativeModuleResolutionFactV1],
+    layouts: [NativeModuleLayoutFactV1],
+    config: NativeModuleConfigFactV1 = NativeModuleConfigFactV1(
+        compiler_identity: "", target_identity: "", options_identity: "",
+        provider_identity: "")
+) -> NativeModuleCacheWitnessV1:
+    if module_id == "":
+        return native_module_cache_witness_invalid_v1("missing-module-id")
+    if mir_identity == "":
+        return native_module_cache_witness_invalid_v1("missing-mir-identity")
+    if config.compiler_identity == "" or config.target_identity == "" or
+       config.options_identity == "" or config.provider_identity == "":
+        return native_module_cache_witness_invalid_v1("missing-config-fact")
+
+    var dependency_rows: [text] = []
+    var dependency_ids: [text] = []
+    for dependency in dependencies:
+        if dependency.module_id == "" or dependency.iface_digest == "":
+            return native_module_cache_witness_invalid_v1("missing-dependency-fact")
+        if dependency_ids.contains(dependency.module_id):
+            return native_module_cache_witness_invalid_v1("ambiguous-dependency-fact")
+        dependency_ids.push(dependency.module_id)
+        dependency_rows.push(
+            canon_str(dependency.module_id) + "=" + canon_str(dependency.iface_digest))
+
+    var resolution_rows: [text] = []
+    var import_ids: [text] = []
+    for resolution in resolutions:
+        if resolution.import_id == "" or resolution.selected == "" or
+           resolution.dir_generation == "" or resolution.resolver_version == "" or
+           resolution.probes.len() == 0:
+            return native_module_cache_witness_invalid_v1("missing-resolution-fact")
+        if resolution.selected_count != 1 or import_ids.contains(resolution.import_id):
+            return native_module_cache_witness_invalid_v1("ambiguous-resolution-fact")
+        import_ids.push(resolution.import_id)
+        val digest = resolution_witness_digest(
+            resolution.probes, resolution.selected,
+            resolution.dir_generation, resolution.resolver_version)
+        resolution_rows.push(canon_field("import", canon_str(resolution.import_id)) +
+            canon_field("witness", canon_str(digest)))
+
+    var layout_rows: [text] = []
+    var layout_ids: [text] = []
+    for layout in layouts:
+        if layout.owner_module_id == "" or layout.type_id == "" or
+           layout.layout_digest == "":
+            return native_module_cache_witness_invalid_v1("missing-layout-fact")
+        val layout_id = layout.owner_module_id + "::" + layout.type_id
+        if layout.owner_count != 1 or layout_ids.contains(layout_id):
+            return native_module_cache_witness_invalid_v1("ambiguous-layout-fact")
+        layout_ids.push(layout_id)
+        layout_rows.push(canon_seq([
+            canon_field("owner", canon_str(layout.owner_module_id)),
+            canon_field("type", canon_str(layout.type_id)),
+            canon_field("layout", canon_str(layout.layout_digest)),
+        ]))
+
+    val sorted_resolutions = action_key_sort_texts(resolution_rows)
+    val sorted_layouts = action_key_sort_texts(layout_rows)
+    NativeModuleCacheWitnessV1(
+        schema_version: 1, module_id: module_id, mir_identity: mir_identity,
+        dependency_fold: dependency_interface_fold(dependency_rows),
+        resolution_fold: sha256_text(canon_field(
+            "simple/native-resolution-set/v1", canon_seq(sorted_resolutions))),
+        cross_module_layout_fingerprint: sha256_text(canon_field(
+            "simple/cross-module-layouts/v1", canon_seq(sorted_layouts))),
+        config_fingerprint: sha256_text(canon_field(
+            "simple/native-module-config/v1", canon_seq([
+                canon_field("compiler", canon_str(config.compiler_identity)),
+                canon_field("target", canon_str(config.target_identity)),
+                canon_field("options", canon_str(config.options_identity)),
+                canon_field("provider", canon_str(config.provider_identity)),
+            ]))),
+        valid: true, reason: "ok")
+
+export NativeModuleResolutionFactV1, NativeModuleLayoutFactV1
+export NativeModuleConfigFactV1
+export NativeModuleCacheWitnessV1, native_module_cache_witness_invalid_v1
+export native_module_cache_witness_v1

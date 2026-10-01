@@ -1,0 +1,73 @@
+# Canonical disposable RUN-3 integration input. No qualification receipt.
+use app.io.args_ops.{get_args}
+use compiler.driver.driver_build.managed_parse_run_contract.{ManagedParseRunV1, managed_parse_run_encode_v1, managed_parse_run_validate_v1}
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseModuleV1, ManagedParseSnapshotV1, managed_parse_snapshot_digest_v1}
+use compiler.driver.cache.package_scc_scheduler.{PackageCompileScheduleV1, PackageSccGroupV1, PackageSccWaveV1, package_scc_identity_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionPoolV1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1, persisted_graph_digest_v1}
+use lib.compiler_artifact_service.profile.{ArtifactServiceProfileV1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionBindingV1}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 5: return 2
+    val root = args[1]
+    val worker = args[2]
+    val broker = args[3]
+    val good = match file_read_regular_no_follow_bounded(args[4], 1048576):
+        case Ok(value): value
+        case Err(_): return 3
+    val worker_digest = file_hash_sha256_or_empty(worker)
+    val broker_digest = file_hash_sha256_or_empty(broker)
+    val scope = frontend_parse_cache_scope()
+    if scope == "" or worker_digest == "" or broker_digest == "": return 4
+    if not dir_create(root + "/sources", true): return 5
+    var modules: [ManagedParseModuleV1] = []
+    for name in ["a", "b", "c"]:
+        val path = name + ".spl"
+        if not file_atomic_write(root + "/sources/" + path, good): return 6
+        modules = modules.push(ManagedParseModuleV1(name, "package-" + name, path, sha256_text(good)))
+    val cache = sha256_text(scope)
+    var first = ManagedParseSnapshotV1("worker-a", 1, worker_digest, "", cache,
+        cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu(), 1048576, modules)
+    first.snapshot_digest = managed_parse_snapshot_digest_v1(first)
+    val peer = ManagedParseSnapshotV1("worker-b", 1, worker_digest, first.snapshot_digest, cache,
+        cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu(), 1048576, modules)
+    val variant = sha256_text("disposable-grouped-run-fixture-v1")
+    val group_a = PackageSccGroupV1(package_scc_identity_v1(["package-a"], variant), ["package-a"], [])
+    val group_b = PackageSccGroupV1(package_scc_identity_v1(["package-b"], variant), ["package-b"], [])
+    val group_c = PackageSccGroupV1(package_scc_identity_v1(["package-c"], variant), ["package-c"], [group_a.identity])
+    val schedule = PackageCompileScheduleV1(true, "ok", variant, ["package-a", "package-b", "package-c"],
+        [group_a, group_b, group_c], [PackageSccWaveV1(0, [group_a, group_b]), PackageSccWaveV1(1, [group_c])])
+    var actions: [BuildActionV1] = []
+    var bindings: [GroupedActionBindingV1] = []
+    for group in schedule.groups:
+        val id = "parse-" + group.identity
+        var edges: [text] = []
+        for dependency in group.dependencies: edges = edges.push("parse-" + dependency)
+        actions = actions.push(BuildActionV1(id, "managed-reference-parse-v1:" + worker_digest,
+            [sha256_text(good)], edges, [id + ".flat-receipt"], BuildActionPoolV1.parse, 100,
+            first.snapshot_digest, 268435456, cache))
+        bindings = bindings.push(GroupedActionBindingV1(group.identity, id, "parse", first.snapshot_digest, cache, false))
+    var graph = PersistedBuildGraphV1("fixture-pending", "", first.snapshot_digest, actions)
+    graph.generation = persisted_graph_digest_v1(graph)
+    val profile = ArtifactServiceProfileV1("grouped-real-process-fixture", cache, ["parse"], 0, false,
+        "fixture-cas", 2, 536870912, 4194304)
+    val run = ManagedParseRunV1(sha256_text(root), schedule, graph, profile, bindings, ["worker-a", "worker-b"],
+        [first, peer], root + "/sources", root + "/state", worker, worker_digest,
+        ["SIMPLE_FRONTEND_CACHE=1", "SIMPLE_FRONTEND_CACHE_SCOPE=" + scope, "SIMPLE_NO_STUB_FALLBACK=1"],
+        1, false, 20, 30000, 10000, broker, broker_digest, 120000)
+    val invalid = managed_parse_run_validate_v1(run)
+    if invalid != "":
+        print "FAIL manifest authority: {invalid}"
+        return 7
+    val payload = managed_parse_run_encode_v1(run)
+    if payload == "" or not file_atomic_write(root + "/run.sdn", payload): return 8
+    print root + "/run.sdn"
+    0

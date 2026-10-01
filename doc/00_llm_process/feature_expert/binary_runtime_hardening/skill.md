@@ -30,7 +30,6 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
   design doc above.
 
 ## Landed so far (2026-08-18, updated end of session)
-## Landed so far (2026-08-18)
 - Gate: `scripts/check/check-no-direct-rt.shs` — ratchet mode (baseline
   `scripts/check/no_direct_rt_baseline.txt` = **12821**, only goes down) +
   `--critical`/`SIMPLE_RT_CRITICAL=1` phase-A error mode (any forbidden site
@@ -87,3 +86,60 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
 - Compiler fixes proving the alias lane: strict-JIT fail-open closed;
   bare-assignment locals minted correctly (both in `src/compiler_rust`,
   deployed binary still needs rebuild+deploy to pick up the second).
+
+## RT API groups (2026-09-06)
+
+The migration now has a **group** axis, not just a per-symbol one. Every
+`rt_*` API is registered in `config/api/api_registry.sdn` with its group,
+lane, backing, migration class, typed alias and current direct call-site
+count; `scripts/check/check-rt-api-groups.shs` (advisory,
+`push-rt-api-groups`) fails a new ungrouped `rt_*` and any group whose sites
+exceed the recorded floor. Policy:
+`doc/04_architecture/runtime/rt_api/rt_api_group_policy.md`; measurements:
+`doc/01_research/runtime/rt_api/rt_api_group_census_2026-09-06.md`.
+
+Numbers worth keeping (base `ef8b58f3dab`, measured not estimated):
+
+- **4168** registered symbols; lanes both=707 c-only=1182 rust-only=1371
+  none=908. `lane` is **C/Rust**, not C/Simple — the Simple side is the
+  `twin` column (46 rows).
+- **180** groups (179 first-token families with >= 5 symbols, plus the
+  residual `misc` at 427 symbols / 846 sites). The residual is **not** named
+  `core` — `rt_core_*` is a real family.
+- **6388** forbidden direct call sites under `src/` -> **1786** symbols ->
+  **180** groups: a **35.5x** collapse. That ratio is the policy's whole
+  justification. Highest leverage first: `enum` 179 sites/7 symbols,
+  `bytes` 210/10, `env` 283/14, `time` 221/23.
+- The old **~12948** figure is stale. `--roots src` measures 6230
+  line-counted (baseline 7776, green); the new per-symbol census token-counts
+  6388; forbidden + allowlisted = 12439.
+- **48 of 180 groups are `unowned`** (no allowlisted provider). `--critical`
+  is honestly RED on exactly that.
+- **120 of 892 `rt_alias_map.sdn` entries** are neither defined nor called —
+  probably stale alias rows, untouched.
+
+Trap found and fixed on the way: the stdlib SDN parser could not read
+`name |h1, h2|` tables at all, so `config/check/must_check_gates.sdn` parsed
+to a bare string from Simple, and a `#` comment carrying a colon became a
+real dict key. Both fixed in `src/lib/common/sdn/parser.spl`, pinned by
+`test/01_unit/common/sdn_named_table_spec.spl`. Reader:
+`src/lib/common/api_registry.spl`.
+## rt_* dual-lane ratchet landmines (2026-09-06)
+- `scripts/check/check-rt-dual-implementation-ratchet.shs` (push-blocking,
+  baseline `scripts/check/rt_dual_implementation_baseline.txt`) freezes the
+  set of `rt_*` symbols that have only one of the two lanes (Rust
+  `src/compiler_rust/runtime/src/**` vs C `src/runtime/*.c`). It is a
+  different gate from `check-dual-run-shadow.shs` (C/Simple twin).
+- **The C lane is matched PER LINE via `rt_NAME(...) {`** (`:87`). A C
+  signature that wraps across lines is invisible to it: `rt_mem_snapshot_record`
+  is defined at `src/runtime/runtime.c:2078` with a wrapped signature and
+  therefore sits in the baseline (`:1076`) as `rust-only`. **New C definitions
+  must use a single-line signature** or the ratchet will not credit them.
+- `SPL_HOSTED_UNAVAILABLE_WEAK` is `#undef`'d at `src/runtime/runtime_native.c:675`;
+  a definition placed after that point must be strong, not weak.
+- `2da5aa6ef2f` added the missing lane for four symbols:
+  `rt_phase_profile_record` (C, `runtime.c`), `rt_to_int_dynamic` (Rust,
+  `value_ops.rs`), `rt_vulkan_copy_u32_slots` (C, real slot copy),
+  `rt_vulkan_readback_u32_checksum` (C, unavailable-fallback arm). This is
+  lane parity for symbols that already exist, not license to add C — pure
+  Simple first still applies (`../../layer_expert/runtime/skill.md`).

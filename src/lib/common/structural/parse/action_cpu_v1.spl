@@ -1,0 +1,100 @@
+"""Bounded semantic actions over VM-owned nodes; actions never mutate compiler state.
+
+Every instruction is [opcode, a, b]. Capture(a=kind) uses the last matched
+token. Node(a=kind,b=arity) consumes values in order. SetValue(a=stack depth,
+b=value) overwrites one node. Diagnostic(a=code,b=stack depth) records its span.
+Drop(a=count) and Dup(a=depth) operate on the private counted value stack.
+Actions mutate only the invocation's reference owner. A fatal action error
+invalidates that owner: the grammar executor publishes empty output and never
+tries another branch. Therefore no per-action arena snapshot is needed.
+Zero-arity Node requires a matched token and anchors its empty span at that
+token's end. Before any match it rejects; no source coordinate is fabricated.
+"""
+use std.common.structural.parse.program_v1.*
+use std.common.structural.parse.program_output_v1.{ParseProgramNodeV1, ParseProgramDiagnosticV1}
+use std.common.structural.parse.transaction_v1.{ParseSemanticStateV1, ParseNodeOverwriteV1,
+    parse_semantic_push_v1}
+
+pub struct ParseActionExecutionV1:
+    ok: bool
+    error: text
+    state: ParseSemanticStateV1
+    steps_used: i64
+
+fn _action_failure_v1(error: text, initial: ParseSemanticStateV1, steps: i64) -> ParseActionExecutionV1:
+    ParseActionExecutionV1(ok: false, error: error, state: initial, steps_used: steps)
+
+pub fn parse_action_execute_v1(program: ParseProgramV1, action: i64,
+    initial: ParseSemanticStateV1, limits: ParseProgramLimitsV1, fuel: i64) -> ParseActionExecutionV1:
+    # The grammar owner validated the program and action index before calling.
+    var state = initial
+    var pc = program.action_offsets[action]
+    val end = program.action_offsets[action + 1]
+    var steps = 0
+    while pc < end:
+        if steps >= fuel: return _action_failure_v1("fuel_exhausted", initial, steps)
+        steps = steps + 1
+        val op = program.action_words[pc]
+        val a = program.action_words[pc + 1]
+        val b = program.action_words[pc + 2]
+        if op == PA_CAPTURE_V1:
+            if not state.last_valid: return _action_failure_v1("capture_without_match", initial, steps)
+            if state.nodes.len() >= limits.max_nodes or state.value_count >= limits.max_values:
+                return _action_failure_v1("output_capacity", initial, steps)
+            val index = state.nodes.len()
+            state.nodes.push(ParseProgramNodeV1(kind: a, start: state.last_start,
+                count: state.last_count, value: 0, child_start: state.children.len(), child_count: 0))
+            parse_semantic_push_v1(state, index)
+        elif op == PA_NODE_V1:
+            if b > state.value_count: return _action_failure_v1("value_underflow", initial, steps)
+            if b == 0 and not state.last_valid:
+                return _action_failure_v1("node_without_anchor", initial, steps)
+            val base = state.value_count - b
+            if state.nodes.len() >= limits.max_nodes or base >= limits.max_values or
+                b > limits.max_children - state.children.len():
+                return _action_failure_v1("output_capacity", initial, steps)
+            var start = state.last_start
+            if b == 0: start = start + state.last_count
+            var end_byte = start
+            val child_start = state.children.len()
+            var i = base
+            while i < state.value_count:
+                val child = state.nodes[state.values[i]]
+                if i == base or child.start < start: start = child.start
+                if i == base or child.start + child.count > end_byte:
+                    end_byte = child.start + child.count
+                state.children.push(state.values[i])
+                i = i + 1
+            state.value_count = base
+            val index = state.nodes.len()
+            state.nodes.push(ParseProgramNodeV1(kind: a, start: start, count: end_byte - start,
+                value: 0, child_start: child_start, child_count: b))
+            parse_semantic_push_v1(state, index)
+        elif op == PA_SET_VALUE_V1:
+            if a >= state.value_count: return _action_failure_v1("value_underflow", initial, steps)
+            val index = state.values[state.value_count - 1 - a]
+            if state.journal_active:
+                state.node_overwrites.push(ParseNodeOverwriteV1(index: index, previous: state.nodes[index]))
+            var node = state.nodes[index]
+            node.value = b
+            state.nodes[index] = node
+        elif op == PA_DIAGNOSTIC_V1:
+            if b >= state.value_count: return _action_failure_v1("value_underflow", initial, steps)
+            if state.diagnostics.len() >= limits.max_diagnostics:
+                return _action_failure_v1("output_capacity", initial, steps)
+            val node = state.nodes[state.values[state.value_count - 1 - b]]
+            state.diagnostics.push(ParseProgramDiagnosticV1(code: a, start: node.start, count: node.count))
+        elif op == PA_DROP_V1:
+            if a > state.value_count: return _action_failure_v1("value_underflow", initial, steps)
+            state.value_count = state.value_count - a
+        elif op == PA_DUP_V1:
+            if a >= state.value_count: return _action_failure_v1("value_underflow", initial, steps)
+            if state.value_count >= limits.max_values: return _action_failure_v1("output_capacity", initial, steps)
+            val index = state.values[state.value_count - 1 - a]
+            parse_semantic_push_v1(state, index)
+        else:
+            return _action_failure_v1("unsupported_action", initial, steps)
+        pc = pc + 3
+    ParseActionExecutionV1(ok: true, error: "", state: state, steps_used: steps)
+
+export ParseActionExecutionV1, parse_action_execute_v1

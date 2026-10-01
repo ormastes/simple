@@ -1,4 +1,9 @@
 # Seed interpreter: a match-expression with a returning arm makes every later statement in the frame cost ~10 ms
+## Closed 2026-09-16 — FIXED in seed 2026-08-22; measured post-fix table flat in N plus pins
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED in the seed (2026-08-22, see "Mechanism and fix" below). Compiler-side symptom fixed by shape (MATCHRET,
 `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl`).
@@ -102,3 +107,4 @@ expressions in the compiler — 10.frontend 30 sites / 12 files, 20.hir 39 /
 10, 50.mir 114 / 18 — of which ~589 have a `return` within the arms. All of
 them were paying this per statement on the seed; none needs a source change
 now (MATCHRET in `module_import_registration.spl` may stay as is).
+

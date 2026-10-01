@@ -1,0 +1,328 @@
+# All remote authority comes from an explicitly supplied, validated host record.
+# Source files are copied and checked before worker launch; workers never share
+# writable cache/output directories. A timeout observing a worker is not death.
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildResultV1, builder_validate_task_v1, builder_validate_host_v1, builder_validate_result_v1, builder_task_identity_v1}
+use app.bootstrap_builder.codec.{builder_write_task_v1, builder_read_task_v1, builder_read_result_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use std.common.build_manager.no_child_started.{builder_no_child_started_decode_v1}
+use app.io.file_ops.{file_exists, file_is_regular_no_follow, file_hash_sha256, file_copy, file_create_exclusive, file_atomic_write, file_read_regular_no_follow_bounded}
+use app.io.process_ops.{process_run_timeout}
+use app.io.env_ops.{host_os}
+use app.io.time_ops.{current_time_ms, sleep_ms}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk_native, dir_create_all}
+
+pub struct BuilderAttemptV1:
+    task_id: text
+    attempt: i64
+    host: BuildHostV1
+    pid: i64
+    local_root: text
+    remote_root: text
+    error: text
+    identity_digest: text
+    process: BuilderProcessPortV1
+
+struct BuilderTerminalObservationV1:
+    root: text
+    identity_digest: text
+    exit_code: i64
+
+var _builder_terminal_observations_v1: [BuilderTerminalObservationV1] = []
+
+# A native wait can consume its process handle before the result/reap files can
+# be transferred. Retain that observation independently; never reuse its token.
+# Attempt directories are exclusive and identity binds every observation.
+fn builder_transport_wait_v1(attempt: BuilderAttemptV1, timeout_ms: i64) -> i64:
+    for observation in _builder_terminal_observations_v1:
+        if observation.root == attempt.local_root and observation.identity_digest == attempt.identity_digest:
+            return observation.exit_code
+    val code = match attempt.process.wait_operation(attempt.pid, timeout_ms):
+        Ok(value): value
+        Err(_message): return -1
+    if code >= 0:
+        _builder_terminal_observations_v1 = _builder_terminal_observations_v1.push(BuilderTerminalObservationV1(
+            root: attempt.local_root, identity_digest: attempt.identity_digest, exit_code: code))
+    code
+
+pub fn builder_transport_parent_v1(path: text) -> text:
+    val parts = path.replace("\\", "/").split("/")
+    var parent = ""
+    var index = 0
+    while index + 1 < parts.len():
+        if index > 0: parent = parent + "/"
+        parent = parent + parts[index]
+        index = index + 1
+    parent
+
+pub fn builder_transport_shell_quote_v1(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+# SCP's remote path is a second protocol boundary. Restrict it to a portable
+# absolute path alphabet; do not rely on an implementation's legacy shell mode.
+pub fn builder_transport_remote_path_valid_v1(path: text) -> bool:
+    if not path.starts_with("/") or path.contains("//"): return false
+    for part in path.split("/"):
+        if part == "." or part == "..": return false
+    var index = 0
+    while index < path.len():
+        val ch = path[index:index + 1]
+        if not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.".contains(ch): return false
+        index = index + 1
+    true
+
+fn builder_transport_ssh_v1(host: BuildHostV1, command: text) -> (text, text, i32):
+    process_run_timeout("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host.endpoint, command], 30000)
+
+fn builder_transport_copy_v1(source: text, destination: text, digest: text) -> text:
+    if not file_is_regular_no_follow(source) or file_hash_sha256(source) != digest:
+        return "source digest mismatch: " + source
+    if not dir_create_all(builder_transport_parent_v1(destination)):
+        return "cannot create staging directory"
+    if not file_copy(source, destination): return "cannot stage: " + source
+    if not file_is_regular_no_follow(destination) or file_hash_sha256(destination) != digest:
+        return "staged digest mismatch: " + destination
+    ""
+
+# Cache reuse is a copy from a completed prior attempt, never a writable share.
+# Include all task fields (except attempt) in compatibility and require the old
+# worker's exact sealed tree-reaped receipt before even enumerating its cache.
+fn builder_transport_retry_cache_v1(task: BuildTaskV1, host: BuildHostV1, run_root: text, target: text, process: BuilderProcessPortV1) -> text:
+    if task.attempt <= 1: return ""
+    val prior_root = run_root + "/attempts/" + task.id + "/" + str(task.attempt - 1) + "/" + host.id
+    var previous = match builder_read_task_v1(prior_root + "/request.sdn"):
+        Ok(value): value
+        Err(_message): return ""
+    val old_identity = builder_task_identity_v1(previous)
+    previous.attempt = task.attempt
+    if builder_task_identity_v1(previous) != builder_task_identity_v1(task): return ""
+    val prior = BuilderAttemptV1(task_id: task.id, attempt: task.attempt - 1,
+        host: host, pid: 0, local_root: prior_root,
+        remote_root: host.workspace + "/attempts/" + task.id + "/" + str(task.attempt - 1) + "/" + host.id,
+        error: "", identity_digest: old_identity, process: process)
+    if not builder_transport_reaped_v1(prior): return ""
+    if host.transport == "ssh":
+        # This runs after the fresh remote workspace has been staged.
+        val from_path = prior.remote_root + "/work/.builder-cache"
+        val to_path = host.workspace + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id + "/work/.builder-cache"
+        val command = "if test -d " + builder_transport_shell_quote_v1(from_path) + "; then cp -R -- " + builder_transport_shell_quote_v1(from_path) + " " + builder_transport_shell_quote_v1(to_path) + "; fi"
+        if builder_transport_ssh_v1(host, command).2 != 0: return "cannot copy reaped remote attempt cache"
+        return ""
+    val cache_root = prior_root + "/work/.builder-cache/"
+    val paths = dir_walk_native(cache_root)
+    if paths.len() > 100000: return "retry cache snapshot exceeds file bound"
+    for path in paths:
+        val normalized = path.replace("\\", "/")
+        if not normalized.starts_with(cache_root): return "cache walk escaped attempt directory"
+        if file_is_regular_no_follow(normalized):
+            val relative = normalized[cache_root.len():]
+            val error = builder_transport_copy_v1(normalized, target + "/work/.builder-cache/" + relative, file_hash_sha256(normalized))
+            if error != "": return error
+    ""
+
+pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_root: text, run_root: text, process: BuilderProcessPortV1) -> BuilderAttemptV1:
+    val root = run_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
+    val remote = host.workspace + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
+    var result = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
+        host: host, pid: -1, local_root: root, remote_root: remote, error: "",
+        identity_digest: builder_task_identity_v1(task), process: process)
+    result.error = builder_validate_task_v1(task)
+    if result.error == "": result.error = builder_validate_host_v1(host)
+    if result.error != "": return result
+    if host.transport == "local":
+        if not file_is_regular_no_follow(host.worker_program) or file_hash_sha256(host.worker_program) != host.worker_digest:
+            result.error = "configured worker image digest mismatch"
+            return result
+    else:
+        val quoted_worker = builder_transport_shell_quote_v1(host.worker_program)
+        val measured = builder_transport_ssh_v1(host, "test -f " + quoted_worker + " && ! test -L " + quoted_worker + " && sha256sum -- " + quoted_worker)
+        if measured.2 != 0 or measured.0.split(" ")[0] != host.worker_digest:
+            result.error = "configured remote worker image digest mismatch"
+            return result
+    if host.transport == "ssh" and not builder_transport_remote_path_valid_v1(remote):
+        result.error = "SSH workspace must use a portable absolute path"
+        return result
+    if not dir_create_all(root) or not file_create_exclusive(root + "/attempt.claim", "claimed\n"):
+        result.error = "attempt directory already claimed or unavailable"
+        return result
+    if not dir_create_all(root + "/work"):
+        result.error = "cannot create attempt workspace"
+        return result
+    var program = task.program
+    if not program.starts_with("/") and not program.contains(":"):
+        program = source_root + "/" + program
+    result.error = builder_transport_copy_v1(program, root + "/producer.exe", task.producer_digest)
+    if result.error != "": return result
+    for input in task.inputs:
+        if file_exists(run_root + "/cancel.request"):
+            result.error = "dispatch cancelled before worker launch"
+            return result
+        result.error = builder_transport_copy_v1(source_root + "/" + input.path, root + "/work/" + input.path, input.digest)
+        if result.error != "": return result
+    for output in task.outputs:
+        if not dir_create_all(builder_transport_parent_v1(root + "/work/" + output)):
+            result.error = "cannot create output directory"
+            return result
+    if not builder_write_task_v1(root + "/request.sdn", task):
+        result.error = "cannot persist task before launch"
+        return result
+    if host.transport == "local":
+        result.error = builder_transport_retry_cache_v1(task, host, run_root, root, process)
+        if result.error != "": return result
+        if host_os() != "windows":
+            val executable_mode = process_run_timeout("chmod", ["500", "--", root + "/producer.exe"], 10000)
+            if executable_mode.2 != 0:
+                result.error = "cannot make staged producer executable"
+                return result
+        if file_exists(run_root + "/cancel.request"):
+            result.error = "dispatch cancelled before worker launch"
+            return result
+        match process.spawn_operation(host.worker_program, host.worker_digest, ["worker", "--request", root + "/request.sdn", "--attempt-root", root, "--host", host.id], root + "/work"):
+            Ok(token): result.pid = token
+            Err(message):
+                result.error = message
+                return result
+    else:
+        # mkdir without -p at the final component is the remote exclusive claim.
+        val prepare = "mkdir -p -- " + builder_transport_shell_quote_v1(builder_transport_parent_v1(remote)) + " && mkdir -- " + builder_transport_shell_quote_v1(remote)
+        if builder_transport_ssh_v1(host, prepare).2 != 0:
+            result.error = "remote attempt already claimed or unavailable"
+            return result
+        val stage = process_run_timeout("scp", ["-q", "-r", "-o", "BatchMode=yes", "--", root + "/.", host.endpoint + ":" + remote + "/"], 300000)
+        if stage.2 != 0:
+            result.error = "remote immutable staging failed"
+            return result
+        result.error = builder_transport_retry_cache_v1(task, host, run_root, root, process)
+        if result.error != "": return result
+        val command = "chmod 500 -- " + builder_transport_shell_quote_v1(remote + "/producer.exe") + " && exec " + builder_transport_shell_quote_v1(host.worker_program) + " worker --request " + builder_transport_shell_quote_v1(remote + "/request.sdn") + " --attempt-root " + builder_transport_shell_quote_v1(remote) + " --host " + builder_transport_shell_quote_v1(host.id)
+        match process.spawn_operation("ssh", "", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host.endpoint, command], root + "/work"):
+            Ok(token): result.pid = token
+            Err(message):
+                result.error = message
+                return result
+    if result.pid <= 0: result.error = "worker launch failed"
+    result
+
+# Terminal leader observation is retained while exact tree proof is pending.
+pub fn builder_transport_poll_v1(attempt: BuilderAttemptV1) -> i64:
+    if attempt.pid == 0:
+        if builder_transport_terminal_v1(attempt):
+            match builder_transport_collect_v1(attempt):
+                Ok(result): return result.exit_code
+                Err(_message): return -2
+        val _live = builder_transport_control_v1(attempt, "probe")
+        return -2
+    if attempt.pid < 0: return -1
+    val code = builder_transport_wait_v1(attempt, 1)
+    if code == -2 or code == -1: return code
+    if not builder_transport_terminal_v1(attempt): return -2
+    code
+
+pub fn builder_transport_collect_v1(attempt: BuilderAttemptV1) -> Result<BuildResultV1, text>:
+    if attempt.error != "": return Err(attempt.error)
+    if attempt.host.transport == "ssh":
+        val copied = process_run_timeout("scp", ["-q", "-o", "BatchMode=yes", "--", attempt.host.endpoint + ":" + attempt.remote_root + "/result.sdn", attempt.local_root + "/result.sdn"], 30000)
+        if copied.2 != 0: return Err("remote result unavailable; execution state remains unknown")
+    val result = builder_read_result_v1(attempt.local_root + "/result.sdn")?
+    if result.task_id != attempt.task_id or result.attempt != attempt.attempt or result.host_id != attempt.host.id:
+        return Err("worker result identity does not match transport")
+    if attempt.host.transport == "ssh":
+        for output in result.outputs:
+            val copied = process_run_timeout("scp", ["-q", "-o", "BatchMode=yes", "--", attempt.host.endpoint + ":" + attempt.remote_root + "/work/" + output.path, attempt.local_root + "/work/" + output.path], 300000)
+            if copied.2 != 0: return Err("remote output unavailable: " + output.path)
+    for output in result.outputs:
+        val path = attempt.local_root + "/work/" + output.path
+        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != output.digest:
+            return Err("transport output digest mismatch: " + output.path)
+    Ok(result)
+
+# Cancellation asks the worker, which owns the compiler tree, to kill+reap it.
+# Never kill just the SSH client and mistake its exit for remote tree cleanup.
+pub fn builder_transport_cancel_v1(attempt: BuilderAttemptV1) -> bool:
+    if attempt.pid == 0:
+        val _acknowledged = builder_transport_control_v1(attempt, "cancel")
+        val deadline = current_time_ms() + 30000
+        while current_time_ms() < deadline:
+            if builder_transport_terminal_v1(attempt): return true
+            sleep_ms(100)
+        return false
+    if attempt.pid < 0: return false
+    if attempt.host.transport == "local":
+        if not file_atomic_write(attempt.local_root + "/cancel.request", "cancel\n"): return false
+    else:
+        val command = "printf cancel > " + builder_transport_shell_quote_v1(attempt.remote_root + "/cancel.request")
+        if builder_transport_ssh_v1(attempt.host, command).2 != 0: return false
+    val code = builder_transport_wait_v1(attempt, 30000)
+    if code == -2 or code == -1: return false
+    builder_transport_terminal_v1(attempt)
+
+fn builder_transport_read_control_v1(attempt: BuilderAttemptV1, name: text, limit: i64 = 4096) -> text:
+    if attempt.host.transport == "ssh":
+        val copied = process_run_timeout("scp", ["-q", "-o", "BatchMode=yes", "--", attempt.host.endpoint + ":" + attempt.remote_root + "/" + name, attempt.local_root + "/" + name], 10000)
+        if copied.2 != 0: return ""
+    match file_read_regular_no_follow_bounded(attempt.local_root + "/" + name, limit):
+        Ok(value): value
+        Err(_message): ""
+
+pub fn builder_transport_reaped_v1(attempt: BuilderAttemptV1) -> bool:
+    builder_transport_read_control_v1(attempt, "compiler.reaped") == attempt.identity_digest + "\n" + attempt.host.id
+
+# A no-child certificate is NOT a tree-reap receipt. It is admissible only with
+# the exact ERROR result and no accepted outputs for this same task attempt.
+pub fn builder_transport_no_child_started_v1(attempt: BuilderAttemptV1) -> bool:
+    val payload = builder_transport_read_control_v1(attempt, "compiler.not-started.sdn", 262144)
+    val proof = match builder_no_child_started_decode_v1(payload):
+        Ok(value): value
+        Err(_message): return false
+    if proof.identity_digest != attempt.identity_digest or proof.host_id != attempt.host.id: return false
+    val result = match builder_transport_collect_v1(attempt):
+        Ok(value): value
+        Err(_message): return false
+    result.identity_digest == attempt.identity_digest and result.status == "ERROR" and result.exit_code != 0 and result.outputs.len() == 0
+
+pub fn builder_transport_terminal_v1(attempt: BuilderAttemptV1) -> bool:
+    builder_transport_reaped_v1(attempt) or builder_transport_no_child_started_v1(attempt)
+
+# Nonce freshness establishes that this exact worker still owns the compiler.
+# Timeout is unknown state; it never licenses retry or PID-based termination.
+fn builder_transport_control_v1(attempt: BuilderAttemptV1, action: text) -> bool:
+    val nonce = "n" + str(getpid()) + "_" + str(current_time_ms())
+    val request = attempt.identity_digest + "\n" + attempt.host.id + "\n" + nonce + "\n" + action
+    if not file_atomic_write(attempt.local_root + "/control.request", request): return false
+    if attempt.host.transport == "ssh":
+        # Upload under a temporary name; rename is the remote publication point.
+        val copied = process_run_timeout("scp", ["-q", "-o", "BatchMode=yes", "--", attempt.local_root + "/control.request", attempt.host.endpoint + ":" + attempt.remote_root + "/control.pending"], 10000)
+        if copied.2 != 0: return false
+        val renamed = builder_transport_ssh_v1(attempt.host, "mv -- " + builder_transport_shell_quote_v1(attempt.remote_root + "/control.pending") + " " + builder_transport_shell_quote_v1(attempt.remote_root + "/control.request"))
+        if renamed.2 != 0: return false
+    val deadline = current_time_ms() + 2000
+    while current_time_ms() < deadline:
+        if builder_transport_read_control_v1(attempt, "control.response") == request: return true
+        sleep_ms(50)
+    false
+
+pub fn builder_transport_recover_v1(task: BuildTaskV1, host: BuildHostV1, run_root: text, process: BuilderProcessPortV1) -> Result<BuilderAttemptV1, text>:
+    val task_error = builder_validate_task_v1(task)
+    if task_error != "": return Err(task_error)
+    val host_error = builder_validate_host_v1(host)
+    if host_error != "": return Err(host_error)
+    val root = run_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
+    val remote = host.workspace + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
+    if host.transport == "ssh" and not builder_transport_remote_path_valid_v1(remote):
+        return Err("invalid remote recovery path")
+    val attempt = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
+        host: host, pid: 0, local_root: root, remote_root: remote, error: "",
+        identity_digest: builder_task_identity_v1(task), process: process)
+    if builder_transport_terminal_v1(attempt):
+        val result = builder_transport_collect_v1(attempt)?
+        val error = builder_validate_result_v1(task, result)
+        if error != "": return Err(error)
+        return Ok(attempt)
+    if builder_transport_control_v1(attempt, "probe"): return Ok(attempt)
+    Err("worker ownership unknown: no exact final receipt or fresh challenge response; retry forbidden")
+
+export BuilderAttemptV1, builder_transport_start_v1, builder_transport_poll_v1
+export builder_transport_collect_v1, builder_transport_cancel_v1
+export builder_transport_parent_v1, builder_transport_shell_quote_v1, builder_transport_remote_path_valid_v1
+export builder_transport_recover_v1, builder_transport_reaped_v1
+export builder_transport_no_child_started_v1, builder_transport_terminal_v1

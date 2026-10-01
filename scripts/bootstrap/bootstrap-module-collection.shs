@@ -1,0 +1,116 @@
+#!/bin/sh
+# Diagnostic object compilation. Caller owns source inventory and admission;
+# this scheduler never substitutes a producer or promotes diagnostic output.
+
+bootstrap_module_object_valid() {
+  # Check the output kind independently of the compiler's status or suffix.
+  # ELF ET_REL, COFF (no PE optional header), and Mach-O MH_OBJECT are the
+  # supported host object containers. This is not a full object-file verifier.
+  od -An -v -tu1 -N20 "$1" 2>/dev/null | awk '
+    { for (i = 1; i <= NF; i++) b[++n] = $i }
+    END {
+      if (n < 20) exit 1
+      if (b[1] == 127 && b[2] == 69 && b[3] == 76 && b[4] == 70) {
+        if ((b[6] == 1 && b[17] == 1 && b[18] == 0) ||
+            (b[6] == 2 && b[17] == 0 && b[18] == 1)) exit 0
+        exit 1
+      }
+      machine = b[1] + 256 * b[2]
+      if ((machine == 34404 || machine == 43620 || machine == 332 || machine == 452) &&
+          b[3] + b[4] * 256 > 0 && b[17] == 0 && b[18] == 0) exit 0
+      if (((b[1] == 207 || b[1] == 206) && b[2] == 250 && b[3] == 237 && b[4] == 254) &&
+          b[13] == 1 && b[14] == 0 && b[15] == 0 && b[16] == 0) exit 0
+      if (b[1] == 254 && b[2] == 237 && b[3] == 250 && (b[4] == 206 || b[4] == 207) &&
+          b[13] == 0 && b[14] == 0 && b[15] == 0 && b[16] == 1) exit 0
+      exit 1
+    }'
+}
+
+run_module_compile_inventory() (
+  [ "$#" -eq 8 ] || return 2
+  mc_manifest=$1 mc_work=$2 mc_cache_root=$3 mc_workers=$4 mc_threads=$5
+  mc_run=$6 mc_validate=$7 mc_summary=$8
+  case "$mc_workers:$mc_threads" in *[!0-9:]*|0:*|*:0|:*|*:) return 2 ;; esac
+  [ -f "$mc_manifest" ] || return 2
+  mkdir -p "$mc_work" "$mc_cache_root" || return 2
+  mc_attempt=$(mktemp -d "$mc_work/attempt.XXXXXX") || return 2
+  mc_failed=0 mc_count=0 mc_batch=0 mc_jobs= mc_blocked=0 mc_block_log=
+  # A scheduler filesystem/hash error must not orphan already launched work.
+  # Children own their timeout; finish/reap them without deleting their caches.
+  trap 'for mc_pending in $mc_jobs; do wait "${mc_pending%:*}" 2>/dev/null || :; done' 0
+  trap 'exit 143' 1 2 15
+  # A failed binary remains failed; fail-fast must skip this entire inventory.
+  mc_stopped=${MODULE_COMPILE_PRIOR_FAILURE:-0}
+  while IFS= read -r mc_entry || [ -n "$mc_entry" ]; do
+    [ -n "$mc_entry" ] || continue
+    mc_count=$((mc_count + 1))
+    mc_dir="$mc_attempt/$mc_count"
+    mkdir -p "$mc_dir/home" "$mc_dir/tmp" || return 2
+    printf '%s\n' "$mc_entry" >"$mc_dir/entry"
+    if [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ] && [ "$mc_stopped" = 1 ]; then
+      printf 'task=module_compile_%s|entry=%s|result=SKIPPED|status=fail-fast|log=-\n' "$mc_count" "$mc_entry" >"$mc_dir/row"
+      mc_failed=1
+    elif [ "$mc_blocked" = 1 ] || ! "$mc_validate" >"$mc_dir/prerequisite.log" 2>&1; then
+      [ "$mc_blocked" = 1 ] || mc_block_log="$mc_dir/prerequisite.log"
+      mc_blocked=1
+      printf 'task=module_compile_%s|entry=%s|result=BLOCKED|status=prerequisite-unavailable|log=%s\n' "$mc_count" "$mc_entry" "$mc_block_log" >"$mc_dir/row"
+      mc_failed=1 mc_stopped=1
+    else
+      mc_key=$(printf '%s\n' "$mc_entry" | hash_stream) || return 2
+      mc_cache="$mc_cache_root/$mc_key"
+      (
+        HOME="$mc_dir/home" TMPDIR="$mc_dir/tmp"
+        export HOME TMPDIR
+        mc_log="$mc_dir/compile.log" mc_output="$mc_dir/module.o"
+        mc_result=PASS mc_status=0 mc_started=$(date +%s)
+        mkdir -p "$mc_cache" || exit 2
+        if ! "$mc_validate" >"$mc_log" 2>&1; then
+          mc_result=BLOCKED mc_status=prerequisite-unavailable
+        else
+          "$mc_run" "$mc_entry" "$mc_cache" "$mc_output" "$mc_threads" "$mc_log" >"$mc_log" 2>&1 || mc_status=$?
+          [ "$mc_status" = 0 ] || mc_result=FAIL
+          if ! "$mc_validate" >>"$mc_log" 2>&1; then
+            mc_result=BLOCKED mc_status=authority-changed
+          elif [ "$mc_status" = 0 ] && { [ ! -s "$mc_output" ] || [ -L "$mc_output" ]; }; then
+            mc_result=FAIL mc_status=missing-object
+          elif [ "$mc_status" = 0 ] && ! bootstrap_module_object_valid "$mc_output"; then
+            mc_result=FAIL mc_status=invalid-object
+          fi
+        fi
+        mc_ended=$(date +%s)
+        printf 'task=module_compile_%s|entry=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|artifact=%s|cache=%s|threads=%s|mode=diagnostic-relocatable-object\n' \
+          "$mc_count" "$mc_entry" "$mc_result" "$mc_status" "$((mc_ended - mc_started))" \
+          "$mc_log" "$mc_output" "$mc_cache" "$mc_threads" >"$mc_dir/row"
+        [ "$mc_result" = PASS ]
+      ) &
+      mc_jobs="$mc_jobs $!:$mc_count"
+      mc_batch=$((mc_batch + 1))
+    fi
+    if [ "$mc_batch" -ge "$mc_workers" ]; then
+      for mc_job in $mc_jobs; do
+        wait "${mc_job%:*}" || { mc_failed=1; mc_stopped=1; }
+      done
+      mc_jobs= mc_batch=0
+    fi
+  done <"$mc_manifest"
+  for mc_job in $mc_jobs; do
+    wait "${mc_job%:*}" || mc_failed=1
+  done
+  if [ "$mc_count" -eq 0 ]; then
+    printf 'task=module_compile_inventory|result=FAIL|status=empty-inventory|log=-\n' >>"$mc_summary"
+    return 1
+  fi
+  mc_index=1
+  while [ "$mc_index" -le "$mc_count" ]; do
+    if [ -s "$mc_attempt/$mc_index/row" ]; then
+      cat "$mc_attempt/$mc_index/row" >>"$mc_summary" || return 2
+    else
+      mc_entry=$(cat "$mc_attempt/$mc_index/entry")
+      printf 'task=module_compile_%s|entry=%s|result=FAIL|status=worker-failed|log=%s\n' \
+        "$mc_index" "$mc_entry" "$mc_attempt/$mc_index/compile.log" >>"$mc_summary"
+      mc_failed=1
+    fi
+    mc_index=$((mc_index + 1))
+  done
+  [ "$mc_failed" -eq 0 ]
+)

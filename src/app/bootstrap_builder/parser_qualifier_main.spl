@@ -1,0 +1,152 @@
+# Separately pinned native issuer: owns fresh worker build and executed evidence.
+use app.io.args_ops.{get_args}
+use app.io.process_ops.{process_run_timeout}
+use app.io.env_ops.{cwd, env_get}
+use std.common.build_manager.contracts.{BuildTaskV1}
+use std.common.build_manager.codec.{builder_decode_task_v1, builder_encode_task_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_exists, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.parser_qualification_capture.{parser_qualification_sources_v1,
+    parser_qualification_pins_v1, parser_qualification_canonical_v1}
+use app.bootstrap_builder.parser_qualification_evidence.{parser_qualification_execute_v1}
+use compiler.driver.driver_build.managed_parse_qualification.{ManagedParseQualificationV2,
+    managed_parse_worker_build_encode_v1, managed_parse_qualification_encode_v2,
+    managed_parse_qualification_admit_v1}
+
+fn parser_qualifier_read_task_v1(path: text) -> Result<BuildTaskV1, text>:
+    val payload = file_read_regular_no_follow_bounded(path, 16777216)?
+    builder_decode_task_v1(payload)
+
+fn parser_qualifier_issue_v1(task: BuildTaskV1, workspace: text, root: text,
+    runtime: text, issuer: text, target: text, parent: text, parent_digest: text) -> Result<text, text>:
+    if task.outputs.len() != 1 or task.timeout_ms < 1 or task.timeout_ms > 3600000:
+        return Err("qualification requires one fresh worker output and bounded build")
+    if parser_qualification_canonical_v1(cwd()) != parser_qualification_canonical_v1(workspace):
+        return Err("qualifier current directory must equal captured build workspace")
+    val own_args = get_args()
+    if own_args.len() == 0 or parser_qualification_canonical_v1(own_args[0]) != parser_qualification_canonical_v1(issuer):
+        return Err("issuer path must name the actual running qualification executable")
+    if not file_is_regular_no_follow(parent) or file_hash_sha256_or_empty(parent) != parent_digest:
+        return Err("separately admitted production parent executable differs")
+    val image = workspace + "/" + task.outputs[0]
+    if task.args.len() == 0 or task.args[0] != "native-build": return Err("qualification must execute native-build")
+    var output_matches = false
+    var target_matches = false
+    var runtime_matches = false
+    var entry_closure = false
+    for index in 0..task.args.len():
+        if task.args[index] == "--entry-closure": entry_closure = true
+        if index + 1 >= task.args.len(): continue
+        if task.args[index] == "-o" or task.args[index] == "--output":
+            output_matches = task.args[index + 1] == image or task.args[index + 1] == task.outputs[0]
+        if task.args[index] == "--target": target_matches = task.args[index + 1] == target
+        if task.args[index] == "--runtime-path":
+            val provider_root = parser_qualification_canonical_v1(task.args[index + 1])
+            runtime_matches = provider_root != "" and parser_qualification_canonical_v1(runtime).starts_with(provider_root + "/")
+    if not output_matches or not target_matches or not runtime_matches or not entry_closure:
+        return Err("native build output, target, runtime provider or entry closure differs")
+    val compiler_tool = env_get("CC")
+    val tool_digest = file_hash_sha256_or_empty(compiler_tool)
+    if compiler_tool == "" or tool_digest.len() != 64: return Err("actual native compiler tool unavailable")
+    var tool_declared = false
+    for input in task.inputs:
+        if input.digest == tool_digest and file_hash_sha256_or_empty(workspace + "/" + input.path) == tool_digest:
+            tool_declared = true
+    if not tool_declared: return Err("actual compiler tool must have a declared pinned build input")
+    if file_exists(image) or file_exists(root + "/qualification.sdn"):
+        return Err("worker qualification requires a fresh build/evidence root")
+    val pinned = parser_qualification_pins_v1(workspace, task)
+    if pinned != "": return Err(pinned)
+    val runtime_digest = file_hash_sha256_or_empty(runtime)
+    val issuer_digest = file_hash_sha256_or_empty(issuer)
+    if not file_is_regular_no_follow(runtime) or not file_is_regular_no_follow(issuer) or
+            runtime_digest.len() != 64 or issuer_digest.len() != 64:
+        return Err("runtime or independently pinned issuer image unavailable")
+    var runtime_declared = false
+    for input in task.inputs:
+        if parser_qualification_canonical_v1(workspace + "/" + input.path) == parser_qualification_canonical_v1(runtime) and
+                input.digest == runtime_digest: runtime_declared = true
+    if not runtime_declared: return Err("runtime is not a declared digest-pinned worker build input")
+    if not dir_create(root, true): return Err("cannot create issuer evidence root")
+    print "TRACE qualifier capture before"
+    val before = parser_qualification_sources_v1(workspace, task)?
+    if sha256_text(before) != task.source_digest: return Err("build task source closure differs from fresh capture")
+    if not file_atomic_write(root + "/closure-before.sdn", before): return Err("cannot retain before inventory")
+    print "TRACE qualifier native build begin"
+    val (stdout, stderr, exit_code) = process_run_timeout(task.program, task.args, task.timeout_ms)
+    if not file_atomic_write(root + "/build.stdout.log", stdout) or
+            not file_atomic_write(root + "/build.stderr.log", stderr): return Err("cannot retain actual worker build logs")
+    if exit_code != 0: return Err("actual fresh worker build exit {exit_code}")
+    print "TRACE qualifier capture after"
+    val after = parser_qualification_sources_v1(workspace, task)?
+    if not file_atomic_write(root + "/closure-after.sdn", after): return Err("cannot retain after inventory")
+    if after != before: return Err("complete worker source closure changed during native build")
+    val repinned = parser_qualification_pins_v1(workspace, task)
+    if repinned != "": return Err(repinned)
+    if file_hash_sha256_or_empty(runtime) != runtime_digest or file_hash_sha256_or_empty(issuer) != issuer_digest:
+        return Err("runtime or qualifier image changed during native build")
+    if file_hash_sha256_or_empty(compiler_tool) != tool_digest: return Err("actual native compiler tool changed during build")
+    val image_digest = file_hash_sha256_or_empty(image)
+    if not file_is_regular_no_follow(image) or image_digest.len() != 64: return Err("native worker output missing")
+    print "TRACE qualifier executed parser evidence begin"
+    val executed = parser_qualification_execute_v1(root + "/executed", workspace, image, image_digest,
+        parent, parent_digest, target)?
+    # Retain the exact canonical request in the hash-bound evidence artifact;
+    # this binds argv and declared non-SCV configuration/provider input digests.
+    val evidence = executed.evidence + "\n" + builder_encode_task_v1(task)
+    val frontend = executed.frontend_identity
+    if not file_atomic_write(root + "/evidence.log", evidence): return Err("cannot retain executed parser evidence")
+    # Revalidate after evidence; no changed provider or source can be admitted.
+    if parser_qualification_sources_v1(workspace, task)? != before or
+            parser_qualification_pins_v1(workspace, task) != "" or
+            file_hash_sha256_or_empty(image) != image_digest or file_hash_sha256_or_empty(issuer) != issuer_digest or
+            file_hash_sha256_or_empty(runtime) != runtime_digest or file_hash_sha256_or_empty(compiler_tool) != tool_digest or
+            file_hash_sha256_or_empty(parent) != parent_digest:
+        return Err("qualification authority changed during executed native evidence")
+    val closure = root + "/closure-after.sdn"
+    val build = root + "/build.sdn"
+    val log = root + "/evidence.log"
+    val draft = ManagedParseQualificationV2(image, image_digest, frontend, target,
+        task.program, task.producer_digest, runtime, runtime_digest, closure, sha256_text(after),
+        build, "", log, sha256_text(evidence), issuer, issuer_digest)
+    val build_payload = managed_parse_worker_build_encode_v1(draft)
+    if not file_atomic_write(build, build_payload): return Err("cannot retain canonical executed build receipt")
+    val qualification = ManagedParseQualificationV2(image, image_digest, frontend, target,
+        task.program, task.producer_digest, runtime, runtime_digest, closure, sha256_text(after),
+        build, sha256_text(build_payload), log, sha256_text(evidence), issuer, issuer_digest)
+    val payload = managed_parse_qualification_encode_v2(qualification)
+    val path = root + "/qualification.sdn"
+    if not file_atomic_write(path, payload): return Err("cannot retain canonical qualification")
+    val admitted = managed_parse_qualification_admit_v1(path, sha256_text(payload), issuer_digest,
+        image, image_digest, frontend, target)
+    if admitted != "": return Err(admitted)
+    Ok(path)
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() < 5: return 2
+    val task = match parser_qualifier_read_task_v1(args[2]):
+        case Ok(value): value
+        case Err(reason):
+            print "FAIL {reason}"
+            return 3
+    if args[1] == "capture" and args.len() == 5:
+        val capture = match parser_qualification_sources_v1(args[3], task):
+            case Ok(value): value
+            case Err(reason):
+                print "FAIL {reason}"
+                return 4
+        if not file_atomic_write(args[4], capture): return 5
+        print sha256_text(capture)
+        return 0
+    if args[1] != "qualify" or args.len() != 10: return 2
+    val result = parser_qualifier_issue_v1(task, args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+    match result:
+        case Ok(path):
+            print "PASS canonical parser qualification: {path}"
+            0
+        case Err(reason):
+            print "FAIL parser qualification: {reason}"
+            6

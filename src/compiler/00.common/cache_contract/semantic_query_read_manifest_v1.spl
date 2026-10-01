@@ -1,0 +1,202 @@
+#![allow(primitive_api)]
+
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_magic,
+    wire_put_envelope, wire_put_u8, wire_put_u32, wire_put_u64}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractBudgetV1,
+    ThreePayloadContractReaderV1, three_payload_contract_budget_v1,
+    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1,
+    three_payload_contract_max_payload_bytes_v1,
+    three_payload_contract_put_digest_v1, three_payload_contract_put_text_v1,
+    three_payload_contract_text_valid_v1}
+
+pub enum SemanticCoverageV1:
+    Complete
+    Conservative
+    Unknown
+
+pub struct SemanticQueryKeyV1:
+    kind: text
+    stable_entity_id: text
+    semantic_profile_digest: text
+    parameter_digest: text
+
+pub struct SemanticQueryReadV1:
+    producer: SemanticQueryKeyV1
+    consumer: SemanticQueryKeyV1
+    facet: text
+    ordinal: i64
+    consumed_fingerprint: text
+    witness_digest: text
+    partition_id: text
+    completeness: SemanticCoverageV1
+
+pub struct SemanticQueryReadManifestV1:
+    schema: i64
+    consumer: SemanticQueryKeyV1
+    ordered_reads: [SemanticQueryReadV1]
+
+pub struct SemanticQueryReadManifestDecodeV1:
+    ok: bool
+    value: SemanticQueryReadManifestV1?
+    error: text
+
+pub fn semantic_coverage_tag_v1(value: SemanticCoverageV1) -> i64:
+    match value:
+        case Complete: 1
+        case Conservative: 2
+        case Unknown: 3
+
+pub fn semantic_coverage_from_tag_v1(tag: i64) -> SemanticCoverageV1?:
+    if tag == 1: return Some(SemanticCoverageV1.Complete)
+    if tag == 2: return Some(SemanticCoverageV1.Conservative)
+    if tag == 3: return Some(SemanticCoverageV1.Unknown)
+    nil
+
+pub fn semantic_query_key_valid_v1(value: SemanticQueryKeyV1) -> bool:
+    three_payload_contract_text_valid_v1(value.kind, false) and
+        three_payload_contract_text_valid_v1(value.stable_entity_id, false) and
+        three_payload_contract_digest_valid_v1(value.semantic_profile_digest) and
+        three_payload_contract_digest_valid_v1(value.parameter_digest)
+
+pub fn semantic_query_key_budget_v1(budget: ThreePayloadContractBudgetV1,
+        value: SemanticQueryKeyV1):
+    budget.add_text(value.kind, false)
+    budget.add_text(value.stable_entity_id, false)
+    budget.add_digest(value.semantic_profile_digest)
+    budget.add_digest(value.parameter_digest)
+
+pub fn semantic_query_key_equal_v1(left: SemanticQueryKeyV1, right: SemanticQueryKeyV1) -> bool:
+    left.kind == right.kind and left.stable_entity_id == right.stable_entity_id and
+        left.semantic_profile_digest == right.semantic_profile_digest and
+        left.parameter_digest == right.parameter_digest
+
+pub fn semantic_query_key_canonical_v1(value: SemanticQueryKeyV1) -> text:
+    val kind_bytes = text_to_bytes(value.kind).len()
+    val entity_bytes = text_to_bytes(value.stable_entity_id).len()
+    kind_bytes.to_string() + ":" + value.kind + entity_bytes.to_string() + ":" +
+        value.stable_entity_id + "64:" + value.semantic_profile_digest +
+        "64:" + value.parameter_digest
+
+pub fn semantic_query_key_put_v1(out: [u8], value: SemanticQueryKeyV1) -> [u8]:
+    var bytes = three_payload_contract_put_text_v1(out, value.kind)
+    bytes = three_payload_contract_put_text_v1(bytes, value.stable_entity_id)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.semantic_profile_digest)
+    three_payload_contract_put_digest_v1(bytes, value.parameter_digest)
+
+pub fn semantic_query_key_read_v1(reader: ThreePayloadContractReaderV1) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: reader.read_text(false), stable_entity_id: reader.read_text(false),
+        semantic_profile_digest: reader.read_digest(), parameter_digest: reader.read_digest())
+
+pub fn semantic_query_read_valid_v1(value: SemanticQueryReadV1) -> bool:
+    semantic_query_key_valid_v1(value.producer) and semantic_query_key_valid_v1(value.consumer) and
+        three_payload_contract_text_valid_v1(value.facet, false) and value.ordinal >= 0 and
+        three_payload_contract_digest_valid_v1(value.consumed_fingerprint) and
+        three_payload_contract_digest_valid_v1(value.witness_digest) and
+        three_payload_contract_text_valid_v1(value.partition_id, false)
+
+pub fn semantic_query_read_budget_v1(budget: ThreePayloadContractBudgetV1,
+        value: SemanticQueryReadV1):
+    semantic_query_key_budget_v1(budget, value.producer)
+    semantic_query_key_budget_v1(budget, value.consumer)
+    budget.add_text(value.facet, false)
+    budget.add_bytes(8)
+    budget.add_digest(value.consumed_fingerprint)
+    budget.add_digest(value.witness_digest)
+    budget.add_text(value.partition_id, false)
+    budget.add_bytes(1)
+
+pub fn semantic_query_read_put_v1(out: [u8], value: SemanticQueryReadV1) -> [u8]:
+    var bytes = semantic_query_key_put_v1(out, value.producer)
+    bytes = semantic_query_key_put_v1(bytes, value.consumer)
+    bytes = three_payload_contract_put_text_v1(bytes, value.facet)
+    bytes = wire_put_u64(bytes, value.ordinal)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.consumed_fingerprint)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.witness_digest)
+    bytes = three_payload_contract_put_text_v1(bytes, value.partition_id)
+    wire_put_u8(bytes, semantic_coverage_tag_v1(value.completeness))
+
+pub fn semantic_query_read_read_v1(reader: ThreePayloadContractReaderV1) -> SemanticQueryReadV1:
+    val producer = semantic_query_key_read_v1(reader)
+    val consumer = semantic_query_key_read_v1(reader)
+    val facet = reader.read_text(false)
+    val ordinal = reader.read_u64_nonnegative()
+    val consumed = reader.read_digest()
+    val witness = reader.read_digest()
+    val partition = reader.read_text(false)
+    val coverage = semantic_coverage_from_tag_v1(reader.read_u8())
+    if coverage == nil: reader.reject("unknown_semantic_coverage")
+    val decoded_coverage = match coverage:
+        case Some(value): value
+        case nil: SemanticCoverageV1.Unknown
+    SemanticQueryReadV1(producer: producer, consumer: consumer, facet: facet,
+        ordinal: ordinal, consumed_fingerprint: consumed, witness_digest: witness,
+        partition_id: partition, completeness: decoded_coverage)
+
+pub fn semantic_query_read_manifest_valid_v1(value: SemanticQueryReadManifestV1) -> bool:
+    if value.schema != 1 or not semantic_query_key_valid_v1(value.consumer) or
+            value.ordered_reads.len() > three_payload_contract_max_items_v1(): return false
+    val budget = three_payload_contract_budget_v1()
+    semantic_query_read_manifest_budget_v1(budget, value)
+    if not budget.ok: return false
+    var ordinal: i64 = 0
+    for read in value.ordered_reads:
+        if not semantic_query_read_valid_v1(read) or read.ordinal != ordinal or
+                not semantic_query_key_equal_v1(read.consumer, value.consumer): return false
+        ordinal = ordinal + 1
+    true
+
+pub fn semantic_query_read_manifest_budget_v1(budget: ThreePayloadContractBudgetV1,
+        value: SemanticQueryReadManifestV1):
+    budget.add_bytes(wire_envelope_len() + 8)
+    semantic_query_key_budget_v1(budget, value.consumer)
+    budget.add_bytes(4)
+    budget.add_items(value.ordered_reads.len())
+    for read in value.ordered_reads:
+        semantic_query_read_budget_v1(budget, read)
+
+pub fn semantic_query_read_manifest_wire_bytes_v1(value: SemanticQueryReadManifestV1) -> i64:
+    if not semantic_query_read_manifest_valid_v1(value): return -1
+    val budget = three_payload_contract_budget_v1()
+    semantic_query_read_manifest_budget_v1(budget, value)
+    if budget.ok: budget.used_bytes else: -1
+
+pub fn semantic_query_read_manifest_encode_v1(value: SemanticQueryReadManifestV1) -> [u8]:
+    if not semantic_query_read_manifest_valid_v1(value): return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("SQR1"), 1)
+    out = wire_put_u64(out, value.schema)
+    out = semantic_query_key_put_v1(out, value.consumer)
+    out = wire_put_u32(out, value.ordered_reads.len())
+    for read in value.ordered_reads: out = semantic_query_read_put_v1(out, read)
+    out
+
+fn _semantic_read_failure_v1(error: text) -> SemanticQueryReadManifestDecodeV1:
+    SemanticQueryReadManifestDecodeV1(ok: false, value: nil, error: error)
+
+pub fn semantic_query_read_manifest_decode_bounded_v1(bytes: [u8],
+        max_items: i64) -> SemanticQueryReadManifestDecodeV1:
+    if max_items < 0 or max_items > three_payload_contract_max_items_v1():
+        return _semantic_read_failure_v1("invalid_semantic_read_item_limit")
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _semantic_read_failure_v1("semantic_read_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("SQR1"), 1): return _semantic_read_failure_v1("semantic_read_v1_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val schema = reader.read_u64_nonnegative()
+    val consumer = semantic_query_key_read_v1(reader)
+    val count = reader.read_count()
+    if not reader.ok: return _semantic_read_failure_v1(reader.error)
+    if count > max_items: return _semantic_read_failure_v1("semantic_read_item_limit_exceeded")
+    var reads: [SemanticQueryReadV1] = []
+    var index: i64 = 0
+    while reader.ok and index < count:
+        reads.push(semantic_query_read_read_v1(reader))
+        index = index + 1
+    if not reader.finished(): return _semantic_read_failure_v1(if reader.error == "": "trailing_semantic_read_bytes" else: reader.error)
+    val value = SemanticQueryReadManifestV1(schema: schema, consumer: consumer, ordered_reads: reads)
+    if not semantic_query_read_manifest_valid_v1(value): return _semantic_read_failure_v1("noncanonical_semantic_read_manifest")
+    SemanticQueryReadManifestDecodeV1(ok: true, value: Some(value), error: "")
+
+pub fn semantic_query_read_manifest_decode_v1(bytes: [u8]) -> SemanticQueryReadManifestDecodeV1:
+    semantic_query_read_manifest_decode_bounded_v1(bytes,
+        three_payload_contract_max_items_v1())

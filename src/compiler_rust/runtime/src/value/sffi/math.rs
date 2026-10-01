@@ -148,6 +148,14 @@ pub extern "C" fn rt_math_is_finite(x: f64) -> bool {
     x.is_finite()
 }
 
+/// Second lane (rt-dual-implementation ratchet) of the C `rt_f64_to_bits` in
+/// `src/runtime/runtime_native.c`, which delegates to the core `spl_f64_to_bits`
+/// bit-preserving reinterpret. `f64::to_bits` is the identical operation.
+#[no_mangle]
+pub extern "C" fn rt_f64_to_bits(value: f64) -> i64 {
+    value.to_bits() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

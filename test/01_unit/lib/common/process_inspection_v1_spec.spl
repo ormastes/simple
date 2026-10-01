@@ -1,0 +1,127 @@
+# @cover src/lib/common/process/inspection_v1.spl 80%
+"""Input completion must be bound to the same opaque process ticket."""
+
+use std.spec.*
+use std.common.process.inspection_v1.{
+    decode_process_inspection_input_v1, process_inspection_input_complete_v1,
+    process_inspection_retirement_complete_v1
+}
+use std.common.process.observation_v4.{
+    ProcessObservationWireV4, ProcessObservationPacketV4,
+    ProcessObservationDescendantPolicyV4, POV4_VALID_TREE_CONTROL,
+    decode_process_observation_v4
+}
+
+fn _input_words() -> [i64]:
+    var words: [i64] = [0; 75]
+    words[0] = 1
+    words[1] = 11
+    words[2] = 12
+    words[3] = 13
+    words[4] = 14
+    words[5] = 3
+    words[6] = 3
+    words[7] = 1
+    words[8] = 1
+    words[9] = 1
+    var index = 0
+    while index < 32:
+        words[11 + index] = index
+        words[43 + index] = 31 - index
+        index = index + 1
+    words
+
+fn _expected_digest() -> [u8]:
+    var result: [u8] = []
+    var index = 0
+    while index < 32:
+        result.push(index as u8)
+        index = index + 1
+    result
+
+fn _retirement_packet() -> ProcessObservationPacketV4:
+    var binding: [u8] = []
+    for index in 0..32: binding.push(index as u8)
+    val wire = ProcessObservationWireV4(
+        words: [4, 2, 64, 2, 1, 2, 3, 4, 7, 255, 0, 0, 0, 3, 0, 42, 0,
+            0, 0, 10, 11, 12, 13, 14, 15, 20, 20, 30, 0, 0, 0, 0, 1, 1,
+            1, 1, 3, 4, 7, 0, 2, 100, 1, 0, 0, 1, 1, 1, 1, 2, 0, 2, 2,
+            2, 2, 0, 1, 1, 1, 1, 2, 1, 32, 0],
+        stdout: [111u8, 107u8], stderr: [33u8], binding: binding)
+    decode_process_observation_v4(wire).unwrap().packet
+
+describe "process inspection V1 input receipt":
+    it "requires exact input delivery and closure":
+        val receipt = decode_process_inspection_input_v1(_input_words()).unwrap()
+        expect(receipt.ticket_high).to_equal(13)
+        expect(process_inspection_input_complete_v1(receipt, 3,
+            _expected_digest())).to_equal(true)
+        expect(process_inspection_input_complete_v1(receipt, 4,
+            _expected_digest())).to_equal(false)
+        var wrong_digest = _expected_digest()
+        wrong_digest[0] = 255u8
+        expect(process_inspection_input_complete_v1(receipt, 3,
+            wrong_digest)).to_equal(false)
+
+    it "rejects an early child exit as inspection authority":
+        var early = _input_words()
+        early[6] = 1
+        early[10] = 32
+        val receipt = decode_process_inspection_input_v1(early).unwrap()
+        expect(process_inspection_input_complete_v1(receipt, 3,
+            _expected_digest())).to_equal(false)
+
+    it "rejects malformed ticket, state, and digest bytes":
+        var missing_ticket = _input_words()
+        missing_ticket[3] = 0
+        expect(decode_process_inspection_input_v1(missing_ticket).is_err()).to_equal(true)
+        var impossible_state = _input_words()
+        impossible_state[7] = 0
+        expect(decode_process_inspection_input_v1(impossible_state).is_err()).to_equal(true)
+        var bad_digest = _input_words()
+        bad_digest[43] = 256
+        expect(decode_process_inspection_input_v1(bad_digest).is_err()).to_equal(true)
+        var short_words = _input_words()
+        short_words.pop()
+        expect(decode_process_inspection_input_v1(short_words).is_err()).to_equal(true)
+        var over_written = _input_words()
+        over_written[6] = 4
+        expect(decode_process_inspection_input_v1(over_written).is_err()).to_equal(true)
+        var no_reap = _input_words()
+        no_reap[9] = 0
+        expect(decode_process_inspection_input_v1(no_reap).is_err()).to_equal(true)
+
+describe "process inspection V1 descendant retirement":
+    it "accepts authenticated group retirement and rejects a leader-only packet":
+        val complete = _retirement_packet()
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.ProcessGroup, complete)).to_equal(true)
+        var leader_only = complete
+        leader_only.tree_control_available = false
+        leader_only.validity_bits = leader_only.validity_bits & ~POV4_VALID_TREE_CONTROL
+        leader_only.tree_empty = false
+        leader_only.tree_empty_ns = -1
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.LeaderOnly, leader_only)).to_equal(true)
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.ProcessGroup, leader_only)).to_equal(false)
+
+    it "requires the group control bit, event time, and exact leader retirement":
+        var missing_bit = _retirement_packet()
+        missing_bit.validity_bits = missing_bit.validity_bits & ~POV4_VALID_TREE_CONTROL
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.ProcessGroup, missing_bit)).to_equal(false)
+        var early_event = _retirement_packet()
+        early_event.tree_empty_ns = early_event.process_started_ns - 1
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.ProcessGroup, early_event)).to_equal(false)
+        var unreaped = _retirement_packet()
+        unreaped.leader_reaped = false
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.ProcessGroup, unreaped)).to_equal(false)
+        var no_start = _retirement_packet()
+        no_start.process_started_ns = -1
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.ProcessGroup, no_start)).to_equal(false)
+        expect(process_inspection_retirement_complete_v1(
+            ProcessObservationDescendantPolicyV4.Cgroup, _retirement_packet())).to_equal(false)

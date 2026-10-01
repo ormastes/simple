@@ -1,0 +1,120 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/bin/simple}
+TIMEOUT_SECS=${FONT_CATALOG_TIMEOUT_SECS:-15}
+IDENTITY_TIMEOUT_SECS=${FONT_CATALOG_IDENTITY_TIMEOUT_SECS:-5}
+RSS_MAX_KIB=${FONT_CATALOG_RSS_MAX_KIB:-524288}
+AS_MAX_KIB=${FONT_CATALOG_AS_MAX_KIB:-1048576}
+PROBE=$ROOT/test/05_perf/graphics_2d/font_catalog_pointer_release_perf_probe.spl
+REGISTRY=$ROOT/src/lib/common/encoding/font_registry.spl
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/simple-font-catalog-perf.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+. "$ROOT/scripts/check/lib/require-self-hosted.shs"
+command -v prlimit >/dev/null 2>&1 || {
+    echo "ERROR nothing checked: prlimit is required for the hard address-space bound" >&2
+    exit 2
+}
+
+case "$AS_MAX_KIB:$RSS_MAX_KIB:$TIMEOUT_SECS:$IDENTITY_TIMEOUT_SECS" in
+    *[!0-9:]*) echo "ERROR invalid numeric resource bound" >&2; exit 2 ;;
+esac
+[ "$TIMEOUT_SECS" -gt 0 ] && [ "$IDENTITY_TIMEOUT_SECS" -gt 0 ] || {
+    echo "ERROR timeout bounds must be positive" >&2
+    exit 2
+}
+[ "$TIMEOUT_SECS" -le 60 ] && [ "$IDENTITY_TIMEOUT_SECS" -le 15 ] &&
+[ "$AS_MAX_KIB" -le 2097152 ] || {
+    echo "ERROR resource bounds exceed the guard's safe maximum" >&2
+    exit 2
+}
+[ "$AS_MAX_KIB" -ge "$RSS_MAX_KIB" ] || {
+    echo "ERROR address-space bound must cover the RSS acceptance ceiling" >&2
+    exit 2
+}
+
+SIMPLE_BIN=$(resolve_binary "$SIMPLE_BIN") ||
+    check_untestable "font-catalog runtime is not executable"
+SIMPLE_REAL=$(real_path "$SIMPLE_BIN")
+PROVENANCE=${FONT_CATALOG_PROVENANCE:-${SIMPLE_REAL}.provenance.env}
+[ -f "$PROVENANCE" ] && [ ! -L "$PROVENANCE" ] ||
+    check_untestable "adjacent Stage4 provenance is missing or is a symlink: $PROVENANCE"
+[ "$(wc -c <"$PROVENANCE")" -le 65536 ] ||
+    check_untestable "Stage4 provenance exceeds 64 KiB"
+prov_value() {
+    [ "$(grep -c "^$1=" "$PROVENANCE")" -eq 1 ] || return 1
+    sed -n "s/^$1=//p" "$PROVENANCE"
+}
+[ "$(prov_value schema)" = simple-bootstrap-stage4-provenance-v1 ] &&
+[ "$(prov_value status)" = pass ] &&
+[ "$(prov_value artifact_kind)" = pure-simple-full-cli ] &&
+[ "$(prov_value output_path)" = "$SIMPLE_REAL" ] &&
+[ "$(prov_value output_sha256)" = "$(sha256sum "$SIMPLE_REAL" | awk '{print $1}')" ] ||
+    check_untestable "Stage4 provenance does not positively bind this pure-Simple full CLI"
+set +e
+(ulimit -f 16
+ exec timeout -k 2 "$IDENTITY_TIMEOUT_SECS" \
+     prlimit --as="$((AS_MAX_KIB * 1024))" -- \
+     "$SIMPLE_BIN" --version) >"$WORK/version" 2>&1
+version_status=$?
+set -e
+[ "$version_status" -eq 0 ] ||
+    check_untestable "bounded font-catalog runtime identity probe failed status=$version_status"
+version=$(cat "$WORK/version")
+case "$version" in
+    *"bootstrap seed only"*|*"Rust-built Simple binary"*|*"Rust-built"*)
+        check_untestable "font-catalog runtime is the Rust bootstrap seed" ;;
+esac
+case "$version" in
+    *"self-hosted"*|*"pure-Simple"*) : ;;
+    *) check_untestable "runtime version lacks a positive self-hosted identity marker" ;;
+esac
+
+# The behavioral boundary alone is intentionally loose enough for slower
+# admitted hosts. Pair it with a source-owner contract that retains the exact
+# cf09420b88e cache declaration, cache-hit return, fill, and builder split.
+[ "$(grep -Fxc 'var _selected_font_asset_candidates_cache: [FontAssetCandidate] = []' "$REGISTRY")" -eq 1 ] &&
+grep -Fq 'if _selected_font_asset_candidates_cache.len() > 0:' "$REGISTRY" &&
+grep -Fq 'return _selected_font_asset_candidates_cache' "$REGISTRY" &&
+grep -Fq '_selected_font_asset_candidates_cache = built' "$REGISTRY" &&
+grep -Fq 'fn _selected_font_asset_candidates_build() -> [FontAssetCandidate]:' "$REGISTRY" || {
+    echo "FAIL font catalog memoization owner contract missing" >&2
+    exit 1
+}
+echo "font_catalog_memoization_source_contract=pass"
+
+set +e
+(ulimit -f 2048
+ exec timeout -k 2 "$TIMEOUT_SECS" /usr/bin/time -f 'max_rss_kib=%M' -o "$WORK/time" \
+     prlimit --as="$((AS_MAX_KIB * 1024))" -- \
+     "$SIMPLE_BIN" run "$PROBE") >"$WORK/stdout" 2>"$WORK/stderr"
+status=$?
+set -e
+if [ "$status" -ne 0 ]; then
+    cat "$WORK/stdout"
+    cat "$WORK/stderr" >&2
+    echo "FAIL font catalog pointer-release probe status=$status timeout_secs=$TIMEOUT_SECS" >&2
+    exit 1
+fi
+
+cat "$WORK/stdout"
+grep -Fq 'font_catalog_pointer_release iterations=152 ' "$WORK/stdout" || {
+    echo "FAIL missing completed-iteration receipt" >&2
+    exit 1
+}
+grep -Fq 'checksum=259678016' "$WORK/stdout" || {
+    echo "FAIL font catalog work checksum changed" >&2
+    exit 1
+}
+max_rss_kib=$(sed -n 's/^max_rss_kib=//p' "$WORK/time")
+case "$max_rss_kib" in
+    ''|*[!0-9]*) echo "FAIL missing max RSS receipt" >&2; exit 1 ;;
+esac
+if [ "$max_rss_kib" -gt "$RSS_MAX_KIB" ]; then
+    echo "FAIL max_rss_kib=$max_rss_kib exceeds $RSS_MAX_KIB" >&2
+    exit 1
+fi
+echo "font_catalog_pointer_release_max_rss_kib=$max_rss_kib"
+echo "font_catalog_pointer_release_as_limit_kib=$AS_MAX_KIB"
+echo "PASS font catalog pointer-release latency/RSS guard"

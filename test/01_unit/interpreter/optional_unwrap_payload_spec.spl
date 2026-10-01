@@ -1,0 +1,88 @@
+# `!` on an Option must yield the PAYLOAD, never the Option box itself.
+#
+# Bug: doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
+#
+# SCOPE, stated up front so this spec is not mistaken for the guard: it pins the
+# language contract on the lane the spec runner uses, and it does NOT catch the
+# defect that prompted it. `bin/simple test` executes specs on the INTERPRET
+# route, and the 2026-09-18 defect was JIT-lane-only -- this file passes
+# identically on the binary that loses the payload and on one that does not
+# (both measured). The check that fails closed on a bad binary is
+# `scripts/check/check-deployed-binary-optional-unwrap.shs`, which runs a probe
+# through the deployed binary's own default lane and compares it against the
+# interpret lane.
+#
+# What was measured on the deployed seed (2026-09-06 build) via `bin/simple run`:
+# `Some(42)!` stringified as `<enum@0x...>`, `Some("hello")!.len()` answered -1,
+# `Some("hello")! == "hello"` answered false, and one `print` of a concatenated
+# unwrapped text emitted nothing at all -- all silently, exit 0. Container
+# payloads (`[i64]?`) kept working, which is why the rows below deliberately
+# cover a scalar int, a bool, a text and an array: a probe of containers alone
+# reports green on a binary that miscompiles every scalar one.
+#
+# The casualty was SCV cold-init, which unwraps a `text?` git listing with `!`:
+# `.len()` -1 and an empty `.split` produced an EMPTY source inventory, which is
+# then published and permanently wedges native-build in that worktree.
+
+use std.spec
+
+fn opt_i64() -> i64?:
+    Some(42)
+
+fn opt_text() -> text?:
+    Some("hello")
+
+fn opt_bool() -> bool?:
+    Some(true)
+
+fn opt_array() -> [i64]?:
+    Some([1, 2, 3])
+
+fn opt_none() -> text?:
+    nil
+
+describe "Option unwrap yields the payload":
+    it "unwraps an i64 payload to the number, not the box":
+        expect(opt_i64()!).to_equal(42)
+
+    it "unwraps a bool payload to the boolean":
+        expect(opt_bool()!).to_equal(true)
+
+    it "unwraps an array payload and keeps its length":
+        expect(opt_array()!.len()).to_equal(3)
+
+    it "unwraps a text payload to a real text of the right length":
+        # -1 here is the observed stale-seed answer: `.len()` on the Option
+        # box rather than on the string.
+        expect(opt_text()!.len()).to_equal(5)
+
+    it "unwraps a text payload that compares equal to its literal":
+        expect(opt_text()! == "hello").to_equal(true)
+
+    it "unwraps a text payload that concatenates as text":
+        expect("[" + opt_text()! + "]").to_equal("[hello]")
+
+    it "splits an unwrapped text payload into its parts":
+        expect(opt_text()!.split("l").len()).to_equal(3)
+
+describe "Option unwrap through the other binding forms":
+    it "binds the payload through `if val`":
+        var seen = 0
+        if val bound = opt_text():
+            seen = bound.len()
+        expect(seen).to_equal(5)
+
+    it "binds the payload through `match`":
+        var seen = 0
+        match opt_text():
+            case Some(payload):
+                seen = payload.len()
+            case _:
+                seen = -99
+        expect(seen).to_equal(5)
+
+    it "coalesces to the payload, not the box":
+        expect((opt_text() ?? "").len()).to_equal(5)
+
+    it "coalesces a nil optional to the default":
+        expect((opt_none() ?? "fallback")).to_equal("fallback")

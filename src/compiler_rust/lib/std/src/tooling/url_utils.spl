@@ -30,6 +30,13 @@ struct Url:
 # =====================================
 
 # URL encode a string (percent encoding)
+#
+# RFC 3986 §2.5: the input is first encoded as UTF-8 octets, then every octet
+# outside the unreserved set is percent-encoded. So a non-ASCII character
+# becomes one escape PER BYTE ("é" -> "%C3%A9"), not one escape per code
+# point ("é" -> "%E9"). The UTF-8 byte sequence of a code point is fully
+# determined by its value, so it is computed arithmetically here — no byte
+# accessor on text is needed.
 fn url_encode(input: text) -> text:
     var result = ""
 
@@ -37,11 +44,22 @@ fn url_encode(input: text) -> text:
         if is_unreserved(ch):
             result = result + ch
         else:
-            # Encode as %XX
-            val code = char_code(ch)
-            result = result + "%" + to_hex(code)
+            result = result + utf8_percent_encode(char_code(ch))
 
     result
+
+# Percent-encode one Unicode code point as the %XX escapes of each of its
+# UTF-8 bytes (RFC 3986 §2.5). Code points below 0x80 stay a single escape;
+# U+00E9 ("é") is C3 A9, U+4E2D ("中") is E4 B8 AD.
+fn utf8_percent_encode(cp: i32) -> text:
+    if cp < 0x80:
+        "%" + to_hex(cp)
+    elif cp < 0x800:
+        "%" + to_hex(0xC0 | (cp >> 6)) + "%" + to_hex(0x80 | (cp & 0x3F))
+    elif cp < 0x10000:
+        "%" + to_hex(0xE0 | (cp >> 12)) + "%" + to_hex(0x80 | ((cp >> 6) & 0x3F)) + "%" + to_hex(0x80 | (cp & 0x3F))
+    else:
+        "%" + to_hex(0xF0 | (cp >> 18)) + "%" + to_hex(0x80 | ((cp >> 12) & 0x3F)) + "%" + to_hex(0x80 | ((cp >> 6) & 0x3F)) + "%" + to_hex(0x80 | (cp & 0x3F))
 
 # URL decode a percent-encoded string
 fn url_decode(input: text) -> text:
@@ -83,7 +101,9 @@ fn is_unreserved(ch: text) -> bool:
     # `get` is not a method on text -- this whole module was unloadable behind
     # a parse error until 75c6fff3b1a, so this line had never once been run.
     # The rest of the file already uses `char_at`, which is the real accessor.
-    val c = ch.char_at(0) if ch.len() > 0 else: ""
+    var c = ""
+    if ch.len() > 0:
+        c = ch.char_at(0)
 
     # A-Z, a-z, 0-9, -, ., _, ~
     (c >= "A" and c <= "Z") or
@@ -122,9 +142,6 @@ fn char_code(ch: text) -> i32:
         # every non-ASCII character, so url_encode("\u{e9}") produced "%20" --
         # a wrong answer with no error. Never trade a loud failure for a
         # silent wrong one.
-        # TODO: url_encode should percent-encode each UTF-8 BYTE (%C3%A9), not
-        # the code point; that needs a byte accessor on text and is tracked in
-        # doc/08_tracking/bug/match_arm_comma_separator_rejected_2026-08-02.md.
         _ => ch.char_code_at(0)
 
 # Character from code

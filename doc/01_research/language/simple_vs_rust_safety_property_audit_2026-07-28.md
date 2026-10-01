@@ -271,6 +271,11 @@ model. Options, cheapest first:
 3. **Full affine types.** Rust-equivalent, largest blast radius, conflicts with
    mutable-by-default collections (Decision #3) and with class reference-share.
 
+**DECIDED (user, 2026-07-29): option 2 — "make iso real and fix silent pattern
+acceptance."** Implementation lanes ISO1 (iso carried through HIR, emit_move at
+iso binding transfer, NLL fires on real code) and PAT1 (unknown-variant pattern
+diagnostic) launched same day; status in `.spipe/mission_critical_harden/state.md`.
+
 Recommendation: **option 2** — it activates machinery that already exists and is
 already correct, confines the change to an opt-in keyword that is currently
 inert, and leaves the copy/share defaults untouched.

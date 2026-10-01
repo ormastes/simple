@@ -266,7 +266,7 @@ impl MathExpr {
                 // Use \cdot for explicit multiplication
                 format!("{} \\cdot {}", left.to_latex(), right.to_latex())
             }
-            MathExpr::MatMul(left, right) => format!("{} @ {}", left.to_latex(), right.to_latex()),
+            MathExpr::MatMul(left, right) => format!("{} \\cdot {}", left.to_latex(), right.to_latex()),
             MathExpr::Div(left, right) => {
                 format!("\\frac{{{}}}{{{}}}", left.to_latex(), right.to_latex())
             }
@@ -305,9 +305,12 @@ impl MathExpr {
             }
 
             // Subscript
-            MathExpr::Subscript(base, index) => {
-                format!("{}_{{{}}}", base.to_latex(), index.to_latex())
-            }
+            MathExpr::Subscript(base, index) => match index.as_ref() {
+                MathExpr::Slice { .. } | MathExpr::Array(_) => {
+                    format!("{}[{}]", base.to_latex(), subscript_index_to_latex(index))
+                }
+                _ => format!("{}_{{{}}}", base.to_latex(), index.to_latex()),
+            },
             MathExpr::Slice { start, end } => {
                 let start_str = start.as_ref().map(|s| s.to_latex()).unwrap_or_default();
                 let end_str = end.as_ref().map(|e| e.to_latex()).unwrap_or_default();
@@ -361,6 +364,13 @@ impl MathExpr {
                 format!("{} \\approx {}", left.to_latex(), right.to_latex())
             }
         }
+    }
+}
+
+fn subscript_index_to_latex(expr: &MathExpr) -> String {
+    match expr {
+        MathExpr::Array(items) => items.iter().map(subscript_index_to_latex).collect::<Vec<_>>().join(","),
+        _ => expr.to_latex(),
     }
 }
 
@@ -452,5 +462,26 @@ mod tests {
             Box::new(MathExpr::Int(4)),
         );
         assert_eq!(expr.to_latex(), "\\left(2 + 3\\right) \\cdot 4");
+    }
+
+    #[test]
+    fn test_latex_matmul_and_slice_contract() {
+        let matmul = MathExpr::MatMul(
+            Box::new(MathExpr::Var("A".to_string())),
+            Box::new(MathExpr::Var("B".to_string())),
+        );
+        assert_eq!(matmul.to_latex(), "A \\cdot B");
+
+        let slice = MathExpr::Subscript(
+            Box::new(MathExpr::Var("A".to_string())),
+            Box::new(MathExpr::Array(vec![
+                MathExpr::Slice {
+                    start: Some(Box::new(MathExpr::Var("i".to_string()))),
+                    end: Some(Box::new(MathExpr::Var("j".to_string()))),
+                },
+                MathExpr::Var("k".to_string()),
+            ])),
+        );
+        assert_eq!(slice.to_latex(), "A[i:j,k]");
     }
 }

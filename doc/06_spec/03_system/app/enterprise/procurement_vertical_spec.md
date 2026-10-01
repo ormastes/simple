@@ -24,7 +24,7 @@ The purchase-to-stock flow of the Simple Enterprise Suite (design §6.4), end to
 | Design | doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §6.4 |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/procurement_vertical_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -81,6 +81,11 @@ Lane: .spipe/simple_enterprise_suite (W6-B).
 
 #### moves a requisition through PO, partial receipts, invoice, and a live sale
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- moves a requisition through PO, partial receipts, invoice, and a live sale
 - Open a clean shared store; admin registers the supplier
    - Expected: proc_supplier_add(store, sa, t, admin, "sup-1", "Acme Supply").reason equals `accepted`
 - Buyer raises a requisition for 5 units of SKU-1
@@ -115,10 +120,12 @@ Lane: .spipe/simple_enterprise_suite (W6-B).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 57 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("moves a requisition through PO, partial receipts, invoice, and a live sale")
 step("Open a clean shared store; admin registers the supplier")
 val store = fresh_store("e2e")
 val t = tenant_a()
@@ -182,6 +189,7 @@ store_close(store)
 
 #### denies an over-receipt beyond ordered minus received
 
+- denies an over-receipt beyond ordered minus received
 - Receive 4 of the 5 ordered
    - Expected: proc_receive(store, sb, t, buyer, envelope("or-rc1", "proc.po.receive"), "po-1", 4).reason equals `accepted`
 - Attempt to receive 2 more — only 1 remains, must be denied with no effect
@@ -195,10 +203,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies an over-receipt beyond ordered minus received")
 val store = seed_open_po("over_receipt")
 val t = tenant_a()
 val buyer = buyer_a()
@@ -220,6 +230,7 @@ store_close(store)
 
 #### denies an invoice for more than has been received
 
+- denies an invoice for more than has been received
 - Invoice 4 units when only 3 were received
    - Expected: r.reason equals `invalid-record`
    - Expected: proc_po_invoiced(store, "tenant-a", "po-1") equals `0`
@@ -228,10 +239,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies an invoice for more than has been received")
 val store = seed_open_po("over_invoice")
 val t = tenant_a()
 val buyer = buyer_a()
@@ -249,6 +262,7 @@ store_close(store)
 
 #### denies a PO from an unapproved requisition and approval of a missing one
 
+- denies a PO from an unapproved requisition and approval of a missing one
 - PO from a merely created requisition is an invalid transition
    - Expected: r.reason equals `invalid-transition`
 - Approving a nonexistent requisition is not-found
@@ -260,10 +274,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies a PO from an unapproved requisition and approval of a missing one")
 val store = fresh_store("unapproved")
 val t = tenant_a()
 val admin = admin_a()
@@ -288,6 +304,7 @@ store_close(store)
 
 #### denies bad sessions and wrong roles
 
+- denies bad sessions and wrong roles
 - Inactive session rejected
    - Expected: proc_receive(store, dead, t, buyer, envelope("g-rc", "proc.po.receive"), "po-1", 1).reason equals `invalid-session`
 - Sales role cannot receive against a PO
@@ -299,10 +316,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies bad sessions and wrong roles")
 val store = seed_open_po("guards")
 val t = tenant_a()
 val buyer = buyer_a()
@@ -324,6 +343,7 @@ store_close(store)
 
 #### replaying the same receipt command changes nothing
 
+- replaying the same receipt command changes nothing
 - Receive once
    - Expected: proc_receive(store, sb, t, buyer, envelope("same-key", "proc.po.receive"), "po-1", 3).reason equals `accepted`
 - Replay the SAME idempotency key
@@ -338,10 +358,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replaying the same receipt command changes nothing")
 val store = seed_open_po("replay")
 val t = tenant_a()
 val buyer = buyer_a()
@@ -369,6 +391,7 @@ store_close(store)
 
 #### tenant B sees none of tenant A's procurement state
 
+- tenant B sees none of tenant A's procurement state
 - Tenant B sees no requisition, no receipts, no payable
    - Expected: proc_requisition_status(store, "tenant-b", "req-1") equals ``
    - Expected: proc_payable_total(store, "tenant-b") equals `0`
@@ -383,10 +406,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tenant B sees none of tenant A's procurement state")
 val store = seed_open_po("isolation")
 step("Tenant B sees no requisition, no receipts, no payable")
 expect(proc_requisition_status(store, "tenant-b", "req-1")).to_equal("")
@@ -410,6 +435,7 @@ store_close(store)
 
 #### reopens the database with PO, receipts, payable, and replay guard intact
 
+- reopens the database with PO, receipts, payable, and replay guard intact
 - Close the store (simulated shutdown)
 - Reopen and verify PO state, shared stock, payable, and audit
    - Expected: proc_requisition_status(store2, "tenant-a", "req-1") equals `approved`
@@ -424,10 +450,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reopens the database with PO, receipts, payable, and replay guard intact")
 val store = seed_open_po("restart")
 val t = tenant_a()
 val buyer = buyer_a()
@@ -471,3 +499,54 @@ store_close(store2)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `04b4914f52cb4653fb6ecf0a33978bf90caf0b26880b23ea295a7a1e54074b4a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `04b4914f52cb4653fb6ecf0a33978bf90caf0b26880b23ea295a7a1e54074b4a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `04b4914f52cb4653fb6ecf0a33978bf90caf0b26880b23ea295a7a1e54074b4a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/enterprise/procurement_vertical_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/procurement_vertical_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/procurement_vertical_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/procurement_vertical_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/procurement_vertical_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 17 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/procurement_vertical_spec.spl:132:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'moves a requisition through PO, partial receipts, invoice, and a live sale' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/procurement_vertical_spec.spl:192:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'denies an over-receipt beyond ordered minus received' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/procurement_vertical_spec.spl:211:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'denies an invoice for more than has been received' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

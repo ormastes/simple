@@ -58,6 +58,7 @@ This test file covers basic type inference rules that work in the current runtim
 
 ## Syntax
 
+```simple
 Type annotations are optional when the type can be inferred:
 
     val x = 42          # inferred: i64
@@ -81,8 +82,10 @@ Bidirectional inference from expected type:
 
     val nums: [i64] = [1, 2, 3]  # list element type inferred
 
+```
 ## Examples
 
+```simple
     val x = 42
     val y = x + 8    # => 50  (i64 propagated through arithmetic)
 
@@ -94,6 +97,7 @@ Bidirectional inference from expected type:
     val words = ["a", "b", "c"]
     words.len()  # => 3  (list type inferred as [text])
 
+```
 ## Key Concepts
 
 **Hindley-Milner (HM)** — Simple's inference algorithm is based on HM with

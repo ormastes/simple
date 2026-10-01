@@ -8,8 +8,42 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::process::Child;
 
+/// Owned-process V3 exposes opaque native leases that the interpreter cannot
+/// safely manufacture or project. Keep every registered entry fail-closed.
+pub fn rt_process_owned_v3_adapter_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::Runtime(
+        "OwnedProcessV3 opaque adapter is unavailable in the interpreter; it requires the native runtime provider".to_string(),
+    ))
+}
+
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
+}
+
+/// Resolve a POSIX absolute interpreter path (`/bin/sh`, `/bin/bash`,
+/// `/usr/bin/env`, ...) to something `std::process::Command` can actually
+/// spawn on Windows. Mirror of the SFFI-lane helper in
+/// `runtime/src/value/sffi/env_process.rs` (48f49e11883, 2026-08-09): on
+/// Windows `Command::new("/bin/sh")` treats the leading `/` as the current
+/// drive root (`C:in\sh`), and CreateProcess does not fall back to a
+/// PATH search once a separator is present — spawn fails with
+/// ERROR_FILE_NOT_FOUND. Bare names do PATH-search and resolve via Git
+/// Bash. Only rewrites well-known POSIX interpreter paths, only on
+/// Windows, and only when the literal path does not already exist.
+fn resolve_command_path(cmd: &str) -> &str {
+    #[cfg(windows)]
+    {
+        if std::path::Path::new(cmd).exists() {
+            return cmd;
+        }
+        match cmd {
+            "/bin/sh" | "/usr/bin/sh" => return "sh",
+            "/bin/bash" | "/usr/bin/bash" => return "bash",
+            "/bin/env" | "/usr/bin/env" => return "env",
+            _ => {}
+        }
+    }
+    cmd
 }
 
 #[cfg(unix)]
@@ -473,7 +507,10 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// # Returns
 /// * Array of (key, value) tuples
-pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_env_all(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_env_all/rt_env_vars require no arguments"));
+    }
     unsafe {
         let result = sffi_env_all();
         Ok(runtime_to_value(result))
@@ -625,7 +662,7 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let output = command.args(&cmd_args).stdin(std::process::Stdio::null()).output();
 
@@ -673,7 +710,7 @@ pub fn rt_process_run_inherit(args: &[Value]) -> Result<Value, CompileError> {
             ))
         }
     };
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let code = command
         .args(cmd_args)
@@ -725,7 +762,7 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let status = command
         .args(&cmd_args)
@@ -790,7 +827,7 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let mut child = match command
         .args(&cmd_args)
@@ -827,6 +864,18 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Truncated streams contain their retained head and tail separated by
 /// `\n[output truncated: N bytes omitted]\n`; the marker is outside the byte budget.
+fn bounded_output_limit(value: &Value) -> Option<usize> {
+    match value {
+        // -1 means unlimited, the same contract as the C runtime owner. Use
+        // i64::MAX rather than usize::MAX so read_bounded's `(max + 1) / 2`
+        // cannot overflow.
+        Value::Int(-1) => Some(i64::MAX as usize),
+        Value::Int(value) if *value >= 0 => Some(usize::try_from(*value).unwrap_or(usize::MAX)),
+        Value::UInt { value, .. } => Some(usize::try_from(*value).unwrap_or(usize::MAX)),
+        _ => None,
+    }
+}
+
 pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 4 {
         return Err(CompileError::runtime(
@@ -859,16 +908,20 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
             ))
         }
     };
-    let max_output_bytes = match args[3] {
-        Value::Int(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-        _ => {
+    // Imported `i64` constants can retain their unsigned literal carrier in
+    // bootstrap interpretation even though binding/type checking has already
+    // admitted them as i64. Accept that equivalent representation as well as
+    // the canonical signed -1 unlimited sentinel.
+    let max_output_bytes = match bounded_output_limit(&args[3]) {
+        Some(value) => value,
+        None => {
             return Err(CompileError::runtime(
-                "rt_process_run_bounded: max_output_bytes must be a non-negative integer",
+                "rt_process_run_bounded: max_output_bytes must be a non-negative integer or -1 (unlimited)",
             ))
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
     let child = match command
@@ -892,6 +945,226 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
         Value::text(String::from_utf8_lossy(&stdout).into_owned()),
         Value::text(String::from_utf8_lossy(&stderr).into_owned()),
         Value::Int(exit_code),
+    ]))
+}
+
+/// Mirror of `RtOwnedProcessReceipt` in `src/runtime/runtime.h`.
+#[repr(C)]
+#[derive(Default)]
+struct RtOwnedProcessReceipt {
+    version: u64,
+    slot: u64,
+    generation: u64,
+    pid: i64,
+    process_group_id: i64,
+    start_identity: u64,
+    stdout_bytes_seen: u64,
+    stderr_bytes_seen: u64,
+    stdout_bytes_kept: u64,
+    stderr_bytes_kept: u64,
+    exit_code: i64,
+    timed_out: i32,
+    term_sent: i32,
+    kill_sent: i32,
+    identity_revalidated: i32,
+    reaped: i32,
+    stdout_truncated: i32,
+    stderr_truncated: i32,
+    runtime_error: i32,
+}
+
+/// Mirror of `RtOwnedProcessObservationV1` in `src/runtime/runtime.h`.
+#[repr(C)]
+#[derive(Default)]
+struct RtOwnedProcessObservationV1 {
+    version: u64,
+    evidence_flags: u64,
+    user_cpu_ms: i64,
+    system_cpu_ms: i64,
+    peak_direct_child_rss_bytes: i64,
+    peak_tree_charge_bytes: i64,
+    io_read_bytes: i64,
+    io_write_bytes: i64,
+    pids_peak: i64,
+    termination_signal: i64,
+    runtime_error: i32,
+}
+
+// Core owned-process runners from src/runtime/runtime_process_owned.c, which
+// the runtime crate compiles (see runtime/build.rs). The `*_value` C wrappers
+// return seed-runtime string/array handles the interpreter cannot own, so the
+// interpreter calls the core entry and builds the tuple itself.
+unsafe extern "C" {
+    fn rt_process_run_owned_observed_bounded(
+        cmd: *const std::os::raw::c_char,
+        argv: *const *const std::os::raw::c_char,
+        timeout_ms: i64,
+        max_output_bytes: u64,
+        out: *mut std::os::raw::c_char,
+        out_cap: u64,
+        err: *mut std::os::raw::c_char,
+        err_cap: u64,
+        receipt: *mut RtOwnedProcessReceipt,
+        observation: *mut RtOwnedProcessObservationV1,
+    ) -> bool;
+}
+
+/// Capability discovery is a query, not an authority-minting operation.  The
+/// interpreter therefore returns the exact unavailable receipt instead of
+/// throwing while all lease-bearing V3 operations continue to fail closed.
+pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(1),
+        Value::Int(0),
+        Value::Int(0),
+    ])))
+}
+
+pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(4),
+        Value::Int(8),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(95),
+    ])))
+}
+
+/// Process Observation V4 never falls back to the V1/V3 process providers.
+/// Interpreter mode exposes the symbol surface but cannot mint V4 authority.
+pub fn rt_process_observation_v4_provider_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime(
+        "process observation V4 is unavailable in interpreter mode; use the exact native V4 provider",
+    ))
+}
+
+/// `rt_process_run_owned_observed_bounded_value(cmd, args, timeout_ms, max_output_bytes) -> (text, text, [i64])`
+///
+/// Interpreter twin of the C `_value` wrapper in `runtime_process_owned.c`:
+/// the 30-field `[i64]` is 19 receipt fields followed by 11 observation
+/// fields, in the exact `OWNED_PUSH` order (`fields[0] == 1`,
+/// `fields[19] == 2` are the layout versions the Simple facade checks).
+/// Argument validation and clamps mirror `owned_run_bounded_value_impl`.
+pub fn rt_process_run_owned_observed_bounded_value(args: &[Value]) -> Result<Value, CompileError> {
+    const NAME: &str = "rt_process_run_owned_observed_bounded_value";
+    const RT_OWNED_ABI_MAX_TIMEOUT_MS: i64 = 3_600_000;
+    const RT_OWNED_ABI_MAX_OUTPUT_BYTES: i64 = 16 * 1024 * 1024;
+    if args.len() < 4 {
+        return Err(CompileError::runtime(format!(
+            "{NAME} requires 4 arguments (cmd, args, timeout_ms, max_output_bytes)"
+        )));
+    }
+    let cmd = match &args[0] {
+        Value::Str(value) => std::ffi::CString::new(value.as_str())
+            .map_err(|_| CompileError::runtime(format!("{NAME}: cmd must not contain NUL")))?,
+        _ => return Err(CompileError::runtime(format!("{NAME}: cmd must be a string"))),
+    };
+    let cmd_args = match &args[1] {
+        Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                Value::Str(value) => std::ffi::CString::new(value.as_str())
+                    .map_err(|_| CompileError::runtime(format!("{NAME}: args must not contain NUL"))),
+                _ => Err(CompileError::runtime(format!(
+                    "{NAME}: args must be an array of strings"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "{NAME}: args must be an array of strings"
+            )))
+        }
+    };
+    let timeout_ms = match args[2] {
+        Value::Int(value) if value >= 0 => value.min(RT_OWNED_ABI_MAX_TIMEOUT_MS),
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "{NAME}: timeout_ms must be a non-negative integer"
+            )))
+        }
+    };
+    let max_output_bytes = match args[3] {
+        Value::Int(value) if value >= 0 => value.min(RT_OWNED_ABI_MAX_OUTPUT_BYTES),
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "{NAME}: max_output_bytes must be a non-negative integer"
+            )))
+        }
+    };
+
+    let mut argv: Vec<*const std::os::raw::c_char> = Vec::with_capacity(cmd_args.len() + 2);
+    argv.push(cmd.as_ptr());
+    argv.extend(cmd_args.iter().map(|arg| arg.as_ptr()));
+    argv.push(std::ptr::null());
+
+    let capacity = max_output_bytes as usize + 1;
+    let mut out = vec![0u8; capacity];
+    let mut err = vec![0u8; capacity];
+    let mut receipt = RtOwnedProcessReceipt::default();
+    let mut observation = RtOwnedProcessObservationV1::default();
+    // The bool result is deliberately ignored, as in the C `_value` wrapper:
+    // `receipt.runtime_error` carries provider failure without hiding output.
+    // SAFETY: every pointer is valid for the call; argv is NULL-terminated and
+    // its CStrings outlive the call; out/err are `capacity` bytes each.
+    let _ = unsafe {
+        rt_process_run_owned_observed_bounded(
+            cmd.as_ptr(),
+            argv.as_ptr(),
+            timeout_ms,
+            max_output_bytes as u64,
+            out.as_mut_ptr() as *mut std::os::raw::c_char,
+            capacity as u64,
+            err.as_mut_ptr() as *mut std::os::raw::c_char,
+            capacity as u64,
+            &mut receipt,
+            &mut observation,
+        )
+    };
+
+    let stdout_kept = (receipt.stdout_bytes_kept as usize).min(capacity);
+    let stderr_kept = (receipt.stderr_bytes_kept as usize).min(capacity);
+    let r = &receipt;
+    let o = &observation;
+    let fields: Vec<i64> = vec![
+        r.version as i64,
+        r.slot as i64,
+        r.generation as i64,
+        r.pid,
+        r.process_group_id,
+        r.start_identity as i64,
+        r.stdout_bytes_seen as i64,
+        r.stderr_bytes_seen as i64,
+        r.stdout_bytes_kept as i64,
+        r.stderr_bytes_kept as i64,
+        r.exit_code,
+        r.timed_out as i64,
+        r.term_sent as i64,
+        r.kill_sent as i64,
+        r.identity_revalidated as i64,
+        r.reaped as i64,
+        r.stdout_truncated as i64,
+        r.stderr_truncated as i64,
+        r.runtime_error as i64,
+        o.version as i64,
+        o.evidence_flags as i64,
+        o.user_cpu_ms,
+        o.system_cpu_ms,
+        o.peak_direct_child_rss_bytes,
+        o.peak_tree_charge_bytes,
+        o.io_read_bytes,
+        o.io_write_bytes,
+        o.pids_peak,
+        o.termination_signal,
+        o.runtime_error as i64,
+    ];
+    Ok(Value::Tuple(vec![
+        Value::text(String::from_utf8_lossy(&out[..stdout_kept]).into_owned()),
+        Value::text(String::from_utf8_lossy(&err[..stderr_kept]).into_owned()),
+        Value::array(fields.into_iter().map(Value::Int).collect()),
     ]))
 }
 
@@ -938,7 +1211,7 @@ fn process_spawn(args: &[Value], guarded: bool) -> Result<Value, CompileError> {
 
     #[cfg(target_os = "linux")]
     let mut command = if guarded {
-        let mut shell = std::process::Command::new("/bin/sh");
+        let mut shell = std::process::Command::new(resolve_command_path("/bin/sh"));
         shell
             .arg("-c")
             .arg("child=; stop(){ [ -z \"$child\" ] || { kill -TERM -- \"-$child\" 2>/dev/null || true; sleep 0.1; kill -KILL -- \"-$child\" 2>/dev/null || true; }; }; die(){ sig=$1; stop; trap - \"$sig\"; kill \"-$sig\" \"$$\"; exit 143; }; trap 'die 1' HUP; trap 'die 2' INT; trap 'die 15' TERM; setsid /bin/sh -c 'sleep 3600 & exec \"$@\"' simple-guard-grp \"$@\" & child=$!; wait \"$child\"; code=$?; stop; if [ \"$code\" -gt 128 ]; then sig=$((code-128)); trap - \"$sig\"; kill \"-$sig\" \"$$\"; fi; exit \"$code\"")
@@ -946,10 +1219,10 @@ fn process_spawn(args: &[Value], guarded: bool) -> Result<Value, CompileError> {
             .arg(&*cmd);
         shell
     } else {
-        std::process::Command::new(&*cmd)
+        std::process::Command::new(resolve_command_path(&*cmd))
     };
     #[cfg(not(target_os = "linux"))]
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     command
         .args(&cmd_args)
@@ -997,6 +1270,30 @@ pub fn rt_process_spawn_guarded(args: &[Value]) -> Result<Value, CompileError> {
     process_spawn(args, true)
 }
 
+/// Exit status as the caller's `rt_process_wait` contract wants it: the code for
+/// a normal exit, `-(128 + signo)` for a signal death, `-1` only when neither is
+/// available. `ExitStatus::code()` returns `None` for a signal death, so the
+/// long-standing `code().unwrap_or(-1)` discarded WTERMSIG and rendered every
+/// signal death as a bare -1 -- which the caller shows as 255 and the bootstrap
+/// then reported as "worker was KILLED ... signal number discarded by an older
+/// runtime". That was indistinguishable from an OOM, a SIGSEGV and a failed
+/// wait, and cost four investigations on one Stage-3 crash. `runtime_process.c`
+/// was fixed on 2026-09-05; this is the same rule for its Rust twins.
+/// See doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md
+fn wait_status_to_code(status: std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return code as i64;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signo) = status.signal() {
+            return -(128 + signo as i64);
+        }
+    }
+    -1
+}
+
 /// Wait for a spawned process to complete
 ///
 /// Callable from Simple as: `rt_process_wait(pid, timeout_ms)`
@@ -1035,7 +1332,7 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
             match poll {
                 Ok(Some(status)) => {
                     SPAWNED_PROCESSES.lock().unwrap().remove(&pid);
-                    return Ok(Value::Int(status.code().unwrap_or(-1) as i64));
+                    return Ok(Value::Int(wait_status_to_code(status)));
                 }
                 Ok(None) if std::time::Instant::now() >= deadline => return Ok(Value::Int(-2)),
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
@@ -1050,7 +1347,7 @@ pub fn rt_process_wait(args: &[Value]) -> Result<Value, CompileError> {
     let mut processes = SPAWNED_PROCESSES.lock().unwrap();
     match processes.remove(&pid) {
         Some(mut child) => match child.wait() {
-            Ok(status) => Ok(Value::Int(status.code().unwrap_or(-1) as i64)),
+            Ok(status) => Ok(Value::Int(wait_status_to_code(status))),
             Err(_) => Ok(Value::Int(-1)),
         },
         None => {
@@ -1080,7 +1377,44 @@ pub fn rt_process_is_running(args: &[Value]) -> Result<Value, CompileError> {
             Ok(None) => Ok(Value::Bool(true)), // still running
             _ => Ok(Value::Bool(false)),       // exited or error
         },
-        None => Ok(Value::Bool(false)), // not tracked
+        // Not one of OUR children. `false` here is wrong: a pid we did not
+        // spawn can be perfectly alive. The C runtime
+        // (src/runtime/runtime_process.c:54) already gets this right — it
+        // falls back to `kill(pid, 0)` when waitpid reports ECHILD — and the
+        // interpreter must match, or callers silently get "dead" for every
+        // process they did not spawn themselves.
+        //
+        // This was reported as a caret bug: `cs`'s roster showed every agent
+        // as `exited: pane pid <N> is not running` while `tmux list-panes`
+        // said `dead=0`, because tmux — not cs — is the pane's parent.
+        // See doc/08_tracking/bug/interpreter_process_is_running_false_for_unspawned_pid_2026-09-06.md
+        None => Ok(Value::Bool(pid_is_live(pid))),
+    }
+}
+
+/// Liveness probe for a pid this process did not spawn.
+///
+/// Signal 0 performs the permission and existence checks without delivering a
+/// signal. EPERM means the process exists but belongs to another user, which
+/// is still "alive" for our purposes — treating it as dead is the bug this
+/// exists to avoid.
+fn pid_is_live(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        // No cheap portable probe here; report unknown as not-running rather
+        // than claiming liveness we did not verify.
+        false
     }
 }
 
@@ -1172,7 +1506,7 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     command
         .args(&cmd_args)
@@ -1468,7 +1802,7 @@ pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(unix)]
 fn shell_command(cmd: &str) -> std::process::Command {
-    let mut command = std::process::Command::new("/bin/sh");
+    let mut command = std::process::Command::new(resolve_command_path("/bin/sh"));
     command.arg("-c").arg(cmd);
     command
 }
@@ -1592,7 +1926,7 @@ mod tests {
             let _guard = registry.lock().unwrap();
             panic!("poison process registry");
         }));
-        let child = std::process::Command::new("/bin/sh")
+        let child = std::process::Command::new(resolve_command_path("/bin/sh"))
             .args(["-c", "sleep 30"])
             .spawn()
             .expect("spawn sabotage child");
@@ -1649,8 +1983,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_exec_captures_stdout_and_exit_code_via_shell() {
-        let out = rt_shell_exec(&[Value::text("echo hello".to_string())])
-            .expect("rt_shell_exec should succeed");
+        let out = rt_shell_exec(&[Value::text("echo hello".to_string())]).expect("rt_shell_exec should succeed");
         let Value::Str(stdout) = out else {
             panic!("expected text result, got {out:?}");
         };
@@ -1675,10 +2008,8 @@ mod tests {
     fn shell_exec_honors_shell_metacharacters() {
         // Real callers (e.g. container_adapter.spl) rely on pipes/redirection
         // being interpreted, not passed literally to argv[1].
-        let out = rt_shell_exec(&[Value::text(
-            "echo one; echo two 1>&2 2>/dev/null".to_string(),
-        )])
-        .expect("rt_shell_exec should succeed");
+        let out = rt_shell_exec(&[Value::text("echo one; echo two 1>&2 2>/dev/null".to_string())])
+            .expect("rt_shell_exec should succeed");
         let Value::Str(stdout) = out else {
             panic!("expected text result, got {out:?}");
         };
@@ -1688,10 +2019,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_exec_tuple_returns_stdout_stderr_and_exit_code_separately() {
-        let result = rt_shell_exec_tuple(&[Value::text(
-            "printf out; printf err 1>&2; exit 3".to_string(),
-        )])
-        .expect("rt_shell_exec_tuple should succeed");
+        let result = rt_shell_exec_tuple(&[Value::text("printf out; printf err 1>&2; exit 3".to_string())])
+            .expect("rt_shell_exec_tuple should succeed");
         let Value::Tuple(parts) = result else {
             panic!("expected tuple result, got {result:?}");
         };
@@ -1746,6 +2075,41 @@ mod tests {
         }
     }
 
+    /// -1 is the documented "unlimited" bound (C runtime contract; std
+    /// process_run passes it on Windows). It must run the child, not error.
+    #[test]
+    fn process_run_bounded_accepts_minus_one_as_unlimited() {
+        let (cmd, script) = if cfg!(windows) {
+            ("cmd.exe", vec!["/C", "echo bounded-ok"])
+        } else {
+            ("/bin/sh", vec!["-c", "echo bounded-ok"])
+        };
+        let result = rt_process_run_bounded(&[
+            Value::text(cmd.to_string()),
+            Value::Array(Arc::new(
+                script.into_iter().map(|s| Value::text(s.to_string())).collect(),
+            )),
+            Value::Int(0),
+            Value::Int(-1),
+        ])
+        .expect("-1 must be accepted as unlimited");
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple");
+        };
+        assert_eq!(parts[2], Value::Int(0));
+        let Value::Str(stdout) = &parts[0] else {
+            panic!("expected stdout string");
+        };
+        assert!(stdout.contains("bounded-ok"), "stdout: {}", stdout);
+        assert!(rt_process_run_bounded(&[
+            Value::text(cmd.to_string()),
+            Value::Array(Arc::new(vec![])),
+            Value::Int(0),
+            Value::Int(-2),
+        ])
+        .is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_run_bounded_drains_flooding_streams_with_head_and_tail() {
@@ -1774,6 +2138,30 @@ mod tests {
             assert!(output.ends_with("TAIL"));
             assert!(output.contains("\n[output truncated: 9944 bytes omitted]\n"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_run_bounded_accepts_unsigned_nonnegative_output_limit() {
+        let result = rt_process_run_bounded(&[
+            Value::text("/bin/true".to_string()),
+            Value::Array(Arc::new(vec![])),
+            Value::Int(5_000),
+            Value::UInt { value: 64, width: 64 },
+        ])
+        .unwrap();
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple");
+        };
+        assert_eq!(parts[2], Value::Int(0));
+    }
+
+    #[test]
+    fn bounded_output_limit_accepts_both_integer_carriers() {
+        assert_eq!(bounded_output_limit(&Value::Int(64)), Some(64));
+        assert_eq!(bounded_output_limit(&Value::UInt { value: 64, width: 64 }), Some(64));
+        assert_eq!(bounded_output_limit(&Value::Int(-1)), Some(i64::MAX as usize));
+        assert_eq!(bounded_output_limit(&Value::Int(-2)), None);
     }
 
     #[cfg(unix)]
@@ -1845,6 +2233,28 @@ mod tests {
     #[test]
     fn interpreter_runtime_reports_interpreter_abi() {
         assert_eq!(rt_is_interpreter_runtime(&[]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn owned_process_v3_adapter_fails_closed_in_interpreter() {
+        let error = rt_process_owned_v3_adapter_unavailable(&[]).expect_err("interpreter must not mint a lease");
+        assert!(error.to_string().contains("opaque adapter is unavailable"));
+        assert!(error.to_string().contains("native runtime provider"));
+    }
+
+    #[test]
+    fn owned_process_v3_capability_query_reports_unavailable_in_interpreter() {
+        assert_eq!(
+            rt_process_owned_v3_capabilities_unavailable(&[]).unwrap(),
+            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(0), Value::Int(0),]))
+        );
+    }
+
+    #[test]
+    fn owned_pinned_process_adapter_fails_closed_in_interpreter() {
+        let error =
+            rt_process_owned_v3_adapter_unavailable(&[]).expect_err("interpreter must not mint an executable pin");
+        assert!(error.to_string().contains("opaque adapter is unavailable"));
     }
 
     // Note: Can't test sys_exit() as it terminates the process

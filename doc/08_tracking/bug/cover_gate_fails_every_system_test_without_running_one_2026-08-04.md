@@ -99,16 +99,18 @@ with coverage collection on. Until then, treat the 227 in
 `test/03_system/app` as **unmeasured**, not as 227 defects: the only honest
 current number for that directory comes from a `--no-cover-check` run.
 
-## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+## Triage 2026-09-13 (BUGFIX-10 fanout)
 
-**STILL-OPEN, confirmed by CONTENT.**
-`src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:203-214`
-(`validate_system_test_covers`) still gates purely on the `/system/` and
-`/03_system/` path substrings and flags any file whose `extract_cover_annotations`
-returns empty — no test is executed to reach that verdict. Note checked and
-DISMISSED during this pass: `missing.push(f)` at :213 discards its result, which
-would be a silent no-op if `push` were pure — but every other call site in this
-file (:115, :229, :342, :482, :523, :551, :593, :638, :720) uses the same bare
-mutating form, so that is the file-wide convention, not a defect. The gate is live.
-Policy decision (should a missing `# @cover` be a FAILURE or a warning?) is not a
-unilateral stdlib change; left open.
+Already explicitly a "rollout/policy decision... not something a
+bug-triage session can resolve unilaterally" per the 2026-08-10
+re-verification. Fixing it means either fabricating coverage claims across
+thousands of files or weakening a gate the repo rules forbid weakening —
+neither available to this lane. Left OPEN, unchanged.
+## Triage 2026-09-13
+
+Explicitly recorded as "a rollout/policy decision... not something a
+bug-triage session can resolve unilaterally" -- 2,122+ legacy specs
+lack the # @cover annotation the gate now requires, and adding it
+requires measured coverage data per file (not mechanical). Leaving
+OPEN as recorded, no attempt.
+

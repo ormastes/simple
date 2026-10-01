@@ -1,0 +1,53 @@
+# DevHub auth token persistence (auth.sdn)
+#
+# This module owns parsing and rewriting plaintext token sections. Token
+# resolution policy (environment, command, then file) remains in config.spl.
+
+use app.io.mod.{file_read, file_exists, file_atomic_write}
+
+
+fn load_auth_token_from(path: text, provider: text) -> text:
+    """Load one provider token from an auth.sdn path."""
+    if not file_exists(path):
+        return ""
+
+    val content = file_read(path)
+    if content == nil:
+        return ""
+
+    var section = ""
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_dn
+        else if trimmed.ends_with(":") and not trimmed.contains(" "):
+            section = trimmed.replace(":", "")
+        else if section == provider and trimmed.starts_with("token:"):
+            # Split at the first colon so values such as user:pass survive.
+            val colon_idx = trimmed.find(":")
+            val token = trimmed[colon_idx + 1:].trim()
+            if token.starts_with("\"") and token.ends_with("\""):
+                return token[1:token.len() - 1]
+            return token
+    ""
+
+
+fn _without_auth_section(content: text, section_name: text) -> text:
+    var result = ""
+    var skip = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.ends_with(":") and not trimmed.contains(" "):
+            skip = trimmed == "{section_name}:"
+        if not skip:
+            result = result + line + "\n"
+    result
+
+
+fn save_auth_token_to(path: text, provider: text, token: text) -> bool:
+    """Save one provider token while preserving all other auth.sdn sections."""
+    val existing = if file_exists(path): file_read(path) else: "# ITF Auth Tokens (do not share)\n\n"
+    var content = _without_auth_section(existing, provider)
+    if token != "":
+        content = content + "\n{provider}:\n    token: \"{token}\"\n"
+    file_atomic_write(path, content)

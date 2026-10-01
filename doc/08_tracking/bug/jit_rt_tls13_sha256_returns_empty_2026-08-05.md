@@ -1,4 +1,9 @@
 # `rt_tls13_sha256` returns an EMPTY digest under the Cranelift JIT — silently
+## Closed 2026-09-16 — Status FIXED; two fixes on main, KAT 3/3 both engines on rebuilt seed; self-host redeploy pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED. Two independent, complementary fixes now both land on
 current `main`, verified together against a freshly rebuilt seed
@@ -183,3 +188,4 @@ A regression guard belongs in the `engine_probe` form
 (`src/lib/nogc_sync_mut/spec/engine_probe.spl`), asserting the probe's
 `tls13_sha256 len=32` line under **both** named engines — a spec body can never
 reach the JIT itself, so an in-process `expect` cannot catch this.
+

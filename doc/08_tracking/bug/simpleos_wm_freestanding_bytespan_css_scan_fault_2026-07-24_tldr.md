@@ -1,4 +1,8 @@
 # TLDR — SimpleOS WM Freestanding ByteSpan CSS Scanner Fault
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - OVMF, kernel, compositor, font, disk, and 3840x2160 scanout now initialize.
 - Guest disassembly proved `_css_scan_rules_simple` incorrectly targeted
@@ -9,3 +13,4 @@
   collision fixture and keeps `CustomPrefixOwner.starts_with` separate.
 - Live QEMU verification remains for a fresh session; this session's launch cap
   is exhausted.
+

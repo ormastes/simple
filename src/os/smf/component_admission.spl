@@ -1,0 +1,45 @@
+# Pure OS admission adapter for dynamically resolved component artifacts.
+# Common policy deliberately treats source_kind as opaque.  The first OS/SMF
+# slice admits only precompiled SMF artifacts and fails closed for every other
+# source, including file, native library, JIT, and remote locators.
+
+use std.common.structural.component.resolver.{
+    ComponentResolverCatalog,
+    ComponentResolveRequest,
+    ComponentResolution,
+    component_resolve
+}
+
+struct SmfComponentAdmission:
+    accepted: bool
+    reason: text
+    component_id: text
+    implementation_id: text
+    artifact_path: text
+    impl_digest: text
+
+fn smf_component_admit(resolution: ComponentResolution) -> SmfComponentAdmission:
+    if resolution.mode != "dynamic":
+        return SmfComponentAdmission(accepted: false, reason: "not_dynamic", component_id: resolution.component_id, implementation_id: resolution.implementation_id, artifact_path: "", impl_digest: resolution.impl_digest)
+    if resolution.source_kind != "smf_artifact":
+        return SmfComponentAdmission(accepted: false, reason: "unsupported_source_kind:" + resolution.source_kind, component_id: resolution.component_id, implementation_id: resolution.implementation_id, artifact_path: "", impl_digest: resolution.impl_digest)
+    if resolution.locator == "":
+        return SmfComponentAdmission(accepted: false, reason: "missing_artifact_path", component_id: resolution.component_id, implementation_id: resolution.implementation_id, artifact_path: "", impl_digest: resolution.impl_digest)
+    if resolution.impl_digest == "":
+        return SmfComponentAdmission(accepted: false, reason: "missing_impl_digest", component_id: resolution.component_id, implementation_id: resolution.implementation_id, artifact_path: "", impl_digest: resolution.impl_digest)
+    SmfComponentAdmission(accepted: true, reason: "smf_artifact_admitted", component_id: resolution.component_id, implementation_id: resolution.implementation_id, artifact_path: resolution.locator, impl_digest: resolution.impl_digest)
+
+# Module-side verdict keeps specs independent of cross-module record-field
+# projection while proving the adapter consumes the real common resolution.
+fn smf_component_admission_verdict(catalog: ComponentResolverCatalog, req: ComponentResolveRequest) -> text:
+    match component_resolve(catalog, req):
+        Ok(value):
+            val admitted = smf_component_admit(value)
+            if admitted.accepted:
+                "ok:" + admitted.component_id + ":" + admitted.implementation_id + ":" + admitted.artifact_path
+            else:
+                "err:" + admitted.reason
+        Err(error):
+            "err:resolve:" + error.code
+
+export SmfComponentAdmission, smf_component_admit, smf_component_admission_verdict

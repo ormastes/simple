@@ -34,7 +34,7 @@
 # the built-in vector/bitmap renderers for unsupported glyphs.
 
 use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
-use std.common.encoding.sfnt.{font_runtime_ttf_default_supported}
+use std.common.encoding.sfnt.{font_runtime_ttf_default_supported, sfnt_face_blob, font_face_spec_path, font_face_spec_index, font_unmanaged_face_identity}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_glyf_void_transport_probe, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_blob_glyph_exists}
 use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset, load_selected_font_file, selected_font_asset_identity_for_path}
 #
@@ -222,6 +222,68 @@ impl FontRasterizer:
     static fn load_selected_bytes(ttf_path: text, blob: [u8]) -> FontRasterizer:
         FontRasterizer._load_selected_bytes(ttf_path, blob, false)
 
+    # Load a font the pinned registry does not own — a platform system face.
+    #
+    # `load_selected` above answers `invalid()` for ANY path with no entry in
+    # `selected_font_asset_candidates()`, which is a provenance allowlist, not a
+    # format check. That is why `/System/Library/Fonts/Supplemental/Arial.ttf`
+    # was rejected in the very process that loaded a bundled Noto asset
+    # (round 9, doc/10_metrics/ui/web_chrome_parity_round9_2026-09-13.md) —
+    # nothing about the file was ever looked at. The allowlist stays exactly as
+    # it is: it is what the SimpleOS baremetal image and the digest-pinned
+    # bundle rely on. This is a SEPARATE, explicitly unmanaged lane, taken only
+    # after the managed one declines, and it keeps every structural validation
+    # (`font_runtime_ttf_default_supported` -> `validate_default_glyf_font`)
+    # that guards the managed lane against a malformed file.
+    #
+    # `path#N` selects face N of a TrueType collection; a bare path is face 0.
+    #
+    # The cache identity is `unmanaged=<path>#<face>;bytes=<n>`, NOT a digest.
+    # The managed lane's `sha256=` identity comes from the registry's PINNED
+    # metadata and costs nothing to read; hashing here would mean running
+    # sha256 over a 630 KB repacked face in the interpreter on every process
+    # start, which is the renderer's hot path (measured: it dominated a probe
+    # that previously finished in under two minutes). Path plus face index plus
+    # byte length identifies a file-backed face on a host exactly as well for
+    # cache-keying purposes, and it is an honest name rather than a partial
+    # digest wearing a `sha256=` prefix. Two faces of one .ttc get different
+    # identities, which is what stops Helvetica Regular and Bold sharing a
+    # metrics cache.
+    static fn load_unmanaged(ttf_path: text) -> FontRasterizer:
+        val base_path = font_face_spec_path(ttf_path)
+        val face_index = font_face_spec_index(ttf_path)
+        if base_path == "" or face_index < 0:
+            return FontRasterizer.invalid()
+        # A path the registry OWNS is not unmanaged, and the managed lane's
+        # verdict on it is final. Without this, a registry asset that
+        # `load_selected` refused — because `SIMPLE_ASSET_ROOT` did not resolve
+        # it, which is the asset-root enforcement
+        # `test/02_integration/rendering/font_renderer_bungee_native_probe.spl`
+        # pins — would be re-opened here as a plain relative path from the cwd
+        # and load anyway. This lane exists for paths the registry does not
+        # know at all, never as a second chance for one it rejected.
+        if selected_font_asset_candidate_for_path(base_path) != nil:
+            return FontRasterizer.invalid()
+        if not file_exists(base_path):
+            return FontRasterizer.invalid()
+        val raw = file_read_bytes(base_path)
+        if raw == nil or raw.len() == 0:
+            return FontRasterizer.invalid()
+        val blob = sfnt_face_blob(raw, face_index)
+        if blob.len() == 0:
+            return FontRasterizer.invalid()
+        if not font_runtime_ttf_default_supported(blob):
+            return FontRasterizer.invalid()
+        FontRasterizer(
+            lib_handle: 0, init_fp: 0, raster_fp: 0, subpixel_raster_fp: 0,
+            metric_fp: 0, pixel_fp: 0, subpixel_pixel_fp: 0, kern_fp: 0,
+            line_metric_fp: 0, layout_fp: 0, layout_glyph_metric_fp: 0,
+            glyph_pixels_ptr_fp: 0, glyph_pixels_len_fp: 0, glyph_free_fp: 0,
+            has_glyph_fp: 0, generation_fp: 0, font_path: base_path,
+            dylib_path: "", font_cache_identity: font_unmanaged_face_identity(base_path + "#" + face_index.to_text(), blob.len()),
+            loaded_generation: 1, selected_blob: blob,
+        )
+
     static fn _load_selected_bytes(ttf_path: text, blob: [u8], file_backed: bool) -> FontRasterizer:
         # No Option-unwrap + field access here: `opt.?` then `.field` on the
         # candidate FAULTS on baremetal (cr2=0x0, 2026-07-18). The identity is
@@ -274,10 +336,16 @@ impl FontRasterizer:
             # file, and the blob.len() below then raised "method `len` not
             # found on type `nil`". See doc/08_tracking/bug/
             # engine2d_font_api_interpreter_lane_crashes_2026-08-15.md.
-            if not file_exists(ttf_path):
+            # `path#N` names one face of a collection. The dylib initializer
+            # takes a plain path, so the spec is stripped before the existence
+            # check; without this the dylib lane refuses every collection face
+            # on a host where libspl_fonts IS present, and the caller falls
+            # through to the pure-Simple lane for no reason.
+            val unmanaged_path = font_face_spec_path(ttf_path)
+            if not file_exists(unmanaged_path):
                 spl_dlclose(h)
                 return FontRasterizer.invalid()
-            file_read_bytes(ttf_path)
+            file_read_bytes(unmanaged_path)
         var font_cache_identity = ""
         if val candidate = selected:
             font_cache_identity = "sha256={candidate.sha256};axes={candidate.default_axes}"

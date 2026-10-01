@@ -29,8 +29,6 @@ binding to a local first (`var f = me.hook; f(args)`); the setter must be a `me`
 use nvme_types.*
 use sandbox.*
 
-val HOOK_COUNTER_MAX: i64 = 1000000000000000000
-
 # ── A hook's return: a decision value + self-reported fuel consumed ───────────
 struct HookVote:
     value:     i64
@@ -38,13 +36,6 @@ struct HookVote:
 
 fn vote(value: i64, fuel_used: i64) -> HookVote:
     HookVote(value: value, fuel_used: fuel_used)
-
-fn hook_counter_next(v: i64) -> i64:
-    if v < 0:
-        return 1
-    if v >= HOOK_COUNTER_MAX:
-        return HOOK_COUNTER_MAX
-    v + 1
 
 # ── Default (built-in) hook bodies (positional scalar args) ───────────────────
 # gc_score(block, valid, erase, fuel): greedy default scores by live-page count, so the
@@ -99,7 +90,7 @@ impl PolicyHooks:
     me request_install(kind: i64) -> bool:
         if hook_kind_allowed(kind):
             return true
-        me.rejected_installs = hook_counter_next(me.rejected_installs)
+        me.rejected_installs = me.rejected_installs + 1
         false
 
     # ── Typed installers (only the allowed kinds have one) ───────────────────
@@ -151,7 +142,7 @@ impl PolicyHooks:
         var f = me.gc_score
         val v: HookVote = f(block, valid, erase, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
+            me.fuel_aborts = me.fuel_aborts + 1
             return default_gc_score(block, valid, erase, me.fuel_budget).value
         v.value
 
@@ -162,7 +153,7 @@ impl PolicyHooks:
         var f = me.qos
         val v: HookVote = f(opcode, nblocks, nsid, age, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
+            me.fuel_aborts = me.fuel_aborts + 1
             return clamp_priority(default_qos(opcode, nblocks, nsid, age, me.fuel_budget).value)
         clamp_priority(v.value)
 
@@ -173,7 +164,7 @@ impl PolicyHooks:
         var f = me.hot_cold
         val v: HookVote = f(lba, read_count, write_count, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
+            me.fuel_aborts = me.fuel_aborts + 1
             return clamp_bool(default_hot_cold(lba, read_count, write_count, me.fuel_budget).value)
         clamp_bool(v.value)
 
@@ -184,18 +175,14 @@ impl PolicyHooks:
         var f = me.telemetry
         val v: HookVote = f(kind, code, value, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
+            me.fuel_aborts = me.fuel_aborts + 1
             return clamp_bool(default_telemetry(kind, code, value, me.fuel_budget).value)
         clamp_bool(v.value)
 
     me rejected_count() -> i64:
-        if me.rejected_installs < 0:
-            return 0
         me.rejected_installs
 
     me fuel_abort_count() -> i64:
-        if me.fuel_aborts < 0:
-            return 0
         me.fuel_aborts
 
 # ── Self-test ─────────────────────────────────────────────────────────────────

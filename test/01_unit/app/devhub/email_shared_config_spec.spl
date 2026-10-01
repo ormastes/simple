@@ -1,0 +1,90 @@
+# codex-system-test
+# @req REQ-005
+"""
+Shared mail JSON parser and credential forwarding contract.
+Pure owner calls; no real configuration, process, network, or secret access.
+"""
+use std.spec.*
+use std.spec.step
+use app.devhub.cmd_email.{EmailAccount, parse_email_shared_config, email_credential_args, email_mail_process_args, email_expand_path}
+use app.io.mod.{env_get, env_set}
+
+describe "Devhub shared mail configuration":
+    it "should retain the exact shared file and POP3 account for subprocess forwarding":
+        step("Parse a shared POP3 account with a stored password-manager command")
+        val content = """
+        {"default_account":"work","accounts":{"work":{"protocol":"pop3","email":"alice@example.test","password_cmd":"failing-password-manager"}}}
+        """
+        val config = parse_email_shared_config(content, "/fixture/devhub/email.json")
+        expect(config.default_account).to_equal("work")
+        expect(config.accounts.len()).to_equal(1)
+        val account = config.accounts[0]
+        expect(account.provider).to_equal("pop3")
+        expect(account.email).to_equal("alice@example.test")
+        expect(account.config_file).to_equal("/fixture/devhub/email.json")
+        step("Forward the same file without converting stored password policy into an override")
+        expect(email_credential_args(account)).to_equal(["--account", "work", "--config-file", "/fixture/devhub/email.json"])
+
+    it "should preserve explicit credential and noninteractive options":
+        step("Construct invocation-only password options for a shared account")
+        val account = EmailAccount(
+            name: "work", provider: "pop3", email: "alice@example.test",
+            password_cmd: "stored-manager", password_command_override: "explicit-manager",
+            config_file: "/fixture/shared.json", password_file: "", non_interactive: true,
+            tenant_id: "", client_id: "", client_secret_env: "", shared_mailbox: "",
+        )
+        step("Forward only the explicitly selected command with the shared file")
+        expect(email_credential_args(account)).to_equal([
+            "--account", "work", "--password-cmd", "explicit-manager",
+            "--config-file", "/fixture/shared.json", "--non-interactive"
+        ])
+
+    it "should reject malformed shared configuration and unknown protocols":
+        step("Parse malformed JSON and account containers")
+        expect(parse_email_shared_config("not-json", "/fixture/mail.json").accounts.len()).to_equal(0)
+        expect(parse_email_shared_config("{\"accounts\":[]}", "/fixture/mail.json").accounts.len()).to_equal(0)
+        step("Preserve an unsupported protocol as an explicit unsupported account")
+        val config = parse_email_shared_config("{\"accounts\":{\"work\":{\"protocol\":\"unknown\"}}}", "/fixture/mail.json")
+        expect(config.accounts.len()).to_equal(1)
+        expect(config.accounts[0].provider).to_equal("unsupported")
+
+    it "should prefix an explicitly configured script without splitting spaced paths":
+        step("Set the optional mail script prefix while preserving the original environment")
+        val original = env_get("DEVHUB_MAIL_SCRIPT")
+        val configured = env_set("DEVHUB_MAIL_SCRIPT", "/fixture/path with spaces/mail")
+        val prefixed = email_mail_process_args(["read", "1", "--non-interactive"])
+        val cleared = env_set("DEVHUB_MAIL_SCRIPT", "")
+        val direct = email_mail_process_args(["version"])
+        val restored = env_set("DEVHUB_MAIL_SCRIPT", original)
+        step("Check one literal prefix argument and unchanged direct-executable arguments")
+        expect(configured).to_be(true)
+        expect(cleared).to_be(true)
+        expect(restored).to_be(true)
+        expect(prefixed).to_equal(["/fixture/path with spaces/mail", "read", "1", "--non-interactive"])
+        expect(direct).to_equal(["version"])
+
+    it "should expand only the literal home prefix with USERPROFILE fallback and no shell evaluation":
+        step("Temporarily isolate HOME and USERPROFILE for path expansion")
+        val original_home = env_get("HOME")
+        val original_profile = env_get("USERPROFILE")
+        val marker = "{" + "home" + "}"
+        val home_set = env_set("HOME", "/fixture/home with spaces")
+        val profile_set = env_set("USERPROFILE", "C:/fixture/profile")
+        val home_path = email_expand_path(marker + "/mail/config.json")
+        val home_only = email_expand_path(marker)
+        val shell_text = email_expand_path(marker + "/$(touch ignored)")
+        val embedded = email_expand_path("relative/" + marker + "/config.json")
+        val home_clear = env_set("HOME", "")
+        val profile_path = email_expand_path(marker + "/mail/config.json")
+        val profile_clear = env_set("USERPROFILE", "")
+        val missing = email_expand_path(marker + "/mail/config.json")
+        val restored_home = env_set("HOME", original_home)
+        val restored_profile = env_set("USERPROFILE", original_profile)
+        step("Verify exact paths, literal shell text, fallback, and missing-home failure")
+        expect(home_set and profile_set and home_clear and profile_clear and restored_home and restored_profile).to_be(true)
+        expect(home_path).to_equal("/fixture/home with spaces/mail/config.json")
+        expect(home_only).to_equal("/fixture/home with spaces")
+        expect(shell_text).to_equal("/fixture/home with spaces/$(touch ignored)")
+        expect(embedded).to_equal("relative/" + marker + "/config.json")
+        expect(profile_path).to_equal("C:/fixture/profile/mail/config.json")
+        expect(missing).to_equal("")

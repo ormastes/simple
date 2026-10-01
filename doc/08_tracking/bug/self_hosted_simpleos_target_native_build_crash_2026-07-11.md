@@ -266,30 +266,6 @@ Ubuntu LLVM 18.1.8 (AlignTypeEnum still exists in 18, so no version mixing).
 Matches the "native-build cannot emit on ANY backend" broad-regression memory —
 bisect, don't patch.
 
-### Follow-up (2026-07-18): pure-Simple WFFI argument corruption fixed; packaged LLVM crash remains separate
-
-The core-C implementation of `spl_wffi_call_i64` copied tagged Simple integer
-array elements directly across the C ABI. Every positive pointer/integer
-argument was therefore shifted left by the three tag bits. The Rust provider
-already decoded the same contract with `RuntimeValue::as_int()`. The C provider
-now mirrors it with `rt_core_as_int()`, and the native focus test sends two
-tagged integers through a real two-argument function pointer and requires the
-raw sum.
-
-This explains the pure-Simple `_lc2 -> LLVMSetDataLayout` invalid-handle crash,
-but not the direct Rust/inkwell `LLVMModuleCreateWithNameInContext` crash above,
-which does not traverse WFFI.
-
-The second crash was isolated with cached relinks. Merely disabling forced
-whole-archive still crashed, as did bypassing stripping only for the child: the
-already-linked Stage 2 parent remained corrupt. Relinking Stage 2 with LLVM
-constructors preserved and selective archive extraction passed `--version`,
-created an LLVM module, and reached ordinary bundle validation. That binary
-then rebuilt all 656 Stage 3 modules with zero failures and linked Stage 3.
-Canonical bootstrap no longer enables the diagnostics-only whole-archive
-override, and selective native-all links no longer strip constructors. Legacy
-forced whole-archive mode retains its historical stripping behavior.
-
 ### Binary inventory — what can native-build src/app right now?
 
 | Binary | Status |
@@ -360,32 +336,3 @@ The canonical SimpleOS wrapper now creates a missing sysroot before target Simpl
 ## 2026-07-12 static LLVM guest-tool relink
 
 Current sysroot inputs require LLC/LLD relink rather than reuse of older binaries. The relinker must include full `libsimple_runtime.a` because current libc calls Simple runtime owners. LLC then narrowed to one strong undefined, `rt_math_pow`; SimpleOS libc now exports that ABI by delegating to its existing freestanding `pow`. Verification awaits a fresh libc/sysroot rebuild and capped LLC/LLD relink.
-
-## 2026-08-17 triage (wave W3) — FAMILY: no source-matched self-hosted binary deployed
-
-This row is one member of a single family, not an independent defect. On this
-host `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple` is the **Rust
-seed**, so every remaining blocker in this row requires building and deploying a
-source-matched self-hosted CLI. The rows sharing that blocker are:
-
-- `host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17`
-- `stage4_full_cli_source_check_blank_exit8_2026-07-23`
-- `self_hosted_cli_native_build_silent_no_artifact_2026-08-14`
-- `self_hosted_simpleos_target_native_build_crash_2026-07-11`
-- `native_selfhosted_run_segfault_startup_normalize_2026-07-24`
-- `bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17`
-- `mcp_full_program_native_codegen_and_arg_extract_2026-06-16`
-- `no_self_hosted_binary_deployed_blocks_bootstrap_gate_2026-08-09` (the family
-  statement itself: an ENVIRONMENT fact on this machine, not a code defect)
-
-W3 was explicitly barred from rebuilding or redeploying `bin/simple` /
-`bin/release/**` (~16 concurrent lanes share them), so **no execution evidence
-for this row was produced or is claimed**. Status is unchanged: OPEN, blocked on
-deploy. What W3 did instead was pin, by source spec, the fail-closed checks these
-rows depend on, so they cannot be silently lost again while the deploy blocker
-persists: `test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl`
-(native-build worker exit 0 without an artifact; driver Success without a fresh
-staged artifact; argv read through `rt_cli_get_args` rather than a same-named
-import). Ablation-verified: neutralising the native_build_main.spl guard takes
-that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
-

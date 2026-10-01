@@ -1,4 +1,9 @@
 # Bug: host-WM showcase wrappers have no headless presentation lane
+## Closed 2026-09-16 — ...b to select real showcase content ## Fix Direction Add a headless variant of the `wm_*` wr
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-25  
 **Status:** CONSTRAINT IDENTIFIED - Evidence collection blocked on shared hardware
@@ -21,3 +26,4 @@ Add a headless variant of the `wm_*` wrappers presenting via the same PPM-captur
 - Offscreen evidence collection
 - Concurrent evidence-loop runs without window collision
 - Full showcase content coverage in automated matrix checks
+

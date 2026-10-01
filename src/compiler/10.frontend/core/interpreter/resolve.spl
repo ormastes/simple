@@ -11,6 +11,7 @@
 # 4. Per-function slot mappings are cached for use at call time
 
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
+use compiler.core.types.{span_line}
 
 # ===== Resolution State =====
 # Current function being resolved
@@ -136,7 +137,7 @@ fn resolve_is_slot_shadowed(decl_id: i64, slot: i64) -> bool:
 
 fn resolve_prescan_stmts(stmts: [i64]):
     for sid in stmts:
-        val s_node = stmt_get(sid)
+        val s_node: CoreStmt = stmt_get(sid)
         val tag = s_node.tag
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
             val name = s_node.name
@@ -165,9 +166,10 @@ fn resolve_prescan_stmts(stmts: [i64]):
 
 fn resolve_expr(eid: i64):
     if eid < 0: return
-    val tag = expr_get(eid).tag
+    val e0: CoreExpr = expr_get(eid)
+    val tag = e0.tag
     if tag == EXPR_IDENT:
-        val name = expr_get(eid).s_val
+        val name = e0.s_val
         val slot = rl_lookup(name)
         if slot >= 0:
             val shadowed = rl_is_shadowed(slot)
@@ -175,7 +177,7 @@ fn resolve_expr(eid: i64):
                 expr_i_val[eid] = slot
         return
     # Recurse into sub-expressions
-    val e = expr_get(eid)
+    val e: CoreExpr = e0
     if e.left >= 0: resolve_expr(e.left)
     if e.right >= 0: resolve_expr(e.right)
     for arg_eid in e.args:
@@ -185,7 +187,7 @@ fn resolve_expr(eid: i64):
 
 fn resolve_stmt(sid: i64):
     if sid < 0: return
-    val s_node = stmt_get(sid)
+    val s_node: CoreStmt = stmt_get(sid)
     val tag = s_node.tag
     # Resolve expressions in statement
     if s_node.expr_idx >= 0:
@@ -197,7 +199,7 @@ fn resolve_stmt(sid: i64):
         resolve_stmt(child_sid)
 
 fn resolve_function(decl_id: i64):
-    val d_node = decl_get(decl_id)
+    val d_node: CoreDecl = decl_get(decl_id)
     rl_reset()
     # Register parameters first (slots 0..N-1)
     for pname in d_node.param_names:
@@ -294,7 +296,7 @@ fn cl_contains(name: text) -> bool:
 
 fn esc_collect_locals(stmts: [i64]):
     for sid in stmts:
-        val s_node = stmt_get(sid)
+        val s_node: CoreStmt = stmt_get(sid)
         val tag = s_node.tag
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
             if s_node.name != "": cl_add(s_node.name)
@@ -318,8 +320,9 @@ fn esc_collect_locals(stmts: [i64]):
 
 fn esc_note_assign_target(target_eid: i64):
     if target_eid < 0: return
-    if expr_get(target_eid).tag != EXPR_IDENT: return
-    val nm = expr_get(target_eid).s_val
+    val target_e: CoreExpr = expr_get(target_eid)
+    if target_e.tag != EXPR_IDENT: return
+    val nm = target_e.s_val
     if esc_in_lambda:
         esc_add(nm)
     elif cl_contains(nm) == false:
@@ -327,7 +330,7 @@ fn esc_note_assign_target(target_eid: i64):
 
 fn esc_walk_expr(eid: i64):
     if eid < 0: return
-    val e = expr_get(eid)
+    val e: CoreExpr = expr_get(eid)
     val tag = e.tag
     if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
         esc_note_assign_target(e.left)
@@ -347,7 +350,7 @@ fn esc_walk_expr(eid: i64):
 
 fn esc_walk_stmt(sid: i64):
     if sid < 0: return
-    val s_node = stmt_get(sid)
+    val s_node: CoreStmt = stmt_get(sid)
     val tag = s_node.tag
     if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
         esc_note_assign_target(s_node.expr_idx)
@@ -370,7 +373,7 @@ fn esc_walk_stmt(sid: i64):
         esc_walk_stmt(cs)
 
 fn esc_analyze_function(decl_id: i64):
-    val d_node = decl_get(decl_id)
+    val d_node: CoreDecl = decl_get(decl_id)
     cl_reset()
     for pname in d_node.param_names:
         cl_add(pname)
@@ -384,7 +387,8 @@ fn esc_analyze_module():
     var did: i64 = 0
     val total = decl_count()
     while did < total:
-        if decl_get(did).tag == DECL_FN:
+        val d_scan: CoreDecl = decl_get(did)
+        if d_scan.tag == DECL_FN:
             esc_analyze_function(did)
         did = did + 1
 
@@ -396,8 +400,209 @@ fn resolve_module_locals():
     var did: i64 = 0
     val total = decl_count()
     while did < total:
-        val d = decl_get(did)
+        val d: CoreDecl = decl_get(did)
         if d.tag == DECL_FN:
             resolve_function(did)
         did = did + 1
+
+# ===== Captured-write check (owner ruling 2026-09-27) =====
+# Pure-Simple twin of src/compiler_rust/parser/src/capture_write_check.rs: a
+# nested fn or lambda must not assign to a local of an enclosing function or
+# lambda. Closures capture enclosing locals by value and are read-only
+# (.claude/rules/language.md:22); before this check the write was silently
+# lost here too (a nested `bump()` left the caller's counter at 0). Names not
+# bound in any enclosing frame are module globals (writable) or implicit
+# declarations. The walk covers statements and the expression forms that
+# carry nested bodies; it can miss a write but never invents one.
+
+var cw_names: [text] = []
+var cw_name_frame: [i64] = []
+var cw_frame_boundary: [bool] = []
+var cw_frame_fn: [text] = []
+var cw_pending_fn: text = ""
+var cw_error: text = ""
+
+fn cw_message(name: text, in_fn: text, line: i64) -> text:
+    val site = if in_fn == "<closure>": "a closure" else: "nested fn `" + in_fn + "`"
+    val at = if line > 0: " (line " + line.to_text() + ")" else: ""
+    "cannot assign to captured variable `" + name + "` inside " + site + at + ": closures capture enclosing locals by value and are read-only; return the new value or use a module-level `var`"
+
+fn cw_push_frame(boundary: bool, fn_name: text):
+    cw_frame_boundary.push(boundary)
+    cw_frame_fn.push(fn_name)
+
+fn cw_pop_frame():
+    val top = cw_frame_boundary.len() - 1
+    var kept_names: [text] = []
+    var kept_frames: [i64] = []
+    var i = 0
+    while i < cw_names.len():
+        if cw_name_frame[i] < top:
+            kept_names.push(cw_names[i])
+            kept_frames.push(cw_name_frame[i])
+        i = i + 1
+    cw_names = kept_names
+    cw_name_frame = kept_frames
+    var kept_b: [bool] = []
+    var kept_f: [text] = []
+    var j = 0
+    while j < top:
+        kept_b.push(cw_frame_boundary[j])
+        kept_f.push(cw_frame_fn[j])
+        j = j + 1
+    cw_frame_boundary = kept_b
+    cw_frame_fn = kept_f
+
+fn cw_declare(name: text):
+    if name == "": return
+    cw_names.push(name)
+    cw_name_frame.push(cw_frame_boundary.len() - 1)
+
+# 0 = unbound, 1 = local to the current fn/lambda, 2 = captured enclosing local
+fn cw_lookup(name: text) -> i64:
+    val top = cw_frame_boundary.len() - 1
+    var i = cw_names.len() - 1
+    while i >= 0:
+        if cw_names[i] == name:
+            var g = cw_name_frame[i] + 1
+            while g <= top:
+                if cw_frame_boundary[g]: return 2
+                g = g + 1
+            return 1
+        i = i - 1
+    0
+
+fn cw_current_fn() -> text:
+    var k = cw_frame_boundary.len() - 1
+    while k >= 0:
+        if cw_frame_boundary[k]: return cw_frame_fn[k]
+        k = k - 1
+    "<closure>"
+
+fn cw_note_assign(target_eid: i64, span_id: i64):
+    if target_eid < 0 or cw_error != "": return
+    val t: CoreExpr = expr_get(target_eid)
+    if t.tag != EXPR_IDENT: return
+    val kind = cw_lookup(t.s_val)
+    if kind == 2:
+        val sid = if span_id > 0: span_id else: t.span_id
+        val line = if sid > 0: span_line(sid) else: 0
+        cw_error = cw_message(t.s_val, cw_current_fn(), line)
+    elif kind == 0:
+        cw_declare(t.s_val)
+
+fn cw_declare_iter(iter_name: text):
+    if iter_name == "": return
+    if iter_name.starts_with("("):
+        val inner = iter_name[1:iter_name.len() - 1]
+        for tname in inner.split(","):
+            cw_declare(tname.trim())
+    else:
+        cw_declare(iter_name)
+
+fn cw_walk_stmts(stmts: [i64]):
+    for sid in stmts:
+        cw_walk_stmt(sid)
+
+fn cw_walk_stmt(sid: i64):
+    if sid < 0 or cw_error != "": return
+    val s: CoreStmt = stmt_get(sid)
+    val tag = s.tag
+    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL:
+        cw_pending_fn = s.name
+        cw_walk_expr(s.expr_idx)
+        cw_pending_fn = ""
+        cw_declare(s.name)
+        return
+    if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+        for veid in s.body:
+            cw_walk_expr(veid)
+        cw_note_assign(s.expr_idx, s.span_id)
+        return
+    if tag == STMT_EXPR or tag == STMT_RETURN:
+        cw_walk_expr(s.expr_idx)
+        return
+    if tag == STMT_FOR:
+        cw_walk_expr(s.expr_idx)
+        cw_declare_iter(s.name)
+        cw_walk_stmts(s.body)
+        return
+    if tag == STMT_IF or tag == STMT_WHILE or tag == STMT_BLOCK:
+        cw_walk_expr(s.expr_idx)
+        cw_walk_stmts(s.body)
+        cw_walk_stmts(s.else_body)
+
+fn cw_walk_expr(eid: i64):
+    if eid < 0 or cw_error != "": return
+    val e: CoreExpr = expr_get(eid)
+    val tag = e.tag
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
+        cw_walk_expr(e.right)
+        cw_note_assign(e.left, e.span_id)
+        return
+    if tag == EXPR_LAMBDA and e.i_val == 1:
+        # Colon-block (`describe`/`it`/hook): a scope, not a closure.
+        cw_pending_fn = ""
+        cw_push_frame(false, "")
+        for beid in e.stmts:
+            cw_walk_expr(beid)
+        cw_pop_frame()
+        return
+    if tag == EXPR_LAMBDA:
+        val fn_name = if cw_pending_fn != "": cw_pending_fn else: "<closure>"
+        cw_pending_fn = ""
+        cw_push_frame(true, fn_name)
+        for pid in e.args:
+            cw_declare(expr_get(pid).s_val)
+        for beid in e.stmts:
+            cw_walk_expr(beid)
+        cw_pop_frame()
+        return
+    cw_pending_fn = ""
+    if tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK or tag == EXPR_UNSAFE_BLOCK:
+        cw_walk_stmts(e.stmts)
+        cw_walk_expr(e.left)
+        return
+    if tag == EXPR_FOR:
+        cw_walk_expr(e.left)
+        cw_declare_iter(e.s_val)
+        cw_walk_stmts(e.stmts)
+        return
+    if tag == EXPR_WHILE:
+        cw_walk_expr(e.left)
+        cw_walk_stmts(e.stmts)
+        return
+    if tag == EXPR_IF:
+        cw_walk_expr(e.left)
+        cw_walk_expr(e.right)
+        cw_walk_expr(e.extra)
+        return
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL or tag == EXPR_ARRAY_LIT or tag == EXPR_TUPLE:
+        cw_walk_expr(e.left)
+        for aid in e.args:
+            cw_walk_expr(aid)
+        return
+    if tag == EXPR_BINARY or tag == EXPR_UNARY or tag == EXPR_INDEX or tag == EXPR_FIELD_ACCESS or tag == EXPR_NULL_COALESCE:
+        cw_walk_expr(e.left)
+        cw_walk_expr(e.right)
+
+# Returns "" when the module is clean, else the first diagnostic.
+fn capture_write_check_module() -> text:
+    cw_error = ""
+    var did: i64 = 0
+    val total = decl_count()
+    while did < total and cw_error == "":
+        val d: CoreDecl = decl_get(did)
+        if d.tag == DECL_FN and not d.name.starts_with("__lambda_"):
+            cw_names = []
+            cw_name_frame = []
+            cw_frame_boundary = []
+            cw_frame_fn = []
+            cw_pending_fn = ""
+            cw_push_frame(false, d.name)
+            for pname in d.param_names:
+                cw_declare(pname)
+            cw_walk_stmts(d.body_stmts)
+        did = did + 1
+    cw_error
 

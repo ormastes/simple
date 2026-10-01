@@ -17,22 +17,26 @@
 
 #### should reject non-multiple batches before GPU initialization
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should reject non-multiple batches before GPU initialization
 - Submit a one-coefficient batch to every GPU provider
    - Expected: cuda_result.reason equals `cuda-ntt-input-size-invalid`
-- cuda shutdown
    - Expected: reason equals `metal-ntt-input-size-invalid`
-- metal shutdown
    - Expected: reason equals `vulkan-ntt-input-size-invalid`
-- vulkan shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject non-multiple batches before GPU initialization")
 step("Submit a one-coefficient batch to every GPU provider")
 val malformed = [17]
 var cuda = X25519MlKem768CudaNttExecutor.create(
@@ -63,20 +67,21 @@ vulkan.shutdown()
 
 #### should reject unpinned CUDA and Metal binary bytes before hardware
 
+- should reject unpinned CUDA and Metal binary bytes before hardware
 - Submit compiled artifacts without their pinned digests
    - Expected: cuda_result.reason equals `cuda-ntt-binary-digest-mismatch`
-- cuda shutdown
    - Expected: reason equals `metal-ntt-binary-digest-mismatch`
-- metal shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject unpinned CUDA and Metal binary bytes before hardware")
 step("Submit compiled artifacts without their pinned digests")
 val fixture = _branch_list(256)
 var cuda = X25519MlKem768CudaNttExecutor.create_binary(
@@ -99,19 +104,20 @@ metal.shutdown()
 
 #### should reject CUDA source without both entry points after digest admission
 
+- should reject CUDA source without both entry points after digest admission
 - Admit a digest-matched source that lacks CUDA entry points
-- executor,  branch list
    - Expected: result.reason equals `cuda-ntt-artifact-invalid`
-- executor shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject CUDA source without both entry points after digest admission")
 step("Admit a digest-matched source that lacks CUDA entry points")
 var executor = X25519MlKem768CudaNttExecutor.create(
     "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt.metal")
@@ -127,20 +133,21 @@ executor.shutdown()
 
 #### should reject Vulkan digest and magic failures before initialization
 
+- should reject Vulkan digest and magic failures before initialization
 - Exercise digest mismatch and invalid SPIR-V magic independently
    - Expected: reason equals `vulkan-ntt-binary-digest-mismatch`
-- mismatch shutdown
    - Expected: reason equals `vulkan-ntt-binary-magic-invalid`
-- invalid magic shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject Vulkan digest and magic failures before initialization")
 step("Exercise digest mismatch and invalid SPIR-V magic independently")
 val fixture = _branch_list(256)
 var mismatch = X25519MlKem768VulkanNttExecutor.create_binaries(
@@ -167,19 +174,20 @@ invalid_magic.shutdown()
 
 #### should reject Vulkan use after shutdown before artifact access
 
+- should reject Vulkan use after shutdown before artifact access
 - Close the executor before submitting a valid-size batch
-- executor shutdown
-- executor,  branch list
    - Expected: reason equals `vulkan-ntt-executor-closed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject Vulkan use after shutdown before artifact access")
 step("Close the executor before submitting a valid-size batch")
 var executor = X25519MlKem768VulkanNttExecutor.create_binaries(
     "missing-forward.spv", "", "missing-inverse.spv", "")
@@ -195,17 +203,19 @@ match x25519_mlkem768_vulkan_ntt_execute(
 
 #### should reject a non-Vulkan backend in the Vulkan resolver
 
+- should reject a non-Vulkan backend in the Vulkan resolver
 - Request CUDA through the Vulkan-only candidate resolver
--  branch config
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject a non-Vulkan backend in the Vulkan resolver")
 step("Request CUDA through the Vulkan-only candidate resolver")
 match x25519_mlkem768_resolve_vulkan_candidate(
         _branch_config(X25519MlKem768Backend.Cuda), "keygen"):
@@ -219,28 +229,19 @@ match x25519_mlkem768_resolve_vulkan_candidate(
 
 #### should reject secondary GPU key-material guards before provider access
 
+- should reject secondary GPU key-material guards before provider access
 - Submit malformed secondary key material to CUDA and Metal candidates
--  branch config
--  branch config
--  branch config
-- cuda shutdown
--  branch config
--  branch config
--  branch config
-- metal shutdown
--  branch config
--  branch config
--  branch config
-- vulkan shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should reject secondary GPU key-material guards before provider access")
 step("Submit malformed secondary key material to CUDA and Metal candidates")
 val private_key = _branch_bytes32()
 val seed = _branch_list(32)
@@ -314,7 +315,7 @@ vulkan.shutdown()
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -334,3 +335,69 @@ Tests covering X25519MLKEM768 deterministic branch contract.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4094365ae29552ec2c73e8ee99d2f1211dbfe80860b97177db52848f011f35e1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4094365ae29552ec2c73e8ee99d2f1211dbfe80860b97177db52848f011f35e1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4094365ae29552ec2c73e8ee99d2f1211dbfe80860b97177db52848f011f35e1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl
+mirror: doc/06_spec/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:77:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject non-multiple batches before GPU initialization' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject non-multiple batches before GPU initialization' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:105:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject unpinned CUDA and Metal binary bytes before hardware' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject unpinned CUDA and Metal binary bytes before hardware' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:125:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject CUDA source without both entry points after digest admission' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:125:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject CUDA source without both entry points after digest admission' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:138:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject Vulkan digest and magic failures before initialization' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:162:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject Vulkan use after shutdown before artifact access' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_branch_contract_spec.spl:175:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject a non-Vulkan backend in the Vulkan resolver' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

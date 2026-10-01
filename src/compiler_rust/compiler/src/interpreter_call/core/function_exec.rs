@@ -1,13 +1,13 @@
 // Core function execution logic
 
-use super::arg_binding::{bind_args, bind_args_with_values};
+use super::arg_binding::{bind_args, bind_args_with_values, name_callee};
 use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot,
-    owner_bindings, owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
+    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot, owner_bindings,
+    owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -55,9 +55,7 @@ fn sffi_return_contract(return_type: Option<&Type>) -> SffiReturnContract {
         // `return` in a `-> unit` fn yield Value::Nil under a NonOptional
         // contract, faulting with "nil is forbidden by the non-optional
         // return contract".
-        Some(Type::Simple(name)) if name == "()" || name == "unit" || name == "void" => {
-            SffiReturnContract::Unit
-        }
+        Some(Type::Simple(name)) if name == "()" || name == "unit" || name == "void" => SffiReturnContract::Unit,
         Some(Type::Optional(_)) => SffiReturnContract::Optional,
         // Explicit generic spelling `Option<T>` / `Optional<T>` is equivalent
         // to the `T?` sugar (which parses to `Type::Optional`) and must be
@@ -209,12 +207,59 @@ pub(crate) fn publish_and_repoint(env: &mut Env) {
     env.release_scope();
     publish_live_bound_globals(env);
     env.refresh_scope(owned_globals_snapshot());
+    env.drop_published_globals();
+}
+
+/// `SIMPLE_ENV_AUDIT=1`: recompute the `nonlocal_overlay` superset on every
+/// call-entry publish and abort if it is missing a name. One relaxed atomic
+/// load when off.
+fn env_audit_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var("SIMPLE_ENV_AUDIT").is_ok_and(|v| v == "1");
+            STATE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
 }
 
 pub(crate) fn publish_live_bound_globals(env: &Env) {
+    // Counted, not guessed: this scan is O(caller frame width) and runs on
+    // every call out of the frame. See the PUBLISH_GLOBALS_* comment in
+    // perf_counters.rs.
+    // This runs on EVERY call out of a frame, so the instrumentation is behind
+    // ONE `enabled()` load rather than one per counter.
+    if crate::perf_counters::enabled() {
+        crate::perf_counters::bump(&crate::perf_counters::PUBLISH_GLOBALS_CALLS, 1);
+        crate::perf_counters::bump(
+            &crate::perf_counters::PUBLISH_GLOBALS_SCANNED,
+            env.nonlocal_overlay_len() as u64,
+        );
+        crate::perf_counters::bump(
+            &crate::perf_counters::PUBLISH_GLOBALS_NONLOCAL,
+            env.nonlocal_overlay_entries().count() as u64,
+        );
+        // Fail-closed audit of the superset invariant: any overlay name the
+        // superset does not cover would have its global write dropped here.
+        // Kept with the counters so the off-path cost of both is one load; a
+        // suite run arms them together (SIMPLE_PERF_COUNTERS=1 SIMPLE_ENV_AUDIT=1).
+        if env_audit_enabled() {
+            let missed = env.nonlocal_overlay_audit_misses();
+            assert!(
+                missed.is_empty(),
+                "CowEnv nonlocal_overlay superset is missing publishable overlay name(s): {missed:?}"
+            );
+        }
+    }
+    // Empty for the ordinary frame, and `Vec::new()` does not allocate, so the
+    // common path here is a single `is_empty` on the superset.
     let changed = env
-        .overlay_entries()
-        .filter(|(name, _)| !env.is_local(name) && !env.is_refreshed_global(name))
+        .nonlocal_overlay_entries()
+        .filter(|(name, _)| !env.is_refreshed_global(name))
         .filter_map(|(name, value)| {
             env.global_binding(name)
                 .map(|(owner, source_name)| (owner, source_name, value.clone()))
@@ -223,6 +268,10 @@ pub(crate) fn publish_live_bound_globals(env: &Env) {
     if changed.is_empty() {
         return;
     }
+    crate::perf_counters::bump(
+        &crate::perf_counters::PUBLISH_GLOBALS_PUBLISHED,
+        changed.len() as u64,
+    );
     for (owner, name, value) in &changed {
         set_owned_global(owner, name, value.clone(), false);
     }
@@ -238,9 +287,10 @@ pub(crate) fn publish_live_bound_globals(env: &Env) {
 /// refresh of any stale global copy sitting in the frame's own overlay.
 pub(crate) fn refresh_live_bound_globals(env: &mut Env) {
     env.refresh_scope(owned_globals_snapshot());
+    // Same set the overlay walk produced, off the `nonlocal_overlay` superset
+    // (see CowEnv::nonlocal_overlay): O(aliases) instead of O(frame width).
     let stale = env
-        .overlay_entries()
-        .filter(|(name, _)| !env.is_local(name))
+        .nonlocal_overlay_entries()
         .filter_map(|(name, _)| env.global_binding(name))
         .collect::<HashSet<_>>();
     for (owner, name) in stale {
@@ -257,10 +307,7 @@ pub(crate) fn sync_live_bound_globals(local_env: &Env, outer_env: &mut Env) {
         .forwarded_globals()
         .map(|((owner, name), value)| ((Arc::clone(owner), name.clone()), value.clone()))
         .collect::<HashMap<_, _>>();
-    for (local_name, _) in local_env.overlay_entries() {
-        if local_env.is_local(local_name) {
-            continue;
-        }
+    for (local_name, _) in local_env.nonlocal_overlay_entries() {
         let Some((owner, source_name)) = local_env.global_binding(local_name) else {
             continue;
         };
@@ -297,8 +344,11 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
     }
     let mut changed = Vec::new();
     let mut live_for_caller = Vec::new();
-    for (local_name, value) in local_env.overlay_entries() {
-        if func.params.iter().any(|param| param.name == *local_name) || local_env.is_local(local_name) {
+    // Superset-driven (see CowEnv::nonlocal_overlay): the `is_local` half of
+    // this filter is now structural, so the walk is O(aliases), not O(callee
+    // frame width).
+    for (local_name, value) in local_env.nonlocal_overlay_entries() {
+        if func.params.iter().any(|param| param.name == *local_name) {
             continue;
         }
         let (target_owner, target_name) = local_env
@@ -626,6 +676,8 @@ pub(crate) fn execute_function_body(
     // oversized-allocation report can say WHICH .spl function's loop allocated.
     // No-op (one cached-bool branch) unless the guard is enabled.
     let _mem_frame = crate::mem_trace::InterpFrame::enter(&func.name);
+    // SIGPROF sampler frame (SIMPLE_INTERP_SAMPLE=1), default OFF.
+    let _sample_frame = crate::interpreter::sampler::Frame::enter(&func.name);
 
     // Stack overflow detection: push depth, auto-pop on drop
     let _depth_guard = crate::interpreter::push_call_depth(&func.name)?;
@@ -761,7 +813,21 @@ pub(crate) fn execute_function_body(
     // Auto-wrap return value in Some() when the declared return type is T? (Optional)
     // and the actual return value is not already an Option enum.
     // This handles `fn f() -> i32?: return 42` without explicit `return Some(42)`.
-    let result = if matches!(func.return_type, Some(Type::Optional(_))) {
+    //
+    // EXCEPTION: `-> any?`. For a dynamically-typed optional return there is no
+    // static call-site unwrap (the `any` erases the type info that drives the
+    // Some-unwrap for concrete `T?`), so wrapping delivers a raw Option enum to
+    // the caller ("cannot convert enum to float", `as i64` == 0). For `any?`,
+    // nil itself is the none sentinel: pass values and nil through untouched.
+    // Bugs: doc/08_tracking/bug/free_fn_optional_wrap_2026-06-26.md,
+    // doc/08_tracking/bug/llm_caret_json_parse_nil_contract_and_any_option_wrap_2026-08-25.md
+    let optional_inner_is_any = matches!(
+        &func.return_type,
+        Some(Type::Optional(inner)) if matches!(inner.as_ref(), Type::Simple(name) if name == "any")
+    );
+    let result = if optional_inner_is_any {
+        result
+    } else if matches!(func.return_type, Some(Type::Optional(_))) {
         match &result {
             Value::Enum { enum_name, .. } if enum_name == "Option" => result,
             Value::Nil => Value::Enum {
@@ -774,9 +840,7 @@ pub(crate) fn execute_function_body(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the implicit
                 // `T -> Option<T>` wrap on a function return, the exact shape
                 // behind `emit_call() -> LocalId?`.
-                crate::interpreter::note_enum_payload_function(
-                    "fn-return-some-wrap", "Option", "Some", 0, &result,
-                );
+                crate::interpreter::note_enum_payload_function("fn-return-some-wrap", "Option", "Some", 0, &result);
                 Value::Enum {
                     enum_name: "Option".to_string(),
                     variant: "Some".to_string(),
@@ -815,12 +879,7 @@ pub(crate) fn execute_function_body(
     };
 
     // Validate the full return contract (total, not unit-only).
-    let result = validate_sffi_return_contract(
-        &func.name,
-        func.return_type.as_ref(),
-        return_origin,
-        Some(result),
-    )?;
+    let result = validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, Some(result))?;
 
     // Wrap in Promise if async and requested
     let result = if wrap_async && is_async_function(func) {
@@ -898,7 +957,7 @@ pub(crate) fn exec_function_with_bound_args(
 #[allow(clippy::too_many_arguments)] // reason: mirrors exec_function_with_values plus one extra param
 pub(crate) fn exec_function_with_values_and_writeback(
     func: &FunctionDef,
-    args: &[Value],
+    args: Vec<Value>,
     original_args: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -969,10 +1028,10 @@ pub(crate) fn exec_function_with_values_and_self(
             enums,
             impl_methods,
             self_mode,
-        )?;
+        ).map_err(|e| name_callee(e, func))?;
 
         outer_env.release_scope();
-    let result = execute_function_body(
+        let result = execute_function_body(
             func,
             bound,
             &mut local_env,
@@ -1015,10 +1074,11 @@ pub(crate) fn exec_function_with_captured_env(
             enums,
             impl_methods,
             self_mode,
-        )?;
+        ).map_err(|e| name_callee(e, func))?;
 
+        let parked = park_written_back_arguments(func, args, outer_env, classes, self_mode);
         outer_env.release_scope();
-    let result = execute_function_body(
+        let result = execute_function_body(
             func,
             bound_args,
             &mut local_env,
@@ -1035,6 +1095,7 @@ pub(crate) fn exec_function_with_captured_env(
         if result.is_ok() {
             write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
         }
+        restore_parked_arguments(&parked, outer_env, &local_env);
         result
     })
 }
@@ -1099,8 +1160,14 @@ fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> 
 /// callee's new container; writing back a value-equal one is observably a
 /// no-op, so identity is the right — and O(1) — test.
 fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) -> bool {
-    let (Value::Object { fields: caller_fields, .. }, Value::Object { fields: callee_fields, .. }) =
-        (&mut *caller_val, callee_val)
+    let (
+        Value::Object {
+            fields: caller_fields, ..
+        },
+        Value::Object {
+            fields: callee_fields, ..
+        },
+    ) = (&mut *caller_val, callee_val)
     else {
         return false;
     };
@@ -1146,6 +1213,166 @@ fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) ->
     true
 }
 
+/// A caller binding parked for the duration of a call: the caller's variable
+/// name and the callee parameter it was bound to.
+type ParkedArg = (String, String);
+
+/// Map identifier arguments to their parameter names, using exactly the rules
+/// `write_back_mutable_arguments` uses, so the park set can never contain a
+/// binding the write-back will not restore.
+///
+/// Returns `None` when the mapping is not reconstructible (a spread argument),
+/// in which case nothing may be parked.
+fn identifier_arg_bindings(func: &FunctionDef, args: &[Argument], self_mode: SelfMode) -> Option<Vec<ParkedArg>> {
+    let params_to_bind: Vec<_> = func
+        .params
+        .iter()
+        .filter(|p| !(self_mode == SelfMode::SkipSelf && p.name == METHOD_SELF))
+        .collect();
+    let mut out: Vec<ParkedArg> = Vec::new();
+    let mut positional_idx = 0usize;
+    for arg in args {
+        if matches!(&arg.value, simple_parser::ast::Expr::Spread(_)) {
+            return None;
+        }
+        let simple_parser::ast::Expr::Identifier(caller) = &arg.value else {
+            if arg.name.is_none() {
+                positional_idx += 1;
+            }
+            continue;
+        };
+        let param_name = if let Some(name) = &arg.name {
+            if params_to_bind.iter().any(|p| p.name == name.as_str() && p.variadic) {
+                continue;
+            }
+            name.clone()
+        } else {
+            let param = params_to_bind.get(positional_idx);
+            positional_idx += 1;
+            match param {
+                Some(p) if !p.variadic => p.name.clone(),
+                // A variadic parameter swallows the rest, so no later
+                // positional argument can be mapped safely.
+                Some(_) => return None,
+                None => continue,
+            }
+        };
+        if caller == METHOD_SELF && self_mode == SelfMode::SkipSelf {
+            continue;
+        }
+        out.push((caller.clone(), param_name));
+    }
+    Some(out)
+}
+
+/// Release the CALLER's handle on a reference-semantics argument for the
+/// duration of the call, so the callee owns it uniquely.
+///
+/// `interpreter/expr/calls.rs`'s MECALL-OWNED fast path makes `w.put(x)` — a
+/// `me` method that mutates `self.field.push(..)` — an in-place `Arc::make_mut`
+/// by taking the receiver out of the frame that calls the method. That frame is
+/// then the only holder, so the push is O(1). But when the receiver reached that
+/// frame as a PARAMETER, every frame it travelled through still holds its own
+/// binding of the same object, `Arc::strong_count > 1`, and the push deep-copies
+/// the whole backing Vec. Accumulating n items through even one extra hop was
+/// therefore O(n^2): measured 80,000 pushes = 80,000 clones / 3.2e9 elements /
+/// 595 s, against 4 clones / 0.57 s for the direct shape. Every generated
+/// `hc_enc_*` HIR encoder is exactly the multi-hop shape.
+///
+/// This is unobservable, not a semantic change: the caller frame is suspended
+/// for the whole call and cannot read the binding, and the value it will hold
+/// afterwards is already fixed — `write_back_mutable_arguments` overwrites it
+/// with the callee's final value for precisely these argument shapes. A
+/// `Value::Nil` placeholder is left behind so the write-back's
+/// `outer_env.contains_key` test still sees the binding, and
+/// `restore_parked_arguments` fills in anything the write-back declined (and is
+/// the only restore on the error path).
+///
+/// What is deliberately NOT parked, because another observer would then see a
+/// hole rather than a copy: non-local names (module globals are reachable
+/// through MODULE_GLOBALS and the owner stores), `self`, a name passed more than
+/// once in the same call, value-type structs (they keep value semantics and are
+/// never written back wholesale), and non-container values. A genuine alias —
+/// a second live binding of the same object elsewhere — is untouched by this and
+/// still forces the copy-on-write clone, which is what preserves value
+/// semantics.
+///
+/// Record: doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md
+/// Diagnostic trap: report any write into an OUTER frame's `self` binding with
+/// a value that cannot be a receiver. Gated on SIMPLE_DEBUG_FIELD_ACCESS.
+/// Record: doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+fn trap_self_write(site: &str, func_name: &str, caller_name: &str, value: &Value) {
+    if caller_name != METHOD_SELF || !crate::interpreter::field_access_debug_enabled() {
+        return;
+    }
+    if matches!(value, Value::Object { .. } | Value::Nil) {
+        return;
+    }
+    eprintln!(
+        "[self-write-trap] site={site} func={func_name} value_type={} value={}",
+        value.type_name(),
+        value.to_debug_string().chars().take(200).collect::<String>()
+    );
+}
+
+fn park_written_back_arguments(
+    func: &FunctionDef,
+    args: &[Argument],
+    outer_env: &mut Env,
+    classes: &HashMap<String, Arc<ClassDef>>,
+    self_mode: SelfMode,
+) -> Vec<ParkedArg> {
+    let Some(bindings) = identifier_arg_bindings(func, args, self_mode) else {
+        return Vec::new();
+    };
+    let mut parked: Vec<ParkedArg> = Vec::new();
+    for (caller_name, param_name) in bindings.iter() {
+        // Passed twice in the same call: the two parameters legitimately alias,
+        // and only one write-back wins. Leave it alone.
+        if bindings.iter().filter(|(c, _)| c == caller_name).count() > 1 {
+            continue;
+        }
+        if !outer_env.is_local(caller_name.as_str()) {
+            continue;
+        }
+        let parkable = match outer_env.get(caller_name.as_str()) {
+            Some(v @ (Value::Array(_) | Value::Dict(_) | Value::Tuple(_) | Value::Object { .. })) => {
+                !is_value_type_struct(v, classes)
+            }
+            _ => false,
+        };
+        if !parkable {
+            continue;
+        }
+        // Drop the caller's Arc, keeping the name bound so the write-back's
+        // `contains_key` gate still passes.
+        // No trap here: this site writes `Value::Nil`, which `trap_self_write`
+        // classifies as benign and ignores, so a truthful call is a guaranteed
+        // no-op. (It previously passed a synthetic `Value::Bool(false)` purely
+        // to force the trap to fire, which reported a value never written.)
+        outer_env.insert(caller_name.clone(), Value::Nil);
+        crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_OK, 1);
+        parked.push((caller_name.clone(), param_name.clone()));
+    }
+    parked
+}
+
+/// Refill any parked binding the write-back did not (error path, or a callee
+/// that rebound the parameter to a non-container). Idempotent: a binding the
+/// write-back already restored is left alone.
+fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env: &Env) {
+    for (caller_name, param_name) in parked {
+        if !matches!(outer_env.get(caller_name.as_str()), Some(Value::Nil)) {
+            continue;
+        }
+        if let Some(value) = local_env.get(param_name.as_str()) {
+            trap_self_write("restore_parked", param_name, caller_name, value);
+            outer_env.insert(caller_name.clone(), value.clone());
+        }
+        crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_RESTORED, 1);
+    }
+}
+
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
 //
 // When a function is called with a simple identifier argument (e.g., `f(a)`)
@@ -1166,6 +1393,14 @@ fn write_back_mutable_arguments(
     classes: &HashMap<String, Arc<ClassDef>>,
     self_mode: SelfMode,
 ) {
+    if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+        eprintln!(
+            "[wbma-enter] func={} nargs={} outer_env_has_b={}",
+            func.name,
+            args.len(),
+            outer_env.contains_key("b")
+        );
+    }
     let params_to_bind: Vec<_> = func
         .params
         .iter()
@@ -1270,6 +1505,16 @@ fn write_back_mutable_arguments(
                 if !param_is_mut && mut_written.contains(&caller_name) {
                     continue;
                 }
+                if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
+                    eprintln!(
+                        "[wbma-ident] func={} caller_name={} param_name={} callee_present={} outer_has={}",
+                        func.name,
+                        caller_name,
+                        param_name,
+                        local_env.get(&param_name).is_some(),
+                        outer_env.contains_key(&caller_name)
+                    );
+                }
                 if let Some(callee_val) = local_env.get(&param_name) {
                     // Value-type structs (task #91) keep VALUE semantics: never
                     // write callee mutations back to the caller's binding.
@@ -1281,6 +1526,7 @@ fn write_back_mutable_arguments(
                         && outer_env.contains_key(&caller_name)
                     {
                         let new_val = callee_val.clone();
+                        trap_self_write("write_back_ident", &func.name, &caller_name, &new_val);
                         if param_is_mut {
                             mut_written.insert(caller_name.clone());
                         }
@@ -1289,9 +1535,22 @@ fn write_back_mutable_arguments(
                         // Value-type struct: fields stay value-copied, but its
                         // container-valued fields are shared handles. See
                         // merge_shared_collection_fields.
-                        if let Some(mut caller_val) = outer_env.get(&caller_name).cloned() {
+                        // Take the caller's handle OUT of the frame before
+                        // mutating: `get().cloned()` leaves `outer_env` holding
+                        // the same `Arc`, so the `Arc::make_mut` inside
+                        // merge_shared_collection_fields ALWAYS deep-copies the
+                        // struct's whole field map -- copy-on-write against an
+                        // alias that is dead, since the binding is overwritten
+                        // immediately after. `take_frame_owned` fires only when
+                        // this frame is the value's sole home, and the
+                        // no-change path restores it exactly.
+                        let taken = outer_env.take_frame_owned(&caller_name);
+                        let took = taken.is_some();
+                        if let Some(mut caller_val) = taken.or_else(|| outer_env.get(&caller_name).cloned()) {
                             if merge_shared_collection_fields(&mut caller_val, callee_val) {
                                 outer_env.insert(caller_name, caller_val);
+                            } else if took {
+                                outer_env.restore_frame_owned(caller_name, caller_val);
                             }
                         }
                     }
@@ -1314,10 +1573,33 @@ fn write_back_mutable_arguments(
                             Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                         )
                     {
-                        if let Some(obj_val) = outer_env.get(&obj_name).cloned() {
-                            if let Value::Object { class, mut fields } = obj_val {
-                                Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                outer_env.insert(obj_name, Value::Object { class, fields });
+                        // Same dead-alias copy-on-write as the value-type path
+                        // above: with `get().cloned()` the frame still holds the
+                        // other handle, so `Arc::make_mut` is guaranteed to copy
+                        // the object's whole field map on every `f(obj.field)`
+                        // write-back. Take it when this frame owns it outright.
+                        let taken = outer_env.take_frame_owned(&obj_name);
+                        let took = taken.is_some();
+                        if let Some(obj_val) = taken.or_else(|| outer_env.get(&obj_name).cloned()) {
+                            match obj_val {
+                                Value::Object { class, mut fields } => {
+                                    if crate::perf_counters::enabled() {
+                                        crate::perf_counters::bump(&crate::perf_counters::FIELD_WRITEBACK_CALLS, 1);
+                                        if Arc::strong_count(&fields) > 1 {
+                                            crate::perf_counters::bump(
+                                                &crate::perf_counters::FIELD_WRITEBACK_MAP_CLONES,
+                                                1,
+                                            );
+                                        }
+                                    }
+                                    Arc::make_mut(&mut fields).insert(field_name, callee_val);
+                                    outer_env.insert(obj_name, Value::Object { class, fields });
+                                }
+                                other => {
+                                    if took {
+                                        outer_env.restore_frame_owned(obj_name, other);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1397,11 +1679,12 @@ fn exec_function_inner(
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| name_callee(e, func))?;
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
+    let parked = park_written_back_arguments(func, args, outer_env, classes, self_mode);
     outer_env.release_scope();
     let result = execute_function_body(
         func,
@@ -1421,6 +1704,7 @@ fn exec_function_inner(
     if result.is_ok() {
         write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
     }
+    restore_parked_arguments(&parked, outer_env, &local_env);
 
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {
@@ -1435,7 +1719,7 @@ fn exec_function_inner(
 #[allow(clippy::too_many_arguments)] // reason: mirrors exec_function_with_values_inner plus one extra param
 fn exec_function_with_values_and_writeback_inner(
     func: &FunctionDef,
-    args: &[Value],
+    args: Vec<Value>,
     original_args: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -1460,17 +1744,25 @@ fn exec_function_with_values_and_writeback_inner(
     let self_mode = SelfMode::IncludeSelf;
     let bound = bind_args_with_values(
         &func.params,
-        args,
+        &args,
         outer_env,
         functions,
         classes,
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| name_callee(e, func))?;
+    // The pre-evaluated argument vector holds its own handle on every
+    // argument. Kept alive across the body, it pins a parked receiver's field
+    // Arc (strong_count > 1), so each `me` push deep-copies the backing Vec —
+    // O(n^2) for every cross-module call, since imported functions dispatch
+    // through this overload path. The callee's bound copies are all it needs.
+    // Record: doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md
+    drop(args);
 
     crate::layout_recorder::record_function_return();
 
+    let parked = park_written_back_arguments(func, original_args, outer_env, classes, self_mode);
     outer_env.release_scope();
     let result = execute_function_body(
         func,
@@ -1490,6 +1782,7 @@ fn exec_function_with_values_and_writeback_inner(
     if result.is_ok() {
         write_back_mutable_arguments(func, original_args, outer_env, &local_env, classes, self_mode);
     }
+    restore_parked_arguments(&parked, outer_env, &local_env);
 
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);
@@ -1519,7 +1812,7 @@ fn exec_function_with_values_inner(
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| name_callee(e, func))?;
     exec_function_with_bound_args_inner(func, bound, outer_env, functions, classes, enums, impl_methods)
 }
 

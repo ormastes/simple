@@ -1,4 +1,8 @@
 # Test runner: file-level `Failed` count includes a phantom +1 after all `it` examples pass
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `bin/simple test` (SSpec runner), file-level result aggregation
@@ -45,7 +49,6 @@ as a failure).
 | `test/unit/app/dashboard_framework_policy_spec.spl` | `9 examples, 0 failures` | `Passed: 9, Failed: 1` |
 | `test/unit/app/duplicate_check/detector_grouping_spec.spl` | `3 examples, 0 failures` | `Passed: 3, Failed: 1` (noise between the tally and the phantom failure includes a `Usage: simple_lint <file.spl> [options]` help-text dump — an apparent malformed `simple_lint` subprocess invocation triggered while loading `compiler.tools.duplicate_check.*`, consistent with the "late second pass over the whole dependency graph" hypothesis above) |
 | `test/unit/compiler/linker/lib_smf_format_spec.spl` | `4 examples, 0 failures` | `Passed: 4, Failed: 1` |
-| `test/01_unit/compiler/lint/lint_profile_spec.spl` | `15 examples, 0 failures` | `Passed: 15, Failed: 1` (reproduces identically on the pristine, unmodified file at `main` HEAD — confirmed 2026-07-28 during the profile-rename lane by reverting both the spec and its `config_and_model.spl` dependency and rerunning; not caused by that lane's changes) |
 
 All five (plus the `feature/usage` instance added by a later triage pass):
 rerun individually via
@@ -91,3 +94,4 @@ already covered elsewhere, stop double-counting it into the file's
 `Failed` tally. Whichever direction, the fix belongs in the test-runner
 source (interpreter/tooling), not in these five spec files, which are
 correct as written.
+

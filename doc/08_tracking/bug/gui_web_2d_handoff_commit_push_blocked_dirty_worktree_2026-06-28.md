@@ -1,11 +1,11 @@
 # GUI/Web/2D Handoff Commit Push Blocked By Dirty Worktree
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+## Closed 2026-09-13 — the blocked commit landed on origin/main
+- **measured**: `git log --all --grep=...handoff contract` finds `5efec791397` (2026-06-28) and `git merge-base --is-ancestor 5efec791397 origin/main` reports ON_MAIN.
+- **measured**: the jj revision this entry names, `9396eebc3b79`, is not a valid object here (`git cat-file -t` -> "Not a valid object name") — it was rewritten into the landed sha above.
+- **inferred**: the blocker was transient worktree state in a session that no longer exists, and the landing policy is now PR-only (.claude/rules/vcs.md, ruleset since 2026-09-05), superseding the sync file-count guard path described here.
 
 Date: 2026-06-28
-
-**Status (2026-07-17):** RESOLVED — work committed and verified on HEAD despite rebase churn. Worktree blocker was transient historical state.
 
 ## Summary
 
@@ -57,12 +57,12 @@ dirty working-copy change, not from `pkmpz`.
 Current dirty `@` includes unrelated deletions such as:
 
 ```text
-doc/06_spec/test/01_unit/app/slang_pack/main_spec.md
-doc/06_spec/test/02_integration/app/slang_pack_log_modes_spec.md
+doc/06_spec/test/01_unit/app/svllm_pack/main_spec.md
+doc/06_spec/test/02_integration/app/svllm_pack_log_modes_spec.md
 doc/09_report/2026/06/llm_goal_evidence_2026-06-28.md
-doc/09_report/2026/06/llm_runtime_slang_local_readiness_2026-06-28.md
+doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-28.md
 scripts/check/check-llm-goal-evidence.shs
-scripts/check/check-llm-runtime-slang-local-readiness.shs
+scripts/check/check-llm-runtime-svllm-local-readiness.shs
 ```
 
 An attempt to rebase dirty `@` onto `pkmpz` produced unrelated conflicts in
@@ -80,10 +80,6 @@ env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 
 Do not include the current dirty `@` in the push unless that separate lane has
 been reviewed, committed, and verified.
-
-## Runtime verification (2026-07-17)
-
-All 5 files named as the isolated committed change confirmed present on current HEAD: `gui_web_2d_five_platform_handoff_contract_spec.spl`, `gui_web_2d_headless_handoff_prep_spec.spl`, both check scripts, and the plan doc. VCS-landing claim verified; broader "Completion Boundary" caveats about live-platform evidence remain unaffected and are separately scoped.
 
 ## Completion Boundary
 

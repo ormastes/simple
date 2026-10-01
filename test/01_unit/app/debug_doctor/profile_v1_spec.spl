@@ -1,0 +1,42 @@
+use std.spec.{describe, it, expect}
+use app.debug_doctor.profile_v1.{decode_debug_doctor_profile_v1, evaluate_debug_doctor_profile_v1}
+use std.debug_doctor.matrix.{DoctorCapabilityReportV1}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{DebugVerificationV1, DebugPerturbationV1}
+
+fn live_host_debug_report() -> DoctorCapabilityReportV1:
+    DoctorCapabilityReportV1(
+        target: "host", operation: "debug", support: CapLevel.Native,
+        verification: DebugVerificationV1.LiveVerified,
+        perturbation: DebugPerturbationV1.Stopping,
+        required_privilege: "debug", tool_version: "test", reason: "fixture")
+
+describe "DebugDoctorProfileV1":
+    it "decodes a versioned profile and accepts matching live evidence":
+        val loaded = decode_debug_doctor_profile_v1("debug_doctor:\n  schema: simple.debug-doctor-profile/v1\n  program: test/fixtures/dap/host_debug_target_program.spl\n  required_targets: [host]\n  required_operations: [debug]\n  required_verification: live_verified\n  required_privilege: debug")
+        expect(loaded.ok).to_equal(true)
+        val health = evaluate_debug_doctor_profile_v1(loaded.profile, [live_host_debug_report()])
+        expect(health.healthy).to_equal(true)
+        expect(health.checked).to_equal(1)
+
+    it "fails closed on unknown requirements":
+        val loaded = decode_debug_doctor_profile_v1("debug_doctor:\n  schema: simple.debug-doctor-profile/v1\n  required_targets: [invented]\n  required_verification: maybe\n  required_privilege: root")
+        expect(loaded.ok).to_equal(false)
+        expect(loaded.error).to_contain("unknown target")
+
+    it "does not count an unavailable report as healthy":
+        val loaded = decode_debug_doctor_profile_v1("debug_doctor:\n  schema: simple.debug-doctor-profile/v1\n  required_targets: [host]\n  required_operations: [debug]\n  required_verification: live_verified\n  required_privilege: debug")
+        val unavailable = DoctorCapabilityReportV1(
+            target: "host", operation: "debug", support: CapLevel.Unavailable,
+            verification: DebugVerificationV1.Blocked,
+            perturbation: DebugPerturbationV1.Stopping,
+            required_privilege: "debug", tool_version: "test", reason: "blocked")
+        val health = evaluate_debug_doctor_profile_v1(loaded.profile, [unavailable])
+        expect(health.healthy).to_equal(false)
+        expect(health.failures[0]).to_contain("support=unavailable")
+
+    it "requires a report for every target and operation pair":
+        val loaded = decode_debug_doctor_profile_v1("debug_doctor:\n  schema: simple.debug-doctor-profile/v1\n  required_targets: [host]\n  required_operations: [debug, profile]\n  required_verification: live_verified\n  required_privilege: debug")
+        val health = evaluate_debug_doctor_profile_v1(loaded.profile, [live_host_debug_report()])
+        expect(health.healthy).to_equal(false)
+        expect(health.failures[0]).to_contain("operation=profile")

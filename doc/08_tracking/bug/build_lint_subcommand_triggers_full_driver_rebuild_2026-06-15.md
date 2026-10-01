@@ -1,7 +1,8 @@
 # Bug: `bin/simple build lint <file>` triggers a full cargo/clippy driver rebuild
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** build_lint_subcommand_triggers_full_driver_rebuild_2026-06-15
 - **Filed:** 2026-06-15
@@ -45,17 +46,10 @@ the Rust crates. A per-file lint should be sub-second, not a 50s+ crate rebuild.
   (that was a build-script symbol-scan issue, now resolved); this is the
   `build lint` subcommand falling through to a cargo rebuild.
 
-## 2026-08-17 verification (CLI lane) — STILL OPEN; SAME ROOT CAUSE as
-## build_lint_routes_to_rust_clippy_not_cli_run_lint_2026-07-06.md
+## Triage 2026-09-13 — LEFT OPEN (still reproduces)
 
-These two rows are one defect, not two. `bin/simple build lint <file>` reaches
-`src/compiler_rust/driver/src/cli/commands/misc_commands.rs:130` ->
-`handle_build_lint_with_args`, which discards the file argument and shells out
-to `cargo clippy --manifest-path src/compiler_rust/Cargo.toml --workspace`.
-The full-workspace cargo/clippy rebuild reported here IS that `cargo clippy`
-invocation; it is not a separate build-system defect. Fixing the routing (see
-the sibling doc) removes the rebuild by construction, because the pure-Simple
-linter never invokes cargo.
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple build lint src/lib/common/bytes/span.spl` still goes into cargo instead of linting the Simple file. It printed `Blocking waiting for file lock on build directory` and was killed at the 120 s bound (rc=124) having produced zero Simple-level lint output.
+- **inferred**: the cargo lock contention is incidental — a bootstrap was running concurrently on this host — but it is only reachable because `build lint` enters the Rust build at all, which is the defect. The `<file>` argument is still not routed to the Simple linter.
+- **inferred**: the entry's workaround (invoke the seed driver's `lint` directly) remains the way to get Simple-level diagnostics; `.claude/rules/commands.md` documents `bin/simple lint <files>` as the sanctioned pure-Simple path, so `build lint` arguably should reject a `.spl` argument rather than silently rebuilding the driver.
+- Verdict: OPEN — P3 tooling UX, unchanged since filing.
 
-Not patched by this lane (Rust file, out of scope). Verified by content, not
-by SHA.

@@ -1,0 +1,138 @@
+# Purpose: text is the highest-volume renderer path after solid fills, and
+# `blit_glyph` blended a glyph's u8 coverage mask one pixel at a time with five
+# branches and ~15 integer ops each. Fully-in-bounds rows now go through a
+# native AVX-512-dispatched mask-blend kernel.
+#
+# The blend is NOT interchangeable with either kernel already in the tree:
+# it is straight-alpha src-over with FLOOR /255 (not the percent blend's
+# /100 + 50), and it always writes opaque alpha while ignoring the
+# destination's — so it must take the opaque-dst branch unconditionally rather
+# than reusing a general Porter-Duff path. Confusing those shifts every glyph
+# pixel, which is why this spec exists.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+
+@unsafe(reason: "parity probe of the glyph mask-blend kernel", capabilities: [ffi])
+extern fn rt_engine2d_blend_mask_span_u32(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]
+
+# The exact arithmetic blit_glyph uses, kept here as the oracle.
+fn oracle_blend(dst: u32, alpha: i64, color: u32) -> u32:
+    val fg_r = ((color >> 16) & 0xFFu32) as i64
+    val fg_g = ((color >> 8) & 0xFFu32) as i64
+    val fg_b = (color & 0xFFu32) as i64
+    if alpha >= 255:
+        return 0xFF000000u32 | ((fg_r as u32) << 16) | ((fg_g as u32) << 8) | (fg_b as u32)
+    if alpha <= 0:
+        return dst
+    val dr = ((dst >> 16) & 0xFFu32) as i64
+    val dg = ((dst >> 8) & 0xFFu32) as i64
+    val db = (dst & 0xFFu32) as i64
+    val inv = 255 - alpha
+    val r = (fg_r * alpha + dr * inv) / 255
+    val g = (fg_g * alpha + dg * inv) / 255
+    val b = (fg_b * alpha + db * inv) / 255
+    0xFF000000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+
+fn dst_ramp(n: i64) -> [u32]:
+    var b: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        b.push((0xFF000000u32 | ((i * 13 + 7) as u32)))
+        i = i + 1
+    b
+
+fn mask_ramp(n: i64) -> [u8]:
+    var m: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        m.push(((i * 37) % 256) as u8)
+        i = i + 1
+    m
+
+fn span_matches_oracle(n: i64, color: u32) -> bool:
+    val dst = dst_ramp(n)
+    val mask = mask_ramp(n)
+    val got = rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, n, color)
+    if got.len() != n:
+        return false
+    var i: i64 = 0
+    while i < n:
+        if got[i.to_i32()] != oracle_blend(dst[i.to_i32()], (mask[i.to_i32()]).to_i64(), color):
+            return false
+        i = i + 1
+    true
+
+describe "glyph mask-blend kernel matches the blit_glyph oracle":
+    it "matches across widths straddling the 64-byte and 16-lane boundaries":
+        step("glyph rows are short and odd-sized, so the tail path matters most")
+        var bad = 0
+        var n = 1
+        while n <= 80:
+            if not span_matches_oracle(n, 0xFF3366CCu32):
+                bad = bad + 1
+            n = n + 1
+        assert_equal(bad, 0)
+
+    it "matches for every alpha value 0..255 at a fixed destination":
+        step("floor /255 must hold at both saturating ends and everywhere between")
+        val n: i64 = 256
+        var mask: [u8] = []
+        var i: i64 = 0
+        while i < n:
+            mask.push(i as u8)
+            i = i + 1
+        val dst = dst_ramp(n)
+        val got = rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, n, 0xFF10A0F0u32)
+        var bad = 0
+        i = 0
+        while i < n:
+            if got[i.to_i32()] != oracle_blend(dst[i.to_i32()], i, 0xFF10A0F0u32):
+                bad = bad + 1
+            i = i + 1
+        assert_equal(bad, 0)
+
+    it "matches for several foreground colours":
+        step("the blend is per-channel, so one colour can hide a channel bug")
+        var bad = 0
+        for c in [0xFF000000u32, 0xFFFFFFFFu32, 0xFF010203u32, 0xFF7F8081u32]:
+            if not span_matches_oracle(37, c):
+                bad = bad + 1
+        assert_equal(bad, 0)
+
+    it "always writes opaque alpha, never the destination alpha":
+        step("blit_glyph forces 0xFF; a general Porter-Duff path would not")
+        val n: i64 = 32
+        val got = rt_engine2d_blend_mask_span_u32(dst_ramp(n), 0, mask_ramp(n), 0, n, 0xFF204060u32)
+        var non_opaque = 0
+        var i: i64 = 0
+        while i < n:
+            if (got[i.to_i32()] >> 24) != 255u32:
+                non_opaque = non_opaque + 1
+            i = i + 1
+        assert_equal(non_opaque, 0)
+
+    it "honours a non-zero destination and mask offset":
+        step("glyph rows start part-way into both buffers")
+        val n: i64 = 64
+        val dst = dst_ramp(n)
+        val mask = mask_ramp(n)
+        val got = rt_engine2d_blend_mask_span_u32(dst, 10, mask, 5, 20, 0xFF884422u32)
+        assert_equal(got.len(), 20)
+        var bad = 0
+        var i: i64 = 0
+        while i < 20:
+            if got[i.to_i32()] != oracle_blend(dst[(10 + i).to_i32()], (mask[(5 + i).to_i32()]).to_i64(), 0xFF884422u32):
+                bad = bad + 1
+            i = i + 1
+        assert_equal(bad, 0)
+
+    it "returns an empty span for any out-of-range request":
+        step("a short row must be refused, not clamped — clamping paints the wrong pixels")
+        val dst = dst_ramp(32)
+        val mask = mask_ramp(32)
+        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, 64, 0xFF000000u32).len(), 0)
+        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 30, mask, 0, 8, 0xFF000000u32).len(), 0)
+        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 0, mask, 30, 8, 0xFF000000u32).len(), 0)
+        assert_equal(rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, 0, 0xFF000000u32).len(), 0)

@@ -228,16 +228,113 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
 # Drop Shadow — Offset + blur + blend compose
 # ============================================================================
 
+fn _emu_box_blur_1d(src: [i32], n: i32, r: i32) -> [i32]:
+    if r <= 0:
+        return src
+    val win = 2 * r + 1
+    var out: [i32] = [0; n]
+    var sum = 0
+    var k = 0 - r
+    while k <= r:  # cpu-lane-loop-ok: window priming, 2r+1 steps
+        if k >= 0 and k < n:
+            sum = sum + src[k]
+        k = k + 1
+    var i = 0
+    while i < n:  # cpu-lane-loop-ok: one iteration per profile sample
+        out[i] = sum / win
+        val leave = i - r
+        val enter = i + r + 1
+        if leave >= 0 and leave < n:
+            sum = sum - src[leave]
+        if enter >= 0 and enter < n:
+            sum = sum + src[enter]
+        i = i + 1
+    out
+
+# 1D coverage profile (0..255) of a blurred step of length `span` starting at
+# `offset` within a buffer of length `n`. Three box passes approximate a
+# gaussian (central limit); box radius r ~= sigma, and CSS defines a box-shadow
+# blur radius as 2*sigma, so the caller passes blur_r/2.
+#
+# A box blur of an AXIS-ALIGNED rect is exactly separable, so the 2D coverage is
+# the outer product of the x and y profiles. That is why no 2D mask is ever
+# materialized: the cost is O(w + h) profile work plus one composite pass.
+fn _emu_shadow_profile(n: i32, offset: i32, span: i32, r: i32) -> [i32]:
+    var p: [i32] = [0; n]
+    var i = offset
+    while i < offset + span:  # cpu-lane-loop-ok: one iteration per covered sample
+        if i >= 0 and i < n:
+            p[i] = 255
+        i = i + 1
+    var out = _emu_box_blur_1d(p, n, r)
+    out = _emu_box_blur_1d(out, n, r)
+    _emu_box_blur_1d(out, n, r)
+
+# Standard CSS drop shadow: rasterize the shadow rect as an ALPHA COVERAGE
+# field, blur that coverage, then composite the shadow colour through it.
+#
+# The previous implementation filled an OPAQUE rect expanded by blur_r and then
+# blurred the already-filled area in place. Blurring a uniformly filled region
+# returns the same uniform region, so the shadow was a hard band with no edge
+# falloff at all.
+#
+# Coverage crosses 1/2 exactly ON the shadow rect edge, which is the CSS/Chrome
+# definition.
 fn emu_draw_shadow_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
     if w <= 0 or h <= 0:
         return
     val sx = x + offset_x
     val sy = y + offset_y
-    val sw = w + 2 * blur_r
-    val sh = h + 2 * blur_r
-    core.draw_rect_filled(sx - blur_r, sy - blur_r, sw, sh, color)
-    if blur_r > 0:
-        emu_draw_blur_rect(core, sx - blur_r, sy - blur_r, sw, sh, blur_r)
+    var shadow_a = ((color >> 24) & 0xFFu32) as i32
+    if shadow_a == 0:
+        # Legacy callers pass a bare 0x00RRGGBB; keep those opaque.
+        shadow_a = 255
+    if blur_r <= 0:
+        core.draw_rect_filled(sx, sy, w, h, color)
+        return
+    # Pad by 2*blur_r so the whole falloff (half-support ~1.5*blur_r) fits.
+    val pad = 2 * blur_r
+    val mx = sx - pad
+    val my = sy - pad
+    val mw = w + 2 * pad
+    val mh = h + 2 * pad
+    if mw <= 0 or mh <= 0:
+        return
+    val br = if blur_r / 2 < 1: 1 else: blur_r / 2
+    val prof_x = _emu_shadow_profile(mw, pad, w, br)
+    val prof_y = _emu_shadow_profile(mh, pad, h, br)
+    val fb: [u32] = core.read_pixels()
+    val fb_w = core.width()
+    val fb_h = core.height()
+    val sr = ((color >> 16) & 0xFFu32) as i32
+    val sg = ((color >> 8) & 0xFFu32) as i32
+    val sb = (color & 0xFFu32) as i32
+    var outp: [u32] = [0u32; mw * mh]
+    var py = 0
+    while py < mh:  # cpu-lane-loop-ok: one iteration per shadow-region row
+        val fy = my + py
+        val cov_y = prof_y[py]
+        var px = 0
+        while px < mw:  # cpu-lane-loop-ok: one iteration per shadow-region column
+            val fx = mx + px
+            val idx = py * mw + px
+            var dst: u32 = 0u32
+            if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                dst = fb[fy * fb_w + fx]
+            val cov = ((prof_x[px] * cov_y) / 255 * shadow_a) / 255
+            if cov <= 0:
+                outp[idx] = dst
+            else:
+                val dr = ((dst >> 16) & 0xFFu32) as i32
+                val dg = ((dst >> 8) & 0xFFu32) as i32
+                val db = (dst & 0xFFu32) as i32
+                val rr = (sr * cov + dr * (255 - cov)) / 255
+                val rg = (sg * cov + dg * (255 - cov)) / 255
+                val rb = (sb * cov + db * (255 - cov)) / 255
+                outp[idx] = ((rr as u32) << 16) | ((rg as u32) << 8) | (rb as u32)
+            px = px + 1
+        py = py + 1
+    core.draw_image(mx, my, mw, mh, outp)
 
 # ============================================================================
 # Affine Transform Image — Per-pixel inverse transform sample

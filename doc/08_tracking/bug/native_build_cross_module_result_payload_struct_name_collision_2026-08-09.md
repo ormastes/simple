@@ -1,5 +1,14 @@
 # `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th/5th/7th layer RESOLVED (6th layer's leads were dead ends; see 7th layer for the real root cause and fix)
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: native-build MIR lowering cross-module
+Result<T,E> payload struct-name recovery, multi-layer (4th-7th) investigation
+already landed partial fixes per the doc; remaining layers need native-build
+reproduction which is expensive on this host (see
+test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17 /
+prepush_hook_unpassable_native_build_oom_2026-08-17 for why). Left OPEN.
+
+
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
@@ -614,3 +623,7 @@ measurements will keep reproducing that bug instead of the payload-struct-name
 collision. The collision itself was NOT re-measured by this lane — its root
 cause is in `src/compiler/50.mir/**`, claimed by another lane. Status left OPEN
 unchanged.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

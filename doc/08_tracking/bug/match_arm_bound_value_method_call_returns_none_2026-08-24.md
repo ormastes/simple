@@ -1,4 +1,8 @@
 # JIT: reading through a `case Some(x)` binding answers as if every key were absent
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24
 **Severity:** HIGH (silent wrong answers, not a crash — two hardening exit gates were dead for days because of it)
@@ -82,3 +86,4 @@ ERROR, then restored to PASS — all three observations made.
   suspect. No census of such sites has been done.
 - **Done when:** the un-hoisted parser gives identical results under JIT and
   interpreter, with a fixture that fails pre-fix under `run`.
+

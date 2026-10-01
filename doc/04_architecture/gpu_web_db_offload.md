@@ -45,12 +45,3 @@ RAM-only mode admits column/vector batches into GPU-resident or pinned buffers.
 SSD-backed mode keeps durability on CPU and accelerates only batch-friendly
 reads/operators. NoSQL/vector mode targets ANN/vector search and batched
 document/vector filters while metadata and small writes remain CPU/storage.
-# Device-origin production evidence
-
-The scheduler's `GpuEvidence` decision means only that a batch is eligible; it
-is not execution proof. Production promotion crosses a separate
-`GpuWdbDeviceReceipt` boundary after backend completion. The receipt binds the
-positive backend handle and device identity to device-origin readback, expected
-and actual CPU-oracle checksums, mismatch count, and CPU-fallback status.
-Upload-only, runtime-queue-only, synthetic-handle, or CPU-mirror evidence remains
-CPU-authoritative even when the backend is available and timing is positive.

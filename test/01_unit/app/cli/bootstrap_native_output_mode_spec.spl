@@ -1,0 +1,97 @@
+"""Behavior regression for positional bootstrap native-build output selection.
+
+Exercises production argument projection and the environment owner. Native CLI
+object admission needs a refreshed compiler and remains a separate integration
+gate; these scenarios do not claim to compile or validate a COFF/ELF artifact.
+"""
+use std.spec.{describe, it, expect, step}
+use app.cli.bootstrap_native_output_args.{bootstrap_native_build_output_mode}
+use app.io.native_build_output_mode.{
+    native_build_output_mode_snapshot, native_build_output_mode_bind,
+    native_build_output_mode_restore
+}
+
+describe "bootstrap positional native output mode":
+    it "should project each supported CLI mode to its driver value":
+        step("Select object, archive, and shared output for a positional module")
+        expect(bootstrap_native_build_output_mode(["simple", "native-build", "module.spl", "--emit-object"])).to_equal("1")
+        expect(bootstrap_native_build_output_mode(["simple", "native-build", "module.spl", "--emit-archive"])).to_equal("archive")
+        expect(bootstrap_native_build_output_mode(["simple", "native-build", "module.spl", "--emit-shared"])).to_equal("shared")
+
+    it "should preserve the default and accept repeated identical flags":
+        step("Leave output mode unspecified or repeat the same mode")
+        expect(bootstrap_native_build_output_mode(["simple", "native-build", "module.spl"])).to_equal("")
+        expect(bootstrap_native_build_output_mode(["--emit-object", "module.spl", "--emit-object"])).to_equal("1")
+        expect(bootstrap_native_build_output_mode([])).to_equal("")
+
+    it "should reject every ordered pair of conflicting emit modes":
+        step("Request two distinct output modes")
+        val modes = ["--emit-object", "--emit-archive", "--emit-shared"]
+        for first in modes:
+            for second in modes:
+                if first != second:
+                    expect(bootstrap_native_build_output_mode(["module.spl", first, second])).to_equal("conflict")
+
+    it "should skip option operands that resemble output flags":
+        step("Use flag-shaped output names and cache paths")
+        expect(bootstrap_native_build_output_mode(["module.spl", "-o", "--emit-shared", "--emit-object"])).to_equal("1")
+        expect(bootstrap_native_build_output_mode(["module.spl", "--cache-dir", "--emit-object"])).to_equal("")
+        expect(bootstrap_native_build_output_mode(["module.spl", "--output=--emit-shared", "--emit-archive"])).to_equal("archive")
+
+    it "should override an inherited mode and restore its exact value":
+        step("Temporarily select object output over inherited shared output")
+        val original = native_build_output_mode_snapshot()
+        val seeded = native_build_output_mode_restore("shared")
+        val previous = native_build_output_mode_snapshot()
+        val bound = native_build_output_mode_bind(bootstrap_native_build_output_mode(["module.spl", "--emit-object"]))
+        val during = native_build_output_mode_snapshot()
+        val restored = native_build_output_mode_restore(previous)
+        val after = native_build_output_mode_snapshot()
+        val cleaned = native_build_output_mode_restore(original)
+        expect(seeded and bound and restored and cleaned).to_equal(true)
+        expect(during).to_equal("1")
+        expect(after).to_equal("shared")
+
+    it "should restore absence without introducing an empty environment value":
+        step("Bind archive output with no inherited variable and then restore")
+        val original = native_build_output_mode_snapshot()
+        val seeded = native_build_output_mode_restore(nil)
+        val previous = native_build_output_mode_snapshot()
+        val bound = native_build_output_mode_bind("archive")
+        val during = native_build_output_mode_snapshot()
+        val restored = native_build_output_mode_restore(previous)
+        val after = native_build_output_mode_snapshot()
+        val cleaned = native_build_output_mode_restore(original)
+        expect(seeded and bound and restored and cleaned).to_equal(true)
+        expect(previous).to_be_nil()
+        expect(during).to_equal("archive")
+        expect(after).to_be_nil()
+
+    it "should restore a present empty environment value distinctly from absence":
+        step("Temporarily replace an explicitly empty output-mode variable")
+        val original = native_build_output_mode_snapshot()
+        val seeded = native_build_output_mode_restore("")
+        val previous = native_build_output_mode_snapshot()
+        val bound = native_build_output_mode_bind("shared")
+        val during = native_build_output_mode_snapshot()
+        val restored = native_build_output_mode_restore(previous)
+        val after = native_build_output_mode_snapshot()
+        val cleaned = native_build_output_mode_restore(original)
+        expect(seeded and bound and restored and cleaned).to_equal(true)
+        expect(previous).to_equal("")
+        expect(during).to_equal("shared")
+        expect(after).to_equal("")
+
+    it "should preserve inheritance for omitted flags and refuse a conflict without mutation":
+        step("Submit no override and then conflicting output flags")
+        val original = native_build_output_mode_snapshot()
+        val seeded = native_build_output_mode_restore("archive")
+        val omitted = native_build_output_mode_bind(bootstrap_native_build_output_mode(["module.spl"]))
+        val inherited = native_build_output_mode_snapshot()
+        val rejected = native_build_output_mode_bind(bootstrap_native_build_output_mode(["module.spl", "--emit-object", "--emit-shared"]))
+        val after = native_build_output_mode_snapshot()
+        val cleaned = native_build_output_mode_restore(original)
+        expect(seeded and omitted and cleaned).to_equal(true)
+        expect(rejected).to_equal(false)
+        expect(inherited).to_equal("archive")
+        expect(after).to_equal("archive")

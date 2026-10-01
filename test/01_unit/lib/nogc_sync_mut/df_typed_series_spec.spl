@@ -1,0 +1,128 @@
+"""Typed DataFrame columns retain static values and explicit missing rows."""
+# @req REQ-001
+# @cover src/lib/nogc_sync_mut/df/typed_series.spl
+
+use std.spec.*
+use std.ndarray.*
+use std.nogc_sync_mut.df.mod.{Symbol, Series, SeriesErased, DataFrame}
+use std.nogc_sync_mut.df.typed_series.*
+
+fn increment_i64(value: Int64) -> Int64:
+    Int64.new(value.value + 1)
+
+fn above_ten_i64(value: Int64) -> bool:
+    value.value > 10
+
+fn positive_without_missing_i64(value: Int64) -> bool:
+    if value.value == 77:
+        panic("predicate visited a missing row")
+    value.value > 0
+
+fn first_match_i64(value: Int64) -> bool:
+    if value.value == 11:
+        panic("any_present did not short circuit")
+    value.value == 9
+
+describe "typed DataFrame columns":
+    it "validates masks and preserves missing rows through map and filter":
+        step("Build a statically typed integer column with one missing row")
+        val name = Symbol.from("id")
+        val invalid = TypedSeries<Int64>.from_masked(
+            name, [Int64.new(1)], [])
+        expect(invalid.is_err()).to_equal(true)
+        val built = TypedSeries<Int64>.from_masked(
+            name, [Int64.new(9), Int64.new(77), Int64.new(11)],
+            [Bool.new(false), Bool.new(true), Bool.new(false)])
+        val column = built.unwrap()
+        val missing_cell = column.get(Index.new(1))
+        expect(missing_cell.is_ok()).to_equal(true)
+        val missing_value = missing_cell.unwrap()
+        expect(missing_value.?).to_equal(false)
+        val out_of_bounds = column.get(Index.new(3))
+        expect(out_of_bounds.is_err()).to_equal(true)
+        val mapped_result = column.map_values(increment_i64)
+        val mapped = mapped_result.unwrap()
+        expect(mapped.values[0].value).to_equal(10)
+        expect(mapped.values[1].value).to_equal(77)
+        val filtered_result = mapped.filter([
+            Bool.new(false), Bool.new(true), Bool.new(true)])
+        val filtered = filtered_result.unwrap()
+        expect(filtered.len().value).to_equal(2)
+        expect(filtered.missing[0].value).to_equal(true)
+        expect(filtered.values[1].value).to_equal(12)
+
+    it "filters present values and short circuits typed queries":
+        step("Skip missing rows during typed predicate evaluation")
+        val built = TypedSeries<Int64>.from_masked(
+            Symbol.from("value"),
+            [Int64.new(9), Int64.new(77), Int64.new(11)],
+            [Bool.new(false), Bool.new(true), Bool.new(false)])
+        val column = built.unwrap()
+        val selected_result = column.filter_present(above_ten_i64)
+        val selected = selected_result.unwrap()
+        expect(selected.len().value).to_equal(1)
+        expect(selected.values[0].value).to_equal(11)
+        expect(selected.missing[0].value).to_equal(false)
+        val any_result = column.any_present(above_ten_i64)
+        val all_result = column.all_present(above_ten_i64)
+        val all_skipping_missing = column.all_present(positive_without_missing_i64)
+        val any_short_circuit = column.any_present(first_match_i64)
+        val any_value = any_result.unwrap()
+        val all_value = all_result.unwrap()
+        val all_skip_value = all_skipping_missing.unwrap()
+        val any_short_value = any_short_circuit.unwrap()
+        expect(any_value).to_equal(true)
+        expect(all_value).to_equal(false)
+        expect(all_skip_value).to_equal(true)
+        expect(any_short_value).to_equal(true)
+        val empty = TypedSeries<Int64>.from_values(Symbol.from("empty"), [])
+        val empty_any = empty.any_present(above_ten_i64)
+        val empty_all = empty.all_present(above_ten_i64)
+        val empty_any_value = empty_any.unwrap()
+        val empty_all_value = empty_all.unwrap()
+        expect(empty_any_value).to_equal(false)
+        expect(empty_all_value).to_equal(true)
+
+    it "rejects a directly constructed column with an invalid mask":
+        step("Check the shape again at each public read or transform")
+        val malformed = TypedSeries<Int64>(
+            name: Symbol.from("bad"), values: [Int64.new(1)], missing: [])
+        val read = malformed.get(Index.new(0))
+        val mapped = malformed.map_values(increment_i64)
+        val filtered = malformed.filter([Bool.new(true)])
+        val selected = malformed.filter_present(above_ten_i64)
+        val any_result = malformed.any_present(above_ten_i64)
+        val all_result = malformed.all_present(above_ten_i64)
+        expect(read.is_err()).to_equal(true)
+        expect(mapped.is_err()).to_equal(true)
+        expect(filtered.is_err()).to_equal(true)
+        expect(selected.is_err()).to_equal(true)
+        expect(any_result.is_err()).to_equal(true)
+        expect(all_result.is_err()).to_equal(true)
+
+    it "round trips a wide integer through the dynamic DataFrame":
+        step("Convert typed numeric storage without passing through f64")
+        val name = Symbol.from("wide")
+        val built = TypedSeries<Int64>.from_masked(
+            name, [Int64.new(9007199254740993), Int64.new(0)],
+            [Bool.new(false), Bool.new(true)])
+        val typed = built.unwrap()
+        val dynamic_result = i64_typed_series_into_dynamic(typed)
+        val dynamic = dynamic_result.unwrap()
+        val frame_result = DataFrame.from_columns([SeriesErased.I64Series(dynamic)])
+        val frame = frame_result.unwrap()
+        val column_result = frame.col(name)
+        val typed_result = i64_typed_series_from_dynamic(column_result.unwrap())
+        val restored = typed_result.unwrap()
+        val first_result = restored.get(Index.new(0))
+        val first = first_result.unwrap()
+        val first_value = first.unwrap()
+        expect(first_value.value).to_equal(9007199254740993)
+        expect(restored.missing[1].value).to_equal(true)
+
+    it "rejects a dynamic numeric dtype mismatch":
+        step("Keep a floating column out of an integer typed view")
+        val dynamic = Series.from_f64_values(
+            Symbol.from("metric"), [Float64.new(1.5)])
+        val result = i64_typed_series_from_dynamic(dynamic)
+        expect(result.is_err()).to_equal(true)

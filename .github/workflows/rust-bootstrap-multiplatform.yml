@@ -2,6 +2,7 @@ name: Rust Bootstrap Multiplatform
 
 on:
   push:
+    branches: [main]
     paths:
       - 'src/compiler_rust/**'
       - 'src/compiler/**'
@@ -65,6 +66,21 @@ on:
       - 'test/01_unit/compiler/backend/hosted_c_target_guard_spec.spl'
       - '.github/workflows/baremetal-tests.yml'
       - '.github/workflows/freebsd-build.yml'
+      - 'scripts/bootstrap/run-linux-phase2-tests.shs'
+      - 'scripts/check/lib/bootstrap-stage3/**'
+      - 'scripts/resource/run_capped.shs'
+      - 'scripts/check/check-linux-phase2-test-runner-contract.shs'
+      - 'test/01_unit/scripts/linux_phase2_false_pass_contract_test.shs'
+      - 'test/01_unit/scripts/run_capped_fail_closed_contract_test.shs'
+      - 'test/01_unit/scripts/bootstrap_seed_generation_permissions_test.shs'
+      - 'scripts/check/check-freebsd-selfhost-ci.shs'
+      - 'scripts/check/check-ui-slim-closure.shs'
+      - 'scripts/check/check-pure-simple-lint-runnable.shs'
+      - 'src/app/ui.tui/async_app.spl'
+      - 'scripts/check/check-ui-layout-branch-coverage.shs'
+      - 'test/unit/app/ui/layout_spec.spl'
+      - 'src/app/ui.tui/backend.spl'
+      - 'src/app/ui.tui_web/backend.spl'
       # These workflows must remain absent; trigger this guard if someone
       # restores one so portability contracts reject the regression.
       - '.github/workflows/windows-tests.yml'
@@ -73,6 +89,7 @@ on:
       - '.github/workflows/simple-llvm-cross.yml'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   pull_request:
+    types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
     paths:
       - 'src/compiler_rust/**'
       - 'src/compiler/**'
@@ -136,6 +153,21 @@ on:
       - 'test/01_unit/compiler/backend/hosted_c_target_guard_spec.spl'
       - '.github/workflows/baremetal-tests.yml'
       - '.github/workflows/freebsd-build.yml'
+      - 'scripts/bootstrap/run-linux-phase2-tests.shs'
+      - 'scripts/check/lib/bootstrap-stage3/**'
+      - 'scripts/resource/run_capped.shs'
+      - 'scripts/check/check-linux-phase2-test-runner-contract.shs'
+      - 'test/01_unit/scripts/linux_phase2_false_pass_contract_test.shs'
+      - 'test/01_unit/scripts/run_capped_fail_closed_contract_test.shs'
+      - 'test/01_unit/scripts/bootstrap_seed_generation_permissions_test.shs'
+      - 'scripts/check/check-freebsd-selfhost-ci.shs'
+      - 'scripts/check/check-ui-slim-closure.shs'
+      - 'scripts/check/check-pure-simple-lint-runnable.shs'
+      - 'src/app/ui.tui/async_app.spl'
+      - 'scripts/check/check-ui-layout-branch-coverage.shs'
+      - 'test/unit/app/ui/layout_spec.spl'
+      - 'src/app/ui.tui/backend.spl'
+      - 'src/app/ui.tui_web/backend.spl'
       # These workflows must remain absent; trigger this guard if someone
       # restores one so portability contracts reject the regression.
       - '.github/workflows/windows-tests.yml'
@@ -145,9 +177,15 @@ on:
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   workflow_dispatch:
 
+# main must reach a verdict: before 2026-09-28 every main run was cancelled by
+# the next main push (874/1000 runs cancelled, 0 completed on main). With
+# cancel-in-progress false GitHub keeps at most one running + one pending run
+# per group, and a newer queued run replaces the older PENDING one, so main's
+# queue stays bounded. Manual dispatches are run-isolated and never cancelled;
+# PR runs still cancel their own stale in-progress run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -155,8 +193,11 @@ env:
 
 # Pin x86_64 build hosts: local ARM64 runners advertise ubuntu-latest.
 jobs:
+  # ARM64 self-hosted runners also advertise ubuntu-latest. Pin hosted Linux
+  # jobs so x86_64, cross, and VM builds cannot land on those runners.
   # Native builds — compile and test on each platform
   native:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     strategy:
       fail-fast: false
       matrix:
@@ -204,10 +245,32 @@ jobs:
           sh scripts/check/check-bootstrap-host-capacity.shs
           sh scripts/check/check-bootstrap-windows-authority-paths.shs
 
+      - name: Validate Linux Phase 2 test-runner contracts
+        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        run: |
+          sh scripts/check/check-linux-phase2-test-runner-contract.shs
+          sh test/01_unit/scripts/linux_phase2_false_pass_contract_test.shs
+          sh test/01_unit/scripts/run_capped_fail_closed_contract_test.shs
+
+      - name: Validate bootstrap capacity and Windows authority contracts
+        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        run: |
+          sh scripts/check/check-bootstrap-host-capacity.shs
+          sh scripts/check/check-bootstrap-keep-going-policy.shs
+          sh scripts/check/check-bootstrap-windows-authority-paths.shs
+
       - name: Setup MSVC
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Select Clang C driver (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          clang-cl --version
+          if ($LASTEXITCODE -ne 0) { throw 'clang-cl is required for the Windows bootstrap' }
+          "CC=clang-cl" >> $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_msvc=clang-cl" >> $env:GITHUB_ENV
       - name: Fix MSVC linker PATH
         if: runner.os == 'Windows'
         shell: bash
@@ -226,12 +289,16 @@ jobs:
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
         run: sudo apt-get install -y libpolly-18-dev
 
-      - name: Install FreeType (macOS)
+      - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: |
-          brew install coreutils freetype zstd ${{ matrix.backend == 'llvm' && 'llvm@18' || '' }}
+          brew install coreutils freetype zstd llvm ${{ matrix.backend == 'llvm' && 'llvm@18' || '' }}
+          llvm_objcopy="$(brew --prefix llvm)/bin/llvm-objcopy"
+          test -x "$llvm_objcopy"
+          "$llvm_objcopy" --version
           echo "RUSTFLAGS=-L native=$(brew --prefix freetype)/lib" >> "$GITHUB_ENV"
           echo "LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:${LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "CPATH=$(brew --prefix freetype)/include:${CPATH:-}" >> "$GITHUB_ENV"
           if [ "${{ matrix.backend }}" = "llvm" ]; then
             llvm_prefix=$(brew --prefix llvm@18)
             echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
@@ -294,47 +361,82 @@ jobs:
           else
             mcp_flag=--no-mcp
           fi
-          # Admit a pure-Simple planner parent before the coordinated build.
-          # Keep it in its own output tree so the later build cannot replace
-          # the compiler whose digest authorizes the planner receipt.
-          planner_output=build/bootstrap/ci-planner-parent
-          sh scripts/bootstrap/bootstrap-from-scratch.sh \
-            --backend=${{ matrix.backend }} \
-            --mode=dynload --full-bootstrap --stop-after-stage2 \
-            --output="$planner_output" --jobs=2
-          planner_parent=
-          for candidate in "$planner_output"/stage2/*/simple "$planner_output"/stage2/*/simple.exe; do
-            [ -f "$candidate" ] || continue
-            if [ -n "$planner_parent" ]; then
-              echo "error: multiple planner parents found" >&2
-              exit 1
-            fi
-            planner_parent=$candidate
-          done
-          test -n "$planner_parent"
-          planner_receipt="$planner_output/ci-stage4-planner-admission.env"
-          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
-            --target=//bootstrap:stage4 --reason=self-host-convergence-check \
-            --parent-compiler="$planner_parent" \
-            --bootstrap-output="$planner_output" --out="$planner_receipt"
-          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+          # Establish the narrow receipt-free Stage 2 trust root first.
+          SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=${{ matrix.backend }} \
             --mode=dynload \
             --full-bootstrap \
-            --bootstrap-receipt="$planner_receipt" \
-            "$mcp_flag" \
+            --stop-after-stage2 \
+            --no-mcp \
+            --output=build/bootstrap \
             --jobs=2
+          stage2="$(find build/bootstrap/stage2 -type f \( -name simple -o -name simple.exe \) -print -quit)"
+          test -n "$stage2"
+          stage3_receipt="$PWD/build/bootstrap/multiplatform-stage3-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage3 \
+            --reason=verify-landed-compiler-fix \
+            --parent-compiler="$stage2" \
+            --bootstrap-output=build/bootstrap \
+            --out="$stage3_receipt"
+          if [ "$mcp_flag" = --full-cli ]; then
+            # Keep the Stage 4 planner parent isolated from the coordinated
+            # build so its admitted digest cannot be replaced by later stages.
+            planner_output=build/bootstrap/ci-planner-parent
+            sh scripts/bootstrap/bootstrap-from-scratch.sh \
+              --backend=${{ matrix.backend }} \
+              --mode=dynload --full-bootstrap --stop-after-stage2 \
+              --output="$planner_output" --jobs=2
+            planner_parent=
+            for candidate in "$planner_output"/stage2/*/simple "$planner_output"/stage2/*/simple.exe; do
+              [ -f "$candidate" ] || continue
+              if [ -n "$planner_parent" ]; then
+                echo "error: multiple planner parents found" >&2
+                exit 1
+              fi
+              planner_parent=$candidate
+            done
+            test -n "$planner_parent"
+            stage4_receipt="$PWD/$planner_output/multiplatform-stage4-planner-admission-v2.env"
+            sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+              --target=//bootstrap:stage4 \
+              --reason=self-host-convergence-check \
+              --parent-compiler="$planner_parent" \
+              --bootstrap-output="$planner_output" \
+              --out="$stage4_receipt"
+            sh scripts/bootstrap/bootstrap-strategy.shs \
+              --strategy=full \
+              --output=build/bootstrap \
+              --stage4-bootstrap-receipt="$stage4_receipt" \
+              -- \
+              --bootstrap-receipt="$stage3_receipt" \
+              --resume-stage3-from-admitted=build/bootstrap \
+              --backend=${{ matrix.backend }} \
+              "$mcp_flag" \
+              --mode=dynload
+          else
+            SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
+              --bootstrap-receipt="$stage3_receipt" \
+              --resume-stage3-from-admitted=build/bootstrap \
+              --output=build/bootstrap
+          fi
 
       - name: Upload pure-Simple bootstrap failure logs
         if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap-failure-logs-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
+          # The engine also writes logs under its worktree storage root;
+          # upload-artifact skips that hidden path unless enabled below.
           path: |
             build/bootstrap/logs/**
             build/bootstrap/ci-planner-parent/logs/**
             build/bootstrap/admission/**
             build/bootstrap/scheduler/**
+            .simple/storage/build/bootstrap/logs/**
+            .simple/storage/build/bootstrap/stage3/**/*.log*
+            .simple/storage/build/bootstrap/stage3/**/*.transcript
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -417,6 +519,50 @@ jobs:
       - name: Test
         working-directory: src/compiler_rust
         run: cargo test --workspace --lib
+
+      # Slim-UI import-closure gate (NFR-UI-SLIM-002,
+      # doc/02_requirements/nfr/ui_slim_kernel_plugin.md; plan Wave 0 / A01).
+      # Runs `deps fast` on the ordinary-mode TUI entry through the seed just
+      # built above and fails if any file in its closure lives under one of the
+      # five forbidden prefixes the NFR names. Needs a built seed, which is why
+      # it runs here and not in repo-hygiene.yml (which only runs --selftest).
+      # Skipped on Windows: the guard is POSIX sh and the seed there is
+      # simple.exe, untested under Git Bash.
+      - name: Slim-UI closure gate
+        if: runner.os != 'Windows' && matrix.backend == 'llvm'
+        run: |
+          sh scripts/check/check-ui-slim-closure.shs \
+            --seed src/compiler_rust/target/bootstrap/simple \
+            src/app/ui.tui/async_app.spl \
+            src/os/compositor src/os/drivers src/os/kernel \
+            src/lib/skia src/lib/gc_async_mut/gpu
+
+      # Pure-Simple lint runnable pin: the lint program (src/app/cli/lint_entry.spl)
+      # must EXECUTE through the seed just built and its findings must
+      # discriminate (clean fixture -> "Lint passed", dirty fixture ->
+      # RAW-RT-001). Its --selftest also needs the binary, so it cannot run in
+      # repo-hygiene.yml; it was baselined as unwired debt until wired here.
+      - name: Pure-Simple lint runnable gate
+        if: runner.os != 'Windows' && matrix.backend == 'llvm'
+        run: |
+          sh scripts/check/check-pure-simple-lint-runnable.shs \
+            --binary src/compiler_rust/target/bootstrap/simple
+
+      # Shared UI layout-engine gate (landed with 0f7492dfb32; the guard header
+      # cites no plan/NFR doc, the commit is its authority). Two blocking halves:
+      # ui.tui/backend.spl and ui.tui_web/backend.spl must still import the same
+      # common.ui.layout.{compute_layout}, and running test/unit/app/ui/layout_spec.spl
+      # under SIMPLE_COVERAGE=1 must leave >= 90% of the decisions in
+      # src/lib/common/ui/layout.spl covered on BOTH outcomes (0 recorded
+      # decisions is ERROR, never a pass). Unlike the two gates above there is
+      # no repo-hygiene --selftest half: its selftest itself runs the
+      # interpreter, so without a binary it exits 2. Not parameterized; it
+      # probes bin/simple (untracked, absent here) and falls back to the seed
+      # built above at src/compiler_rust/target/bootstrap/simple.
+      - name: Shared UI layout-engine coverage gate
+        if: runner.os != 'Windows' && matrix.backend == 'llvm'
+        run: |
+          sh scripts/check/check-ui-layout-branch-coverage.shs
 
       - name: Validate hosted Stage4 dynload provider archive
         if: (runner.os == 'Linux' || runner.os == 'macOS') && matrix.backend == 'llvm'
@@ -583,6 +729,7 @@ jobs:
           retention-days: 7
 
   native-architectures:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     name: Pure Simple — ARM32/RV32 LLVM objects + x86_64/AArch64/RISC-V64 dual backend
     runs-on: ubuntu-24.04
     needs: native
@@ -644,6 +791,7 @@ jobs:
 
   # Cross-compilation builds from Linux x86_64
   cross:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -662,12 +810,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation toolchain
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.pkg }}
+
+      - name: Select Clang for Windows GNU bootstrap
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          sudo apt-get install -y clang
+          echo 'CC_x86_64_pc_windows_gnu=clang' >> "$GITHUB_ENV"
+          clang --version | head -1
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -686,6 +841,7 @@ jobs:
 
   # FreeBSD build (VM-based)
   freebsd:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     name: Native — FreeBSD x86_64
     steps:
@@ -696,11 +852,74 @@ jobs:
         with:
           usesh: true
           prepare: |
-            pkg install -y curl bash freetype2
+            pkg install -y curl bash
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
           run: |
+            set -eu
             . "$HOME/.cargo/env"
-            export RUSTFLAGS="-L native=/usr/local/lib"
             cd src/compiler_rust
-            cargo build --profile bootstrap -p simple-driver
-            cargo test --workspace --lib -j 1 -- --test-threads=1
+            echo 'FreeBSD guest resource diagnostics (bounded)'
+            {
+              echo 'sysctl:'
+              sysctl -n hw.ncpu hw.physmem vm.swap_total 2>&1 || true
+              echo 'swapinfo:'
+              swapinfo -h 2>&1 || true
+            } | head -n 40
+
+            CARGO_BUILD_JOBS=1 cargo build --profile bootstrap -p simple-driver || {
+              cargo_status=$?
+              echo "FreeBSD cargo build failed (status=$cargo_status)" >&2
+              echo 'FreeBSD dmesg tail (last 80 lines)' >&2
+              dmesg 2>&1 | tail -n 80 || true
+              exit "$cargo_status"
+            }
+            CARGO_BUILD_JOBS=1 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --lib -j 1 -- --test-threads=1 || {
+              cargo_status=$?
+              echo "FreeBSD cargo test failed (status=$cargo_status)" >&2
+              echo 'FreeBSD dmesg tail (last 80 lines)' >&2
+              dmesg 2>&1 | tail -n 80 || true
+              exit "$cargo_status"
+            }
+
+  # Native FreeBSD self-hosted Stage 3 proof. This is intentionally separate
+  # from the Rust seed build above: it exercises the canonical receipt-free
+  # Stage 2 trust root and the tracked Stage 3 resume interface in the guest.
+  freebsd-selfhost:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ubuntu-24.04
+    name: Self-host — FreeBSD Stage 3
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run native FreeBSD self-host checker
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            mkdir -p /usr/local/etc/pkg/repos
+            sed 's|/quarterly|/latest|' /etc/pkg/FreeBSD.conf > /usr/local/etc/pkg/repos/FreeBSD.conf
+            grep -q '/latest' /usr/local/etc/pkg/repos/FreeBSD.conf
+            pkg update -f
+            pkg install -y bash coreutils curl git gmake llvm23 pkgconf libffi zstd perl5 rsync python3
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          run: |
+            set -eu
+            . "$HOME/.cargo/env"
+            export PATH=/usr/local/libexec/gnubin:/usr/local/bin:$PATH
+            # The synced checkout is owned by a different uid than the VM's
+            # SSH user; without this, git refuses it and bootstrap preflight
+            # cannot bind HEAD ("detected dubious ownership").
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            git config --global --add safe.directory "$(pwd -P)"
+            git rev-parse --verify HEAD >/dev/null
+            sh scripts/check/check-freebsd-selfhost-ci.shs
+
+      - name: Upload FreeBSD self-host evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-selfhost-${{ github.sha }}
+          path: build/bootstrap-freebsd-ci
+          if-no-files-found: warn
+          retention-days: 14

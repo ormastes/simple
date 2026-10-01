@@ -42,6 +42,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#endif
 
 /* ----------------------------------------------------------------
  * Directory Operations
@@ -175,8 +178,13 @@ bool rt_dir_remove_all_cpath(const char* path) {
  * File Locking
  * ---------------------------------------------------------------- */
 
-int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
-    if (!path) return -1;
+int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+    /* Raw (ptr, len) `text` ABI per runtime.h: rt_file_lock IS in
+     * text_arg_indices, so the caller splits `text` into two words. */
+    if (!path_ptr || path_len == 0 || path_len >= 4096) return -1;
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = 0;  /* NUL-terminate */
 
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;
@@ -301,29 +309,46 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) {
-    if (!path || size <= 0 || offset < 0) return NULL;
+int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
+    /* Tagged-value `text` contract per runtime.h: rt_mmap is ABSENT from
+     * text_arg_indices, so the caller passes ONE tagged value, not a C
+     * string. The old `const char*` shape never matched a generated caller. */
+    int64_t path_len = rt_string_len(path_value);
+    const uint8_t* path_ptr = rt_string_data(path_value);
+    if (!path_ptr || path_len <= 0 || path_len >= 4096 || size <= 0 || offset < 0) return 0;
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = 0;  /* NUL-terminate */
+    /* Bounds contract shared with the Rust owner and runtime_native.c: the
+     * region must lie inside the file, else a later access SIGBUSes. */
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
 
     int prot = readonly != 0 ? PROT_READ : (PROT_READ | PROT_WRITE);
     int flags = MAP_SHARED;
     int open_flags = readonly != 0 ? O_RDONLY : O_RDWR;
 
     int fd = open(path, open_flags);
-    if (fd < 0) return NULL;
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
+        close(fd);
+        return 0;
+    }
 
     void* addr = mmap(NULL, (size_t)size, prot, flags, fd, (off_t)offset);
     close(fd);
 
-    if (addr == MAP_FAILED) return NULL;
-    return addr;
+    if (addr == MAP_FAILED) return 0;
+    return (int64_t)(intptr_t)addr;
 }
 
-bool rt_munmap(void* addr, int64_t size) {
+bool rt_munmap(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
-    return munmap(addr, (size_t)size) == 0;
+    return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
 }
 
-bool rt_madvise(void* addr, int64_t size, int64_t advice) {
+bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     if (!addr || size <= 0) return false;
 
     /* Convert advice codes: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED */
@@ -337,12 +362,12 @@ bool rt_madvise(void* addr, int64_t size, int64_t advice) {
         default: return false;
     }
 
-    return madvise(addr, (size_t)size, posix_advice) == 0;
+    return madvise((void*)(intptr_t)addr, (size_t)size, posix_advice) == 0;
 }
 
-bool rt_msync(void* addr, int64_t size) {
+bool rt_msync(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
-    return msync(addr, (size_t)size, MS_SYNC) == 0;
+    return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
 }
 
 /* ----------------------------------------------------------------
@@ -683,6 +708,44 @@ bool rt_process_is_running(int64_t pid) {
         return true;
     }
     return (errno == EPERM);
+}
+
+int64_t rt_process_start_identity(int64_t pid) {
+    if (pid <= 0) return 0;
+#if defined(__linux__)
+    char path[64], line[2048];
+    snprintf(path, sizeof(path), "/proc/%lld/stat", (long long)pid);
+    FILE* file = fopen(path, "r");
+    if (!file) return 0;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    char* cursor = strrchr(line, ')');
+    if (!cursor || cursor[1] != ' ') return 0;
+    cursor += 2;
+    for (int field = 3; field < 22; field++) {
+        cursor = strchr(cursor, ' ');
+        if (!cursor) return 0;
+        cursor++;
+    }
+    errno = 0;
+    char* end = NULL;
+    unsigned long long value = strtoull(cursor, &end, 10);
+    if (errno != 0 || end == cursor || value > INT64_MAX) return 0;
+    return (int64_t)value;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return 0;
+    uint64_t seconds = (uint64_t)info.pbi_start_tvsec;
+    uint64_t micros = (uint64_t)info.pbi_start_tvusec;
+    if (seconds > (uint64_t)INT64_MAX / 1000000ULL) return 0;
+    return (int64_t)(seconds * 1000000ULL + micros);
+#else
+    return 0;
+#endif
 }
 
 bool rt_process_kill(int64_t pid) {

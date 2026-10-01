@@ -1,4 +1,40 @@
-use std.spec.{describe, it, expect}
+"""
+Typed environment scenario governance specification
+
+## Purpose and audience
+Executable specification of the std.spec scenario-governance surface
+(omission records, MC/DC exclusion collection, and the bounded exclusion
+snapshot), written for the testing-infrastructure team and the reviewers who
+must confirm a skipped scenario is always owner-tracked, reasoned, and
+versioned before it is admitted.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/std/spec/scenario_governance_spec.spl` from the repository
+root; the scenarios exercise the governance API directly with no external
+fixtures and reset the exclusion snapshot before each collection case.
+
+## Compatibility and limitations
+Governance is enforced in-process: the MC/DC exclusion snapshot is bounded
+at a fixed capacity and reset between scenarios, so this spec must not run
+concurrently with another spec that collects exclusions in the same
+process. Error names (MCDC-E-*, ENV-E-*) are the stable contract.
+
+## Verification guidance and troubleshooting
+A failure naming an MCDC-E-* or ENV-E-* code means a rejection path changed
+its stable error identity; a capacity or snapshot failure means the
+bounded-collection invariants drifted. Re-run this single file and compare
+the expected error code in the failing line against
+`src/lib/std/spec/scenario_governance.spl` before renaming any code.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: scenario governance
+# @req REQ-SSPEC-LIB
+
+use std.spec.{describe, it, expect, step}
 use lib.common.env_access.model.{env_scenario_execute, env_scenario_exclude, env_scenario_skip}
 use std.spec.skip_governance.SkipRecord
 use std.spec.scenario_governance.{
@@ -25,11 +61,17 @@ fn tracked_record(category: text = "environment") -> SkipRecord:
 
 describe "typed environment scenario governance":
     it "starts and resets with a bounded empty exclusion snapshot":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): snapshot capacity and post-reset entry count
+        step("Reset the exclusion pool and read its bounded capacity")
         scenario_governance_mcdc_exclusions_reset()
-        expect(scenario_governance_mcdc_exclusions_capacity()).to_equal(1024)
-        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)
+        expect(scenario_governance_mcdc_exclusions_capacity()).to_equal(1024)  # oracle: the governance pool is provisioned at a fixed 1024-entry capacity by design
+        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)  # oracle: a fresh reset must leave zero collected exclusions
 
     it "does not collect an exclusion whose canonical review is absent":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): rejection problem text and post-rejection snapshot count
+        step("Attempt to collect an exclusion whose review id is missing")
         scenario_governance_mcdc_exclusions_reset()
         val selection = env_scenario_exclude(
             "missing-reviewed-decision",
@@ -37,10 +79,13 @@ describe "typed environment scenario governance":
             "runtime-assurance", "MISSING-MC-REVIEW", "2099-12-31")
         val problem = scenario_governance_collect_mcdc_exclusion(
             selection, "10:sample.spl:42", 0, "source-v1")
-        expect(problem.len()).to_be_greater_than(0)
-        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)
+        expect(problem.len()).to_be_greater_than(0)  # oracle: an absent review must produce a non-empty rejection problem, never a silent accept
+        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)  # oracle: a rejected exclusion must not enter the collected snapshot
 
     it "rejects broad identity and whole-decision ordinal before collection":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): rejection codes for wildcard identity and ordinal -1 scope
+        step("Submit a wildcard identity and a whole-decision ordinal and read the codes")
         scenario_governance_mcdc_exclusions_reset()
         val selection = env_scenario_exclude(
             "missing-reviewed-decision",
@@ -51,14 +96,21 @@ describe "typed environment scenario governance":
         expect(broad).to_equal("MCDC-E-IDENTITY")
         val whole = scenario_governance_collect_mcdc_exclusion(
             selection, "10:sample.spl:42", -1, "source-v1")
-        expect(whole).to_equal("MCDC-E-EXCLUSION-SCOPE")
-        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)
+        expect(whole).to_equal("MCDC-E-EXCLUSION-SCOPE")  # oracle: ordinal -1 means the whole decision, which the scope rule must reject by code
+        expect(scenario_governance_mcdc_exclusions_snapshot().len()).to_equal(0)  # oracle: neither rejected exclusion may enter the snapshot
 
     it "keeps blocked and unsupported outcomes distinct from pass":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): rendered status names for the Blocked and Unsupported enums
+        step("Render the Blocked and Unsupported omission statuses by name")
         expect(scenario_omission_status_name(ScenarioOmissionStatus.Blocked)).to_equal("BLOCKED")
         expect(scenario_omission_status_name(ScenarioOmissionStatus.Unsupported)).to_equal("UNSUPPORTED")
 
     it "accepts a reasoned owner-tracked unavailable scenario":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): acceptance verdict for the fully-reasoned skip record
+        step("Validate a complete skip record with owner, venue, and evidence")
+        # @req REQ-MC-ENV-001
         val selection = env_scenario_skip(
             "hardware-fault", "physical fault injection rig is unavailable on this host",
             "runtime-assurance", "MC-ENV-001", "qualified fault-injection rig",
@@ -68,6 +120,10 @@ describe "typed environment scenario governance":
         expect(result.ok).to_equal(true)
 
     it "rejects unavailable execution and owner drift":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): rejection verdicts for execute-mismatch and owner-mismatch
+        step("Validate an execute selection as blocked, then a skip with a drifted owner")
+        # @req REQ-MC-ENV-001
         val execute_result = validate_scenario_omission_record(
             env_scenario_execute("hardware-fault"), ScenarioOmissionStatus.Blocked,
             tracked_record())
@@ -81,6 +137,10 @@ describe "typed environment scenario governance":
         expect(owner_result.message).to_equal("ENV-E-OMISSION-OWNER-MISMATCH")
 
     it "accepts only narrow reviewed versioned MC/DC exclusions":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): acceptance and category-mismatch codes for MC/DC exclusions
+        step("Validate a category-matched exclusion, then the same one under environment category")
+        # @req REQ-MC-ENV-001
         val selection = env_scenario_exclude(
             "unproducible-hardware-state",
             "physical fault injection rig is unavailable on this host",
@@ -94,6 +154,10 @@ describe "typed environment scenario governance":
         expect(wrong_category.message).to_equal("ENV-E-EXCLUSION-CATEGORY")
 
     it "rejects exclusion version drift":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): version-drift rejection code for a v2 exclusion
+        step("Validate an exclusion whose review version has drifted to v2")
+        # @req REQ-MC-ENV-001
         val selection = env_scenario_exclude(
             "unproducible-hardware-state",
             "physical fault injection rig is unavailable on this host",
@@ -104,6 +168,10 @@ describe "typed environment scenario governance":
         expect(result.message).to_equal("ENV-E-EXCLUSION-VERSION")
 
     it "rejects wildcard exclusion scope":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): scope rejection code for an all* identity
+        step("Validate an exclusion whose identity is the wildcard all*")
+        # @req REQ-MC-ENV-001
         val selection = env_scenario_exclude(
             "all*", "physical fault injection rig is unavailable on this host",
             "runtime-assurance", "MC-ENV-001", "2099-12-31")

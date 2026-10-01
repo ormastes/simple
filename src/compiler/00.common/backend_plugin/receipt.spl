@@ -1,0 +1,156 @@
+# codex-impl: fail-closed admission and deterministic backend receipts.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.backend_plugin.model.{
+    BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+    BackendRole, BackendCapability, BackendPluginVTableV1,
+    BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_supports_role, backend_plugin_supports_target,
+    backend_plugin_has_capability
+}
+
+enum BackendPluginError:
+    NotFound(detail: text)
+    LoadFailed(detail: text)
+    MissingSymbol(detail: text)
+    AbiMismatch(detail: text)
+    DescriptorTooSmall(detail: text)
+    ProviderVersionMismatch(detail: text)
+    MirDigestMismatch(detail: text)
+    RoleUnsupported(detail: text)
+    TargetUnsupported(detail: text)
+    CapabilityMismatch(detail: text)
+    ProviderRejected(detail: text)
+    TeardownFailed(detail: text)
+
+impl BackendPluginError:
+    fn code() -> text:
+        match self:
+            case NotFound(_): "BACKEND_PLUGIN_NOT_FOUND"
+            case LoadFailed(_): "BACKEND_PLUGIN_LOAD_FAILED"
+            case MissingSymbol(_): "BACKEND_PLUGIN_MISSING_SYMBOL"
+            case AbiMismatch(_): "BACKEND_PLUGIN_ABI_MISMATCH"
+            case DescriptorTooSmall(_): "BACKEND_PLUGIN_DESCRIPTOR_SIZE"
+            case ProviderVersionMismatch(_): "BACKEND_PLUGIN_PROVIDER_VERSION"
+            case MirDigestMismatch(_): "BACKEND_PLUGIN_MIR_DIGEST"
+            case RoleUnsupported(_): "BACKEND_PLUGIN_ROLE"
+            case TargetUnsupported(_): "BACKEND_PLUGIN_TARGET"
+            case CapabilityMismatch(_): "BACKEND_PLUGIN_CAPABILITY"
+            case ProviderRejected(_): "BACKEND_PLUGIN_PROVIDER_REJECTED"
+            case TeardownFailed(_): "BACKEND_PLUGIN_TEARDOWN_FAILED"
+
+    fn diagnostic() -> text:
+        match self:
+            case NotFound(detail): detail
+            case LoadFailed(detail): detail
+            case MissingSymbol(detail): detail
+            case AbiMismatch(detail): detail
+            case DescriptorTooSmall(detail): detail
+            case ProviderVersionMismatch(detail): detail
+            case MirDigestMismatch(detail): detail
+            case RoleUnsupported(detail): detail
+            case TargetUnsupported(detail): detail
+            case CapabilityMismatch(detail): detail
+            case ProviderRejected(detail): detail
+            case TeardownFailed(detail): detail
+
+fn _backend_plugin_frame(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _backend_plugin_sorted_text(values: [text]) -> [text]:
+    var out: [text] = []
+    for value in values:
+        out.push(value)
+        var index = out.len() - 1
+        while index > 0 and out[index] < out[index - 1]:
+            val prior = out[index - 1]
+            out[index - 1] = out[index]
+            out[index] = prior
+            index = index - 1
+    out
+
+fn _backend_plugin_canonical_features(features: [text]) -> text:
+    var framed: [text] = []
+    for feature in _backend_plugin_sorted_text(features):
+        framed.push(_backend_plugin_frame(feature))
+    framed.join("")
+
+struct BackendProviderReceipt:
+    provider_identity: text
+    provider_version: text
+    build_id: text
+    abi_version: i64
+    mir_abi_digest: text
+    target: text
+    features: [text]
+    role: BackendRole
+    optimization: text
+    plugin_path_policy: text = "builtin"
+
+impl BackendProviderReceipt:
+    fn canonical_text() -> text:
+        ("BackendProviderReceiptV1"
+            + _backend_plugin_frame(self.provider_identity)
+            + _backend_plugin_frame(self.provider_version)
+            + _backend_plugin_frame(self.build_id)
+            + _backend_plugin_frame(self.abi_version.to_string())
+            + _backend_plugin_frame(self.mir_abi_digest)
+            + _backend_plugin_frame(self.target)
+            + _backend_plugin_frame(_backend_plugin_canonical_features(self.features))
+            + _backend_plugin_frame(self.role.name())
+            + _backend_plugin_frame(self.optimization)
+            + _backend_plugin_frame(self.plugin_path_policy))
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+fn backend_plugin_receipt(descriptor: BackendPluginDescriptorV1, request: BackendPluginRequestV1) -> BackendProviderReceipt:
+    BackendProviderReceipt(
+        descriptor.provider_identity, descriptor.provider_version,
+        descriptor.build_id, descriptor.abi_version, descriptor.mir_abi_digest,
+        request.target, request.features, request.role, request.optimization,
+        if request.has_plugin_path: "explicit:" + request.plugin_path else: "builtin")
+
+fn validate_backend_plugin_request(request: BackendPluginRequestV1) -> Result<BackendPluginRequestV1, BackendPluginError>:
+    if request.backend_name == "": return Err(BackendPluginError.ProviderRejected("backend_name is required"))
+    if request.target == "": return Err(BackendPluginError.ProviderRejected("target is required"))
+    if request.cpu == "": return Err(BackendPluginError.ProviderRejected("cpu is required"))
+    if request.optimization == "": return Err(BackendPluginError.ProviderRejected("optimization is required"))
+    if request.mir_abi_digest == "": return Err(BackendPluginError.ProviderRejected("MIR ABI digest is required"))
+    if request.has_plugin_path and request.plugin_path == "": return Err(BackendPluginError.ProviderRejected("plugin path is required when selected"))
+    if not request.has_plugin_path and request.plugin_path != "": return Err(BackendPluginError.ProviderRejected("plugin path requires explicit selection"))
+    for index in 0..request.features.len():
+        if request.features[index] == "": return Err(BackendPluginError.ProviderRejected("CPU feature names must not be empty"))
+        for prior in 0..index:
+            if request.features[prior] == request.features[index]: return Err(BackendPluginError.ProviderRejected("CPU features must not contain duplicates"))
+    Ok(request)
+
+fn _validate_backend_plugin_operations(request: BackendPluginRequestV1, vtable: BackendPluginVTableV1) -> Result<bool, BackendPluginError>:
+    if not vtable.supports_open_session: return Err(BackendPluginError.ProviderRejected("missing open_session operation"))
+    if not vtable.supports_compile_module: return Err(BackendPluginError.ProviderRejected("missing compile_module operation"))
+    if not vtable.supports_diagnostics: return Err(BackendPluginError.ProviderRejected("missing diagnostics operation"))
+    if not vtable.supports_close_session: return Err(BackendPluginError.ProviderRejected("missing close_session operation"))
+    if request.role == BackendRole.CompilerAot and not vtable.supports_finalize_object: return Err(BackendPluginError.ProviderRejected("missing finalize_object operation"))
+    if request.role == BackendRole.InterpreterJit and not vtable.supports_execute: return Err(BackendPluginError.ProviderRejected("missing execute operation"))
+    Ok(true)
+
+fn admit_backend_plugin_descriptor(request: BackendPluginRequestV1, descriptor: BackendPluginDescriptorV1) -> Result<BackendProviderReceipt, BackendPluginError>:
+    val validated = validate_backend_plugin_request(request)
+    if validated.is_err(): return Err(validated.err().unwrap())
+    if descriptor.provider_identity == "": return Err(BackendPluginError.ProviderRejected("provider identity is required"))
+    if descriptor.provider_identity != request.backend_name: return Err(BackendPluginError.ProviderRejected("provider identity does not match requested backend"))
+    if descriptor.provider_version == "": return Err(BackendPluginError.ProviderVersionMismatch("provider version is required"))
+    if descriptor.build_id == "": return Err(BackendPluginError.ProviderRejected("provider build ID is required"))
+    if descriptor.abi_version != BACKEND_PLUGIN_ABI_VERSION_V1: return Err(BackendPluginError.AbiMismatch("backend ABI mismatch"))
+    if descriptor.descriptor_size < BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1: return Err(BackendPluginError.DescriptorTooSmall("backend descriptor is smaller than the v1 prefix"))
+    if descriptor.mir_abi_digest != request.mir_abi_digest: return Err(BackendPluginError.MirDigestMismatch("backend MIR ABI digest mismatch"))
+    if not backend_plugin_supports_role(descriptor, request.role): return Err(BackendPluginError.RoleUnsupported(request.role.name()))
+    if not backend_plugin_supports_target(descriptor, request.target): return Err(BackendPluginError.TargetUnsupported(request.target))
+    for required in request.required_capabilities:
+        if not backend_plugin_has_capability(descriptor, required): return Err(BackendPluginError.CapabilityMismatch(required.name()))
+    val operations = _validate_backend_plugin_operations(request, descriptor.vtable)
+    if operations.is_err(): return Err(operations.err().unwrap())
+    Ok(backend_plugin_receipt(descriptor, request))
+
+export BackendPluginError, BackendProviderReceipt, backend_plugin_receipt,
+    validate_backend_plugin_request, admit_backend_plugin_descriptor

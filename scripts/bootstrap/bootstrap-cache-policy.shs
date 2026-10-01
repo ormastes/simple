@@ -37,13 +37,38 @@ bootstrap_strategy_validate() {
   esac
 }
 
-bootstrap_strategy_failure_policy() {
-  case "$1" in
-    adhoc) printf '%s\n' fail-fast ;;
-    normal) printf '%s\n' phase-isolated ;;
-    full) printf '%s\n' inventory-to-end ;;
-    *) return 1 ;;
+# Local runs collect every independent result; CI=true/1 defaults to fail-fast.
+# Exact env 0/1 overrides that default; empty/invalid values use the default.
+# Resolve before scheduling so descendants inherit the same decision. Explicit
+# flags override env in argument order.
+bootstrap_compile_failure_policy() {
+  case "${SIMPLE_COMPILE_FAIL_FAST:-}" in
+    0|1) ;;
+    *)
+      case "${CI:-}" in
+        true|1) SIMPLE_COMPILE_FAIL_FAST=1 ;;
+        *) SIMPLE_COMPILE_FAIL_FAST=0 ;;
+      esac
+      ;;
   esac
+  for bootstrap_policy_arg in "$@"; do
+    case "$bootstrap_policy_arg" in
+      --fail-fast) SIMPLE_COMPILE_FAIL_FAST=1 ;;
+      --keep-going) SIMPLE_COMPILE_FAIL_FAST=0 ;;
+    esac
+  done
+  export SIMPLE_COMPILE_FAIL_FAST
+}
+
+bootstrap_strategy_failure_policy() {
+  # Strategy chooses scheduling, while the resolved compile flag chooses when
+  # independent work stops. Report the policy the workers actually receive.
+  bootstrap_strategy_validate "$1" || return 1
+  if [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ]; then
+    printf '%s\n' fail-fast
+  else
+    printf '%s\n' inventory-to-end
+  fi
 }
 
 # Compatibility hook: automatic scope pruning is prohibited. An explicit

@@ -1,0 +1,75 @@
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.contract.startup_plan_v1.{
+    startup_entry_kind_command,
+    startup_entry_kind_root,
+    startup_entry_kind_script,
+    startup_plan_from_request,
+    startup_plan_sealed,
+    startup_request_v1
+}
+use app.startup.contract.startup_capsule_selection_v1.{
+    select_startup_capsules_v1,
+    startup_capsule_request_v1
+}
+
+fn command_plan(command: text):
+    startup_plan_from_request(startup_request_v1(
+        "simple", command, 0, 0, startup_entry_kind_command(), 0, 0, 1))
+
+describe "startup capsule closure":
+    it "keeps root startup free of compiler implementation capsules":
+        val plan = startup_plan_from_request(startup_request_v1(
+            "simple", "", 0, 0, startup_entry_kind_root(), 0, 0, 1))
+        val result = select_startup_capsules_v1(startup_capsule_request_v1(
+            plan, false, false, false, ""))
+        assert_true(result.ok)
+        assert_eq(result.eager_capsules, ["startup.contracts", "startup.router"])
+        assert_true(result.forbidden_capsules.contains("compiler.native"))
+
+    it "delays script interpreter loader and frontend bodies":
+        val plan = startup_plan_from_request(startup_request_v1(
+            "simple", "hello.spl", 0, 0, startup_entry_kind_script(), 0, 0, 1))
+        val result = select_startup_capsules_v1(startup_capsule_request_v1(
+            plan, false, false, false, ""))
+        assert_true(result.ok)
+        assert_true(result.eager_capsules.contains("compiler.frontend.interface"))
+        assert_true(result.delayed_capsules.contains("compiler.frontend"))
+        assert_true(result.delayed_capsules.contains("compiler.interpreter"))
+        assert_true(result.delayed_capsules.contains("compiler.loader"))
+        assert_true(result.forbidden_capsules.contains("compiler.aspect"))
+        assert_true(result.forbidden_capsules.contains("compiler.dynload"))
+
+    it "admits optional aspect and dynload only when requested":
+        val result = select_startup_capsules_v1(startup_capsule_request_v1(
+            command_plan("check"), true, true, false, ""))
+        assert_true(result.ok)
+        assert_true(result.delayed_capsules.contains("compiler.aspect"))
+        assert_true(result.delayed_capsules.contains("compiler.dynload"))
+        assert_false(result.eager_capsules.contains("compiler.aspect"))
+
+    it "attaches exactly one selected backend to native-producing commands":
+        val result = select_startup_capsules_v1(startup_capsule_request_v1(
+            command_plan("native-build"), false, false, true,
+            "compiler.backend.c"))
+        assert_true(result.ok)
+        assert_true(result.native_attachment)
+        assert_true(result.delayed_capsules.contains("compiler.backend.c"))
+        assert_true(result.delayed_capsules.contains("compiler.linker"))
+        assert_false(result.delayed_capsules.contains("compiler.interpreter"))
+
+    it "rejects native attachment on a non-producing command":
+        val result = select_startup_capsules_v1(startup_capsule_request_v1(
+            command_plan("check"), false, false, true,
+            "compiler.backend.c"))
+        assert_false(result.ok)
+        assert_true(result.error.contains("native-producing"))
+
+    it "rejects a forbidden capsule selected through the sealed plan":
+        var plan = command_plan("check")
+        plan.forbidden_capsules = ["compiler.frontend"]
+        plan.forbidden_receipt_count = 1
+        plan = startup_plan_sealed(plan)
+        val result = select_startup_capsules_v1(startup_capsule_request_v1(
+            plan, false, false, false, ""))
+        assert_false(result.ok)
+        assert_true(result.error.contains("conflicts"))

@@ -1,0 +1,98 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage4-timeout-descendant.XXXXXX")
+descendant_pid=
+cleanup() {
+  if [ -n "$descendant_pid" ]; then
+    kill -KILL "$descendant_pid" 2>/dev/null || :
+  fi
+  rm -rf "$fixture"
+}
+trap cleanup EXIT INT TERM HUP
+
+fail() {
+  echo "bootstrap_stage4_timeout_descendant_contract_test: $*" >&2
+  exit 1
+}
+
+process_live() {
+  live_pid=$1
+  kill -0 "$live_pid" 2>/dev/null || return 1
+  live_state=$(ps -o stat= -p "$live_pid" 2>/dev/null | tr -d ' ' || :)
+  [ -n "$live_state" ] || return 1
+  case "$live_state" in Z*) return 1 ;; esac
+  return 0
+}
+
+matrix_source="$repo_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+helper_source="$fixture/helpers.sh"
+sed -n '/^record_command() {$/,/^validate_help_log() {$/p' "$matrix_source" |
+  sed '$d' >"$helper_source"
+cat >"$fixture/descendant.sh" <<'DESCENDANT'
+#!/bin/sh
+set -eu
+sleep 60 &
+child=$!
+child_pgid=$(ps -o pgid= -p "$child" | tr -d ' ')
+printf 'pid=%s\npgid=%s\n' "$child" "$child_pgid" >"$STAGE4_DESCENDANT_RECEIPT"
+: >"$STAGE4_DESCENDANT_ACK"
+wait "$child"
+DESCENDANT
+chmod +x "$fixture/descendant.sh"
+
+cat >"$fixture/invoke-helper.sh" <<'INVOKE'
+#!/bin/sh
+set -eu
+. "$STAGE4_HELPER_SOURCE"
+source_root=$STAGE4_FIXTURE_ROOT
+logs=$STAGE4_FIXTURE_ROOT/logs
+homes=$STAGE4_FIXTURE_ROOT/homes
+tmps=$STAGE4_FIXTURE_ROOT/tmps
+state=$STAGE4_FIXTURE_ROOT/state
+timeout_seconds=30
+mkdir -p "$logs" "$homes" "$tmps" "$state"
+case "$1" in
+  run) run_logged probe sh "$STAGE4_DESCENDANT_SCRIPT" ;;
+  append) : >"$logs/probe.log"; run_logged_append probe sh "$STAGE4_DESCENDANT_SCRIPT" ;;
+  input) : >"$STAGE4_INPUT"; run_logged_with_input probe "$STAGE4_INPUT" sh "$STAGE4_DESCENDANT_SCRIPT" ;;
+  *) exit 64 ;;
+esac
+INVOKE
+chmod +x "$fixture/invoke-helper.sh"
+
+for helper_mode in run append input; do
+  mode_root="$fixture/$helper_mode"
+  mkdir -p "$mode_root"
+  receipt="$mode_root/descendant.env"
+  ack="$mode_root/ack"
+  input="$mode_root/input"
+  STAGE4_HELPER_SOURCE="$helper_source" STAGE4_FIXTURE_ROOT="$mode_root" \
+    STAGE4_DESCENDANT_SCRIPT="$fixture/descendant.sh" \
+    STAGE4_DESCENDANT_RECEIPT="$receipt" STAGE4_DESCENDANT_ACK="$ack" STAGE4_INPUT="$input" \
+    TMPDIR="$mode_root" sh "$repo_root/scripts/bootstrap/run-process-group-timeout.shs" \
+      90 2 sh "$fixture/invoke-helper.sh" "$helper_mode" &
+  supervisor_pid=$!
+  wait_count=0
+  while [ "$wait_count" -lt 100 ] && [ ! -f "$ack" ]; do
+    sleep 0.05
+    wait_count=$((wait_count + 1))
+  done
+  [ -f "$ack" ] || fail "$helper_mode descendant did not acknowledge start"
+  descendant_pid=$(sed -n 's/^pid=//p' "$receipt")
+  descendant_pgid=$(sed -n 's/^pgid=//p' "$receipt")
+  [ -n "$descendant_pid" ] && [ -n "$descendant_pgid" ] || fail "$helper_mode descendant identity missing"
+  process_live "$descendant_pid" || fail "$helper_mode descendant was not live before cancellation"
+  kill -TERM "$supervisor_pid"
+  supervisor_status=0
+  wait "$supervisor_pid" || supervisor_status=$?
+  [ "$supervisor_status" -eq 143 ] || fail "$helper_mode supervisor returned $supervisor_status"
+  ! process_live "$descendant_pid" || fail "$helper_mode acknowledged descendant survived cancellation"
+  descendant_pid=
+done
+
+[ "$(grep -c 'timeout --foreground -k 15s' "$helper_source" || :)" -eq 3 ] ||
+  fail "all three run_logged helpers must keep timeout in the worker foreground group"
+
+echo "PASS Stage4 run_logged descendants remain owned by the outer supervisor"

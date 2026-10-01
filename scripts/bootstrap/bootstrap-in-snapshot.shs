@@ -1,0 +1,204 @@
+#!/bin/sh
+# bootstrap-in-snapshot.shs — run a bootstrap against an IMMUTABLE snapshot of
+# committed content instead of the shared working copy.
+#
+# Why this exists. bootstrap-from-scratch.sh builds $PWD. On a machine where
+# other sessions are actively developing, the window a stage needs is longer
+# than the gap between their edits, so the build loses a race it cannot win.
+# Measured 2026-09-05, three failures in 70 minutes, each with a different
+# error string and each looking like a defect in the thing it named:
+#
+#   12:03  failed to parse ... at 64:1 ... found TripleLt
+#          -> conflict markers on disk for part of a minute
+#   12:44  bootstrap-admission-error: parent-stage2-sanity-candidate-mismatch
+#          -> the Stage-2 binary was rewritten while the admission hashed it
+#   12:58  error: refused incomplete Stage 2 admission provenance
+#          -> two files appeared under src/compiler/10.frontend/ mid-build
+#
+# doc/08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md
+#
+# The precedent is check-seed-builds-push.shs, which already materialises the
+# tip into `git worktree add --detach` and says why: "never the shared,
+# contested working copy".
+#
+# IMPORTANT SEMANTIC: a snapshot is COMMITTED CONTENT. Uncommitted edits in the
+# working copy are deliberately NOT built. That is the entire point -- it is
+# also a foot-gun if you expected your unstaged fix to be included, so the
+# script prints the rev and the dirty-file count before starting.
+#
+# Usage:
+#   scripts/bootstrap/bootstrap-in-snapshot.shs [--rev <rev>] [--keep] \
+#       [--worktree <dir>] -- <bootstrap-from-scratch.sh args...>
+#   scripts/bootstrap/bootstrap-in-snapshot.shs --selftest
+#
+# The inner command is overridable for the selftest only:
+#   SNAPSHOT_INNER_CMD='sh scripts/bootstrap/bootstrap-from-scratch.sh'
+set -u
+
+snap_rev=HEAD
+snap_keep=0
+snap_wt=
+snap_selftest=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev=*) snap_rev=${1#*=} ;;
+        --rev) shift; snap_rev=${1:?--rev needs a value} ;;
+        --worktree=*) snap_wt=${1#*=} ;;
+        --worktree) shift; snap_wt=${1:?--worktree needs a value} ;;
+        --keep) snap_keep=1 ;;
+        --selftest) snap_selftest=1 ;;
+        --) shift; break ;;
+        -h|--help)
+            sed -n '2,40p' "$0"; exit 0 ;;
+        *) break ;;
+    esac
+    shift
+done
+
+snap_repo=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "ERROR — nothing was checked (not a git repository: $(pwd -P))" >&2
+    exit 2
+}
+snap_inner=${SNAPSHOT_INNER_CMD:-'sh scripts/bootstrap/bootstrap-from-scratch.sh'}
+
+snapshot_run() {
+    sr_rev=$1; sr_wt=$2; sr_keep=$3; shift 3
+    sr_sha=$(git -C "$snap_repo" rev-parse --verify "${sr_rev}^{commit}" 2>/dev/null) || {
+        echo "ERROR — nothing was checked (cannot resolve rev '${sr_rev}')" >&2
+        return 2
+    }
+    sr_dirty=$(git -C "$snap_repo" status --porcelain 2>/dev/null | grep -c '^ M\|^M ' || true)
+    [ -n "$sr_wt" ] || sr_wt="${snap_repo}/build/snapshot-wt-$(echo "$sr_sha" | cut -c1-12)"
+    if [ -e "$sr_wt" ]; then
+        git -C "$snap_repo" worktree remove --force "$sr_wt" >/dev/null 2>&1
+        rm -rf "$sr_wt"
+    fi
+    echo "snapshot: rev ${sr_sha} (working copy has ${sr_dirty} modified tracked file(s), NOT included)"
+    git -C "$snap_repo" worktree add --detach --force "$sr_wt" "$sr_sha" >/dev/null 2>&1 || {
+        echo "ERROR — nothing was checked (git worktree add failed for ${sr_sha})" >&2
+        return 2
+    }
+    sr_files=$(git -C "$sr_wt" ls-files 2>/dev/null | wc -l)
+    if [ "$sr_files" -eq 0 ]; then
+        git -C "$snap_repo" worktree remove --force "$sr_wt" >/dev/null 2>&1
+        echo "ERROR — nothing was checked (snapshot worktree is empty)" >&2
+        return 2
+    fi
+    # Deliberately NO cargo-target symlink. Tried it 2026-09-05 to reuse warm
+    # artifacts; the run died in 30 seconds with "error: failed to fingerprint
+    # Rust seed inputs", and bootstrap-authority-wiring.shs documents exactly
+    # why: "The fingerprint has several silent `return 1` paths (PATH shape,
+    # target triple, SYMLINKS UNDER THE SEED TREES)". So the worktree gets its
+    # own real target/ and the first --full-bootstrap here is a cold cargo
+    # build. Keep the worktree (--keep) and later runs are warm.
+    # CARGO_TARGET_DIR is not an alternative: the bootstrap resolves the seed at
+    # the repo-relative path src/compiler_rust/target/bootstrap/simple, so
+    # redirecting cargo's output moves the seed out from under it.
+    echo "snapshot: worktree ${sr_wt} (${sr_files} tracked files)"
+    ( cd "$sr_wt" && eval "$snap_inner \"\$@\"" ) 2>&1
+    sr_rc=$?
+    if [ "$sr_keep" -eq 1 ] || [ "$sr_rc" -ne 0 ]; then
+        echo "snapshot: worktree KEPT at ${sr_wt} (rc=${sr_rc}); remove with: git -C ${snap_repo} worktree remove --force ${sr_wt}"
+    else
+        git -C "$snap_repo" worktree remove --force "$sr_wt" >/dev/null 2>&1
+        echo "snapshot: worktree removed"
+    fi
+    echo "snapshot: rev ${sr_sha} exited rc=${sr_rc}"
+    return "$sr_rc"
+}
+
+# --- selftest ---------------------------------------------------------------
+# Proves the ONE property this script exists for: an edit landing in the shared
+# working copy DURING the run is not visible to the build. That is the failure
+# the three incidents above share, so it is the thing worth pinning.
+snapshot_selftest() {
+    st_root=$(mktemp -d) || return 2
+    st_fail=0
+    st_repo="$st_root/repo"
+    mkdir -p "$st_repo/src/lib"
+    ( cd "$st_repo" && git init -q . && git config user.email t@t && git config user.name t )
+    printf 'committed\n' > "$st_repo/src/lib/probe.spl"
+    ( cd "$st_repo" && git add -A && git commit -qm c1 )
+
+    # Fixture "bootstrap": records what it sees, then sleeps so the main working
+    # copy can be mutated underneath it, then records again.
+    cat > "$st_root/inner.sh" <<'INNER'
+#!/bin/sh
+cat src/lib/probe.spl > "$SNAPSHOT_ST_OUT.before"
+: > "$SNAPSHOT_ST_READY"
+while [ ! -f "$SNAPSHOT_ST_GO" ]; do sleep 0.2; done
+cat src/lib/probe.spl > "$SNAPSHOT_ST_OUT.after"
+ls src/lib > "$SNAPSHOT_ST_OUT.ls"
+exit "${SNAPSHOT_ST_RC:-0}"
+INNER
+    chmod +x "$st_root/inner.sh"
+
+    SNAPSHOT_ST_OUT="$st_root/seen"; export SNAPSHOT_ST_OUT
+    SNAPSHOT_ST_READY="$st_root/ready"; export SNAPSHOT_ST_READY
+    SNAPSHOT_ST_GO="$st_root/go"; export SNAPSHOT_ST_GO
+    # snap_inner is resolved from SNAPSHOT_INNER_CMD at startup, long before we
+    # get here, so setting the env var alone is a no-op. Set the variable.
+    snap_inner="sh $st_root/inner.sh"
+    snap_repo=$st_repo
+
+    ( snapshot_run HEAD "$st_root/wt" 0 >"$st_root/run.log" 2>&1 ) &
+    st_pid=$!
+    st_i=0
+    while [ ! -f "$SNAPSHOT_ST_READY" ] && [ "$st_i" -lt 100 ]; do sleep 0.2; st_i=$((st_i + 1)); done
+    # Mutate the shared working copy mid-run, exactly as a parallel session does:
+    # rewrite a tracked file AND add a new one.
+    printf 'TORN <<<<<<< HEAD\n' > "$st_repo/src/lib/probe.spl"
+    printf 'new\n' > "$st_repo/src/lib/appeared.spl"
+    : > "$SNAPSHOT_ST_GO"
+    wait "$st_pid"
+
+    [ "$(cat "$st_root/seen.before" 2>/dev/null)" = committed ] || {
+        echo "selftest FAIL: snapshot did not start from committed content"; st_fail=1; }
+    [ "$(cat "$st_root/seen.after" 2>/dev/null)" = committed ] || {
+        echo "selftest FAIL: a mid-run edit to the shared working copy WAS visible in the snapshot"; st_fail=1; }
+    grep -q appeared.spl "$st_root/seen.ls" 2>/dev/null && {
+        echo "selftest FAIL: a file created mid-run appeared inside the snapshot"; st_fail=1; }
+    grep -q 'worktree removed' "$st_root/run.log" 2>/dev/null || {
+        echo "selftest FAIL: clean run did not remove its worktree"; st_fail=1; }
+    [ -e "$st_root/wt" ] && { echo "selftest FAIL: worktree still on disk after a clean run"; st_fail=1; }
+
+    # A failing inner command must KEEP the worktree for debugging.
+    rm -f "$SNAPSHOT_ST_GO" "$SNAPSHOT_ST_READY"
+    SNAPSHOT_ST_RC=7; export SNAPSHOT_ST_RC
+    ( snapshot_run HEAD "$st_root/wt2" 0 >"$st_root/run2.log" 2>&1 ) &
+    st_pid2=$!
+    st_i=0
+    while [ ! -f "$SNAPSHOT_ST_READY" ] && [ "$st_i" -lt 100 ]; do sleep 0.2; st_i=$((st_i + 1)); done
+    : > "$SNAPSHOT_ST_GO"
+    wait "$st_pid2"; st_rc2=$?
+    [ "$st_rc2" -eq 7 ] || { echo "selftest FAIL: inner exit code not propagated (got $st_rc2, want 7)"; st_fail=1; }
+    grep -q 'worktree KEPT' "$st_root/run2.log" 2>/dev/null || {
+        echo "selftest FAIL: a failing run did not keep its worktree"; st_fail=1; }
+    git -C "$st_repo" worktree remove --force "$st_root/wt2" >/dev/null 2>&1
+
+    # An unresolvable rev is an ERROR, never a pass.
+    ( snapshot_run no-such-rev "$st_root/wt3" 0 >"$st_root/run3.log" 2>&1 )
+    [ "$?" -eq 2 ] || { echo "selftest FAIL: unresolvable rev did not ERROR with exit 2"; st_fail=1; }
+
+    if [ "$st_fail" -ne 0 ]; then
+        # A selftest that fails without saying why is as useless as no selftest.
+        echo "--- run.log ---"; cat "$st_root/run.log" 2>/dev/null
+        echo "--- run2.log ---"; cat "$st_root/run2.log" 2>/dev/null
+        echo "--- run3.log ---"; cat "$st_root/run3.log" 2>/dev/null
+    fi
+    rm -rf "$st_root"
+    if [ "$st_fail" -eq 0 ]; then
+        echo "PASS — 8 selftest assertion(s) checked, snapshot isolates the build from concurrent edits"
+        return 0
+    fi
+    echo "FAIL — selftest assertions failed"
+    return 1
+}
+
+if [ "$snap_selftest" -eq 1 ]; then
+    snapshot_selftest
+    exit $?
+fi
+
+snapshot_run "$snap_rev" "$snap_wt" "$snap_keep" "$@"
+exit $?

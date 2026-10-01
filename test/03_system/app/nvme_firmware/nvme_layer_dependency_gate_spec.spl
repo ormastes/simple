@@ -1,0 +1,132 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# plan: doc/03_plan/hardware/nvme_ssd_firmware_hardening_design_plan.md
+
+# @tag: system, nvme, firmware, mdsoc, layering, gate
+# @req REQ-SSPEC-SYSTEM
+"""
+The firmware's layers must only depend downward.
+
+MDSOC gives the NVMe firmware an ordered stack — host interface above NVMe
+command handling above the FTL above the FIL above the raw NAND — and the whole
+value of that ordering is that a lower layer never reaches back up into a higher
+one. Nothing in the language enforces it; a single `use` statement can invert an
+edge and no compiler will object.
+`scripts/check/check-nvme-layer-dependencies.shs` builds the module graph from
+the `use` statements under the firmware tree and fails on any upward edge, any
+cross-layer leak, and any module it cannot classify — an unclassified module is
+reported, never skipped, because a module the gate cannot place is a module it
+cannot police.
+
+KNOWN RED, DELIBERATELY NOT PAPERED OVER. Against the working tree at the time
+this scenario was written the gate reports `FAIL — 76 module(s) checked, 212
+edge(s), unclassified module(s): addr_algebra addr_algebra_check
+payload_types_check`, exit 1: three in-flight modules from the typed-address
+migration have no layer classification yet. A second probe — the working-tree gate script and its working-tree baseline run
+over a git-HEAD extraction of the firmware tree — reported a different red,
+`stale baseline: nvme_emu_media:nvme_controller nvme_emu_media:ftl`. That probe
+mixes two tree states, so it is recorded as an observation and not as a claim
+about HEAD; the working-tree FAIL above is the load-bearing finding, and it is
+left visible here. This
+scenario does not tune the gate, extend its classification table, or rebaseline
+it.
+
+What it pins instead is the contract that holds in either state: the verdict is a
+well-formed last line of stdout naming a NON-ZERO module count and an edge count,
+so a run that walked no graph cannot look like a clean one; an empty or missing
+directory yields ERROR and exit 2, never a pass; and the fatal, unconditional
+selftest — seven fixtures, including an upward import that must be flagged and an
+unclassified module that must not be silently skipped — proves the gate can turn
+red without any tracked file being sabotaged.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val GATE: text = "scripts/check/check-nvme-layer-dependencies.shs"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "MDSOC NVMe firmware layer dependency gate":
+
+    # @manual scenario evidence
+    it "should emit a well-formed verdict naming a non-zero module count and an edge count":
+        # @req REQ-SSPEC-SYSTEM
+        step("should emit a well-formed verdict naming a non-zero module count and an edge count")
+
+        step("Run the gate over the firmware tree, whatever state it is in")
+        # No green is asserted on purpose — see the docstring. The grammar below
+        # holds identically for a PASS and for the current honest FAIL.
+        val (out, err, rc) = _run("out=$(sh " + GATE + " 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"; printf '%s\\n' \"$last\" | grep -Eq '^(PASS|FAIL|ERROR) —' && printf 'SHAPE WELLFORMED\\n' || printf 'SHAPE MALFORMED\\n'; printf '%s\\n' \"$last\" | grep -Eq '[1-9][0-9]* module\\(s\\) checked' && printf 'MODULES NONZERO\\n' || printf 'MODULES VACUOUS\\n'; printf '%s\\n' \"$last\" | grep -Eq '[1-9][0-9]* edge\\(s\\)' && printf 'EDGES NONZERO\\n' || printf 'EDGES VACUOUS\\n'")
+        val log: text = out + err
+
+        step("The last line of stdout is one of the three declared verdicts")
+        expect(log).to_contain("SHAPE WELLFORMED")
+
+        step("It states a NON-ZERO module count — a graph of nothing is never a pass")
+        expect(log).to_contain("MODULES NONZERO")
+
+        step("It states a NON-ZERO edge count, so a graph with no edges is visible as such")
+        expect(log).to_contain("EDGES NONZERO")
+
+        step("A non-zero exit means the gate found something; that finding stays visible")
+        # Recorded rather than asserted green: the current offenders are three
+        # unclassified in-flight typed-address modules. Left RED on purpose.
+        expect(log).to_contain("GATE_RC")
+
+    # @manual scenario evidence
+    it "should refuse with ERROR and exit 2 when there is nothing to check":
+        # @req REQ-SSPEC-SYSTEM
+        step("should refuse with ERROR and exit 2 when there is nothing to check")
+
+        step("Point the gate at a directory that does not exist")
+        val (out, err, rc) = _run("out=$(sh " + GATE + " --dir /nonexistent/simple-gate-probe 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val log: text = out + err
+
+        step("The verdict is ERROR — nothing was checked, never PASS")
+        expect(log).to_contain("VERDICT ERROR — nothing was checked")
+
+        step("And the exit code is 2, captured before any pipe")
+        expect(log).to_contain("GATE_RC 2")
+
+        step("An empty directory is also an ERROR, not a clean graph")
+        # The distinction matters: a missing directory is an obvious mistake, an
+        # empty one looks exactly like a tree with no violations.
+        val (eout, eerr, erc) = _run("T=$(mktemp -d) && out=$(sh " + GATE + " --dir $T 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'EMPTY %s\\n' \"$last\"; printf 'EMPTY_RC %s\\n' \"$rc\"; rmdir $T")
+        val elog: text = eout + eerr
+        expect(elog).to_contain("EMPTY ERROR — nothing was checked")
+        expect(elog).to_contain("EMPTY_RC 2")
+
+    # @manual scenario evidence
+    it "should run its fatal selftest unconditionally and prove it can turn RED":
+        # @req REQ-SSPEC-SYSTEM
+        step("should run its fatal selftest unconditionally and prove it can turn RED")
+
+        step("--selftest reports its fixture count and scans no real tree")
+        val (sout, serr, src) = _run("out=$(sh " + GATE + " --selftest 2>&1); rc=$?; printf '%s\\n' \"$out\"; last=$(printf '%s\\n' \"$out\" | tail -1); printf 'VERDICT %s\\n' \"$last\"; printf 'GATE_RC %s\\n' \"$rc\"")
+        val slog: text = sout + serr
+        expect(slog).to_contain("selftest: 7 fixture(s) passed")
+        expect(slog).to_contain("VERDICT PASS — 7 fixture(s) checked")
+        expect(slog).to_contain("GATE_RC 0")
+
+        step("The selftest also runs on the ERROR path, so it cannot be routed around")
+        val (eout, eerr, erc) = _run("sh " + GATE + " --dir /nonexistent/simple-gate-probe 2>&1")
+        expect(eout + eerr).to_contain("selftest: 7 fixture(s) passed")
+
+        step("The fixtures include real sabotage that must turn the gate red")
+        # Fixture 2 inverts an edge (fil_ecc -> ftl_map), fixture 5 leaks across
+        # layers, fixture 6 leaves a module unclassified. Each is a must-FAIL
+        # assertion, so a gate incapable of red fails its own selftest.
+        val (fout, ferr, frc) = _run("n=0; for pat in 'upward import fil_ecc->ftl_map was not flagged' 'FTL->fil_scheduler leak was not flagged' 'unclassified module was silently skipped'; do grep -q \"$pat\" " + GATE + " && n=$((n+1)); done; if [ $n -eq 3 ]; then echo MUTATION_FIXTURES_PRESENT; else echo MUTATION_FIXTURES_ABSENT_$n; fi")
+        expect(fout + ferr).to_contain("MUTATION_FIXTURES_PRESENT")
+
+        step("And false-positive guards, so red is not merely over-reporting")
+        val (gout, gerr, grc) = _run("if grep -q 'commented-out use flagged' " + GATE + " && grep -q 'docstring use flagged' " + GATE + "; then echo FP_GUARDS_PRESENT; else echo FP_GUARDS_ABSENT; fi")
+        expect(gout + gerr).to_contain("FP_GUARDS_PRESENT")
+
+        step("A failed selftest blocks the scan entirely, never degrading to a pass")
+        val (hout, herr, hrc) = _run("if grep -q 'selftest failed; no scan performed' " + GATE + "; then echo SELFTEST_FATAL; else echo SELFTEST_ADVISORY; fi")
+        expect(hout + herr).to_contain("SELFTEST_FATAL")

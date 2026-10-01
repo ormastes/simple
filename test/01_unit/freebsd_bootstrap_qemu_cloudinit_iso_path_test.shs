@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+
+# Host-only regression test for de801c8. Fake tools exercise the wrapper's
+# real setup and ISO creation path without starting QEMU or contacting a guest.
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+script="$root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+test_work=$(mktemp -d "${TMPDIR:-/tmp}/simple-freebsd-cloudinit-iso.XXXXXX")
+fake_script_dir=$(mktemp -d "$root/scripts/check/.freebsd-cloudinit-iso.XXXXXX")
+trap 'rm -rf "$test_work" "$fake_script_dir"' EXIT HUP INT TERM
+
+mkdir -p "$test_work/bin" "$test_work/media" "$test_work/runtime"
+
+cat >"$test_work/bin/qemu-img" <<'EOF'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    check) exit 0 ;;
+    create)
+        output=
+        for arg do output=$arg; done
+        : >"$output"
+        ;;
+    resize) : >"$2" ;;
+    *) exit 0 ;;
+esac
+EOF
+
+cat >"$test_work/bin/genisoimage" <<'EOF'
+#!/bin/sh
+set -eu
+output=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-output" ]; then output=$2; shift 2; else shift; fi
+done
+[ -n "$output" ]
+: >"$output"
+EOF
+
+cat >"$test_work/bin/qemu-system-x86_64" <<'EOF'
+#!/bin/sh
+set -eu
+pidfile=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-pidfile" ]; then pidfile=$2; shift 2; else shift; fi
+done
+sleep 1 &
+echo "$!" >"$pidfile"
+EOF
+
+cat >"$test_work/bin/ssh" <<'EOF'
+#!/bin/sh
+set -eu
+command=
+for arg do command=$arg; done
+case "$command" in
+    "uname -sr") printf '%s\n' 'FreeBSD 14.4' ;;
+    *"command -v clang"*) printf '%s\n' ok ;;
+    *"echo 'int main"*) printf '%s\n' ok ;;
+    *) exit 0 ;;
+esac
+EOF
+
+chmod +x "$test_work/bin/"*
+media="$test_work/media/base.qcow2"
+printf 'fake admitted media\n' >"$media"
+media_sha=$(sha256sum "$media" | awk '{print $1}')
+printf '%s  base.qcow2\n' "$media_sha" >"$media.sha256"
+printf 'fake ssh public key\n' >"$test_work/id.pub"
+printf 'fake ssh private key\n' >"$test_work/id"
+
+run_wrapper() {
+    wrapper=$1
+    runtime=$2
+    env PATH="$test_work/bin:$PATH" \
+        QEMU_VM_PATH="$media" \
+        QEMU_CLOUDINIT_ISO="$runtime/nested/cloud-init/seed.iso" \
+        QEMU_RUNTIME_DIR="$runtime" QEMU_VM_DIR="$runtime" \
+        QEMU_SSH_PUBLIC_KEY="$test_work/id.pub" QEMU_SSH_PRIVATE_KEY="$test_work/id" \
+        QEMU_MIN_FREE_GB=0 QEMU_SSH_TIMEOUT=1 QEMU_ROOT_SSH_TIMEOUT=1 \
+        QEMU_REMOTE_TIMEOUT=1 QEMU_TRANSFER_TIMEOUT=1 QEMU_BOOTSTRAP_TIMEOUT=1 \
+        QEMU_SMOKE_TIMEOUT=1 QEMU_FULL_TIMEOUT=1 sh "$wrapper" --smoke
+}
+
+# Replaying the pre-fix source must be red because the ISO parent is absent.
+pre_fix="$fake_script_dir/check-freebsd-bootstrap-qemu-pre-fix.shs"
+sed '/"$(dirname "$QEMU_CLOUDINIT_ISO")"/d' "$script" >"$pre_fix"
+chmod +x "$pre_fix"
+if run_wrapper "$pre_fix" "$test_work/runtime/pre-fix" >/dev/null 2>&1; then
+    printf '%s\n' 'pre-fix unexpectedly created a nested cloud-init ISO' >&2
+    exit 1
+fi
+[ ! -e "$test_work/runtime/pre-fix/nested/cloud-init/seed.iso" ]
+
+# The fixed wrapper creates the parent and invokes the real ISO command.
+run_wrapper "$script" "$test_work/runtime/fixed" >/dev/null
+[ -f "$test_work/runtime/fixed/nested/cloud-init/seed.iso" ]
+
+printf '%s\n' 'freebsd_bootstrap_qemu_cloudinit_iso_path=true'

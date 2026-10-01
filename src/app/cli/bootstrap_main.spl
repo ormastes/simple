@@ -1,5 +1,7 @@
+@unsafe(reason: "raw bootstrap argument-vector ABI", capabilities: [ffi])
 extern fn sys_get_args() -> [text]
-extern fn rt_native_build(args: [text]) -> i64
+
+# TODO: [driver][P1] Verify Stage 3 self-hosting: the bootstrap has only ever reached "Stage 2 admitted", and Stage 3 -- stage2 recompiling THIS file -- has never been attempted, so the byte-identical stage2 == stage3 fixpoint that the bootstrap claim rests on is unproven; see doc/08_tracking/bug/bootstrap_stage2_admission_refused_by_concurrent_source_edits_2026-09-05.md
 
 # Non-lazy AND direct-from-defining-module: `use lazy` deferred the driver to
 # a dynload lib that was never implemented (#99), linking as undefined
@@ -9,12 +11,27 @@ extern fn rt_native_build(args: [text]) -> i64
 # Importing driver.spl directly lets discovery pull the driver and its
 # transitive imports statically. (2026-07-13 redeploy)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
+    selected_k1_backend_policy_v1, selected_k1_backend_table_diagnostic_v1}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
 use compiler.common.driver_compile_options.{CompileOptions}
 use app.cli.bootstrap_identity.{bootstrap_version}
-use app.cli.bootstrap_focused_native_build.{run_exact_stage4_focused_capsule}
+use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
+use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir}
+use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
+use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
+use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
+use app.cli.native_build_main.{run_native_build_worker}
+use app.io._CliCompile.compile_targets.{cli_native_build_with_environment_variant_policy_v1}
+use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
+use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
+use plugins.backend_registry.full_static_backend_registry.{
+    install_full_static_backends_for_k1_policy_v1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_extract_v1,
+    environment_variant_policy_handoff_owner_error_label_v1
+}
 use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists, dir_create}
-use std.nogc_sync_mut.io.file_ops.{file_append}
 
 fn native_build_help() -> i64:
     0
@@ -54,44 +71,6 @@ fn bootstrap_output_from_args(args: [text], i: i64) -> text:
     else:
         bootstrap_output_from_args(args, i + 1)
 
-# ponytail: native codegen currently emits an invalid `bitcast i64 to i1`
-# when a `bool`-returning function merges more than one branch (each arm
-# stores into a shared i64 slot, then the final load is bitcast to i1
-# instead of truncated/compared) -- see filed bug. Returning `i64` (1/0)
-# instead of `bool` sidesteps that miscompile without touching the shared
-# backend; callers compare against `1`.
-fn native_build_flag_needs_value(flag: text) -> i64:
-    if flag == "-o":
-        1
-    elif flag == "--output":
-        1
-    elif flag == "--source":
-        1
-    elif flag == "--entry":
-        1
-    elif flag == "--threads":
-        1
-    elif flag == "--timeout":
-        1
-    elif flag == "--cache-dir":
-        1
-    elif flag == "--backend":
-        1
-    elif flag == "--runtime-bundle":
-        1
-    elif flag == "--runtime-path":
-        1
-    elif flag == "--mode":
-        1
-    elif flag == "--target":
-        1
-    elif flag == "--linker-script":
-        1
-    elif flag == "--log":
-        1
-    else:
-        0
-
 fn native_build_entry_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
         ""
@@ -102,11 +81,82 @@ fn native_build_entry_from_args(args: [text], i: i64) -> text:
     else:
         native_build_entry_from_args(args, i + 1)
 
-fn native_build_has_entry_closure(args: [text]) -> i64:
+fn native_build_low_memory_from_args(args: [text]) -> bool:
     for arg in args:
-        if arg == "--entry-closure":
-            return 1
-    0
+        if arg == "--low-memory":
+            return true
+    false
+
+fn bootstrap_native_build_thread_count(args: [text]) -> i64:
+    var threads: i64 = 0
+    var index: i64 = 0
+    while index < args.len():
+        val arg = args[index]
+        if (arg == "--threads" or arg == "--jobs" or arg == "-j")
+                and index + 1 < args.len():
+            threads = args[index + 1].to_i64() ?? 0
+            index = index + 2
+            continue
+        if arg.starts_with("--threads="):
+            threads = arg.substring(10).to_i64() ?? 0
+        elif arg.starts_with("--jobs="):
+            threads = arg.substring(7).to_i64() ?? 0
+        index = index + 1
+    threads
+
+pub fn bootstrap_stage3_process_route_requested(
+    args: [text], stage4_marker: text, worker_marker: text,
+    requested_route: text
+) -> bool:
+    requested_route != "direct" and stage4_marker != "1" and worker_marker != "1"
+        and bootstrap_native_build_thread_count(args) > 1
+
+pub fn bootstrap_native_build_worker_args(args: [text]) -> [text]:
+    var result: [text] = []
+    var copying = false
+    for arg in args:
+        if copying:
+            result.push(arg)
+        elif arg == "native-build":
+            copying = true
+    result
+
+fn bootstrap_internal_native_build_args(args: [text], entry_index: i64) -> [text]:
+    var result: [text] = []
+    var index = entry_index + 1
+    while index < args.len():
+        result.push(args[index])
+        index = index + 1
+    result
+
+pub fn bootstrap_internal_native_build_entry(path: text) -> bool:
+    path.ends_with("src/app/cli/parse_shard_main.spl") or
+        path.ends_with("src/app/cli/native_build_worker.spl")
+
+pub fn bootstrap_internal_native_build_run_requested(
+    args: [text], worker_marker: text
+) -> bool:
+    worker_marker == "1" and args.len() >= 3 and args[1] == "run" and
+        bootstrap_internal_native_build_entry(args[2])
+
+fn run_bootstrap_stage3_process_route(args: [text]) -> i64:
+    val worker_args = bootstrap_native_build_worker_args(args)
+    if worker_args.len() == 0:
+        return 1
+    val marker = "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING"
+    val old_marker = env_get(marker) ?? ""
+    env_set(marker, "1")
+    val result = run_native_build_worker(worker_args)
+    env_set(marker, old_marker)
+    result
+
+fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
+    val worker_args = bootstrap_native_build_worker_args(args)
+    val option_error = cli_native_build_option_error(worker_args, true)
+    if option_error != "":
+        print "Error: " + option_error
+        return 1
+    run_bootstrap_stage3_process_route(args)
 
 fn native_build_runtime_bundle_is_removed(bundle: text) -> i64:
     if bundle == "hosted" or bundle == "rust-hosted" or bundle == "rust_hosted":
@@ -132,47 +182,8 @@ fn native_build_policy_action_from_args(args: [text], i: i64) -> text:
             return bundle
     native_build_policy_action_from_args(args, i + 1)
 
-fn bootstrap_native_build_ffi_progress(state: text):
-    val path = env_get("SIMPLE_BUILD_PROGRESS_EVENTS") ?? ""
-    if path != "":
-        val _ = file_append(path, "event=build_progress phase=bootstrap_ffi unit_kind=seed_native_build done=0 total=1 remaining=1 tasks_done=0 tasks_total=1 tasks_remaining=1 failed=0 cached=0 current=rt_native_build terminal={state}\n")
-
-fn run_rt_native_build(args: [text]) -> i64:
-    val entry = native_build_entry_from_args(args, 0)
-    val has_entry_closure = native_build_has_entry_closure(args)
-    var old_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
-    var old_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
-    # The seed interpreter can resolve this explicit import to an optional
-    # same-named env_get from another loaded module.
-    if old_entry == nil:
-        old_entry = ""
-    if old_entry_closure == nil:
-        old_entry_closure = ""
-    if entry != "" and has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
-    elif has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
-    bootstrap_native_build_ffi_progress("running")
-    val result = rt_native_build(args)
-    bootstrap_native_build_ffi_progress("returned")
-    if entry != "" and has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)
-    elif has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)
-    result
-
-# rt_native_build's Rust arg parser (src/compiler_rust/native_all/src/lib.rs)
-# treats any bare positional that isn't consumed by a value-taking flag as a
-# `source_dir` to scan, and silently falls back to compiling
-# `src/app/cli/main.spl` as the entry when no `--entry` was given. That means
-# `bm native-build some_file.spl` never compiles `some_file.spl` -- it scans
-# for it as a directory (a no-op, since it's a file) and then compiles the
-# unrelated default entry instead. Detect the "single .spl file positional,
-# no explicit --entry" shape here and forward an explicit `--entry <path>`
-# (plus `--entry-closure` so the build only walks the entry's reachable
-# closure instead of falling through to a full-project scan).
+# A single positional file without explicit source roots uses the direct
+# driver. The native CLI coordinator owns project roots and other shapes.
 fn native_build_single_spl_positional(args: [text]) -> text:
     var i = 0
     var result = ""
@@ -208,23 +219,6 @@ fn native_build_single_spl_positional(args: [text]) -> text:
     else:
         ""
 
-# `--entry` without `--source` is NOT a hang -- it is the by-design delegation
-# to the Rust rt_native_build FFI, which then scans the DEFAULT source roots
-# (effectively the whole project) and loads that entire import graph BEFORE any
-# codegen, printing nothing meanwhile. Measured 2026-08-01: with
-# `--source <dir>` the same invocation finishes in 2.1 s and produces a working
-# 23 KB binary; without it, no output at all after 45 s. Silence for minutes is
-# what made this look like defect-grade hang, so name the cost and the fix.
-fn native_build_has_source_arg(args: [text], i: i64) -> i64:
-    if i >= args.len():
-        0
-    elif args[i] == "--source":
-        1
-    elif args[i].starts_with("--source="):
-        1
-    else:
-        native_build_has_source_arg(args, i + 1)
-
 fn native_build_backend_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
         "llvm"
@@ -234,6 +228,16 @@ fn native_build_backend_from_args(args: [text], i: i64) -> text:
         args[i].substring(10)
     else:
         native_build_backend_from_args(args, i + 1)
+
+fn native_build_backend_plugin_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        ""
+    elif args[i] == "--backend-plugin" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("--backend-plugin="):
+        args[i].substring(17)
+    else:
+        native_build_backend_plugin_from_args(args, i + 1)
 
 fn native_build_mode_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
@@ -253,18 +257,10 @@ fn native_build_no_borrow_check_from_args(args: [text], i: i64) -> bool:
     else:
         native_build_no_borrow_check_from_args(args, i + 1)
 
-# #138/#19: the authorized Stage4 explicit entry and the single-file positional
-# shape (no --source dirs -- i.e. `bm native-build foo.spl -o out`) compile
-# THROUGH THE PURE-SIMPLE IN-PROCESS PIPELINE instead of the Rust
-# rt_native_build FFI seed. The in-process failure surfaces loudly; it never
-# silently retries the seed.
+# Native commands use the pure driver or its compiled CLI coordinator.
 pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val removed_bundle = native_build_policy_action_from_args(args, 0)
-    # `--help`/`-h` used to be forwarded to the Rust seed extern
-    # rt_native_build. In the PURE-SIMPLE stage2/stage3 capsule that extern is
-    # only a backfilled stub (see llvm_native_link.spl's seed-owned-extern
-    # backfill), so `simple native-build --help` SEGFAULTED (exit 139) instead
-    # of printing anything. Usage text needs no seed, so answer it in-process.
+    # Usage text is answered before entering the compiler.
     # Note: native_build_help() cannot carry this text -- its body is hardcoded
     # to `return 0` in bootstrap MIR lowering (module_lowering.spl), so edits to
     # its .spl source are ignored in the capsule.
@@ -272,7 +268,10 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
         print ""
         print "Options:"
-        print "  -o <output>                 Output executable path (default build/native/<stem>)"
+        print "  -o <output>                 Output artifact path (default build/native/<stem>)"
+        print "  --emit-object               Emit a relocatable object"
+        print "  --emit-archive              Emit a static archive"
+        print "  --emit-shared               Emit a shared library"
         print "  --backend=<llvm|cranelift>  Codegen backend (default auto)"
         print "  --mode=<dynload|one-binary> Link mode"
         print "  --no-borrow-check           Skip the borrow checker"
@@ -282,9 +281,9 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         print "  -h, --help                  Show this help"
         return 0
     if removed_bundle == "--list-optimizations":
-        return run_rt_native_build(args)
-    # Bare `native-build` with no arguments at all also reached the seed extern
-    # and segfaulted. There is nothing to build, so fail like `compile` does.
+        cli_print_shared_optimization_inventory("native-build")
+        return 0
+    # There is nothing to build, so fail like `compile` does.
     if args.len() < 3:
         print "error: missing source file"
         print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
@@ -296,12 +295,19 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     if mode != "" and mode != "dynload" and mode != "one-binary":
         print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
         return 1
+    val requested_output_mode = bootstrap_native_build_output_mode(args)
+    if requested_output_mode == "conflict":
+        print "Error: --emit-object, --emit-archive, and --emit-shared are mutually exclusive"
+        return 1
+    if requested_output_mode != "" and env_get("SIMPLE_BOOTSTRAP_STAGE4") == "1":
+        print "Error: Stage4 strict profile does not support object, archive, or shared output"
+        return 1
     val explicit_entry = native_build_entry_from_args(args, 0)
     if explicit_entry != "":
+        if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1":
+            return run_exact_stage3_focused_capsule(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
-            if native_build_has_source_arg(args, 0) == 0:
-                print "note: --entry without --source scans the DEFAULT source roots (whole project) and stays silent while loading that import graph; pass --source <dir> to bound it"
-            return run_rt_native_build(args)
+            return run_bootstrap_native_build_coordinator(args)
         if explicit_entry != "src/app/cli/main.spl" and explicit_entry != "src/app/os/main.spl":
             print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
             return 1
@@ -314,7 +320,17 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         return run_exact_stage4_focused_capsule(args)
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
-        return run_rt_native_build(args)
+        return run_bootstrap_native_build_coordinator(args)
+    # Stage3's admitted bootstrap binary is not a general `simple run` host,
+    # but it can safely route the coordinator's two exact internal children
+    # below. The coordinator owns process/cache sharding, failure fallback, and
+    # MemAvailable fanout clamping; the real build remains the sole mutable
+    # CompileContext owner.
+    if bootstrap_stage3_process_route_requested(
+            args, env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
+            env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "",
+            env_get("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE") ?? ""):
+        return run_bootstrap_stage3_process_route(args)
     val output_arg = bootstrap_output_from_args(args, 0)
     val output = if output_arg != "": output_arg else: "build/native/{_bootstrap_default_stem(entry_path)}"
     # rfind + `> 0` (not path.dirname/Option-match on rfind): rfind returns a
@@ -333,6 +349,26 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     # names -- avoids the `aot_native_file_with_backend` duplicate-name
     # collision between driver_public_compile [subprocess facade] and
     # driver_api_native_single [in-process]).
+    # This direct driver route bypasses the composition wrapper that normally
+    # installs K1. Backend-session construction must see the selected table.
+    if not install_selected_k1_backend_table_v1():
+        # Name WHICH module answered, instead of discarding it. There are two
+        # definitions of install_selected_k1_backend_table_v1 shadowed under the
+        # module path compiler.driver.bootstrap_k1_selected: the fail-closed
+        # stub (src/compiler/80.driver/bootstrap_k1_selected.spl, policy
+        # "unselected", install always false) and the real composition
+        # (src/compositions/kernel_llvm_cranelift/..., policy "llvm-cranelift").
+        # Both return false with identical output today, so site 16
+        # (stage2_sanity_positional_route_k1_composition_admission_failed_2026-09-13.md)
+        # could not tell "the stub bound into the capsule" from "the real
+        # installer ran and its table validation failed". The policy string
+        # separates them in one line, at zero cost on the success path.
+        print "PLUG-E-K1-POLICY: bootstrap backend composition admission failed (selected policy '{selected_k1_backend_policy_v1()}'; 'unselected' means the fail-closed stub bound instead of a committed K1 composition)"
+        # Site 16/18: the real composition bound and the validator still said
+        # false inside the compiled capsule. Name every sub-check so the lane
+        # run localises the miscompile instead of discarding it.
+        print "  k1-table: {selected_k1_backend_table_diagnostic_v1()}"
+        return 1
     var options: CompileOptions = driver_core_compile_options_default()
     options.input_files = [entry_path]
     options.bootstrap_input_count = 1
@@ -350,12 +386,42 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     options.output_file = Some(output)
     options.output_format = driver_output_format_native()
     options.backend = backend
+    options.backend_plugin_path = native_build_backend_plugin_from_args(args, 0)
+    options.low_memory = native_build_low_memory_from_args(args)
     options.release = true
-    options.opt_level = 3
+    # Cranelift V2 has exact O0/O1/O2 readback and rejects O3. Select its
+    # highest supported mode here instead of asking the provider to substitute.
+    options.opt_level = if backend == "cranelift": 2 else: 3
     options.no_borrow_check = native_build_no_borrow_check_from_args(args, 0)
     options = compileoptions_normalize_mir_optimization(options)
+    # Positional builds enter the driver directly. Bind the same CLI-over-env
+    # cache selection used by focused builds before any driver/cache work.
+    # Per-worker dispatch above retains its own explicit routing contract.
+    val previous_cache = native_build_cache_snapshot()
+    val requested_cache = focused_native_build_cache_dir(args)
+    if not native_build_cache_bind(requested_cache):
+        print "error: could not bind native-build --cache-dir '{requested_cache}'"
+        return 1
+    val previous_output_mode = native_build_output_mode_snapshot()
+    if not native_build_output_mode_bind(requested_output_mode):
+        # Attempt both restores even when one fails, as below after compilation.
+        val output_restored = native_build_output_mode_restore(previous_output_mode)
+        val cache_restored = native_build_cache_restore(previous_cache)
+        if not output_restored or not cache_restored:
+            print "error: could not restore native-build environment after output-mode binding failure"
+        print "error: could not bind native-build output mode '{requested_output_mode}'"
+        return 1
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
+    # Restore before every result-dependent return, including compile failure
+    # and missing/stub output refusal. Absent and empty are distinct states.
+    val output_restored = native_build_output_mode_restore(previous_output_mode)
+    if not native_build_cache_restore(previous_cache):
+        print "error: could not restore native-build cache environment"
+        return 1
+    if not output_restored:
+        print "error: could not restore native-build output-mode environment"
+        return 1
     # Free-function accessors, NOT result.is_success()/.get_errors(): this
     # entry is MIR-lowered without HIR type inference, so method calls on the
     # lazy-import-returned result never resolve (Task #145 erased-receiver
@@ -467,6 +533,8 @@ fn run_compile_bootstrap(args: [text]) -> i64:
     options.output_file = Some(output)
     options.output_format = driver_output_format_smf()
     options.backend = backend
+    options.backend_plugin_path = native_build_backend_plugin_from_args(args, 0)
+    options.low_memory = native_build_low_memory_from_args(args)
     options = compileoptions_normalize_mir_optimization(options)
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
@@ -486,7 +554,7 @@ fn run_compile_bootstrap(args: [text]) -> i64:
         1
 
 fn get_cli_args() -> [text]:
-    sys_get_args()
+    unsafe(capabilities: [ffi]): sys_get_args()
 
 fn main() -> i64:
     val all_args = get_cli_args()
@@ -501,6 +569,36 @@ fn main() -> i64:
         print "       simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
         return 0
     val first = all_args[1]
+    val native_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    if bootstrap_internal_native_build_run_requested(
+            all_args, native_worker_marker):
+        # Deliberately not a general bootstrap `run` command. Only children
+        # spawned by native_build_main's admitted coordinator may enter, and
+        # only its two fixed internal entrypoints are accepted.
+        # Same preamble as native_build_worker.spl's main: without the backend
+        # table, codegen entry answers PLUG-E-NOTFOUND as a ud2/SIGILL.
+        if not install_selected_k1_backend_table_v1() or
+                not install_full_static_backends_for_k1_policy_v1(selected_k1_backend_policy_v1()):
+            print "error: PLUG-E-TABLE: native-build worker backend composition refused: {selected_k1_backend_table_diagnostic_v1()}"
+            return 1
+        # The coordinator always attaches its one internal policy handoff
+        # argument; strip and decode it exactly as native_build_worker.spl's
+        # own main does, or the build rejects it as an unknown option.
+        val opened = match environment_variant_policy_handoff_extract_v1(
+            bootstrap_internal_native_build_args(all_args, 2)):
+            case Ok(value): value
+            case Err(failure):
+                val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
+                print "error: native-build worker rejected its internal policy handoff: {reason}"
+                return 1
+        return cli_native_build_with_environment_variant_policy_v1(
+            opened.user_args, opened.handoff.collection)
+    if first == "run" and native_worker_marker == "1" and argc >= 3:
+        # A marked coordinator child may never escape the internal allowlist
+        # into ordinary command handling. Unmarked `run` is not internal and
+        # deliberately falls through to the canonical unknown-command path.
+        print "error: unsupported bootstrap internal entry '{all_args[2]}'"
+        return 1
     if first == "native-build":
         return run_native_build_bootstrap(all_args)
     if first.len() == 9 and first.starts_with("--version"):

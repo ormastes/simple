@@ -1,0 +1,300 @@
+# Shared Simple-source lexical facts, published by CoreLexer.
+#
+# WHY THIS EXISTS
+# ---------------
+# Several tools outside the compiler need to know, for a line of Simple source,
+# "what here is CODE, and what is merely text inside a string or a comment?"
+# Every one of them answered it by hand-scanning characters, and every one of
+# them got it wrong in the same way. Two live examples in this tree:
+#
+#   src/app/sspec_maintain/source_facts.spl
+#       _mask_strings_and_comment  - a per-line in_string/escaped character
+#                                    walk, patched twice for "a mention inside
+#                                    a string literal is not a statement".
+#       in_triple_string           - tracked by counting `"""` per line and
+#                                    testing the parity. A `"""` that appears
+#                                    INSIDE an ordinary string literal makes
+#                                    that count odd and swallows the rest of
+#                                    the file.
+#   src/app/spipe_docgen/spipe_docgen/parser.spl
+#       1,939 lines and 255 text-scan call sites over the same grammar.
+#
+# A per-line scanner cannot answer the question, because the question is not
+# per-line: a `"""` docstring spans lines, and whether column 12 of line 40 is
+# code depends on line 3. CoreLexer already knows. This module publishes what
+# it knows, so consumers stop reimplementing it.
+#
+# WHAT IT PUBLISHES
+# -----------------
+# `simple_string_continuation_lines(source)` marks the lines that continue a
+# string opened earlier, which is the other half of the same question and the
+# one a parity count gets wrong on 31 spec files in this tree.
+#
+# `simple_string_byte_ranges(source)` gives, per line, the BYTE ranges inside
+# string tokens — for tools that must keep byte columns and only need to know
+# which bytes are payload.
+#
+# `simple_code_lines(source)` returns one entry per source line holding only
+# that line's CODE, with string literal CONTENT replaced by an empty pair of
+# quotes and comments removed entirely. Column positions are preserved by
+# left-padding, so leading indentation — and therefore any indent-based
+# analysis a consumer already does — survives unchanged.
+#
+# LEXER CONTRACT THIS RELIES ON (measured, not assumed; see
+# test/01_unit/compiler/frontend/core_source_facts_spec.spl):
+#   - comments produce no token at all;
+#   - a `"""` docstring is one ordinary StringLit token on its opening line;
+#   - a StringLit's text is its content WITHOUT the surrounding quotes, so the
+#     replacement `""` is never longer than the source it stands in for and
+#     pad-to-column can never truncate a following token;
+#   - line and column are 1-based and column marks the token's first character;
+#   - end of input is TokenKind.Eof (190) and `lex_next` returns it forever.
+#
+# SCOPE - what this is NOT
+# ------------------------
+# This is a lexical fact, not a grammar. It says where the code is; it does not
+# say what the code means. No consumer may read it as shared Simple grammar,
+# which the parser-framework lane explicitly does not claim. See
+# doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
+#
+# NOT RE-ENTRANT. Both functions call `lex_init`, which resets the module-global
+# CoreLexer. They are safe for a TOOL that owns its process (sspec_maintain,
+# docgen, a linter) and unsafe to call from inside an in-progress parse — doing
+# so would reset the lexer under the parser. That is a direct consequence of
+# the global parser source state this lane measured and froze (8 sites; see
+# scripts/check/check-parser-source-global-ratchet.shs). When that debt is paid
+# and the lexer takes its source by value, this caveat goes away; until then,
+# do not call these from the compiler's own parse path.
+#
+# Comments are DROPPED, so a consumer whose fact lives in a comment
+# (`# @req REQ-1`, `# @step: ...`) must keep reading the raw line for it. That
+# is a deliberate boundary, not an oversight: mixing the two is what made the
+# hand-rolled scanners ambiguous in the first place.
+
+use compiler.frontend.core.lexer.*
+
+# Token kind codes, from src/compiler/10.frontend/core/lexer_types.spl.
+# Named here so the scan reads as intent rather than as magic integers.
+val SOURCE_FACTS_TOK_STRING: i64 = 3
+val SOURCE_FACTS_TOK_NEWLINE: i64 = 180
+val SOURCE_FACTS_TOK_INDENT: i64 = 181
+val SOURCE_FACTS_TOK_DEDENT: i64 = 182
+val SOURCE_FACTS_TOK_EOF: i64 = 190
+# An Error token's `text` is a DIAGNOSTIC MESSAGE, not source. Measured: a
+# non-ASCII identifier such as `val 안녕 = 1` lexes to two kind-191 tokens whose
+# text is "unexpected character: 안". Placing that into the code line would
+# inject words the source never contained, so a consumer scanning for a token
+# could match the diagnostic instead. Error tokens are dropped; the resulting
+# gap is honest (the lexer could not read that span) where the message is not.
+val SOURCE_FACTS_TOK_ERROR: i64 = 191
+
+# A source with N newline characters has N+1 lines, which is exactly what
+# `text.split("\n")` yields — consumers index the two side by side, so the two
+# lengths must agree even for a trailing newline.
+fn source_facts_line_count(source: text) -> i64:
+    var count: i64 = 1
+    for ch in source:
+        if ch == "\n":
+            count = count + 1
+    count
+
+fn simple_code_lines(source: text) -> [text]:
+    """Code-only text per source line: string CONTENT blanked, comments removed.
+
+    Indentation and column positions are preserved. Element i corresponds to
+    `source.split("\n")[i]`.
+    """
+    val total = source_facts_line_count(source)
+    var lines: [text] = []
+    var seed: i64 = 0
+    while seed < total:
+        lines.push("")
+        seed = seed + 1
+    if source == "":
+        return lines
+
+    lex_init(source)
+    # The lexer reports Eof forever rather than terminating, so the loop is
+    # bounded by an explicit budget as well: a malformed source that somehow
+    # never reaches Eof must end the scan, not hang a consumer.
+    val budget = source.len() * 4 + 64
+    var steps: i64 = 0
+    while steps < budget:
+        steps = steps + 1
+        val kind = lex_next()
+        if kind == SOURCE_FACTS_TOK_EOF:
+            break
+        if kind == SOURCE_FACTS_TOK_NEWLINE or kind == SOURCE_FACTS_TOK_INDENT or
+                kind == SOURCE_FACTS_TOK_DEDENT or kind == SOURCE_FACTS_TOK_ERROR:
+            continue
+        val line = lex_token_line()
+        if line < 1 or line > total:
+            continue
+        var piece = lex_token_text()
+        if kind == SOURCE_FACTS_TOK_STRING:
+            # The content is what a consumer must not see; the quotes are kept
+            # so a scan for a quoted form still finds a quoted form.
+            piece = "\"\""
+        val index = line - 1
+        var current = lines[index]
+        val col = lex_token_col()
+        if current.len() > col - 1:
+            # A token whose recorded column has already been PASSED can only
+            # happen when a replacement ran wider than its source. Separate the
+            # two rather than letting them fuse into one spurious identifier.
+            # The boundary case len() == col - 1 is an exact fit and must add
+            # NOTHING: inserting a separator there rewrites `skip(` as `skip (`
+            # and breaks every consumer that scans for the call form. Caught by
+            # wiring a real consumer, not by reading this loop.
+            if current != "":
+                current = current + " "
+        else:
+            while current.len() < col - 1:
+                current = current + " "
+        lines[index] = current + piece
+    lines
+
+fn simple_string_continuation_lines(source: text) -> [bool]:
+    """Which lines are CONTINUATIONS of a string literal opened on an earlier line.
+
+    Element i is true when `source.split("\n")[i]` lies inside a multi-line
+    string token that began before it — that is, every line of a `\"\"\"`
+    docstring except its opening line, including the line carrying its close.
+
+    This is the fact a per-line scanner cannot compute. The heuristic it exists
+    to replace counts triple quotes on each line and tests the parity, which is
+    correct only for well-formed docstrings: one triple quote written inside a
+    COMMENT flips the parity and swallows every following line. Measured over
+    this tree on 2026-09-05, 31 `*_spec.spl` files trip exactly that, two of
+    them at line 3 — so a consumer using the parity heuristic silently loses
+    the whole file.
+    """
+    val total = source_facts_line_count(source)
+    var flags: [bool] = []
+    var seed: i64 = 0
+    while seed < total:
+        flags.push(false)
+        seed = seed + 1
+    if source == "":
+        return flags
+
+    # Line index of each byte offset, built once: offset_line[k] is the 0-based
+    # line holding byte k. A token's end offset is exclusive, so the closing
+    # line is the line of (end - 1).
+    var offset_line: [i64] = []
+    var line_no: i64 = 0
+    for ch in source:
+        offset_line.push(line_no)
+        if ch == "\n":
+            line_no = line_no + 1
+
+    lex_init(source)
+    val budget = source.len() * 4 + 64
+    var steps: i64 = 0
+    while steps < budget:
+        steps = steps + 1
+        val kind = lex_next()
+        if kind == SOURCE_FACTS_TOK_EOF:
+            break
+        if kind != SOURCE_FACTS_TOK_STRING:
+            continue
+        val start_line = lex_token_line() - 1
+        val end_offset = lex_token_end_get() - 1
+        if end_offset < 0 or end_offset >= offset_line.len():
+            continue
+        val end_line = offset_line[end_offset]
+        var mark = start_line + 1
+        while mark <= end_line and mark < total:
+            if mark >= 0:
+                flags[mark] = true
+            mark = mark + 1
+    flags
+
+fn simple_string_byte_ranges(source: text) -> [[i64]]:
+    """Per line, the BYTE ranges (line-relative, end-exclusive, flattened as
+    [s0, e0, s1, e1, ...]) that lie inside a string token, quotes included.
+
+    A byte-scanning tool that must keep its own byte columns — the `simple
+    query`/`check` lint scanners index `byte_at` on the raw line and hand those
+    columns to other byte-indexed helpers — cannot use `simple_code_lines`,
+    whose columns are character columns. This fact answers only the question
+    such a tool gets wrong on its own: WHICH bytes are string payload. It knows
+    single-quoted strings, raw strings, escapes and multi-line docstrings
+    because the lexer does; a per-line byte walker that special-cases `"` and
+    `\"\"\"` does not (it cannot see `'…'` at all).
+
+    Element i pairs with `source.split("\n")[i]`. A string spanning lines
+    contributes [start, line_len] on its opening line, [0, line_len] on each
+    interior line, and [0, end] on its closing line.
+
+    Offsets: the lexer reports CHARACTER offsets while `text.len()`/`byte_at`
+    are byte-based (measured: a 26-char source with one 2-byte `é` has
+    `len() == 27`). Each line converts char->byte once, so this is O(source).
+    """
+    val total = source_facts_line_count(source)
+    var ranges: [[i64]] = []
+    var seed: i64 = 0
+    while seed < total:
+        ranges.push([])
+        seed = seed + 1
+    if source == "":
+        return ranges
+
+    # Per character: its line, its char offset within that line, and the byte
+    # offset within that line at which it starts. Built once.
+    var char_line: [i64] = []
+    var char_col: [i64] = []
+    var char_byte: [i64] = []
+    var line_byte_len: [i64] = []
+    var line_no: i64 = 0
+    var col: i64 = 0
+    var byte_in_line: i64 = 0
+    for ch in source:
+        char_line.push(line_no)
+        char_col.push(col)
+        char_byte.push(byte_in_line)
+        if ch == "\n":
+            line_byte_len.push(byte_in_line)
+            line_no = line_no + 1
+            col = 0
+            byte_in_line = 0
+        else:
+            col = col + 1
+            byte_in_line = byte_in_line + ch.len()
+    line_byte_len.push(byte_in_line)
+
+    lex_init(source)
+    val budget = source.len() * 4 + 64
+    var steps: i64 = 0
+    while steps < budget:
+        steps = steps + 1
+        val kind = lex_next()
+        if kind == SOURCE_FACTS_TOK_EOF:
+            break
+        if kind != SOURCE_FACTS_TOK_STRING:
+            continue
+        val start_char = lex_token_start_get()
+        val end_char = lex_token_end_get()
+        if start_char < 0 or start_char >= char_line.len() or end_char <= start_char:
+            continue
+        val last_char = end_char - 1
+        if last_char >= char_line.len():
+            continue
+        val first_line = char_line[start_char]
+        val last_line = char_line[last_char]
+        # Byte offset just past the token's last char on its closing line.
+        val end_byte = char_byte[last_char] + source[last_char:last_char + 1].len()
+        var mark = first_line
+        while mark <= last_line and mark < total:
+            val from_byte = if mark == first_line: char_byte[start_char] else: 0
+            val to_byte = if mark == last_line: end_byte else: line_byte_len[mark]
+            ranges[mark].push(from_byte)
+            ranges[mark].push(to_byte)
+            mark = mark + 1
+    ranges
+
+export SOURCE_FACTS_TOK_STRING, SOURCE_FACTS_TOK_NEWLINE
+export SOURCE_FACTS_TOK_INDENT, SOURCE_FACTS_TOK_DEDENT, SOURCE_FACTS_TOK_EOF
+export SOURCE_FACTS_TOK_ERROR
+export source_facts_line_count, simple_code_lines, simple_string_continuation_lines
+export simple_string_byte_ranges

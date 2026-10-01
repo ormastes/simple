@@ -29,6 +29,17 @@ use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr}
 use compiler.mir.mir_data.{MirModule}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
+use compiler.driver.action_graph.scc_compile_outputs.{
+    SccCompileOutputsV1, SccModuleCompileOutputV1
+}
+use compiler.driver.action_graph.scc_publication_ownership.{
+    scc_publication_complete_smf_v1
+}
+use compiler.driver.action_graph.demand_compile_integration.{
+    demand_compile_complete_scc_outputs_v1
+}
 
 extern fn rt_hash_text(s: text) -> i64
 
@@ -54,6 +65,58 @@ fn smf_render_launch_metadata() -> text:
         "  uses_arg_parser: true\n" +
         "  mmap_hint: true\n"
 
+fn smf_publish_demand_scc_outputs_v1(ctx: CompileContext, path: text) -> bool:
+    if ctx.demand_scc_publication == nil:
+        return true
+    if (ctx.demand_compile_execution == nil or
+            ctx.demand_mir_admission == nil or
+            ctx.demand_dirty_modules.len() == 0):
+        return false
+    var ownership = ctx.demand_scc_publication!
+    var execution = ctx.demand_compile_execution!
+    for index in 0..ownership.modules.len():
+        if not scc_publication_complete_smf_v1(
+                &mut ownership,
+                ownership.modules[index].entry.module_identity, path):
+            ctx.demand_scc_publication = Some(ownership)
+            ctx.demand_compile_execution = Some(execution)
+            return false
+    val dirty = ctx.demand_dirty_modules[0]
+    val authority = PackageArchiveAuthorityV1(
+        dirty.producer_compatibility_id, dirty.package_index_generation,
+        dirty.configuration_variant, dirty.scv_revision,
+        dirty.scv_tree_digest, dirty.scv_inventory_digest)
+    var scc_identities: [text] = []
+    for output in ownership.modules:
+        if not scc_identities.contains(output.entry.scc_identity):
+            scc_identities = scc_identities.push(output.entry.scc_identity)
+    for scc_identity in scc_identities.sorted():
+        var scheduled: [text] = []
+        var modules: [SccModuleCompileOutputV1] = []
+        for output in ownership.modules:
+            if output.entry.scc_identity == scc_identity:
+                scheduled = scheduled.push(output.entry.module_identity)
+                modules = modules.push(output)
+        if modules.len() == 0:
+            ctx.demand_scc_publication = Some(ownership)
+            ctx.demand_compile_execution = Some(execution)
+            return false
+        val completion = demand_compile_complete_scc_outputs_v1(
+                execution, machine_cache_root(), authority,
+                ctx.demand_mir_admission!,
+                SccCompileOutputsV1(
+                    scc_identity, scheduled.sorted(), modules),
+                modules[0].baseline_artifact_identity,
+                modules[0].baseline_artifact_digest)
+        execution = completion.execution
+        if not completion.accepted:
+            ctx.demand_scc_publication = Some(ownership)
+            ctx.demand_compile_execution = Some(execution)
+            return false
+    ctx.demand_scc_publication = Some(ownership)
+    ctx.demand_compile_execution = Some(execution)
+    true
+
 impl CompilerDriver:
     me compile_to_smf(output: text) -> CompileResult:
         val ctx = self.ctx
@@ -74,6 +137,9 @@ impl CompilerDriver:
 
         match link_to_smf(smf_bytes, output, ctx.options.verbose):
             case Ok(_):
+                if not smf_publish_demand_scc_outputs_v1(ctx, output):
+                    return CompileResult.CodegenError(
+                        "demand-driven SCC SMF publication failed closed")
                 log_build_progress("smf_package", "modules", ctx.mir_modules.len(), ctx.mir_modules.len(), output, 1, 1, 0, 0, "complete")
                 smf_log_info(
                     log,
@@ -116,6 +182,13 @@ impl CompilerDriver:
         val opt_level = compileoptions_effective_mir_opt_level(ctx.options)
         var all_object_bytes: [u8] = []
 
+        # Fail closed. An SMF with no code still gets a `main` symbol of size
+        # 0 (smf_writer), and the loader then jumps into it. Zero modules,
+        # a module with functions but no object, or no code in total are
+        # compile errors, never a successful empty artifact.
+        if ctx.mir_modules.keys().len() == 0:
+            return CompileResult.CodegenError(
+                "SMF compile produced no MIR modules; nothing to package")
         for name in ctx.mir_modules.keys():
             smf_log_trace(log, "compiling module for SMF: {name}")
             val compiled = compile_module_with_backend(
@@ -129,11 +202,31 @@ impl CompilerDriver:
                     return CompileResult.CodegenError(
                         "AOT compile error in {name}: {err.to_text()}")
                 case Ok(module):
+                    var module_bytes: [u8] = []
                     if val obj_bytes = module.object_code:
-                        all_object_bytes = all_object_bytes.concat(obj_bytes)
+                        module_bytes = obj_bytes
+                    if module_bytes.len() == 0 and ctx.mir_modules[name].functions.len() > 0:
+                        return CompileResult.CodegenError(
+                            "AOT compile error in {name}: backend returned no object code for {ctx.mir_modules[name].functions.len()} function(s)")
+                    all_object_bytes = all_object_bytes.concat(module_bytes)
                 case _:
                     return CompileResult.CodegenError(
                         "AOT compile error in {name}: backend result not Ok")
+
+        if all_object_bytes.len() == 0:
+            return CompileResult.CodegenError(
+                "SMF compile produced no object code across {ctx.mir_modules.keys().len()} module(s)")
+        # extract_code_from_object only understands ELF and passes anything
+        # else through as raw code, so a COFF or Mach-O object would be
+        # loaded and entered at its file header.
+        if all_object_bytes.len() >= 4:
+            val b0 = all_object_bytes[0] as i64
+            val b1 = all_object_bytes[1] as i64
+            val coff = (b0 == 0x64 and b1 == 0x86) or (b0 == 0x64 and b1 == 0xAA)
+            val macho = b0 == 0xCF and b1 == 0xFA and (all_object_bytes[2] as i64) == 0xED and (all_object_bytes[3] as i64) == 0xFE
+            if coff or macho:
+                return CompileResult.CodegenError(
+                    "SMF packaging needs ELF object code, but the backend produced a {if coff: "COFF" else: "Mach-O"} object for this host target")
 
         val deps = smf_collect_dependency_hashes(ctx)
         val entry_source_hash = if ctx.source_content_hashes_owner.len() > 0:

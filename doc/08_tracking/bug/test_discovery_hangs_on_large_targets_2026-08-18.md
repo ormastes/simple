@@ -1,4 +1,8 @@
 # `bin/simple test` never leaves `[setup] discover: begin` on large targets — two O(n^2) steps in the manifest reindex
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Status:** ROOT-CAUSED and FIXED in pure Simple (`src/lib`, no bootstrap needed), with before/after measured on the real function over the real tree.
@@ -204,3 +208,4 @@ deserves its own record.)
 * `[jit-fallback] unresolved external symbol 'char_code'` drops this whole module
   to the interpreter ("expect ~100-1000x slowdown", the runtime's own words),
   which is what turns both quadratic terms from annoying into fatal.
+

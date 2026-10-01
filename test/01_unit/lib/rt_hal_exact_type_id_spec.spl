@@ -1,0 +1,53 @@
+# @cover src/lib/nogc_sync_mut/rt_hal/exact_type_identity_owner.spl 80%
+
+use std.spec.*
+use std.common.rt_hal.exact_type_id.*
+use std.nogc_sync_mut.rt_hal.exact_type_descriptor_parser.*
+use std.nogc_sync_mut.rt_hal.exact_type_identity_owner.*
+
+describe "RT/HAL v2 exact type authority":
+    it "admits a canonical type once and validates only after freeze":
+        val owner=rt_hal_exact_type_registry_create(8,4096)
+        val first=rt_hal_exact_type_registry_admit(owner,"v2;i64")
+        val again=rt_hal_exact_type_registry_admit(owner,"v2;i64")
+        val seal=rt_hal_exact_type_registry_freeze(owner)
+        expect(rt_hal_exact_type_registry_validates(seal,first)).to_equal(true)
+        expect(rt_hal_exact_type_admission_equal(seal,first,again)).to_equal(true)
+        expect(rt_hal_exact_type_registry_retained_bytes(seal)).to_equal(4096)
+        expect(rt_hal_exact_type_registry_release(owner,seal)).to_equal(true)
+        expect(rt_hal_exact_type_registry_validates(seal,first)).to_equal(false)
+
+    it "rejects malformed and noncanonical descriptor spellings":
+        expect(rt_hal_exact_type_descriptor_canonical("v2;wat")).to_equal("")
+        expect(rt_hal_exact_type_descriptor_canonical("v2;tuple;01;")).to_equal("")
+        expect(rt_hal_exact_type_descriptor_canonical("v2;array;1;6:v2;i16")).to_equal("v2;array;1;6:v2;i16")
+
+    it "ignores every transported candidate field during parent readmission":
+        val owner=rt_hal_exact_type_registry_create(2,2048)
+        var foreign=rt_hal_exact_type_id_i16()
+        foreign.receipt=777;foreign.generation=888;foreign.lane0=999
+        val candidate=rt_hal_exact_type_foreign_candidate(foreign)
+        val batch=rt_hal_exact_type_registry_readmit_five(owner,
+            candidate,"v2;i16",candidate,"v2;i16",candidate,"v2;i16",
+            candidate,"v2;i16",candidate,"v2;i16")
+        val trusted=batch.operation
+        val local=rt_hal_exact_type_registry_admit(owner,"v2;i16")
+        val seal=rt_hal_exact_type_registry_freeze(owner)
+        expect(rt_hal_exact_type_admission_equal(seal,trusted,local)).to_equal(true)
+        expect(rt_hal_exact_type_registry_release(owner,seal)).to_equal(true)
+
+    it "keeps lifecycle authority out of copied observation seals":
+        val first=rt_hal_exact_type_registry_create(1,2048)
+        val second=rt_hal_exact_type_registry_create(1,2048)
+        val admitted=rt_hal_exact_type_registry_admit(first,"v2;bool")
+        val seal=rt_hal_exact_type_registry_freeze(first)
+        expect(rt_hal_exact_type_registry_validates(seal,admitted)).to_equal(true)
+        val invalid_seal=rt_hal_exact_type_registry_freeze(second)
+        expect(rt_hal_exact_type_registry_validates(invalid_seal,admitted)).to_equal(false)
+        expect(rt_hal_exact_type_registry_release(first,seal)).to_equal(true)
+
+    it "fails before allocating beyond the retained memory ceiling":
+        val rejected=rt_hal_exact_type_registry_create(2,1)
+        val admitted=rt_hal_exact_type_registry_admit(rejected,"v2;i8")
+        val seal=rt_hal_exact_type_registry_freeze(rejected)
+        expect(rt_hal_exact_type_registry_validates(seal,admitted)).to_equal(false)

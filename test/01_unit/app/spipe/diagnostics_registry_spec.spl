@@ -1,0 +1,138 @@
+"""SPipe diagnostics registry
+
+## Purpose and audience
+
+Proves the on-disk `registry.sdn` loads cleanly with zero problems, and that
+the registry loader's invariants -- no duplicate codes, no code outside the
+reserved-legacy or free-new-code ranges, no used-but-unregistered code --
+actually reject malformed registries rather than silently accepting them.
+The real shipped `src/app/spipe/diagnostics/registry.sdn` carries every
+legacy JS SPK code as a reserved row plus S1-D's own admission codes.
+Audience: language tools maintainers and code reviewers.
+
+## Registry invariants
+
+Fail-closed validation for duplicate codes, out-of-range codes, and
+unregistered-but-used codes against the shipped diagnostic registry.
+
+## Fixtures
+
+Test cases include duplicate codes, out-of-range codes, and clean minimal registries.
+
+## Code classification
+
+Boundary and range checking for diagnostic code assignment.
+
+## Verification guidance and troubleshooting
+
+Each scenario verifies one invariant class; cross-check findings across all scenarios.
+"""
+# Lifecycle: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md ;
+# doc/01_research/domain/sspec_documentization_maintenance.md
+# @manual_section: spipe-diagnostics-registry
+
+use std.spec.*
+use app.spipe.diagnostics.registry.{
+    load_registry, parse_registry_source, validate_registry,
+    find_duplicate_codes, find_out_of_range_codes,
+    find_unregistered_used_codes, code_number, in_free_new_range,
+}
+use app.spipe.admission.verdict.{admission_diagnostic_codes}
+
+val REGISTRY_PATH = "src/app/spipe/diagnostics/registry.sdn"
+
+describe "SPipe diagnostics registry":
+    it "loads the shipped registry with zero validation problems":
+        # @req REQ-SPKC-039
+        # @capture: text_evidence("registry_validation_pass")
+        step("Load src/app/spipe/diagnostics/registry.sdn")
+        match load_registry(REGISTRY_PATH):
+            case Ok(rows):
+                step("Validate every row: no duplicates, no out-of-range codes")
+                val problems = validate_registry(rows)
+                expect(problems.len()).to_equal(0)  # oracle: registry must have zero validation problems when shipped
+                expect(rows.len() > 0).to_be(true)  # oracle: shipping a non-empty registry is the precondition; >0 rows expected per SPK704 sample docs
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "carries every legacy JS SPK code as a reserved row (SPK704 sample)":
+        # @capture: text_evidence("legacy_code_spk704")
+        step("Load the shipped registry and find the SPK704 row")
+        match load_registry(REGISTRY_PATH):
+            case Ok(rows):
+                var found = false
+                for row in rows:
+                    if row.code == "SPK704":
+                        found = true
+                        expect(row.reserved).to_be(true)  # oracle: SPK704 is a legacy JS code per SPK collision incident history
+                        expect(row.owner).to_equal("legacy_js")  # oracle: all legacy codes in the registry carry owner="legacy_js" marker
+                expect(found).to_be(true)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "registers every admission code S1-D can emit":
+        # @capture: text_evidence("admission_codes_registered")
+        step("Cross-check admission_diagnostic_codes() against the registry")
+        match load_registry(REGISTRY_PATH):
+            case Ok(rows):
+                val unregistered = find_unregistered_used_codes(rows, admission_diagnostic_codes())
+                expect(unregistered.len()).to_equal(0)  # oracle: S1-D's emission vector must be completely registered (zero unregistered = safety invariant)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "REJECTS a registry with a duplicated code":
+        # @capture: text_evidence("duplicate_code_rejected")
+        step("Load the duplicate-code fixture")
+        match load_registry("test/fixture/spipe/registry/duplicate_code.sdn"):
+            case Ok(rows):
+                val dups = find_duplicate_codes(rows)
+                expect(dups.len()).to_equal(1)  # oracle: duplicate-code fixture has exactly 1 duplicated entry (SPK530 measured)
+                expect(dups[0]).to_equal("SPK530")  # oracle: SPK530 is the duplicate in this fixture
+                val problems = validate_registry(rows)
+                expect(problems.len() > 0).to_be(true)  # oracle: duplicates always produce validation problems (non-empty problem list)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "REJECTS a registry with a code outside every free range":
+        # @capture: text_evidence("out_of_range_rejected")
+        step("Load the out-of-range fixture")
+        match load_registry("test/fixture/spipe/registry/out_of_range_code.sdn"):
+            case Ok(rows):
+                val bad = find_out_of_range_codes(rows)
+                expect(bad.len()).to_equal(1)  # oracle: out-of-range fixture has exactly 1 out-of-range entry
+                expect(bad[0]).to_equal("SPK999")  # oracle: SPK999 is outside all free ranges (110-129, 510-549)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "accepts a minimal clean registry (reserved legacy + one admission code)":
+        # @capture: text_evidence("minimal_registry_accepted")
+        step("Load the clean-minimal fixture")
+        match load_registry("test/fixture/spipe/registry/clean_minimal.sdn"):
+            case Ok(rows):
+                expect(validate_registry(rows).len()).to_equal(0)  # oracle: minimal clean registry has zero validation problems
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "classifies code numbers into the reserved SPK110-129/510-529/530-549 free ranges":
+        # @capture: text_evidence("code_classification_boundaries")
+        step("Check in_free_new_range for boundary and out-of-range values")
+        expect(in_free_new_range(110)).to_be(true)  # oracle: 110 is the inclusive lower bound of range 1 (SPK110-129)
+        expect(in_free_new_range(129)).to_be(true)  # oracle: 129 is the inclusive upper bound of range 1
+        expect(in_free_new_range(109)).to_be(false)  # oracle: 109 is below range 1 (out of range)
+        expect(in_free_new_range(130)).to_be(false)  # oracle: 130 is above range 1, below range 2 (out of range)
+        expect(in_free_new_range(510)).to_be(true)  # oracle: 510 is the inclusive lower bound of range 2 (SPK510-549)
+        expect(in_free_new_range(529)).to_be(true)  # oracle: 529 is in the middle of range 2
+        expect(in_free_new_range(530)).to_be(true)  # oracle: 530 is in the upper half of range 2
+        expect(in_free_new_range(549)).to_be(true)  # oracle: 549 is the inclusive upper bound of range 2
+        expect(in_free_new_range(550)).to_be(false)  # oracle: 550 is above range 2 (out of range)
+        expect(in_free_new_range(704)).to_be(false)  # oracle: 704 is a legacy code, not in any new free range
+
+    it "parses the numeric part of an SPKnnn code, rejecting malformed codes":
+        # @capture: text_evidence("spk_code_parsing")
+        step("Check code_number on well-formed and malformed codes")
+        expect(code_number("SPK110")).to_equal(110)  # oracle: SPK110 parses to numeric 110
+        expect(code_number("SPK001")).to_equal(1)  # oracle: SPK001 parses to numeric 1 (leading zeros stripped)
+        expect(code_number("NOTSPK1")).to_equal(-1)  # oracle: malformed prefix NOTSPK1 returns sentinel -1
+        expect(code_number("SPK")).to_equal(-1)  # oracle: bare SPK (no numeric) returns sentinel -1

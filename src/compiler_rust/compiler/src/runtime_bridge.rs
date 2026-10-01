@@ -5,6 +5,7 @@
 
 use simple_runtime::RuntimeValue;
 
+use crate::codegen::shared::enum_runtime_type_id;
 use crate::value::Value;
 use crate::value_bridge::{bridge_tags, BridgeValue};
 
@@ -79,6 +80,19 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         // across the interpreter bridge (see compile_interp_call).
         Value::Tuple(data) => values_to_runtime_tuple(data.iter()),
         Value::LabeledTuple { values, .. } => values_to_runtime_array(values.iter()),
+        // Enum values cross the interpreter/native boundary as the same boxed
+        // RuntimeEnum ABI used by native constructors and match checks. Type
+        // IDs come from the shared helper: Option and Result have reserved IDs,
+        // while user enum names retain the established hash-based identity.
+        Value::Enum {
+            enum_name,
+            variant,
+            payload,
+        } => simple_runtime::value::rt_enum_new(
+            enum_runtime_type_id(enum_name),
+            simple_runtime::value::hash_variant_discriminant(variant),
+            payload.as_deref().map_or(RuntimeValue::NIL, value_to_runtime),
+        ),
         // A Dict must marshal to a real native `RuntimeDict` heap object (not
         // NIL) so a composite (Dict/Map) return value that is forced through
         // the interpreter bridge (`InterpCall` — e.g. via a TryOperator or
@@ -162,6 +176,20 @@ fn values_to_runtime_array<'a>(items: impl IntoIterator<Item = &'a Value>) -> Ru
 /// Convert a RuntimeValue to an interpreter Value (simple types only)
 pub fn runtime_to_value(rv: RuntimeValue) -> Value {
     use simple_runtime::value::tags as rt_tags;
+
+    // Full-precision floats use HeapObjectType::Float at erased/Any/container
+    // boundaries. Checking only TAG_FLOAT below silently converted every such
+    // value to Value::Nil through the unsupported-heap fallback. This surfaced
+    // in the self-hosted compiler when FloatLit/Json Number pattern payloads
+    // crossed rt_interp_call before ast_semantic_value called f64_to_bits.
+    if rv.is_float() {
+        return Value::Float(rv.as_float());
+    }
+    // Wide signed integers use the adjacent HeapObjectType::Int carrier. Keep
+    // that scalar distinct from HeapUInt and from enum/object wrappers.
+    if let Some(value) = rv.as_heap_i64() {
+        return Value::Int(value);
+    }
 
     match rv.tag() {
         rt_tags::TAG_INT => Value::Int(rv.as_int()),
@@ -336,12 +364,131 @@ mod tests {
     }
 
     #[test]
+    fn value_to_runtime_enum_uses_the_native_hashed_enum_abi() {
+        use simple_runtime::value::{
+            hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload, HeapObjectType,
+        };
+
+        let value = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(Box::new(Value::Int(42))),
+        };
+        let runtime = value_to_runtime(&value);
+
+        assert_eq!(runtime.heap_type(), Some(HeapObjectType::Enum));
+        assert_eq!(rt_enum_id(runtime), i64::from(enum_runtime_type_id("Option")));
+        assert_eq!(rt_enum_discriminant(runtime), i64::from(hash_variant_discriminant("Some")));
+        assert_eq!(rt_enum_payload(runtime).as_int(), 42);
+    }
+
+    #[test]
+    fn value_to_runtime_enum_marshals_result_ok() {
+        use simple_runtime::value::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload};
+
+        let runtime = value_to_runtime(&Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(Box::new(Value::Int(17))),
+        });
+
+        assert_eq!(rt_enum_id(runtime), i64::from(enum_runtime_type_id("Result")));
+        assert_eq!(rt_enum_discriminant(runtime), i64::from(hash_variant_discriminant("Ok")));
+        assert_eq!(rt_enum_payload(runtime).as_int(), 17);
+    }
+
+    #[test]
+    fn value_to_runtime_enum_preserves_none_err_and_nested_payloads() {
+        use simple_runtime::value::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload};
+
+        let none = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            payload: None,
+        };
+        let none_runtime = value_to_runtime(&none);
+        assert_eq!(rt_enum_id(none_runtime), i64::from(enum_runtime_type_id("Option")));
+        assert_eq!(rt_enum_discriminant(none_runtime), i64::from(hash_variant_discriminant("None")));
+        assert_eq!(rt_enum_payload(none_runtime), RuntimeValue::NIL);
+
+        let nested = Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            payload: Some(Box::new(Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                payload: Some(Box::new(Value::text("payload".to_string()))),
+            })),
+        };
+        let runtime = value_to_runtime(&nested);
+        assert_eq!(rt_enum_id(runtime), i64::from(enum_runtime_type_id("Result")));
+        assert_eq!(rt_enum_discriminant(runtime), i64::from(hash_variant_discriminant("Err")));
+        let nested_runtime = rt_enum_payload(runtime);
+        assert_eq!(rt_enum_id(nested_runtime), i64::from(enum_runtime_type_id("Option")));
+        assert_eq!(rt_enum_discriminant(nested_runtime), i64::from(hash_variant_discriminant("Some")));
+        assert_eq!(runtime_to_value(rt_enum_payload(nested_runtime)), Value::text("payload".to_string()));
+    }
+
+    #[test]
+    fn enum_marshalling_retains_the_existing_user_enum_collision_contract() {
+        use simple_runtime::value::rt_enum_id;
+
+        let first = value_to_runtime(&Value::Enum {
+            enum_name: "collision.Type175882".to_string(),
+            variant: "Same".to_string(),
+            payload: None,
+        });
+        let second = value_to_runtime(&Value::Enum {
+            enum_name: "collision.Type255081".to_string(),
+            variant: "Same".to_string(),
+            payload: None,
+        });
+
+        assert_eq!(enum_runtime_type_id("collision.Type175882"), enum_runtime_type_id("collision.Type255081"));
+        assert_eq!(rt_enum_id(first), rt_enum_id(second));
+    }
+
+    #[test]
     fn high_bit_u64_runtime_roundtrip_is_lossless_and_remains_unsigned() {
         for value in [0, 7, 1u64 << 61, 1u64 << 63, u64::MAX] {
             let source = Value::UInt { value, width: 64 };
             let runtime = value_to_runtime(&source);
             assert_eq!(runtime.as_heap_u64(), Some(value));
             assert_eq!(runtime_to_value(runtime), source);
+        }
+    }
+
+    #[test]
+    fn heap_boxed_float_runtime_roundtrip_preserves_exact_bits() {
+        for value in [0.0, -0.0, 0.1, f64::MIN_POSITIVE, f64::MAX] {
+            let runtime = RuntimeValue::from_float(value);
+            assert_eq!(runtime.heap_type(), Some(simple_runtime::value::HeapObjectType::Float));
+            match runtime_to_value(runtime) {
+                Value::Float(actual) => assert_eq!(actual.to_bits(), value.to_bits()),
+                other => panic!("expected exact Float bridge value, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn heap_boxed_wide_signed_int_runtime_roundtrip_stays_int() {
+        for value in [i64::MIN, -(1i64 << 61), 1i64 << 61, i64::MAX] {
+            let runtime = RuntimeValue::from_int(value);
+            assert_eq!(runtime.heap_type(), Some(simple_runtime::value::HeapObjectType::Int));
+            assert_eq!(runtime_to_value(runtime), Value::Int(value));
+        }
+    }
+
+    #[test]
+    fn enum_wrapper_is_not_implicitly_coerced_to_its_float_payload() {
+        use simple_runtime::value::{rt_enum_new, rt_enum_payload};
+
+        let payload = RuntimeValue::from_float(0.1);
+        let wrapper = rt_enum_new(77, 3, payload);
+        assert_eq!(runtime_to_value(wrapper), Value::Nil);
+        match runtime_to_value(rt_enum_payload(wrapper)) {
+            Value::Float(actual) => assert_eq!(actual.to_bits(), 0.1f64.to_bits()),
+            other => panic!("explicit enum payload extraction lost float: {other:?}"),
         }
     }
 

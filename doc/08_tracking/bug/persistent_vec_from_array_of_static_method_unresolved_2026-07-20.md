@@ -1,22 +1,14 @@
 # `PersistentVec.from_array` / `.of` unresolved as static methods (works for `.empty`/`.range`/`.repeat`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
 `test/unit/lib/{gc_async_immut,gc_sync_immut}`
-**Status:** RESOLVED — current registration and dispatch preserve every static
-method; exact and analogous regressions are pinned in
-`test/01_unit/app/interpreter/static_method_complete_registration_spec.spl`.
-**Fix owner:** pure Simple
-`src/app/interpreter/module/evaluator.spl::register_impl`; no Rust compiler or
-runtime source is part of this fix.
-
-## Resolution verification (2026-08-02)
-
-The original PersistentVec and GcConfig reproducers now pass on the deployed
-bootstrap seed. That establishes the historical symptom is stale there, but is
-not accepted as pure-Simple release evidence. The canonical pure-Simple owner
-registers each member inside `for method in impl_block.methods`; the focused
-regression covers both exact APIs and an adjacent three-static-method impl.
+**Status:** open — genuine defect, reproduces under both `bin/simple run`
+and `bin/simple test` (NOT the known test-vs-run static-method landmine)
 
 ## Symptom
 
@@ -132,3 +124,4 @@ either. Root cause not isolated further this pass.
 
 No Rust seed source fix attempted (out of scope for this triage pass per the
 fix-guide; needs a rebuild). Left as GENUINE-BUG, both specs unmodified.
+

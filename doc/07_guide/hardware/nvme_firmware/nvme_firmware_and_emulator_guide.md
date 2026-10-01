@@ -14,63 +14,6 @@ deliberately avoided — see the caveats below):
 > `build/nvme_fw_rv32.elf` is produced; the full no-alloc firmware port is still not complete
 > (see "rv32 status").
 
-## RV32 RAM-backed read-level lane
-
-The RV32 firmware reserves `.nandram` for media state and executes startup,
-admin/I/O queue creation, erase, program, read, preventive refresh, read retry,
-and recovery refresh on the CPU. The canonical order is:
-
-```sh
-sh scripts/check/check-rv32-nvme-nand-recovery.shs --self-test
-sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
-sh scripts/check/check-rv32-nvme-nand-recovery.shs --ghdl
-sh scripts/check/check-rv32-nvme-nand-recovery.shs --fpga
-```
-
-The AXI gate runs before board programming. It executes the firmware through
-`rv32_axi4_mem_adapter` into wait-state-injected RAM, derives `.nandram` from
-the ELF, and fails unless that 256-byte range receives reads and writes and the
-prevention/recovery/final markers are observed over AXI4-Lite. `.nandram` is
-linker-resident emulated media state transported by AXI; it is not a NAND MMIO
-register device.
-Host-issued NVMe-over-AXI/MMIO firmware-in-loop evidence is complete in GHDL;
-QEMU repeats the command/recovery sequence without claiming AXI. Physical
-source-matched board evidence remains open and is tracked in
-`doc/08_tracking/feature/rv32_nvme_host_axi_mmio_2026-07-28.md`.
-
-### Profile catalog and evidence boundary
-
-Use the profile that matches the transport actually exercised:
-
-| Profile | Available evidence | Do not claim |
-|---|---|---|
-| `TARGET_SIMPLE_SIM` / `fw/` | Host-model NVMe controller, FTL/FIL and command semantics | RV32, AXI, IRQ, PCIe, or OpenSSD hardware |
-| `emu/` | Host/device memcpy seam and RAM-backed NAND emulator | Hardware MMIO, queue DMA, PCIe, or physical NAND |
-| `fw_rv32` + QEMU | Real RV32 ELF, external mailbox command sequence, guest PRP buffers, scalar RAM-NAND recovery | AXI, queue DMA engine, IRQ, PCIe, or board transport |
-| RV32 + GHDL AXI | H1 synthesizable AXI model evidence | PCIe enumeration, MSI/PERST, physical NAND, OpenSSD silicon |
-| KV260 FPGA | H1 FPGA-model evidence with a real host trace | OpenSSD or physical-NAND acceptance |
-| Cosmos+ OpenSSD | H2/vendor profile only through its board gate | Any result inferred from QEMU/GHDL/internal selftest |
-
-The standalone `rv32_nvme_host_axi_mmio` endpoint retains a focused mocked-mailbox
-protocol check. The aggregate gate also boots the real resident RV32 service ELF
-and drives Create CQ/SQ, Identify, Write, Flush, and Read through shared AXI RAM,
-requiring recovery, prevention refresh, alternate remap, payload equality, CQE,
-and IRQ evidence. `scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs` repeats the same
-firmware command/recovery sequence through a GDB-driven guest-RAM mailbox.
-QEMU does not prove AXI, DMA, IRQ, PCIe, or board acceptance. The first
-host contract is qid 0/qid 1, depth 2..16,
-`4 << CAP.DSTRD` doorbells and one dword-aligned PRP1 contained in a page.
-Identify writes 256 bytes; current NAND Read/Write moves one 4-byte word.
-Unsupported PRP2/multi-page requests fail closed. See the feature artifacts
-in `doc/{01_research/local,02_requirements,04_architecture,05_design}/` and the
-runner-backed endpoint SSpec at
-`test/03_system/app/nvme_firmware/rv32_nvme_host_axi_mmio_spec.spl`.
-
-`--fpga` rebuilds the same ELF used by GHDL, builds/programs the KV260
-bitstream, reads the captured UART through JTAG USER4, checks every lifecycle
-marker, and retains ELF/bitstream hashes. Never substitute QEMU/GHDL output for
-the JTAG transcript.
-
 ---
 
 ## 1. The firmware (`fw/`)
@@ -125,7 +68,7 @@ ORs in the thermal critical-warning bit from that model — replacing the former
 
 ```bash
 B=bin/simple
-$B run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # -> ALL FIRMWARE SELF-TESTS PASS  (1174 assertions)
+$B run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # -> ALL FIRMWARE SELF-TESTS PASS  (526 assertions)
 $B run examples/09_embedded/simpleos_nvme_fw/fw/sim_main.spl   # -> ALL END-TO-END CHECKS PASS
 $B run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl  # -> ALL NVME CONTROLLER E2E CHECKS PASS
 $B run examples/09_embedded/simpleos_nvme_fw/fw/rain_check.spl      # -> RAIN OK
@@ -133,15 +76,15 @@ $B run examples/09_embedded/simpleos_nvme_fw/fw/rain_ftl_check.spl  # -> RAIN-FT
 $B run examples/09_embedded/simpleos_nvme_fw/fw/thermal_check.spl   # -> THERMAL OK
 ```
 
-- **`test_fw.spl`** — full self-test suite, 1174 `PASS:` assertions across all modules (now
+- **`test_fw.spl`** — full self-test suite, 526 `PASS:` assertions across all modules (now
   including RAIN, thermal, sandbox, hooks selftests).
 - **`sim_main.spl`** — single-queue end-to-end: 128 writes → read-back → overwrite-all (write
   amplification) → garbage collection (reclaim stale blocks, logical view preserved) → trim →
   power-fail + recovery (committed state survives, trim stays trimmed).
 - **`nvme_main.spl`** — admin-driven controller acceptance: host bring-up (Identify → Features →
   Create CQ→SQ) → multi-queue IO with round-robin → negative cases (SQ→missing-CQ rejected,
-  invalid namespace rejected, delete-bound-CQ rejected) → reverse-order teardown → SMART log
-  (live thermal temperature + critical-warning) → power-cycle survival.
+  delete-bound-CQ rejected) → reverse-order teardown → SMART log (live thermal temperature +
+  critical-warning) → power-cycle survival.
 - **`rain_check.spl` / `rain_ftl_check.spl` / `thermal_check.spl`** — the P7/P8 wiring demos:
   `RAIN OK` (standalone per-stripe XOR parity), `RAIN-FTL OK` (256 LBAs survive a whole-channel
   uncorrectable failure, rebuilt in place), `THERMAL OK` (live composite temperature + critical
@@ -159,12 +102,10 @@ Additional firmware modules: `power_thermal.spl` (power-state + thermal model, w
 
 > **Wired vs. shelf (honest status).** This is a hardware-**faithful simulation**, not a
 > silicon-shippable binary — "production level" in the literal sense is not done. Of the gap-closure
-> items: **P1** (`fil_fmc`), **P2** (`fil_scheduler`), **P3** (SECDED ECC floor), **P4**
-> (segmented-PRP floor), **P5** (DRAM/map-cache floor), **P6** (cooperative ownership floor),
-> **P7** (`power_thermal`), and **P8** (`rain`) are wired floors in the live path. **P9** has a
-> fail-closed rv32 direct-smoke recipe; the QEMU PASS marker requires a produced
-> `build/nvme_fw_rv32.elf`, and the full 22-module no-alloc firmware port remains open.
-> Canonical table:
+> items: **P1** (`fil_fmc`), **P7** (`power_thermal`), and **P8** (`rain`) are **wired into the live
+> controller/FTL**; **P2** (`fil_scheduler`) is done-but-**shelf** (a single-threaded sim cannot
+> exhibit channel-level parallelism); **P3–P6** are **not started**; **P9** (rv32 bare-metal) is
+> **build-blocked** (see "rv32 status"). Canonical table:
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status".
 
 ---
@@ -299,24 +240,29 @@ done
 
 ## 5. rv32 bare-metal status (read this plainly)
 
-Default `fw_rv32/build.shs` is the small direct rv32 ELF recipe; it avoids rebuilding the Rust
-seed and does not compile the full Simple firmware graph. Build the ELF before treating this as
-boot evidence:
+The pure-Simple firmware was **NOT** booted bare-metal on rv32 this session — **P9 is
+build-blocked, not done.** A new array-free, scalar re-expression of the RAIN reconstruct lives in
+`examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl`; it is `bin/simple check`-clean and
+host-verified. But the rv32 LLVM native build **cannot produce an ELF in this environment**: the
+silent failure is environmental, not a property of the firmware source. The proven full-OS recipe
+(`--entry src/os/kernel/arch/riscv32/boot.spl`) **also** exits 255 with no diagnostic and no ELF
+when run here, so the rv32 LLVM backend itself is broken in this environment (the prebuilt
+`build/os/simpleos_riscv32.elf` that boots is **stale**). The boot was therefore never observed.
+This **supersedes** the older claim that the blocker was `[i64]`/`.push` needing a heap —
+`entry.spl` is now array-free yet still cannot build. Tracked in
+`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
 ```sh
 NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf
 ```
 
-When the ELF exists, the boot must print `RV32 NVME FW BEGIN`, the ordered NAND
-stage markers, `NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS`,
-`ALL RV32 NVME FW CHECKS PASS`, and exit `RESULT: PASS`.
+When the ELF exists, the boot must print `RV32 NVME FW BEGIN`,
+`ALL RV32 NVME FW CHECKS PASS`, and exit `RESULT: PASS`;
 `boot.shs --self-test` separately proves the wrapper fails closed on bad serial output. This is
-direct single-hart controller-policy evidence, not the full firmware port. Set
+P9 direct-smoke evidence, not the full firmware port. Set
 `NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the slower full rv32 OS boot/source
-graph; the full 22-module no-alloc port remains open. The rv32 scalar smoke uses
-bounded no-alloc caps for internal counters; host simulation remains the source
-for full-width counter stress.
+graph; the full 22-module no-alloc port remains open.
 
 ---
 
@@ -333,32 +279,3 @@ for full-width counter stress.
   `doc/03_plan/hardware/nvme_fw_emulated_nand_plan.md`.
 - rv32 native-build blocker: `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 - Newtype + Lean caveats: `doc/08_tracking/bug/newtype_run_path_and_enforcement_gaps_2026-06-29.md`.
-
-## Running the fw on the Simple rv32 FPGA core
-
-The corrected full-word SECDED and alternate-slot remap ELF passes QEMU,
-behavioral GHDL, exact-BRAM GHDL with clean and garbage-filled RAM, and the full
-AXI4 RAM gate. A recorded revision completed behavioral simulation at 10.897245
-ms and observed 847 AXI reads plus 460 writes inside `.nandram`; those metrics
-are historical after later `entry.spl` changes. A prior KV260 run captured 229
-UART bytes through USER4 JTAG, but physical PASS requires a fresh retained
-source-matched ELF/bitstream/transcript bundle.
-Run the complete gate with:
-
-```sh
-sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
-sh scripts/check/check-rv32-nvme-nand-recovery.shs --ghdl
-sh scripts/check/check-rv32-nvme-nand-recovery.shs --fpga
-```
-
-The workload is designed to execute startup, admin and I/O queue creation,
-SQ/CQ full/empty/deletion behavior, completion reaping,
-erase/program/read, downward retention recovery, upward disturb recovery,
-neighbor prevention, independently decoded SECDED, verified FCR, and
-failed-primary alternate-slot remap from the same ELF. It verifies controller
-policy after the gate passes, not analog NAND physics or host-driven NVMe MMIO.
-Launch details and the `.bss`-zero requirement:
-see
-`doc/07_guide/hardware/fpga/simpleos_on_simple_riscv_fpga.md` §5–6.5 — the fw
-uses the same load-and-release flow as SimpleOS (tiny-BRAM SoC preferred; the
-fw is small).

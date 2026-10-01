@@ -1,0 +1,79 @@
+# SSH X25519MLKEM768 selection-boundary policy shared by sshd and the client.
+#
+# The current SSH packet/KEX implementation is curve25519-sha256 only. This
+# boundary therefore refuses to advertise or execute the hybrid name until a
+# real wire implementation is supplied. Required mode fails closed instead of
+# silently negotiating classical Curve25519.
+
+mod os.apps.sshd.ssh_hybrid_negotiation_policy
+
+use lib.common.crypto.x25519_mlkem768.protocol_profile.{
+    X25519MlKem768Protocol,
+    X25519MlKem768ProtocolProfile,
+    X25519MlKem768ProtocolPolicy,
+    x25519_mlkem768_validate_protocol_profile,
+    x25519_mlkem768_validate_protocol_policy,
+    x25519_mlkem768_validate_protocol_admission}
+
+fn ssh_x25519_mlkem768_wire_format_pinned() -> bool:
+    """Whether an authoritative OpenSSH packet/transcript codec is present.
+
+    Profile names, component orders, and byte counts are metadata, not proof
+    that SSH string framing, exchange-hash transcript fields, and shared-secret
+    mpint encoding match OpenSSH.  Keep this false until those exact encodings
+    are implemented and covered by an independent OpenSSH transcript fixture.
+    """
+    false
+
+fn ssh_admit_x25519_mlkem768_selection(
+        profile: X25519MlKem768ProtocolProfile,
+        policy: X25519MlKem768ProtocolPolicy,
+        selected_kex: text,
+        hybrid_wire_crypto_available: bool) -> Result<bool, text>:
+    x25519_mlkem768_validate_protocol_profile(profile)?
+    x25519_mlkem768_validate_protocol_policy(policy)?
+    if profile.protocol != X25519MlKem768Protocol.Ssh2:
+        return Err("SSH X25519MLKEM768 admission requires the pinned SSH-2.0 profile")
+    if selected_kex != profile.algorithm_name:
+        return Err("SSH required X25519MLKEM768 but selected a different KEX")
+    if not ssh_x25519_mlkem768_wire_format_pinned():
+        return Err("SSH X25519MLKEM768 OpenSSH wire format is not pinned; refusing advertisement")
+    if not hybrid_wire_crypto_available:
+        return Err("SSH X25519MLKEM768 wire crypto is unavailable; refusing advertisement")
+    Ok(true)
+
+fn ssh_reject_retry_after_x25519_mlkem768_failure(
+        profile: X25519MlKem768ProtocolProfile,
+        policy: X25519MlKem768ProtocolPolicy,
+        failure_reason: text) -> Result<bool, text>:
+    x25519_mlkem768_validate_protocol_profile(profile)?
+    x25519_mlkem768_validate_protocol_policy(policy)?
+    if failure_reason == "":
+        return Err("SSH X25519MLKEM768 failed; classical retry is forbidden")
+    Err("SSH X25519MLKEM768 failed: " + failure_reason +
+        "; classical retry is forbidden")
+
+fn ssh_admit_x25519_mlkem768_exchange(
+        profile: X25519MlKem768ProtocolProfile,
+        policy: X25519MlKem768ProtocolPolicy,
+        selected_kex: text,
+        hybrid_wire_crypto_available: bool,
+        observed_client_share_bytes: i64,
+        observed_server_share_bytes: i64) -> Result<bool, text>:
+    """Admit a complete SSH hybrid exchange boundary.
+
+    Selection and wire availability are checked before the exact client and
+    server share lengths.  This keeps an implemented KEX from accepting a
+    truncated or extended ML-KEM/X25519 encoding and prevents callers from
+    treating selection alone as proof of a usable hybrid exchange.
+    """
+    ssh_admit_x25519_mlkem768_selection(
+        profile, policy, selected_kex, hybrid_wire_crypto_available)?
+    x25519_mlkem768_validate_protocol_admission(
+        profile, policy, observed_client_share_bytes,
+        observed_server_share_bytes)
+
+export ssh_admit_x25519_mlkem768_selection
+export ssh_admit_x25519_mlkem768_exchange
+export ssh_reject_retry_after_x25519_mlkem768_failure
+export ssh_x25519_mlkem768_wire_format_pinned

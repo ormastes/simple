@@ -1,0 +1,342 @@
+#!/bin/sh
+# RenderDoc web capture lane: produce a RenderDoc .rdc for BOTH sides of the
+# web-renderer differential, per catalog page --
+#
+#   (a) the pure-Simple web renderer on the Vulkan Engine2D backend, and
+#   (b) Chrome headless rendering the SAME file:// page Vulkan-backed (ANGLE),
+#
+# so scripts/check/check-renderdoc-web-diff.shs has real inputs.
+#
+# Linux-only in substance (RenderDoc cannot capture on macOS here); on any host
+# the --selftest fixtures run and are fatal, and a host without the tools
+# reports ERROR -- never a pass.
+#
+# Usage:
+#   sh scripts/check/check-renderdoc-web-capture-lane.shs [--page NAME]... [--selftest]
+#
+# Verdict is the LAST stdout line:
+#   PASS  — <n> page(s) captured on both sides            exit 0
+#   FAIL  — ...                                           exit 1
+#   ERROR — nothing was checked (<reason>)                exit 2
+#
+# Receipt: build/renderdoc/receipt.env
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT"
+
+CATALOG="examples/06_io/ui/web_catalog/catalog.sdn"
+CATALOG_DIR="examples/06_io/ui/web_catalog"
+OUT_DIR="${RDOC_WEB_OUT_DIR:-build/renderdoc}"
+RECEIPT="$OUT_DIR/receipt.env"
+PAGE_W="${RDOC_WEB_PAGE_W:-900}"
+PAGE_H="${RDOC_WEB_PAGE_H:-760}"
+CAPTURE_TIMEOUT="${RDOC_WEB_TIMEOUT:-300}"
+PAGES=""
+RUN_SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --page) shift; [ $# -gt 0 ] || { echo "--page needs a value" >&2; exit 2; }; PAGES="$PAGES $1" ;;
+        --selftest) RUN_SELFTEST_ONLY=1 ;;
+        *) echo "usage: $0 [--page NAME]... [--selftest]" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------- classifiers
+# Shell twin of src/app/ui/renderdoc_capture_lane_receipt.spl. Both must agree;
+# the Simple module is the authority and is pinned by
+# test/01_unit/app/ui/renderdoc_capture_lane_receipt_spec.spl.
+
+# classify_rdc_magic <file> -> echoes pass|fail
+classify_rdc_magic() {
+    f="${1:-}"
+    [ -n "$f" ] && [ -s "$f" ] || { echo fail; return; }
+    magic="$(dd if="$f" bs=4 count=1 2>/dev/null || true)"
+    if [ "$magic" = "RDOC" ]; then echo pass; else echo fail; fi
+}
+
+# classify_chrome_vulkan_log <logfile> -> echoes pass|vulkan-angle-unavailable
+# A POSITIVE line is required. No log, or no proof, or any known ANGLE failure
+# marker => vulkan-angle-unavailable. Absence of proof is never a pass.
+classify_chrome_vulkan_log() {
+    log="${1:-}"
+    [ -n "$log" ] && [ -s "$log" ] || { echo vulkan-angle-unavailable; return; }
+    if grep -qE 'angle=vulkan.*not found' "$log" 2>/dev/null; then
+        echo vulkan-angle-unavailable; return
+    fi
+    if grep -qE 'Exiting GPU process due to errors during initialization|ANGLE Display::initialize error|GLDisplayEGL::Initialize failed|eglInitialize .*failed|Internal Vulkan error' "$log" 2>/dev/null; then
+        echo vulkan-angle-unavailable; return
+    fi
+    if grep -qE 'ANGLE \([^)]*Vulkan|GL_RENDERER.*Vulkan|ANGLE Vulkan' "$log" 2>/dev/null; then
+        echo pass; return
+    fi
+    echo vulkan-angle-unavailable
+}
+
+# ------------------------------------------------------------------- selftest
+selftest() {
+    tmp="$(mktemp -d)"
+    fixtures=0
+    fails=0
+    t() {
+        fixtures=$((fixtures + 1))
+        if [ "$2" = "$3" ]; then return 0; fi
+        fails=$((fails + 1))
+        echo "selftest FAIL: $1 (expected '$3', got '$2')" >&2
+    }
+
+    # 1. magic validation: a real RDOC header passes.
+    printf 'RDOCxxxxxx' > "$tmp/good.rdc"
+    t magic-good "$(classify_rdc_magic "$tmp/good.rdc")" pass
+    # 2. magic validation: wrong magic fails.
+    printf 'XXXXyyyyyy' > "$tmp/bad.rdc"
+    t magic-bad "$(classify_rdc_magic "$tmp/bad.rdc")" fail
+    # 3. magic validation: missing/empty file fails (never a pass).
+    t magic-missing "$(classify_rdc_magic "$tmp/absent.rdc")" fail
+    : > "$tmp/empty.rdc"
+    t magic-empty "$(classify_rdc_magic "$tmp/empty.rdc")" fail
+
+    # 4. a Chrome log WITH the ANGLE Vulkan line passes.
+    cat > "$tmp/chrome-good.log" <<'EOF'
+[1:1:0101/000000.000:INFO:gpu_info_collector.cc(80)] GL_VENDOR: Google Inc. (Mesa)
+[1:1:0101/000000.000:INFO:gpu_info_collector.cc(81)] GL_RENDERER: ANGLE (Mesa, llvmpipe (LLVM 15.0.7, 256 bits), Vulkan 1.3.255)
+EOF
+    t chrome-angle-present "$(classify_chrome_vulkan_log "$tmp/chrome-good.log")" pass
+    # 5. SABOTAGE: same log with the ANGLE line removed -> unavailable.
+    grep -v 'GL_RENDERER' "$tmp/chrome-good.log" > "$tmp/chrome-sabotaged.log"
+    t chrome-angle-removed "$(classify_chrome_vulkan_log "$tmp/chrome-sabotaged.log")" vulkan-angle-unavailable
+    # 6. an explicit ANGLE failure marker overrides any positive line.
+    cat > "$tmp/chrome-failed.log" <<'EOF'
+GL_RENDERER: ANGLE (Mesa, llvmpipe, Vulkan 1.3)
+[ERROR] Exiting GPU process due to errors during initialization
+EOF
+    t chrome-angle-failed "$(classify_chrome_vulkan_log "$tmp/chrome-failed.log")" vulkan-angle-unavailable
+    # 7. empty log -> unavailable, never a pass.
+    : > "$tmp/chrome-empty.log"
+    t chrome-log-empty "$(classify_chrome_vulkan_log "$tmp/chrome-empty.log")" vulkan-angle-unavailable
+
+    # 8. missing-tool ERROR: the lane with no RenderDoc anywhere must ERROR (2),
+    #    not pass. Exercised through the real resolver with a scrubbed PATH.
+    lane_rc=$(sh -c '
+        RDOC_WEB_TOOL_SEARCH=isolated; export RDOC_WEB_TOOL_SEARCH
+        RDOC_HOME=""; export RDOC_HOME
+        SIMPLE_RDOC_LANE_INNER=1; export SIMPLE_RDOC_LANE_INNER
+        RDOC_WEB_OUT_DIR="'"$tmp"'/lane-out"; export RDOC_WEB_OUT_DIR
+        /bin/sh "'"$ROOT"'/scripts/check/check-renderdoc-web-capture-lane.shs" --page overview >/dev/null 2>&1
+        echo $?')
+    t missing-tool-error "$lane_rc" 2
+
+    SELFTEST_FIXTURES="$fixtures"
+    rm -rf "$tmp"
+    if [ "$fails" -gt 0 ]; then
+        echo "SELFTEST FAILED — $fixtures fixture(s), $fails failure(s)" >&2
+        exit 2
+    fi
+    echo "selftest_fixtures=$fixtures selftest_failures=0"
+}
+
+SELFTEST_FIXTURES=0
+if [ "$RUN_SELFTEST_ONLY" = 1 ]; then
+    selftest
+    echo "PASS — $SELFTEST_FIXTURES selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+# Selftest runs before every scan and is fatal. SIMPLE_RDOC_LANE_INNER guards
+# the recursive invocation the selftest itself makes.
+if [ "${SIMPLE_RDOC_LANE_INNER:-0}" != 1 ]; then
+    SIMPLE_RDOC_LANE_INNER=1
+    export SIMPLE_RDOC_LANE_INNER
+    selftest
+fi
+
+# --------------------------------------------------------------- tool resolve
+. "$ROOT/scripts/lib/renderdoc-evidence-common.shs"
+
+# RDOC_WEB_TOOL_SEARCH=isolated restricts discovery to the explicit overrides
+# only. Used by selftest fixture 8 so the missing-tool ERROR path is exercised
+# identically on a tool-less Mac and on a fully provisioned Linux runner; it
+# fakes nothing -- it takes the real error_out branch with the real exit code.
+if [ "${RDOC_WEB_TOOL_SEARCH:-}" = isolated ]; then
+    RENDERDOC_HOME=""
+    [ "${RDOC_HOME:-}" != "" ] && [ -x "${RDOC_HOME}/bin/renderdoccmd" ] && RENDERDOC_HOME="$RDOC_HOME"
+    CHROME_BIN="${RDOC_WEB_CHROME_BIN:-}"
+else
+    RENDERDOC_HOME="$(rdoc_find_renderdoc_home "$ROOT" 2>/dev/null || true)"
+    CHROME_BIN="$(rdoc_find_chrome "$ROOT" 2>/dev/null || true)"
+fi
+
+mkdir -p "$OUT_DIR"
+: > "$RECEIPT"
+{
+    echo "receipt_schema=renderdoc-web-capture-lane-v1"
+    echo "renderdoc_home=$RENDERDOC_HOME"
+    echo "chrome_bin=$CHROME_BIN"
+    echo "page_size=${PAGE_W}x${PAGE_H}"
+} >> "$RECEIPT"
+
+error_out() {
+    echo "lane_status=error" >> "$RECEIPT"
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+
+[ -f "$CATALOG" ] || error_out "missing-catalog:$CATALOG"
+
+# Page list from the catalog (or --page overrides, validated against it).
+catalog_pages="$(sed -n 's/^[[:space:]]*- tab:[[:space:]]*//p' "$CATALOG")"
+[ -n "$catalog_pages" ] || error_out "catalog-declares-no-pages"
+
+if [ -n "$PAGES" ]; then
+    selected=""
+    for p in $PAGES; do
+        if printf '%s\n' "$catalog_pages" | grep -qx "$p"; then
+            selected="$selected $p"
+        else
+            error_out "unknown-page:$p"
+        fi
+    done
+else
+    selected="$catalog_pages"
+fi
+
+[ "$RENDERDOC_HOME" != "" ] || error_out "renderdoc-unavailable"
+have vulkaninfo || error_out "vulkan-tools-unavailable"
+[ "$CHROME_BIN" != "" ] || error_out "chrome-unavailable"
+SIMPLE_BIN="${RDOC_SIMPLE_BIN:-$(rdoc_resolve_simple_interpreter "$ROOT" 2>/dev/null || true)}"
+[ "$SIMPLE_BIN" != "" ] || error_out "simple-binary-unavailable"
+
+pages_checked=0
+pages_both=0
+pages_failed=0
+
+for page in $selected; do
+    html="$CATALOG_DIR/$page.html"
+    if [ ! -f "$html" ]; then
+        pages_checked=$((pages_checked + 1))
+        pages_failed=$((pages_failed + 1))
+        {
+            echo "page_${page}_status=fail"
+            echo "page_${page}_reason=missing-html:$html"
+        } >> "$RECEIPT"
+        continue
+    fi
+    pages_checked=$((pages_checked + 1))
+    page_dir="$OUT_DIR/$page"
+    rm -rf "$page_dir"
+    mkdir -p "$page_dir"
+
+    # ---- (a) Simple web renderer on Vulkan.
+    # Reuses rdoc_capture_simple_vulkan, the repo's proven in-application
+    # trigger recipe: renderdoccmd alone captures NOTHING for an offscreen
+    # renderer (no present => no frame to grab), so the program itself must
+    # bracket the frame with rt_renderdoc_* -- which is what
+    # src/app/test/renderdoc_web_page_capture.spl does. Page and size travel
+    # as env vars so the helper's call shape is unchanged.
+    simple_rdc="$OUT_DIR/$page.simple.rdc"
+    simple_dir="$page_dir/simple"
+    set +e
+    (
+        RDOC_SIMPLE_PROG="$ROOT/src/app/test/renderdoc_web_page_capture.spl" \
+        RDOC_SIMPLE_BIN="$SIMPLE_BIN" \
+        RDOC_HTML_PATH="$ROOT/$html" \
+        RDOC_SCENE="web-catalog-$page" \
+        PAGE_W="$PAGE_W" PAGE_H="$PAGE_H" \
+        SIMPLE_2D_BACKEND=vulkan \
+        SIMPLE_2D_BACKEND_STRICT=1 \
+        SIMPLE_VK_READBACK=native \
+        rdoc_capture_simple_vulkan "$ROOT" "$RENDERDOC_HOME" "$simple_dir"
+    ) >"$page_dir/simple.log" 2>&1
+    set -e
+    found="$(find "$simple_dir" -type f -name '*.rdc' 2>/dev/null | sed -n 1p)"
+    [ -n "$found" ] && cp "$found" "$simple_rdc"
+    simple_status="$(classify_rdc_magic "$simple_rdc")"
+
+    # ---- (b) Chrome, Vulkan-backed (ANGLE), same page and size.
+    # rdoc_capture_html already carries the GPU-child hooking + display-mode
+    # selection (xvfb / gpu-launcher / headless) that a bare renderdoccmd
+    # wrapper lacks; xvfb is the default here because a GPU-less runner has no
+    # DISPLAY and a headless Chrome presents nothing to hook.
+    chrome_rdc="$OUT_DIR/$page.chrome.rdc"
+    chrome_dir="$page_dir/chrome"
+    set +e
+    (
+        RDOC_HTML_PATH="$ROOT/$html" \
+        RDOC_SCENE="web-catalog-$page" \
+        RDOC_CHROME_WIDTH="$PAGE_W" \
+        RDOC_CHROME_HEIGHT="$PAGE_H" \
+        RDOC_CHROME_USE_XVFB="${RDOC_CHROME_USE_XVFB:-1}" \
+        RDOC_CAPTURE_TIMEOUT_SECS="$CAPTURE_TIMEOUT" \
+        rdoc_capture_html "$ROOT" "$RENDERDOC_HOME" "$CHROME_BIN" "$chrome_dir"
+    ) >"$page_dir/chrome-capture.log" 2>&1
+    set -e
+    cfound="$(find "$chrome_dir" -type f -name '*.rdc' 2>/dev/null | sed -n 1p)"
+    [ -n "$cfound" ] && cp "$cfound" "$chrome_rdc"
+    chrome_status="$(classify_rdc_magic "$chrome_rdc")"
+
+    # ANGLE backing proof. The capture log alone may never print the resolved
+    # renderer, so chrome://gpu is dumped explicitly with the SAME Vulkan flags
+    # and both texts are fed to the classifier. No proof is never a pass.
+    chrome_log="$page_dir/chrome-angle.log"
+    chrome_flags="$(rdoc_chrome_vulkan_flags)"
+    # shellcheck disable=SC2086
+    timeout "$CAPTURE_TIMEOUT" "$CHROME_BIN" $chrome_flags \
+        --headless=new --no-first-run --disable-dev-shm-usage \
+        --user-data-dir="$page_dir/chrome-gpu-profile" \
+        --enable-logging=stderr --v=1 --dump-dom chrome://gpu \
+        >"$chrome_log" 2>&1 || true
+    cat "$chrome_dir/renderdoc-html.log" >> "$chrome_log" 2>/dev/null || true
+    chrome_backing="$(classify_chrome_vulkan_log "$chrome_log")"
+
+    # ---- (c) diff, when the sibling tool exists.
+    if [ -f "$ROOT/scripts/check/check-renderdoc-web-diff.shs" ] \
+        && [ "$simple_status" = pass ] && [ "$chrome_status" = pass ]; then
+        diff_out="$(sh "$ROOT/scripts/check/check-renderdoc-web-diff.shs" "$simple_rdc" "$chrome_rdc" 2>&1 || true)"
+        diff_status="$(printf '%s\n' "$diff_out" | sed -n 's/^renderdoc_diff_status=//p' | sed -n 1p)"
+        [ -n "$diff_status" ] || diff_status="blocked:diff-tool-silent"
+        printf '%s\n' "$diff_out" > "$page_dir/diff.md"
+    elif [ ! -f "$ROOT/scripts/check/check-renderdoc-web-diff.shs" ]; then
+        diff_status="blocked:diff-tool-missing"
+    else
+        diff_status="blocked:capture-incomplete"
+    fi
+
+    {
+        echo "page_${page}_renderdoc_capture_simple_status=$simple_status"
+        echo "page_${page}_renderdoc_capture_chrome_status=$chrome_status"
+        echo "page_${page}_chrome_vulkan_backing=$chrome_backing"
+        echo "page_${page}_renderdoc_diff_status=$diff_status"
+        echo "page_${page}_simple_rdc=$simple_rdc"
+        echo "page_${page}_chrome_rdc=$chrome_rdc"
+    } >> "$RECEIPT"
+
+    if [ "$simple_status" = pass ] && [ "$chrome_status" = pass ] && [ "$chrome_backing" = pass ]; then
+        pages_both=$((pages_both + 1))
+    else
+        pages_failed=$((pages_failed + 1))
+    fi
+done
+
+{
+    echo "pages_checked=$pages_checked"
+    echo "pages_captured_both=$pages_both"
+    echo "pages_failed=$pages_failed"
+} >> "$RECEIPT"
+
+if [ "$pages_checked" -le 0 ]; then
+    echo "lane_status=error" >> "$RECEIPT"
+    echo "ERROR — nothing was checked (0 pages examined)"
+    exit 2
+fi
+if [ "$pages_failed" -gt 0 ] || [ "$pages_both" -le 0 ]; then
+    echo "lane_status=fail" >> "$RECEIPT"
+    echo "FAIL — $pages_checked page(s) checked, $pages_failed failed, $pages_both captured on both sides"
+    exit 1
+fi
+echo "lane_status=pass" >> "$RECEIPT"
+echo "PASS — $pages_both page(s) captured on both sides"
+exit 0

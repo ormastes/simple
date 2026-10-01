@@ -1,0 +1,164 @@
+# Pinned clipped-rectangle source loader. This prepares DrawIR only; it does
+# not claim that a backend submitted, completed, or read back GPU work.
+
+use std.fs.{read_file}
+use std.io_runtime.{file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{
+    DrawIrCommand, DrawIrComposition, DRAW_IR_BACKEND_GPU,
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    draw_ir_rect, draw_ir_rect_bounds, draw_ir_rect_clipped
+}
+
+val _CONTROLLED_CLIP_PATH: text =
+    "test/fixtures/simple_2d_skia/controlled_clipped_rect_v2.sdn"
+val _CONTROLLED_CLIP_SHA256: text =
+    "b16d53f7785a09559bf209797fcb724906f896b93d23eff512bda69ec44d8f2f"
+
+fn _controlled_clip_i32(value: text) -> Result<i32, text>:
+    if value == "" or value.len() > 11:
+        return Err("invalid-integer")
+    var start = 0
+    if value.starts_with("-"):
+        if value.len() == 1:
+            return Err("invalid-integer")
+        start = 1
+    var index = start
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57:
+            return Err("invalid-integer")
+        index = index + 1
+    val parsed = value.to_i64()
+    if parsed < -2147483648 or parsed > 2147483647:
+        return Err("integer-out-of-range")
+    Ok(parsed as i32)
+
+fn _controlled_clip_argb(value: text) -> Result<u32, text>:
+    if value.len() != 10 or not value.starts_with("0x"):
+        return Err("invalid-argb-color")
+    var packed = 0i64
+    var index = 2
+    while index < 10:
+        val code = value.char_code_at(index)
+        var digit = -1i64
+        if code >= 48 and code <= 57:
+            digit = code - 48
+        elif code >= 97 and code <= 102:
+            digit = code - 87
+        if digit < 0:
+            return Err("invalid-argb-color")
+        packed = (packed << 4) | digit
+        index = index + 1
+    if ((packed >> 24) & 255) != 255:
+        return Err("nonopaque-argb-color")
+    Ok(packed.to_u32())
+
+fn _controlled_clip_command(row: text, index: i32) -> Result<DrawIrCommand, text>:
+    val line = row.trim()
+    if not line.starts_with("- rect: [") or not line.ends_with("]"):
+        return Err("invalid-command-row")
+    val body = line[9:line.len() - 1]
+    val sections = body.split("] clip: [")
+    if sections.len() != 1 and sections.len() != 2:
+        return Err("invalid-clip-section")
+    val rect_fields = sections[0].split(",")
+    if rect_fields.len() != 5:
+        return Err("invalid-rectangle-field-count")
+    val x = _controlled_clip_i32(rect_fields[0].trim())?
+    val y = _controlled_clip_i32(rect_fields[1].trim())?
+    val width = _controlled_clip_i32(rect_fields[2].trim())?
+    val height = _controlled_clip_i32(rect_fields[3].trim())?
+    val color = _controlled_clip_argb(rect_fields[4].trim())?
+    if width <= 0 or height <= 0:
+        return Err("invalid-rectangle-size")
+    if sections.len() == 1:
+        return Ok(draw_ir_rect("rect-{index}", x, y, width, height, color))
+    val clip_fields = sections[1].split(",")
+    if clip_fields.len() != 4:
+        return Err("invalid-clip-field-count")
+    val clip_x = _controlled_clip_i32(clip_fields[0].trim())?
+    val clip_y = _controlled_clip_i32(clip_fields[1].trim())?
+    val clip_width = _controlled_clip_i32(clip_fields[2].trim())?
+    val clip_height = _controlled_clip_i32(clip_fields[3].trim())?
+    if clip_width < 0 or clip_height < 0:
+        return Err("invalid-clip-size")
+    Ok(draw_ir_rect_clipped("rect-{index}", x, y, width, height,
+        color, draw_ir_rect_bounds(clip_x, clip_y, clip_width, clip_height)))
+
+fn _controlled_clip_expected_shape(commands: [DrawIrCommand]) -> bool:
+    val clear = commands[0]
+    val clipped = commands[1]
+    val empty_clip = commands[2]
+    val disjoint_clip = commands[3]
+    val final_rect = commands[4]
+    clear.x == 0 and clear.y == 0 and clear.width == 16 and
+        clear.height == 16 and not clear.clip_rect.present and
+        clipped.x == -2 and clipped.y == -2 and clipped.width == 20 and
+        clipped.height == 20 and clipped.clip_rect.present and
+        clipped.clip_rect.x == 2 and clipped.clip_rect.y == 3 and
+        clipped.clip_rect.width == 5 and clipped.clip_rect.height == 6 and
+        empty_clip.x == 0 and empty_clip.y == 0 and
+        empty_clip.width == 16 and empty_clip.height == 16 and
+        empty_clip.clip_rect.present and empty_clip.clip_rect.x == 4 and
+        empty_clip.clip_rect.y == 4 and empty_clip.clip_rect.width == 0 and
+        empty_clip.clip_rect.height == 8 and
+        disjoint_clip.x == 0 and disjoint_clip.y == 0 and
+        disjoint_clip.width == 16 and disjoint_clip.height == 16 and
+        disjoint_clip.clip_rect.present and disjoint_clip.clip_rect.x == 20 and
+        disjoint_clip.clip_rect.y == 20 and disjoint_clip.clip_rect.width == 3 and
+        disjoint_clip.clip_rect.height == 3 and
+        final_rect.x == 10 and final_rect.y == 11 and
+        final_rect.width == 4 and final_rect.height == 3 and
+        not final_rect.clip_rect.present
+
+# Authenticate exact file bytes before parsing. Command geometry, colors, and
+# clips are taken from the source rows, then checked against the pinned case.
+pub fn simple_2d_controlled_clip_scene_from_source(source: text) -> Result<DrawIrComposition, text>:
+    if sha256_text(source) != _CONTROLLED_CLIP_SHA256:
+        return Err("controlled-clip-source-sha256-mismatch")
+    val rows = source.split("\n")
+    if rows.len() < 16:
+        return Err("controlled-clip-source-short")
+    if rows[0] != "schema: simple-2d-controlled-clip/v2" or
+        rows[1] != "fixture_id: controlled-clipped-rect-v2" or
+        rows[3] != "origin: top-left" or
+        rows[4] != "source_color_encoding: ARGB8888" or
+        rows[5] != "color_primaries: srgb" or
+        rows[6] != "transfer_function: srgb" or
+        rows[7] != "alpha_mode: opaque" or
+        rows[8] != "coverage: non-antialiased" or
+        rows[9] != "clip_space: target" or rows[10] != "commands:":
+        return Err("controlled-clip-source-metadata")
+    if not rows[2].starts_with("surface: "):
+        return Err("controlled-clip-surface")
+    val surface_row = rows[2]
+    val extent = surface_row[9:].split("x")
+    if extent.len() != 2:
+        return Err("controlled-clip-surface")
+    val surface_width = _controlled_clip_i32(extent[0])?
+    val surface_height = _controlled_clip_i32(extent[1])?
+    if surface_width != 16 or surface_height != 16:
+        return Err("controlled-clip-surface")
+    var tail = 16
+    while tail < rows.len():
+        if rows[tail] != "":
+            return Err("controlled-clip-extra-source")
+        tail = tail + 1
+    var commands: [DrawIrCommand] = []
+    var index = 0
+    while index < 5:
+        commands.push(_controlled_clip_command(rows[index + 11], index)?)
+        index = index + 1
+    if not _controlled_clip_expected_shape(commands):
+        return Err("controlled-clip-command-shape")
+    val batch = draw_ir_batch("controlled-clipped-rect-v2", DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("controlled-clip-surface", "controlled-clip",
+            0, 0, surface_width, surface_height, 0, 1000, false), commands)
+    Ok(draw_ir_composition("controlled-clipped-rect-v2",
+        "controlled-clipped-rectangle-only", DRAW_IR_BACKEND_GPU, [batch]))
+
+pub fn simple_2d_controlled_clip_fixture_scene() -> Result<DrawIrComposition, text>:
+    if not file_exists(_CONTROLLED_CLIP_PATH):
+        return Err("controlled-clip-source-missing")
+    simple_2d_controlled_clip_scene_from_source(read_file(_CONTROLLED_CLIP_PATH))

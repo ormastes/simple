@@ -1,0 +1,166 @@
+#!/bin/sh
+# check-freestanding-string-len-abi.shs
+#
+# Fences the string-object ABI that LLVM codegen bakes into every `text.len()`.
+#
+# `.len()` never reaches rt_len on the native lanes. compile_inline_len
+# (src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs) expands it to
+# "load i64 from object+8", and the compiler emits string objects whose payload
+# starts at object+16. The hosted RtCoreString matches that exactly.
+#
+# Several 64-bit freestanding runtimes declared RuntimeString with a uint32_t
+# len (payload at offset 12). Their own C accessors stayed self-consistent, so
+# substring / equality / trim / starts_with / chars all answered correctly --
+# but the codegen-inlined i64 load at offset 8 read the length in its low half
+# and the first four payload bytes in its high half. Every `while i < s.len()`
+# loop over such a string became unbounded: correct output, then a silent stall.
+#
+# Incidents:
+#   doc/08_tracking/bug/x64_rt_extras_runtime_string_layout_mismatch.md
+#     (x86_64, fixed 2026-07-12, silently reverted by the tree wipe 6f86ff32a7d)
+#   doc/08_tracking/bug/riscv64_freestanding_runtime_text_len_and_loop_concat_2026-08-31.md
+#     (riscv64 in-guest components lane: caret and the test runner both stalled)
+#
+# Two fail-closed checks, neither of which needs an OS boot or a cross toolchain:
+#   1. The selfcheck binary builds and passes. It first REPRODUCES the defect
+#      against the 32-bit-len layout (exits 2 "vacuous" if it cannot), then
+#      asserts the 64-bit-len layout satisfies the codegen contract, including
+#      that `.len()` still counts BYTES and not characters.
+#   2. Every 64-bit freestanding RuntimeString declares a 64-bit len. This is
+#      the half that is RED before the fix and GREEN after, on the real product
+#      files -- and it is what catches the fix being dropped from one lane, or
+#      reverted wholesale by a tree clobber, which is exactly how the 2026-07-12
+#      x86_64 fix came back.
+#
+# 32-bit lanes (riscv32, arm32, x86_32) are deliberately NOT in the ratchet:
+# their runtime word is 32 bits wide and there is no evidence their layout is
+# wrong. Adding them needs a measurement, not an assumption.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) ...            exit 0
+#   FAIL  — ...                         exit 1
+#   ERROR — nothing was checked         exit 2
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+if [ -z "$ROOT" ] || [ ! -d "$ROOT/src/runtime" ]; then
+    echo "ERROR — nothing was checked (not in a repo clone: no src/runtime under '$ROOT')"
+    exit 2
+fi
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SELFCHECK="src/runtime/test/rt_freestanding_string_len_abi_selfcheck.c"
+
+# Every 64-bit freestanding/baremetal RuntimeString declaration that must carry
+# a 64-bit len. Format: <path>|<struct-name>
+LANES="
+examples/09_embedded/simple_os/arch/common/baremetal_runtime.h|RuntimeString
+examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c|RuntimeString
+examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c|RuntimeString
+examples/09_embedded/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c|RuntimeString
+examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c|RuntimeString
+examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c|RuntimeString
+examples/09_embedded/simple_os/arch/x86_64/hello_user/boot/user_stubs.c|RuntimeString
+"
+
+checks=0
+fails=0
+offenders=""
+
+# ---- check 1: the selfcheck builds and passes -------------------------------
+if [ ! -f "$SELFCHECK" ]; then
+    echo "ERROR — nothing was checked (missing selfcheck source $SELFCHECK)"
+    exit 2
+fi
+
+CC_BIN=""
+for candidate in "${CC:-}" clang cc gcc; do
+    [ -n "$candidate" ] || continue
+    if command -v "$candidate" >/dev/null 2>&1; then CC_BIN="$candidate"; break; fi
+done
+if [ -z "$CC_BIN" ]; then
+    # Absence of a compiler is absence of evidence, never a pass.
+    echo "ERROR — nothing was checked (no C compiler found: tried \$CC, clang, cc, gcc)"
+    exit 2
+fi
+
+TMPDIR_SELF=$(mktemp -d 2>/dev/null) || {
+    echo "ERROR — nothing was checked (cannot create a temp dir)"
+    exit 2
+}
+BIN="$TMPDIR_SELF/string_len_abi_selfcheck"
+
+"$CC_BIN" -std=c11 -O0 -Wall -o "$BIN" "$SELFCHECK" >"$TMPDIR_SELF/build.log" 2>&1
+build_rc=$?
+if [ "$build_rc" -ne 0 ]; then
+    echo "--- build log ---"
+    cat "$TMPDIR_SELF/build.log"
+    rm -rf "$TMPDIR_SELF"
+    echo "FAIL — selfcheck $SELFCHECK failed to compile with $CC_BIN"
+    exit 1
+fi
+
+"$BIN" >"$TMPDIR_SELF/run.log" 2>&1
+run_rc=$?
+cat "$TMPDIR_SELF/run.log"
+rm -rf "$TMPDIR_SELF"
+
+checks=$((checks + 1))
+if [ "$run_rc" -eq 2 ]; then
+    echo "ERROR — nothing was checked (selfcheck reported itself vacuous: the defect no longer reproduces, so a pass would prove nothing)"
+    exit 2
+fi
+if [ "$run_rc" -ne 0 ]; then
+    fails=$((fails + 1))
+    offenders="$offenders $SELFCHECK(rc=$run_rc)"
+fi
+
+# ---- check 2: every 64-bit lane declares a 64-bit len ------------------------
+for row in $LANES; do
+    path=$(printf '%s' "$row" | cut -d'|' -f1)
+    name=$(printf '%s' "$row" | cut -d'|' -f2)
+    [ -n "$path" ] || continue
+
+    if [ ! -f "$path" ]; then
+        echo "ERROR — nothing was checked (lane file listed but absent: $path)"
+        exit 2
+    fi
+
+    # The len field is the line immediately following the HeapHeader/hdr member
+    # inside the struct that closes with "} <name>;". Pull the 8 lines above the
+    # closing brace and look at the declared width of the len member.
+    decl=$(grep -B8 "^} *${name};" "$path" 2>/dev/null | grep -E '^[[:space:]]*(uint32_t|uint64_t|spl_u64|uint16_t)[[:space:]]+len;' | tail -1)
+    if [ -z "$decl" ]; then
+        # Single-line form: typedef struct { ... uintNN_t len; ... } Name;
+        decl=$(grep -E "\} *${name};" "$path" 2>/dev/null \
+               | grep -oE '(uint32_t|uint64_t|spl_u64|uint16_t)[[:space:]]+len;' | tail -1)
+    fi
+    checks=$((checks + 1))
+    if [ -z "$decl" ]; then
+        fails=$((fails + 1))
+        offenders="$offenders $path(no len member found for $name)"
+        continue
+    fi
+    case "$decl" in
+        *uint64_t*|*spl_u64*) : ;;
+        *)
+            fails=$((fails + 1))
+            width=$(printf '%s' "$decl" | awk '{print $1}')
+            offenders="$offenders $path($name.len is $width, must be uint64_t)"
+            ;;
+    esac
+done
+
+if [ "$checks" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no lanes and no selfcheck ran)"
+    exit 2
+fi
+
+if [ "$fails" -ne 0 ]; then
+    echo "FAIL — $checks check(s) run, $fails failed:$offenders"
+    exit 1
+fi
+
+echo "PASS — $checks check(s) run, codegen .len() ABI (i64 len at +8, data at +16) holds on every 64-bit freestanding lane"
+exit 0

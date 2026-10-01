@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Pin the nth-path target-key scheme the pure-Simple web renderer hands
+to hit testing and CSS animation against the DOM the reference browser walks.
+The renderer synthesises a `::marker` box as every `<li>`'s FIRST child
+(`simple_web_html_layout_renderer_foundation.spl`, "First child by
+construction"), but `::marker` is a pseudo-element: `querySelectorAll('*')`
+cannot see it, so counting it as an element shifted the ordinal of every real
+child inside a list item by one and pointed each key at the wrong node.
+Audience: browser-engine layout and differ maintainers.
+
+The geometry differ already excludes `::`-prefixed tags from its own copy of
+this scheme (doc/08_tracking/bug/web_layout_geometry_differ_counts_marker_boxes
+_as_elements_2026-09-12.md). These keys claimed to mirror it "byte-for-byte"
+and did not; this spec is what makes that claim checkable.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TARGET-KEY-001 — a body-relative nth-path target key counts DOM elements only, never synthesised pseudo-element boxes.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_hit_test_target_at_time
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}ul{margin:0;padding:0;list-style:none}</style></head><body>"
+
+fn hit(inner: text, x: i32, y: i32) -> text:
+    simple_web_layout_hit_test_target_at_time(
+        HEAD + inner + "</body></html>", VW, VH, x, y, 0)
+
+# One <ul> holding one <li> whose only element child is a 40 px block.
+val LIST: text = (
+    "<ul><li><div style=\"height:40px;background:#123456\">x</div></li></ul>"
+)
+
+describe "nth-path target keys count DOM elements, not ::marker boxes":
+    it "AC-1: the block inside a list item is the list item's child 0":
+        step("hit the middle of the 40 px block: body > ul(0) > li(0) > div(0)")
+        expect(hit(LIST, 400, 20)).to_equal("path:0/0/0")
+
+    it "AC-2: a list item's SECOND element child keeps ordinal 1":
+        step("two blocks in one <li>; the marker must not push the second to 2")
+        val two = (
+            "<ul><li><div style=\"height:40px\">a</div>" +
+            "<div style=\"height:40px;background:#abcdef\">b</div></li></ul>"
+        )
+        expect(hit(two, 400, 60)).to_equal("path:0/0/1")
+
+    it "AC-3: a block outside any list is unaffected":
+        step("the scheme must not have shifted non-list content")
+        expect(hit(
+            "<div style=\"height:40px;background:#654321\">x</div>", 400, 20)
+        ).to_equal("path:0")

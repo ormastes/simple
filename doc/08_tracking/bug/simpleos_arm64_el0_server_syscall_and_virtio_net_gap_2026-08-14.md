@@ -1,4 +1,8 @@
 # SimpleOS ARM64 EL0 server syscall and VirtIO-net gap (2026-08-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -100,3 +104,4 @@ serial markers as ARM64 network/database proof.
   instead of guessing a descriptor identity.
 - Still open: storage policy currently forbids builds/QEMU, so device init,
   cross-page EL0 copy, and host-visible HTTP remain unproved live criteria.
+

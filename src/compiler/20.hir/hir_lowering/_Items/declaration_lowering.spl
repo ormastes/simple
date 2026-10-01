@@ -12,7 +12,16 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.expressions.*
-use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, is_valid_asm_symbol_name, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_annotation_v1
+}
+
+pub fn declaration_lowering_publish_annotation_consumer_v1(subject: text,
+        consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("annotation-consumer")
+    reverse_reference_register_annotation_v1(subject, consumer, evidence)
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
@@ -25,9 +34,9 @@ use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, cus
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields}
 
 extern fn rt_env_get(key: text) -> text?
-extern fn rt_enum_discriminant(value: Any) -> i64
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
@@ -215,49 +224,21 @@ impl HirLowering:
         if fn_.is_static:
             if val owner_type = self.current_method_self_type:
                 fn_fallback_type = Some(self.declared_callable_type(fn_, nil))
-        # The bare-name bootstrap fast path below owns ONLY the compiler's own
-        # fixed set of top-level CLI entry functions (bootstrap_version,
-        # main, ...) -- bootstrap_hir_symbol_known_name is that same fixed
-        # list. Any OTHER non-method function (a class `static fn`, which
-        # carries is_method=false too, but ALSO an ordinary top-level
-        # function like `fn build() -> Reg: ...` in a real compiled program)
-        # used to fall through bootstrap_hir_symbol_for_name's catch-all to a
-        # hardcoded SymbolId(100) that is NEVER inserted into self.symbols
-        # (no `define()` call), so it is absent from the flat symbol table
-        # the --entry-closure MIR path builds from
-        # `self.symbols.symbols.values()`. For a static method call site that
-        # resolves the same id via struct_method_syms["static::Type::method"]
-        # and looks it up, this produced `unknown_100` -> ld.lld "undefined
-        # symbol: unknown_100" (bug native_flat_static_method_call_unknown_100).
-        # For a plain function returning a class/struct, the callee NAME still
-        # linked fine (bootstrap_flat_function_symbol_name emits a non-method
-        # function under its bare name regardless of func.symbol validity),
-        # but resolved_call_hir_return_type(id=100) always found nothing, so
-        # remember_call_hir_return never threaded the declared return type
-        # onto the call result -- struct_value_syms was never populated for
-        # `val r = build()`, and every method call / field read on `r`
-        # afterward silently misresolved (bug
-        # native_flat_free_fn_struct_return_symbol_100). Routing any
-        # unrecognized name through the qualified lookup-or-define branch
-        # instead reuses the SAME symbol the declare loop (module_lowering.spl
-        # signature-declaration pre-pass) already defined for it -- present in
-        # the flat table, carrying the real declared type -- so both the
-        # call site and the emitted body agree on one real, linkable symbol.
-        if self.ambient_bootstrap_enabled() and not fn_.is_method and bootstrap_hir_symbol_known_name(fn_.name):
-            fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
-        else:
-            val fn_symbol_lookup = self.symbols.lookup(fn_symbol_name)
-            if val found_symbol = fn_symbol_lookup:
-                # `if val` can still bind nil on the seed interpreter when the
-                # lookup fails. Guard the payload explicitly so we never stash
-                # `Some(nil)` in current_function or emit a nil symbol id into
-                # downstream `.id` consumers.
-                if found_symbol == nil:
-                    fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, fn_fallback_type, fn_.span, fn_.visibility, false, nil)
-                else:
-                    fn_symbol_id = found_symbol
-            else:
+        # The declaration table owns callable identity in every mode. Fixed
+        # bootstrap IDs are not reserved in this table: assigning main=6 can
+        # alias a local extern and attach the entry body to its runtime name.
+        # Reuse the predeclared signature/ID, or allocate a real row for a
+        # synthesized function, exactly as ordinary functions and methods do.
+        val fn_symbol_lookup = self.symbols.lookup(fn_symbol_name)
+        if val found_symbol = fn_symbol_lookup:
+            # `if val` can still bind nil on the seed interpreter when the
+            # lookup fails. Never put Some(nil) into current_function.
+            if found_symbol == nil:
                 fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, fn_fallback_type, fn_.span, fn_.visibility, false, nil)
+            else:
+                fn_symbol_id = found_symbol
+        else:
+            fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, fn_fallback_type, fn_.span, fn_.visibility, false, nil)
         self.current_function = Some(fn_symbol_id)
         # NOTE(#133): push the function scope unconditionally, including under
         # SIMPLE_BOOTSTRAP. Bug #133: params were never lowered under bootstrap
@@ -266,8 +247,7 @@ impl HirLowering:
         # references (e.g. `args`, `i`) resolved to `i64 undef` because no
         # scope/symbol existed for them. Body identifiers resolve through
         # `self.symbols.lookup(name)` (expressions.spl Ident arm) regardless of
-        # bootstrap mode -- only the function's OWN symbol uses the name-based
-        # `bootstrap_hir_symbol_for_name` scheme. Pushing the scope here and
+        # bootstrap mode. Pushing the scope here and
         # lowering params below (via the existing `lower_param`, which calls
         # `self.symbols.define`) makes `args`/`i` resolve to real param locals
         # under bootstrap too.
@@ -384,21 +364,48 @@ impl HirLowering:
         if fn_.has_return_type:
             val declared_ret = self.lower_type(fn_.return_type)
             if self.ambient_bootstrap_enabled():
-                # NARROW (deliberate): in bootstrap mode only Str declared
-                # returns take priority for now. Widening every declared type
-                # (arrays/structs/dicts) immediately broke consumers tuned to
-                # the uniform-i64 convention (`get_args()` -> Array-typed local
-                # made `a.len()` lower to the raw receiver -> strlen SIGSEGV,
-                # W92). Widen type-by-type with repro coverage; ceiling noted
-                # in native_call_return_type_loss 2026-07-23.
+                # NARROW (deliberate): in bootstrap mode scalar declarations
+                # whose ABI has an established direct MIR representation take
+                # priority. Arrays/structs/dicts remain on the legacy fallback:
+                # widening every declared type immediately broke consumers tuned
+                # to the uniform-i64 convention (`get_args()` -> Array-typed
+                # local made `a.len()` lower to the raw receiver -> strlen
+                # SIGSEGV, W92). `bool` is a scalar i1 throughout HIR, MIR and
+                # LLVM, so erasing it here was not a compatibility boundary: it
+                # published imported `-> bool` helpers as i64, then later call
+                # lowering could not retain the actual return slot. Preserve it
+                # alongside `text`; expand other shapes only with dedicated ABI
+                # evidence. See native_imported_bool_return_void_2026-09-14.
                 match declared_ret.kind:
-                    case HirTypeKind.Str:
+                    case HirTypeKind.Str | HirTypeKind.Bool:
                         return_type = declared_ret
                     case _:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
             else:
                 return_type = declared_ret
-        elif self.ambient_bootstrap_enabled():
+        elif self.ambient_bootstrap_enabled() and fn_.name != "main":
+            # `main` is excluded for the same reason it is excluded at the
+            # `not fn_.has_return_type` guard further down in this file: an
+            # entry point with no declared return type IS unit.
+            #
+            # Without this exclusion the function contradicts itself. The BODY
+            # is lowered by `has_return_type` (false here) via
+            # `lower_hir_block_unit`, which deliberately produces NO tail value;
+            # but the RETURN TYPE came from `bootstrap_builtin_return_type`,
+            # whose fallback for any name outside its small builtin table
+            # (get_args / bootstrap_version / eprint) is
+            # `hir_bootstrap_i64_type`. So `fn main(): print(...)` was lowered
+            # as unit-bodied but i64-returning, and
+            # 50.mir/_MirLowering/function_lowering.spl:577 correctly rejected
+            # it: "E-SFFI-016: missing return in non-unit function 'main'".
+            #
+            # The table is meant as a fallback for bootstrap BUILTINS whose
+            # declarations are not visible, not for a declared function that
+            # simply omits its return type. NOTE: the same contradiction still
+            # exists for any other undeclared, bodied function lowered in
+            # bootstrap mode; only the entry point is fixed here, because that
+            # is the one this gate exercises and a wider change to the fallback
+            # is unverifiable without a bootstrap.
             return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
@@ -445,8 +452,12 @@ impl HirLowering:
         # so it needs none of this user-function return inference.
         if (not fn_.has_return_type) and not self.ambient_bootstrap_enabled() and fn_.name != "main":
             val fn_sym_type = self.symbols.get_symbol_type(fn_symbol_id)
-            if fn_sym_type.?:
-                match fn_sym_type.unwrap().kind:
+            # Bind the Option payload directly. Calling `.unwrap()` here can
+            # resolve to an unrelated imported `unwrap` implementation after
+            # the Phase boundary (observed as Poll.unwrap in native HIR), then
+            # turn a present HirType into nil before the kind match.
+            if val present_fn_sym_type = fn_sym_type:
+                match present_fn_sym_type.kind:
                     case HirTypeKind.Function(_, ret, _):
                         return_type = ret
                     case _:
@@ -464,10 +475,18 @@ impl HirLowering:
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(fn_.name, fn_.visibility)
 
+        for attribute in fn_.attributes:
+            declaration_lowering_publish_annotation_consumer_v1(
+                attribute.name, fn_.name,
+                "function-attribute:{attribute.name}:{fn_.name}")
         # Parse function attributes (@entry, @naked, @noreturn, @section, @interrupt)
         var fa: FunctionAttr = parse_function_attrs(fn_.attributes)
         if fa.rt_hal_error != "":
-            self.error_fatal(fa.rt_hal_error, Some(fn_.span))
+            self.error(fa.rt_hal_error, fn_.span)
+        if fa.placement_error != "":
+            self.error(fa.placement_error, fn_.span)
+        if fa.is_global and not is_valid_asm_symbol_name(fn_.name):
+            self.error("E-GLOBAL-MANGLE: `{fn_.name}` is not a valid assembler symbol name for @global", fn_.span)
         if fn_.is_kernel:
             fa.is_gpu_kernel = true
         # Parse export attributes (@export("C"))
@@ -563,31 +582,44 @@ impl HirLowering:
         if custom_primitive_is_name(struct_name):
             custom_primitive_bind_symbol(struct_name, symbol.id)
 
+        # Struct type parameters are scoped exactly like class type parameters:
+        # they must remain visible while field annotations are lowered.  Without
+        # this scope, multi-character parameters such as `Id` are immediately
+        # discarded and every `Id` field becomes an unresolved type.
+        self.symbols.push_scope(ScopeKind.Class)
         var type_params: [HirTypeParam] = []
         for tp in struct_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
-        # Phase A gate (#158): a generic struct (`struct Box<T>: v: T`) is NOT
-        # monomorphized on the native build path. Its `T`-typed field never gets
-        # a concrete layout -- at MIR the field degrades to an opaque
-        # pointer-width slot, so a fat value (e.g. `text`) stored in it is
-        # truncated and read back as a garbage integer (silent wrong answer, no
-        # diagnostic). Mirrors lower_function's gate (see :198) and
-        # trait_impl_lowering's generic-method gate: loud-fail at declaration
-        # until real monomorphization lands (#158 Phase B). The bare-generic-fn
-        # and generic-method tiers were already gated; this closes the residual
-        # plain-generic-struct hole.
-        if struct_type_params.len() > 0:
-            self.error("generic structs are not supported on the native build path yet: struct '{struct_name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", struct_span)
+        # #158 Phase C (extended to structs 2026-08-23): a generic struct is a
+        # non-emittable TEMPLATE, not an error at its declaration site
+        # (hardening plan 9.3 step 12) -- exactly the rule already applied to a
+        # generic CLASS in class_declaration_lowering.spl and to a generic
+        # IMPL in trait_impl_lowering. It is recorded as `is_generic_template`
+        # below and never emitted.
+        #
+        # The old Phase A fatal's reasoning (a `T`-typed field degrades to an
+        # opaque pointer-width slot at MIR, truncating a fat value) is about
+        # EMITTING an unmonomorphized template. That risk is unchanged and is
+        # still fenced -- but at the USE site, where it belongs: a reachable
+        # instantiation fails loudly as an unrewritten generic call in 40.mono
+        # (E-MONO-030/032, then E-MONO-033 refuses MIR lowering) and as
+        # HWIR-E-GENERIC in strict MIR. Declaring a template nobody
+        # instantiates is not a defect; emitting one is.
+        #
+        # Enumerated, not assumed (the 43ead88be55 precedent): `grep -rn
+        # '^struct <Name><'` over src/compiler, src/runtime and src/app/cli
+        # returns ZERO generic structs, and none of the 28 that exist under
+        # src/lib (ecs, ndarray, db, storage, tooling/ds_utils, async,
+        # common/search) is imported by anything in the stage1 closure. So no
+        # stage1 instantiation exists to be silently mislowered by this change.
 
         var fields: [HirField] = []
         for f in struct_fields:
             val sf: ParserField = f
             val lowered_field: HirField = self.lower_field(sf)
-            if (struct_name == "BackendError" and lowered_field.name == "span") or (struct_name == "CompiledUnit" and lowered_field.name == "entry_point"):
-                val actual_disc = rt_enum_discriminant(lowered_field.type_.kind)
-                eprint("[hir-field-type] struct={struct_name} field={lowered_field.name} actual={actual_disc}\n")
             fields = fields.push(lowered_field)
+        self.symbols.pop_scope()
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(struct_name, struct_visibility)
@@ -596,7 +628,7 @@ impl HirLowering:
         val layout: LayoutAttr = parse_layout_attrs(struct_attributes)
         val has_layout = layout.layout_kind != TypeLayoutKind.Simple or layout.has_explicit_align or layout.is_packed
         val platform: PlatformParseResult = parse_platform_attrs(struct_attributes)
-        val platform_fields = platform_attr_fields_for(platform)
+        val platform_fields: PlatformAttrFields = platform_attr_fields_for(platform)
 
         HirStruct(
             symbol: symbol,
@@ -634,6 +666,9 @@ impl HirLowering:
         val fld: ParserField = f
         val fld_type: Type = fld.type_
         val type_ = self.lower_type(fld_type)
+        self.lower_field_with_type(fld, type_)
+
+    me lower_field_with_type(fld: ParserField, type_: HirType) -> HirField:
         val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues.
@@ -673,9 +708,9 @@ impl HirLowering:
         )
 
     me lower_enum(enum_: ParserEnum, owner_module: text) -> HirEnum:
-        self.lower_enum_with_symbol(enum_, owner_module, enum_.name)
+        self.lower_enum_with_symbol(enum_, owner_module, enum_.name, false)
 
-    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text) -> HirEnum:
+    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text, project_imported_payloads: bool) -> HirEnum:
         # Field access, NOT a positional `case ParserEnum(...)` destructure: that
         # arm was written for an 8-field ParserEnum and stopped matching once
         # `attributes` (and later fields) were appended, so every enum lowered
@@ -687,13 +722,21 @@ impl HirLowering:
         val is_public = enum_.is_public
         val doc_comment = enum_.doc_comment
         val span = enum_.span
-        val symbol = self.symbols.lookup_or_invalid(lookup_name)
+        var symbol = self.symbols.lookup_or_invalid(lookup_name)
+        if project_imported_payloads and self.imported_enum_symbol_ids.contains_key(lookup_name):
+            symbol = SymbolId(id: self.imported_enum_symbol_ids[lookup_name])
+        if project_imported_payloads and not symbol.is_valid():
+            self.error("imported enum `{lookup_name}` has no materialized symbol", span)
         var hir_type_params: [HirTypeParam] = []
         for tp in type_params:
             hir_type_params = hir_type_params.push(self.lower_type_param(tp))
         var hir_variants: [HirVariant] = []
+        # Imported enum payload dependencies are registered in the declaring
+        # owner's qualified type index. Resolving their raw parser spellings in
+        # the consumer can either miss (`Effect`) or bind a distinct same-named
+        # type, so only imported variants project through that owner.
         for v in variants:
-            hir_variants = hir_variants.push(self.lower_variant(v))
+            hir_variants = hir_variants.push(self.lower_variant(v, owner_module, project_imported_payloads))
         var hir_attrs: [HirAttribute] = []
         for raw_attr in enum_.attributes:
             hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))
@@ -726,7 +769,7 @@ impl HirLowering:
             dyn_open: enum_.dyn_open
         )
 
-    me lower_variant(v: Variant) -> HirVariant:
+    me lower_variant(v: Variant, owner_module: text, project_imported_payloads: bool) -> HirVariant:
         val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
 
         # QUALIFIED patterns in a statement match, not `val kind = match` over
@@ -741,12 +784,21 @@ impl HirLowering:
             case VariantKind.Tuple(types):
                 var hir_types: [HirType] = []
                 for t in types:
-                    hir_types = hir_types.push(self.lower_type(t))
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(t, owner_module)
+                    else:
+                        self.lower_type(t)
+                    hir_types = hir_types.push(lowered_type)
                 kind = HirVariantKind.Tuple(hir_types)
             case VariantKind.Struct(fields):
                 var hir_fields: [HirField] = []
                 for f in fields:
-                    hir_fields = hir_fields.push(self.lower_field(f))
+                    val fld: ParserField = f
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(fld.type_, owner_module)
+                    else:
+                        self.lower_type(fld.type_)
+                    hir_fields = hir_fields.push(self.lower_field_with_type(fld, lowered_type))
                 kind = HirVariantKind.Struct(hir_fields)
 
         var discriminant = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: v.span)

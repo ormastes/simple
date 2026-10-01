@@ -1,8 +1,83 @@
 #define _XOPEN_SOURCE 700
 
 #include <pthread.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdint.h>
+
+/* ---------------------------------------------------------------------------
+ * POSIX barriers on Darwin.
+ *
+ * pthread_barrier_* is an OPTIONAL part of POSIX (_POSIX_BARRIERS) and Apple
+ * does not implement it, so this translation unit did not compile on macOS at
+ * all -- the guard's "117 compiled" green was only ever measured on Linux.
+ *
+ * The two-phase rendezvous below IS the property under test: a second thread
+ * must observe the receiver as valid strictly BEFORE the owner frees it, and
+ * must observe it as invalid strictly AFTER the owner has freed it. Removing
+ * or loosening the rendezvous would change the interleaving and stop testing
+ * the concurrent unregister window, so the barriers are not removed here --
+ * they are PROVIDED, with identical semantics for this use:
+ *   - no waiter returns until `count` waiters have arrived (generation guard,
+ *     so a fast thread cannot fall through into the next generation),
+ *   - exactly one waiter per generation receives PTHREAD_BARRIER_SERIAL_THREAD
+ *     and the rest receive 0 (barrier_wait_ok() below accepts both).
+ * Every assertion in this file is unchanged.
+ * ------------------------------------------------------------------------ */
+#if defined(__APPLE__) && !defined(PTHREAD_BARRIER_SERIAL_THREAD)
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+
+typedef struct { int spl_unused; } pthread_barrierattr_t;
+
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+    unsigned        count;
+    unsigned        waiting;
+    unsigned        generation;
+} pthread_barrier_t;
+
+static int pthread_barrier_init(pthread_barrier_t* barrier,
+                                const pthread_barrierattr_t* attr,
+                                unsigned count) {
+    (void)attr;
+    if (count == 0) return EINVAL;
+    if (pthread_mutex_init(&barrier->mutex, NULL) != 0) return EAGAIN;
+    if (pthread_cond_init(&barrier->cond, NULL) != 0) {
+        pthread_mutex_destroy(&barrier->mutex);
+        return EAGAIN;
+    }
+    barrier->count = count;
+    barrier->waiting = 0;
+    barrier->generation = 0;
+    return 0;
+}
+
+static int pthread_barrier_destroy(pthread_barrier_t* barrier) {
+    int rc = pthread_cond_destroy(&barrier->cond);
+    int rc2 = pthread_mutex_destroy(&barrier->mutex);
+    return rc != 0 ? rc : rc2;
+}
+
+static int pthread_barrier_wait(pthread_barrier_t* barrier) {
+    int serial = 0;
+    unsigned generation;
+    if (pthread_mutex_lock(&barrier->mutex) != 0) return EINVAL;
+    generation = barrier->generation;
+    if (++barrier->waiting == barrier->count) {
+        barrier->waiting = 0;
+        barrier->generation++;
+        serial = 1;
+        pthread_cond_broadcast(&barrier->cond);
+    } else {
+        while (generation == barrier->generation) {
+            pthread_cond_wait(&barrier->cond, &barrier->mutex);
+        }
+    }
+    pthread_mutex_unlock(&barrier->mutex);
+    return serial ? PTHREAD_BARRIER_SERIAL_THREAD : 0;
+}
+#endif /* __APPLE__ && !PTHREAD_BARRIER_SERIAL_THREAD */
 
 extern uint8_t* rt_alloc(int64_t size);
 extern uint8_t* rt_struct_alloc(int64_t size);

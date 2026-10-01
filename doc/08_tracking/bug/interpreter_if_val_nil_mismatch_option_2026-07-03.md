@@ -1,7 +1,58 @@
 # Interpreter `if val x = <nil Option>:` Wrongly Takes the Match Branch - 2026-07-03
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+## Re-verified 2026-09-13 — seed lane clean; pure-Simple lane still unverified (LEFT OPEN)
+
+**Lane caveat (added in the same 2026-09-13 pass, after review):** this entry is
+filed against the **pure-Simple / self-hosted** lane, which the run recorded
+below does NOT exercise. No self-hosted binary is deployed on this host —
+`bin/release/simple.exe`, `bin/release/x86_64-pc-windows-msvc/simple.exe` and
+`bin/release/x86_64-pc-windows-gnu/simple.exe` all print the Rust
+bootstrap-seed banner. Running the repro through the pure-Simple CLI on the
+seed (`simple run src/app/cli/main.spl -- run <repro>`) emitted only lint
+diagnostics and never executed the program, so that substitute lane does not
+work either. The seed result below therefore shows only that the **seed** does
+not exhibit the defect; it does NOT discharge the pure-Simple fix.
+**This entry stays OPEN pending a deployed self-hosted binary.**
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran an Option-returning function through `if val` on both the nil and the
+Some path in one program:
+
+```spl
+fn get(f: bool) -> i64?:
+    if f:
+        return 5
+    nil
+
+fn main():
+    if val x = get(false):
+        print("BAD entered with {x}")
+    else:
+        print("OK nil skipped")
+    if val y = get(true):
+        print("OK some {y}")
+    else:
+        print("BAD skipped some")
+```
+
+Output:
+
+```
+OK nil skipped
+OK some 5
+```
+
+The nil case no longer enters the match branch and the Some case still binds
+the payload correctly. The "executable interpreter proof pending" caveat is
+discharged on the seed lane (measured, not inferred).
+
+Status: SOURCE FIXED (2026-07-15); executable interpreter proof pending a
 runnable pure-Simple compiler artifact.
 
 ## Symptom
@@ -72,11 +123,56 @@ against the JIT path's handling of the same node — the JIT path (or whatever
 lowering `world.spl`'s passing specs exercise) evidently distinguishes
 `Some`/`nil` correctly; the plain tree-walking interpreter fallback does not.
 
-## Resolution
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
 
-Plain `if val`/`while val` desugars now mark their synthetic binding for
-Option-only normalization. The interpreter maps `Option::None` to nil and
-`Option::Some` to its payload while preserving Result wrappers and ordinary
-empty text/arrays. The explicit `.?` operator keeps its broader not-empty
-semantics. Mirrored interpreter system tests cover statement, expression,
-while, Result, and ordinary-empty-value forms.
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret` —
+i.e. exactly the "interpreter fallback" lane this record isolates.
+
+Fixture (`build/wi/r_ifval.spl`), the record's own repro plus a positive
+control so a "never takes the branch" regression could not read as a pass:
+
+```simple
+fn maybe_none() -> Option<i64>:
+    nil
+
+fn maybe_some() -> Option<i64>:
+    7
+
+fn main() -> void:
+    val v = maybe_none()
+    var matched = false
+    if val x = v:
+        matched = true
+    print("nil case matched={matched} (expected false)")
+
+    val w = maybe_some()
+    var matched2 = false
+    var seen = 0
+    if val y = w:
+        matched2 = true
+        seen = y
+    print("some case matched={matched2} seen={seen} (expected true 7)")
+```
+
+Observed:
+
+```
+nil case matched=false (expected false)
+some case matched=true seen=7 (expected true 7)
+```
+
+Both directions are correct: `if val` does not fire on a nil `Option`, and it
+does fire — with the payload bound — on a `Some`. The positive control matters
+here: without it, a binary that had regressed to "never take the `if val`
+branch" would have produced a green first line and looked fixed.
+
+Scope, and a correction to this record's own header: the body of this record
+diagnoses the **Rust seed's** tree-walking interpreter fallback (its
+"Suggested fix direction" section is explicitly not investigated further), so
+the "SOURCE FIXED (2026-07-15)" header and the "pending a runnable pure-Simple
+compiler artifact" clause do not describe the same engine the Symptom section
+measured. This re-reproduction covers the seed's interpreter. The pure-Simple
+interpreter's own `if val` desugar was NOT exercised — driving it from a spec
+needs the parser's `if val` lowering shape, which was not reconstructed in this
+pass.

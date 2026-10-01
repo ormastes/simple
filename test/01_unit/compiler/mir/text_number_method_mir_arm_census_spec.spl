@@ -1,0 +1,148 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+
+"""
+# Census: interpreter-accepted text/number methods with no MIR dispatch arm
+
+## Overview
+
+`.upper()`, `.chars()` and `.to_float()` were the third instance of one
+recurring CLASS: a method the interpreter accepts
+(`src/compiler_rust/compiler/src/interpreter_method/{string,primitives}.rs`)
+that MIR lowering never claims, so native compilation dies with
+`unresolved method call` — or worse, mis-lowers silently. Prior instances:
+`.to_upper()`/`.parse_f64()`
+(doc/08_tracking/bug/native_string_methods_unresolved_in_mir_2026-07-17.md)
+and Dict `.clear()`/`.set()` (dict_method_dispatch_spec.spl).
+
+This spec generalizes: it LOWERS a fixture per method name through the real
+MIR lowering and reports every one that still has no arm. Known gaps are
+REPORTED (printed as `MIR_GAP:`), not failed — failing on someone else's
+backlog would train people to delete the spec. What FAILS is regression of
+any method that is known-lowerable today.
+
+A grep census (2026-09-01, this box) of interpreter names never mentioned in
+`src/compiler/50.mir/`: 72 text-method aliases (e.g. capitalize, pad_start,
+repeat, reversed, substr, title, to_int, trim_start, zfill ...) and 63
+number-method names (abs, ceil, floor, sqrt, round arms, to_hex, gcd ...).
+Textual absence is only a hint — hence this spec lowers instead of grepping.
+
+## Known deliberate divergence
+
+`int.to_float()` is accepted by the interpreter (primitives.rs:31, `n as
+f64`) but stays LOUD natively: the text-special arm requires a proven Str
+receiver, and silently routing an int through `rt_string_to_float` would be
+garbage. Pinned below as loud-until-implemented.
+"""
+
+# @tag: unit, compiler, mir, text, dispatch, census
+
+use std.spec.step
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir.*
+
+fn lower_src(src: text, tag: text) -> text:
+    val filename = "census_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        result = result + serialize_mir_function(function)
+    result
+
+fn text_method_unresolved(method: text) -> bool:
+    val src = "fn probe(s: text) -> i64:\n    val r = s." + method + "()\n    0\n"
+    lower_src(src, "t_" + method).contains("unresolved method call")
+
+fn int_method_unresolved(method: text) -> bool:
+    val src = "fn probe(n: i64) -> i64:\n    val r = n." + method + "()\n    0\n"
+    lower_src(src, "n_" + method).contains("unresolved method call")
+
+# Zero-arg text methods the interpreter accepts (interpreter_method/string.rs
+# match arms; canonical spellings only, aliases collapse to the same arm).
+val TEXT_METHODS = [
+    "trim", "strip", "lower", "to_lower", "upper", "to_upper", "chars",
+    "to_float", "parse_f64", "split_lines", "lines",
+    "capitalize", "title", "swapcase", "reversed",
+    "is_empty", "char_count", "to_int", "parse_int", "trim_start",
+    "trim_end", "chomp", "ord", "bytes", "len"
+]
+
+# Methods known-lowerable today: a regression on any of these FAILS.
+val TEXT_MUST_LOWER = [
+    "trim", "strip", "lower", "to_lower", "upper", "to_upper", "chars",
+    "to_float", "parse_f64", "split_lines", "lines"
+]
+
+# Zero-arg number methods the interpreter accepts (primitives.rs match arms).
+val INT_METHODS = [
+    "abs", "to_float", "to_f64", "floor", "ceil", "round", "sqrt",
+    "is_even", "is_odd", "to_hex", "to_bin", "to_oct", "bit_length",
+    "count_ones", "trailing_zeros", "signum", "fract", "to_text", "to_str"
+]
+
+describe "MIR text/number method arm census":
+    it "keeps every known-lowerable text method lowering (regression gate)":
+        step("Lower each must-lower text method on a typed text receiver")
+        var regressed: [text] = []
+        var checked = 0
+        for m in TEXT_MUST_LOWER:
+            if text_method_unresolved(m):
+                regressed = regressed.push(m)
+            checked = checked + 1
+        step("Non-vacuity: every method was actually lowered")
+        assert_equal(checked, TEXT_MUST_LOWER.len())
+        if regressed.len() > 0:
+            print("REGRESSED_TEXT_ARMS: {regressed}")
+        assert_equal(regressed.len(), 0)
+
+    it "enumerates interpreter-accepted text methods still without an arm (reported, not failed)":
+        step("Lower every census text method and report the gaps")
+        var gaps = 0
+        var probed = 0
+        for m in TEXT_METHODS:
+            probed = probed + 1
+            if text_method_unresolved(m):
+                gaps = gaps + 1
+                print("MIR_GAP:text.{m}() -- interpreter accepts, MIR has no arm")
+        print("TEXT_CENSUS: probed={probed} gaps={gaps}")
+        step("Non-vacuity: the census probed a real population")
+        assert_equal(probed > 10, true)
+
+    it "enumerates interpreter-accepted number methods still without an arm (reported, not failed)":
+        step("Lower every census number method on a typed i64 receiver")
+        var gaps = 0
+        var probed = 0
+        for m in INT_METHODS:
+            probed = probed + 1
+            if int_method_unresolved(m):
+                gaps = gaps + 1
+                print("MIR_GAP:i64.{m}() -- interpreter accepts, MIR has no arm")
+        print("INT_CENSUS: probed={probed} gaps={gaps}")
+        step("Non-vacuity: the census probed a real population")
+        assert_equal(probed > 10, true)
+
+    it "keeps int.to_float() loud natively (deliberate interpreter divergence)":
+        step("A numeric receiver must NOT be claimed by the text-special arm")
+        # If this starts lowering, it must be via a real numeric-conversion
+        # arm -- never by falling into rt_string_to_float. Guard the silent-
+        # wrong route: either it is still unresolved (loud), or it lowered
+        # WITHOUT the string parser.
+        val mir = lower_src("fn conv(n: i64) -> f64:\n    n.to_float()\n", "int_tf")
+        val still_loud = mir.contains("unresolved method call")
+        val used_string_parser = mir.contains("rt_string_to_float")
+        assert_equal(still_loud or (not used_string_parser), true)

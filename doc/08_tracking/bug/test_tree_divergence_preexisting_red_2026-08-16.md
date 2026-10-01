@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence red at `f6cadcc36af` — step-over record
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (pre-existing; not introduced by this session)
 **Recorded:** 2026-08-16, as the mandatory record accompanying a delta-PASS landing
@@ -68,3 +72,4 @@ Note `integration:rendering/vulkan_strict_spec.spl` and
 `unit:compiler/verification/report_rendering_spec.spl` fall in the rendering area this
 session reviewed; they are listed here as divergence offenders only — no claim is made
 about their content.
+

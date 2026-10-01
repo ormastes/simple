@@ -1,0 +1,51 @@
+# Compile natively: the runtime heap registry is the allocation authority.
+# Differential oracle is the normalization algorithm before the fast path.
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use hir_owner_name_reference.{reference_owner}
+
+extern fn rt_heap_registry_count() -> i64
+
+fn main() -> i64:
+    val cases = [
+        "compiler.hir.hir_types", "lib.text", "_Owner9._field2", "A", "src",
+        "", ".", "..", ".owner", "owner.", "owner..name", "std", "std.text",
+        "std.0.text", "owner.123.Type", "123", "123abc.Type", "a1.2b",
+        "owner.spl", "owner.sdn", "owner.SPL", "owner-with-dash.Type",
+        "src/compiler/20.hir/hir_types.spl", "../src/lib/text.spl",
+        "./src/lib/text.spl", "../../src/lib/text.spl",
+        "/tmp/frozen/src/compiler/20.hir/hir_types.spl",
+        "C:\\work\\src\\compiler\\20.hir\\hir_types.spl",
+        "/tmp/café/src/lib/text.spl", "café.Type", "owner.λ", "a:b.Type"
+    ]
+    for path in cases:
+        val expected = reference_owner(path)
+        val actual = hir_symbol_owner_module(path)
+        if actual != expected:
+            print "FAIL: owner={path} expected={expected} actual={actual}"
+            return 1
+    # Warm the exact canonical operand before counting any repeated lookup.
+    val canonical = "compiler.hir.hir_lowering.module_callable_types"
+    if hir_symbol_owner_module(canonical) != canonical:
+        return 2
+    val fast_before = rt_heap_registry_count()
+    var index = 0
+    while index < 256:
+        if hir_symbol_owner_module(canonical) != canonical:
+            return 3
+        index = index + 1
+    val fast_after = rt_heap_registry_count()
+    val reference_before = rt_heap_registry_count()
+    index = 0
+    while index < 256:
+        if reference_owner(canonical) != canonical:
+            return 4
+        index = index + 1
+    val reference_after = rt_heap_registry_count()
+    val fast_delta = fast_after - fast_before
+    val reference_delta = reference_after - reference_before
+    print "MEASURE: hir_owner iterations=256 fast_objects={fast_delta} reference_objects={reference_delta}"
+    if fast_delta != 0 or reference_delta <= fast_delta:
+        print "FAIL: canonical owner allocation regression"
+        return 5
+    print "PASS: owner differential cases and canonical allocation budget"
+    0

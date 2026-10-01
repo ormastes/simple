@@ -1,46 +1,12 @@
 # `container[key].push(x)` silently loses the write for dict values and tuple/struct fields
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-31
 **Engine tested:** tree-walk interpreter (`bin/simple test`) — JIT/native unverified
 **Severity:** silent wrong results, no error or warning
-
-## RE-ATTRIBUTION + NARROWED RULE (2026-08-17)
-
-Two corrections, both measured today under `bin/simple` (Rust seed, mtime
-2026-08-16 22:59) by running one program under both engines.
-
-**1. The JIT is now verified, and it is CORRECT.** The "JIT/native unverified"
-note above is resolved: every shape in the table below persists the write under
-`SIMPLE_EXECUTION_MODE=jit` and only the tree-walk **interpreter** loses it. So
-this is an interpreter defect. It was triaged into the `src/compiler/50.mir/**`
-lane against `_MirLoweringExpr/method_calls_literals.spl`; that is the wrong
-owner — MIR lowering feeds the engine that already behaves.
-
-**2. "Indexing a dict yields a copy" is too broad.** Sweeping the class as a
-container x element MATRIX (rather than the four filed anecdotes) shows the
-discriminator is narrower than the container kind. Interpreter results:
-
-| shape | result |
-|---|---|
-| `Dict<text, [i64]>` — `c["k"].push(x)` | **write lost** |
-| `Dict<i64, [text]>` — `c[7].push(x)` | persists |
-| `[(i64, [i64])]` — `a[0].1.push(x)` | **write lost** |
-| `[Bag]` where `Bag.items: [i64]` — `b[0].items.push(x)` | persists |
-| `Dict<text, Bag>` — `d["g"].items.push(x)` | persists |
-| `[[i64]]` / `[[[i64]]]` | persists |
-| explicit write-back `d[k] = d[k].push(x)` | persists |
-
-So the filed claim that **struct** fields lose the write does not reproduce —
-both struct-field shapes persist — and dict behaviour depends on the key/element
-types, not on it being a dict. Whoever fixes this should treat the matrix, not
-the container kind, as the specification.
-
-Specs (RED today):
-- reproducing: `test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl`
-- prevention (the matrix above): `test/01_unit/compiler/codegen/cross_engine_divergence_prevention_spec.spl`
 
 ## The rule
 
@@ -161,3 +127,52 @@ c["k"].push(2)
 - `.claude/memory/feedback_arrays_value_types.md` — refine: the copy happens at
   dict-value and tuple/struct-field access, not at every array index
 - `doc/07_guide/language/dict_native_pitfalls.md`
+
+
+## Re-measurement 2026-09-18 — the audit table is stale; one shape is fixed, one is a LANE SPLIT
+
+Binaries: a seed built from `origin/main` `c8fa65bf714` today (51,645,288 B,
+sha256 `308de6af84db5c26e2c0`) and, for contrast, the binary deployed at
+`bin/simple` (built 2026-09-06).
+
+Same four shapes as the original table, both lanes, fresh seed:
+
+| shape | example | interpret | JIT |
+|---|---|---|---|
+| array of arrays | `b[0].push(x)` | keeps | keeps |
+| **dict value** | `c["k"].push(x)` | **keeps** | keeps |
+| write-back | `d["k"] = d["k"].push(x)` | keeps | keeps |
+| **tuple field** | `a[0].1.push(x)` | **LOSES** | **keeps** |
+
+Three corrections to the record above:
+
+1. **The dict-value shape is fixed.** It lost the write when this was filed and
+   keeps it now. Four of the seven "broken" sites in the audit table were
+   dict-value sites, so they are no longer broken by this defect.
+2. **The tuple-field shape is now a LANE SPLIT, not a flat failure.** The
+   interpret lane still discards the write; the JIT lane keeps it. The original
+   entry says "JIT/native unverified" — it is verified now, and the two engines
+   disagree, which is the part that still needs an owner.
+3. **Both non-dict sites the table lists are already remediated in-tree**, so no
+   live stdlib site is known to lose a write today:
+   - `gc_async_mut/pure/collections.spl` keeps two parallel arrays
+     (`keys: [K]`, `members: [[T]]`) precisely to avoid the tuple-field shape,
+     and says so in a comment.
+   - `common/encoding/font_cldr_rank.spl` uses the read-modify-write form with a
+     comment citing this bug id.
+
+**Anyone re-running this must check their binary first.** On the deployed
+2026-09-06 seed the dict-value shape still fails, so measuring with it reproduces
+the original table and would lead to "fixing" code that is already correct. That
+binary carries a separate defect
+(`seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md`);
+`scripts/check/check-deployed-binary-optional-unwrap.shs` tells the two apart in
+about a second.
+
+Pinned by `test/01_unit/interpreter/mutate_through_index_shapes_spec.spl`
+(7 examples): the three working shapes are now guarded, since the dict-value one
+is recently-fixed behaviour with production callers and nothing else covered it.
+The tuple-field shape is deliberately left unasserted there — asserting either
+lane's answer would add a red or bless a defect — so it remains this record's one
+live item. Measured: 7/7 on the fresh seed; the three dict examples fail on the
+deployed seed.

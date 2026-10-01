@@ -51,75 +51,37 @@ into erased-element-type containers; root-cause properly before patching.
 - See `seed_f64_array_element_precision_mask_2026-07-19.md` (hardening-sweep
   banner) for the sibling f64 fix this was found alongside.
 
-## REPRODUCED 2026-08-17 — but the filed symptom is WRONG, and the real one is worse
+## Attempted re-measurement 2026-09-18 — NOT reproduced, and not refuted either
 
-The native build completed (`BUILD_RC=0`, ~50 min for a 7-line program). **It does
-not SIGSEGV.** It returns a silently wrong value — which puts this row in the
-silently-wrong-results class, where a crash-titled doc will never be recognised.
+This entry could not be re-measured on Linux aarch64 today, and the reason is
+worth recording so the next attempt does not spend the same hour.
 
-| arm | `got=` | `eq=` | `len=` |
-|---|---|---|---|
-| `interpret` | `hello` | true | 1 |
-| `jit` | `hello` | true | 1 |
-| **native-build** | **`109691254279185`** | **true** | **1** |
+The repro command above (`native-build --entry repro.spl`) never reaches
+codegen on this host. Working through it in order:
 
-The wrong value decodes cleanly: `109691254279185` = `0x63C37C3F0C11`, a Linux
-heap address whose low 3 bits are `001` — a **correctly tagged**
-`RT_VALUE_TAG_HEAP` text pointer. With `eq=true` and `len=1`, that proves the dict
-**stored and retrieved the text correctly**. Nothing is null and nothing is
-corrupt, so the doc's "null struct deref / SIGSEGV on read or compare" root cause
-is not what happens.
+1. `native-build` first refused with `SCV-E-ADMISSION:
+   compile-event-journal-missing`, whose named remedy
+   (`SIMPLE_SCV_INVENTORY_COLD_INIT=1`) then published an EMPTY inventory and
+   wedged the cache permanently — a separate defect found while chasing this
+   one, fixed fail-closed in PR #1084 and recorded in
+   `seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md`.
+2. With a sound binary and a clean cache the inventory builds correctly
+   (16,797 entries), and the build then stops at `SCV-E-SNAPSHOT:
+   snapshot-inventory-empty`, cleared by the documented opt-in
+   `SIMPLE_SCV_FREEZE_FALLBACK=1` (these fixtures live outside the `src` root
+   the freeze covers).
+3. Past that it stops at `error: persistent package index admission failed:
+   scv-authority-missing`, and `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` then leads to
+   `filesystem-event-journal-missing`. That is where it ends: **no native
+   artifact is produced, so there is nothing to run and nothing to observe.**
 
-What breaks is `"got=" + v`: the native `+` lowering rendered a tagged pointer as
-a **decimal integer** instead of concatenating it as text. That is a static-type
-decision, not a runtime one — `expr_dispatch.spl bin_is_str_concat` chooses
-between `rt_strcat_tagged` and integer add, and `runtime_native.c:5847-5862`
-documents that contract. A dict read yields `any`, so the static test appears to
-fall through to the integer arm.
+So the interpret and JIT lanes return rc 30 as this entry already says, and the
+native lane — the only one where this bug lives — cannot be exercised here at
+all. Treat this entry as UNVERIFIED-since-2026-07-20 rather than as reproduced
+or fixed; a native row measured under any of the workarounds above would be
+manufactured, not observed.
 
-**Not yet asserted.** A four-arm discriminating build was still running: plain
-text (positive control), non-empty dict literal, empty dict literal, plus
-`eq`/`len`. If plain text ALSO renders as a pointer, the dict is entirely
-innocent and this row is misfiled against the wrong subsystem; if only the dict
-arms break, it is dict-read type-loss as described.
-
-**Scope:** if that holds, the root cause is in `src/compiler/70.backend/**`, not
-`src/os` or `src/runtime` — diagnosis and hand-off, not a patch from this lane.
-
-**Recommended retitle** once the discriminator lands: this is a native-only
-wrong-value defect on text concatenation of an `any`-typed value, not a dict
-SIGSEGV.
-
-## DISCRIMINATOR LANDED 2026-08-17 — root cause pinned; the dict is innocent
-
-Five arms in ONE native binary (the pointer varies with ASLR across runs, which
-confirms it is a raw address rather than a constant):
-
-| arm | native result | verdict |
-|---|---|---|
-| A plain text | `hello` | OK — positive control |
-| B `{"k":"hello"}` literal | `hello` | OK |
-| **C empty `{}` then assign** | **`99467552042465`** | **WRONG** |
-| D `v == "hello"` | `true` | value intact |
-| E `v.len()` | `5` | value intact |
-
-Arm A passing rules out a general text-rendering fault; arms D and E prove the
-dict stored and returned a correctly tagged text. **The dict is not the defect.**
-
-**Root cause: MIR concat lowering.** An empty `{}` gives the read a static type of
-`I64`, so `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:564`
-`local_is_str` is false, `:579` sets `is_numeric`, and `:594` renders through
-`rt_raw_i64_to_string` — printing the tagged pointer as a decimal integer. A
-non-empty dict literal infers `str` and passes through correctly at `:564`.
-
-The correct runtime primitives already exist and are simply not used on this
-path: `rt_to_string` (`runtime_native.c:2869`) and `rt_any_add` (`:2843`) both
-tag-dispatch correctly at runtime. So the fix is a lowering decision, not new
-runtime code.
-
-Scope: `src/compiler/50.mir/**`. Diagnosed and handed off, not patched.
-
-**Retitle required.** As filed this is a dict SIGSEGV; it is actually a
-native-only wrong-VALUE defect in text concatenation of a statically-`I64`
-`any` read. A crash-titled row will never be searched for by anyone hunting
-silently-wrong results, which is the class it belongs to.
+The same blocker is why `check-engine-differential`'s native lane answers 0 of
+19 fixtures (see that gate's DEGRADED COVERAGE line). Whoever clears the
+persistent package index unblocks both at once, and this entry becomes
+measurable again.

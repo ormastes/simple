@@ -1,7 +1,6 @@
 # Missing implementation: src/hardware/fpga_linux/generate_rv64_test_program_package.spl
 
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/hardware/fpga_linux/` — RV64 FPGA test-program VHDL package
   generator

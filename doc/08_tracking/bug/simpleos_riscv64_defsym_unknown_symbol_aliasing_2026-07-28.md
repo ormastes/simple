@@ -1,14 +1,13 @@
 # SimpleOS rv64 link aliases lost call targets (`unknown_N`) to real functions via `--defsym`
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 04).
+- **Status:** OPEN — fail-closed source fix present; RV64 target admission pending
 - **Severity:** HIGH (latent memory-safety / wrong-signature calls)
-- **Area:** `src/compiler/70.backend/backend/llvm_native_link.spl`, SimpleOS riscv64 link
+- **Area:** `src/compiler/70.backend/backend/simpleos_native_linkers.spl`, SimpleOS riscv64 link
 - **Filed:** 2026-07-28
 
 ## Summary
 
-`link_simpleos_riscv64` unconditionally aliases thirteen `unknown_0..unknown_12`
+`link_simpleos_riscv64` previously aliased thirteen `unknown_0..unknown_12`
 symbols onto five real kernel functions using `ld` `--defsym`, on the real-kernel
 link path. `unknown_N` is not an intentional extern — it is the placeholder the
 MIR lowering emits when a callee symbol resolves to an **empty name**, i.e. a
@@ -82,6 +81,28 @@ commit is `fix(vcs): restore main from pushed jj conflict tree`, a bulk
 restoration after the jj-conflict-tree incident, so it is the commit that put
 this text on `main` but not necessarily where the code was originally authored.
 
+## Verification status (2026-09-23)
+
+Current source contains no `--defsym=unknown_` argument under
+`src/compiler/70.backend`; the RISC-V64 route still reaches
+`link_simpleos_riscv64` through `llvm_native_link_orchestrator`. The focused
+regression now creates real RISC-V64 objects and demonstrates both behaviors:
+the historical `--defsym` silently aliases `unknown_0` onto an unrelated real
+function, while omitting it leaves the undefined symbol visible and makes
+`ld.lld` fail closed. The fixture discovers supported versioned or unversioned
+LLVM tools and accepts explicit `SIMPLE_TEST_CLANG`, `SIMPLE_TEST_LLD`, and
+`SIMPLE_TEST_NM` overrides; missing tools are reported as test failures.
+
+The focused interpreter spec passed 2/2 on 2026-09-23 using the available Rust
+bootstrap seed in 1.86 seconds wall time with 283,608 KiB peak RSS. This is
+host-fixture evidence only; it is not pure-Simple or QEMU admission evidence.
+
+TODO(deferred-rv64-qemu-perf-rss): When an admitted pure-Simple phase compiler
+and RV64 QEMU environment are ready, run this focused spec with that compiler,
+exercise the production `link_simpleos_riscv64` kernel route in QEMU, and record
+wall time plus peak RSS against the prior baseline. Host-fixture evidence alone
+does not close the target verification or performance/memory gate.
+
 ## Suggested fix
 
 1. Delete the `--defsym=unknown_*` block. A lost call target must fail the link.
@@ -95,74 +116,3 @@ this text on `main` but not necessarily where the code was originally authored.
 - `doc/08_tracking/bug/simpleos_fabricated_rt_guard_weak_real_false_positive_2026-07-28.md`
   — the fabricated-`rt_*` link guard intended to cover the adjacent fail-open
   class on x86_64.
-
-## 2026-08-17 — fail-closed: unknown_N no longer aliased onto real functions
-
-Status: FIXED (link-path half).
-
-Root cause chain, both ends verified against current source on 2026-08-17:
-
-1. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3396`
-   `symbol_to_operand` names an unresolvable callee `unknown_<symbol-id>`.
-   That is the correct loud behaviour: it reaches the linker undefined.
-2. `src/compiler/70.backend/backend/llvm_native_link.spl:3115-3128` silenced it
-   with thirteen `--defsym=unknown_N=<real kernel function>` arguments on the
-   REAL-KERNEL riscv64 path (`not is_smoke_entry and not
-   uses_freestanding_runtime`), mapping the unknowns onto five functions with
-   unrelated signatures: `rt_riscv_uart_put`, `_uart_put`, `_boot_banner`,
-   `log_raw_println`, `rt_riscv_noalloc_pmm_init`, plus three
-   `rt_riscv_qemu_*` accessors. A call the compiler failed to resolve jumped
-   into an unrelated function with whatever was in the argument registers.
-
-Fix: all thirteen now defsym to `__simple_unresolved_call_trap`, a new function
-emitted into the generated riscv64 stub source (same function that builds the
-defsym list). It writes a message to the UART and halts on `wfi`.
-
-Why this needed no latent-breakage measurement: the set of DEFINED symbol names
-is unchanged, so every link that resolved before still resolves. The change is
-confined to what happens when a lost call is actually TAKEN at runtime — a halt
-with a message instead of silently running another function.
-
-Not proven: that no riscv64 kernel currently depends on one of these aliases
-being taken and behaving benignly. Reaching a trap on a real kernel boot would
-be evidence of a lost call, not a regression of this change.
-
-Spec: `test/01_unit/compiler/backend/unresolved_symbol_alias_fails_closed_spec.spl`
-(similar-problem detection: pins the RULE that no unknown_* may be aliased to a
-working function, not just the thirteen known sites).
-
----
-
-## ALREADY FIXED — verified by CONTENT 2026-08-17 (not by commit ancestry)
-
-The triage row for this bug asserted "Verified live: lines 3095-3107 still push
-`--defsym=unknown_0..12` onto `rt_riscv_uart_put`/`_uart_put`/etc". **That is
-stale.** Current source, checked directly:
-
-```
-$ /usr/bin/grep -n 'defsym=unknown' src/compiler/70.backend/backend/llvm_native_link.spl
-3120:            args = args.push("--defsym=unknown_{unknown_idx}=__simple_unresolved_call_trap")
-```
-
-There is exactly ONE such line and all 13 `unknown_N` symbols alias to
-`__simple_unresolved_call_trap`, not to real kernel functions. The trap is
-defined in the same file (line 3032) and is loud by construction: it prints
-`FATAL: unresolved call (unknown_N) reached at runtime; MIR lowering failed to
-resolve a callee` over the UART and then spins in `wfi`.
-
-That inverts the defect. The bug was that an unresolved call silently landed on
-an unrelated real function — a silent wrong answer. It now halts loudly with a
-diagnostic naming the cause, which is the correct behaviour for an unresolvable
-callee. The comment at line 3118 states this intent explicitly ("Every
-unknown_N resolves to the trap, NOT to an unrelated function").
-
-`rt_riscv_uart_put` still appears in the file (lines 2973, 2990, 3032, 3146) but
-only as the UART **output primitive** used by the trap and by `serial_println` —
-never as a `--defsym` alias target.
-
-Not closed by SHA (ancestry is unsound in this repo — constant rebasing rewrites
-SHAs); closed by reading current source.
-
-**Residual, stated honestly:** this closure is a source-level verification. It
-was NOT confirmed by a riscv64 link + QEMU boot, because that needs a native
-build lane unavailable in this session.

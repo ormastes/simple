@@ -1,0 +1,305 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-016 REQ-017
+
+use std.spec.*
+use std.common.structural.environment_instruction.*
+
+fn device_grant() -> DeviceRangeGrantV1:
+    device_range_grant_v1(4096, 256, 1 | 2 | 4 | 8,
+        true, true, true, true, 32, 4, 64, 16, 71, 72)
+
+fn device_proof(opcodes: i64) -> DeviceCapabilityProofV1:
+    device_capability_proof_v1(
+        7, 3, opcodes, 71, 72, 81, 82, 91, 92, 100, 200)
+
+fn device_pin() -> DeviceAuthorityPinV1:
+    device_authority_pin_v1(7, 3, 81, 82, 91, 92)
+
+fn environment(opcode: EnvOpcodeV1, sequence: i64, flags: i64,
+               argument_length: i64, result_capacity: i64) -> EnvInstructionV1:
+    env_instruction_v1(19, sequence, opcode, 7, flags,
+        0, argument_length, argument_length, 0,
+        result_capacity, result_capacity)
+
+fn device_operation(opcode: EnvOpcodeV1, sequence: i64, flags: i64,
+                    address: i64, length: i64, width: i64,
+                    irq: i64 = 0, token: i64 = 0,
+                    argument_length: i64 = 0,
+                    result_capacity: i64 = 0) -> DeviceInstructionV1:
+    device_instruction_v1(
+        environment(opcode, sequence, flags, argument_length, result_capacity),
+        address, length, width, irq, token, 3, 71, 72)
+
+fn executor(opcodes: i64) -> DeviceSandboxExecutorV1:
+    DeviceSandboxExecutorV1(pin: device_pin(), proof: device_proof(opcodes),
+        grant: device_grant(),
+        current_epoch: 150, next_sequence: 0, read_once_consumed_mask: 0,
+        irq_masked_bits: 0, irq_pending_bits: 2,
+        dma_mapped: false, dma_mapped_address: 0, dma_mapped_length: 0,
+        sealed: true)
+
+fn ascii_bytes(value: text) -> [u8]:
+    var out: [u8] = [0u8; value.len()]
+    var i = 0
+    while i < value.len():
+        out[i] = value.char_code_at(i) as u8
+        i = i + 1
+    out
+
+describe "bounded IRQ/MMIO/DMA environment adapter":
+    it "requires an unexpired capability proof bound to the exact grant":
+        val operation = device_operation(
+            EnvOpcodeV1.MmioRead, 0, DEVICE_FLAG_READ_ONCE_V1,
+            4096, 4, 4, token: 1, result_capacity: 4)
+        val wrong = device_capability_proof_v1(
+            7, 3, env_opcode_mask_v1(EnvOpcodeV1.MmioRead),
+            91, 92, 81, 82, 91, 92, 100, 200)
+        val status = device_validate_instruction_v1(
+            device_pin(), wrong, device_grant(), operation, 150, [], [0u8; 4])
+        expect(env_instruction_status_to_i64(status)).to_equal(
+            env_instruction_status_to_i64(
+                EnvInstructionStatusV1.UnsupportedCapability))
+
+    it "rejects out-of-range, unsupported-width, and unaligned MMIO":
+        val proof = device_proof(env_opcode_mask_v1(EnvOpcodeV1.MmioRead))
+        val outside = device_operation(
+            EnvOpcodeV1.MmioRead, 0, DEVICE_FLAG_READ_ONCE_V1,
+            4352, 4, 4, token: 1, result_capacity: 4)
+        val wide = device_operation(
+            EnvOpcodeV1.MmioRead, 0, DEVICE_FLAG_READ_ONCE_V1,
+            4096, 16, 16, token: 1, result_capacity: 16)
+        val unaligned = device_operation(
+            EnvOpcodeV1.MmioRead, 0, DEVICE_FLAG_READ_ONCE_V1,
+            4097, 4, 4, token: 1, result_capacity: 4)
+        expect(env_instruction_status_to_i64(device_validate_instruction_v1(
+            device_pin(), proof, device_grant(), outside, 150,
+            [], [0u8; 4]))).to_equal(env_instruction_status_to_i64(
+                EnvInstructionStatusV1.UnsafeInstruction))
+        expect(env_instruction_status_to_i64(device_validate_instruction_v1(
+            device_pin(), proof, device_grant(), wide, 150,
+            [], [0u8; 16]))).to_equal(env_instruction_status_to_i64(
+                EnvInstructionStatusV1.UnsafeInstruction))
+        expect(env_instruction_status_to_i64(device_validate_instruction_v1(
+            device_pin(), proof, device_grant(), unaligned, 150,
+            [], [0u8; 4]))).to_equal(env_instruction_status_to_i64(
+                EnvInstructionStatusV1.UnsafeInstruction))
+
+    it "requires explicit side-effect and read-once declarations":
+        val reads = device_proof(env_opcode_mask_v1(EnvOpcodeV1.MmioRead))
+        val writes = device_proof(env_opcode_mask_v1(EnvOpcodeV1.MmioWrite))
+        val read = device_operation(
+            EnvOpcodeV1.MmioRead, 0, 0, 4096, 4, 4, result_capacity: 4)
+        val write = device_operation(
+            EnvOpcodeV1.MmioWrite, 0, 0, 4096, 4, 4, argument_length: 4)
+        expect(env_instruction_status_to_i64(device_validate_instruction_v1(
+            device_pin(), reads, device_grant(), read, 150,
+            [], [0u8; 4]))).to_equal(env_instruction_status_to_i64(
+                EnvInstructionStatusV1.UnsafeInstruction))
+        expect(env_instruction_status_to_i64(device_validate_instruction_v1(
+            device_pin(), writes, device_grant(), write, 150,
+            [1u8; 4], []))).to_equal(env_instruction_status_to_i64(
+                EnvInstructionStatusV1.UnsafeInstruction))
+
+    it "uses caller-owned model and result buffers and consumes read-once once":
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        var owner = executor(mask)
+        var device: [u8] = [0u8; 256]
+        device[0] = 4u8
+        device[1] = 3u8
+        device[2] = 2u8
+        device[3] = 1u8
+        var result: [u8] = [0u8; 4]
+        val operation = device_operation(
+            EnvOpcodeV1.MmioRead, 0, DEVICE_FLAG_READ_ONCE_V1,
+            4096, 4, 4, token: 2, result_capacity: 4)
+        val first = owner.execute(operation, [], result, device)
+        val repeated = device_operation(
+            EnvOpcodeV1.MmioRead, 1, DEVICE_FLAG_READ_ONCE_V1,
+            4096, 4, 4, token: 2, result_capacity: 4)
+        val second = owner.execute(repeated, [], result, device)
+        expect(first.applied).to_be(true)
+        expect(first.physical_effect).to_be(false)
+        expect(first.allocation_count_after_seal).to_equal(0)
+        expect(result).to_equal([4u8, 3u8, 2u8, 1u8])
+        expect(env_instruction_status_to_i64(second.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+
+    it "bounds DMA, requires mapping, and copies only through caller buffers":
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.DmaMap)
+            | env_opcode_mask_v1(EnvOpcodeV1.DmaSubmit)
+            | env_opcode_mask_v1(EnvOpcodeV1.DmaPoll)
+            | env_opcode_mask_v1(EnvOpcodeV1.DmaUnmap)
+        var owner = executor(mask)
+        var device: [u8] = [0u8; 256]
+        val payload: [u8] = [9u8, 8u8, 7u8, 6u8]
+        var result: [u8] = [0u8; 4]
+        val map = device_operation(
+            EnvOpcodeV1.DmaMap, 0, 0, 4096, 16, 0)
+        val premature_submit = device_operation(
+            EnvOpcodeV1.DmaSubmit, 0, DEVICE_FLAG_DMA_TO_DEVICE_V1,
+            4096, 4, 0, argument_length: 4)
+        val duplicate_map = device_operation(
+            EnvOpcodeV1.DmaMap, 1, 0, 4096, 16, 0)
+        val submit = device_operation(
+            EnvOpcodeV1.DmaSubmit, 1, DEVICE_FLAG_DMA_TO_DEVICE_V1,
+            4096, 4, 0, argument_length: 4)
+        val outside_mapping = device_operation(
+            EnvOpcodeV1.DmaSubmit, 1, DEVICE_FLAG_DMA_TO_DEVICE_V1,
+            4112, 4, 0, argument_length: 4)
+        val poll = device_operation(
+            EnvOpcodeV1.DmaPoll, 2, DEVICE_FLAG_DMA_FROM_DEVICE_V1,
+            4096, 4, 0, result_capacity: 4)
+        val outside_poll = device_operation(
+            EnvOpcodeV1.DmaPoll, 2, DEVICE_FLAG_DMA_FROM_DEVICE_V1,
+            4112, 4, 0, result_capacity: 4)
+        val wrong_unmap = device_operation(
+            EnvOpcodeV1.DmaUnmap, 3, 0, 4112, 16, 0)
+        val unmap = device_operation(
+            EnvOpcodeV1.DmaUnmap, 3, 0, 4096, 16, 0)
+        expect(env_instruction_status_to_i64(owner.execute(
+            premature_submit, payload, [], device).observation.status)).to_equal(
+                env_instruction_status_to_i64(
+                    EnvInstructionStatusV1.UnsafeInstruction))
+        expect(owner.execute(map, [], [], device).applied).to_be(true)
+        expect(env_instruction_status_to_i64(owner.execute(
+            duplicate_map, [], [], device).observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(env_instruction_status_to_i64(owner.execute(
+            outside_mapping, payload, [], device).observation.status)).to_equal(
+                env_instruction_status_to_i64(
+                    EnvInstructionStatusV1.UnsafeInstruction))
+        expect(owner.execute(submit, payload, [], device).applied).to_be(true)
+        expect(env_instruction_status_to_i64(owner.execute(
+            outside_poll, [], result, device).observation.status)).to_equal(
+                env_instruction_status_to_i64(
+                    EnvInstructionStatusV1.UnsafeInstruction))
+        val polled = owner.execute(poll, [], result, device)
+        expect(polled.applied).to_be(true)
+        expect(polled.allocation_count_after_seal).to_equal(0)
+        expect(result).to_equal(payload)
+        expect(env_instruction_status_to_i64(owner.execute(
+            wrong_unmap, [], [], device).observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(owner.execute(unmap, [], [], device).applied).to_be(true)
+        expect(env_instruction_status_to_i64(owner.execute(
+            device_operation(EnvOpcodeV1.DmaUnmap, 4, 0, 4096, 16, 0),
+            [], [], device).observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+
+        var boundary_owner = executor(mask)
+        var boundary_device: [u8] = [0u8; 256]
+        var boundary_result: [u8] = [0u8; 4]
+        val boundary_submit = device_operation(
+            EnvOpcodeV1.DmaSubmit, 1, DEVICE_FLAG_DMA_TO_DEVICE_V1,
+            4108, 4, 0, argument_length: 4)
+        val boundary_poll = device_operation(
+            EnvOpcodeV1.DmaPoll, 2, DEVICE_FLAG_DMA_FROM_DEVICE_V1,
+            4108, 4, 0, result_capacity: 4)
+        expect(boundary_owner.execute(map, [], [], boundary_device).applied).to_be(true)
+        expect(boundary_owner.execute(
+            boundary_submit, payload, [], boundary_device).applied).to_be(true)
+        expect(boundary_owner.execute(
+            boundary_poll, [], boundary_result, boundary_device).applied).to_be(true)
+        expect(boundary_result).to_equal(payload)
+
+    it "allows only granted IRQs and acknowledges each token once":
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.InterruptMask)
+            | env_opcode_mask_v1(EnvOpcodeV1.InterruptAcknowledge)
+        var owner = executor(mask)
+        var device: [u8] = [0u8; 256]
+        val mask_irq = device_operation(
+            EnvOpcodeV1.InterruptMask, 0, 0, 0, 0, 0, irq: 33)
+        val acknowledge = device_operation(
+            EnvOpcodeV1.InterruptAcknowledge, 1, DEVICE_FLAG_READ_ONCE_V1,
+            0, 0, 0, irq: 33, token: 2)
+        val repeated = device_operation(
+            EnvOpcodeV1.InterruptAcknowledge, 2, DEVICE_FLAG_READ_ONCE_V1,
+            0, 0, 0, irq: 33, token: 2)
+        val fresh = device_operation(
+            EnvOpcodeV1.InterruptAcknowledge, 2, DEVICE_FLAG_READ_ONCE_V1,
+            0, 0, 0, irq: 33, token: 6)
+        val outside = device_operation(
+            EnvOpcodeV1.InterruptMask, 2, 0, 0, 0, 0, irq: 36)
+        var unmasked = executor(mask)
+        val early_ack = device_operation(
+            EnvOpcodeV1.InterruptAcknowledge, 0, DEVICE_FLAG_READ_ONCE_V1,
+            0, 0, 0, irq: 33, token: 2)
+        expect(env_instruction_status_to_i64(unmasked.execute(
+            early_ack, [], [], device).observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(owner.execute(mask_irq, [], [], device).applied).to_be(true)
+        expect(owner.execute(acknowledge, [], [], device).applied).to_be(true)
+        expect(owner.admit_pending_irq(33)).to_be(true)
+        expect(env_instruction_status_to_i64(owner.execute(
+            repeated, [], [], device).observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(owner.execute(fresh, [], [], device).applied).to_be(true)
+        expect(env_instruction_status_to_i64(device_validate_instruction_v1(
+            device_pin(), device_proof(mask), device_grant(), outside, 150,
+            [], []))).to_equal(env_instruction_status_to_i64(
+                EnvInstructionStatusV1.UnsafeInstruction))
+
+    it "replays exact device identity without touching the model":
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        var owner = executor(mask)
+        var device: [u8] = [5u8; 256]
+        var captured: [u8] = [0u8; 4]
+        var replayed: [u8] = [0u8; 4]
+        val operation = device_operation(
+            EnvOpcodeV1.MmioRead, 0, DEVICE_FLAG_READ_ONCE_V1,
+            4096, 4, 4, token: 3, result_capacity: 4)
+        val receipt = owner.execute(operation, [], captured, device)
+        device[0] = 99u8
+        val replay = device_replay_exact_v1(
+            device_pin(), device_proof(mask), device_grant(), 150,
+            operation, operation, receipt, [], captured, replayed)
+        val changed = device_operation(
+            EnvOpcodeV1.MmioRead, 0, DEVICE_FLAG_READ_ONCE_V1,
+            4100, 4, 4, token: 3, result_capacity: 4)
+        val rejected = device_replay_exact_v1(
+            device_pin(), device_proof(mask), device_grant(), 150,
+            operation, changed, receipt, [], captured, replayed)
+        val rebound = device_replay_exact_v1(
+            device_pin(), device_proof(mask), device_grant(), 150,
+            changed, changed, receipt, [], captured, replayed)
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(replayed).to_equal(captured)
+        expect(env_instruction_status_to_i64(rejected.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(env_instruction_status_to_i64(rebound.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+
+    it "fails before effects when the ordered sequence is exhausted":
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        var owner = executor(mask)
+        owner.next_sequence = 9223372036854775807
+        var device: [u8] = [7u8; 256]
+        var result: [u8] = [88u8; 4]
+        val operation = device_operation(
+            EnvOpcodeV1.MmioRead, 9223372036854775807,
+            DEVICE_FLAG_READ_ONCE_V1, 4096, 4, 4,
+            token: 1, result_capacity: 4)
+        val receipt = owner.execute(operation, [], result, device)
+        expect(env_instruction_status_to_i64(receipt.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(result).to_equal([88u8; 4])
+
+    it "admits unavailable hardware only with bounded reason-bearing exclusion":
+        val reason = ascii_bytes("No emulated DMA completion source exists on this target")
+        val exclusion = scenario_exclusion_v1(
+            44, ExclusionKindV1.CapabilityUnavailable, 45,
+            0, reason.len(), reason.len(), 46, 51, 52, 47, 100, 200)
+        val blank = ascii_bytes("        ")
+        val blank_exclusion = scenario_exclusion_v1(
+            44, ExclusionKindV1.CapabilityUnavailable, 45,
+            0, blank.len(), blank.len(), 46, 51, 52, 47, 100, 200)
+        val stale = scenario_exclusion_v1(
+            44, ExclusionKindV1.CapabilityUnavailable, 45,
+            0, reason.len(), reason.len(), 46, 51, 52, 47, 100, 149)
+        expect(device_scenario_exclusion_admitted_v1(
+            exclusion, 150, reason)).to_be(true)
+        expect(device_scenario_exclusion_admitted_v1(
+            blank_exclusion, 150, blank)).to_be(false)
+        expect(device_scenario_exclusion_admitted_v1(
+            stale, 150, reason)).to_be(false)

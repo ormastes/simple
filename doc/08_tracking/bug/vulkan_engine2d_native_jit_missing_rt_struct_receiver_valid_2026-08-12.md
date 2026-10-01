@@ -1,4 +1,9 @@
 # Vulkan Engine2D native JIT is missing `rt_struct_receiver_valid`
+## Closed 2026-09-16 — Resolved 2026-08-15; panic gone, both integration specs PASS on fixed binary
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -110,3 +115,26 @@ native-feature lane is itself broken. Native-mode Vulkan Engine2D therefore
 needs either (a) the vendored rspirv/vulkan feature build repaired, or (b) a
 C-ABI bridge from the JIT's `rt_vulkan_*` imports to the interpreter's
 dlopen-based providers. Tracked here until split out.
+
+## Update 2026-08-15: availability bridge implemented, verification pending
+
+Option (b), minimal slice: the non-feature `rt_vulkan_is_available` stub in
+`src/compiler_rust/runtime/src/vulkan_graphics_runtime_core.rs` no longer
+returns a hardcoded 0. It now performs the same runtime loader probe as the
+interpreter path (`interpreter_extern/gpu.rs`): dlopen of the platform Vulkan
+loader (`libvulkan.so.1`/`libvulkan.so` on Linux, the dylib candidates on
+macOS, `vulkan-1.dll` on Windows) via the runtime crate's existing
+unconditional `libloading` dependency, cached in a `OnceLock`, fail-closed
+(any error -> 0). The `feature = "vulkan"` path is untouched, and the vendored
+rspirv build is not touched. Note: only availability is bridged — the other
+non-feature `rt_vulkan_*` entry points remain stubs, so a probe returning 1
+now hands control to the C-runtime/provider path rather than the feature-gated
+Rust implementation.
+
+Bridge implemented, verification pending. Deferred commands:
+
+```bash
+cargo build --release --bin simple   # in src/compiler_rust
+sh scripts/check/check-vulkan-engine2d-readback.shs
+```
+

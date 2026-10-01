@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+[ "$(uname -s)" = Darwin ] || { echo 'SKIP: Darwin observer'; exit 0; }
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mkdir "$tmp/bin"
+# No host-wide ps or per-sample executable admission may be required on Darwin.
+printf '#!/bin/sh\nexit 77\n' >"$tmp/bin/ps"
+chmod +x "$tmp/bin/ps"
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/fast.env" -- /bin/sleep 1
+grep -Fxq 'observer_backend=darwin-sysctl-libproc' "$tmp/fast.env"
+grep -Fxq 'observer_starts=1' "$tmp/fast.env"
+grep -Fxq 'observer_restarts=0' "$tmp/fast.env"
+grep -Fxq 'observer_errors=0' "$tmp/fast.env"
+grep -Fxq 'quiescent=1' "$tmp/fast.env"
+observer=$(sed -n 's/^observer_path=//p' "$tmp/fast.env")
+pid=$(sed -n 's/^observer_last_pid=//p' "$tmp/fast.env")
+kill -0 "$pid" 2>/dev/null && fail 'persistent observer survived supervisor cleanup'
+actual=$(shasum -a 256 "$observer" | awk '{print $1}')
+grep -Fxq "observer_sha256=$actual" "$tmp/fast.env"
+awk -F= '/^sample_duration_max_ms=/ { seen=1; if ($2 >= 100) exit 1 } END { if (!seen) exit 1 }' \
+    "$tmp/fast.env" || fail 'native sampler exceeded target duration on idle fixture'
+# A request for the wrong birth identity fails, instead of charging an unrelated
+# reused PID's memory or reporting an empty workload.
+status=0
+printf 'R %s 0:0\n' "$$" | "$observer" >"$tmp/reuse.out" || status=$?
+[ "$status" -eq 89 ] && [ ! -s "$tmp/reuse.out" ] || fail 'accepted wrong birth identity'
+status=0
+perl "$guard" --receipt="$tmp/tampered.env" -- /bin/sh -c \
+    'echo $$ >"$1"; target="${SIMPLE_BOOTSTRAP_SESSION_EXEC%/*}/macos-process-observer"; cp /usr/bin/true "$target.new"; mv "$target.new" "$target"; exec sleep 10' \
+    sh "$tmp/work.pid" >"$tmp/tampered.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] || fail 'observer replacement did not fail closed'
+grep -Fxq 'status=rss-measurement-failed' "$tmp/tampered.env"
+grep -Fxq 'quiescent=0' "$tmp/tampered.env"
+kill -0 "$(cat "$tmp/work.pid")" 2>/dev/null && fail 'observer tamper left root alive'
+export RSS_TEST_REAL_CC RSS_TEST_OBSERVER_REAL RSS_TEST_OBSERVER_PROXY CC RSS_TEST_PS_FAIL_AFTER
+RSS_TEST_REAL_CC=$(command -v "${CC:-cc}")
+RSS_TEST_OBSERVER_REAL=$tmp/native-observer-real
+RSS_TEST_OBSERVER_PROXY=$root/test/01_unit/scripts/fixture_process_observer_proxy.pl
+RSS_TEST_PS_FAIL_AFTER=$tmp/never
+CC=$root/test/01_unit/scripts/fixture_process_observer_cc.shs
+for fault in close oversize malformed; do
+    status=0
+    RSS_TEST_OBSERVER_FAULT=$fault perl "$guard" --receipt="$tmp/$fault.env" -- \
+        /bin/sh -c 'touch "$1"' sh "$tmp/$fault.started" >"$tmp/$fault.log" 2>&1 || status=$?
+    [ "$status" -eq 89 ] && [ ! -e "$tmp/$fault.started" ] && [ -s "$tmp/$fault.env" ] || \
+        fail "$fault observer bypassed startup gate or failure receipt"
+done
+echo 'PASS: persistent native backend, pinned identity, observer cleanup, PID reuse, 100 ms duration, no ps dependency'

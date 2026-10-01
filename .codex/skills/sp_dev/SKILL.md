@@ -3,6 +3,15 @@ name: sp_dev
 description: "SPipe dev entrypoint: refine a feature/bug/TODO into acceptance criteria, then continue through the SPipe pipeline."
 ---
 
+
+## SPipe home routing
+
+Reusable core lives at `{home}/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `{home}/spipe` (`SPIPE_WORKSPACE`). `{home}/spipe/common` links to core and project
+`.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
+runtime state out of core. Preserve existing reversed layouts and pinned legacy
+submodules until explicit migration; never overwrite an occupied route.
+See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownership.
 # SP Dev -- SPipe Development Entrypoint
 
 `/sp_dev` is the Codex entrypoint for the SPipe development workflow. The
@@ -69,6 +78,14 @@ approve`, run `spipe self-review-guide` (or
 `node .spipe/spipe/cli/spipe.js self-review-guide`) and follow its exact-head
 review, protected dispatch, and exact-head poll. This is the canonical
 discovery entry point.
+
+If `spipe` is absent or returns `unknown command: self-review-guide`, first
+fetch and fast-forward the current `main`, then initialize the pinned plugin:
+`git fetch origin main`, `git switch main`, `git merge --ff-only origin/main`,
+and `git submodule update --init .spipe/spipe`. Run the
+`node .spipe/spipe/cli/spipe.js self-review-guide` form. The unknown command
+means a stale installation; it does not authorize falling back to author
+`gh pr review --approve`.
 
 When a lane reaches protected PR integration, tell the operator and future LLM
 that GitHub forbids a PR author from submitting an `APPROVED` review on their
@@ -973,10 +990,21 @@ authentication. Never have the PR author's credential call
 eligible independent provider reviewer when provider approval is required.
 After a push, base/PR edit, policy/ruleset change, or expiry, treat the old
 admission as invalid and perform a new exact-state review before redispatch.
+**A handoff state is not a finish line.** The default end state of a lane is
+`merged`. Because every push to `main`/`release/**` invalidates admission on all
+open PRs (and it expires in 10 minutes), an `awaiting-self-review-admission` or
+`merge-blocked` (BEHIND) PR will not converge on its own. After the zero-P0/P1
+exact-head review, the owner override lands it: `gh pr review <n> --comment`,
+`gh pr ready <n>`, `gh pr merge <n> --admin --merge` (owner PR-only bypass on
+`main` and `release/*`; see `.claude/rules/vcs.md` § "Force-landing a PR").
+Stop short of merging only for a genuinely failing check or an unmet evidence
+precondition, and then name it in the PR body.
+Read `gh pr view <n> --comments` first: an unanswered review finding that the
+change breaks callers or regresses a spec is a blocker, not noise.
 `--no-verify` skips local Git hooks only and never bypasses repository
 protection or required checks. See `doc/07_guide/app/devhub.md`,
 `doc/07_guide/infra/self_review_policy_db.md`, and
-`tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
+`tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
 
 For broad SPipe planning lanes, split independent research or implementation
 checks across lower-model parallel agents when available (for example Codex
@@ -1041,11 +1069,20 @@ and `doc/08_tracking/feature/` before reporting the handoff state.
 
 ## Reference: SimpleOS LLVM/Clang toolchain
 
+For the Stage-4 bootstrap migration, require Clang/LLVM 23.1 together with a
+matching Rust LLVM binding/vendor update. A legacy LLVM 18/20 bootstrap is
+diagnostic-only: do not report it as a 23.1 candidate or use it for deployment.
+Record unavailable-host/toolchain state with the exact resume command and keep
+the corresponding platform acceptance row active.
+
 Building a C/C++ "hello world" for SimpleOS with clang? The LLVM→SimpleOS port
-is already built (easy to lose): cross clang/lld at
-`build/os/llvm/cross-x86_64-unknown-simpleos/bin/`, source at
-`/home/ormastes/llvm-project`, sysroot at `build/os/sysroot/`. Compile+link
-works; in-guest exec is blocked. Full guide + verified commands:
+has a host cross toolchain and static sysroot, but it is not a general POSIX
+port and must not be described as easy guest-native Clang support. The current
+Clang-20 cross driver has a register-allocator failure for ordinary C code;
+historical in-guest proof is limited to `clang -cc1 -emit-obj`. Guest driver
+mode additionally needs filesystem exec plus fork/exec. Keep host cross,
+guest `-cc1`, guest link, and guest run as distinct gates. Full guide + exact
+commands:
 `doc/07_guide/os/simpleos_llvm_toolchain.md`.
 
 ## Session update 2026-07-18

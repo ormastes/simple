@@ -1,4 +1,4 @@
-# Vscode Protocol Numeric Guard Specification
+# @manual: primary
 
 > <details>
 
@@ -32,7 +32,7 @@ vscode_protocol_numeric_guard_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Vscode Protocol Numeric Guard Specification
+# @manual: primary
 
 ## Scenarios
 
@@ -70,7 +70,22 @@ expect(source.contains("parts[1].trim().to_int()")).to_equal(false)
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Purpose: Verify vscode protocol numeric guards.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-UI-001
+doc/01_research/local/REQ-APP-UI-001.md
+doc/03_plan/sys_test/REQ-APP-UI-001.md
+doc/04_architecture/REQ-APP-UI-001.md
+doc/05_design/REQ-APP-UI-001.md
 
 Tests covering:
 - vscode protocol numeric guards

@@ -1,0 +1,119 @@
+# Regression spec for
+# doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md
+#
+# Defect 1 (interpreter): `for k, v in d.items():` -- the bare two-name
+# pattern documented at
+# doc/07_guide/quick_reference/syntax_quick_reference.md -- bound `k` to the
+# loop's positional index and `v` to the WHOLE (key, value) tuple instead of
+# unpacking it. The parser's "enumerate shorthand" special case (`for i, item
+# in items:` auto-wraps each element as `(loop_index, element)`) fired
+# unconditionally on any bare two-name pattern, double-wrapping an iterable
+# that already yielded tuples. `for (k, v) in d.items():` (parenthesized) was
+# unaffected. Symptom: `semantic: type mismatch: cannot convert tuple to int`.
+#
+# Defect 2 (JIT/native): `Dict.items` had no dispatch arm in the MIR lowering
+# path at all -- `Runtime error: Function 'Dict.items' not found` -- even
+# though the byte-identical `Dict.entries` alias already worked there.
+#
+# WHY A SUBPROCESS for the JIT half: a spec body runs on the tree-walk
+# interpreter under the spec runner's own engine and structurally cannot
+# observe what the JIT does.
+#
+# Pin (a), REVERSED 2026-09-12: the static `.items()`/`.entries()` rule this
+# spec originally pinned was superseded by a language decision -- a bare comma
+# for-pattern is ALWAYS a tuple destructure, whatever the iterable is, and the
+# seed's enumerate shorthand was REMOVED (it was a seed-only feature the
+# pure-Simple compiler never had and the seed's own JIT never implemented).
+# `for i, pair in [(1, 2), (3, 4)]:` therefore destructures now: i = 1, 3 and
+# pair = 2, 4. Both engines answer identically, so pin (a) is asserted for the
+# JIT lane too -- the former "JIT bare enumerate over any array" gap is gone,
+# because there is no bare enumerate to be missing. Enumerate intent is spelled
+# `for i, x in xs.enumerate():`. See doc/08_tracking/bug/
+# seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+#
+# Pin (b): `for k, v in d.entries():` (the second alias) destructures the
+# same as `.items()`, in both lanes.
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_dict_items_for_loop.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn field(raw: text, key: text) -> text:
+    val prefix = key + "="
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with(prefix):
+            val parts = t.split("=")
+            return parts[1]
+    "MISSING"
+
+describe "for k, v in d.items() (bare two-name pattern) on the interpreter":
+    it "sums the same total as the parenthesized spelling and matches d[k] on every pair":
+        step("interpreter: bare and parenthesized items() for-loops agree with the oracle")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        val expected = field(out, "EXPECTED_TOTAL")
+        # Absolute-literal oracle (d = {"a":1,"b":2,"c":3}) so a crashed probe
+        # (both sides read "MISSING") cannot vacuously satisfy the relative
+        # checks below.
+        expect(expected).to_equal("6")
+        expect(field(out, "UNPAREN_TOTAL")).to_equal(expected)
+        expect(field(out, "PAREN_TOTAL")).to_equal(expected)
+        expect(field(out, "KV_MATCH")).to_equal("1")
+        expect(field(out, "COUNT_MATCH")).to_equal("1")
+
+    it "destructures a bare two-name pattern over an array of 2-tuples (pin a)":
+        step("interpreter: for i, pair in [(1,2),(3,4)] destructures, does not enumerate")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "FIRST_SUM")).to_equal("4")
+        expect(field(out, "SECOND_REPR")).to_equal("2;4;")
+
+    it "destructures the .entries() alias the same as .items() (pin b)":
+        step("interpreter: for k, v in d.entries() destructures like d.items()")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "ENTRIES_BARE_TOTAL")).to_equal("6")
+
+describe "Dict.items() under the JIT":
+    it "resolves Dict.items (same as Dict.entries) and agrees with the interpreter":
+        step("jit: Dict.items resolves and both for-loop spellings agree with the oracle and the interpreter")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PROBE_DONE")
+        val expected = field(jit, "EXPECTED_TOTAL")
+        expect(expected).to_equal("6")
+        expect(field(jit, "UNPAREN_TOTAL")).to_equal(expected)
+        expect(field(jit, "PAREN_TOTAL")).to_equal(expected)
+        expect(field(jit, "KV_MATCH")).to_equal("1")
+        expect(field(jit, "COUNT_MATCH")).to_equal("1")
+
+        val interp = run_probe_in_mode("interpreter")
+        expect(field(jit, "UNPAREN_TOTAL")).to_equal(field(interp, "UNPAREN_TOTAL"))
+        expect(field(jit, "PAREN_TOTAL")).to_equal(field(interp, "PAREN_TOTAL"))
+
+    it "destructures the .entries() alias the same as .items() (pin b, JIT)":
+        step("jit: for k, v in d.entries() destructures like d.items(), matching the interpreter")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PROBE_DONE")
+        expect(field(jit, "ENTRIES_BARE_TOTAL")).to_equal("6")
+
+    it "destructures a bare two-name pattern over an array of 2-tuples (pin a, JIT)":
+        step("jit: same destructure as the interpreter, byte for byte")
+        val jit = run_probe_in_mode("jit")
+        val interp = run_probe_in_mode("interpreter")
+        expect(jit).to_contain("PROBE_DONE")
+        expect(field(jit, "FIRST_SUM")).to_equal("4")
+        expect(field(jit, "SECOND_REPR")).to_equal("2;4;")
+        expect(field(jit, "FIRST_SUM")).to_equal(field(interp, "FIRST_SUM"))
+        expect(field(jit, "SECOND_REPR")).to_equal(field(interp, "SECOND_REPR"))

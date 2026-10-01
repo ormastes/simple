@@ -48,7 +48,7 @@ This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` |
-| Updated | 2026-07-07 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -84,7 +84,7 @@ payload reached ring 3.
 Together these current readiness markers prove AP startup plus live guest
 evidence in the `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` readiness lane for both
 the freestanding helper path and the scheduler-owned green handoff path without
-using final ring/user markers as the scheduler-row pass condition.
+claiming the separate final ring/user transition.
 The generated manual is therefore current evidence for the SimpleOS part of
 the multicore-green lane, not a placeholder QEMU smoke.
 
@@ -158,7 +158,7 @@ _Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE
 - Verify the default Simple binary does not point at the stale release wrapper
    - Expected: DEFAULT_SIMPLE_BIN equals `src/compiler_rust/target/debug/simple`
 - Verify explicit live runs can still override the compiler path
-   - Expected: _simple_bin() equals `_default_live_simple_bin()`
+   - Expected: _simple_bin() equals `if rt_file_exists(BOOTSTRAP_SIMPLE_BIN): BOOTSTRAP_SIMPLE_BIN else: DEFAULT_S... (full value in folded executable source)`
 
 
 <details>
@@ -171,7 +171,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("Verify the default Simple binary does not point at the stale release wrapper")
 expect(DEFAULT_SIMPLE_BIN).to_equal("src/compiler_rust/target/debug/simple")
 step("Verify explicit live runs can still override the compiler path")
-expect(_simple_bin()).to_equal(_default_live_simple_bin())
+expect(_simple_bin()).to_equal(if rt_file_exists(BOOTSTRAP_SIMPLE_BIN): BOOTSTRAP_SIMPLE_BIN else: DEFAULT_SIMPLE_BIN)
 ```
 
 </details>
@@ -183,7 +183,6 @@ expect(_simple_bin()).to_equal(_default_live_simple_bin())
 - Skip live QEMU execution on hosts without qemu-system-x86_64
    - Expected: _qemu_available() is false
 - Build the SimpleOS green carrier guest probe
--  run shell
    - Expected: built is true
 - Boot the two-CPU guest probe under QEMU
    - TUI capture: after_step
@@ -199,8 +198,10 @@ expect(_simple_bin()).to_equal(_default_live_simple_bin())
    - Expected: serial contains `GREEN_USER_ENTRY_BRIDGE_READY_MARKER`
    - Expected: serial contains `GREEN_USER_SYSCALL_BRIDGE_READY_MARKER`
    - Expected: serial contains `GREEN_USER_CR3_READY_MARKER`
-- Do not use final hardware handoff markers as the scheduler-row pass condition
-   - Expected: _has_required_markers(serial) is true
+- Verify scheduler-only live lane does not print final hardware handoff markers
+   - Expected: serial does not contain `GREEN_HW_HANDOFF_MARKER`
+   - Expected: serial does not contain `GREEN_USER_ENTRY_MARKER`
+   - Expected: serial does not contain `GREEN_USER_SYSCALL_MARKER`
 
 
 <details>
@@ -219,26 +220,26 @@ elif not _qemu_available():
 else:
     step("Build the SimpleOS green carrier guest probe")
     val output_path = "build/os/simpleos_green_carrier_probe.elf"
-    _run_shell("rm -f " + output_path)
     val built = _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
     expect(built).to_equal(true)
-    if built == true:
-        step("Boot the two-CPU guest probe under QEMU")
-        val result = _run_probe(output_path)
-        val serial = result[0]
-        if not _has_required_markers(serial):
-            _print_probe_debug(serial, result[1])
-        step("Verify AP startup and current green carrier readiness markers")
-        expect(serial.contains(AP_ONLINE_MARKER)).to_equal(true)
-        expect(serial.contains(GREEN_PASS_MARKER)).to_equal(true)
-        expect(serial.contains(GREEN_PREEMPT_MARKER)).to_equal(true)
-        expect(serial.contains(GREEN_SCHED_HANDOFF_MARKER)).to_equal(true)
-        expect(serial.contains(GREEN_USER_HANDOFF_READY_MARKER)).to_equal(true)
-        expect(serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)).to_equal(true)
-        expect(serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)).to_equal(true)
-        expect(serial.contains(GREEN_USER_CR3_READY_MARKER)).to_equal(true)
-        step("Do not use final hardware handoff markers as the scheduler-row pass condition")
-        expect(_has_required_markers(serial)).to_equal(true)
+    step("Boot the two-CPU guest probe under QEMU")
+    val result = _run_probe(output_path)
+    val serial = result[0]
+    if not _has_required_markers(serial):
+        _print_probe_debug(serial, result[1])
+    step("Verify AP startup and current green carrier readiness markers")
+    expect(serial.contains(AP_ONLINE_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_PASS_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_PREEMPT_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_SCHED_HANDOFF_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_USER_HANDOFF_READY_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_USER_CR3_READY_MARKER)).to_equal(true)
+    step("Verify scheduler-only live lane does not print final hardware handoff markers")
+    expect(serial.contains(GREEN_HW_HANDOFF_MARKER)).to_equal(false)
+    expect(serial.contains(GREEN_USER_ENTRY_MARKER)).to_equal(false)
+    expect(serial.contains(GREEN_USER_SYSCALL_MARKER)).to_equal(false)
 ```
 
 </details>
@@ -261,7 +262,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -274,20 +275,19 @@ elif not _qemu_available():
 else:
     step("Build the SimpleOS green carrier guest probe for final handoff evidence")
     val output_path = "build/os/simpleos_green_carrier_probe.elf"
-    val built = rt_file_exists(output_path) or _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
+    val built = _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
     expect(built).to_equal(true)
-    if built == true:
-        step("Boot the two-CPU guest probe under QEMU")
-        val result = _run_probe(output_path)
-        val serial = result[0]
-        if not serial.contains(GREEN_HW_HANDOFF_MARKER) or not serial.contains(GREEN_USER_ENTRY_MARKER) or not serial.contains(GREEN_USER_SYSCALL_MARKER):
-            _print_probe_debug(serial, result[1])
-        step("Verify AP startup, scheduler handoff, final hardware handoff, user entry, and syscall markers")
-        expect(serial).to_contain(AP_ONLINE_MARKER)
-        expect(serial).to_contain(GREEN_SCHED_HANDOFF_MARKER)
-        expect(serial).to_contain(GREEN_HW_HANDOFF_MARKER)
-        expect(serial).to_contain(GREEN_USER_ENTRY_MARKER)
-        expect(serial).to_contain(GREEN_USER_SYSCALL_MARKER)
+    step("Boot the two-CPU guest probe under QEMU")
+    val result = _run_probe(output_path)
+    val serial = result[0]
+    if not serial.contains(GREEN_HW_HANDOFF_MARKER) or not serial.contains(GREEN_USER_ENTRY_MARKER) or not serial.contains(GREEN_USER_SYSCALL_MARKER):
+        _print_probe_debug(serial, result[1])
+    step("Verify AP startup, scheduler handoff, final hardware handoff, user entry, and syscall markers")
+    expect(serial).to_contain(AP_ONLINE_MARKER)
+    expect(serial).to_contain(GREEN_SCHED_HANDOFF_MARKER)
+    expect(serial).to_contain(GREEN_HW_HANDOFF_MARKER)
+    expect(serial).to_contain(GREEN_USER_ENTRY_MARKER)
+    expect(serial).to_contain(GREEN_USER_SYSCALL_MARKER)
 ```
 
 </details>

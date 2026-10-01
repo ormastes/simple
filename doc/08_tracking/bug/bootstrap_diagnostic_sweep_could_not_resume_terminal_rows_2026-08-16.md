@@ -1,4 +1,8 @@
 # Bootstrap diagnostic sweep could not resume terminal rows
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-16
 - Owner: `/root/sweep_planner`
@@ -59,3 +63,4 @@ watchdog artifacts may be absent where the terminal class permits it.
 Quarantine slot allocation checks every known suffix (including partial status,
 claim, log, and evidence receipts), so an older incomplete slot is never
 overwritten.
+

@@ -44,7 +44,7 @@ pub(super) fn eval_control_expr(
                         .into_iter()
                         .map(|(k, (o, s))| (k, o.to_string(), s))
                         .collect::<Vec<_>>(),
-                    collect_free_vars(body),
+                    collect_lambda_free_vars(body, params),
                 );
             }
             // For move closures, we capture by value (clone the environment)
@@ -62,7 +62,7 @@ pub(super) fn eval_control_expr(
                 // name->value map demotes imported global aliases to locals,
                 // which loses their defining owner and recreates the stage-4
                 // stale-arena-index class of bug on lambda global writes.
-                let used = collect_free_vars(body);
+                let used = collect_lambda_free_vars(body, params);
                 let used: HashSet<String> = used.iter().map(|s| s.to_string()).collect();
                 Arc::new(env.project_preserving_bindings(&used))
             };
@@ -243,10 +243,13 @@ pub(super) fn eval_control_expr(
                     // walks the overlay), so each statement after a match
                     // expression cost O(module globals). See bug
                     // seed_match_expression_return_arm_statement_cost_cliff_2026-08-22.
-                    arm_env.clear_dirty();
                     for (name, value) in arm_bindings {
                         arm_env.insert(name, value);
                     }
+                    // Pattern bindings are arm-local setup, not writes by the
+                    // arm body. Clear them after insertion so dirty-only
+                    // write-back cannot overwrite a same-named outer value.
+                    arm_env.clear_dirty();
                     let mut result = Value::Nil;
                     let stmt_count = arm.body.statements.len();
                     for (idx, stmt) in arm.body.statements.iter().enumerate() {
@@ -394,6 +397,46 @@ fn collect_free_vars(expr: &Expr) -> HashSet<String> {
     let mut bound: Vec<String> = Vec::new();
     collect_free_vars_recursive(expr, &mut bound, &mut vars);
     vars
+}
+
+/// Collect the names an outer frame must capture for a lambda body.
+///
+/// The lambda's own parameters are lexical bindings, not free reads.  Seeding
+/// them here is important when an imported module has the same bare name: the
+/// module binding must not be copied into the closure under a parameter name.
+fn collect_lambda_free_vars(expr: &Expr, params: &[LambdaParam]) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    let mut bound: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
+    collect_free_vars_recursive(expr, &mut bound, &mut vars);
+    vars
+}
+
+#[cfg(test)]
+mod lambda_capture_tests {
+    use super::*;
+
+    #[test]
+    fn lambda_parameter_shadows_same_named_module_capture() {
+        let body = Expr::FieldAccess {
+            receiver: Box::new(Expr::Identifier("server".to_string())),
+            field: "id".to_string(),
+        };
+        let params = vec![LambdaParam {
+            name: "server".to_string(),
+            ty: None,
+        }];
+
+        assert!(
+            collect_free_vars(&body).contains("server"),
+            "regression setup must expose the old over-capture"
+        );
+        let captures = collect_lambda_free_vars(&body, &params);
+
+        assert!(
+            !captures.contains("server"),
+            "lambda parameter was captured as an imported module"
+        );
+    }
 }
 
 /// Record `name` as free unless an enclosing binder inside the walked body owns it.
@@ -747,6 +790,7 @@ fn collect_free_vars_recursive(expr: &Expr, bound: &mut Vec<String>, vars: &mut 
         | Expr::ExistsCheck(expr)
         | Expr::Spread(expr)
         | Expr::DictSpread(expr)
+        | Expr::StructSpread(expr)
         | Expr::OptionalChain { expr, .. } => {
             collect_free_vars_recursive(expr, bound, vars);
         }

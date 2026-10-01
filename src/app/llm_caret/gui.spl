@@ -2,8 +2,23 @@
 # Pure page, request, and response helpers are shared by the live HTTP adapter
 # and system tests. Provider dispatch stays in main.spl so the self-hosted JIT
 # never has to carry a function-valued callback across this module boundary.
+#
+# `caret_gui_html()` now renders the workbench composition (lane A7,
+# doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md
+# §4.1/§4.2): left control column (roster + selected-agent details +
+# composer) and a right area (one large selected session + a preview strip),
+# driven from the same `session_contract` state the TUI uses, instead of the
+# old centered single-conversation page. Real session data now arrives through
+# `workbench.session_source`'s live registry (lane A8): the manager's owner
+# publishes its roster there and `caret_gui_html()` renders it. An empty
+# registry still renders an empty roster -- that is the honest page before any
+# agent is launched.
 
 use app.llm_caret.json_helpers.{extract_json_string, escape_json_text}
+use app.llm_caret.workbench.gui_layout.{WorkbenchMode, SessionUiState}
+use app.llm_caret.workbench.gui_page.{render_workbench_page_with_output}
+use app.llm_caret.workbench.session_source.{live_sessions, live_selected,
+    live_pane_id, live_pane_lines}
 
 fn _caret_gui_html_escape(value: text) -> text:
     var escaped = value.replace("&", "&amp;")
@@ -12,75 +27,16 @@ fn _caret_gui_html_escape(value: text) -> text:
     escaped = escaped.replace("\"", "&quot;")
     escaped
 
+# Serves the LIVE workbench state (lane A8): the roster is whatever
+# `multi_caret_manager` last published through
+# `workbench.session_source.publish_manager_sessions`, and the active region
+# shows the smux pane output last published by `workbench.pane_source`.
+# Nothing published yet renders an empty roster -- the honest "no agents
+# launched" page, never fabricated rows.
 fn caret_gui_html() -> text:
-    """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LLM Caret</title>
-<style>
-:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-body { margin: 0; min-height: 100vh; background: #0b1020; color: #eef2ff; display: grid; place-items: center; }
-main { width: min(720px, calc(100vw - 32px)); background: #151b2e; border: 1px solid #334155; border-radius: 18px; box-shadow: 0 24px 70px #0008; overflow: hidden; }
-header { padding: 22px 24px; border-bottom: 1px solid #334155; }
-h1 { margin: 0; font-size: 1.25rem; }
-#status { color: #86efac; font-size: .85rem; margin-top: 6px; }
-#messages { min-height: 260px; max-height: 55vh; overflow: auto; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
-.message { padding: 12px 14px; border-radius: 12px; white-space: pre-wrap; }
-.user { align-self: flex-end; background: #2563eb; }
-.assistant { align-self: flex-start; background: #273449; }
-form { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 18px 24px 24px; }
-input, button { min-height: 44px; border-radius: 10px; border: 1px solid #475569; font: inherit; }
-input { padding: 0 12px; color: #f8fafc; background: #0f172a; }
-button { padding: 0 20px; color: white; background: #2563eb; cursor: pointer; }
-button:disabled { opacity: .6; cursor: wait; }
-</style>
-</head>
-<body>
-<main aria-label="LLM Caret chat">
-<header><h1>LLM Caret</h1><div id="status" role="status">Connected</div></header>
-<section id="messages" aria-live="polite" aria-label="Conversation"></section>
-<form id="chat-form">
-<label for="prompt" hidden>Message</label>
-<input id="prompt" name="prompt" autocomplete="off" placeholder="Message LLM Caret" autofocus required>
-<button id="send" type="submit">Send</button>
-</form>
-</main>
-<script>
-const form = document.getElementById('chat-form');
-const prompt = document.getElementById('prompt');
-const messages = document.getElementById('messages');
-const send = document.getElementById('send');
-function add(role, text) {
-  const node = document.createElement('div');
-  node.className = 'message ' + role;
-  node.dataset.role = role;
-  node.textContent = text;
-  messages.appendChild(node);
-  messages.scrollTop = messages.scrollHeight;
-}
-form.addEventListener('submit', async function(event) {
-  event.preventDefault();
-  const text = prompt.value.trim();
-  if (!text) return;
-  add('user', text);
-  prompt.value = '';
-  send.disabled = true;
-  try {
-    const response = await fetch('/api/chat', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({content: text})});
-    const data = await response.json();
-    add('assistant', data.content || data.error || 'No response');
-  } catch (error) {
-    add('assistant', 'Connection error');
-  } finally {
-    send.disabled = false;
-    prompt.focus();
-  }
-});
-</script>
-</body>
-</html>"""
+    var no_states: [SessionUiState] = []
+    render_workbench_page_with_output(live_sessions(), live_selected(),
+        no_states, WorkbenchMode.Full, live_pane_id(), live_pane_lines())
 
 fn caret_gui_json_content(content: text) -> text:
     "{\"content\":\"{escape_json_text(content)}\"}"

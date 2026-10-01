@@ -65,17 +65,6 @@ extern size_t strlen(const char *s);
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
 
-/* gdt64_tss_desc is defined for real in boot/crt0.s as a 16-byte TSS descriptor
- * INSIDE gdt64 (selector 0x30, within the GDTR limit, in writable .data). The
- * former weak free-floating .bss array here was never seen by `ltr 0x30` (the
- * CPU reads the active GDT, not this symbol), so it made rt_x86_tss_init's
- * descriptor write a no-op and ltr #GP(0x30). Removed in favour of the crt0.s
- * slot. */
-
-__attribute__((weak)) void spl_x86_on_user_fault(void) {
-    serial_puts("[fault] user fault hook missing\r\n");
-}
-
 /* serial_puthex is `static` in baremetal_stubs.c and not linkable from here.
  * The rt_tuple_/rt_closure_ diagnostic prints below are debug-only, so stub
  * them out locally rather than teaching the other TU to export the helper.
@@ -88,7 +77,6 @@ extern RuntimeValue rt_string_from_cstr(const char *cstr);
 extern RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 extern RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_string_len(RuntimeValue str);
-extern RuntimeValue rt_string_data(RuntimeValue str);
 extern RuntimeValue rt_value_to_string(RuntimeValue val);
 extern RuntimeValue rt_array_new(RuntimeValue cap);
 extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
@@ -97,8 +85,6 @@ extern RuntimeValue rt_array_len(RuntimeValue arr);
 extern RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_enum_new(RuntimeValue eid, RuntimeValue disc, RuntimeValue payload);
 extern RuntimeValue rt_print(RuntimeValue val);
-extern RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
-extern RuntimeValue rt_map_remove(RuntimeValue map, RuntimeValue key);
 
 /* Helper: decode to RuntimeString */
 static RuntimeString *_decode_str(RuntimeValue v) {
@@ -428,7 +414,7 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv) {
     if (len <= 0) len = 0;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -606,42 +592,194 @@ RuntimeValue rt_field_set(RuntimeValue object, RuntimeValue field_index, Runtime
 }
 
 
-/* ---- rt_closure_* (closure introspection) ---- */
+/* ---- rt_closure_* (first-class closures) ----
+ *
+ * PORT, not a new symbol. All four names are declared in
+ * src/runtime/runtime.h:664-667 and defined for the hosted target in
+ * src/runtime/runtime_native.c (rt_closure_new at :8042). The riscv64
+ * freestanding sibling carries the same port at
+ * examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:1317.
+ *
+ * Until now x86_64 had the three ACCESSORS but no allocator: baremetal_stubs.c
+ * deliberately left `rt_closure_new` unresolved, so it bound to auto_stubs.c's
+ * WEAK 8-argument `return NIL_VALUE` catch-all. The image linked clean and then
+ * faulted at 0x080059f1 the moment a closure was called, because every closure
+ * value was NIL and the indirect call went through a NULL func_ptr. That is the
+ * mcp component row. A stub here is precisely the failure mode, so this is a
+ * real allocator.
+ *
+ * PARAMETER WIDTHS ARE NOT FREE CHOICES — they are the codegen ABI, declared in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:678-681:
+ *   rt_closure_new         (I64, I32)      -> I64
+ *   rt_closure_set_capture (I64, I32, I64) -> I8
+ *   rt_closure_get_capture (I64, I32)      -> I64
+ *   rt_closure_func_ptr    (I64)           -> I64
+ * and matched by the Rust runtime (value/objects.rs:177,198,213,227), whose
+ * index/count parameters are `u32`. The accessors below previously declared
+ * those parameters as 64-bit RuntimeValue, which leaves the upper half of the
+ * register undefined; the same defect trapped the riscv64 lane and is recorded
+ * in that file's port comment.
+ *
+ * Differences from the hosted definition, and why each is correct here:
+ *   * `rt_core_register_closure` is dropped: this runtime has no collector and
+ *     never frees, so every closure is already immortal.
+ *   * captures are filled with NIL_VALUE explicitly rather than relying on
+ *     zeroing — NIL_VALUE is TAG_SPECIAL (0x3), not 0.
+ *   * func_ptr is stored RAW (untagged): codegen passes and expects a bare code
+ *     address, and tagging it would corrupt the indirect call.
+ *
+ * Layout is the one the pre-existing accessors already assumed, kept verbatim
+ * so nothing that reads a closure has to change:
+ *   HeapHeader | func_ptr i64 @+0 | capture_count u32 @+8 | pad | captures @+16
+ */
+
+typedef struct {
+    HeapHeader   hdr;
+    int64_t      func_ptr;
+    uint32_t     capture_count;
+    uint32_t     _pad;
+    RuntimeValue captures[];
+} RuntimeClosure;
+
+_Static_assert(offsetof(RuntimeClosure, func_ptr) == sizeof(HeapHeader),
+               "closure func_ptr must follow the header immediately");
+_Static_assert(offsetof(RuntimeClosure, captures) == sizeof(HeapHeader) + 16,
+               "closure captures must sit 16 bytes past the header: the accessors read them there");
+
+/* Reject a handle that is not a closure rather than reading a foreign field. */
+static RuntimeClosure *_as_closure(RuntimeValue value) {
+    if (!IS_HEAP(value)) return (RuntimeClosure *)0;
+    RuntimeClosure *c = (RuntimeClosure *)DECODE_PTR(value);
+    if (!c || c->hdr.type != HEAP_CLOSURE) return (RuntimeClosure *)0;
+    return c;
+}
+
+RuntimeValue rt_closure_new(RuntimeValue func_ptr, uint32_t capture_count) {
+    int64_t count = (int64_t)capture_count;
+    if (!func_ptr || count < 0) return NIL_VALUE;
+    /* Bounded like every other allocation in this file. */
+    if (count > 4096) return NIL_VALUE;
+    RuntimeClosure *c = (RuntimeClosure *)malloc(
+        sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
+    if (!c) return NIL_VALUE;
+    runtime_heap_header_init(&c->hdr, HEAP_CLOSURE);
+    c->hdr.size = (uint32_t)(sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
+    c->func_ptr = (int64_t)func_ptr;
+    c->capture_count = (uint32_t)count;
+    c->_pad = 0;
+    for (int64_t i = 0; i < count; i++) c->captures[i] = NIL_VALUE;
+    return ENCODE_PTR(c);
+}
 
 RuntimeValue rt_closure_func_ptr(RuntimeValue closure) {
-    if (!IS_HEAP(closure)) return 0;
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(closure);
-    if (!h || h->type != HEAP_CLOSURE) return 0;
-    /* Closure layout: HeapHeader + func_ptr(i64) + capture_count(u32) + captures[] */
-    int64_t *func = (int64_t *)(h + 1);
-    return (RuntimeValue)*func;
+    RuntimeClosure *c = _as_closure(closure);
+    return c ? (RuntimeValue)c->func_ptr : 0;
 }
 
-RuntimeValue rt_closure_get_capture(RuntimeValue closure, RuntimeValue index) {
-    if (!IS_HEAP(closure)) return NIL_VALUE;
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(closure);
-    if (!h || h->type != HEAP_CLOSURE) return NIL_VALUE;
-    /* func_ptr(8 bytes) + capture_count(4 bytes) + padding(4 bytes) + captures[] */
-    uint8_t *base = (uint8_t *)(h + 1);
-    uint32_t cap_count = *(uint32_t *)(base + 8);
-    RuntimeValue *captures = (RuntimeValue *)(base + 16);
-    uint32_t idx = (uint32_t)(int64_t)index;
-    if (idx >= cap_count) return NIL_VALUE;
-    return captures[idx];
+RuntimeValue rt_closure_get_capture(RuntimeValue closure, uint32_t index) {
+    RuntimeClosure *c = _as_closure(closure);
+    if (!c || index >= c->capture_count) return NIL_VALUE;
+    return c->captures[index];
 }
 
-RuntimeValue rt_closure_set_capture(RuntimeValue closure, RuntimeValue index, RuntimeValue value) {
-    if (!IS_HEAP(closure)) return 0;
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(closure);
-    if (!h || h->type != HEAP_CLOSURE) return 0;
-    uint8_t *base = (uint8_t *)(h + 1);
-    uint32_t cap_count = *(uint32_t *)(base + 8);
-    RuntimeValue *captures = (RuntimeValue *)(base + 16);
-    uint32_t idx = (uint32_t)(int64_t)index;
-    if (idx >= cap_count) return 0;
-    captures[idx] = value;
+/* Returns I8 per the codegen spec, not a tagged RuntimeValue. */
+int8_t rt_closure_set_capture(RuntimeValue closure, uint32_t index, RuntimeValue value) {
+    RuntimeClosure *c = _as_closure(closure);
+    if (!c || index >= c->capture_count) return 0;
+    c->captures[index] = value;
     return 1;
 }
+
+
+/* ---- rt_string_builder_* (loop string accumulation) ----
+ *
+ * PORT of hosted names (runtime.h:403-407, runtime_native.c), mirroring the
+ * riscv64 freestanding port. Found by probe there, not by reading codegen:
+ * `acc = acc + x` inside a loop does NOT lower to repeated rt_string_concat —
+ * codegen rewrites it into a builder. x86_64 freestanding had none of these, so
+ * every such call bound to auto_stubs.c's weak nil stub and every accumulated
+ * string came back empty.
+ *
+ * rt_string_builder_push takes TWO arguments and the second is a tagged string
+ * HANDLE, not a raw char* plus length (runtime.h:405). Getting that wrong is
+ * what produced NUL bytes and a hang on riscv64.
+ */
+
+#define HEAP_STRING_BUILDER 13
+
+typedef struct {
+    HeapHeader hdr;
+    uint32_t   len;
+    uint32_t   cap;
+    char      *data;
+} RuntimeStringBuilder;
+
+RuntimeValue rt_string_builder_new(void) {
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)malloc(sizeof(RuntimeStringBuilder));
+    if (!b) return NIL_VALUE;
+    /* DISTINCT heap type so a builder handle can never be read back as a
+     * RuntimeString by rt_string_len / rt_string_data. */
+    runtime_heap_header_init(&b->hdr, HEAP_STRING_BUILDER);
+    b->hdr.size = (uint32_t)sizeof(RuntimeStringBuilder);
+    b->len = 0;
+    b->cap = 64;
+    b->data = (char *)malloc(b->cap);
+    if (!b->data) return NIL_VALUE;
+    b->data[0] = 0;
+    return ENCODE_PTR(b);
+}
+
+RuntimeValue rt_string_builder_len(RuntimeValue builder) {
+    if (!IS_HEAP(builder)) return 0;
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) return 0;
+    return (RuntimeValue)(int64_t)b->len;
+}
+
+RuntimeValue rt_string_builder_push(RuntimeValue builder, RuntimeValue string) {
+    if (!IS_HEAP(builder)) return builder;
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) return builder;
+
+    RuntimeString *s = IS_HEAP(string) ? (RuntimeString *)DECODE_PTR(string) : (RuntimeString *)0;
+    if (!s || s->hdr.type != HEAP_STRING) return builder;
+    uint32_t add = (uint32_t)s->len;
+    const char *src = s->data;
+    if (add == 0) return builder;
+
+    if (b->len + add + 1U > b->cap) {
+        /* DOUBLE rather than reallocating per push: the freestanding heap does
+         * not free, so per-append reallocation exhausts it. */
+        uint32_t want = b->cap ? b->cap : 64U;
+        while (want < b->len + add + 1U) want *= 2U;
+        char *grown = (char *)malloc(want);
+        if (!grown) return builder;
+        for (uint32_t i = 0; i < b->len; i++) grown[i] = b->data[i];
+        b->data = grown;
+        b->cap = want;
+    }
+    for (uint32_t i = 0; i < add; i++) b->data[b->len + i] = src[i];
+    b->len += add;
+    b->data[b->len] = 0;
+    return builder;
+}
+
+RuntimeValue rt_string_builder_finish(RuntimeValue builder) {
+    if (!IS_HEAP(builder)) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) {
+        return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    }
+    return rt_string_new((RuntimeValue)(uintptr_t)b->data, (RuntimeValue)(int64_t)b->len);
+}
+
+RuntimeValue rt_string_builder_free(RuntimeValue builder) {
+    /* This heap never frees; this exists so the symbol resolves. */
+    (void)builder;
+    return NIL_VALUE;
+}
+
+
 
 
 /* ---- rt_generator_* (coroutine state machine) ---- */
@@ -661,7 +799,7 @@ RuntimeValue rt_generator_new(RuntimeValue slot_count) {
     uint32_t sc = (uint32_t)(int64_t)slot_count;
     RuntimeGenerator *g = (RuntimeGenerator *)malloc(sizeof(RuntimeGenerator) + sc * sizeof(RuntimeValue));
     if (!g) return NIL_VALUE;
-    g->hdr.type = HEAP_GENERATOR;
+    runtime_heap_header_init(&g->hdr, HEAP_GENERATOR);
     g->hdr.size = (uint32_t)(sizeof(RuntimeGenerator) + sc * sizeof(RuntimeValue));
     g->state = 0;
     g->ctx = NIL_VALUE;
@@ -749,93 +887,68 @@ RuntimeValue rt_async_run_until_complete(RuntimeValue future) { (void)future; re
 RuntimeValue rt_async_schedule_await(RuntimeValue future, RuntimeValue callback) { (void)future; (void)callback; return NIL_VALUE; }
 
 
-/* ---- rt_atomic_* (single-core baremetal — no actual contention) ---- */
+/* ---- rt_atomic_* (shared freestanding slot owner) ---- */
 
-/* Atomic int: on single-core baremetal, just a boxed i64 */
+typedef int64_t spl_i64;
+typedef uint64_t spl_u64;
+#include "../../../../../../src/runtime/startup/baremetal/atomic_slot_owner.inc.c"
+
 RuntimeValue rt_atomic_int_new(RuntimeValue initial) {
-    int64_t *p = (int64_t *)malloc(sizeof(int64_t));
-    if (!p) return 0;
-    *p = (int64_t)initial;
-    return (RuntimeValue)(uintptr_t)p;
+    return (RuntimeValue)simpleos_atomic_core_new((spl_i64)initial);
 }
 
 RuntimeValue rt_atomic_int_load(RuntimeValue handle) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    return p ? (RuntimeValue)*p : 0;
+    return (RuntimeValue)simpleos_atomic_core_load((spl_i64)handle);
 }
 
 RuntimeValue rt_atomic_int_store(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (p) *p = (int64_t)value;
+    simpleos_atomic_core_store((spl_i64)handle, (spl_i64)value);
     return NIL_VALUE;
 }
 
 RuntimeValue rt_atomic_int_swap(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    int64_t old = *p;
-    *p = (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)simpleos_atomic_core_swap((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_compare_exchange(RuntimeValue handle, RuntimeValue current, RuntimeValue new_val) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    if (*p == (int64_t)current) {
-        *p = (int64_t)new_val;
-        return 1;
-    }
-    return 0;
+    return (RuntimeValue)simpleos_atomic_core_compare_exchange(
+        (spl_i64)handle, (spl_i64)current, (spl_i64)new_val);
 }
 
 RuntimeValue rt_atomic_int_fetch_add(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    int64_t old = *p;
-    *p += (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)simpleos_atomic_core_fetch_add((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_sub(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    int64_t old = *p;
-    *p -= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)simpleos_atomic_core_fetch_sub((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_and(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    int64_t old = *p;
-    *p &= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)simpleos_atomic_core_fetch_and((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_or(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    int64_t old = *p;
-    *p |= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)simpleos_atomic_core_fetch_or((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_xor(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    int64_t old = *p;
-    *p ^= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)simpleos_atomic_core_fetch_xor((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_free(RuntimeValue handle) {
-    (void)handle; /* bump allocator */
+    simpleos_atomic_core_free((spl_i64)handle);
     return NIL_VALUE;
 }
 
 /* Atomic bool */
+static RuntimeValue simpleos_atomic_bool_arg(RuntimeValue value) {
+    if (value == TAGGED_BOOL_FALSE) return 0;
+    if (value == TAGGED_BOOL_TRUE) return 1;
+    return value ? 1 : 0;
+}
+
 RuntimeValue rt_atomic_bool_new(RuntimeValue initial) {
-    return rt_atomic_int_new(initial ? 1 : 0);
+    return rt_atomic_int_new(simpleos_atomic_bool_arg(initial));
 }
 
 RuntimeValue rt_atomic_bool_load(RuntimeValue handle) {
@@ -843,16 +956,34 @@ RuntimeValue rt_atomic_bool_load(RuntimeValue handle) {
 }
 
 RuntimeValue rt_atomic_bool_store(RuntimeValue handle, RuntimeValue value) {
-    return rt_atomic_int_store(handle, value ? 1 : 0);
+    return rt_atomic_int_store(handle, simpleos_atomic_bool_arg(value));
 }
 
 RuntimeValue rt_atomic_bool_swap(RuntimeValue handle, RuntimeValue value) {
-    return rt_atomic_int_swap(handle, value ? 1 : 0) ? 1 : 0;
+    return rt_atomic_int_swap(handle, simpleos_atomic_bool_arg(value)) ? 1 : 0;
+}
+
+RuntimeValue rt_atomic_bool_compare_exchange(RuntimeValue handle,
+                                             RuntimeValue current,
+                                             RuntimeValue new_value) {
+    return rt_atomic_int_compare_exchange(handle,
+        simpleos_atomic_bool_arg(current), simpleos_atomic_bool_arg(new_value));
+}
+
+RuntimeValue rt_atomic_bool_fetch_and(RuntimeValue handle, RuntimeValue value) {
+    return rt_atomic_int_fetch_and(handle, simpleos_atomic_bool_arg(value)) ? 1 : 0;
+}
+
+RuntimeValue rt_atomic_bool_fetch_or(RuntimeValue handle, RuntimeValue value) {
+    return rt_atomic_int_fetch_or(handle, simpleos_atomic_bool_arg(value)) ? 1 : 0;
+}
+
+RuntimeValue rt_atomic_bool_fetch_not(RuntimeValue handle) {
+    return rt_atomic_int_fetch_xor(handle, 1) ? 1 : 0;
 }
 
 RuntimeValue rt_atomic_bool_free(RuntimeValue handle) {
-    (void)handle;
-    return NIL_VALUE;
+    return rt_atomic_int_free(handle);
 }
 
 
@@ -873,7 +1004,7 @@ typedef struct {
 RuntimeValue rt_shared_new(RuntimeValue value) {
     SharedBox *b = (SharedBox *)malloc(sizeof(SharedBox));
     if (!b) return NIL_VALUE;
-    b->hdr.type = HEAP_SHARED;
+    runtime_heap_header_init(&b->hdr, HEAP_SHARED);
     b->hdr.size = (uint32_t)sizeof(SharedBox);
     b->ref_count = 1;
     b->_pad = 0;
@@ -924,7 +1055,7 @@ RuntimeValue rt_shared_downgrade(RuntimeValue shared) {
     /* Store the SharedBox pointer as a "weak" ref */
     SharedBox *w = (SharedBox *)malloc(sizeof(SharedBox));
     if (!w) return NIL_VALUE;
-    w->hdr.type = HEAP_WEAK;
+    runtime_heap_header_init(&w->hdr, HEAP_WEAK);
     w->hdr.size = (uint32_t)sizeof(SharedBox);
     w->ref_count = 0;
     w->value = shared; /* store original shared ref */
@@ -934,7 +1065,7 @@ RuntimeValue rt_shared_downgrade(RuntimeValue shared) {
 RuntimeValue rt_unique_new(RuntimeValue value) {
     SharedBox *b = (SharedBox *)malloc(sizeof(SharedBox));
     if (!b) return NIL_VALUE;
-    b->hdr.type = HEAP_UNIQUE;
+    runtime_heap_header_init(&b->hdr, HEAP_UNIQUE);
     b->hdr.size = (uint32_t)sizeof(SharedBox);
     b->ref_count = 1;
     b->value = value;
@@ -1036,7 +1167,7 @@ typedef struct {
 RuntimeValue rt_future_new(void) {
     RuntimeFuture *f = (RuntimeFuture *)malloc(sizeof(RuntimeFuture));
     if (!f) return NIL_VALUE;
-    f->hdr.type = HEAP_FUTURE;
+    runtime_heap_header_init(&f->hdr, HEAP_FUTURE);
     f->hdr.size = (uint32_t)sizeof(RuntimeFuture);
     f->state = 0;
     f->result = NIL_VALUE;
@@ -1137,7 +1268,7 @@ RuntimeValue rt_random_hex(RuntimeValue len_rv) {
     if (len <= 0 || len > 1024) len = 16;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
     s->len = (uint32_t)len;
     for (int64_t i = 0; i < len; i++) {
@@ -1302,30 +1433,10 @@ RuntimeValue rt_slice(RuntimeValue collection, RuntimeValue start, RuntimeValue 
 /* ---- Miscellaneous genuinely useful ---- */
 
 RuntimeValue rt_char_from_code(RuntimeValue code) {
-    int64_t c = (int64_t)code;
-    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF))
-        return rt_string_from_cstr("");
-    char buf[5] = { 0, 0, 0, 0, 0 };
-    RuntimeValue len = 1;
-    if (c < 0x80) {
-        buf[0] = (char)c;
-    } else if (c < 0x800) {
-        len = 2;
-        buf[0] = (char)(0xC0 | (c >> 6));
-        buf[1] = (char)(0x80 | (c & 0x3F));
-    } else if (c < 0x10000) {
-        len = 3;
-        buf[0] = (char)(0xE0 | (c >> 12));
-        buf[1] = (char)(0x80 | ((c >> 6) & 0x3F));
-        buf[2] = (char)(0x80 | (c & 0x3F));
-    } else {
-        len = 4;
-        buf[0] = (char)(0xF0 | (c >> 18));
-        buf[1] = (char)(0x80 | ((c >> 12) & 0x3F));
-        buf[2] = (char)(0x80 | ((c >> 6) & 0x3F));
-        buf[3] = (char)(0x80 | (c & 0x3F));
-    }
-    return rt_string_new((RuntimeValue)(uintptr_t)buf, len);
+    int64_t c = DECODE_INT(code);
+    if (c < 0 || c > 127) c = '?';
+    char buf[2] = { (char)c, '\0' };
+    return rt_string_from_cstr(buf);
 }
 
 RuntimeValue rt_str_hash(RuntimeValue str) {
@@ -1355,24 +1466,6 @@ RuntimeValue rt_text_to_bytes(RuntimeValue str) {
     return arr;
 }
 
-uint64_t rt_text_raw_z_size(RuntimeValue str) {
-    return (uint64_t)rt_string_len(str) + 1U;
-}
-
-uint64_t rt_text_copy_z_to_raw(uint64_t dst, RuntimeValue str) {
-    char *out = (char *)(uintptr_t)dst;
-    const char *src = (const char *)(uintptr_t)rt_string_data(str);
-    uint64_t len = (uint64_t)rt_string_len(str);
-    if (!out) return 0;
-    if (!src) {
-        out[0] = '\0';
-        return 1;
-    }
-    for (uint64_t i = 0; i < len; i++) out[i] = src[i];
-    out[len] = '\0';
-    return len + 1U;
-}
-
 RuntimeValue rt_bytes_from_raw(RuntimeValue ptr, RuntimeValue len) {
     uint8_t *p = (uint8_t *)(uintptr_t)ptr;
     int64_t n = (int64_t)len;
@@ -1389,7 +1482,7 @@ RuntimeValue rt_bytes_to_text(RuntimeValue arr_rv) {
     if (!a || a->len == 0) return rt_string_from_cstr("");
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + a->len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + a->len + 1);
     s->len = a->len;
     for (uint32_t i = 0; i < a->len; i++) {
@@ -1452,81 +1545,8 @@ static inline uint64_t _rdtsc(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-
-static inline void _cpuid(uint32_t leaf, uint32_t *a, uint32_t *b,
-                          uint32_t *c, uint32_t *d) {
-    __asm__ volatile("cpuid"
-                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
-                     : "a"(leaf), "c"(0));
-}
-
-#ifndef SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS
-#define SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS 10000000ULL
-#endif
-
-static inline uint8_t _boot_inb(uint16_t port) {
-    uint8_t value;
-    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
-
-static inline void _boot_outb(uint16_t port, uint8_t value) {
-    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static uint64_t _pit_tsc_frequency_hz(void) {
-    const uint16_t pit_count = 11932U;
-    uint8_t original_control = _boot_inb(0x61);
-    uint8_t stopped_control = (uint8_t)(original_control & 0xFEU);
-    _boot_outb(0x61, stopped_control);
-    _boot_outb(0x43, 0xB0);
-    _boot_outb(0x42, (uint8_t)(pit_count & 0xFFU));
-    _boot_outb(0x42, (uint8_t)(pit_count >> 8));
-    uint64_t start = _rdtsc();
-    _boot_outb(0x61, (uint8_t)(stopped_control | 0x01U));
-    uint64_t polls = 0;
-    uint8_t saw_low = 0;
-    uint8_t saw_transition = 0;
-    while (polls < SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS) {
-        uint8_t output_high = (uint8_t)(_boot_inb(0x61) & 0x20U);
-        if (output_high == 0) saw_low = 1;
-        if (saw_low != 0 && output_high != 0) {
-            saw_transition = 1;
-            break;
-        }
-        polls++;
-    }
-    uint64_t end = _rdtsc();
-    _boot_outb(0x61, original_control);
-    if (saw_transition == 0 || end <= start) return 0;
-    return ((end - start) * 1193182ULL) / pit_count;
-}
-
-static uint64_t _tsc_frequency_hz(void) {
-    static uint64_t cached;
-    static uint8_t initialized;
-    uint32_t a, b, c, d;
-    if (initialized != 0) return cached;
-    initialized = 1;
-    _cpuid(0, &a, &b, &c, &d);
-    if (a >= 0x15) {
-        uint32_t max_leaf = a;
-        _cpuid(0x15, &a, &b, &c, &d);
-        if (a != 0 && b != 0 && c != 0) {
-            cached = ((uint64_t)c * b) / a;
-            if (cached != 0) return cached;
-        }
-        if (max_leaf >= 0x16) {
-            _cpuid(0x16, &a, &b, &c, &d);
-            if (a != 0) cached = (uint64_t)a * 1000000ULL;
-        }
-    }
-    if (cached == 0) cached = _pit_tsc_frequency_hz();
-    return cached;
-}
 #else
 static inline uint64_t _rdtsc(void) { return 0; }
-static uint64_t _tsc_frequency_hz(void) { return 0; }
 #endif
 
 static uint64_t _boot_tsc = 0;
@@ -1534,10 +1554,8 @@ static uint64_t _boot_tsc = 0;
 RuntimeValue rt_time_now(void) {
     if (_boot_tsc == 0) _boot_tsc = _rdtsc();
     uint64_t elapsed = _rdtsc() - _boot_tsc;
-    uint64_t frequency = _tsc_frequency_hz();
-    if (frequency == 0) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)((elapsed / frequency) * 1000ULL
-        + ((elapsed % frequency) * 1000ULL) / frequency));
+    /* Approximate: assume ~2 GHz TSC */
+    return ENCODE_INT((int64_t)(elapsed / 2000000));
 }
 
 RuntimeValue rt_time_ms(void) {
@@ -1551,10 +1569,7 @@ RuntimeValue rt_time_millis(void) {
 RuntimeValue rt_time_now_micros(void) {
     if (_boot_tsc == 0) _boot_tsc = _rdtsc();
     uint64_t elapsed = _rdtsc() - _boot_tsc;
-    uint64_t frequency = _tsc_frequency_hz();
-    if (frequency == 0) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)((elapsed / frequency) * 1000000ULL
-        + ((elapsed % frequency) * 1000000ULL) / frequency));
+    return ENCODE_INT((int64_t)(elapsed / 2000));
 }
 
 RuntimeValue rt_time_now_unix_micros(void) {
@@ -1662,14 +1677,7 @@ RuntimeValue rt_hostname(void) { return rt_string_from_cstr("simpleos"); }
 RuntimeValue rt_native_build(RuntimeValue args) { (void)args; return NIL_VALUE; }
 RuntimeValue rt_dyn_torch_tensor_from_bits_1d(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return NIL_VALUE; }
 
-RuntimeValue rt_dict_insert(RuntimeValue d, RuntimeValue k, RuntimeValue v) {
-    RuntimeValue out = rt_map_set(d, k, v);
-    return IS_NIL(out) ? FALSE_VALUE : TRUE_VALUE;
-}
-
-RuntimeValue rt_dict_remove(RuntimeValue d, RuntimeValue k) {
-    return IS_NIL(rt_map_remove(d, k)) ? FALSE_VALUE : TRUE_VALUE;
-}
+RuntimeValue rt_dict_insert(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
 RuntimeValue rt_ensure_dir(RuntimeValue path) { (void)path; return NIL_VALUE; }
 RuntimeValue rt_exec(RuntimeValue cmd) { (void)cmd; return NIL_VALUE; }
 RuntimeValue rt_shell(RuntimeValue cmd, RuntimeValue args, RuntimeValue env) { (void)cmd; (void)args; (void)env; return NIL_VALUE; }
@@ -1800,11 +1808,7 @@ NOP1(rt_set_macro_trace)
 NOP1(rt_file_copy)
 NOP2(rt_file_copy_to)
 NOP1(rt_file_create)
-/* rt_file_exists is NOT stubbed here: baremetal_stubs.c defines it for real
- * over the FAT32-on-NVMe API, with the (ptr, len) ABI its call sites emit.
- * This NOP1 was a second STRONG definition returning NIL_VALUE; under the
- * freestanding link's `-z muldefs` it won by link order, so every existence
- * probe in std.enterprise_store's file backend answered "no" (lane W10-B). */
+NOP1(rt_file_exists)
 NOP1(rt_file_is_dir)
 NOP1(rt_file_is_file)
 NOP2(rt_file_lock)
@@ -2267,7 +2271,6 @@ NOP2(rt_lyon_transform_matrix)
 NOP1(rt_lyon_transform_identity)
 NOP2(rt_lyon_transform_apply)
 NOP1(rt_font_load)
-NOP2(rt_font_load_bytes)
 NOP2(rt_font_load_from_memory)
 NOP3(rt_font_render)
 NOP3(rt_font_measure)
@@ -2639,28 +2642,11 @@ NOP2(rt_simd_add_f32x8)
 NOP2(rt_simd_add_f64x2)
 NOP2(rt_simd_add_f64x4)
 NOP2(rt_simd_add_i32x4)
-NOP2(rt_simd_add_i64x4)
-NOP2(rt_simd_add_u32x4)
-NOP2(rt_simd_and_i32x4)
-NOP2(rt_simd_and_i32x8)
-NOP2(rt_simd_and_u32x4)
-NOP2(rt_simd_or_i32x4)
-NOP2(rt_simd_or_i32x8)
-NOP2(rt_simd_or_u32x4)
-NOP2(rt_simd_shl_i32x4)
-NOP2(rt_simd_shl_i32x8)
-NOP2(rt_simd_shr_i32x4)
-NOP2(rt_simd_shr_i32x8)
 NOP2(rt_simd_sub_f32x4)
 NOP2(rt_simd_sub_f32x8)
 NOP2(rt_simd_sub_f64x2)
 NOP2(rt_simd_sub_f64x4)
 NOP2(rt_simd_sub_i32x4)
-NOP2(rt_simd_sub_i64x4)
-NOP2(rt_simd_sub_u32x4)
-NOP2(rt_simd_xor_i32x4)
-NOP2(rt_simd_xor_i32x8)
-NOP2(rt_simd_xor_u32x4)
 NOP2(rt_simd_mul_f32x4)
 NOP2(rt_simd_mul_f32x8)
 NOP2(rt_simd_mul_f64x2)
@@ -3123,9 +3109,61 @@ NOP2(rt_driver_submit_stencil)
  * =================================================================== */
 
 /* ARM32 — 28 functions */
+NOP0(rt_arm32_cpsid_i)
+NOP0(rt_arm32_cpsid_if)
+NOP0(rt_arm32_cpsie_i)
+NOP0(rt_arm32_cpsie_if)
+NOP0(rt_arm32_dmb)
+NOP0(rt_arm32_dsb)
+NOP0(rt_arm32_isb)
+NOP1(rt_arm32_mcr_cntp_ctl)
+NOP1(rt_arm32_mcr_cntp_tval)
+NOP1(rt_arm32_mcr_dacr)
+NOP1(rt_arm32_mcr_sctlr)
+NOP0(rt_arm32_mcr_tlbiall)
+NOP1(rt_arm32_mcr_tlbimva)
+NOP1(rt_arm32_mcr_ttbcr)
+NOP1(rt_arm32_mcr_ttbr0)
+NOP1(rt_arm32_mcr_ttbr1)
+NOP1(rt_arm32_mcr_vbar)
+NOP0(rt_arm32_mrc_cntfrq)
+NOP0(rt_arm32_mrc_cntp_ctl)
+NOP0(rt_arm32_mrc_midr)
 NOP0(rt_arm32_mrc_mpidr)
+NOP0(rt_arm32_mrc_sctlr)
+NOP0(rt_arm32_mrc_ttbr0)
+NOP0(rt_arm32_mrc_ttbr1)
+NOP0(rt_arm32_mrrc_cntpct_hi)
+NOP0(rt_arm32_mrrc_cntpct_lo)
+NOP0(rt_arm32_wfe)
+NOP0(rt_arm32_wfi)
 
 /* ARM64 — 25 functions */
+NOP1(rt_arm64_daif_clr)
+NOP1(rt_arm64_daif_set)
+NOP0(rt_arm64_dmb)
+NOP0(rt_arm64_dsb)
+NOP0(rt_arm64_isb)
+NOP0(rt_arm64_mrs_cntfrq_el0)
+NOP0(rt_arm64_mrs_cntp_ctl_el0)
+NOP0(rt_arm64_mrs_cntpct_el0)
+NOP0(rt_arm64_mrs_currentel)
+NOP0(rt_arm64_mrs_mpidr_el1)
+NOP0(rt_arm64_mrs_sctlr_el1)
+NOP0(rt_arm64_mrs_ttbr0_el1)
+NOP0(rt_arm64_mrs_ttbr1_el1)
+NOP1(rt_arm64_msr_cntp_ctl_el0)
+NOP1(rt_arm64_msr_cntp_tval_el0)
+NOP1(rt_arm64_msr_mair_el1)
+NOP1(rt_arm64_msr_sctlr_el1)
+NOP1(rt_arm64_msr_tcr_el1)
+NOP1(rt_arm64_msr_ttbr0_el1)
+NOP1(rt_arm64_msr_ttbr1_el1)
+NOP1(rt_arm64_msr_vbar_el1)
+NOP0(rt_arm64_tlbi_alle1)
+NOP1(rt_arm64_tlbi_vae1)
+NOP0(rt_arm64_wfe)
+NOP0(rt_arm64_wfi)
 
 /* RISC-V 32 — 17 functions */
 NOP0(rt_rv32_csrr_mcause)
@@ -3134,6 +3172,7 @@ NOP0(rt_rv32_csrr_mhartid)
 NOP0(rt_rv32_csrr_mie)
 NOP0(rt_rv32_csrr_mstatus)
 NOP0(rt_rv32_csrr_mtvec)
+NOP0(rt_rv32_csrr_satp)
 NOP0(rt_rv32_csrr_time)
 NOP1(rt_rv32_csrw_mcause)
 NOP1(rt_rv32_csrw_mepc)
@@ -3142,6 +3181,8 @@ NOP1(rt_rv32_csrw_mstatus)
 NOP1(rt_rv32_csrw_mtvec)
 NOP1(rt_rv32_fence)
 NOP0(rt_rv32_mret)
+NOP0(rt_rv32_wfi)
+NOP0(rt_rv32_sfence_vma)
 
 /* ===================================================================
  * 5. AUTO-GENERATED REMAINING STUBS
@@ -3283,7 +3324,6 @@ NOP2(rt_cranelift_isub)
 NOP2(rt_cranelift_jump)
 NOP2(rt_cranelift_load)
 NOP2(rt_cranelift_new_aot_module)
-NOP2(rt_cranelift_new_aot_module_triple)
 NOP2(rt_cranelift_new_module)
 NOP2(rt_cranelift_new_signature)
 NOP2(rt_cranelift_null)
@@ -3391,8 +3431,6 @@ NOP2(rt_font_bitmap_free)
 NOP2(rt_font_bitmap_get_pixel)
 NOP2(rt_font_bitmap_height)
 NOP2(rt_font_bitmap_width)
-NOP2(rt_font_bitmap_xoff)
-NOP2(rt_font_bitmap_yoff)
 NOP2(rt_font_glyph_advance)
 NOP2(rt_font_glyph_bitmap)
 NOP2(rt_font_line_height)
@@ -3531,7 +3569,10 @@ NOP2(rt_io_tcp_write_text)
 NOP2(rt_io_udp_connect)
 NOP2(rt_io_udp_local_addr)
 NOP2(rt_io_udp_set_read_timeout)
-NOP2(rt_load_barrier)
+/* rt_load_barrier: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_lyon_fill_tessellate)
 NOP2(rt_lyon_fill_tessellate_with_rule)
 NOP2(rt_lyon_fill_tessellation_free)
@@ -3678,6 +3719,10 @@ NOP2(rt_rapier2d_world_cast_ray)
 NOP2(rt_rapier2d_world_get_contacts)
 NOP2(rt_rapier2d_world_intersection_test)
 NOP2(rt_read_cr0)
+/* rt_read_msr: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_read_stdin_line)
 NOP2(rt_regex_captures_len)
 NOP2(rt_regex_destroy)
@@ -3697,7 +3742,20 @@ NOP2(rt_rocm_memset)
 NOP2(rt_rocm_stream_synchronize)
 NOP2(rt_rocm_synchronize)
 NOP2(rt_rocm_unload_module)
+NOP2(rt_rv32_csrr_scause)
+NOP2(rt_rv32_csrr_sepc)
+NOP2(rt_rv32_csrr_sie)
+NOP2(rt_rv32_csrr_sip)
+NOP2(rt_rv32_csrr_sstatus)
+NOP2(rt_rv32_csrr_stval)
+NOP2(rt_rv32_csrr_stvec)
+NOP2(rt_rv32_csrw_satp)
+NOP2(rt_rv32_csrw_sepc)
+NOP2(rt_rv32_csrw_sie)
+NOP2(rt_rv32_csrw_sstatus)
+NOP2(rt_rv32_csrw_stvec)
 NOP2(rt_rv32_sbi_call)
+NOP2(rt_rv32_sfence_vma_all)
 NOP2(rt_sdl2_clear_quit)
 NOP2(rt_sdl2_event_key_mod)
 NOP2(rt_sdl2_event_key_sym)
@@ -3782,7 +3840,10 @@ NOP2(rt_ssh_get_methods)
 NOP2(rt_ssh_is_authenticated)
 NOP2(rt_ssh_set_timeout)
 NOP2(rt_stdin_read_all)
-NOP2(rt_store_barrier)
+/* rt_store_barrier: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_tar_extract_file)
 NOP2(rt_tcp_connect_timeout)
 NOP2(rt_term_enable_ansi)
@@ -3954,6 +4015,10 @@ NOP2(rt_vulkan_submit_and_wait)
 NOP2(rt_vulkan_wait_fence)
 NOP2(rt_vulkan_wait_idle)
 NOP2(rt_write_cr0)
+/* rt_write_msr: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_ws_receive)
 NOP2(rt_zip_extract_file)
 
@@ -3969,30 +4034,6 @@ RuntimeValue FontRenderer_dot_browser_serif_default(void) { return NIL_VALUE; }
 RuntimeValue KLogEntry_dot_from_bytes(void) { return NIL_VALUE; }
 RuntimeValue QualcommBackend_dot_is_adreno_gpu(void) { return FALSE_VALUE; }
 RuntimeValue tools__pkg__pkg_repository__TlsClient(void) { return NIL_VALUE; }
-
-/* rt_cuda_device_identity / rt_vulkan_accepted_compute_submit_count: these
- * are raw-i64 ABI (not tagged RuntimeValue -- see &[I64],&[I64] in
- * codegen/runtime_sffi.rs), so they must NOT use the NOP1/NOP0 macros
- * above (those return the tagged NIL_VALUE bit pattern, which a raw-int
- * caller would not see as <= 0). Reached via Engine2DReadback's
- * device-identity-stamped CUDA readback path (backend_cuda.spl, added
- * 0c3bfb3b792) and the Vulkan frame-batching accepted-submit counter
- * (sffi_vulkan.spl:vulkan_sffi_accepted_compute_submit_count) -- both
- * survive as symbol references here for the same "closure spillover"
- * reason documented above, even though this baremetal kernel never
- * initializes a CUDA or Vulkan backend. This mirrors the hosted runtime's
- * own already-reviewed "feature not compiled in" convention exactly:
- * cuda_runtime.rs `#[cfg(not(feature = "cuda"))] fn rt_cuda_device_identity
- * (..) -> i64 { 0 }` and vulkan_graphics_runtime_compute.rs
- * `#[cfg(not(feature = "vulkan"))] { 0 }`. 0 ("no identity" / "zero
- * submissions accepted") is the honest, permanently-correct answer on a
- * machine with no CUDA or Vulkan hardware, not a fabricated placeholder --
- * the CUDA caller already treats <= 0 as "unknown/no device"
- * (backend_cuda.spl: `if device_identity <= 0: return
- * engine2d_readback([], "device_identity_unknown")`).
- */
-RuntimeValue rt_cuda_device_identity(RuntimeValue device) { (void)device; return 0; }
-RuntimeValue rt_vulkan_accepted_compute_submit_count(void) { return 0; }
 RuntimeValue generate_css(void) { return rt_string_from_cstr(""); }
 RuntimeValue noalloc_log_debug(void) { return NIL_VALUE; }
 RuntimeValue panic(void) { return NIL_VALUE; }
@@ -4147,37 +4188,10 @@ RuntimeValue rt_webgpu_present(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_shutdown(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_upload_pixels(void) { return NIL_VALUE; }
 RuntimeValue text_dot_from_char_code(RuntimeValue code) {
-    int64_t cp = DECODE_INT(code);
-    /* Reject invalid codepoints: negative, above U+10FFFF, or a UTF-16
-       surrogate (U+D800..U+DFFF). Same "can't represent it" empty-string
-       policy as std.common.string_core.char_from_code_inline on the
-       pure-Simple side (see
-       doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md). */
-    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
-        return rt_string_new((RuntimeValue)(uintptr_t)0, (RuntimeValue)0);
-    }
-    uint8_t buf[4];
-    uint64_t len;
-    if (cp < 0x80) {
-        buf[0] = (uint8_t)cp;
-        len = 1;
-    } else if (cp < 0x800) {
-        buf[0] = (uint8_t)(0xC0 | (cp >> 6));
-        buf[1] = (uint8_t)(0x80 | (cp & 0x3F));
-        len = 2;
-    } else if (cp < 0x10000) {
-        buf[0] = (uint8_t)(0xE0 | (cp >> 12));
-        buf[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        buf[2] = (uint8_t)(0x80 | (cp & 0x3F));
-        len = 3;
-    } else {
-        buf[0] = (uint8_t)(0xF0 | (cp >> 18));
-        buf[1] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
-        buf[2] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        buf[3] = (uint8_t)(0x80 | (cp & 0x3F));
-        len = 4;
-    }
-    return rt_string_new((RuntimeValue)(uintptr_t)buf, (RuntimeValue)len);
+    char buf[2];
+    buf[0] = (char)(DECODE_INT(code) & 0x7F);
+    buf[1] = '\0';
+    return rt_string_from_cstr(buf);
 }
 
 /* End of rt_extras.c */

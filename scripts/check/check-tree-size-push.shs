@@ -208,7 +208,21 @@ die() {
 # inspect_commit <repo> <commit>
 #   Sets IC_FILES, IC_DUPS, IC_DUPLIST. Returns 1 and sets IC_ERR if any git call
 #   failed — a git failure is never a clean result.
+#
+# ONE LISTING (2026-09-24, push-hook 10s budget): the commit is listed ONCE with
+# `ls-tree -r -t -z` (full format: every blob, gitlink AND tree entry). The
+# blob-only name list (IC_FILES and the load-bearing path floors), the name
+# list with tree entries (duplicate detection) and the src/ entry list are all
+# derived from that one file, and IC_CACHE_* records which commit they belong
+# to so path_count/src_entry_count read the cache instead of re-walking the
+# tree. Before this the candidate commit cost 11 git walks (two full recursive
+# listings, 7 scoped recursive listings, 2 src/ listings) — 9.2-10.7s measured
+# on Windows for a push-tip evaluation, which alone blew the push budget. -z
+# means no core.quotePath quoting, so a prefix match on a name is exactly the
+# pathspec match `ls-tree -r -- <path>` performed.
 # ---------------------------------------------------------------------------
+IC_CACHE_REPO=""
+IC_CACHE_COMMIT=""
 inspect_commit() {
     ic_repo=$1
     ic_commit=$2
@@ -216,14 +230,38 @@ inspect_commit() {
     IC_FILES=0
     IC_DUPS=0
     IC_DUPLIST=""
+    IC_CACHE_REPO=""
+    IC_CACHE_COMMIT=""
 
     ic_list="$TMPROOT/ls.out"
-    git -C "$ic_repo" ls-tree -r --name-only "$ic_commit" >"$ic_list" 2>"$TMPROOT/ls.err"
+    git -C "$ic_repo" ls-tree -r -t -z "$ic_commit" >"$TMPROOT/lsz.out" 2>"$TMPROOT/ls.err"
     ic_st=$?
     if [ "$ic_st" -ne 0 ]; then
-        IC_ERR="git ls-tree -r failed (status $ic_st) on $ic_commit"
+        IC_ERR="git ls-tree -r -t failed (status $ic_st) on $ic_commit"
         return 1
     fi
+    tr '\0' '\n' <"$TMPROOT/lsz.out" >"$TMPROOT/lsfull.out" || { IC_ERR="tr failed on $ic_commit"; return 1; }
+    # "<mode> SP <type> SP <sha> TAB <path>" -> three derived lists. The path is
+    # everything after the FIRST tab, so a tab inside a name cannot truncate it.
+    awk -v blobs="$ic_list" -v alln="$TMPROOT/lst.out" -v srcl="$TMPROOT/src.out" '
+        {
+            t = index($0, "\t")
+            if (t == 0) { bad = 1; next }
+            split(substr($0, 1, t - 1), meta, " ")
+            name = substr($0, t + 1)
+            print name > alln
+            if (meta[2] != "tree") print name > blobs
+            if (name == "src") print "SELF " meta[2] > srcl
+            else if (name ~ /^src\/[^\/]+$/) print "CHILD" > srcl
+        }
+        END { printf "" > blobs; printf "" > alln; printf "" > srcl; exit bad }' "$TMPROOT/lsfull.out"
+    ic_st=$?
+    if [ "$ic_st" -ne 0 ]; then
+        IC_ERR="could not parse the ls-tree listing of $ic_commit (awk status $ic_st)"
+        return 1
+    fi
+    IC_CACHE_REPO=$ic_repo
+    IC_CACHE_COMMIT=$ic_commit
 
     IC_FILES=$(wc -l <"$ic_list")
     IC_FILES=$(printf '%s' "$IC_FILES" | tr -d ' ')
@@ -243,13 +281,8 @@ inspect_commit() {
     # `-t` additionally emits the TREE entries themselves, so a name repeated at
     # a level is listed twice regardless of what is under it. Duplicate BLOBs are
     # already caught by either listing. IC_FILES stays on the blob-only listing so
-    # the size band keeps counting files, not files+directories.
-    git -C "$ic_repo" ls-tree -r -t --name-only "$ic_commit" >"$TMPROOT/lst.out" 2>/dev/null
-    ic_st=$?
-    if [ "$ic_st" -ne 0 ]; then
-        IC_ERR="git ls-tree -r -t failed (status $ic_st) on $ic_commit"
-        return 1
-    fi
+    # the size band keeps counting files, not files+directories. lst.out is
+    # that -t name list, written by the single listing above.
     sort "$TMPROOT/lst.out" >"$TMPROOT/sorted.out" || { IC_ERR="sort failed on $ic_commit"; return 1; }
     uniq -d "$TMPROOT/sorted.out" >"$TMPROOT/dup.out" || { IC_ERR="uniq failed on $ic_commit"; return 1; }
     IC_DUPS=$(wc -l <"$TMPROOT/dup.out")
@@ -262,6 +295,13 @@ inspect_commit() {
 # path_count <repo> <commit> <path>  -> echoes file count, returns git's status
 # ---------------------------------------------------------------------------
 path_count() {
+    if [ -n "$IC_CACHE_COMMIT" ] && [ "$1" = "$IC_CACHE_REPO" ] && [ "$2" = "$IC_CACHE_COMMIT" ]; then
+        # Same predicate as the pathspec: the path itself, or anything under it.
+        awk -v p="$3" 'BEGIN { pp = p "/"; lp = length(pp) }
+            $0 == p || substr($0, 1, lp) == pp { n++ }
+            END { printf "%d", n }' "$TMPROOT/ls.out"
+        return $?
+    fi
     pc_out="$TMPROOT/pc.out"
     git -C "$1" ls-tree -r --name-only "$2" -- "$3" >"$pc_out" 2>/dev/null
     pc_st=$?
@@ -292,6 +332,19 @@ file_count() {
 #   Returns non-zero only when git failed for some OTHER reason.
 # ---------------------------------------------------------------------------
 src_entry_count() {
+    if [ -n "$IC_CACHE_COMMIT" ] && [ "$1" = "$IC_CACHE_REPO" ] && [ "$2" = "$IC_CACHE_COMMIT" ]; then
+        if [ ! -s "$TMPROOT/src.out" ]; then
+            printf '%s' "-1"
+            return 0
+        fi
+        # A src/ that is a TREE: count its direct entries. Anything else (a
+        # blob or gitlink named src) takes the uncached path below, which
+        # reports git's own failure exactly as before.
+        if "$GREP" -qx 'SELF tree' "$TMPROOT/src.out"; then
+            awk '$0 == "CHILD" { n++ } END { printf "%d", n }' "$TMPROOT/src.out"
+            return $?
+        fi
+    fi
     se_out="$TMPROOT/se.out"
     git -C "$1" ls-tree --name-only "$2" -- src >"$se_out" 2>/dev/null
     se_st=$?
@@ -429,7 +482,7 @@ evaluate_commit() {
 #   commits keep their own parents as reference. The stated number is still
 #   RECORDED in the verdict line, which is the flag's whole purpose.
 #
-# MERGES: first parent (`<rev>^1`) — the mainline the commit advances.
+# MERGES: the parent whose file count is closest (2026-09-28; was first parent).
 # ROOT COMMITS: no parent, so no relative band exists. REF_FILES is -1 and the
 #   caller SAYS SO on stderr; the absolute band, duplicate-entry check, src/
 #   entry band and load-bearing path floors all still apply unchanged.
@@ -460,6 +513,31 @@ reference_for_rev() {
         return 2
     }
     REF_SOURCE="first parent $rf_parent"
+    # Merge (2026-09-28): band against the CLOSEST parent. Merging published
+    # main into a stale PR branch has the branch as first parent, so the
+    # first-parent delta is main's already-gated growth. A tree within the band
+    # of any parent it merges is structurally consistent with that parent; the
+    # absolute band, src/ band and path floors still apply unchanged.
+    rf_parents=$(git -C "$rf_repo" rev-list --parents -n1 "$rf_rev" 2>/dev/null | cut -d" " -f2-) || rf_parents=""
+    [ "$(printf "%s\n" $rf_parents | grep -c .)" -gt 1 ] || return 0
+    rf_own=$(file_count "$rf_repo" "$rf_rev") || {
+        IC_ERR="git ls-tree failed reading merge $rf_rev"
+        return 2
+    }
+    rf_best=$(( rf_own - REF_FILES )); [ "$rf_best" -ge 0 ] || rf_best=$(( -rf_best ))
+    for rf_p in $rf_parents; do
+        [ "$rf_p" = "$rf_parent" ] && continue
+        rf_n=$(file_count "$rf_repo" "$rf_p") || {
+            IC_ERR="git ls-tree failed reading merge parent $rf_p"
+            return 2
+        }
+        rf_d=$(( rf_own - rf_n )); [ "$rf_d" -ge 0 ] || rf_d=$(( -rf_d ))
+        if [ "$rf_d" -lt "$rf_best" ]; then
+            rf_best=$rf_d
+            REF_FILES=$rf_n
+            REF_SOURCE="closest merge parent $rf_p"
+        fi
+    done
     return 0
 }
 
@@ -478,9 +556,9 @@ evaluate_rev_banded() {
 }
 
 # ===========================================================================
-# SELFTEST — runs before every scan, FATAL. 24 fixtures.
+# SELFTEST — runs before every scan, FATAL. 26 fixtures.
 # ===========================================================================
-SELFTEST_EXPECTED=24
+SELFTEST_EXPECTED=26
 
 # --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
 # Every git call that BUILDS a fixture must go through st_git/st_git_init.
@@ -810,6 +888,13 @@ selftest() {
     st_assert_banded expect-files-tip       "$st_jump"       "$st_jump" 230 0
     # ... and NOT applied to a non-tip commit, which keeps its own parent
     st_assert_banded expect-files-not-nontip "$st_jump"      "$st_c5"   230 1
+    # merges (2026-09-28): a stale branch (first parent c0, 200 files) merging
+    # main (second parent c5, 210) lands main's tree — banded against the
+    # closest parent it PASSES; a merge tree far from BOTH parents still FAILS.
+    st_merge_ok=$(st_git "$st_dir" commit-tree "$st_c5^{tree}" -p "$st_c0" -p "$st_c5" -m merge </dev/null) || return 1
+    st_merge_far=$(st_git "$st_dir" commit-tree "$st_jump^{tree}" -p "$st_c0" -p "$st_c5" -m merge </dev/null) || return 1
+    st_assert_banded merge-closest-parent   "$st_merge_ok"   ''         -1  0
+    st_assert_banded merge-far-from-parents "$st_merge_far"  ''         -1  1
 
     # --- 16 fixtures that MUST FAIL ---------------------------------------
     st_assert truncated-tree      "$st_trunc"   -1  1   # the wipe, no base
@@ -850,7 +935,7 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (16 must-fail, 7 must-pass, 1 env-isolation)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (17 must-fail, 8 must-pass, 1 env-isolation)"
     return 0
 }
 

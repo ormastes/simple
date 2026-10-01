@@ -265,7 +265,20 @@ while IFS= read -r pid_reuse_line; do
   esac
 done <"$pid_reuse_handle" >"$pid_reuse_manifest"
 cat "$pid_reuse_manifest" >"$pid_reuse_handle"
-if portable_lock_acquire "$tmp/real" pid-reuse 1; then
+# With a readable /proc (Linux, MSYS/Cygwin) the helper's
+# refine_leader_group_state (2eb51991053) positively identifies a
+# differently-started leader whose whole group descends from it as a
+# recycled PID and reclaims the claim; without /proc (macOS) the kill()
+# verdict keeps the group live and the claim must stay held.
+if [ -r "/proc/$$/stat" ]; then
+  portable_lock_acquire "$tmp/real" pid-reuse 5 ||
+    fail "recycled-leader group was not reclaimed after start mismatch"
+  pid_reuse_reclaimed=$PORTABLE_LOCK_HANDLE
+  portable_lock_handle_is_owned "$pid_reuse_reclaimed" ||
+    fail "recycled-leader reclaim did not own lock"
+  portable_lock_release "$pid_reuse_reclaimed" ||
+    fail "recycled-leader reclaim release failed"
+elif portable_lock_acquire "$tmp/real" pid-reuse 1; then
   fail "live process group was recovered after start mismatch"
 else
   pid_reuse_status=$?

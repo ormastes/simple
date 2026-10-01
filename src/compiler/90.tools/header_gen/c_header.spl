@@ -8,7 +8,7 @@
 # verification. Output is valid C11 with C++ extern "C" compatibility.
 
 use compiler.mir.mir_data.*
-use compiler.backend.c_type_mapper.{CTypeMapper}
+use compiler.backend.common.c_abi_type_mapping.{c_abi_map_type}
 use compiler.backend.error_conversion.{is_result_type, is_result_type_name, map_result_type, emit_error_type_header_declarations, emit_result_function_declaration}
 use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typedef, emit_callback_typedef, CallbackTypedef}
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_c_static_asserts, generate_c_struct_def}
@@ -16,6 +16,7 @@ use compiler.hir.hir_definitions.{HirField}
 use compiler.hir.hir_types.{HirType}
 use compiler.tools.header_gen.header_utils.{to_guard_name, sanitize_c_name, mir_function_params, mir_function_param_count, mir_function_param}
 use std.array.{array_sort_by}
+use compiler.mir.mir_types.{MirType}
 
 # ============================================================================
 # C Header Emission
@@ -172,27 +173,25 @@ fn emit_c_header(lib_name: text, exported_fns: [MirFunction], exported_types: [M
 
 fn _mir_type_to_c_param(ty: MirType) -> text:
     """Map a MIR type to C parameter type string."""
-    val mapper = CTypeMapper.create()
     match ty.kind:
         case Unit: "void"
         case Opaque(name):
             if name == "str" or name == "text":
                 "const char*"
             else:
-                mapper.map_type(ty)
-        case _: mapper.map_type(ty)
+                c_abi_map_type(ty)
+        case _: c_abi_map_type(ty)
 
 fn _mir_type_to_c_return(ty: MirType) -> text:
     """Map a MIR type to C return type string."""
-    val mapper = CTypeMapper.create()
     match ty.kind:
         case Unit: "void"
         case Opaque(name):
             if name == "str" or name == "text":
                 "const char*"
             else:
-                mapper.map_type(ty)
-        case _: mapper.map_type(ty)
+                c_abi_map_type(ty)
+        case _: c_abi_map_type(ty)
 
 fn _emit_type_declarations(type_def: MirTypeDef, module: MirModule) -> [text]:
     """Emit opaque handle typedef and function declarations for an exported type."""
@@ -336,9 +335,11 @@ fn _emit_layout_asserts(type_def: MirTypeDef) -> text:
             val c_name = sanitize_c_name(type_def.name)
 
             # Sort fields alphabetically by name for deterministic _Static_assert order
-            val sorted_fields = array_sort_by(fields, \a, b:
-                if a.name < b.name: -1
-                elif a.name > b.name: 1
+            val sorted_fields: [MirFieldDef] = array_sort_by(fields, \a, b:
+                val fa: MirFieldDef = a
+                val fb: MirFieldDef = b
+                if fa.name < fb.name: -1
+                elif fa.name > fb.name: 1
                 else: 0
             )
 
@@ -346,7 +347,7 @@ fn _emit_layout_asserts(type_def: MirTypeDef) -> text:
             var hir_fields: [HirField] = []
             var fi = 0
             while fi < sorted_fields.len():
-                val field = sorted_fields[fi]
+                val field: MirFieldDef = sorted_fields[fi]
                 val hir_type = _mir_type_to_hir_type(field.type_)
                 hir_fields.push(HirField(
                     name: field.name,

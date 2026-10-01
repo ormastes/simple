@@ -1,4 +1,15 @@
 # No general `.spl` → SVM-G path: DAP GPU attach is routing-only
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13
+Re-confirmed accurate: this is an architectural gap by the doc's own
+repeated self-assessment (2026-08-09 and earlier), not a defect with a
+contained fix -- a widen-and-wire vs. drop-the-expectation decision is still
+pending. No new evidence found. Left OPEN as characterized.
+
 
 **Status:** OPEN — architectural gap, not a defect in any landed stream
 
@@ -67,3 +78,4 @@ to general `.spl` and wire it into the GPU attach path, or (b) keep GPU debuggin
 scoped to explicitly-authored SVM-G programs and drop the `.spl`-attach
 expectation from the design. (b) is much cheaper and may be the honest scope —
 the notebook/Lab lanes already work with SVM-G sources directly.
+

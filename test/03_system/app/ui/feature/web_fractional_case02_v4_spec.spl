@@ -1,0 +1,128 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, draw_ir, affine, coverage_aa
+"""Strict Web fractional mode retains full paint and v4 source provenance."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER,
+    DRAW_IR_RASTER_COVERAGE_AA, DRAW_IR_SCHEMA_VERSION_V4,
+    DRAW_IR_SOURCE_HTML_AST}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_fractional_result}
+
+val CASE02: text =
+    "test/fixtures/html_css/corpus/cases/02-fractional-edges.html"
+val CASE02_SHA256: text =
+    "5ad0ddd4a7848160e220c116c7c7f21872a7f184d3444a2d97990e88da10bfe1"
+
+describe "pinned Web fractional case 02 DrawIR v4":
+    it "emits complete source-mapped paint through strict layout":
+        step("Read the pinned HTML/CSS source and run the real fractional producer")
+        val html = read_file(CASE02)
+        expect(sha256_text(html)).to_equal(CASE02_SHA256)
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(
+            html, 640, 480)
+        if result.fractional_scene_rejection_reason != "":
+            fail_test("case02 strict producer rejected: {result.fractional_scene_rejection_reason}")
+        step("Check canvas, html, body, scene, tile and bar paint inventory")
+        expect(result.render_degraded).to_be(false)
+        expect(result.composition.schema).to_equal(DRAW_IR_SCHEMA_VERSION_V4)
+        expect(result.composition.backend_target).to_equal(DRAW_IR_BACKEND_CPU)
+        expect(result.composition.batches.len()).to_equal(1)
+        val batch = result.composition.batches[0]
+        expect(batch.schema).to_equal(DRAW_IR_SCHEMA_VERSION_V4)
+        expect(batch.source.source_kind).to_equal(DRAW_IR_SOURCE_HTML_AST)
+        expect(batch.embedding.width).to_equal(640)
+        expect(batch.embedding.height).to_equal(480)
+        expect(batch.embedding.clip).to_be(true)
+        expect(batch.commands.len()).to_equal(6)
+        expect(batch.commands[0].component_id).to_equal("html-canvas")
+        expect(batch.commands[3].component_id).to_equal("scene")
+        expect(batch.commands[0].color).to_equal(0xFFFFFFFFu32)
+        expect(batch.commands[3].color).to_equal(0xFFFFFFFFu32)
+        var i = 0
+        while i < 6:
+            val command = batch.commands[i]
+            expect(command.clip_rect.present).to_be(true)
+            expect(command.clip_rect.x).to_equal(0)
+            expect(command.clip_rect.y).to_equal(0)
+            expect(command.clip_rect.width).to_equal(640)
+            expect(command.clip_rect.height).to_equal(480)
+            expect(command.affine_transform != nil).to_be(true)
+            expect(command.computed_style.len()).to_be_greater_than(0)
+            i = i + 1
+        expect(batch.commands[0].raster_policy).to_equal(
+            DRAW_IR_RASTER_ALIASED_PIXEL_CENTER)
+        expect(batch.commands[3].raster_policy).to_equal(
+            DRAW_IR_RASTER_ALIASED_PIXEL_CENTER)
+        step("Check coverage for both fractional leaves and a rotated tile")
+        val tile = batch.commands[4]
+        val bar = batch.commands[5]
+        expect(tile.parent_id).to_equal("scene")
+        expect(bar.parent_id).to_equal("scene")
+        expect(tile.color).to_equal(0xFF247BDEu32)
+        expect(bar.color).to_equal(0xFF111111u32)
+        expect(tile.raster_policy).to_equal(DRAW_IR_RASTER_COVERAGE_AA)
+        expect(bar.raster_policy).to_equal(DRAW_IR_RASTER_COVERAGE_AA)
+        match tile.fractional_geometry:
+            case Some(geometry):
+                expect(geometry.width).to_equal(180.5)
+                expect(geometry.height).to_equal(100.0)
+            case nil: fail_test("rotated tile lost local fractional geometry")
+        match bar.fractional_geometry:
+            case Some(geometry):
+                expect(geometry.width).to_equal(2.5)
+                expect(geometry.height).to_equal(280.5)
+            case nil: fail_test("bar lost local fractional geometry")
+        match tile.affine_transform:
+            case Some(matrix):
+                expect(matrix.b).to_be_greater_than(0.1)
+                expect(matrix.c).to_be_less_than(-0.1)
+            case nil: fail_test("rotated tile lost its affine map")
+        match bar.affine_transform:
+            case Some(matrix):
+                expect(matrix.a).to_equal(1.0)
+                expect(matrix.d).to_equal(1.0)
+                expect(matrix.b).to_equal(0.0)
+                expect(matrix.c).to_equal(0.0)
+            case nil: fail_test("fractional bar lost its affine map")
+
+    it "rejects unhandled CSS without a partial v4 scene":
+        step("Add unsupported paint and require an empty rejected composition")
+        val html = read_file(CASE02)
+        val changed = html.replace("background:#111;",
+            "background:#111;filter:blur(2px);")
+        expect(changed == html).to_be(false)
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(
+            changed, 640, 480)
+        expect(result.fractional_scene_rejection_reason != "").to_be(true)
+        expect(result.composition.batches.len()).to_equal(0)
+
+    it "rejects unsupported transform grammar atomically":
+        step("Append a second transform function after rotation")
+        val html = read_file(CASE02)
+        val changed = html.replace("rotate(7deg)",
+            "rotate(7deg) skew(3deg)")
+        expect(changed == html).to_be(false)
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(
+            changed, 640, 480)
+        expect(result.fractional_scene_rejection_reason != "").to_be(true)
+        expect(result.composition.batches.len()).to_equal(0)
+
+    it "rejects fractional containing backgrounds before integer rounding":
+        step("Move html and body by a fractional authored left offset")
+        val html = read_file(CASE02)
+        val changed = html.replace("html,body{margin:0;",
+            "html,body{position:relative;left:0.25px;margin:0;")
+        expect(changed == html).to_be(false)
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(
+            changed, 640, 480)
+        expect(result.fractional_scene_rejection_reason).to_start_with(
+            "background-source-geometry-unresolved:")
+        expect(result.composition.batches.len()).to_equal(0)

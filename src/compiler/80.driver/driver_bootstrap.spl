@@ -4,14 +4,17 @@
 # helpers used during the self-hosted bootstrap process.
 
 use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
+use std.io_runtime.{file_copy, file_delete}
+use std.env.{env_get}
 use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef, MirBody}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
-use compiler.backend.llvm_backend.{MirToLlvm, LlvmTargetConfig}
+use compiler.backend.llvm_backend.{MirToLlvm}
+use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, compile_ir_to_object}
-use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_text}
+use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_text}
 use compiler.backend.llvm_ir_builder.{llvm_ir_builder_handle}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
@@ -27,12 +30,8 @@ use compiler.driver.driver_source_loading.{_driver_module_name_from_path, _drive
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity}
 
-extern fn rt_file_copy(src: text, dst: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
-
 fn bootstrap_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+    (env_get("SIMPLE_BOOTSTRAP_DEBUG")) == "1"
 
 pub fn bootstrap_native_opt_level(ctx: CompileContext, is_release: bool) -> i64:
     # NOTE: explicit match, not `if ctx.options.opt_level.?:` -- an explicit
@@ -61,6 +60,32 @@ pub fn bootstrap_llvm_ir_path_from_object_path(obj_path: text) -> text:
         obj_path.slice(0, obj_path.len() - 1) + "ll"
     else:
         obj_path + ".ll"
+
+pub fn bootstrap_llvm_success_cleanup_paths(obj_path: text, keep_ir: bool) -> [text]:
+    """Temporary LLVM artifacts removable after the object is copied."""
+    var paths = [obj_path]
+    if not keep_ir:
+        paths.push(bootstrap_llvm_ir_path_from_object_path(obj_path))
+    paths
+
+pub fn bootstrap_llvm_success_cleanup_paths_with_policy(
+    obj_path: text, keep_intermediates: bool, keep_ir: bool
+) -> [text]:
+    if keep_intermediates:
+        []
+    else:
+        bootstrap_llvm_success_cleanup_paths(obj_path, keep_ir)
+
+fn bootstrap_cleanup_llvm_success_artifacts(obj_path: text):
+    val keep_intermediates = env_get("SIMPLE_KEEP_BUILD_INTERMEDIATES") == "1"
+    val keep_ir = env_get("SIMPLE_KEEP_LLVM_IR") == "1"
+    val print_paths = env_get("SIMPLE_PRINT_BUILD_INTERMEDIATES") == "1"
+    if keep_intermediates and print_paths:
+        print "[native-build] retained intermediate: {obj_path}"
+        print "[native-build] retained intermediate: {bootstrap_llvm_ir_path_from_object_path(obj_path)}"
+    for path in bootstrap_llvm_success_cleanup_paths_with_policy(
+        obj_path, keep_intermediates, keep_ir):
+        file_delete(path)
 
 pub fn bootstrap_llvm_phase_message(phase: text, subject: text, detail: text) -> text:
     "Bootstrap LLVM {phase} failed ({subject}): {detail}"
@@ -101,7 +126,7 @@ pub fn bootstrap_emit_seed_wrapper(output: text) -> CompileResult:
     CompileResult.CodegenError("bootstrap seed-wrapper fallback was removed")
 
 pub fn bootstrap_entry_module_name(ctx: CompileContext) -> text:
-    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val native_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
     if native_entry != "":
         var i = 0
         while i < ctx.sources.len():
@@ -135,7 +160,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     # from the freshly-parsed Module.functions) to the MIR free path so it lowers
     # real bodies instead of ret-0 stubs.
     val entry_module_name = bootstrap_entry_module_name(ctx)
-    val closure_mode = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+    val closure_mode = (env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")) == "1"
     if closure_mode and bootstrap_hir_module_count() > 0:
         if bootstrap_trace_enabled():
             print "[driver-mir] bootstrap flat:start entry={entry_module_name} modules={bootstrap_hir_module_count()}"
@@ -328,13 +353,22 @@ fn bootstrap_emit_llvm_trailer(translator: MirToLlvm):
         translator.builder.emit("; String constants")
         translator.builder.emit(string_globals)
 
+pub fn bootstrap_real_llvm_translator() -> MirToLlvm:
+    """Create an armed translator for the direct-emit bootstrap LLVM paths."""
+    var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    # Direct emit bypasses translate_module_with_entry_policy, which normally
+    # arms and clears the accumulator read by bootstrap_emit_llvm_trailer.
+    translator.bootstrap_string_globals_active = true
+    llvm_bootstrap_string_globals_reset()
+    translator
+
 pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
     log_phase("aot:bootstrap_real_llvm:start")
     val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
     val temp_obj = llvm_bootstrap_last_object_path()
     val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
-    var translator: MirToLlvm = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    var translator: MirToLlvm = bootstrap_real_llvm_translator()
     val bootstrap_ir_handle = llvm_ir_builder_handle(translator.builder)
     translator.builder.emit_module_header()
     translator.emit_runtime_declarations()
@@ -356,7 +390,8 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         return CompileResult.CodegenError(bootstrap_llvm_phase_message("llc", "ir={temp_ir} obj={temp_obj}", err))
     val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
-    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+    if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+        bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
         log_phase("aot:bootstrap_real_llvm:copied_obj")
         return CompileResult.Success(obj_path)
     CompileResult.CodegenError(
@@ -375,7 +410,7 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
     val temp_obj = llvm_bootstrap_last_object_path()
     val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
-    var translator: MirToLlvm = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    var translator: MirToLlvm = bootstrap_real_llvm_translator()
     translator.builder.emit_module_header()
     translator.emit_runtime_declarations()
     val fn_count = module.functions.keys().len()
@@ -410,7 +445,8 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
         return CompileResult.CodegenError(bootstrap_llvm_phase_message("llc", "ir={temp_ir} obj={temp_obj}", err))
     val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
-    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+    if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+        bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
         log_phase("aot:bootstrap_real_llvm_module:copied_obj")
         return CompileResult.Success(obj_path)
     CompileResult.CodegenError(
@@ -436,7 +472,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
     Bootstrap stages must produce a real native compiler.  Seed-wrapper and
     ret-0 stub fallbacks are intentionally rejected.
     """
-    if (rt_env_get("SIMPLE_BOOTSTRAP_DIRECT_STUB_IR") ?? "") == "1":
+    if (env_get("SIMPLE_BOOTSTRAP_DIRECT_STUB_IR")) == "1":
         return bootstrap_compile_to_native_local(ctx, backend_name, output)
     val is_release = ctx.options.release
     val opt_level = bootstrap_native_opt_level(ctx, is_release)
@@ -460,7 +496,8 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                 bootstrap_llvm_phase_message("worker", "backend={backend_name} output={obj_path}", err.message)
             )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
-        if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+        if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+            bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
             log_phase("aot:bootstrap_native_context:copied_obj")
         else:
             return CompileResult.CodegenError(
@@ -485,7 +522,8 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         bare_metal: false,
         opt_level: opt_level,
         stage4_backend: "llvm",
-        stage4_compiler_hash: native_build_compiler_identity()
+        stage4_compiler_hash: native_build_compiler_identity(),
+        target_triple: ctx.native_target
     )
     match link_llvm_native([obj_path], output, llvm_opts):
         case Ok(_):
@@ -501,7 +539,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
     if ctx.bootstrap_entry_mir.?:
         log_phase("aot:bootstrap_native_local_real:context_mir")
         return compile_bootstrap_context_to_native(ctx, backend_name, output)
-    if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1":
+    if (env_get("SIMPLE_BOOTSTRAP_REAL_LLVM")) == "1":
         log_phase("aot:bootstrap_native_local_real:local_mir")
         var next_ctx = ctx
         log_phase("aot:bootstrap_native_local_real:free_mir:start")
@@ -514,7 +552,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
     log_phase("aot:bootstrap_native_local_real:module")
     log_phase("aot:bootstrap_native_local_real:compile")
     val obj_path = output + ".app.cli.bootstrap_main.o"
-    if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1":
+    if (env_get("SIMPLE_BOOTSTRAP_REAL_LLVM")) == "1":
         val real_result = bootstrap_emit_real_llvm_object(output, opt_level)
         match real_result:
             case CompileResult.Success(_): ()
@@ -527,7 +565,8 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
                 bootstrap_llvm_phase_message("worker", "backend={backend_name} output={obj_path}", err.message)
             )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
-        if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+        if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+            bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
             log_phase("aot:bootstrap_native_local_real:copied_obj")
         else:
             return CompileResult.CodegenError(
@@ -550,7 +589,8 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
         bare_metal: false,
         opt_level: opt_level,
         stage4_backend: "llvm",
-        stage4_compiler_hash: native_build_compiler_identity()
+        stage4_compiler_hash: native_build_compiler_identity(),
+        target_triple: ctx.native_target
     )
     match link_llvm_native([obj_path], output, llvm_opts):
         case Ok(_):

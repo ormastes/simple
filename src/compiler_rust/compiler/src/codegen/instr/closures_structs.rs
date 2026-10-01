@@ -106,6 +106,61 @@ fn report_erased_receiver_bind(
     );
 }
 
+/// A method-call lookup name with the receiver's static type as qualifier is
+/// spelled `Type.method`, and every bare-builtin policy in this file keys on
+/// `!lookup_name.contains('.')` to mean "the receiver type was ERASED". That
+/// test has a hole: when the receiver's static type is `TypeId::VOID` the
+/// qualifier is stringified anyway, so an erased receiver arrives as
+/// `void.method` — which contains a dot and therefore reads as a genuine
+/// type-qualified call to every one of those policies.
+///
+/// `void` is not a type a receiver can have; it is the absence of one. This
+/// returns the method segment for such a pseudo-qualifier and the name
+/// unchanged otherwise, so the erasure policies see `void.len` for what it is.
+///
+/// Found by the native-vs-interpreter differential census, 2026-09-13
+/// (`doc/10_metrics/infra/native_interp_differential_2026-09-13.md`, class
+/// `crash`): `if freqs.len() == 0` in `most_common_char`
+/// (`src/lib/common/text_advanced.spl`) has a receiver from an un-annotated
+/// function, hence `TypeId::VOID`, and reached codegen as `void.len`. The
+/// diagnostic line was
+/// `bare method 'void.len'(0 args) receiver_ty=Some(TypeId(0)) bound by
+/// name-suffix alone to 'StringBuilder_dot_len'`, and that method tail-calls
+/// `StringBuilder.to_text`, which loads field 0 of a receiver that was never
+/// passed: SEGV at `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`, x8 = 0.
+/// Bind an UNQUALIFIED method name to a cross-module target only when the
+/// scan found exactly one distinct candidate.
+///
+/// A bare name carries no receiver-type evidence, so two or more same-named
+/// methods in the link closure are indistinguishable here. Picking one is a
+/// silent miscompile (the caller runs another type's body); refusing leaves
+/// the name bare for codegen's tag-dispatching builtin lowering, which is
+/// correct for every receiver shape, and reports the ambiguity by name.
+fn unique_unqualified_rebind<'a>(hits: &[&'a str], lookup_name: &str, source: &str) -> Option<&'a str> {
+    match hits {
+        [] => None,
+        [single] => Some(single),
+        many => {
+            eprintln!(
+                "warning: refusing to bind unqualified method `{}` -- {} same-named candidates in {} ({}); \
+                 the receiver type was erased before codegen, so no candidate can be chosen soundly",
+                lookup_name,
+                many.len(),
+                source,
+                many.join(", ")
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn strip_erased_receiver_qualifier(lookup_name: &str) -> &str {
+    match lookup_name.split_once('.') {
+        Some(("void", method)) if !method.contains('.') => method,
+        _ => lookup_name,
+    }
+}
+
 // `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact
 // same builtin-collision name set for its own defense-in-depth guard (bug
 // simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision) instead
@@ -162,6 +217,35 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // `.is_empty()` fell all the way through to suffix-based symbol
             // resolution instead of the safe tag-dispatching path.
             | ("len" | "length" | "keys" | "values" | "is_empty", 0)
+            // `items` returns an array of (key, value) tuples for a Dict,
+            // same shape as `keys`/`values` above and same runtime call
+            // (`rt_dict_entries`, see the dispatch arm below). Missing here
+            // meant a bare (erased-receiver) `d.items()` — e.g. inside an
+            // untyped fn parameter — fell through to suffix-based symbol
+            // resolution and raised "Function 'items' not found", even
+            // though a STATICALLY-typed `Dict<K,V>` receiver already
+            // resolved correctly via MIR lowering
+            // (mir/lower/lowering_expr_method.rs). See doc/08_tracking/bug/
+            // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+            //
+            // Deliberately `"items"` ONLY, not `"entries"`, even though both
+            // alias the same runtime call and `entries()` has the identical
+            // erased-receiver gap: a census
+            // (`grep -rnE '^\s*(pub\s+)?fn entries\s*\(\s*(self\s*)?\)' src
+            // test`) found NINE user-defined `entries()` methods on other
+            // types (Map, HashMap, BTree-style collections, PersistentMap/
+            // PersistentSortedMap/PersistentTrie, ConcurrentCollections,
+            // FileStateCache, PersistentDict) — the exact THEFT hazard this
+            // whole gate exists to avoid (see `push`/`get`/`starts_with`
+            // above): an erased receiver that is actually one of those types
+            // at runtime would get silently routed to `rt_dict_entries`
+            // (which no-ops to nil on a non-Dict tag) instead of that type's
+            // real `entries()`. `items()` has ZERO competing definitions
+            // anywhere in `src`/`test` (same census, no hits), so it carries
+            // no such risk. `entries()` on an erased receiver keeps its
+            // pre-existing "Function 'entries' not found" behavior — a
+            // known, unchanged gap, not a regression.
+            | ("items", 0)
             // Array mutators. Same hazard class as the collection idioms
             // above (doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md):
             // `push` is enumerated there as a confirmed erased-receiver THEFT
@@ -202,6 +286,21 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // receiver emits a qualified `Type.index_of` which the caller's
             // `!lookup_name.contains('.')` gate excludes.
             | ("index_of", 1)
+            // Text case conversion. Same THEFT class
+            // (doc/08_tracking/bug/seed_bare_method_suffix_binds_text_lower_to_user_method_2026-09-28.md):
+            // a bare `v.lower()` on an untyped text receiver was bound by the
+            // single-candidate name-suffix scan to the only user `*.lower`
+            // linked in — `Avx512InstructionLowerer.lower(inst)`, an ARITY-1
+            // method — and aborted the macOS arm64 Stage 2 hello-world with
+            // "non-SIMD instruction reached AVX-512 instruction owner".
+            // `rt_string_to_lower` / `rt_string_to_upper` return a non-string
+            // receiver unchanged (`rt_string_len` fails closed with -1), so the
+            // route is safe on any value. Census of owned `.spl`: the only
+            // zero-arg `lower()`/`upper()` definitions are the seed std text
+            // extension itself (`lib/std/src/core/string_ops.spl`). Arity 0
+            // only, so a user `lower(x)` still resolves normally; a typed
+            // receiver arrives qualified and never takes this gate.
+            | ("lower" | "upper", 0)
     )
 }
 
@@ -397,14 +496,7 @@ fn box_for_closure_boundary<M: Module>(
             };
             call_runtime_1(ctx, builder, "rt_value_bool", widened)
         }
-        TypeId::I8
-        | TypeId::I16
-        | TypeId::I32
-        | TypeId::I64
-        | TypeId::U8
-        | TypeId::U16
-        | TypeId::U32
-        | TypeId::U64 => {
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => {
             let widened = match vt {
                 types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
                 types::F64 => builder.ins().bitcast(types::I64, MemFlags::new(), val),
@@ -416,7 +508,19 @@ fn box_for_closure_boundary<M: Module>(
             };
             call_runtime_1(ctx, builder, "rt_value_int", widened)
         }
-        // Heap-shaped or unknown: the value already IS a tagged word.
+        // An unknown static type is usually already a tagged word, but the
+        // Cranelift value type is authoritative when lowering left a concrete
+        // float behind. Passing that raw f32/f64 to the boxed-entry i64 ABI is
+        // invalid IR (and used to surface only in very large dispatchers).
+        TypeId::ANY if vt == types::F32 || vt == types::F64 => {
+            let f = if vt == types::F32 {
+                builder.ins().fpromote(types::F64, val)
+            } else {
+                val
+            };
+            call_runtime_1(ctx, builder, "rt_value_float", f)
+        }
+        // Heap-shaped or unknown word: the value already IS tagged.
         _ => val,
     }
 }
@@ -528,13 +632,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     }
 
     let tagged = emit_aggregate_block_copy(
-        ctx,
-        builder,
-        src_tagged,
-        byte_size,
-        type_name,
-        owner_has_vtable,
-        deep_fields,
+        ctx, builder, src_tagged, byte_size, type_name, owner_has_vtable, deep_fields,
     );
     ctx.vreg_values.insert(dest, tagged);
 }
@@ -568,7 +666,8 @@ fn emit_aggregate_block_copy<M: Module>(
     // Its qualified names need not exist in this object's local vtable map.
     // Honor both resolved true and false; only unresolved JIT layouts may
     // infer the header from the local map.
-    let has_vtable = owner_has_vtable.unwrap_or_else(|| type_name.is_some_and(|n| ctx.vtable_data_ids.contains_key(n)));
+    let has_vtable = owner_has_vtable
+        .unwrap_or_else(|| type_name.is_some_and(|n| ctx.vtable_data_ids.contains_key(n)));
     let byte_size = if has_vtable { byte_size + 8 } else { byte_size };
     // `word_index` indexes THIS block's layout, so it shifts by one word when
     // THIS block carries a vtable header (independent of each field's own type).
@@ -626,7 +725,10 @@ fn emit_aggregate_block_copy<M: Module>(
     }
 
     let heap_tag = builder.ins().iconst(types::I64, 1);
-    builder.ins().bor(new_ptr, heap_tag)
+    let tagged_new_ptr = builder.ins().bor(new_ptr, heap_tag);
+    // Preserve nil and other non-heap values. The zero-filled allocation above
+    // is only the safe load target for an invalid source, not its replacement.
+    builder.ins().select(src_is_valid, tagged_new_ptr, src_tagged)
 }
 
 fn widen_struct_field_value(
@@ -744,8 +846,11 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // is false only for erased receivers). Arity is gated so a genuine user
     // method with a different signature (e.g. `get()` / `get(a, b)`) still falls
     // through to normal resolution when the builtin does not apply.
-    let bare_builtin_collection =
-        !lookup_name.contains('.') && is_bare_builtin_collection_method(lookup_name, args.len());
+    // `strip_erased_receiver_qualifier`: a `void.` qualifier is erasure spelled
+    // out, not a type, so it must take this same builtin route (see that fn).
+    let erasure_stripped = strip_erased_receiver_qualifier(lookup_name);
+    let bare_builtin_collection = !erasure_stripped.contains('.')
+        && is_bare_builtin_collection_method(erasure_stripped, args.len());
     if bare_builtin_collection {
         let recv_ty = ctx.vreg_types.get(&receiver).copied();
         if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
@@ -834,6 +939,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
     };
 
     let mut method_resolution_error: Option<String> = None;
+    // Candidates of an ambiguous bare method on an erased receiver, kept so
+    // the vtable-identity type switch below can dispatch them at runtime.
+    let mut vtable_switch_candidates: Option<Vec<(String, FuncId)>> = None;
     let func_id = resolve_unique_module_qualified_func(ctx, lookup_name)
         .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized_name))
         .or_else(|| ctx
@@ -1035,7 +1143,18 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     candidates.len(),
                     cand_names.join(", ")
                 );
-                eprintln!("{message}");
+                // Before giving up: if every candidate's owner carries a trait
+                // vtable, the receiver's vtable pointer IS its runtime type
+                // identity, so dispatch can be decided at runtime (see
+                // `try_emit_vtable_type_switch`). Record the candidates; the
+                // diagnostic fires only if that switch cannot be built.
+                let mut uniq: Vec<(String, FuncId)> = Vec::new();
+                for (k, id) in &candidates {
+                    if !uniq.iter().any(|(_, u)| u == *id) {
+                        uniq.push(((*k).clone(), **id));
+                    }
+                }
+                vtable_switch_candidates = Some(uniq);
                 method_resolution_error = Some(message);
                 return None;
             }
@@ -1059,6 +1178,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
         });
 
     if let Some(error) = method_resolution_error {
+        if let Some(cands) = vtable_switch_candidates.take() {
+            let method_part = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+            if try_emit_vtable_type_switch(ctx, builder, dest, receiver, args, method_part, &cands)? {
+                return Ok(());
+            }
+        }
+        eprintln!("{error}");
         return Err(error);
     }
 
@@ -1090,36 +1216,105 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // First try exact match, then check for "TypeName.method" qualified
         // entries in use_map (prefers imported types over alphabetical import_map)
         let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
+        // The Optional/Result helpers must never be suffix-rebound to a user
+        // method of the same name -- same defect as the bare import_map
+        // fallback below already refuses, but reached through the two qualified
+        // scans instead. macOS Stage 2 linker blocker 2026-09-13: a bare
+        // `unwrap` on a `text?` bound to the only `.unwrap` in the import maps
+        // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
+        // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
+        // fixing one backend and not the other is how this family recurs.
+        // Keyed on the METHOD SEGMENT, not the whole lookup name: a QUALIFIED
+        // `MirStaticInit.unwrap` / `T.unwrap` skipped this predicate entirely
+        // (it is not literally "unwrap"), so all four scans below still ran and
+        // the bare last-resort one bound it to the only `.unwrap` in the import
+        // maps. That is the second route behind the 208 residual
+        // `bl Poll.unwrap` sites measured on the run-17 Stage 2 candidate
+        // (2026-09-13); the LLVM twin is `mangle.rs`'s
+        // `enum_helper_owner_matches`. The exact `use_map.get(func_name)`
+        // lookup above still runs, so a genuine qualified `Poll.unwrap`
+        // resolves.
+        let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+        let enum_helper = matches!(
+            enum_helper_method,
+            "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
+        );
+        // The BUILTIN collection/text idioms must never be suffix-rebound here
+        // either. `compile_method_call_static`'s first-choice path already
+        // refuses this (the bare `has` / `len` / `length` early-returns at the
+        // `func_ids` suffix scan, and the `bare_builtin_collection` gate that
+        // routes a bare erased-receiver idiom to its tag-dispatching runtime
+        // call) -- but ONLY on the branch where a `func_id` was found. This
+        // `else` branch, reached for a cross-module call, had no such refusal,
+        // so the three unqualified scans below bound a bare `len` to whatever
+        // lone `Type.len` happened to be linked into the closure.
+        //
+        // Measured 2026-09-13 (native-interp differential census, class
+        // `crash`): `most_common_char("hello")` in
+        // `src/lib/common/text_advanced.spl` does `if freqs.len() == 0`, whose
+        // receiver is an erased array. With `common.string_builder` anywhere in
+        // the entry closure the scan below bound it to
+        // `StringBuilder.len` -> `StringBuilder.to_text`, which loads field 0 of
+        // a null receiver: SEGV at `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`
+        // with x8 = 0. Same family and same remedy as the `enum_helper` refusal
+        // directly above, and as the `starts_with` / `slice` / `has` incidents
+        // recorded on `is_bare_builtin_collection_method`.
+        //
+        // Scope: BARE names only (`!lookup_name.contains('.')`). A receiver whose
+        // static type is known arrives qualified as "Type.method" and still
+        // resolves to its real method, so a genuine cross-module
+        // `StringBuilder.len` is untouched. When nothing binds, the builtin
+        // fallback lowers the call to `rt_len` / `rt_contains`, which
+        // tag-dispatch safely on any value -- the same policy the in-module
+        // path already applies.
+        let erasure_stripped = strip_erased_receiver_qualifier(lookup_name);
+        let bare_builtin_collision = !erasure_stripped.contains('.')
+            && is_bare_builtin_collection_method(erasure_stripped, args.len());
+        // One predicate for all the unqualified rebinding scans below: either
+        // family is a name whose qualifier must not be discarded.
+        let no_rebind = enum_helper || bare_builtin_collision;
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
-        if resolved_name.is_none() {
+        //
+        // AMBIGUITY IS REFUSAL, NOT A COIN FLIP (2026-09-13). These scans used
+        // to take the FIRST `raw` ending in `.<method>` and `break`. `use_map`
+        // and `import_map` are HashMaps, so "first" is iteration order — an
+        // arbitrary, closure-dependent pick among every same-named method in
+        // the link closure. `src/lib/common/bytes/ints.spl` defines `store` /
+        // `to_span` on SIX sibling structs; every call to any of them bound to
+        // one arbitrary survivor, the other five bodies were never referenced
+        // and so never emitted, and `U16le.of(x).store(buf)` silently wrote 4
+        // bytes instead of 2. Binding only when the whole scan agrees on ONE
+        // target keeps every unambiguous cross-module rebind these scans exist
+        // for, and turns the ambiguous case into a named diagnostic instead of
+        // a silent miscompile.
+        // doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
+        if resolved_name.is_none() && !no_rebind {
             let method_suffix = format!(".{}", func_name);
+            let mut hits: Vec<&str> = Vec::new();
             for (raw, mangled) in ctx.use_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
-                    resolved_name = Some(mangled.as_str());
-                    break;
+                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 && !hits.contains(&mangled.as_str())
+                {
+                    hits.push(mangled.as_str());
                 }
             }
+            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
         }
         // Also check import_map for qualified entries where type is imported
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !no_rebind {
             let method_suffix = format!(".{}", lookup_name);
+            let mut hits: Vec<&str> = Vec::new();
             for (raw, mangled) in ctx.import_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
                     let type_part = &raw[..raw.len() - method_suffix.len()];
-                    if ctx.use_map.contains_key(type_part) {
-                        resolved_name = Some(mangled.as_str());
-                        break;
+                    if ctx.use_map.contains_key(type_part) && !hits.contains(&mangled.as_str()) {
+                        hits.push(mangled.as_str());
                     }
                 }
             }
+            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
         }
         // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none()
-            && !matches!(
-                lookup_name,
-                "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
-            )
-        {
+        if resolved_name.is_none() && !no_rebind {
             resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 
@@ -1161,8 +1356,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         .map(|s| s.as_str());
                 }
 
-                // Last resort: bare method name
-                if resolved_name.is_none() {
+                // Last resort: bare method name. Never for the enum helpers --
+                // discarding the qualifier here is exactly how a qualified
+                // `T.unwrap` reached an unrelated type's `unwrap` (2026-09-13).
+                if resolved_name.is_none() && !enum_helper {
                     resolved_name = ctx
                         .use_map
                         .get(method)
@@ -1191,6 +1388,24 @@ pub(crate) fn compile_method_call_static<M: Module>(
         if resolved_name.is_none() {
             suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
             resolved_name = suffix_resolved_storage.as_deref();
+        }
+
+        // The cross-module branch binds by NAME ALONE, exactly like the
+        // `func_ids` suffix scan on the other branch — but until 2026-09-13 only
+        // that other branch reported it, so every bind made here was invisible
+        // to `SIMPLE_DEBUG_ERASED_RECEIVER_BIND`. That is why the
+        // `StringBuilder.len` miscall (native-interp differential census, class
+        // `crash`) produced ZERO diagnostic lines while being the whole defect.
+        // Report-only: it never changes which candidate is selected.
+        if let Some(resolved) = resolved_name {
+            report_erased_receiver_bind(
+                ctx.func.name.as_str(),
+                lookup_name,
+                args.len(),
+                ctx.vreg_types.get(&receiver).copied(),
+                resolved,
+                1,
+            );
         }
 
         if let Some(resolved) = resolved_name {
@@ -1304,11 +1519,114 @@ mod tests {
         ));
     }
 
+    /// A bare zero-arg `lower()` / `upper()` on an erased receiver is the text
+    /// builtin, never a name-suffix bind to a lone user `*.lower` method
+    /// (`Avx512InstructionLowerer.lower`, macOS arm64 Stage 2, 2026-09-28).
+    /// doc/08_tracking/bug/seed_bare_method_suffix_binds_text_lower_to_user_method_2026-09-28.md
+    #[test]
+    fn bare_text_case_methods_route_to_builtin_not_user_method() {
+        assert!(is_bare_builtin_collection_method("lower", 0));
+        assert!(is_bare_builtin_collection_method("upper", 0));
+        // A user method with the same name but a different arity still resolves.
+        assert!(!is_bare_builtin_collection_method("lower", 1));
+        assert!(!is_bare_builtin_collection_method("upper", 1));
+    }
+
+    /// The CROSS-MODULE resolution branch of `compile_method_call_static` must
+    /// refuse to discard the receiver for a bare builtin collection idiom, not
+    /// only for the Optional/Result helpers.
+    ///
+    /// Native-vs-interpreter differential census, 2026-09-13, class `crash`
+    /// (`doc/10_metrics/infra/native_interp_differential_2026-09-13.md`,
+    /// `doc/08_tracking/bug/native_stringbuilder_to_text_segv_null_receiver_2026-09-13.md`):
+    /// `if freqs.len() == 0` in `most_common_char` has an ERASED array receiver,
+    /// so it arrives here as the bare name `len`. The three unqualified scans in
+    /// that branch were gated on `!enum_helper` only, so with
+    /// `common.string_builder` in the closure the first of them bound the call
+    /// to `StringBuilder.len`; that tail-calls `StringBuilder.to_text`, which
+    /// loads field 0 of a receiver that was never passed — SEGV at
+    /// `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`, x8 = 0.
+    ///
+    /// Asserted at SOURCE level for the same reason as
+    /// `mangle.rs`'s `cranelift_enum_helper_guard_is_keyed_on_the_method_segment`:
+    /// the scans are inline in a function that needs a whole Cranelift
+    /// `FunctionBuilder` to call.
+    #[test]
+    fn cross_module_scans_refuse_bare_builtin_collection_idioms() {
+        let src = include_str!("closures_structs.rs");
+        // Every needle below is assembled with `concat!` so that this test's own
+        // source — which `include_str!` pulls in — cannot satisfy the assertion
+        // it is making. Written as plain literals, deleting the guard left the
+        // test GREEN because it matched itself; the sabotage run that proved
+        // this is why the concat! split is load-bearing, not cosmetic.
+        let predicate_needle = concat!("let no_rebind = enum_helper || ", "bare_builtin_collision;");
+        assert!(
+            src.contains(predicate_needle),
+            "the cross-module refusal must cover BOTH families"
+        );
+        // All three unqualified scans in that branch must consult it. The needle
+        // is assembled at compile time so this assertion's own source line does
+        // not appear in `include_str!` as a fourth match.
+        let scan_needle = concat!("if resolved_name.is_none() && !", "no_rebind {");
+        assert_eq!(
+            src.matches(scan_needle).count(),
+            3,
+            "every unqualified cross-module scan must be guarded by `no_rebind`"
+        );
+        // BOTH policy sites must first strip the `void.` pseudo-qualifier: the
+        // builtin route in `compile_method_call_static` and the cross-module
+        // refusal. Without this the incident's `void.len` reads as a genuine
+        // type-qualified call and every guard above is a no-op for it.
+        let strip_needle = concat!("let erasure_stripped = ", "strip_erased_receiver_qualifier(lookup_name);");
+        assert_eq!(
+            src.matches(strip_needle).count(),
+            2,
+            "both the builtin route and the cross-module refusal must strip erasure qualifiers"
+        );
+        // And the predicates themselves must classify the incident's call.
+        assert_eq!(strip_erased_receiver_qualifier("void.len"), "len");
+        assert!(is_bare_builtin_collection_method(
+            strip_erased_receiver_qualifier("void.len"),
+            0
+        ));
+        assert!(is_bare_builtin_collection_method("length", 0));
+        // A user method with a different arity is NOT in the family and still
+        // resolves through the scans above.
+        assert!(!is_bare_builtin_collection_method("len", 1));
+        // A genuine type qualifier is untouched, so a real cross-module
+        // `StringBuilder.len` still resolves to its own method.
+        assert_eq!(strip_erased_receiver_qualifier("StringBuilder.len"), "StringBuilder.len");
+        assert!(!is_bare_builtin_collection_method(
+            strip_erased_receiver_qualifier("StringBuilder.len"),
+            0
+        ));
+        // `void` alone, and a deeper path, are not pseudo-qualified calls.
+        assert_eq!(strip_erased_receiver_qualifier("void"), "void");
+        assert_eq!(strip_erased_receiver_qualifier("void.a.b"), "void.a.b");
+    }
+
     #[test]
     fn erased_dict_views_use_builtin_dispatch() {
+        // `set` remains outside this broad bare-name gate: user-defined
+        // `set(k, v)` methods must retain normal method resolution. The narrow
+        // dynamic codegen arm below is reached only by the pre-existing erased
+        // collection route, where it uses rt_collection_set.
+        assert!(!is_bare_builtin_collection_method("set", 2));
         assert!(is_bare_builtin_collection_method("keys", 0));
         assert!(is_bare_builtin_collection_method("values", 0));
         assert!(!is_bare_builtin_collection_method("keys", 1));
+        // `items()` joins `keys`/`values` (doc/08_tracking/bug/
+        // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md,
+        // defect 2's erased-receiver half) — it has no user-defined
+        // competing method anywhere in the tree, so it carries no theft
+        // risk. `entries()` deliberately stays OUT of this gate: real
+        // user-defined `entries()` methods exist on other types (Map,
+        // HashMap, PersistentMap, etc.), so routing a bare `.entries()` here
+        // would risk silently stealing one of those calls. This assertion
+        // guards against that risk being reintroduced.
+        assert!(is_bare_builtin_collection_method("items", 0));
+        assert!(!is_bare_builtin_collection_method("items", 1));
+        assert!(!is_bare_builtin_collection_method("entries", 0));
     }
 
     /// A bare `text.starts_with(prefix)` must reach `rt_string_starts_with`
@@ -1557,8 +1875,8 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         // (`"  42  ".trim().to_i64()`) still returning the intermediate text's
         // HEAP POINTER as a "successful" integer.
         // doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
-        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase"
-        | "char_at" | "replace" => Some(TypeId::STRING),
+        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase" | "char_at"
+        | "replace" => Some(TypeId::STRING),
         // `slice`/`substring`/`concat` are shared with array receivers, where
         // the result is an array, not text — so they stay receiver-gated. A
         // wrong entry here could make a previously-correct call worse.
@@ -1606,7 +1924,7 @@ fn try_compile_builtin_method_call<M: Module>(
             get_vreg_or_default(ctx, builder, &args[1])
         } else {
             // Default to collection length
-            inline_runtime_len_value(builder, receiver_val)
+            inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays)
         };
 
         // step argument (optional, defaults to 1)
@@ -1622,7 +1940,7 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // is_empty: compile as rt_len(receiver) == 0
     if method == "is_empty" {
-        let len_val = inline_runtime_len_value(builder, receiver_val);
+        let len_val = inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays);
         let zero = builder.ins().iconst(types::I64, 0);
         let result = builder
             .ins()
@@ -2085,12 +2403,13 @@ fn try_compile_builtin_method_call<M: Module>(
                 check_variant.hash(&mut hasher);
                 (hasher.finish() & 0xFFFFFFFF) as i64
             };
-            let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_discriminant") else {
+            let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_variant") else {
                 return Ok(None);
             };
             let check_ref = ctx.module.declare_func_in_func(check_id, builder.func);
+            let enum_id_val = builder.ins().iconst(types::I64, 0);
             let disc_val = builder.ins().iconst(types::I64, disc);
-            let call = adapted_call(builder, check_ref, &[receiver_val, disc_val]);
+            let call = adapted_call(builder, check_ref, &[receiver_val, enum_id_val, disc_val]);
             let bool_result = builder.inst_results(call)[0];
             let result = builder.ins().sextend(types::I64, bool_result);
             return Ok(Some(result));
@@ -2114,25 +2433,24 @@ fn try_compile_builtin_method_call<M: Module>(
         // The receiver-type prefix is restricted to integer spellings so a
         // genuine `SomeStruct.chr` method is left to normal resolution.
         //
-        // `text_dot_from_char_code` is the same runtime entry point the LLVM
-        // backend calls and is non-ASCII correct (see
-        // char_from_code_non_ascii_unsupported_2026-07-20). It is declared
-        // explicitly because it is not an `rt_*` pre-declared import.
+        // `rt_char_from_code` is the canonical registered runtime ABI for this
+        // operation.  The legacy `text_dot_from_char_code` export has the
+        // same implementation, but is intentionally absent from the static
+        // provider manifest, so declaring it directly makes a strict JIT
+        // module NULL-jump/fail closed.  Keep Cranelift aligned with the MIR
+        // and runtime manifests rather than bypassing provider ownership.
         //
         // doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md
         m if args.is_empty() && is_int_chr_method(m) => {
-            let fid = if let Some(&existing) = ctx.func_ids.get("text_dot_from_char_code") {
+            let fid = if let Some(&existing) = ctx.func_ids.get("rt_char_from_code") {
                 existing
             } else {
                 let mut sig = Signature::new(platform_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
-                match ctx
-                    .module
-                    .declare_function("text_dot_from_char_code", Linkage::Import, &sig)
-                {
+                match ctx.module.declare_function("rt_char_from_code", Linkage::Import, &sig) {
                     Ok(id) => {
-                        ctx.func_ids.insert("text_dot_from_char_code".to_string(), id);
+                        ctx.func_ids.insert("rt_char_from_code".to_string(), id);
                         id
                     }
                     Err(_) => return Ok(None),
@@ -2147,7 +2465,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "merge" => {
             if args.len() == 1 {
                 let other_val = get_vreg_or_default(ctx, builder, &args[0]);
-                let count = inline_runtime_len_value(builder, other_val);
+                let count = inline_runtime_len_value(builder, other_val, ctx.baremetal, ctx.fam_arrays);
                 if let Some(&func_id) = ctx.runtime_funcs.get("rt_array_extend_i64") {
                     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                     adapted_call(builder, func_ref, &[receiver_val, other_val, count]);
@@ -2281,21 +2599,22 @@ fn try_compile_builtin_method_call<M: Module>(
         // above, and falls through to `rt_dict_remove` for non-arrays.
         // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
         "remove" => "rt_collection_remove",
-        "set" => {
-            if args.len() >= 2 {
-                let key_val = get_vreg_or_default(ctx, builder, &args[0]);
-                let val_val = get_vreg_or_default(ctx, builder, &args[1]);
-                if let Some(&func_id) = ctx.runtime_funcs.get("rt_dict_set") {
-                    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-                    let call = adapted_call(builder, func_ref, &[receiver_val, key_val, val_val]);
-                    let result = builder.inst_results(call)[0];
-                    return Ok(Some(super::helpers::safe_extend_to_i64(builder, result)));
-                }
-            }
-            return Ok(None);
-        }
+        // Keep `set` out of the broad bare-name gate: a user-defined
+        // `set(k, v)` must retain normal method resolution. This arm is used
+        // only after the existing erased-collection route selected it.
+        "set" if args.len() == 2 => "rt_collection_set",
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
+        // `d.items()` on an erased (bare) receiver: same runtime call the
+        // typed-receiver MIR lowering path already uses
+        // (mir/lower/lowering_expr_method.rs), returning an array of (key,
+        // value) tuples matching the interpreter's `items()`/`entries()`
+        // shape. `"entries"` is deliberately NOT added here — see the
+        // `is_bare_builtin_collection_method` gate above for why (real
+        // user-defined `entries()` methods on other types create a theft
+        // risk that `items()` does not have). See doc/08_tracking/bug/
+        // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+        "items" => "rt_dict_entries",
         // `has` is the canonical Dict/Set membership idiom in Simple source;
         // rt_contains tag-dispatches on the receiver at runtime (Array/Dict/
         // String; anything else yields 0), so it is safe for untyped receivers.
@@ -2304,7 +2623,7 @@ fn try_compile_builtin_method_call<M: Module>(
     };
 
     if runtime_func == "rt_len" {
-        return Ok(Some(inline_runtime_len_value(builder, receiver_val)));
+        return Ok(Some(inline_runtime_len_value(builder, receiver_val, ctx.baremetal, ctx.fam_arrays)));
     }
 
     // Check if runtime function exists; declare on-demand if missing
@@ -2379,7 +2698,9 @@ fn try_compile_builtin_method_call<M: Module>(
     let mut call_args = vec![receiver_val];
     for (arg_i, arg) in args.iter().enumerate() {
         let raw = get_vreg_or_default(ctx, builder, arg);
-        let val = if box_dict_key && arg_i == 0 && key_is_int {
+        let val = if runtime_func == "rt_collection_set" {
+            super::methods::wrap_value(ctx, builder, *arg, raw)
+        } else if box_dict_key && arg_i == 0 && key_is_int {
             builder.ins().ishl_imm(raw, 3)
         } else {
             raw
@@ -2515,4 +2836,174 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     }
 
     indirect_call_with_result(ctx, builder, sig_ref, method_ptr, &call_args, dest);
+}
+
+/// Owner struct name of a `Type_dot_method` / `Type.method` candidate key
+/// (`"mod__Type_dot_kind"` -> `"Type"`).
+fn candidate_owner_type(key: &str, method: &str) -> Option<String> {
+    let dot = format!("_dot_{method}");
+    let raw = format!(".{method}");
+    let prefix = key
+        .strip_suffix(dot.as_str())
+        .or_else(|| key.strip_suffix(raw.as_str()))?;
+    let owner = prefix.rsplit("__").next().unwrap_or(prefix);
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner.to_string())
+    }
+}
+
+/// Runtime dispatch for a bare method on an ERASED receiver (`x: Any`, a
+/// trait-typed parameter) whose candidates are ambiguous by name.
+///
+/// A struct that implements a trait carries that trait's vtable pointer at
+/// offset 0 (`compile_struct_init`, keyed on `ctx.vtable_data_ids`). That
+/// pointer is a per-struct constant address, i.e. a runtime type identity.
+/// When EVERY candidate's owner has such a vtable, emit
+///
+/// ```text
+/// vt = load [recv & !7]
+/// if vt == &__vtable__A -> A.method(recv, args)
+/// if vt == &__vtable__B -> B.method(recv, args)
+/// else                  -> rt_method_not_found (aborts, like the interpreter)
+/// ```
+///
+/// This is exactly what the interpreter does by class name, expressed on the
+/// JIT's object layout. Nothing is guessed: a receiver of an unlisted type
+/// reaches `rt_method_not_found` instead of a silently wrong candidate.
+/// Returns `Ok(false)` (emit nothing) when any candidate has no vtable, so
+/// the caller's `[CODEGEN-AMBIGUOUS-METHOD]` refusal stays in force.
+fn try_emit_vtable_type_switch<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    receiver: VReg,
+    args: &[VReg],
+    method: &str,
+    candidates: &[(String, FuncId)],
+) -> InstrResult<bool> {
+    let mut arms: Vec<(cranelift_module::DataId, FuncId)> = Vec::new();
+    let dbg = std::env::var_os("SIMPLE_DEBUG_METHOD_DISPATCH").is_some();
+    if dbg {
+        eprintln!(
+            "[CODEGEN-VTABLE-SWITCH] in '{}' method '{}' candidates={:?} vtable_owners={:?}",
+            ctx.func.name,
+            method,
+            candidates.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            ctx.vtable_data_ids.keys().collect::<Vec<_>>()
+        );
+    }
+    for (key, func_id) in candidates {
+        let Some(owner) = candidate_owner_type(key, method) else {
+            return Ok(false);
+        };
+        let Some(&data_id) = ctx.vtable_data_ids.get(&owner) else {
+            return Ok(false);
+        };
+        if arms.iter().any(|(d, _)| *d == data_id) {
+            // Two candidates stamped with the same vtable cannot be told
+            // apart at runtime; refuse rather than pick.
+            return Ok(false);
+        }
+        arms.push((data_id, *func_id));
+    }
+    if arms.is_empty() {
+        return Ok(false);
+    }
+
+    let recv = get_vreg_or_default(ctx, builder, &receiver);
+    let arg_vals: Vec<cranelift_codegen::ir::Value> =
+        args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+
+    let untag = builder.ins().iconst(types::I64, !7i64);
+    let ptr = builder.ins().band(recv, untag);
+    let merge = builder.create_block();
+    builder.append_block_param(merge, types::I64);
+    let miss = builder.create_block();
+    let probe = builder.create_block();
+    let nonnull = builder.ins().icmp_imm(IntCC::NotEqual, ptr, 0);
+    builder.ins().brif(nonnull, probe, &[], miss, &[]);
+
+    builder.switch_to_block(probe);
+    builder.seal_block(probe);
+    let vt = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
+    for (data_id, func_id) in &arms {
+        let global = ctx.module.declare_data_in_func(*data_id, builder.func);
+        let expected = builder.ins().global_value(types::I64, global);
+        let hit = builder.ins().icmp(IntCC::Equal, vt, expected);
+        let call_block = builder.create_block();
+        let next = builder.create_block();
+        builder.ins().brif(hit, call_block, &[], next, &[]);
+
+        builder.switch_to_block(call_block);
+        builder.seal_block(call_block);
+        let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+        let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
+        let sig_params = builder.func.dfg.signatures[sig_ref].params.len();
+        let mut call_args = if sig_params == arg_vals.len() {
+            vec![]
+        } else {
+            vec![recv]
+        };
+        call_args.extend(arg_vals.iter().copied());
+        let call_args = super::calls::adapt_args_to_signature(builder, func_ref, call_args);
+        let call = adapted_call(builder, func_ref, &call_args);
+        let results = builder.inst_results(call).to_vec();
+        let result = match results.first() {
+            None => builder.ins().iconst(types::I64, 0),
+            Some(&r) => {
+                let ty = builder.func.dfg.value_type(r);
+                if ty == types::I64 {
+                    r
+                } else if ty == types::F64 {
+                    builder.ins().bitcast(types::I64, MemFlags::new(), r)
+                } else if ty.is_int() {
+                    builder.ins().uextend(types::I64, r)
+                } else {
+                    r
+                }
+            }
+        };
+        builder.ins().jump(merge, &[result]);
+
+        builder.switch_to_block(next);
+        builder.seal_block(next);
+    }
+    // No arm matched: fall into the abort path.
+    builder.ins().jump(miss, &[]);
+
+    builder.switch_to_block(miss);
+    builder.seal_block(miss);
+    let type_bytes = b"<erased receiver>";
+    let type_data = super::helpers::declare_named_bytes(ctx, type_bytes)?;
+    let type_global = ctx.module.declare_data_in_func(type_data, builder.func);
+    let type_ptr = builder.ins().global_value(types::I64, type_global);
+    let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
+    let method_bytes = method.as_bytes();
+    let method_data = super::helpers::declare_named_bytes(ctx, method_bytes)?;
+    let method_global = ctx.module.declare_data_in_func(method_data, builder.func);
+    let method_ptr = builder.ins().global_value(types::I64, method_global);
+    let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);
+    let not_found_id = ctx.runtime_funcs["rt_method_not_found"];
+    let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+    let nf = adapted_call(builder, not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
+    let nf_val = builder.inst_results(nf)[0];
+    builder.ins().jump(merge, &[nf_val]);
+
+    builder.switch_to_block(merge);
+    builder.seal_block(merge);
+    let out = builder.block_params(merge)[0];
+    if let Some(d) = dest {
+        ctx.vreg_values.insert(*d, out);
+    }
+    if std::env::var_os("SIMPLE_DEBUG_METHOD_DISPATCH").is_some() {
+        eprintln!(
+            "[CODEGEN-VTABLE-SWITCH] in '{}' bare method '{}' dispatched at runtime over {} vtable arm(s)",
+            ctx.func.name,
+            method,
+            arms.len()
+        );
+    }
+    Ok(true)
 }

@@ -18,6 +18,18 @@
 
 #include "runtime_memory_guard.h"
 
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+/* runtime_native.c owns transient graph reachability.  This allocator is only
+ * the byte-storage owner and must never maintain a competing scope registry. */
+extern int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
+extern int8_t rt_transient_raw_owner_register_state(
+    void* ptr, uint64_t bytes, int8_t owned);
+extern int8_t rt_transient_raw_owner_query(
+    void* ptr, uint64_t* bytes, int8_t* owned);
+extern void rt_transient_raw_owner_unregister(void* ptr);
+extern int8_t rt_transient_raw_owner_thread_allows(void);
+#endif
+
 #if defined(_MSC_VER)
 #define RT_MEMORY_THREAD_LOCAL __declspec(thread)
 #else
@@ -41,6 +53,7 @@ static RT_MEMORY_THREAD_LOCAL int rt_transient_raw_paused = 0;
 #define RT_TRANSIENT_RAW_SIZE_MASK (~RT_TRANSIENT_RAW_OWNED_BIT)
 
 void rt_free(uint8_t* ptr);
+static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out);
 
 static size_t rt_transient_raw_hash(uintptr_t ptr) {
     uint64_t value = (uint64_t)ptr;
@@ -75,6 +88,12 @@ static int rt_transient_raw_insert(uintptr_t ptr, size_t bytes) {
 
 static int rt_transient_raw_grow(void) {
     size_t next_cap = rt_transient_raw_cap == 0 ? 256 : rt_transient_raw_cap * 2;
+    /* Match the canonical native owner: retired module allocations need a
+     * same-capacity rehash, not a permanently larger bookkeeping table. */
+    if (rt_transient_raw_cap != 0 &&
+        (rt_transient_raw_len + 1) * 10 < rt_transient_raw_cap * 6) {
+        next_cap = rt_transient_raw_cap;
+    }
     if (next_cap > SIZE_MAX / sizeof(RtTransientRawAlloc)) return 0;
     RtTransientRawAlloc* fresh = (RtTransientRawAlloc*)calloc(
         next_cap, sizeof(RtTransientRawAlloc));
@@ -108,6 +127,9 @@ static RtTransientRawAlloc* rt_transient_raw_lookup(uintptr_t ptr) {
 }
 
 static int rt_transient_raw_register(void* ptr, size_t bytes) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    return rt_transient_raw_owner_register(ptr, (uint64_t)bytes) != 0;
+#else
     if (!ptr || !rt_transient_raw_active) return ptr != NULL;
     if (bytes > RT_TRANSIENT_RAW_SIZE_MASK) return 0;
     if ((rt_transient_raw_len + rt_transient_raw_tombs + 1) * 10
@@ -117,15 +139,20 @@ static int rt_transient_raw_register(void* ptr, size_t bytes) {
     size_t stored = bytes |
         (rt_transient_raw_paused ? 0 : RT_TRANSIENT_RAW_OWNED_BIT);
     return rt_transient_raw_insert((uintptr_t)ptr, stored);
+#endif
 }
 
 static void rt_transient_raw_erase(void* ptr) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    rt_transient_raw_owner_unregister(ptr);
+#else
     RtTransientRawAlloc* entry = rt_transient_raw_lookup((uintptr_t)ptr);
     if (!entry) return;
     entry->ptr = RT_TRANSIENT_RAW_TOMBSTONE;
     entry->bytes = 0;
     rt_transient_raw_len--;
     rt_transient_raw_tombs++;
+#endif
 }
 
 int32_t rt_transient_raw_scope_begin(void) {
@@ -144,22 +171,57 @@ int32_t rt_transient_raw_scope_pause(void) {
 int64_t rt_transient_raw_words(
     int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr) {
     uintptr_t ptr = ((uintptr_t)value) & ~(uintptr_t)7;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    uint64_t bytes = 0;
+    if (rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) {
+        if (words) *words = (const uintptr_t*)ptr;
+        if (canonical_ptr) *canonical_ptr = ptr;
+        return (int64_t)(bytes / sizeof(uintptr_t));
+    }
+#else
     RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr);
-    if (!entry) return -1;
+    if (entry) {
+        if (words) *words = (const uintptr_t*)ptr;
+        if (canonical_ptr) *canonical_ptr = ptr;
+        return (int64_t)((entry->bytes & RT_TRANSIENT_RAW_SIZE_MASK) / sizeof(uintptr_t));
+    }
+#endif
+    /* A lowering owner is allocated before its per-module transient scope.
+     * It is therefore absent from the transient allocation table, but its
+     * fields are the roots through which scope-owned arrays and strings must
+     * be discovered.  The struct registry is the existing fail-closed proof
+     * that this is a live native object and supplies its exact scan bound. */
+    size_t struct_bytes = 0;
+    if (!rt_struct_alloc_lookup_size((void*)ptr, &struct_bytes)) return -1;
     if (words) *words = (const uintptr_t*)ptr;
     if (canonical_ptr) *canonical_ptr = ptr;
-    return (int64_t)((entry->bytes & RT_TRANSIENT_RAW_SIZE_MASK) / sizeof(uintptr_t));
+    return (int64_t)(struct_bytes / sizeof(uintptr_t));
 }
 
 int32_t rt_transient_raw_promote(uintptr_t ptr) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    ptr &= ~(uintptr_t)7;
+    uint64_t bytes = 0;
+    if (rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) {
+        return rt_transient_raw_owner_register_state((void*)ptr, bytes, 0) != 0;
+    }
+#else
     RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr & ~(uintptr_t)7);
-    if (!entry) return 0;
-    entry->bytes &= RT_TRANSIENT_RAW_SIZE_MASK;
-    return 1;
+    if (entry) {
+        entry->bytes &= RT_TRANSIENT_RAW_SIZE_MASK;
+        return 1;
+    }
+    ptr &= ~(uintptr_t)7;
+#endif
+    /* Persistent struct roots are already outside the transient owner's
+     * reclaim set.  Promotion is intentionally a validated no-op for them. */
+    size_t struct_bytes = 0;
+    return rt_struct_alloc_lookup_size((void*)ptr, &struct_bytes) ? 1 : 0;
 }
 
 int32_t rt_transient_raw_scope_end(void) {
     if (!rt_transient_raw_active) return 0;
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     for (size_t i = 0; i < rt_transient_raw_cap; i++) {
         RtTransientRawAlloc* entry = &rt_transient_raw_allocs[i];
         if (entry->ptr == 0 || entry->ptr == RT_TRANSIENT_RAW_TOMBSTONE) continue;
@@ -173,6 +235,7 @@ int32_t rt_transient_raw_scope_end(void) {
     }
     rt_transient_raw_len = 0;
     rt_transient_raw_tombs = 0;
+#endif
     rt_transient_raw_active = 0;
     rt_transient_raw_paused = 0;
     return 1;
@@ -266,7 +329,13 @@ uint8_t* rt_alloc(int64_t size) {
     if (size <= 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
         void* guarded = rt_mem_guard_alloc_sampled((size_t)size);
-        if (guarded != NULL) return (uint8_t*)guarded;
+        if (guarded != NULL) {
+            if (!rt_transient_raw_register(guarded, (size_t)size)) {
+                rt_mem_guard_free_sampled(guarded);
+                return NULL;
+            }
+            return (uint8_t*)guarded;
+        }
         /* mmap/mprotect failed (or the slot table is full) -- fall through
          * to the normal allocator below rather than returning NULL for a
          * sampling decision that isn't itself an OOM. */
@@ -395,7 +464,9 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
     int ok = rt_struct_alloc_cap != 0 || rt_struct_alloc_resize(256);
     if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
             >= rt_struct_alloc_cap * 7) {
-        if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
+        if ((rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 6) {
+            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
+        } else if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
         } else if (rt_struct_alloc_tombs > rt_struct_alloc_len / 4) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
@@ -465,6 +536,7 @@ uint8_t* rt_struct_alloc(int64_t size) {
 int8_t rt_struct_receiver_valid(
     int64_t receiver, int64_t byte_offset, int64_t access_width) {
     if (receiver == 0 || byte_offset < 0 || access_width <= 0) return 0;
+    if ((((uintptr_t)receiver) & (uintptr_t)7) > 1) return 0;
     uintptr_t ptr = ((uintptr_t)receiver) & ~(uintptr_t)7;
     if (ptr == 0) return 0;
 
@@ -493,15 +565,41 @@ int8_t rt_struct_receiver_valid(
 void* rt_realloc(void* ptr, int64_t size) {
     if (size < 0) return NULL;
     if (!ptr) return rt_alloc(size);
+    /* A transient scope is process-exclusive and thread-affine.  Reject a
+     * foreign-thread resize while its owner may trace or reclaim the pointer;
+     * ownership may be transferred safely after scope end. */
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_owner_thread_allows()) return NULL;
+#endif
     if (size == 0) {
         rt_free((uint8_t*)ptr);
         return NULL;
     }
 
     size_t old_size = 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    uint64_t transient_bytes = 0;
+    int8_t transient_owned = 0;
+    int transient_tracked =
+        rt_transient_raw_owner_query(ptr, &transient_bytes, &transient_owned) != 0;
+#define RT_PRESERVE_TRANSIENT_REALLOC(next_ptr) \
+    do { \
+        if (transient_tracked) { \
+            rt_transient_raw_owner_unregister(next_ptr); \
+            if (!rt_transient_raw_owner_register_state( \
+                    next_ptr, (uint64_t)size, transient_owned)) { \
+                rt_free((uint8_t*)(next_ptr)); \
+                return NULL; \
+            } \
+        } \
+    } while (0)
+#else
+#define RT_PRESERVE_TRANSIENT_REALLOC(next_ptr) do { (void)(next_ptr); } while (0)
+#endif
     if (rt_struct_alloc_lookup_size(ptr, &old_size)) {
         void* next = rt_struct_alloc(size);
         if (!next) return NULL;
+        RT_PRESERVE_TRANSIENT_REALLOC(next);
         memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
         rt_free((uint8_t*)ptr);
         return next;
@@ -512,6 +610,7 @@ void* rt_realloc(void* ptr, int64_t size) {
         old_size = guard_slot->size;
         void* next = rt_alloc(size);
         if (!next) return NULL;
+        RT_PRESERVE_TRANSIENT_REALLOC(next);
         memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
         rt_free((uint8_t*)ptr);
         return next;
@@ -522,31 +621,49 @@ void* rt_realloc(void* ptr, int64_t size) {
         old_size = *(size_t*)base;
         void* next = rt_alloc(size);
         if (!next) return NULL;
+        RT_PRESERVE_TRANSIENT_REALLOC(next);
         memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
         rt_free((uint8_t*)ptr);
         return next;
     }
 
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (transient_tracked) old_size = (size_t)transient_bytes;
+#else
     RtTransientRawAlloc* tracked = rt_transient_raw_lookup((uintptr_t)ptr);
-    if (tracked != NULL) {
+    int transient_tracked = tracked != NULL;
+    if (tracked) {
         old_size = tracked->bytes & RT_TRANSIENT_RAW_SIZE_MASK;
+    }
+#endif
+    if (transient_tracked) {
         void* next = rt_alloc(size);
         if (!next) return NULL;
+        RT_PRESERVE_TRANSIENT_REALLOC(next);
         memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
         rt_free((uint8_t*)ptr);
         return next;
     }
 
-    return realloc(ptr, (size_t)size);
+    void* next = realloc(ptr, (size_t)size);
+#undef RT_PRESERVE_TRANSIENT_REALLOC
+    return next;
 }
 
 void rt_free(uint8_t* ptr) {
     if (!ptr) return;
+    /* See rt_realloc: a rejected foreign free is a deliberate no-op, keeping
+     * the allocation live for its scope owner instead of creating a stale TLS
+     * registry entry and a later double free. */
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_owner_thread_allows()) return;
+#endif
     rt_struct_alloc_unregister(ptr);
     if (rt_mem_guard_is_slot(ptr)) {
         /* Guard slots are never transient-scope-owned and never enter the
          * harden quarantine -- guard_free_sampled already PROT_NONEs the
          * whole mapping, which is the stronger (page-fault) protection. */
+        rt_transient_raw_erase(ptr);
         rt_mem_guard_free_sampled(ptr);
         return;
     }

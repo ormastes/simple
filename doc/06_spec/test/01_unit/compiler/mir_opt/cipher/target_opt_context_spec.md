@@ -1,10 +1,5 @@
 # Target Opt Context Specification
 
-> Safety amendment (2026-08-24): PatternIdiom is Disabled and excluded from
-> effective Speed/Aggressive pipelines. Even an explicitly requested
-> `pattern_idiom` pass with AES capabilities preserves the software call; no
-> unsupported intrinsic is introduced.
-
 > <details>
 
 <!-- sdn-diagram:id=target_opt_context_spec.arch -->
@@ -212,7 +207,7 @@ expect(pipeline.target_ctx.x86_caps.has_aes).to_equal(false)
 
 ### optimizationpipeline_for_level(Aggressive) — pass list
 
-#### Aggressive effective passes exclude pattern_idiom
+#### Aggressive passes include pattern_idiom
 
 <details>
 <summary>Executable SSpec</summary>
@@ -222,12 +217,12 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val pipeline = optimizationpipeline_for_level(OptLevel.Aggressive)
-expect(pipeline.passes.contains("pattern_idiom")).to_equal(false)
+expect(pipeline.passes.contains("pattern_idiom")).to_equal(true)
 ```
 
 </details>
 
-#### Speed effective passes exclude pattern_idiom
+#### Speed passes include pattern_idiom
 
 <details>
 <summary>Executable SSpec</summary>
@@ -237,7 +232,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val pipeline = optimizationpipeline_for_level(OptLevel.Speed)
-expect(pipeline.passes.contains("pattern_idiom")).to_equal(false)
+expect(pipeline.passes.contains("pattern_idiom")).to_equal(true)
 ```
 
 </details>
@@ -293,9 +288,9 @@ expect(func.blocks[0].instructions.len()).to_equal(1)
 
 </details>
 
-### pipeline_optimize with AES caps — preserves quarantined call
+### pipeline_optimize with AES caps — rewrites aes_round via unified path
 
-#### function count is preserved while pass is skipped
+#### function count is preserved after rewrite
 
 <details>
 <summary>Executable SSpec</summary>
@@ -313,7 +308,7 @@ expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
 
 </details>
 
-#### quarantined block has same instruction count
+#### rewritten block has same instruction count
 
 <details>
 <summary>Executable SSpec</summary>
@@ -333,31 +328,7 @@ expect(func.blocks[0].instructions.len()).to_equal(1)
 
 </details>
 
-#### instruction remains Call rather than unsupported Intrinsic
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val m   = make_call_module("std.common.aes.cipher.aes_round_software")
-val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false, caps_kind: TargetCapsKind.X86(make_x86_caps_aes_only()))
-val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["pattern_idiom"], target_ctx: ctx)
-val out = pipeline_optimize(pipeline, m)
-val sym  = out.functions.keys()[0]
-val func = out.functions[sym]
-val inst = func.blocks[0].instructions[0]
-val is_call = match inst.kind:
-    case Call(dest, func_op, args): true
-    case _: false
-expect(is_call).to_equal(true)
-```
-
-</details>
-
-#### crypto_aes_round intrinsic is not introduced
+#### rewritten instruction is Intrinsic not Call
 
 <details>
 <summary>Executable SSpec</summary>
@@ -376,7 +347,31 @@ val inst = func.blocks[0].instructions[0]
 val is_intrinsic = match inst.kind:
     case Intrinsic(dest, name, args): true
     case _: false
-expect(is_intrinsic).to_equal(false)
+expect(is_intrinsic).to_equal(true)
+```
+
+</details>
+
+#### intrinsic name is crypto_aes_round after rewrite
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false, caps_kind: TargetCapsKind.X86(make_x86_caps_aes_only()))
+val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["pattern_idiom"], target_ctx: ctx)
+val out = pipeline_optimize(pipeline, m)
+val sym  = out.functions.keys()[0]
+val func = out.functions[sym]
+val inst = func.blocks[0].instructions[0]
+val intrinsic_name = match inst.kind:
+    case Intrinsic(dest, name, args): name
+    case _: ""
+expect(intrinsic_name).to_equal("crypto_aes_round")
 ```
 
 </details>

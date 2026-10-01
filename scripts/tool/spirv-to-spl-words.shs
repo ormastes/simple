@@ -1,0 +1,72 @@
+#!/bin/sh
+# spirv-to-spl-words.shs -- transcribe a .spv blob into a Simple `[u8]` literal.
+#
+#   sh scripts/tool/spirv-to-spl-words.shs <in.spv> [indent]
+#
+# Writes the array body to stdout: 12 `0xNNu8,` bytes per line, indented by
+# `indent` spaces (default 8), little-endian word order preserved exactly as the
+# file stores it. The first stdout line is a `# sha256: <hex>` comment pinning
+# the .spv the body was made from, so a generated module carries its own
+# provenance and `scripts/check/check-rect-batch-spirv-pinned.shs` can compare.
+#
+# Pure sh + od + awk: no Python, no Simple runtime, so it works on a host with
+# nothing deployed. Fail-closed -- a missing input, an empty input, or a length
+# that is not a multiple of 4 (not a SPIR-V module) is an error, never an empty
+# body that would silently produce a zero-length blob.
+set -eu
+
+spv="${1:-}"
+indent_n="${2:-8}"
+
+if [ -z "$spv" ]; then
+    echo "usage: spirv-to-spl-words.shs <in.spv> [indent]" >&2
+    exit 2
+fi
+if [ ! -f "$spv" ]; then
+    echo "ERROR: no such file: $spv" >&2
+    exit 2
+fi
+
+size=$(wc -c < "$spv" | tr -d ' ')
+if [ "$size" -eq 0 ]; then
+    echo "ERROR: empty file: $spv" >&2
+    exit 2
+fi
+if [ $(( size % 4 )) -ne 0 ]; then
+    echo "ERROR: $spv is $size bytes, not a multiple of 4 -- not a SPIR-V module" >&2
+    exit 2
+fi
+
+if command -v shasum >/dev/null 2>&1; then
+    sha=$(shasum -a 256 "$spv" | awk '{print $1}')
+elif command -v sha256sum >/dev/null 2>&1; then
+    sha=$(sha256sum "$spv" | awk '{print $1}')
+else
+    echo "ERROR: neither shasum nor sha256sum is available -- cannot pin $spv" >&2
+    exit 2
+fi
+
+echo "# sha256: $sha  ($size bytes)"
+
+od -An -v -tx1 "$spv" | tr -s ' ' '\n' | grep -v '^$' | awk -v n="$indent_n" '
+BEGIN {
+    pad = ""
+    for (i = 0; i < n; i++) pad = pad " "
+    count = 0
+    line = ""
+}
+{
+    b = "0x" toupper($1) "u8,"
+    if (count % 12 == 0) {
+        if (count > 0) print line
+        line = pad b
+    } else {
+        line = line " " b
+    }
+    count++
+}
+END {
+    if (count == 0) { print "ERROR: od produced no bytes" > "/dev/stderr"; exit 2 }
+    sub(/,$/, "", line)
+    print line
+}'

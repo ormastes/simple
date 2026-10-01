@@ -1,7 +1,7 @@
 # Bug: `Some(_)` patterns and `.unwrap_or` silently accepted on NON-Option values
 
 - **Date:** 2026-07-27
-- **Status:** open
+- **Status:** open — owner ruling 2026-09-27: staged migration (error for new code first, then convert existing sites in batches, then hard error). Plan: `doc/03_plan/compiler/type_system/option_pattern_non_option_scrutinee_migration_2026-09-27.md`; todo 339. The class spec carries `@tag:in-development` until stage 3.
 - **Severity:** high (silent wrong answers; type error degraded into bad data; engines disagree)
 - **Found by:** lane OPTNIL, reproduced independently by the coordinator
 - **Reconstructed:** the lane's original doc was clobbered off disk by a parallel
@@ -38,62 +38,27 @@ own way — and the two engines disagree:
 The interpreter failing to match `_` is itself a second defect: a wildcard arm
 must be unconditional.
 
+## 2026-08-15 bootstrap instance
+
+GDB captured the same type-checking hole inside Stage 3 itself. `HirFunction`
+stores export metadata as the desugared pair `has_export_attr: bool` plus a
+direct `export_attr: ExportAttr`, but MIR lowering still matched the direct
+struct as `Some/None`. The generated native code called `rt_is_some`, then
+`rt_enum_id` (which correctly returned `-1` for the non-enum struct), and
+finally read the `MirFunction.is_export_c` offset `0x78` from the 16-byte
+`ExportAttr`, causing SIGSEGV at `lower_function_with_gpu_metadata+15851`.
+
+The local bootstrap blocker is repaired by gating on `has_export_attr` and
+projecting `fn_.export_attr.is_export_c` / `.export_name` directly. Focused
+coverage is in `test/01_unit/compiler/mir/mir_exported_types_spec.spl`. The
+broader bug remains open: invalid Option patterns on non-Option values must be
+rejected by type checking rather than relying on consumer-specific behavior.
+
 ## Where
 
-- ~~`src/compiler/10.frontend/core/interpreter/eval_methods.spl:107` — Option
+- `src/compiler/10.frontend/core/interpreter/eval_methods.spl:107` — Option
   handling is gated on `kind == VAL_STRUCT`, so a raw `i64` misses every branch
-  and `unwrap_or` (:117) falls through returning the receiver.~~
-  **NOW-WRONG (2026-08-01) — this described DEAD CODE.** `eval_methods.spl` was
-  a duplicate shadowed by the package-local `_EvalOps` copies and was deleted in
-  `f97dfbbb8ee`. Re-derived against the live `eval_method_call`
-  (`_EvalOps/call_method_eval.spl:567-654`): it has **no Option/Result built-in
-  method block at all**. There is no `unwrap` / `unwrap_or` / `is_some` /
-  `is_none` / `unwrap_err` / `is_ok` / `is_err` arm anywhere in the live
-  interpreter (`grep '"unwrap"' src/compiler/10.frontend/core/interpreter/`
-  returns nothing). Its only `kind == VAL_STRUCT` branches are the `__dict`
-  table and a user-method `func_table_lookup`, after which it hits
-  `eval_set_error("no method '<name>' on struct")`. So the mechanism recorded
-  here — "gated on `VAL_STRUCT`, raw `i64` misses every branch, `unwrap_or`
-  returns the receiver" — is **not** the live pure-Simple behaviour. The live
-  behaviour for a *struct* Option is a hard error, and for a raw `i64` receiver
-  it is `no method 'unwrap_or' on int`. **The user-visible symptom this bug
-  reports (`<value:0x6>` leaking from `unwrap_or`) therefore comes from the MIR
-  lowering below, not from the interpreter** — which strengthens, not weakens,
-  the `rt_unwrap_or_self` root cause. Whether the deleted block ever ran is
-  UNKNOWN: the sabotage proof covered `eval_text_method`, whose sole call site
-  is inside `_EvalOps`; `eval_method_call`'s external caller is
-  `eval.spl:301`, so resolution there was never measured. **What would settle
-  it:** nothing anymore — only one definition survives. **What is actionable:**
-  if any Simple source calls `.unwrap()`/`.is_some()` on an Option struct under
-  the pure-Simple interpreter, it errors today. That gap should be filed and
-  fixed on `_EvalOps/call_method_eval.spl`, not rediscovered from the deleted
-  file.
-  **DONE (2026-08-01, second pass) — and it STRENGTHENS the `rt_unwrap_or_self`
-  root cause below.** The gap was confirmed by *running* the pure-Simple
-  interpreter (`core_interpret_expr` driven with the Rust seed as HOST ONLY over
-  working-copy source, with a deliberately-failing SENTINEL row), then closed:
-  `eval_option_result_method` in `_EvalOps/call_method_eval.spl` now implements
-  `unwrap`, `unwrap_or`, `unwrap_err`, `is_some`, `is_none`, `is_ok`, `is_err`.
-  Two consequences for THIS bug:
-  1. **The interpreter is now eliminated as a suspect by construction.** Its
-     `unwrap_or` returns the payload for `Some`/`Ok` and evaluates the default
-     argument otherwise; it **never** returns the receiver. There is no
-     `_or_self` fallback anywhere on the interpreter path. So any surviving
-     `<value:0x6>` leak from `unwrap_or` is the MIR lowering — the diagnosis
-     below is confirmed, not merely inferred from the interpreter's silence.
-  2. The `VAL_STRUCT` gating story is superseded but its *shape* was
-     half-right, and the reason matters. Measured encoding: there is **no
-     `VAL_ENUM`** in this interpreter; an Option is either BOXED (a
-     `VAL_STRUCT` with `__tag` at field 0) or FLAT (the raw word, `nil` =
-     `None`). A raw `i64` receiver really does miss any `VAL_STRUCT`-gated
-     branch — which is exactly why the new arm is gated **before** the per-kind
-     dispatch and discriminates on `__tag`, never on `kind` or on the struct
-     name. (The struct name is unusable: `eval_enum_variant_call` produces
-     `"Option::Some"` while `parse_int` produces plain `"Option"`.)
-  Regression pin:
-  `test/01_unit/compiler/interpreter/option_result_method_dispatch_spec.spl`.
-  Nothing here retracts the `rt_unwrap_or_self` item; fix #2 in the plan below
-  still stands.
+  and `unwrap_or` (:117) falls through returning the receiver.
 - `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:388-396` —
   `option_payload_or_self` emits **`rt_unwrap_or_self`** ("return the receiver if
   it is not an Option"), typed `i64` while the value stays tag-boxed, producing
@@ -160,23 +125,10 @@ for every probe, so on the current toolchain this defect is not engine-specific.
 
 **`text.last_index_of` / `rfind` are also plain `i64`.** `src/lib/text.spl:61`
 declares `-> i64?`, but the builtin intercepts first
-(`_EvalOps/access_literal_assign_eval.spl:259-268` returns
-`val_make_int(s.last_index_of(needle))`; `compiler/cg_expr.spl:555` emits
-`spl_str_last_index_of`), so callers see a raw `i64`. Any earlier note calling
-`last_index_of` "correctly Option-shaped" is wrong.
-
-> **Citation corrected 2026-08-01 — conclusion holds, history did not.** This
-> cited `eval_methods.spl:459`, which was dead code. Two corrections: (1) the
-> live arm lives in `_EvalOps/access_literal_assign_eval.spl`; (2) between
-> 2026-07-27 and 2026-08-01 the live text-method table had **no**
-> `last_index_of`/`rfind` arm at all — so "the builtin intercepts first" was
-> false for the interpreter lane during that window; `last_index_of` fell
-> through to `eval_set_error` and returned `-1`/`VAL_NONE`. It became true
-> when `f97dfbbb8ee` added the arm. The **raw-`i64`, `-1`-for-miss contract is
-> confirmed** on the live code, and the `?? -1` the old citation quoted was
-> deliberately dropped (it was dead on a miss and corrupted a genuine hit at
-> index 3, the nil sentinel). See
-> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
+(`interpreter/eval_methods.spl:459` returns `val_make_int(… ?? -1)`;
+`compiler/cg_expr.spl:555` emits `spl_str_last_index_of`), so callers see a raw
+`i64`. Any earlier note calling `last_index_of` "correctly Option-shaped" is
+wrong.
 
 ### Repaired (lane IDXFIX2 — 28 files)
 
@@ -859,93 +811,167 @@ Row f is a second, separate finding: the INTERPRETER gets `val x: i64? = 4`
 wrong (answers `_`) while the JIT gets it right. That is §13's defect, now
 confirmed to be independent of the value 3.
 
-## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+## Still REPRODUCIBLE 2026-09-06 — re-measured, not fixed
 
-LIVE, re-reproduced. Bare `val n = 6` then `n.unwrap_or(-99)`, deployed seed, verbatim:
-```
-jit:         uo=<value:0x6>
-interpreter: uo=6
-```
-Neither is an error, and the two engines still disagree — exactly the reported defect. (Control in the same program: `Option<bool> == true` prints `p1=true` on both engines, so real Option equality is fine on the hosted engines; the defect is the missing type check on a NON-Option scrutinee.)
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
 
-## 2026-08-17 lane D — LIVE, three shapes measured, path drift resolved, class spec landed
+Fixture (`build/wi/r_optpat.spl`):
 
-**Verdict: LIVE. No fix attempted — the locus is out of this lane's file scope
-and the blast radius is tree-wide (§8: 2,746 Option-shaped + 4,211 Result-shaped
-sites across 620 files).**
+```simple
+fn main() -> void:
+    val plain: i64 = 5
+    var arm = "none"
+    match plain:
+        case Some(v): arm = "Some({v})"
+        case _: arm = "wildcard"
+    print("match Some(_) on non-Option i64 -> {arm}")
 
-### Path drift resolved
-
-The `## Where` section's cited file
-`src/compiler/10.frontend/core/interpreter/eval_methods.spl` **does not exist**
-(already noted NOW-WRONG above; confirmed again by directory listing).
-`src/compiler/10.frontend/core/interpreter/eval_calls.spl` — the row's other
-cited path — was grepped for `unwrap|is_some|option|result` and contains **no
-Option/Result handling of any kind**. The live pure-Simple dispatch is
-`_EvalOps/call_method_eval.spl:831` (`is_option_result_method`) and `:865`
-(`eval_option_result_method`). Note `:866-870`: when the receiver has no
-Option/Result tag it *does* `eval_set_error(...)` — so the pure-Simple
-interpreter is not the leaking half; the deployed Rust seed is, on both of its
-engines. There is still no static (type-check-time) rejection anywhere.
-
-### Measured 2026-08-17, deployed seed (`bin/simple`, the Rust seed), verbatim
-
-Four probe files, `bin/simple run <file>` under `SIMPLE_EXECUTION_MODE`:
-
-| probe | jit | interpreter | correct |
-|---|---|---|---|
-| `val n = 6; n.unwrap_or(-99)` | `uo=<value:0x6>` | `uo=6` | compile error |
-| `match n: case Some(i)` (n=6) | `some=<value:0x6>` | `some=6` | compile error |
-| `if val Some(k) = n` (n=6) | `bound=<value:0x6>` | `bound=6` | compile error |
-| CONTROL `val o: i64? = 42; o.unwrap_or(7)` | `ok=0.000…002` (denormal) | `ok=42` | `ok=42` |
-
-All four exit 0. The first three are the reported defect, now measured for
-**three distinct consumer shapes** rather than one. The CONTROL row is a
-*separate* live defect and is exactly §25's diagnosis confirmed at the surface:
-an implicit coercion of a bare scalar into a declared `i64?` leaves it unboxed,
-so `unwrap_or` re-reads it under `TAG_FLOAT` and prints a denormal. It matches
-`doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md`.
-
-### Specs landed
-
-- Probes: `test/01_unit/compiler/interpreter/probe_option_on_non_option/`
-  (`unwrap_or_on_i64.spl`, `match_some_on_i64.spl`, `if_val_some_on_i64.spl`,
-  `control_real_option.spl`).
-- Class-detection spec:
-  `test/01_unit/compiler/interpreter/option_on_non_option_scrutinee_class_spec.spl`
-  — shells out per engine (a spec body runs interpreted and can never go red on
-  the JIT), asserts each bad probe is REJECTED, and pins the genuine-Option
-  control so a fix cannot outlaw Option operations wholesale. It is expected
-  RED until the static check exists; that is the point.
-
-### Not proved by this lane
-
-No fix. No measurement on the native/AOT column. No measurement on a
-self-hosted binary (none is runnable in this tree — see the sibling row's note).
-
-### Class spec verdict, verbatim (2026-08-17, `bin/simple run <spec>`)
-
-`bin/simple test` could not reach a verdict on this host today
-(`reason=daemon-no-response budget_ms=480000`, and SIGTERM at the 600s monitor —
-a live bootstrap is saturating the box). Running the spec file directly under
-`bin/simple run` bypasses the test daemon and does reach one:
-
-```
-  ✗ rejects unwrap_or on a bare i64 receiver on both engines
-    expected uo=6
-  ✗ rejects a Some(_) match arm against a bare i64 scrutinee on both engines
-    expected some=6
-  ✗ rejects an if-val Some() binding against a bare i64 on both engines
-    expected bound=6
-  ✗ still accepts a GENUINE Option and returns the payload on both engines
-    expected ok=0.000…002
-4 examples, 4 failures
-SPEC FILE VERDICT: .../option_on_non_option_scrutinee_class_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0
+    val r = plain.unwrap_or(9)
+    print("i64.unwrap_or(9) -> {r}")
 ```
 
-Caveat recorded rather than hidden: inside the spec's subprocess the
-`SIMPLE_EXECUTION_MODE=jit` probe reported the INTERPRETER's value (`uo=6`, not
-`uo=<value:0x6>`), i.e. the env var did not force the JIT from that nested
-invocation. The JIT column in the table above was measured from a direct shell
-invocation and is sound; the spec's per-engine split is not, and needs a better
-engine selector before it can be trusted as a two-engine oracle.
+Observed:
+
+```
+match Some(_) on non-Option i64 -> Some(5)
+i64.unwrap_or(9) -> 5
+```
+
+Both halves of the record still hold on this binary: `case Some(v)` matches a
+plain `i64` and binds the scrutinee itself as the payload, and `.unwrap_or` is
+accepted on a non-Option receiver. Neither produces an error, a warning, or a
+lint.
+
+### Why this was NOT fixed in this pass, stated rather than glossed
+
+Every fix that suggests itself here REMOVES a currently-working code path —
+making `case Some(v)` on a non-Option a hard error, or making `.unwrap_or`
+reject a non-Option receiver. The repo rule for this lane is that a fix must
+not delete a language behaviour to make a symptom go away, and this codebase
+has an unknown number of call sites relying on the permissive shape (the
+record's own §"engines disagree" analysis notes 20,360 unresolved arms in the
+sibling `case_bare_ident` audit). Turning permissiveness into an error is a
+language-semantics decision with a corpus-wide blast radius, not a bounded
+interpreter fix, so it needs an owner and a migration, not a one-line change.
+
+Concretely, what an owner needs to decide first:
+
+1. Is `Some(x)` on a non-Option a **type error** (reject at semantic analysis),
+   a **never-matching arm** (fall through to `case _`), or an **identity
+   match** (today's behaviour)? The three give different answers for the same
+   corpus and only one can be right.
+2. Whichever is chosen, the same answer must be given by the JIT, the Rust
+   seed's interpreter, AND the pure-Simple interpreter — the record's core
+   complaint is that they disagree, and fixing one engine alone widens the gap
+   rather than closing it.
+3. A corpus scan for `case Some(` / `case None` arms over provably non-Option
+   scrutinees is the prerequisite for (1); without it the blast radius is
+   unknown.
+
+Scope note: this run measured the **Rust seed's** interpreter. The package
+attributed the row to
+`src/compiler/10.frontend/core/interpreter/eval_calls.spl`; that is a heuristic
+path mapping, and the pure-Simple interpreter was not separately measured here.
+
+## Re-measurement 2026-09-18 — still open, and the interpreter row has CHANGED
+
+Binary: a seed built from `origin/main` `c8fa65bf714` (2026-09-18), 51,645,288 B,
+sha256 `308de6af84db5c26e2c0`; the same probe on the 2026-09-14 seed answers
+identically, so this is not a one-build artifact.
+
+Probe (`n` is a bare `i64 = 6`, no `index_of` involved):
+
+```simple
+fn main() -> i64:
+    val n = 6
+    match n:
+        case Some(i):
+            print "B match_Some_arm_taken i=" + i.to_text()
+        case _:
+            print "C wildcard_arm_taken"
+    print "D unwrap_or=" + n.unwrap_or(-99).to_text()
+    if val Some(k) = n:
+        print "E if_val_Some_taken k=" + k.to_text()
+    else:
+        print "F if_val_not_taken"
+    0
+```
+
+| row | interpret lane | JIT lane |
+|---|---|---|
+| `match n: case Some(i)` | **Some arm taken, binds `6`** | Some arm taken, binds **`<value:0x6>`** |
+| `n.unwrap_or(-99)` | `6` | **`<value:0x6>`** |
+| `if val Some(k) = n` | **taken, binds `6`** | taken, binds **`<value:0x6>`** |
+
+What changed since the original table, and what did not:
+
+- **Changed:** the interpreter no longer "matches neither arm". It now takes the
+  `Some` arm and binds the raw scalar. The original report's second defect (a
+  `_` wildcard that failed to match) therefore no longer reproduces on this
+  probe — it should not be cited as live without re-measuring.
+- **Unchanged, and still the core defect:** both engines silently ACCEPT
+  `Some(_)`, `if val Some(...)` and `.unwrap_or` on a plain `i64`. No compile
+  error on either lane.
+- **Unchanged:** the two engines still DISAGREE on what gets bound — the raw
+  scalar on the interpret lane, a tag box that stringifies as `<value:0x6>` on
+  the JIT lane. The record's point that fixing one engine alone widens the gap
+  stands.
+
+The fix direction in the section above (reject the pattern at type-check time,
+so the three engines cannot disagree about a program that should not compile)
+is unaffected by this re-measurement.
+
+**Coordination note (2026-09-18):** PR #1077 is open and edits
+`src/compiler/30.types/type_infer/{context,inference_control,inference_expr}.spl`
+for the adjacent dot-question/non-optional-return enforcement in the same HM
+checker. A pattern-side fix should land after it, or be written against its
+tree, rather than underneath it.
+
+## 2026-09-21 semantic-owner pattern slice — source green, row stays open
+
+Base: exact `origin/main` `e0dd873da1b7828389db4eb60e82972cc8245313`.
+PR #1077 is merged at this base, so its type-inference changes are already
+present. The selected owner is
+`src/compiler/30.types/type_infer/inference_control.spl::infer_pattern`, before
+interpreter, JIT, or native pattern lowering.
+
+Direct diagnostic probes with the checked-in Rust bootstrap seed
+(`bin/simple.exe`, 39,066,112 bytes, SHA-256
+`e2a42543d62f794a8df8389de70c4200ff95675b5c48b60f0103b1f47a77e78c`)
+reproduced the accepted bad programs on both execution modes:
+
+| probe | interpreter | JIT |
+|---|---|---|
+| `match 6: case Some(i)` | exit 0, `some=6` | exit 0, `some=<value:0x6>` |
+| `if val Some(k) = 6` | exit 0, `bound=6` | exit 0, `bound=<value:0x6>` |
+| `6.unwrap_or(-99)` | exit 0, `uo=6` | exit 0, `uo=<value:0x6>` |
+| genuine `val o: i64? = 42` | exit 0, `ok=42` | exit 0, `ok=42` |
+
+This seed evidence is diagnostic only. It is not admission or self-hosted
+compiler evidence.
+
+`bin/simple.exe check src/compiler` also failed closed with
+`no admitted cached self-hosted check worker artifact is available`; it was not
+retried and is not counted as a compiler-check pass.
+
+The focused pure-Simple owner spec is
+`test/01_unit/compiler/type_infer/option_pattern_scrutinee_spec.spl`. Before the
+source change it passed 1/5 examples: `Some` and `None` on concrete non-Option
+types were accepted, genuine Option payload bindings were not typed, and an
+unresolved scrutinee was not constrained. After the source change it passes
+6/6 through the seed diagnostic runner. Controls prove that a genuine
+`Optional<i64>` is accepted with an `i64` payload binding, an unresolved type is
+constrained to `Optional<T>`, `Ref<Optional<i64>>` retains match
+auto-dereference, and a named user enum may retain a variant called `Some`.
+
+The earlier subprocess class spec is not sufficient acceptance evidence: its
+negative cases discard process status and stderr and assert only that stdout
+lacks a success marker. A missing shell, bad binary path, or compiler crash can
+therefore make those negative cases pass.
+
+This slice does not close the bug row. `.unwrap_or` on non-Option receivers is
+unchanged, named HIR types cannot yet distinguish a user enum from a struct for
+exhaustive pattern-shape rejection, and no admitted Stage 2/3 artifact and
+receipt were available for native/interpreter proof. Keep `bug_db.sdn` at
+`P1, open` until those gaps and admitted cross-engine evidence are resolved.

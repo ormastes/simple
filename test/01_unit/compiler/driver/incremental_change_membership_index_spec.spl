@@ -1,3 +1,35 @@
+"""
+## Purpose and audience
+Pins the incremental driver's change-membership semantics: duplicate initial
+events and their order, once-per-dependent appends under duplicate dependency
+edges, one-hop invalidation in append order, cycle safety, deleted-path
+non-propagation, and the local (non-self) membership indices behind the
+detection loop. Audience: engineers changing driver_build incremental
+propagation or append logic.
+
+## Operator workflow
+Run the spec and read the verdict line:
+./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/driver/incremental_change_membership_index_spec.spl
+
+## Compatibility and limitations
+Scenarios exercise incremental_propagate_dependency_changes and
+incremental_append_deleted_changes directly on fixture entries; the scenario
+asserting the local membership indices reads the shipped source because the
+loop internals have no runtime API.
+
+## Verification guidance and troubleshooting
+A failing scenario names the propagation or append behavior to re-check; a
+membership-contract failure in the final scenario means a per-call local was
+hoisted into shared state and the diff must be reverted or re-reviewed before
+updating this spec.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_import_alias_resolution.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/sspec_capture_extension.md
+# @manual_section: incremental change membership indices
+
 use std.spec.*
 use std.io_runtime.{file_read}
 use compiler.driver.driver_build.incremental.{
@@ -26,11 +58,17 @@ fn initial_changes(paths: [text]) -> IncrChangeSet:
 
 describe "incremental change membership indices":
     it "preserves duplicate initial events and their order":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-001
+        # @capture(statistics): propagated changed-file list for duplicated seeds
+        step("Propagate a change set with a duplicated initial event")
         val result = incremental_propagate_dependency_changes(
             initial_changes(["a.spl", "a.spl", "b.spl"]), {})
         expect(result.changed_files()).to_equal(["a.spl", "a.spl", "b.spl"])
 
     it "appends each dependent once after duplicate dependency edges":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-002
+        # @capture(statistics): propagated list and per-change kinds
+        step("Propagate one change through a doubled dependency edge")
         val entries: {text: DependencyEntry} = {
             "b.spl": test_entry("b.spl", ["a.spl", "a.spl"])
         }
@@ -40,6 +78,9 @@ describe "incremental change membership indices":
         expect(result.changes[1].kind).to_equal(ChangeKind.DependencyChanged)
 
     it "keeps dependency invalidation one hop in append order":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-003
+        # @capture(statistics): propagated list for a two-hop dependency chain
+        step("Propagate one change through a two-level dependency chain")
         val entries: {text: DependencyEntry} = {
             "b.spl": test_entry("b.spl", ["a.spl"]),
             "c.spl": test_entry("c.spl", ["b.spl"])
@@ -49,6 +90,9 @@ describe "incremental change membership indices":
         expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
 
     it "adds only the initial source dependent in a dependency cycle":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-004
+        # @capture(statistics): propagated list under a dependency cycle
+        step("Propagate one change inside a two-node dependency cycle")
         val entries: {text: DependencyEntry} = {
             "a.spl": test_entry("a.spl", ["b.spl"]),
             "b.spl": test_entry("b.spl", ["a.spl"])
@@ -58,6 +102,9 @@ describe "incremental change membership indices":
         expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
 
     it "does not propagate a deleted path through the dependency graph":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-005
+        # @capture(statistics): live and deleted lists for a deleted seed
+        step("Propagate a deleted change through a dependent edge")
         val entries: {text: DependencyEntry} = {
             "b.spl": test_entry("b.spl", ["a.spl"])
         }
@@ -68,6 +115,9 @@ describe "incremental change membership indices":
         expect(result.deleted()).to_equal(["a.spl"])
 
     it "keeps cached-path order and ignores duplicate live source paths":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-006
+        # @capture(statistics): live and deleted lists with duplicate cache rows
+        step("Append deleted changes against a duplicated live cache")
         val result = incremental_append_deleted_changes(
             IncrChangeSet.empty(),
             ["live.spl", "live.spl"],
@@ -77,6 +127,9 @@ describe "incremental change membership indices":
         expect(result.deleted()).to_equal(["z.spl", "a.spl"])
 
     it "keeps empty inputs empty and compares complete path text":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-007
+        # @capture(statistics): empty-input and exact-path-comparison results
+        step("Append deleted changes with empty and near-miss inputs")
         val empty = incremental_append_deleted_changes(
             IncrChangeSet.empty(), [], [])
         expect(empty.is_empty()).to_equal(true)
@@ -86,10 +139,16 @@ describe "incremental change membership indices":
         expect(exact.changed_files()).to_equal(["same.splx"])
 
     it "keeps membership indices local to one detection call":
+        # @req REQ-DRIVER-INCR-MEMBERSHIP-008
+        # @capture(bit_table): local-index tokens and forbidden member reads
+        step("Read the incremental detection-loop source")
         val source = file_read("src/compiler/80.driver/driver_build/incremental.spl")
         expect(source).to_contain("var source_paths: {text: bool} = {}")
         expect(source).to_contain("var changed_paths: {text: bool} = {}")
-        expect(source.contains("self.source_paths")).to_equal(false)
-        expect(source.contains("self.changed_paths")).to_equal(false)
+        val keeps_source_paths_instance_free = source.contains("self.source_paths")
+        expect(keeps_source_paths_instance_free).to_equal(false)
+        val keeps_changed_paths_instance_free = source.contains("self.changed_paths")
+        expect(keeps_changed_paths_instance_free).to_equal(false)
         expect(source).to_contain("while change_index < result.changes.len()")
-        expect(source.contains("changes.changed_files().contains(src)")).to_equal(false)
+        val avoids_cached_membership_probe = source.contains("changes.changed_files().contains(src)")
+        expect(avoids_cached_membership_probe).to_equal(false)

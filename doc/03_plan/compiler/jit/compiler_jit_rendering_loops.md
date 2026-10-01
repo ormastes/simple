@@ -66,7 +66,7 @@ Next patch direction:
 ## Prerequisites and Blockers
 
 1. **Cranelift backend infrastructure** -- exists at
-   `src/compiler/70.backend/backend/cranelift_codegen_adapter.smf` and
+   `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` and
    `src/compiler_rust/compiler/src/codegen/`
 2. **Type inference pipeline** -- `TypedInteger` variant already in HIR but
    not handled in JIT lowering path
@@ -83,11 +83,14 @@ Fix the JIT path to recognize and lower `TypedInteger(value, type_hint)` literal
 1. The JIT type-inference bail-out is in the Rust seed HIR lowering:
    `src/compiler_rust/compiler/src/hir/lower/expr/literals.rs:45` handles
    `Expr::TypedInteger(n, suffix)` but the error path is at
-   `src/compiler_rust/compiler/src/hir/lower/error.rs:34` (`Cannot infer type: {0}`).
+   `src/compiler_rust/compiler/src/hir/lower/error.rs:46` (`Cannot infer type: {0}`).
    The codegen pipeline entry is at
-   `src/compiler_rust/compiler/src/pipeline/codegen.rs:526` which pattern-matches
+   `src/compiler_rust/compiler/src/pipeline/codegen.rs:578` which pattern-matches
    `Expr::TypedInteger(value, _)`. Fix the lowering so the suffix maps to a
-   concrete HIR type instead of falling through to the error
+   concrete HIR type instead of falling through to the error.
+   (Refresh 2026-09-05: `lower_typed_literal` at `literals.rs:43-52` now maps
+   every integer suffix to a concrete `TypeId` (`U32` at :53); whether the
+   example still falls back at run time is not asserted by any gate.)
 2. Add a match arm for `TypedInteger(val, hint)` that maps to the concrete
    Cranelift type: `U8->i8, U16->i16, U32->i32, U64->i64, I8->i8, ...`
 3. Emit the constant as `iconst` / `f64const` with the correct Cranelift type
@@ -120,7 +123,13 @@ Make `[u32; N]` / `[0u32; 640]` lower to native memory operations.
 Ensure `.to_u32()`, `.to_f64()`, `.sqrt()` resolve in JIT.
 
 1. These methods are likely defined as runtime externs or compiler intrinsics;
-   identify which are missing from the JIT symbol table
+   identify which are missing from the JIT symbol table.
+   (Refresh 2026-09-05: `.sqrt()`/`abs`/`floor`/`ceil`/`round` are already
+   Cranelift intrinsics at `src/compiler_rust/compiler/src/codegen/instr/methods.rs:240-256`
+   (float path `builder.ins().sqrt`, integer path via `fcvt_from_sint`);
+   `.to_u32()`/`.to_f64()` result types are pinned at
+   `codegen/instr/body.rs:238` and `:295`. `[u32]` index-op narrowing is
+   covered by `test/01_unit/compiler/u32_array_index_shr_spec.spl`.)
 2. For conversion methods (`.to_u32()`, `.to_f64()`): emit Cranelift
    `ireduce`/`uextend`/`sextend`/`fcvt_from_sint`/`fcvt_from_uint` as
    appropriate
@@ -164,3 +173,9 @@ symbol resolution tables in the Cranelift adapter
   -- may need to add a "known numeric intrinsics" fast path in JIT lowering
 - **Self-hosted parity (Low):** This FR targets the Rust seed JIT path;
   self-hosted compiler parity is a separate concern
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/compiler_jit_rendering_loops_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

@@ -1,0 +1,162 @@
+# Stage2 positional hello-world raw-string ABI and compiler-test admission
+
+Status: POSITIONAL SMOKE FIXED; Stage2 compiler-test matrix pending. The
+candidate and its runtime capsule were published, but Stage2 verification
+did not pass, so Stage3 and Target 5/6 native size, startup, compile-time,
+and RSS qualification remain blocked. This is separate from the fixed
+`dynlib_lifetime_owner_v1.spl` HIR type error.
+
+## Evidence
+
+The current-source Cranelift Stage2 native build compiled 595 files, reused
+426, failed zero, and linked a 47,135 KB candidate in 377.4 seconds. The
+admission gate preserved that candidate at
+`build/bootstrap-target56/stage2/aarch64-unknown-linux-gnu/simple.rejected`.
+Its `SIMPLE_BOOTSTRAP=0` positional hello-world smoke exited 1 without an
+error line. The retained smoke log is
+`build/bootstrap-target56/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-0.log.hello-world-positional`.
+
+The same candidate reproduces in under one second with the isolated fixture
+`scripts/check/cert/redeploy_gate/fixtures/hello_world.spl`, Cranelift,
+`core-c-bootstrap`, `--entry-closure`, `--mode one-binary`, positional entry,
+`SIMPLE_PACKAGE_INDEX_COLD_INIT=1`, and `SIMPLE_BOOTSTRAP=0`. Local logs are
+under `build/mini_builds/target56_dynlib_probe/`: `positional_repro.log`,
+`positional_trace.log`, and `native_trace.log`. The source passes parsing,
+HIR, MIR, borrow check, async processing, MIR optimization, AOP weaving, and
+debug trace. `SIMPLE_COMPILER_PHASE_PROFILE=1` shows the last marker
+`aot:format:done`, followed by exit 1. `SIMPLE_COMPILER_TRACE=1` emits no
+`[NATIVE]` marker from `_compile_to_native_with_backend_session`.
+
+`bootstrap_main.spl` selects `OutputFormat.Native`; `aot_compile()` routes
+that format to `compile_to_native()`. For Cranelift,
+`driver_aot_uses_versioned_backend()` returns true, and
+`BackendSessionOwnedLeaseV2.open()` runs before the first `[NATIVE]` marker.
+The trace therefore narrows the failure to that dispatch/session boundary or
+an unresolved call into it; it does not yet prove which expression fails.
+The frontend smoke only reports raw exit 1 and the compiler's
+`compile_result_errors()` loop prints no message.
+
+## Session-open diagnosis
+
+Opt-in markers added around native output dispatch show that the candidate
+passes plugin selection and request construction, then
+`BackendSessionOwnedLeaseV2.open()` returns `Err`. The previous implicit
+`error.to_text()` rendering also failed silently before the error could be
+printed. An explicit match over `BackendSessionAuthorityErrorV2` variants now
+reports `BACKEND_SESSION_AUTHORITY: unknown or substituted session` in the
+Stage2 sanity log. The last build compiled 3 files, reused 1,018, and failed
+zero before reaching the same admission refusal.
+
+`backend_session_authority_open_v2()` can return only `InvalidOwner`,
+`CapacityExceeded`, `CounterOverflow`, or `LoadRejected`. The wrapper then
+calls `backend_session_authority_project_v2()`, which can return
+`UnknownOrSubstituted`. The observed error therefore points to token
+projection after opening. It has not yet been proven whether the owner lost
+its newly appended record, token equality fails under native codegen, or a
+different authority invariant is violated.
+
+## Fieldwise token repair and next AOT failure
+
+The next native candidate traced one authority record with owner ID 1,
+generation 1, and the same receipt hash as the returned token. Direct
+whole-struct token equality in `_backend_session_record_index_v2()` therefore
+rejected matching fields. The authority, compile-use, and result-token index
+helpers now compare their token fields explicitly. The following Stage2 build
+compiled 3 files, reused 1,018, and failed zero; its positional smoke passed
+session projection and reached Cranelift direct AOT. This proves the original
+`UnknownOrSubstituted` boundary was removed in that native fixture.
+
+The new failure is `backend object-path status 1`. The AOT diagnostic writer
+reports that its atomic write failed; the driver then cannot read the
+diagnostic file. A temporary bounded console fallback printed a blank line
+where the backend reason should have appeared, so that fallback was reverted.
+The writer/adapter path is in
+`src/compiler/70.backend/backend_plugin/builtin_adapter.spl` and
+`src/compiler/70.backend/backend_plugin/target_context_v2.spl`. Both test
+`diagnostic != ""` before rejecting; native code elsewhere documents that a
+nil string can satisfy that comparison while `len()` is negative. This is a
+plausible cause, not yet proven. The temporary probe was removed from the
+authority owner before commit.
+
+## Cranelift constructor boundary
+
+Changing those diagnostic guards to `len() > 0` did not change the native
+failure, so that experiment was reverted. The smoke prints
+`[cranelift-direct] start` and `target`, but never `module`: the
+`cranelift_new_aot_for_request_v2()` call returns zero. Source inspection
+found a definite bootstrap request mismatch: `bootstrap_main.spl` set
+`options.opt_level = 3` for Cranelift, while the V2 Rust constructor accepts
+only exact optimization modes 0, 1, and 2. The bootstrap CLI now explicitly
+selects Cranelift's highest admitted mode, 2, leaving other backends at 3.
+That policy correction compiled 2 files and reused 1,019, but admission still
+failed before module creation.
+
+A debugger breakpoint on `spl_cranelift_new_aot_module_config_v2` in the
+rejected candidate confirmed the actual Rust ABI argument `opt=2`.
+The first debugger attempt did not decode the target, CPU, or feature text
+because GDB does not support `*` width in its `printf` command. Thus the
+remaining constructor rejection may be a malformed text argument, a
+noncanonical target triple, unsupported ISA, or another V2 check; the current
+evidence does not distinguish them.
+
+## Raw-string ABI repair and current gate
+
+A GDB Python read at the Rust V2 constructor showed name, target, and CPU
+lengths of 14, 25, and 7, but their pointers addressed Simple text object
+headers rather than UTF-8 bytes. `src/lib/nogc_sync_mut/sffi/codegen.spl`
+used `.ptr()` for those raw pointer arguments. The wrapper now uses
+`rt_string_data()` and `rt_string_len()`, like its neighboring Cranelift
+wrappers; the same correction covers the V2 feature readback and two
+global-data name wrappers. The next full Stage2 run compiled the source,
+passed the positional hello-world frontend smoke, and passed the struct
+receiver/runtime capability proof. Its candidate hash was
+`5d71c26b371b83d0041e10b815dae153a38b9f7c61aa0931f3473aaee919e2f6`.
+
+Stage2 compiler tests then stopped before a verification summary was written:
+the default delegated spec rows require four nonempty MC/DC-off waiver fields
+(`REASON`, `REVIEWER`, `REVIEW_ID`, `VERSION`) supplied by an actual owner
+approval record. No such values were invented for this run. A direct
+`BOOTSTRAP_STAGE2_TEST_DELEGATE=0` matrix attempt avoided the waiver and
+reached `compiler_cli_build`, but its RSS observer failed at the default
+1,000 ms observation budget (peak 3,041,288 KiB below the 5,859,375 KiB
+cap). The summary records `compiler_cli_build=FAIL` with status 89 and
+upstream rows blocked; this is measurement failure, not a compiler verdict.
+Logs are under `build/bootstrap-target56/stage2-compiler-tests/` and
+`build/mini_builds/target56_dynlib_probe/stage2_matrix_inprocess.log`.
+
+## In-process compiler matrix and owner-source repair
+
+The in-process Stage2 matrix reran with the supported 5,000 ms observation
+budget and the same RSS cap. The observer held; `compiler_cli_build` ran
+1,157 seconds with max RSS 3,416,676 KiB, below the 5,859,375 KiB cap. The
+current-source full CLI build compiled 2,451 files and failed four:
+`nvfs_device_identity_owner_v1.spl` and
+`nvfs_operation_lease_owner_v1.spl` lost the type of their update-closure
+`state.last_error`; `native_session_owner_v1.spl` lost `state.entries`; and
+`nvfs_posix_driver.spl` compiled an inline conditional `val` as an unresolved
+identifier. The summary is
+`build/bootstrap-target56/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification_inprocess_budget5/summary.env`.
+
+The three owners now mutate their explicitly typed Simple-side state while
+holding their original mutex, matching the repaired dynlib lifetime owner.
+The POSIX constructor's inline conditional was expanded into a block. A
+focused no-stub native build against the admitted Stage2 binary compiled 48
+files, failed zero, and linked a 65 KB probe. Its retained symbols include
+the identity, operation, and GPU owner entrypoints, but no POSIX driver
+constructor; that fourth source repair remains unverified. A second focused
+build reused 47 files and compiled one, but still retained no POSIX driver
+constructor. Both are under `build/mini_builds/target56_stage2_owner_probe/`.
+
+## TODO
+
+The focused probe now calls `NvfsPosixDriver.new_on_owned_device` and includes
+its constructor symbol in a 49-file no-stub native build. Device creation
+returned true; close hit the old runtime capsule's named
+`rt_collection_remove` trap. See
+`target56_stage2_runtime_collection_remove_trap_2026-09-28.md`. Build a fresh
+ABI-matched runtime capsule, require the create/close probe to pass, then
+rerun the Stage2 compiler matrix against a frozen source revision and require
+all five required PASS rows before Stage3. If in-process spec execution cannot
+pass, obtain the owner's actual MC/DC-off waiver record for delegated rows;
+do not fabricate review metadata. Stage2 and Target 5/6 qualification remain
+open.

@@ -1,0 +1,54 @@
+"""The SOSIX service-ID table is frozen, duplicate-free, and owns every public alias."""
+
+use std.spec.*
+use std.common.contracts.sosix.service_ids_v1.*
+use std.common.contracts.sosix.file_operation_v1.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.host.service_contract.{
+    SOSIX_HOST_DISPLAY_PRESENT, SOSIX_HOST_DISPLAY_READBACK,
+    SOSIX_HOST_INPUT_NEXT, SOSIX_HOST_TIMER_DEADLINE
+}
+
+describe "SOSIX frozen service IDs":
+    it "keeps the table duplicate-free and complete":
+        # @req REQ-SOSIX-IDS
+        step("Enumerate every frozen ID")
+        expect(sosix_service_ids_all().len()).to_equal(16)
+        step("Reject a duplicate anywhere in the table")
+        expect(sosix_service_ids_are_unique()).to_be(true)
+
+    it "preserves every assigned numeric wire value in registry order":
+        # @req REQ-SOSIX-IDS
+        val expected: [u32] = [
+            0x0001, 0x0002, 0x0003,
+            0x0101, 0x0102, 0x0103,
+            0x0201, 0x0202, 0x0203, 0x0204,
+            0x0301, 0x0302,
+            0x1001, 0x1002, 0x1101, 0x1201
+        ]
+        val actual = sosix_service_ids_all()
+        expect(actual.len()).to_equal(expected.len())
+        var i: i64 = 0
+        while i < expected.len():
+            expect(actual[i]).to_equal(expected[i])
+            i = i + 1
+
+    it "keeps filesystem and host-service aliases bound to the table":
+        step("Compare the fs compatibility aliases in file_operation_v1")
+        expect(SOSIX_FS_READ_AT).to_equal(SOSIX_ID_FS_READ_AT)
+        expect(SOSIX_FS_WRITE_AT).to_equal(SOSIX_ID_FS_WRITE_AT)
+        step("Compare the host-service compatibility aliases")
+        expect(SOSIX_HOST_DISPLAY_PRESENT).to_equal(SOSIX_ID_HOST_DISPLAY_PRESENT)
+        expect(SOSIX_HOST_DISPLAY_READBACK).to_equal(SOSIX_ID_HOST_DISPLAY_READBACK)
+        expect(SOSIX_HOST_INPUT_NEXT).to_equal(SOSIX_ID_HOST_INPUT_NEXT)
+        expect(SOSIX_HOST_TIMER_DEADLINE).to_equal(SOSIX_ID_HOST_TIMER_DEADLINE)
+
+    it "answers membership for known and unassigned IDs":
+        step("Every frozen ID is known")
+        for id in sosix_service_ids_all():
+            expect(sosix_service_id_is_known(id)).to_be(true)
+        step("Unassigned IDs remain unknown across service ranges")
+        expect(sosix_service_id_is_known(0x0104)).to_be(false)
+        expect(sosix_service_id_is_known(0x0205)).to_be(false)
+        expect(sosix_service_id_is_known(0x1003)).to_be(false)
+        expect(sosix_service_id_is_known(0x1202)).to_be(false)
+        expect(sosix_service_id_is_known(0)).to_be(false)

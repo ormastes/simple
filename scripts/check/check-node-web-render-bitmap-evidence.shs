@@ -103,6 +103,20 @@ emit_unavailable() {
         echo "- reason: $reason"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
+    # Verdict line (2026-09-06): this function used to end at the `cat` above,
+    # so every caller died on a bare `exit 1` with an env dump as the last
+    # stdout line and no PASS/FAIL/ERROR verdict at all. Absence of a runtime
+    # or a binary is absence of evidence, so it is ERROR (exit 2), never a pass.
+    case "$reason" in
+        *-failed|*-not-allowed|invalid-*)
+            echo "FAIL — 0 of 1 bitmap comparison(s) completed ($reason)"
+            exit 1
+            ;;
+        *)
+            echo "ERROR — nothing was checked ($reason)"
+            exit 2
+            ;;
+    esac
 }
 
 cat >"$SIMPLE_SRC" <<SIMPLE_EOF
@@ -191,12 +205,10 @@ SIMPLE_EOF
 
 if ! command -v "$JS_RENDER_RUNTIME_BIN" >/dev/null 2>&1; then
     emit_unavailable "missing-$JS_RENDER_RUNTIME"
-    exit 1
 fi
 
 if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
     emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
-    exit 1
 fi
 
 set +e
@@ -353,4 +365,13 @@ js_frame_us="${js_frame_us:-0}"
 
 cat "$BUILD_DIR/evidence.env"
 
-[ "$status" = "pass" ]
+# Verdict line (2026-09-06): this script used to end on a bare
+# `[ "$status" = "pass" ]`, which under `set -e` exits 1 with an env dump as
+# the last stdout line and no PASS/FAIL/ERROR verdict. A reader could not tell
+# a real comparison failure from a gate that never compared anything.
+if [ "$status" = "pass" ]; then
+    echo "PASS — $TRIALS trial(s) checked at ${WIDTH}x${HEIGHT} against the $JS_RENDER_RUNTIME baseline (checksum $simple_checksum), 0 mismatches"
+else
+    echo "FAIL — $TRIALS trial(s) checked at ${WIDTH}x${HEIGHT} against the $JS_RENDER_RUNTIME baseline (checksum $simple_checksum), $reason"
+    exit 1
+fi

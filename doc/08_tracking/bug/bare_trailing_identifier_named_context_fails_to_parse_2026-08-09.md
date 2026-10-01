@@ -1,7 +1,17 @@
 # A bare trailing expression named `context` fails to parse
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+## Fixed 2026-09-21 (Linux Rust seed parser)
+
+The statement dispatcher now routes `context` to ordinary expression parsing
+when the following token is a newline, dedent, or EOF. It still dispatches the
+`context <expr>:` DSL when a header token follows. A parser regression covers
+an implicit trailing return named `context`; the full statements test file
+passes (20/20).
+
+
+Status: FIXED (P3)
+Fixed 2026-09-21 in the Linux Rust seed parser; the focused parser regression
+and full statements test file pass.
 **Found:** 2026-08-09, Counterpart Conformance Wave 1 lane F4
 **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed; prints the
 bootstrap-seed warning banner)

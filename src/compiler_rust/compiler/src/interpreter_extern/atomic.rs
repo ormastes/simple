@@ -126,9 +126,10 @@ pub fn rt_atomic_bool_swap(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 fn atomic_bool_handle_and_value(args: &[Value], operation: &str) -> Result<(i64, bool), CompileError> {
-    let handle = args.first().ok_or_else(|| {
-        CompileError::semantic(format!("{operation} expects a handle and boolean value"))
-    })?.as_int()?;
+    let handle = args
+        .first()
+        .ok_or_else(|| CompileError::semantic(format!("{operation} expects a handle and boolean value")))?
+        .as_int()?;
     let value = match args.get(1) {
         Some(Value::Bool(value)) => *value,
         _ => return Err(CompileError::semantic(format!("{operation} expects a bool value"))),
@@ -138,14 +139,24 @@ fn atomic_bool_handle_and_value(args: &[Value], operation: &str) -> Result<(i64,
 
 pub fn rt_atomic_bool_compare_exchange(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
-        return Err(CompileError::semantic("rt_atomic_bool_compare_exchange expects 3 arguments"));
+        return Err(CompileError::semantic(
+            "rt_atomic_bool_compare_exchange expects 3 arguments",
+        ));
     }
     let (handle, current) = atomic_bool_handle_and_value(args, "rt_atomic_bool_compare_exchange")?;
     let new_value = match &args[2] {
         Value::Bool(value) => *value,
-        _ => return Err(CompileError::semantic("rt_atomic_bool_compare_exchange expects bool argument")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_atomic_bool_compare_exchange expects bool argument",
+            ))
+        }
     };
-    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_compare_exchange(handle, current, new_value))) }
+    unsafe {
+        Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_compare_exchange(
+            handle, current, new_value,
+        )))
+    }
 }
 
 pub fn rt_atomic_bool_fetch_and(args: &[Value]) -> Result<Value, CompileError> {
@@ -153,7 +164,11 @@ pub fn rt_atomic_bool_fetch_and(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::semantic("rt_atomic_bool_fetch_and expects 2 arguments"));
     }
     let (handle, value) = atomic_bool_handle_and_value(args, "rt_atomic_bool_fetch_and")?;
-    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_and(handle, value))) }
+    unsafe {
+        Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_and(
+            handle, value,
+        )))
+    }
 }
 
 pub fn rt_atomic_bool_fetch_or(args: &[Value]) -> Result<Value, CompileError> {
@@ -161,7 +176,11 @@ pub fn rt_atomic_bool_fetch_or(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::semantic("rt_atomic_bool_fetch_or expects 2 arguments"));
     }
     let (handle, value) = atomic_bool_handle_and_value(args, "rt_atomic_bool_fetch_or")?;
-    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_or(handle, value))) }
+    unsafe {
+        Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_or(
+            handle, value,
+        )))
+    }
 }
 
 pub fn rt_atomic_bool_fetch_not(args: &[Value]) -> Result<Value, CompileError> {
@@ -611,6 +630,71 @@ fn runtime_to_value(rv: RuntimeValue) -> Value {
     }
 }
 
+/// Interpreter-side record of the value each runtime lock protects.
+///
+/// The runtime mutex/rwlock stores a `RuntimeValue`, but the interpreter's
+/// bridge (`runtime_bridge::value_to_runtime`) cannot represent every
+/// interpreter `Value`: a struct (`Value::Object`), class instance, closure or
+/// an enum carrying one marshals to NIL or to a lossy copy. Before this table,
+/// `mutex_new(MyStruct(..))` stored nil, `mutex_lock` handed back nil, and a
+/// `mutex_with_lock` update closure faulted while the real lock was held, so
+/// every later lock blocked forever (PR #1901, NVFS identity/lease owners).
+///
+/// The runtime lock still provides the real exclusion. Alongside it this
+/// table keeps, per lock handle, the exact interpreter `Value` last stored
+/// and the raw `RuntimeValue` the runtime was given for it. A read returns
+/// the recorded `Value` only when the runtime hands back that same raw value,
+/// so a value stored by native code is still decoded from the runtime.
+/// Writes are recorded while the real lock is held (before `unlock`/`set`
+/// releases it, and before a new handle escapes), so readers never observe a
+/// torn slot. Known limit: no interpreter extern frees a lock, so a slot lives
+/// as long as the process.
+struct ProtectedSlot {
+    stored_raw: u64,
+    value: Value,
+}
+
+static PROTECTED_VALUES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, ProtectedSlot>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Unrepresentable values are stored in the runtime as a unique int token
+/// rather than NIL, so `try_lock`'s NIL ("contended") stays distinguishable
+/// and two stores of unrepresentable values never compare equal. Tokens count
+/// down from far below any realistic application integer.
+static PROTECTED_TOKEN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-(1i64 << 55));
+
+fn protected_value_to_runtime(v: &Value) -> RuntimeValue {
+    let rv = value_to_runtime(v);
+    if rv.is_nil() && !matches!(v, Value::Nil) {
+        RuntimeValue::from_int(PROTECTED_TOKEN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed))
+    } else {
+        rv
+    }
+}
+
+fn protected_record(handle: RuntimeValue, stored: RuntimeValue, value: &Value) {
+    let mut table = PROTECTED_VALUES.lock().unwrap_or_else(|e| e.into_inner());
+    table.insert(
+        handle.to_raw(),
+        ProtectedSlot {
+            stored_raw: stored.to_raw(),
+            value: value.clone(),
+        },
+    );
+}
+
+fn protected_read(handle: RuntimeValue, got: RuntimeValue) -> Value {
+    if !got.is_nil() {
+        let table = PROTECTED_VALUES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = table.get(&handle.to_raw()) {
+            if slot.stored_raw == got.to_raw() {
+                return slot.value.clone();
+            }
+        }
+    }
+    runtime_to_protected_value(got)
+}
+
 /// Create new atomic (returns heap object)
 pub fn rt_atomic_new_fn(args: &[Value]) -> Result<Value, CompileError> {
     let initial = args.first().ok_or_else(|| {
@@ -794,9 +878,10 @@ pub fn rt_mutex_new_fn(args: &[Value]) -> Result<Value, CompileError> {
             .with_help("rt_mutex_new requires exactly 1 argument");
         CompileError::semantic_with_context("rt_mutex_new expects 1 argument".to_string(), ctx)
     })?;
-    let initial_rv = value_to_runtime(initial);
+    let initial_rv = protected_value_to_runtime(initial);
     unsafe {
         let mutex = simple_runtime::value::rt_mutex_new(initial_rv);
+        protected_record(mutex, initial_rv, initial);
         Ok(runtime_to_value(mutex))
     }
 }
@@ -819,7 +904,7 @@ pub fn rt_mutex_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
     let mutex = value_to_runtime(mutex_val);
     unsafe {
         let value = simple_runtime::value::rt_mutex_lock(mutex);
-        Ok(runtime_to_protected_value(value))
+        Ok(protected_read(mutex, value))
     }
 }
 
@@ -841,7 +926,7 @@ pub fn rt_mutex_try_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
     let mutex = value_to_runtime(mutex_val);
     unsafe {
         let value = simple_runtime::value::rt_mutex_try_lock(mutex);
-        Ok(runtime_to_protected_value(value))
+        Ok(protected_read(mutex, value))
     }
 }
 
@@ -864,7 +949,8 @@ pub fn rt_mutex_unlock_fn(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let mutex = value_to_runtime(&args[0]);
-    let new_value = value_to_runtime(&args[1]);
+    let new_value = protected_value_to_runtime(&args[1]);
+    protected_record(mutex, new_value, &args[1]);
     unsafe {
         let result = simple_runtime::value::rt_mutex_unlock(mutex, new_value);
         Ok(Value::Int(result))
@@ -886,9 +972,10 @@ pub fn rt_rwlock_new_fn(args: &[Value]) -> Result<Value, CompileError> {
             .with_help("rt_rwlock_new requires exactly 1 argument");
         CompileError::semantic_with_context("rt_rwlock_new expects 1 argument".to_string(), ctx)
     })?;
-    let initial_rv = value_to_runtime(initial);
+    let initial_rv = protected_value_to_runtime(initial);
     unsafe {
         let rwlock = simple_runtime::value::rt_rwlock_new(initial_rv);
+        protected_record(rwlock, initial_rv, initial);
         Ok(runtime_to_value(rwlock))
     }
 }
@@ -911,7 +998,7 @@ pub fn rt_rwlock_read_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_read(rwlock);
-        Ok(runtime_to_protected_value(value))
+        Ok(protected_read(rwlock, value))
     }
 }
 
@@ -933,7 +1020,7 @@ pub fn rt_rwlock_write_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_write(rwlock);
-        Ok(runtime_to_protected_value(value))
+        Ok(protected_read(rwlock, value))
     }
 }
 
@@ -955,7 +1042,7 @@ pub fn rt_rwlock_try_read_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_try_read(rwlock);
-        Ok(runtime_to_protected_value(value))
+        Ok(protected_read(rwlock, value))
     }
 }
 
@@ -977,7 +1064,7 @@ pub fn rt_rwlock_try_write_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_try_write(rwlock);
-        Ok(runtime_to_protected_value(value))
+        Ok(protected_read(rwlock, value))
     }
 }
 
@@ -1000,7 +1087,8 @@ pub fn rt_rwlock_set_fn(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let rwlock = value_to_runtime(&args[0]);
-    let new_value = value_to_runtime(&args[1]);
+    let new_value = protected_value_to_runtime(&args[1]);
+    protected_record(rwlock, new_value, &args[1]);
     unsafe {
         let result = simple_runtime::value::rt_rwlock_set(rwlock, new_value);
         Ok(Value::Int(result))
@@ -1198,5 +1286,55 @@ mod lock_value_roundtrip_tests {
                 "{label}: round trip through a lock degraded {original:?} to nil"
             );
         }
+    }
+
+    fn probe_struct(count: i64) -> Value {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("count".to_string(), Value::Int(count));
+        fields.insert("name".to_string(), Value::text("c".to_string()));
+        Value::Object {
+            class: "MutexStructProbe".to_string(),
+            fields: std::sync::Arc::new(fields),
+        }
+    }
+
+    /// REPRODUCING (PR #1901): a struct protected by a mutex must come back as
+    /// the same struct from `lock`, `try_lock` and after `unlock` stores a new
+    /// one. The bridge has no struct marshaling, so before the interpreter-side
+    /// slot table `lock` returned nil and an update closure faulted while the
+    /// real lock was held.
+    #[test]
+    fn mutex_protecting_struct_reads_back_the_same_struct() {
+        let mutex = rt_mutex_new_fn(&[probe_struct(7)]).expect("mutex_new");
+        let read = rt_mutex_lock_fn(std::slice::from_ref(&mutex)).expect("mutex_lock");
+        assert_eq!(read, probe_struct(7), "lock must return the stored struct");
+        let released = rt_mutex_unlock_fn(&[mutex.clone(), probe_struct(8)]).expect("mutex_unlock");
+        assert_eq!(released, Value::Int(1));
+        let again = rt_mutex_try_lock_fn(std::slice::from_ref(&mutex)).expect("mutex_try_lock");
+        assert_eq!(again, probe_struct(8), "try_lock must return the struct stored by unlock");
+        // Held now: a contended try_lock is still reported as nil, not as the struct.
+        let contended = rt_mutex_try_lock_fn(std::slice::from_ref(&mutex)).expect("mutex_try_lock");
+        assert!(matches!(contended, Value::Nil), "contended try_lock must be nil, got {contended:?}");
+        rt_mutex_unlock_fn(&[mutex, Value::Nil]).expect("mutex_unlock");
+    }
+
+    /// SIMILAR-PROBLEM DETECTION: an enum carrying a struct (`Some(struct)`)
+    /// marshals to a non-nil runtime enum with a nil payload, so a
+    /// "did it become nil" check alone would miss it; rwlocks share the path.
+    #[test]
+    fn struct_carrying_enum_and_rwlock_values_survive_the_lock() {
+        let some_struct = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(Box::new(probe_struct(3))),
+        };
+        let mutex = rt_mutex_new_fn(std::slice::from_ref(&some_struct)).expect("mutex_new");
+        let read = rt_mutex_lock_fn(std::slice::from_ref(&mutex)).expect("mutex_lock");
+        assert_eq!(read, some_struct);
+        rt_mutex_unlock_fn(&[mutex, read]).expect("mutex_unlock");
+
+        let rwlock = rt_rwlock_new_fn(&[probe_struct(5)]).expect("rwlock_new");
+        let read = rt_rwlock_read_fn(std::slice::from_ref(&rwlock)).expect("rwlock_read");
+        assert_eq!(read, probe_struct(5));
     }
 }

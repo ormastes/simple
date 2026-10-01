@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple=${SIMPLE_ADMITTED_RUNTIME:-}
+out=${NATIVE_PROVIDER_ROUTE_OUT:-$root/build/test-logs/native-provider-so-route}
+unit_fixture_dir=$root/build/test-artifacts/posix-dynlib
+provider_dir=$root/build/providers
+
+if test -z "$simple" || test ! -x "$simple"; then
+    echo "native_provider_so_route=blocked reason=admitted-runtime-required" >&2
+    exit 2
+fi
+
+case "$simple" in
+    /*) ;;
+    *) simple=$(CDPATH= cd -- "$(dirname -- "$simple")" && pwd)/$(basename -- "$simple") ;;
+esac
+case "$out" in
+    /*) ;;
+    *) out=$root/$out ;;
+esac
+
+mkdir -p "$out"
+mkdir -p "$unit_fixture_dir" "$provider_dir"
+cc -std=gnu11 -O2 -fPIC -shared \
+    "$root/test/01_unit/os/posix/fixtures/simple_dynlib_fixture.c" \
+    -o "$unit_fixture_dir/libsimple_dynlib_fixture.so"
+cp "$unit_fixture_dir/libsimple_dynlib_fixture.so" \
+    "$unit_fixture_dir/libsimple_dynlib_fixture.so.1"
+cc -std=gnu11 -O2 -fPIC -shared \
+    "$root/src/runtime/test/cli_provider_v1_fixture.c" \
+    -o "$provider_dir/cli_provider_v1_fixture.so"
+
+(cd "$root" && "$simple" test \
+    test/01_unit/os/posix/dynlib_host_facade_boundary_spec.spl \
+    --no-session-daemon --timeout 300)
+
+SIMPLE_LIB="$root/src" "$simple" native-build \
+    --threads "${SIMPLE_BUILD_JOBS:-12}" \
+    --source "$root/src/app" \
+    --source "$root/src/lib" \
+    --source "$root/src/os" \
+    --entry-closure \
+    --entry "$root/test/02_integration/app/provider_cli/pure_provider_dispatch_runner.spl" \
+    --output "$out/pure_provider_dispatch_runner"
+
+(cd "$root" && /usr/bin/time -f 'elapsed_s=%e max_rss_kib=%M' -o "$out/perf.txt" \
+    "$out/pure_provider_dispatch_runner" build/providers/cli_provider_v1_fixture.so \
+    >"$out/receipt.txt")
+
+grep -Fxq 'status=0' "$out/receipt.txt"
+grep -Fxq 'command_status=0' "$out/receipt.txt"
+grep -Fxq 'output=native-provider-ok' "$out/receipt.txt"
+grep -Fxq 'pin_released=true' "$out/receipt.txt"
+grep -Fxq 'session_closed=true' "$out/receipt.txt"
+grep -Eq '^elapsed_s=[0-9]+([.][0-9]+)? max_rss_kib=[1-9][0-9]*$' "$out/perf.txt"
+
+echo "native_provider_so_route=pass"
+cat "$out/perf.txt"

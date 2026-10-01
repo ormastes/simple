@@ -1,7 +1,7 @@
 # SPipe Knowledge Compiler Operator Guide
 
-**Status:** Waves 1–3 accepted; Wave 4 partial; Waves 5–11 planned
-**Date:** 2026-08-26
+**Status:** Waves 1–3 accepted; sealed read-only projection and metadata-lexical slices admitted; authority service is contract-only; Wave 4 partial; Waves 5–11 otherwise planned
+**Date:** 2026-08-27
 
 ## 0. Current capability and evidence matrix
 
@@ -20,6 +20,10 @@ operator instructions.
 | Complete-pool RRF v2 | Accepted foundation | Commit `32574ab884`; up to 3,000 declared complete, digest-bound internal candidates are reranked before the 1,000-hit public cap. Producer/search receipt binding and exposed orchestration remain open. |
 | Authority-bound exact identity | Accepted foundation | Commit `d1b601697f`; canonical UID/key/active-alias resolution over a receipt-bound authorized projection. Retrieval, graph traversal, fusion orchestration, and exposed search remain open. |
 | Pair-based reranker evidence v3 | Accepted foundation | Commit `f89b120be7`; ordered accepted-edge/receipt pairs preserve shared-receipt authority losslessly. Graph candidate generation and exposed search remain open. |
+| Projection Kernel V1 | Accepted narrow slice | Commit `6b7fc8b83f6`; strict `spipe://` URI parsing plus deterministic list/read over a caller-authorized immutable inventory. Its unsigned cursor is only a local continuation; it is a pure library, not MCP, a read-authorizer, a materializer, or a canonical-write path. |
+| SnapshotLexicalSearchV1 | Accepted narrow slice | Commit `6b7fc8b83f6`; fixed-point lexical discovery over sealed identifier, title, and classification metadata. Its logical root binds workspace, snapshot, authorization-scope digest, and metadata-index root; it is not full-text search or a provider bridge. |
+| Transactional AuthorityServiceV1 | Selected contract; backend deferred | Commits `a134cb516f6` and `9655bd6fa0f` freeze the sole-mutable-owner, trust/composition, response-receipt, and fail-closed-client rules. No admitted durable quorum store, authenticated service runtime, canonical publish/open, availability, durability, linearizability, RPO/RTO, or F2 backend exists. |
+| Trace kernel | Frozen, unadmitted candidate | The candidate failed duplicate-reference validation at its review cap. It is not graph/trace admission evidence and must not be resumed by copying its source. |
 | Wave 4 provider/search integration | In progress | JSON, Unicode/analyzer, provider, DBFS, and parity candidates are rejected, blocked, or unverified unless a later accepted commit says otherwise. |
 | Virtual views/MCP 2026/refactor/rebalance/promotion/skill compiler/DB adapters | Planned | Waves 5–11; the corresponding commands in this guide are unavailable. |
 | Five system SSpecs and manuals | RED design scaffolds | Their fail-fast helpers are intentional. They are not runtime or release evidence. |
@@ -36,14 +40,82 @@ The target SPipe Knowledge Compiler turns canonical project documents, source
 metadata, and tests into a stable artifact graph, searchable indexes, and
 read-only virtual documentation views. The released Waves 2–3 currently cover
 identity, parsing, immutable snapshots/overlays, typed graph publication, and
-diagnostics as JavaScript library APIs. Search and virtual views are not yet
-released. Canonical content stays single-copy and paths are not identities.
+diagnostics as JavaScript library APIs.  No operator/CLI/MCP search or virtual
+view surface is released; the two narrow read-only library kernels below are
+admitted. Canonical content stays single-copy and paths are not identities.
 
 SPipe remains usable without Simple. The target architecture requires a
-dependency-free JavaScript search provider, but today the dependency-free
-baseline is the identity/graph library only. A later configured Simple provider
-may add faster search, compiler symbols, duplication analysis, and database
-integration without changing observable contracts.
+dependency-free JavaScript search provider. Today the dependency-free baseline
+also includes the narrow metadata lexical and immutable projection kernels, but
+not full-text/provider search, persistence, or an operator surface. A later
+configured Simple provider may add faster search, compiler symbols, duplication
+analysis, and database integration without changing observable contracts.
+
+### 1.1 Admitted read-only kernels
+
+The two admitted slices have deliberately small boundaries. A trusted caller
+must already have selected an immutable inventory and authorization scope;
+neither slice opens a snapshot, authenticates a caller, or determines what the
+caller may see.
+
+- `ProjectionKernelV1` accepts a deeply frozen inventory and a fixed workspace
+  plus authorization-scope hash. It parses only canonical `spipe://` URIs and
+  lists lifecycle, feature, component, layer, project, and status projections.
+  Pages are deterministically ordered and bounded to 100 entries. Their
+  unsigned base64url local continuation carries and equality-checks workspace,
+  snapshot, scope, view, path, page limit, and last key, but callers can alter
+  `after`; signing/integrity and authorization belong to a deferred adapter. A
+  read returns generated Markdown identifying one canonical artifact; `write()`
+  always rejects.
+- `SnapshotLexicalSearchV1` accepts only frozen metadata for UID, key, aliases,
+  title, kind, status, feature, component, layer, and project. It uses the
+  checked fixed-point lexical index to search identifier, title, and
+  classification fields. Its returned `logical_root` incorporates exactly the
+  workspace UID, snapshot UID, authorization-scope digest, contract, and
+  metadata-index root for caller-side binding/verification. It is not an
+  authorization/authenticity receipt, and an individual hit must not be treated
+  independently as scoped proof.
+
+They do **not** provide MCP exposure, read authorization, materialization,
+full-text bodies, provider bridging, persistence or incremental indexing,
+trace/matrix views, authority publish/open, or a durable backend. The target
+CLI and MCP examples elsewhere in this guide remain future contracts unless a
+later accepted capability matrix entry says otherwise.
+
+The next authority prerequisite is also not implemented by either kernel: a
+sealed, mutually authenticated local-IPC composition must construct the
+authority client and response verifier from trusted OS peer credentials or a
+platform certificate facility. Every definitive terminal/winner response and
+every negative `NoAdmissionV1` proof must arrive in a signed receipt bound to
+wire header/version, response kind, service-instance UID, authority key
+ID/epoch, tenant UID, authenticated caller-subject digest, connection-binding
+digest, scope digest, request digest, idempotency key-or-null, issue/expiry,
+and the applicable outcome fields. A terminal/winner binds
+exact durable terminal and decision bytes/digests and forbids a negative proof;
+`NoAdmissionV1` instead binds the same request tuple plus a quorum watermark
+and signed immutable negative-index proof and forbids a terminal/winner. Until
+that composition and verifier are admitted, no operator may treat a transport
+result as canonical publish/open authority.
+
+### 1.2 Authority service: selected design, no released backend
+
+`AuthorityServiceV1` is the selected F1/N1 authority model.  Its eventual
+durable decision store, not a client-side current pointer, chooses the winner
+for `publish`, `resolveAccepted`, and canonical `open`.  A client invokes the
+existing P2 commit-input selection once per publish attempt, sends its exact
+replay-envelope digest, and has no local success, filesystem, lock, CAS,
+backend-selection, or retry-publish path.  A pre-admission failure is
+`ServiceTransportFailureV1` or `CapabilityDeniedV1`; a post-admission lost
+reply is client-local `IndeterminateDeliveryV1` and is resolved only by the
+same scoped key and request digest.  `NoAdmissionV1` requires a durable quorum
+watermark and signed negative-index proof.
+
+This is an architecture/contract decision only.  Until a separately reviewed
+durable store and mutually authenticated service composition are admitted,
+canonical publish/open is unavailable and normal Node fails closed before a
+mutable decision.  F2/N2 may be used only inside the service after live,
+private certification of the pinned backend tuple; it is never a Node fallback.
+Offline search remains independent of this unavailable authority service.
 
 ## 2. Audience
 
@@ -257,6 +329,27 @@ separate composition-root operation through `createAuthorizationPort` and a
 verified signed receipt; see `test/integration/knowledge_wave2_test.js` for the
 accepted fixture.
 
+#### 5.0.2 Admitted projection and metadata-lexical test commands
+
+These are the only current executable commands for the new read-only kernels;
+they exercise library contracts rather than an operator CLI, server, or mount.
+Run them from `examples/05_stdlib/spipe`:
+
+```sh
+npm run test:projection-kernel
+node --test test/unit/snapshot_lexical_search_test.js
+```
+
+`test/unit/projection_kernel_test.js` covers canonical URI rejection,
+deterministic collision-safe and cursor-bound listing, canonical artifact
+rendering, read-only rejection, and immutable-input enforcement.
+`test/unit/snapshot_lexical_search_test.js` covers metadata-only deterministic
+lexical search, frozen/closed input and snapshot binding, bounded non-cursor
+requests, and the absence of authority, filesystem, process, environment,
+network, or provider imports. These tests do not qualify release availability,
+MCP behavior, authorization, durable authority, full-text retrieval, or native
+provider conformance.
+
 ### 5.1 Index canonical knowledge artifacts
 
 Build a first snapshot for a new workspace:
@@ -282,6 +375,10 @@ results. A direct filesystem move may be recovered by UID, exact content hash,
 or Git rename evidence; ambiguous similarity recovery requires review.
 
 ### 5.2 Browse virtual knowledge views
+
+This is a target operator workflow, not a current CLI/MCP instruction. The
+admitted `ProjectionKernelV1` supplies only the pure URI/list/read kernel
+behind a future caller-authorized adapter; it does not expose these commands.
 
 List a virtual directory and read an artifact or generated directory index:
 
@@ -322,6 +419,10 @@ must use an explicit safe bind, authentication, origin policy, and bounded
 request/rate/parser/query budgets; it does not inherit trust from loopback.
 
 ### 5.3 Search and trace artifacts
+
+This is a target workflow. The admitted `SnapshotLexicalSearchV1` is a
+metadata-only library and does not expose `spipe search`, resolve, trace, or
+matrix commands.
 
 Resolve exact identity before guessing a path:
 
@@ -752,6 +853,20 @@ The next DBFS implementation must be a real facade over the canonical scorer.
 Acceptance requires idempotent remove/re-add statistics, query-term
 deduplication, `explain:false` until explanations are implemented, and an
 independent final-corpus clean rebuild oracle. Wave 4 remains `IN PROGRESS`.
+
+### 13.0.1 W4A operator admission rule
+
+The detailed W4A closure sequence is Section 13.1 of
+`doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`.
+Operators must treat the JS, native-Simple, and DBFS probes as fixture inputs,
+not admission evidence.  A target becomes usable only when its closed
+`ProviderConformanceRecordV1` verifies the pinned manifest, logical root,
+scope binding, statistics, score/explanation/page digests, and applicable
+matrix cells.  Native process use additionally requires the framed-transport
+security matrix and binary/Stage-4 provenance; a qualified performance receipt
+is separately required for NFR performance claims.  PureDatabase, textual DB,
+and server DB adapters are Wave 10 consumers of the frozen contract and must
+not be implied by DBFS or provider success.
 
 The clean post-push lint attempt stopped before a lint verdict because the
 bootstrap runtime/codegen path could not resolve `Array.sort_by`. Record that
@@ -1395,3 +1510,41 @@ The fresh suite also asserts canonical list/read/render success for workspace
 root/view, artifacts, sections, trace, diagnostics, legacy aliases after
 canonical reauthorization, and `spipe_search`. A successful alias must render
 the authorized canonical target rather than echoing an alias-only result.
+
+### 14.1 What must land before an operator can use virtual views (2026-08-27)
+
+No target command in this section is runnable merely because this guide shows
+it.  The availability sequence is deliberately strict:
+
+1. The compiler publisher must create the sealed, production authority
+   inventory for the exact workspace/worktree/base snapshot/authority snapshot/
+   revision tuple (W5A).
+2. The branded authorization service must verify canonical read receipts and
+   issue/verify durable signed cursor receipts bound to that exact proved target
+   and trusted worktree (W5C).
+3. The resolver must combine those ports once; MCP resource/tool, legacy stdio,
+   HTTP, materialization, and editor adapters must use it rather than opening a
+   store or interpreting an unsigned continuation themselves (W5D).
+
+Until all required gates for an adapter pass, use only the admitted library
+kernels described in §1.1 and the released MCP compatibility surface in §4.1.
+In particular, do not browse a `.spipe/view/` directory that a hand-written
+script created, do not copy a cursor between clients or snapshots, and do not
+turn a successful local kernel result into an authorization claim.
+
+When the read-only delivery capsule is admitted, operators will have this
+behavioral matrix:
+
+| Client | Allowed operation | Important rule |
+|---|---|---|
+| Legacy MCP stdio | Existing tools plus admitted list/read resource/tool forms | Legacy tools and `spipe://skill` remain compatible; no implicit current-directory workspace. |
+| MCP 2026 HTTP | Authenticated resource/tool read | TLS and auth/budget/origin policy run before workspace resolution; bearer values never go in a URL. |
+| File-only agent | Browse generated `.spipe/view/` | Manifest-owned read-only output only; user-modified/unknown entries are preserved, not cleaned. |
+| Editor VFS | stat/readDirectory/readFile | All write/delete/rename/copy operations reject; canonical changes use a separate refactor plan/apply capability. |
+
+Shared caching is enabled only for a sealed immutable response whose complete
+authorized result is public.  Every private, mixed, denied, stale, or
+authorization-sensitive result is private/no-store, including conditional
+requests; a `304` must never reveal that a hidden resource exists.  If an
+adapter is unsupported, it is absent from capability advertisement rather than
+emulated by raw paths, a Node filesystem fallback, or a weaker cache policy.

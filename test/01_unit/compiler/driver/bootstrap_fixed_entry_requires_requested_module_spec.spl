@@ -1,0 +1,65 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Bootstrap fixed-entry lowering only applies when the bootstrap CLI was asked for
+
+`lower_to_mir_with_target_context` has a fixed-entry branch that lowers
+`app.cli.bootstrap_main` and nothing else, gated on `SIMPLE_BOOTSTRAP == "1"`.
+`SIMPLE_BOOTSTRAP=1` does not mean "this compile IS the bootstrap CLI": the
+Stage-2 candidate-frontend admission runs its whole probe set a second time in
+bootstrap mode, and one of those probes builds `hello_world.spl`. A POSITIONAL
+source routes through `lower_to_mir()` (`allow_bootstrap_shortcuts = true`)
+while an `--entry` build routes through `lower_to_mir_for_explicit_target()`
+(`false`), which is why exactly one of the four probes failed:
+
+    frontend_smoke_bootstrap1_raw_status=1
+    probe=hello-world-positional-build
+    [ERROR] MIR error: MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap
+
+Measured 2026-09-13 against the Stage-2 binary that run produced: the identical
+positional build succeeds with `SIMPLE_BOOTSTRAP=0` (raw_status=0) and fails
+with `SIMPLE_BOOTSTRAP=1` (raw_status=1).
+
+The branch must additionally require that `app.cli.bootstrap_main` is among
+`ctx.sources`. The `nil` guard inside it is deliberately NOT relaxed — it still
+fails closed when the bootstrap CLI was requested but did not lower.
+"""
+
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Bootstrap fixed-entry lowering gate":
+    it "enters the fixed bootstrap entry path only when that module is in ctx.sources":
+        # @req REQ-SSPEC-COMPILER
+        step("the SIMPLE_BOOTSTRAP gate also tests membership in ctx.sources")
+        val source = rt_file_read_text(
+            "src/compiler/80.driver/driver_pipeline_lowering.spl") ?? ""
+        # Fail closed on a vacuous read: an empty or truncated file must FAIL.
+        expect(source.len() > 20000).to_equal(true)
+        expect(source).to_contain("lower_to_mir_with_target_context")
+        expect(source).to_contain("var bootstrap_entry_requested = false")
+        expect(source).to_contain(
+            "allow_bootstrap_shortcuts and bootstrap_entry_requested and")
+        # The nil guard must survive the change, not be traded away for it.
+        expect(source).to_contain(
+            "MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
+
+    it "dispatches AOT to the bootstrap-CLI native path only when that module is in ctx.sources":
+        # @req REQ-SSPEC-COMPILER
+        step("the AOT SIMPLE_BOOTSTRAP dispatch also tests membership in ctx.sources")
+        # The MIR gate is not the only place that assumes SIMPLE_BOOTSTRAP=1
+        # means "this compile IS the bootstrap CLI". driver_aot_pipeline routes
+        # to bootstrap_compile_context_to_native_local, which emits exactly one
+        # object hardcoded as `<output>.app.cli.bootstrap_main.o` and links only
+        # that. Building hello_world.spl through it produced
+        #   ld.lld: error: undefined symbol: __simple_main
+        # measured 2026-09-13 in the Stage-2 sanity bootstrap-mode pass.
+        val source = rt_file_read_text(
+            "src/compiler/80.driver/driver_aot_pipeline.spl") ?? ""
+        expect(source.len() > 5000).to_equal(true)
+        expect(source).to_contain("bootstrap_compile_context_to_native_local")
+        expect(source).to_contain("var aot_bootstrap_entry_requested = false")
+        expect(source).to_contain(
+            "if aot_bootstrap_entry_requested and (env_get_opt(\"SIMPLE_BOOTSTRAP\")")

@@ -1,4 +1,8 @@
 # native-build: struct/class with a `static fn new()` crashes (nil-symbol)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity:** high (loud crash — blocks ALL stdlib collections)
 **Found:** 2026-07-14, collections lane
@@ -53,3 +57,4 @@ entry-closure lowering switches to that module's symbol table.
 The complete parity gate reports `total=38 pass=38 fail=0` and
 `native_seed_parity=true`. This resolves the local named-struct constructor
 layer; it does not claim every generic stdlib collection is now native-ready.
+

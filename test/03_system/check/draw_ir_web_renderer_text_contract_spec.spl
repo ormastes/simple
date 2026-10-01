@@ -1,0 +1,96 @@
+# codex-system-test
+# @tag: draw-ir, web, gui, hosted, text, source-contract
+# @req AC-4
+"""Canonical Draw IR text route contract.
+
+Web, GUI, and hosted producers carry durable text semantics only. Engine2D is
+the sole owner that chooses transient vector material or bitmap compatibility
+text; the Metal glyph atlas remains an Engine2D backend detail.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_read_text}
+use common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT, DrawIrCommand, DrawIrComposition}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_draw_ir_cpu_bitmap
+}
+
+fn _text_command(composition: DrawIrComposition, value: text) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value == value:
+                return command
+    fail("missing Draw IR TEXT command: {value}")
+    composition.batches[0].commands[0]
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _source(path: text) -> text:
+    val source = file_read_text(path)
+    expect(source.len()).to_be_greater_than(0)
+    source
+
+fn _expect_producer_has_no_private_text_material(source: text):
+    for forbidden in [
+        "render_glyph_to_buffer(", "render_text_to_buffer(",
+        "glyph_atlas_", "pipe_glyph_atlas_blit", "FontRenderer",
+        "FontRenderBatch", "atlas_pixels"
+    ]:
+        if source.contains(forbidden):
+            fail("producer contains private text material: {forbidden}")
+
+fn expect_canonical_text_route():
+    val html = "<style>html,body{margin:0}body{font-family:'Noto Sans Mono';font-size:14px}</style><body>R4</body>"
+    val vector_text = _text_command(
+        simple_web_layout_render_html_draw_ir(html, 96, 32), "R4"
+    )
+    val bitmap_text = _text_command(
+        simple_web_layout_render_html_draw_ir_cpu_bitmap(html, 96, 32), "R4"
+    )
+
+    # Vector identity/advances are durable Draw IR metadata, never atlas data.
+    expect(_style_value(vector_text, "font-identity").len()).to_be_greater_than(0)
+    expect(vector_text.advance_widths.len()).to_be_greater_than(0)
+    # Bitmap-default text deliberately has no vector material to serialize.
+    expect(_style_value(bitmap_text, "font-identity")).to_equal("")
+    expect(bitmap_text.advance_widths.len()).to_equal(0)
+
+    val executor = _source("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+    val engine = _source("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+    expect(executor).to_contain("eng.draw_text(x, y, command.text_value")
+    expect(engine).to_contain("if has_ttf:")
+    expect(engine).to_contain("self.draw_text_configured(")
+    expect(engine).to_contain("self.ensure_font_renderer()")
+    expect(engine).to_contain("fonts.stage_text_configured(")
+
+    # Producers may emit text/style metadata, but cannot raster/blit or carry
+    # transient FontRenderer/FontRenderBatch atlas/cache material.
+    _expect_producer_has_no_private_text_material(_source(
+        "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl"))
+    _expect_producer_has_no_private_text_material(_source(
+        "src/lib/common/ui/widget_draw_ir.spl"))
+    _expect_producer_has_no_private_text_material(_source(
+        "src/app/ui.browser/backend.spl"))
+    _expect_producer_has_no_private_text_material(_source(
+        "src/os/hosted/hosted_browser_renderer_process.spl"))
+
+    # The retained 5x7 and Metal glyph paths are backend compatibility details,
+    # not producer shortcuts. Do not move either into Web/GUI/hosted code.
+    val glyph = _source("src/lib/gc_async_mut/gpu/engine2d/glyph.spl")
+    val metal = _source("src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl")
+    expect(glyph).to_contain("fallback paths")
+    expect(metal).to_contain("me draw_text(")
+    expect(metal).to_contain("CPU-lane fallthrough")
+    expect(metal).to_contain("_dispatch_metal_glyph_atlas_blit")
+
+describe "Draw IR Web renderer canonical text":
+    # @manual: show
+    # @req AC-4
+    it "routes TEXT only through Draw IR and Engine2D-owned text material":
+        step("Render text through canonical Draw IR")
+        expect_canonical_text_route()

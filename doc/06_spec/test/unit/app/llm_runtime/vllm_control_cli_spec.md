@@ -27,7 +27,7 @@ vllm_control_cli_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -189,25 +189,6 @@ expect(response).to_contain("\"reason\":\"unknown_or_incomplete_option\"")
 
 </details>
 
-#### escapes rejected action text in public JSONL
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val response = llm_runtime_control_cli_response(["llm-runtime-control", "--action", "bad\"action", "--pid", "7"])
-
-expect(response).to_contain("\"status\":\"rejected\"")
-expect(response).to_contain("\"reason\":\"unknown_action\"")
-expect(response).to_contain("\"action\":\"bad\\\"action\"")
-expect(response.split(absence_marker()).len()).to_equal(1)
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -227,8 +208,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

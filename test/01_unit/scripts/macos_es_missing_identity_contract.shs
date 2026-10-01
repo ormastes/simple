@@ -1,0 +1,85 @@
+#!/bin/sh
+# Exercise actual bootstrap and phase rejection without signing or building.
+set -eu
+[ "$(uname -s)" = Darwin ] || { echo 'macOS required' >&2; exit 125; }
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)"
+fixture="$(mktemp -d /tmp/macos-es-missing-identity.XXXXXX)"
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+repo="$fixture/repo"
+builder=scripts/check/build-macos-es-history-collector.shs
+policy=config/security/macos_gui_es_collector_policy.env
+mkdir -p "$repo/scripts/check" "$repo/config/security"
+cp "$ROOT_DIR/$builder" "$repo/$builder"
+git -C "$repo" init -q
+git -C "$repo" config user.name 'Admission contract'
+git -C "$repo" config user.email 'admission-contract@example.invalid'
+git -C "$repo" config core.hooksPath /dev/null
+
+# Valid phase metadata, intentionally without tools or artifacts: rejection
+# must occur at policy validation, before any signing or toolchain access.
+make_policy() {
+    awk -F= -v phase="$1" '
+        BEGIN { hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        $1 == "status" { print "status=" phase; next }
+        $1 == "signing_identity" { print "signing_identity=Developer-ID-Test"; next }
+        $1 == "team_identifier" { print "team_identifier=ABCDEFGHIJ"; next }
+        $1 == "collector_build_manifest_sha256" || $1 == "collector_output_sha256" {
+            print $1 "=" (phase == "prepared" ? "unavailable" : hash); next
+        }
+        $1 ~ /_sha256$/ && $2 == "unavailable" { print $1 "=" hash; next }
+        $2 == "unassigned" { print $1 "=/unprovisioned/test-only"; next }
+        { print }
+    ' "$ROOT_DIR/$policy" > "$repo/$policy"
+}
+
+reject() {
+    reject_reason=$1
+    shift
+    git -C "$repo" add -A
+    git -C "$repo" -c commit.gpgsign=false commit -qm 'Admission rejection fixture'
+    result=0
+    sh "$repo/$builder" "$@" > "$fixture/out" 2> "$fixture/err" || result=$?
+    printf 'macOS ES collector: FAIL (%s)\n' "$reject_reason" > "$fixture/expected"
+    if [ "$result" != 125 ] || [ -s "$fixture/out" ] ||
+        ! cmp -s "$fixture/expected" "$fixture/err"; then
+        echo "unexpected admission result: $case_name $* (exit $result)" >&2
+        cat "$fixture/err" >&2
+        exit 1
+    fi
+    [ ! -e "$repo/build" ]
+    count=$((count + 1))
+}
+
+count=0
+case_name=missing-policy
+reject bootstrap-input-shape --verify
+for mode in build verify exec; do
+    case "$mode" in
+        build) phase=prepared; reason=policy-not-prepared; set -- --build-candidate ;;
+        verify) phase=admitted; reason=policy-not-admitted; set -- --verify ;;
+        exec) phase=admitted; reason=policy-not-admitted; set -- --exec-verified -- --self-test ;;
+    esac
+    # Positive control: complete phase metadata passes this gate and reaches
+    # the intentionally absent source snapshot, without touching toolchains.
+    case_name=complete-phase-metadata
+    make_policy "$phase"
+    reject tracked-input-shape "$@"
+    for case_name in missing-signing unassigned-signing missing-team invalid-team \
+        missing-entitlement wrong-entitlement duplicate-signing duplicate-status; do
+        make_policy "$phase"
+        case "$case_name" in
+            missing-signing) expression='/^signing_identity=/d' ;;
+            unassigned-signing) expression='s/^signing_identity=.*/signing_identity=unassigned/' ;;
+            missing-team) expression='/^team_identifier=/d' ;;
+            invalid-team) expression='s/^team_identifier=.*/team_identifier=short/' ;;
+            missing-entitlement) expression='/^required_entitlement=/d' ;;
+            wrong-entitlement) expression='s/^required_entitlement=.*/required_entitlement=wrong/' ;;
+            duplicate-signing) expression='/^signing_identity=/p' ;;
+            duplicate-status) expression='/^status=/p' ;;
+        esac
+        sed "$expression" "$repo/$policy" > "$fixture/mutated"
+        mv "$fixture/mutated" "$repo/$policy"
+        reject "$reason" "$@"
+    done
+done
+echo "macOS ES missing identity/entitlement contract: PASS ($count rejected invocations)"

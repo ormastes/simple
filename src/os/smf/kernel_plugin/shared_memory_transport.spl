@@ -1,0 +1,180 @@
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.shared_memory_ring.KpfSharedMemoryRingV1
+use os.smf.kernel_plugin.shared_memory_wire.KpfSharedMemoryWorkerResultV1
+use os.smf.kernel_plugin.worker_protocol.*
+
+pub class KpfSharedMemoryWorkerTransportV1:
+    submissions: KpfSharedMemoryRingV1
+    completions: KpfSharedMemoryRingV1
+    completion_buffer: [u8]
+    request_epochs: [i64]
+    request_active: [bool]
+    request_table_valid: bool
+    request_lookup_operations: i64
+    generation: i64
+    session_slot: i64
+    session_epoch: i64
+    granted_capability_bits: u64
+    handshake_required_capability_bits: u64
+    handshake_pending: bool
+    handshaken: bool
+    quiescing: bool
+    closed: bool
+    inflight: i64
+
+impl KpfSharedMemoryWorkerTransportV1:
+    pub static fn create(submissions: KpfSharedMemoryRingV1,
+            completions: KpfSharedMemoryRingV1, completion_buffer: [u8],
+            request_epochs: [i64], request_active: [bool],
+            generation: i64,
+            session_slot: i64, session_epoch: i64,
+            granted_capability_bits: u64) -> KpfSharedMemoryWorkerTransportV1:
+        KpfSharedMemoryWorkerTransportV1(submissions: submissions,
+            completions: completions, completion_buffer: completion_buffer,
+            request_epochs: request_epochs,
+            request_active: request_active,
+            request_table_valid: request_epochs.len > 0 and
+                request_active.len == request_epochs.len,
+            request_lookup_operations: 0,
+            generation: generation,
+            session_slot: session_slot, session_epoch: session_epoch,
+            granted_capability_bits: granted_capability_bits,
+            handshake_required_capability_bits: 0,
+            handshake_pending: false, handshaken: false,
+            quiescing: false, closed: false, inflight: 0)
+
+    me request_matches(request_slot: i64, request_epoch: i64) -> bool:
+        self.request_lookup_operations = self.request_lookup_operations + 1
+        if request_slot < 0 or request_slot >= self.request_active.len: return false
+        self.request_active[request_slot] and
+            self.request_epochs[request_slot] == request_epoch
+
+    me handshake(required_capability_bits: u64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if not self.request_table_valid: return KpfWorkerOutcome.MalformedFrame
+        if self.handshake_pending or self.handshaken:
+            return KpfWorkerOutcome.ProtocolMismatch
+        if (self.granted_capability_bits & required_capability_bits) != required_capability_bits:
+            return KpfWorkerOutcome.CapabilityDenied
+        val outcome = self.submissions.enqueue(KpfWorkerFrameV1(
+            protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Handshake, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: -1, request_epoch: 0,
+            capability_bits: required_capability_bits, payload_length: 0, payload: []))
+        if outcome == KpfWorkerOutcome.Accepted:
+            self.handshake_pending = true
+            self.handshake_required_capability_bits = required_capability_bits
+        outcome
+
+    me submit(request: KpfRequestHandleV1, required_capability_bits: u64,
+            payload: [u8]) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if not self.request_table_valid: return KpfWorkerOutcome.MalformedFrame
+        if self.quiescing: return KpfWorkerOutcome.Quiescing
+        if not self.handshaken: return KpfWorkerOutcome.ProtocolMismatch
+        if request.generation != self.generation or request.session_slot != self.session_slot:
+            return KpfWorkerOutcome.StaleCompletion
+        if (self.granted_capability_bits & required_capability_bits) != required_capability_bits:
+            return KpfWorkerOutcome.CapabilityDenied
+        if request.request_slot < 0 or request.request_slot >= self.request_active.len:
+            return KpfWorkerOutcome.StaleCompletion
+        if self.request_matches(request.request_slot, request.request_epoch):
+            return KpfWorkerOutcome.StaleCompletion
+        if self.request_active[request.request_slot]: return KpfWorkerOutcome.WouldBlock
+        val outcome = self.submissions.enqueue(KpfWorkerFrameV1(
+            protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Submit, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: request.request_slot,
+            request_epoch: request.request_epoch,
+            capability_bits: required_capability_bits,
+            payload_length: payload.len, payload: payload))
+        if outcome == KpfWorkerOutcome.Accepted:
+            self.request_epochs[request.request_slot] = request.request_epoch
+            self.request_active[request.request_slot] = true
+            self.inflight = self.inflight + 1
+        outcome
+
+    me poll() -> KpfSharedMemoryWorkerResultV1:
+        val read = self.completions.dequeue_into(self.completion_buffer)
+        if read.outcome != KpfWorkerOutcome.Accepted:
+            return KpfSharedMemoryWorkerResultV1(outcome: read.outcome,
+                request: kpf_worker_empty_request_v1(),
+                payload: self.completion_buffer, payload_length: 0)
+        val frame = read.frame
+        if frame.generation != self.generation or frame.session_epoch != self.session_epoch:
+            return KpfSharedMemoryWorkerResultV1(
+                outcome: KpfWorkerOutcome.StaleCompletion,
+                request: kpf_worker_empty_request_v1(),
+                payload: self.completion_buffer, payload_length: 0)
+        if frame.kind == KpfWorkerFrameKind.HandshakeAccepted:
+            if (not self.handshake_pending or
+                    (frame.capability_bits & self.handshake_required_capability_bits) !=
+                        self.handshake_required_capability_bits or
+                    (self.granted_capability_bits & frame.capability_bits) != frame.capability_bits):
+                return KpfSharedMemoryWorkerResultV1(
+                    outcome: KpfWorkerOutcome.CapabilityDenied,
+                    request: kpf_worker_empty_request_v1(),
+                    payload: self.completion_buffer, payload_length: 0)
+            self.handshake_pending = false
+            self.handshaken = true
+            return KpfSharedMemoryWorkerResultV1(outcome: KpfWorkerOutcome.Accepted,
+                request: kpf_worker_empty_request_v1(),
+                payload: self.completion_buffer, payload_length: 0)
+        if frame.kind == KpfWorkerFrameKind.Quiesced:
+            return KpfSharedMemoryWorkerResultV1(outcome: KpfWorkerOutcome.Quiescing,
+                request: kpf_worker_empty_request_v1(),
+                payload: self.completion_buffer, payload_length: 0)
+        if frame.kind == KpfWorkerFrameKind.Closed:
+            self.closed = true
+            return KpfSharedMemoryWorkerResultV1(outcome: KpfWorkerOutcome.Closed,
+                request: kpf_worker_empty_request_v1(),
+                payload: self.completion_buffer, payload_length: 0)
+        if frame.kind != KpfWorkerFrameKind.Completion or self.inflight <= 0:
+            return KpfSharedMemoryWorkerResultV1(
+                outcome: KpfWorkerOutcome.MalformedFrame,
+                request: kpf_worker_empty_request_v1(),
+                payload: self.completion_buffer, payload_length: 0)
+        if not self.request_matches(frame.request_slot, frame.request_epoch):
+            return KpfSharedMemoryWorkerResultV1(
+                outcome: KpfWorkerOutcome.StaleCompletion,
+                request: kpf_worker_empty_request_v1(),
+                payload: self.completion_buffer, payload_length: 0)
+        self.request_active[frame.request_slot] = false
+        self.inflight = self.inflight - 1
+        KpfSharedMemoryWorkerResultV1(outcome: KpfWorkerOutcome.Accepted,
+            request: KpfRequestHandleV1(generation: frame.generation,
+                session_slot: self.session_slot, request_slot: frame.request_slot,
+                request_epoch: frame.request_epoch), payload: frame.payload,
+            payload_length: frame.payload_length)
+
+    me cancel(request: KpfRequestHandleV1) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if request.generation != self.generation or request.session_slot != self.session_slot:
+            return KpfWorkerOutcome.StaleCompletion
+        if not self.request_matches(request.request_slot, request.request_epoch):
+            return KpfWorkerOutcome.StaleCompletion
+        self.submissions.enqueue(KpfWorkerFrameV1(
+            protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Cancel, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: request.request_slot,
+            request_epoch: request.request_epoch, capability_bits: 0,
+            payload_length: 0, payload: []))
+
+    me quiesce() -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        val outcome = self.submissions.enqueue(KpfWorkerFrameV1(
+            protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Quiesce, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: -1, request_epoch: 0,
+            capability_bits: 0, payload_length: 0, payload: []))
+        if outcome == KpfWorkerOutcome.Accepted: self.quiescing = true
+        outcome
+
+    me close() -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if not self.quiescing or self.inflight != 0: return KpfWorkerOutcome.Quiescing
+        self.submissions.enqueue(KpfWorkerFrameV1(
+            protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Close, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: -1, request_epoch: 0,
+            capability_bits: 0, payload_length: 0, payload: []))

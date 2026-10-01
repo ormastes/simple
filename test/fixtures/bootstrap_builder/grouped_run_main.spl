@@ -1,0 +1,93 @@
+# Actual-process fixture: supply a fresh, disposable RUN-3 manifest with two
+# slots, two independent roots and a dependent action, plus admitted binaries.
+# No mock broker, synthetic reap receipt or claimed execution PASS is used.
+use app.io.args_ops.{get_args}
+use app.bootstrap_builder.grouped_run.{grouped_run_v1}
+use app.bootstrap_builder.grouped_journal.{grouped_journal_decode_v1}
+use compiler.driver.driver_build.managed_parse_run_contract.{ManagedParseRunV1, managed_parse_run_decode_v1, managed_parse_run_encode_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.group_process_owner.{group_process_set_launcher_v1}
+use std.nogc_sync_mut.io.windows_group_broker_launcher.{windows_group_broker_launch_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_exists}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionPoolV1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.action_graph.artifact_service_bridge.{demand_artifact_route_v1}
+use compiler.driver.action_graph.grouped_execution_adapter.{grouped_execution_new_v1, grouped_execution_ready_v1, grouped_execution_claim_v1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+
+fn grouped_run_fixture_preflight(run: ManagedParseRunV1) -> i64:
+    print "TRACE preflight coordinator"
+    val coordinator = coordinator_new_v1(run.graph,
+        [BuildPoolBudgetV1(BuildActionPoolV1.parse, run.worker_slots.len(), run.profile.memory_budget_bytes)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), nil,
+        NativePromotionQueueV1([]), "", demand_compile_counters_empty_v1(), nil, nil, 0, "", 0, 0)
+    val route = demand_artifact_route_v1(execution, run.profile, false, run.run_id, 1)
+    val adapter = grouped_execution_new_v1(run.schedule, route, run.bindings, run.worker_slots, run.max_attempts)
+    print "TRACE preflight ready begin"
+    val ready = grouped_execution_ready_v1(adapter)
+    print "TRACE preflight ready end count={ready.len()}"
+    if ready.len() != 2: return 19
+    print "TRACE preflight claim begin"
+    val claim = grouped_execution_claim_v1(adapter, ready[0].action_id, run.worker_slots[0], 1, run.profile.memory_budget_bytes)
+    print "TRACE preflight claim end accepted={claim.accepted}"
+    if not claim.accepted: return 20
+    0
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 2:
+        print "usage: grouped-run-fixture FRESH_DISPOSABLE_RUN3_MANIFEST"
+        return 2
+    val payload = match file_read_regular_no_follow_bounded(args[1], 16777216):
+        case Ok(value): value
+        case Err(_): return 3
+    val run = match managed_parse_run_decode_v1(payload):
+        case Ok(value): value
+        case Err(_): return 4
+    if run.worker_slots.len() != 2 or run.graph.actions.len() < 3: return 5
+    var roots = 0
+    var dependent = false
+    for action in run.graph.actions:
+        if action.dynamic_edges.len() == 0: roots = roots + 1
+        else: dependent = true
+    if roots < 2 or not dependent: return 6
+    if file_exists(run.state_root + "/journal.sdn"): return 7
+    val preflight = grouped_run_fixture_preflight(run)
+    if preflight != 0: return preflight
+    if not group_process_set_launcher_v1(windows_group_broker_launch_v1): return 8
+    val first = grouped_run_v1(run)
+    if first.exit_code != 0 or first.completed_actions != run.graph.actions.len() or first.cached_actions != 0:
+        print "FAIL actual process execution: {first.reason}"
+        return 9
+    val journal_payload = match file_read_regular_no_follow_bounded(run.state_root + "/journal.sdn", 16777216):
+        case Ok(value): value
+        case Err(_): return 10
+    val journal = match grouped_journal_decode_v1(journal_payload, sha256_text(managed_parse_run_encode_v1(run))):
+        case Ok(value): value
+        case Err(_): return 11
+    if not journal.closed: return 12
+    var used: [text] = []
+    var proof_path = ""
+    for record in journal.records:
+        if record.kind == "CLAIM" and not used.contains(record.worker_id): used = used.push(record.worker_id)
+        if record.kind == "STOP":
+            proof_path = run.state_root + "/groups/" + sha256_text(record.worker_id) + "/generation-{record.generation}/reaped-{record.generation}.sdn"
+    if used.len() != 2 or proof_path == "": return 13
+    val resumed = grouped_run_v1(run)
+    if resumed.exit_code != 0 or resumed.cached_actions != first.completed_actions:
+        print "FAIL verified cached replay: {resumed.reason}"
+        return 14
+    val proof = match file_read_regular_no_follow_bounded(proof_path, 65536):
+        case Ok(value): value
+        case Err(_): return 15
+    if not file_atomic_write(proof_path, proof + "tampered\n"): return 16
+    val rejected = grouped_run_v1(run)
+    # Restore the retained evidence even when the negative assertion fails.
+    if not file_atomic_write(proof_path, proof): return 17
+    if rejected.exit_code == 0:
+        print "FAIL changed terminal tree evidence was accepted"
+        return 18
+    print "PASS actual group processes, dependent admission, cached replay, terminal-proof tamper rejection"
+    0

@@ -1,7 +1,6 @@
 ---
 id: electron_stub_apis_2026-07-05
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+status: RESOLVED
 severity: high
 discovered: 2026-07-05
 discovered_by: Code review of src/app/ui.electron/main.spl and src/app/ui.electron/bridge.js

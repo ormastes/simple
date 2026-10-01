@@ -268,3 +268,11 @@ transcript naming the Vulkan backend, `device_readback`, `overall=pass`, and a
 non-empty checksum can become the reference image identity. Missing workers,
 empty output, incomplete transcripts, and nonzero exits remain unavailable or
 crashed and are rejected by the gate. No GNU `timeout` command is involved.
+
+## Triage 2026-09-13
+
+Requires real Vulkan/lavapipe execution (vulkaninfo, libvulkan_lvp.so)
+across 8 parallel boundary lanes to fix the fabricated-comparator
+pattern -- a GPU/hardware verification gap, not reachable from a unit
+spec here. Leaving OPEN.
+

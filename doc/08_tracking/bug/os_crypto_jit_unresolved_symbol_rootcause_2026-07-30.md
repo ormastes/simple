@@ -1,4 +1,8 @@
 # `os.*` module JIT unresolved-symbol gate — root cause (2026-07-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment: root-cause why every standalone probe against `os.crypto.*`
 triggers a module-wide "unresolved external symbol" JIT fallback,
@@ -161,3 +165,4 @@ unfixed and unblocked-in-practice: the structural cause is now
 understood and a concrete alternative lane is proposed, but that lane
 was not exercised to completion this pass, so the batch should proceed
 under it in a future pass rather than being declared unblocked here.
+

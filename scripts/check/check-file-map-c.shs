@@ -1,0 +1,33 @@
+#!/bin/sh
+# check-file-map-c.shs — prove the two SOSIX file-mapping operations against
+# BOTH C owners of rt_mmap: runtime.c (platform/unix_common.h) and
+# runtime_native.c (core-C archive member). A definition in only one of them
+# is exactly how the core-C lane shipped without rt_mmap (seed test
+# test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source, 2026-09-19).
+# Selfcheck: src/runtime/test/rt_file_map_selfcheck.c
+# Verdict is the last stdout line: PASS exit 0 / FAIL exit 1.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+selfcheck="$root/src/runtime/test/rt_file_map_selfcheck.c"
+cc=${CC:-cc}
+work=${TMPDIR:-/tmp}
+for provider in runtime.c runtime_native.c; do
+    out=$(mktemp "$work/simple-file-map.XXXXXX")
+    trap 'rm -f "$out"' EXIT INT TERM HUP
+    # runtime.c's owner reads the path through rt_string_len/rt_string_data,
+    # which only runtime_native.c defines; the selfcheck supplies a
+    # self-consistent shim for that owner (see the .c for why).
+    shim=""
+    [ "$provider" = "runtime.c" ] && shim="-DRT_FILE_MAP_SELFCHECK_STRING_SHIM=1"
+    "$cc" -std=gnu11 -O0 -ffunction-sections -fdata-sections \
+        -DSIMPLE_RUNTIME_TESTING $shim -I"$root/src/runtime" \
+        "$root/src/runtime/$provider" "$selfcheck" \
+        -Wl,--gc-sections -ldl -lm -lpthread -o "$out"
+    if ! "$out"; then
+        echo "FAIL — rt_file_map selfcheck failed against $provider"
+        exit 1
+    fi
+    rm -f "$out"
+    trap - EXIT INT TERM HUP
+done
+echo "PASS — 2 owner(s) checked, rt_mmap actual-read + prefetch + bounds contract hold in runtime.c and runtime_native.c"

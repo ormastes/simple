@@ -1,4 +1,8 @@
 # Result propagation mis-lowers checked TLS signature arrays
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-21
 **Status:** Compiler cast fixed; deployed bootstrap verification pending
@@ -36,3 +40,4 @@ previously deployed bootstrap executable and does not contain the current Rust
 compiler source change. Its three-run session cap has been reached, so it was
 not rerun again. After deploying a fresh compiler, a future session must run
 `test/01_unit/os/tls13/server_accept_spec.spl` once.
+

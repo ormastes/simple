@@ -1,22 +1,11 @@
 # `rt_dir_list` C platform-header helper collides with the real extern
+## Closed 2026-09-16 — Status FIXED, verified by content grep 2026-08-17; rename landed rt_dir_list_cpath
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-10
-**Status:** RESOLVED 2026-08-17 — the rename this doc requested was applied
-(worker is `rt_dir_list_cpath` in both `unix_common.h:108` and
-`platform_win.h:120`, with in-header comments explaining the old collision).
-`scripts/check/check-extern-abi-signatures.shs` no longer emits any
-`rt_dir_list` mismatch row (verified 2026-08-17; the gate's residual FAIL is
-10 unrelated pre-existing rows — `rt_db_get/delete`, `rt_dir_glob`,
-`rt_file_find`, `rt_file_open` in `descriptor.rs`, `rt_invlpg`,
-`rt_process_run_with_limits`, `rt_struct_alloc`, `rt_write_cr3` — same family,
-separate work). Regression specs (green):
-`test/01_unit/runtime/rt_dir_list_header_no_collision_spec.spl` (repro +
-renamed-worker generalization) and mirror
-`test/unit/runtime/rt_dir_list_header_no_collision_spec.spl`. Related fix same
-day: the pure-Simple backends' 3-arg `rt_file_open` declaration was corrected
-to the 4-arg (ptr,len,ptr,len) ABI in `llvm_backend.spl:386` and
-`llvm_lib_translate.spl:286`, gated by
-`test/01_unit/compiler/backend/rt_extern_decl_arity_spec.spl` (+ mirror).
 **Status:** FIXED — verified by content grep 2026-08-17 (os/runtime lane). The
 suggested rename landed as `rt_dir_list_cpath` (not `rt_dir_list_entries`), and a
 real `rt_dir_list` extern now exists in C:
@@ -98,3 +87,4 @@ still mid-flight on them at the time this was found. Editing files another live
 session owns is how this same afternoon produced a 133-file clobber; the rename
 is small and unambiguous, so it is recorded here for that session to apply
 rather than raced.
+

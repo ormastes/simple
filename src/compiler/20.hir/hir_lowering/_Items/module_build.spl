@@ -86,7 +86,27 @@ impl HirLowering:
             # Dict.values() aggregates in one mixed call can erase one through
             # Any in the stage4 bootstrap ABI and later produce a nil receiver.
             var flat_symbols: [HirSymbol] = []
-            val flat_symbol_keys = self.symbols.symbols.keys()
+            # DETERMINISM -- MEASUREMENT PREREQUISITE, NOT A FIX.
+            # These six lists feed `bootstrap_hir_modules_add`
+            # (lowering_helpers.spl:103,120) -> `_bootstrap_hir_module_*`, which drives
+            # BOTH the prescan loop and the MIR lowering order. `rt_dict_keys`
+            # (src/runtime/runtime_native.c:8652) walks BUCKET order, so that order varied
+            # per process. Measured over ten runs (p1..p10): the function order flipped
+            # 5/5 and correlated PERFECTLY with the outcome -- the run reported 4 errors or
+            # 20 purely according to which function got lowered first, because
+            # bootstrap_globals.spl:400 bails at the first function that accumulates fatal
+            # errors. Sorting makes that stable so counts become comparable between runs.
+            #
+            # IT FIXES NOTHING ELSE. Both functions still carry types whose `.kind` reads
+            # as a non-enum: disc=-1 on 4 of 11 lower_type calls in
+            # module_logical_name_from_path and 20 of 26 in
+            # _module_path_naming_text_index_of, matching their error counts exactly. That
+            # defect is real, per-function, stable, and entirely untouched by this change.
+            #
+            # An earlier sort in module_declarations_bootstrap.spl changed nothing here
+            # because it sorted the SYMBOL-DECLARATION pass -- a different collection.
+            var flat_symbol_keys = self.symbols.symbols.keys()
+            flat_symbol_keys.sort()
             var flat_idx = 0
             while flat_idx < flat_symbol_keys.len():
                 flat_symbols = flat_symbols.push(self.symbols.symbols[flat_symbol_keys[flat_idx]])
@@ -96,31 +116,36 @@ impl HirLowering:
             # bootstrap accumulator loses the entry's functions under the
             # bootstrap ABI even though lower_module populated its Dict.
             var flat_functions: [HirFunction] = []
-            val flat_function_keys = lowered_module.functions.keys()
+            var flat_function_keys = lowered_module.functions.keys()
+            flat_function_keys.sort()
             flat_idx = 0
             while flat_idx < flat_function_keys.len():
                 flat_functions = flat_functions.push(lowered_module.functions[flat_function_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_constants: [HirConst] = []
-            val flat_constant_keys = lowered_module.constants.keys()
+            var flat_constant_keys = lowered_module.constants.keys()
+            flat_constant_keys.sort()
             flat_idx = 0
             while flat_idx < flat_constant_keys.len():
                 flat_constants = flat_constants.push(lowered_module.constants[flat_constant_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_enums: [HirEnum] = []
-            val flat_enum_keys = lowered_module.enums.keys()
+            var flat_enum_keys = lowered_module.enums.keys()
+            flat_enum_keys.sort()
             flat_idx = 0
             while flat_idx < flat_enum_keys.len():
                 flat_enums = flat_enums.push(lowered_module.enums[flat_enum_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_structs: [HirStruct] = []
-            val flat_struct_keys = lowered_module.structs.keys()
+            var flat_struct_keys = lowered_module.structs.keys()
+            flat_struct_keys.sort()
             flat_idx = 0
             while flat_idx < flat_struct_keys.len():
                 flat_structs = flat_structs.push(lowered_module.structs[flat_struct_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_classes: [HirClass] = []
-            val flat_class_keys = lowered_module.classes.keys()
+            var flat_class_keys = lowered_module.classes.keys()
+            flat_class_keys.sort()
             flat_idx = 0
             while flat_idx < flat_class_keys.len():
                 flat_classes = flat_classes.push(lowered_module.classes[flat_class_keys[flat_idx]])
@@ -137,18 +162,68 @@ impl HirLowering:
         hir_phase_profile_module_end(module.name)
         lowered_module
 
+    me imported_enum_owner_module(local_name: text) -> text:
+        """BOOT-20 (2026-09-14) native-codegen workaround: `imported_enum_owners`
+        is a `{text: text}` CLASS FIELD. Under Stage-2 native codegen its
+        `contains_key`/bracket-read pair silently misreports for THIS specific
+        importer -- a minimal two-file fixture (module A declares `enum Kind`,
+        module B does a plain `use A.{Kind}`, no facade, no re-export, enum
+        never even referenced in B's body) native-builds clean under the seed's
+        own in-process HIR lowering (`imported_enums.len=1,
+        imported_enum_owners.len=1, errors.len=0`) but fails
+        `imported enum \`Kind\` has no declaration owner` when compiled by the
+        Stage-2 candidate (sha 80911c47f07cdb64b4c3) -- same `.spl` logic,
+        different engine, different result. See
+        doc/08_tracking/bug/stage2_native_class_field_text_dict_owner_lost_2026-09-14.md.
+        `self.symbols.define(local_name, SymbolKind.Enum, ..., Some(owner))`
+        (module_import_registration.spl) already records the identical owner
+        in `HirSymbol.defining_module` at registration time, so read it back
+        from there instead, using the same scalar-safe
+        lookup_or_invalid -> bracket-read pattern
+        `claim_materialized_payload_binding` already relies on for exactly
+        this reason."""
+        # BOOT-20-robust path: answer from the plain [text] rows mirror
+        # first -- class-field Dict reads (membership AND bracket) on the
+        # symbol table under-report/misread under Stage-2 native codegen
+        # once the table grows in the full stage3 closure; the rows list is
+        # the house-verified-safe structure. The legacy dict path below is
+        # retained as a fallback with a diagnostic trace.
+        val row_prefix = "{local_name}\u001f"
+        for owner_row in self.imported_enum_owner_rows:
+            if owner_row.starts_with(row_prefix):
+                return owner_row[row_prefix.len():]
+        # Function-local imports have left lexical scope before finalization.
+        # Only the fallback depends on the still-visible symbol table.
+        val existing_id = self.symbols.lookup_or_invalid(local_name)
+        if not existing_id.is_valid():
+            return ""
+        val raw = existing_id.id
+        val trace_owner = (hir_module_env_get("SIMPLE_HIR_ENUM_OWNER_TRACE") ?? "") == "1"
+        if trace_owner:
+            eprint("[enum-owner-trace] ROWS-MISS name={local_name} raw={raw} rows={self.imported_enum_owner_rows.len()}")
+        if not rt_dict_contains(self.symbols.symbols, raw):
+            if trace_owner:
+                eprint("[enum-owner-trace] MISSING-BY-CONTAINS name={local_name} raw={raw}")
+            return ""
+        val symbol: HirSymbol = self.symbols.symbols[raw]
+        val owner = symbol.defining_module ?? ""
+        if trace_owner and owner == "":
+            eprint("[enum-owner-trace] EMPTY-DEFINING-MODULE name={local_name} raw={raw}")
+        owner
+
     me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
         var lowered: Dict<SymbolId, HirEnum> = {}
         val imported_names = self.imported_enums.keys()
         var enum_idx = 0
         while enum_idx < imported_names.len():
             val local_name = imported_names[enum_idx]
-            if not self.imported_enum_owners.contains_key(local_name):
+            val owner_module = self.imported_enum_owner_module(local_name)
+            if owner_module == "":
                 self.error("imported enum `{local_name}` has no declaration owner", Span.empty())
                 enum_idx = enum_idx + 1
                 continue
             hir_phase_profile_count_enum_lowering()
-            val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], self.imported_enum_owners[local_name], local_name)
+            val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], owner_module, local_name, true)
             lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
 
@@ -191,6 +266,8 @@ impl HirLowering:
         self.imported_traits = {}
         self.imported_enums = {}
         self.imported_enum_owners = {}
+        self.imported_enum_symbol_ids = {}
+        self.imported_enum_owner_rows = []
         self.materialized_payload_origins = {}
         self.materialized_payload_bindings = {}
         # NOTE (moved): the struct field-type pre-scan that used to run HERE
@@ -365,7 +442,16 @@ impl HirLowering:
             var bootstrap_decl_idx = 0
             while bootstrap_decl_idx < bootstrap_function_keys.len():
                 val bootstrap_decl_fn: ParserFunction = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
-                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
+                # Declare with the function's declared signature, exactly like
+                # the non-bootstrap declare pass (module_declarations_bootstrap
+                # uses the same declared_callable_type). Declared untyped, a
+                # call's HIR result type was unknown, so `val xs = f()` with
+                # `f() -> [i64]` lowered xs as a scalar: under SIMPLE_BOOTSTRAP=1
+                # positional p2_add printed 0 (xs.len() -> rt_string_len,
+                # xs[0] + xs[1] -> rt_strcat_tagged). Generic templates stay
+                # untyped (declared_callable_type returns nil for them).
+                val bootstrap_decl_type = self.declared_callable_type(bootstrap_decl_fn, nil)
+                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, bootstrap_decl_type, Span.empty(), Visibility.Private, false, nil)
                 # Extern fns must keep their BARE runtime symbol: qualifying
                 # them ("std.nogc_sync_mut.simd.rt_simd_has_avx2") makes every
                 # same-module call emit an undefined module-prefixed symbol at
@@ -544,7 +630,7 @@ impl HirLowering:
                 imports: bootstrap_imports,
                 exports: bootstrap_exports,
                 domain_blocks: bootstrap_domain_blocks,
-                symbols: self.symbols,
+                symbols: self.symbols.module_snapshot(),
                 functions: functions,
                 gpu_function_targets: gpu_function_targets,
                 gpu_function_backend_orders: gpu_function_backend_orders,
@@ -616,8 +702,9 @@ impl HirLowering:
         val lowered_impl_function_keys = self.lowered_impl_functions.keys()
         lower_idx = 0
         while lower_idx < lowered_impl_function_keys.len():
-            val sym = lowered_impl_function_keys[lower_idx]
-            functions[sym] = self.lowered_impl_functions[sym]
+            val symbol_number = lowered_impl_function_keys[lower_idx]
+            val method = self.lowered_impl_functions[symbol_number]
+            functions[method.symbol] = method
             lower_idx = lower_idx + 1
 
         val lower_const_names = module.constants.keys()
@@ -694,7 +781,7 @@ impl HirLowering:
             imports: imports,
             exports: exports,
             domain_blocks: domain_blocks,
-            symbols: self.symbols,
+            symbols: self.symbols.module_snapshot(),
             functions: functions,
             gpu_function_targets: gpu_function_targets,
             gpu_function_backend_orders: gpu_function_backend_orders,

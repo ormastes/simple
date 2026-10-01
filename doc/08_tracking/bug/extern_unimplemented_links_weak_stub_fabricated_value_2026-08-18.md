@@ -1,4 +1,8 @@
 # extern fn with no implementation links a weak stub and fabricates a value
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — compiler-side fix in progress by another lane (2026-08-18)
 **Spec (RED):** `test/01_unit/compiler/linker/extern_unimplemented_weak_stub_fabrication_spec.spl:96`
@@ -42,3 +46,4 @@ Do not weaken the spec; it must stay RED until then.
 The DEFAULT (pure-Simple) native-build lane OOMs on this host (worker killed at
 11-36 GB), so the spec uses the in-process Rust lane deliberately — a plain
 `native-build` would time out rather than fail cleanly.
+

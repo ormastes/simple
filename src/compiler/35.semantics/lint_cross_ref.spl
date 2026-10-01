@@ -4,6 +4,7 @@
 # XREF002: Unit/integration test file missing `# @parent` tag           WARNING
 # XREF003: `# @req` references an unknown requirement ID                WARNING
 # XREF004: `# @parent path` references a file that does not exist       WARNING
+# XREF005: Cross-reference source/requirements could not be read         ERROR
 #
 # Scans test files for cross-reference tags:
 #   # @req REQ-042        — links test to requirement
@@ -11,10 +12,7 @@
 #   # @scenario SC-001    — marks a specific scenario
 #   # @feature name       — links to feature
 
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-
-use std.io_runtime.{dir_list}
+use std.io_runtime.{dir_list, file_exists, read_file_text_result}
 
 # ============================================================================
 # Warning Struct
@@ -48,7 +46,17 @@ fn check_cross_refs(source: text, file_path: text) -> [CrossRefWarning]:
     if not is_system and not is_unit and not is_integration:
         return warnings
 
-    val known_reqs = xref_load_requirement_ids()
+    val known_reqs = match xref_load_requirement_ids():
+        case Ok(value): value
+        case Err(error):
+            warnings.push(CrossRefWarning(
+                code: "XREF005",
+                severity: "ERROR",
+                message: error,
+                file_path: file_path,
+                line: 1
+            ))
+            return warnings
 
     # ---- Pass 1: Extract all cross-ref tags ----
     var req_tags: [text] = []
@@ -110,7 +118,7 @@ fn check_cross_refs(source: text, file_path: text) -> [CrossRefWarning]:
 
     var pi = 0
     while pi < parent_tags.len():
-        if not rt_file_exists(parent_tags[pi]):
+        if not file_exists(parent_tags[pi]):
             warnings.push(CrossRefWarning(
                 code: "XREF004",
                 severity: "WARNING",
@@ -130,9 +138,19 @@ fn check_cross_refs_batch(file_paths: [text]) -> [CrossRefWarning]:
     """Scan a list of test files for cross-reference tag issues."""
     var all_warnings: [CrossRefWarning] = []
     for fp in file_paths:
-        if not rt_file_exists(fp):
+        if not file_exists(fp):
             continue
-        val source = rt_file_read_text(fp)
+        val source = match read_file_text_result(fp):
+            case Ok(value): value
+            case Err(error):
+                all_warnings.push(CrossRefWarning(
+                    code: "XREF005",
+                    severity: "ERROR",
+                    message: "could not read cross-reference source {fp}: {error}",
+                    file_path: fp,
+                    line: 1
+                ))
+                continue
         val ws = check_cross_refs(source, fp)
         for w in ws:
             all_warnings.push(w)
@@ -142,12 +160,12 @@ fn check_cross_refs_batch(file_paths: [text]) -> [CrossRefWarning]:
 # Helpers
 # ============================================================================
 
-fn xref_load_requirement_ids() -> [text]:
+fn xref_load_requirement_ids() -> Result<[text], text>:
     """Load known requirement IDs from doc/requirement/ directory."""
     var ids: [text] = []
     val req_dir = "doc/requirement"
-    if not rt_file_exists(req_dir):
-        return ids
+    if not file_exists(req_dir):
+        return Ok(ids)
     val files = dir_list(req_dir)
     for fname in files:
         if not fname.ends_with(".md"):
@@ -158,8 +176,10 @@ fn xref_load_requirement_ids() -> [text]:
             ids.push(base)
         # Scan first 20 lines for a requirement-id pattern
         val full_path = "{req_dir}/{fname}"
-        if rt_file_exists(full_path):
-            val content = rt_file_read_text(full_path)
+        if file_exists(full_path):
+            val content = match read_file_text_result(full_path):
+                case Ok(value): value
+                case Err(error): return Err("could not read requirement file {full_path}: {error}")
             val clines = content.split("\n")
             var ci = 0
             val scan_to = xref_min(20, clines.len())
@@ -168,7 +188,7 @@ fn xref_load_requirement_ids() -> [text]:
                 if extracted != "":
                     ids.push(extracted)
                 ci = ci + 1
-    ids
+    Ok(ids)
 
 fn xref_extract_req_id(line: text) -> text:
     """Extract a requirement id from a line like '# REQ-042' or 'REQ-042:'."""

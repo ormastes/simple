@@ -1,0 +1,47 @@
+use compiler.loader.loader.compiler_sffi.*
+
+fn bounded_type(kind: text, bits: i64, lanes: i64) -> TypeInfo:
+    TypeInfo(
+        kind: kind, name: "bounded", has_bits: true, bits: bits,
+        has_signed: true, signed: true, has_lanes: true, lanes: lanes,
+        args: [], has_elem: false, elem: nil
+    )
+
+describe "Compiler SFFI type encoding bounds":
+    it "rejects zero and oversized widths before cache work":
+        val handle = compiler_create_context()
+        val zero = compiler_instantiate_template_typed(
+            handle, "zero_width", ["T"], [bounded_type("int", 0, 1)]
+        )
+        val oversized = compiler_instantiate_template_typed(
+            handle, "wide", ["T"], [bounded_type("int", 65, 1)]
+        )
+        expect(zero.success).to_equal(false)
+        expect(oversized.success).to_equal(false)
+        expect(compiler_get_stats(handle)).to_contain('"cache_misses": 0')
+        compiler_destroy_context(handle)
+
+    it "rejects zero and unencodable lane counts":
+        val handle = compiler_create_context()
+        val zero = compiler_instantiate_template_typed(
+            handle, "zero_lanes", ["T"], [bounded_type("simd", 32, 0)]
+        )
+        val oversized = compiler_instantiate_template_typed(
+            handle, "wide_lanes", ["T"], [bounded_type("simd", 32, 256)]
+        )
+        expect(zero.success).to_equal(false)
+        expect(oversized.success).to_equal(false)
+        expect(compiler_get_stats(handle)).to_contain('"template_instantiations": 0')
+        compiler_destroy_context(handle)
+
+    it "accepts the inclusive encoding boundaries":
+        val handle = compiler_create_context()
+        val narrow = compiler_instantiate_template_typed(
+            handle, "narrow", ["T"], [bounded_type("int", 1, 1)]
+        )
+        val wide = compiler_instantiate_template_typed(
+            handle, "wide", ["T"], [bounded_type("simd", 64, 255)]
+        )
+        expect(narrow.success).to_equal(true)
+        expect(wide.success).to_equal(true)
+        compiler_destroy_context(handle)

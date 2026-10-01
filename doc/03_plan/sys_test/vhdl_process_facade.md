@@ -4,7 +4,8 @@
 
 This plan covers `REQ-VHDL-SFFI-001`: public VHDL tool wrappers must use the
 canonical pure-Simple captured-process facade and faithfully expose success,
-exit code, stdout, and stderr. The executable owner is
+exit code, stdout, and stderr. The normative requirement is
+`doc/02_requirements/hardware/vhdl.md`. The executable owner is
 `test/03_system/feature/usage/vhdl_spec.spl`; its manual mirror is
 `doc/06_spec/03_system/feature/usage/vhdl_spec.md`.
 
@@ -65,6 +66,8 @@ to this recovery lane is a bootstrap Stage2 CLI exposing `compile` and
 `native-build`, not `test`, `spipe-docgen`, or `sspec-maintain`. The previously
 passing admitted native process-facade probe proves the implementation but is
 not substituted for these new system-test/documentization gates.
+
+This is a blocked execution status, not a passing test result.
 
 ## Static and repository gates
 

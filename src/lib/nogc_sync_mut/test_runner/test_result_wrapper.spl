@@ -1,7 +1,9 @@
 # Result-bearing wrapper for interpreter-mode specs.
 
 use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read, file_write}
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{getpid}
 
 extern fn rt_file_create_excl(path: text, content: text) -> bool
 
@@ -299,6 +301,41 @@ fn spipe_brace_delta(line: text) -> i64:
         i = i + 1
     delta
 
+fn spipe_open_bracket_delta(line: text) -> i64:
+    """Net count of unclosed `[`/`(`/`{` on one line.
+
+    String literals and `#` comments are skipped so a bracket inside spec
+    prose (e.g. `it "matrix[0] is zero":`) does not shift the depth.
+    Used to keep a multi-line top-level declaration such as
+    `val XS: [text] = [` ... `]` whole at module scope: without it the
+    closing `]` (at column 0, and not itself a declaration keyword) was
+    swept into the generated `fn main()`, leaving the module-scope list
+    literal unterminated -> "parse: expected RBracket, found Val".
+    """
+    var delta = 0
+    var i = 0
+    var in_str = false
+    var quote = ""
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if in_str:
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == quote:
+                in_str = false
+        elif ch == "\"" or ch == "'":
+            in_str = true
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch == "[" or ch == "(" or ch == "{":
+            delta = delta + 1
+        elif ch == "]" or ch == ")" or ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
+
 fn spipe_is_top_level_start(trimmed: text) -> bool:
     trimmed.starts_with("fn ") or
     trimmed.starts_with("pub fn ") or
@@ -376,14 +413,26 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     var import_parts: [text] = []
     var top_level_parts: [text] = []
     var body_parts: [text] = []
-    var in_docstring = false
+    # Element i pairs with lines[i]. Replaces a docstring flag that toggled on
+    # ANY line starting with `"""`, so a one-line docstring switched it on and
+    # nothing ever switched it off: every later import and top-level
+    # declaration was pushed verbatim into the main body (1,657 spec files
+    # carry a one-line docstring; measured 2026-09-06).
+    val string_continuation = simple_string_continuation_lines(content)
+    val code_lines = simple_code_lines(content)
     var in_top_fn = false
     var top_fn_indent = 0
     var in_import_block = false
     var import_brace_depth = 0
+    # Unclosed bracket depth of the top-level declaration being collected.
+    var top_decl_depth = 0
     var skipping_spec_import = false
 
-    for raw_line in lines:
+    var line_index = 0
+    while line_index < lines.len():
+        val raw_line = lines[line_index]
+        val fact_index = line_index
+        line_index = line_index + 1
         val infix_line = spipe_rewrite_infix_expect_line(raw_line)
         var line = spipe_rewrite_method_expect_line(infix_line)
         var trimmed = line.trim()
@@ -417,26 +466,11 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
             continue
 
         # Track multi-line docstrings (""")
-        if trimmed.starts_with("\"\"\""):
-            # Toggle docstring state. A line with """ toggles in/out.
-            # If we see """ at start of line and we're NOT in a function body,
-            # treat docstrings at top level as body (they'll go into main).
-            if in_docstring:
-                in_docstring = false
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-            else:
-                in_docstring = true
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-
-        if in_docstring:
+         # Docstring lines pass through verbatim: a line inside a string opened
+        # earlier, or a line that is itself only a string (opener, closer, or a
+        # one-liner). Fixture-string interiors pass through too, instead of
+        # being classified as declarations.
+        if string_continuation[fact_index] or code_lines[fact_index].trim() == "\"\"":
             if in_top_fn:
                 top_level_parts.push(line)
             else:
@@ -466,12 +500,23 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
                 if spipe_is_top_level_start(trimmed):
                     in_top_fn = true
                     top_fn_indent = 0
+                    top_decl_depth = spipe_open_bracket_delta(line)
+                    if top_decl_depth < 0:
+                        top_decl_depth = 0
                     top_level_parts.push(line)
                     continue
 
         # If we're inside a top-level function definition, keep collecting
         # lines until we see a line at the same or lesser indentation (not blank)
         if in_top_fn:
+            # A declaration whose first line left brackets open continues at
+            # column 0 (the closing `]`), so indentation alone cannot end it.
+            if top_decl_depth > 0:
+                top_decl_depth = top_decl_depth + spipe_open_bracket_delta(line)
+                if top_decl_depth < 0:
+                    top_decl_depth = 0
+                top_level_parts.push(line)
+                continue
             if trimmed.len() == 0:
                 top_level_parts.push("")
                 continue
@@ -482,6 +527,9 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
             else:
                 # This line is at same/lesser indent — end of function
                 if current_indent == top_fn_indent and spipe_is_top_level_start(trimmed):
+                    top_decl_depth = spipe_open_bracket_delta(line)
+                    if top_decl_depth < 0:
+                        top_decl_depth = 0
                     top_level_parts.push(line)
                     continue
                 in_top_fn = false
@@ -529,7 +577,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     val wrapped = imports + "\n" + scenario_imports + native_decls + helpers + "\n" + top_level + "\n" + main_decl + native_start + body + native_end
     if native_result:
         return spipe_write_native_wrapper(wrapped)
-    val tmp_path = "/tmp/spipe_wrapped_" + file_path.replace("/", "_")
+    val tmp_path = "/tmp/spipe_wrapped_" + getpid().to_text() + "_" + file_path.replace("/", "_")
     if not file_write(tmp_path, wrapped):
         return file_path
     tmp_path

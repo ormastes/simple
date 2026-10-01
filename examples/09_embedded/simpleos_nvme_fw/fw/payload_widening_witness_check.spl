@@ -1,0 +1,139 @@
+"""
+payload_widening_witness_check — the NON-VACUITY witness for the host-path payload
+widening (plan `nvme_command_set_and_payload_completeness_plan.md` §1.5).
+
+Why this file exists: every other firmware check writes and reads back word 0 only.
+A firmware whose entire command path is ONE MACHINE WORD passes all of them. So
+"the payload is widened" cannot be evidenced by them — a green suite there proves
+nothing about words 1..PAGE_WORDS-1.
+
+This check is built to FAIL on a one-word path. It writes a page whose LATER words
+differ from word 0 (and from each other), round-trips it through the real host
+command path — NvmeController.io_submit -> the SQ ring -> process_one_io -> DRAM
+write buffer -> FTL -> FIL/FMC -> NAND -> back up through the CQ ring -> io_reap —
+and requires each of those later words to come back intact. Any one-word
+projection zeroes words 1.. by construction, so a surviving narrowing anywhere shows
+up here as a 0 where a sentinel should be.
+
+Sentinels are placed at word 1 (adjacent), 100, 255 and 511 (the last word), so a
+path that widened only the first codeword, or only the first cache line, is caught
+rather than passing.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/payload_widening_witness_check.spl
+Gate: prints "PAYLOAD WIDENING WITNESS OK".
+"""
+
+use nvme_types.*
+use nvme_payload.*
+use nvme_admin_types.*
+use nvme_admin.*
+use nvme_controller.*
+use ftl.*
+use fil.*
+use dram.*
+
+# A page whose later words are distinct non-zero sentinels. Built through a single
+# owner (`var p`) — never through a temporary alias — so no write copies the page.
+fn witness_page(tag: i64) -> PageData:
+    var p: PageData = page_zero()
+    p.words[0]   = 0x55 + tag
+    p.words[1]   = 0x1111 + tag
+    p.words[100] = 0x2222 + tag
+    p.words[255] = 0x3333 + tag
+    p.words[511] = 0x4444 + tag
+    p
+
+fn expect_page(got: PageData, tag: i64, label: text) -> i64:
+    var f: i64 = 0
+    f = f + expect_eq(page_word(got, 0),   0x55 + tag,   "{label}: word 0")
+    f = f + expect_eq(page_word(got, 1),   0x1111 + tag, "{label}: word 1 (adjacent)")
+    f = f + expect_eq(page_word(got, 100), 0x2222 + tag, "{label}: word 100")
+    f = f + expect_eq(page_word(got, 255), 0x3333 + tag, "{label}: word 255")
+    f = f + expect_eq(page_word(got, 511), 0x4444 + tag, "{label}: word 511 (last)")
+    f
+
+fn main():
+    var fail: i64 = 0
+
+    # ── 0. The witness page must itself be a real page, or the test is vacuous ──
+    val wp: PageData = witness_page(0)
+    fail = fail + expect_eq(page_word_count(wp), PAGE_WORDS, "witness page holds PAGE_WORDS words")
+    fail = fail + expect_eq(bool_to_int(page_is_well_formed(wp)), 1, "witness page is well formed")
+    # A one-word representation must NOT reproduce it — this is the assertion
+    # that makes the whole file non-vacuous: if the witness page equalled its own
+    # word-0 projection, the page would carry one word and prove nothing.
+    # D11 deleted the one-word compat shim; the projection is now built from
+    # the page-wide primitives directly, which is the SAME property, stated
+    # without an importable narrowing helper.
+    var proj: PageData = page_zero()
+    proj.words[0] = page_word(wp, 0)
+    fail = fail + expect_eq(bool_to_int(page_eq(proj, wp)), 0,
+                            "witness page does NOT survive a one-word projection (test is non-vacuous)")
+
+    # ── 1. Full host round trip through the NVMe controller ───────────────────
+    var c: NvmeController = nvme_controller_new()
+    c.admin_submit(admin_create_cq_cmd(2, 1, MAX_QUEUE_SIZE))
+    c.admin_submit(admin_create_sq_cmd(3, 1, MAX_QUEUE_SIZE, 1))
+    c.admin_process()
+    c.admin_reap()
+    c.admin_reap()
+
+    c.io_submit(1, cmd_make_page(10, OP_WRITE, 40, 1, witness_page(0)))
+    c.io_process()
+    val w: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(w.status, SC_SUCCESS, "page write completed")
+
+    c.io_submit(1, cmd_make(11, OP_READ, 40, 1, 0))
+    c.io_process()
+    val r: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(r.status, SC_SUCCESS, "page read completed")
+    fail = fail + expect_page(r.page, 0, "host read-back")
+
+    # ── 2. The SQ ring must not narrow the payload ────────────────────────────
+    # Submitted but NOT processed: fetch it straight back out of the ring, which is
+    # where a rebuild-from-scalars used to silently drop the page.
+    c.io_submit(1, cmd_make_page(12, OP_WRITE, 41, 1, witness_page(7)))
+    val fetched: NvmeCmd = c.qset.sq_fetch(1)
+    fail = fail + expect_eq(fetched.cid, 12, "SQ ring returns the submitted command")
+    fail = fail + expect_eq(bool_to_int(fetched.has_page), 1, "SQ ring preserves has_page")
+    fail = fail + expect_page(fetched.page, 7, "SQ ring round trip")
+
+    # ── 3. Overwrite must replace ALL words, not just word 0 ──────────────────
+    c.io_submit(1, cmd_make_page(13, OP_WRITE, 40, 1, witness_page(3)))
+    c.io_process()
+    c.io_reap(1)
+    c.io_submit(1, cmd_make(14, OP_READ, 40, 1, 0))
+    c.io_process()
+    val r2: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_page(r2.page, 3, "overwrite replaces the whole page")
+
+    # ── 4. The DRAM write buffer must stage a whole page ──────────────────────
+    var wb: DramWriteBuffer = dram_write_buffer_new()
+    val span: DramSpan = wb.alloc(2)
+    fail = fail + expect_eq(bool_to_int(span.ok), 1, "DRAM span allocated")
+    fail = fail + expect_eq(wb.stage_page(span, 1, witness_page(5)), SC_SUCCESS, "DRAM stages a page")
+    fail = fail + expect_page(wb.page(span, 1), 5, "DRAM write buffer round trip")
+    wb.release(span)
+    fail = fail + expect_eq(page_word(wb.page(span, 1), 511), 0, "released DRAM slot clears the whole page")
+
+    # ── 5. The FTL/FIL/NAND stack must store a whole page ─────────────────────
+    var ftl: Ftl = ftl_new()
+    fail = fail + expect_eq(ftl.write_page(70, witness_page(9)), SC_SUCCESS, "FTL page write")
+    fail = fail + expect_page(ftl.read_page(70), 9, "FTL/FIL/NAND round trip")
+    # An unwritten LBA still reads a well-formed zero page (not a truncated one).
+    fail = fail + expect_eq(page_word_count(ftl.read_page(71)), PAGE_WORDS, "unmapped LBA reads a full zero page")
+
+    # ── 6. GC relocation must carry the whole page, not just word 0 ───────────
+    # Relocation reprograms a live page at a new ppn; a word-0-only copy would
+    # silently zero words 1.. of every relocated page.
+    var g: Ftl = ftl_new()
+    fail = fail + expect_eq(g.write_page(80, witness_page(11)), SC_SUCCESS, "GC fixture write")
+    g.gc_once()
+    fail = fail + expect_page(g.read_page(80), 11, "page survives a GC cycle")
+
+    print ""
+    if fail == 0:
+        print "PAYLOAD WIDENING WITNESS OK"
+    else:
+        print "PAYLOAD WIDENING WITNESS FAIL ({fail})"
+    return ()

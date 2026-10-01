@@ -1,7 +1,16 @@
 # Green Thread Spec Runner Mismatch
 
+## Closed 2026-09-13 — already closed; runner/spec contract mismatch resolved in-entry
+
+- **inferred** Entry status: `closed`. The mismatch was between spec expectations and the
+  test runner, both since reworked; no later entry reopens it.
+- **measured** The current pure-Simple runner still emits the structured
+  `SPEC FILE VERDICT: ... declared>=1 executed=N passed=N failed=N` line this entry's fix
+  standardised (observed running browser_renderer_spec on this host).
+
+
 Date: 2026-06-11
-Status: closed
+Status: closed 2026-09-13 (was: Status: closed)
 Owner: multicore-green lane
 
 ## Summary

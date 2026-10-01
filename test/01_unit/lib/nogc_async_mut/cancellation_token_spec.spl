@@ -1,0 +1,56 @@
+# The REAL CancellationToken must observe its own cancel().
+#
+# Bug: doc/08_tracking/bug/interpreter_module_array_stale_read_via_free_fn_helper_2026-07-29.md
+#
+# That record found `token.cancel()` followed by `token.is_cancelled()` returning
+# false on both engines, and recorded that the real type had ZERO behavioural
+# coverage: test/01_unit/lib/nogc_async_mut/async_spec.spl defines its own local
+# stub `class CancellationToken` with a different field layout and no registry,
+# and async_host_spec.spl only string-matches source text. So the only real
+# cancellation implementation in the tree was guarded by nothing.
+#
+# This file imports the real type. It exists because the record's defect was an
+# interpreter-level stale read of a module-level array through a free-function
+# helper, and the workaround that fixed it (do the registry read inline in the
+# method that owns `self`) is a shape constraint on cancellation.spl that nothing
+# else pins: an innocent-looking refactor that reintroduces the free-function hop
+# would silently make cancel() stop working again.
+
+use std.spec
+use std.async.cancellation.{token_new}
+
+describe "the real CancellationToken observes its own cancel":
+    it "starts uncancelled":
+        var t = token_new()
+        expect(t.is_cancelled()).to_equal(false)
+
+    it "observes its own cancel":
+        var t = token_new()
+        t.cancel()
+        expect(t.is_cancelled()).to_equal(true)
+
+    it "leaves an independent token alone":
+        var a = token_new()
+        var b = token_new()
+        a.cancel()
+        expect(b.is_cancelled()).to_equal(false)
+
+describe "cancellation propagates parent to child":
+    it "cancels a child through its parent":
+        var parent = token_new()
+        var kid = parent.child()
+        parent.cancel()
+        expect(kid.is_cancelled()).to_equal(true)
+
+    it "does not cancel the parent through its child":
+        var parent = token_new()
+        var kid = parent.child()
+        kid.cancel()
+        expect(parent.is_cancelled()).to_equal(false)
+
+    it "leaves a sibling child uncancelled when one child is cancelled":
+        var parent = token_new()
+        var one = parent.child()
+        var two = parent.child()
+        one.cancel()
+        expect(two.is_cancelled()).to_equal(false)

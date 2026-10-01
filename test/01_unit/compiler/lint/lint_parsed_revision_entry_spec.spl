@@ -1,9 +1,28 @@
 """
 ## Purpose and audience
-Purpose: Prove lint can consume an existing parsed revision without reparsing.
+Prove lint can consume an existing parsed revision without reparsing.
 Audience: compiler driver, LSP, and lint maintainers.
+## Operator workflow
+Run this file from the repo root with the seed runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/lint/lint_parsed_revision_entry_spec.spl`.
+Scenarios drive `lint_cli_source_with_parsed_revision` directly and assert
+on the emitted lint codes.
+## Compatibility and limitations
+Covers the parsed-revision entrypoint only: digest staleness, parser-state
+preservation, and the source contract that the bridge never reparses.
+Full lint rule behaviour lives in the lint rule specs. Scenarios one and
+two are interpreter-lane only for the current seed.
+## Verification guidance and troubleshooting
+A red scenario here means the parsed-revision bridge started reparsing,
+stopped failing closed on a stale digest, or leaked parser ownership into
+the bridge body. Re-run the file; for the known RED below, see the NOTE in
+the scenario body before editing oracles.
 """
-# @req: REQ-005, REQ-006, REQ-017
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: lint-parsed-revision
 
 use std.spec.*
 use compiler.tools.lint.main.{
@@ -14,7 +33,13 @@ use compiler.core.parser.{parser_has_errors, parser_set_had_error}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
 describe "lint parsed revision entrypoint":
+    # NOTE: this scenario is legitimately RED on the current seed —
+    # `semantic: class `CodeLine` has no field named `code`` fires on
+    # `result.lint.code`, a real product-side field gap. Keep it RED until
+    # the lint result exposes its code; do not soften the assertions.
     it "preserves parser state while consuming matching declarations":
+        # @req REQ-005
+        # @capture(statistics): lint code counts for the matching-digest run
         step("Reuse a parsed compiler revision")
         val path = "/tmp/already_parsed.spl"
         val source = "fn clean():\n    1\n"
@@ -25,27 +50,35 @@ describe "lint parsed revision entrypoint":
         expect(parser_has_errors()).to_equal(true)
         var revision_errors = 0
         for result in results:
-            if result.lint.code == "LINTREV001": revision_errors = revision_errors + 1
-        expect(revision_errors).to_equal(0)
+            if result.lint.code == "LINTREV001":
+                revision_errors = revision_errors + 1
+        expect(revision_errors).to_equal(0)  # oracle: a matching digest consumes the revision without emitting LINTREV001
         parser_set_had_error(false)
 
     it "fails closed when path or source digest is stale":
+        # @req REQ-006
+        # @capture(statistics): lint code counts for the stale-digest run
         step("Reject a stale parsed lint revision")
         val stale = LintParsedRevision("/tmp/old.spl", "not-a-digest", -1, [])
         val results = lint_cli_source_with_parsed_revision(
             Linter.new(), "/tmp/new.spl", "fn changed():\n    1\n", stale)
         var revision_errors = 0
         for result in results:
-            if result.lint.code == "LINTREV001": revision_errors = revision_errors + 1
-        expect(revision_errors).to_equal(1)
+            if result.lint.code == "LINTREV001":
+                revision_errors = revision_errors + 1
+        expect(revision_errors).to_equal(1)  # oracle: exactly one LINTREV001 rejects the stale digest
+        expect(results.len()).to_be_greater_than(0)
 
     it "keeps parser calls outside the parsed-revision function body":
+        # @req REQ-017
+        # @capture(statistics): source contract scan of the lint bridge body
         step("Reject parser ownership in the parsed lint bridge")
-        val source = file_read(
+        val bridge_source = file_read(
             "src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl")
-        val start = source.find("fn lint_cli_source_with_parsed_revision")
+        val start = bridge_source.find("fn lint_cli_source_with_parsed_revision")
         expect(start).to_be_greater_than(-1)
-        val tail = source[start:]
+        val tail = bridge_source[start:]
         val end = tail.find("fn lint_cli_append_parsed_results")
         expect(end).to_be_greater_than(0)
-        expect(tail[0:end].contains("parse_module_silent")).to_equal(false)
+        val bridge_body = tail[0:end]
+        expect(bridge_body.contains("parse_module_silent")).to_equal(false)  # oracle: the bridge must consume the parsed revision, never reparse

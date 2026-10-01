@@ -1,4 +1,17 @@
 # Bug: regex engines expose no importable `.spl` candidate-verify API
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — LEFT OPEN as a feature request, not closed as a bug
+- **measured** — `grep -rn "fn matches_at\|fn is_match\|fn compile" src/lib/common/regex_engine/*.spl`
+  returns nothing: the `compile` / `matches_at` / `is_match` surface this entry asks for
+  still does not exist.
+- **inferred** — the entry's own 2026-08-09 triage line already reads
+  `FEATURE-REQUEST-NOT-BUG, not a defect`. Three months on, a tracker entry describing a
+  surface that was never built is a feature request filed in the wrong place. It is NOT a
+  defect and cannot stop reproducing; left OPEN so the capability request stays tracked.
 
 - id: regex_engine_no_spl_candidate_verify_api_2026-06-15
 - date: 2026-06-15
@@ -62,3 +75,4 @@ step. Track as a feature request alongside this bug.
 ## Related
 - AC-4 of `.spipe/search-custom-types/state.md`
 - `doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md`
+

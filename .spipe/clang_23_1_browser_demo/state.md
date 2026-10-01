@@ -1,0 +1,60 @@
+# Feature: Clang 23.1 Browser Demo Migration
+
+## Raw Request
+$sp_dev in separate worktree migrate current clang-18 dependency to clang 23.1. do research more what to check and migrate. deep plan and migrate and check adhoc bootstrap too. if there are critical problem which 23.1 not support problem. 1. migrate clang 18 dependency to 23.1 and 2. complete the browser demo.
+
+## Task Type
+feature
+
+## Refined Goal
+Migrate every owned Clang/LLVM 18 or version-pinned browser-demo/bootstrap dependency to Clang/LLVM 23.1, preserve supported cross/freestanding behavior, document any genuine 23.1 incompatibility, and produce passing browser-demo plus SimpleOS QEMU rendering evidence from the isolated worktree.
+
+## Acceptance Criteria
+- AC-1: A repository-wide owned-code inventory identifies every Clang/LLVM executable name, package/version pin, search path, environment variable, diagnostic, bootstrap contract, browser-demo contract, and documentation reference relevant to the 18-to-23.1 migration; vendored sources are excluded.
+- AC-2: Research records authoritative Clang/LLVM 23.1 availability, tool naming, installation/distribution constraints, target support, linker/runtime compatibility, removed/deprecated behavior, and macOS/Linux/Windows implications, with explicit critical-risk conclusions.
+- AC-3: Final feature and NFR requirements plus architecture, detail design, migration plan, system-test plan, agent-task plan, executable SSpec, and mirrored operator manual exist under the canonical repository paths and trace all acceptance criteria.
+- AC-4: Production scripts and configuration prefer and validate Clang/LLVM 23.1 consistently; no owned production path silently selects Clang/LLVM 18 or hardcodes the obsolete browser-demo `clang-20` dependency.
+- AC-5: Tool discovery fails closed with actionable diagnostics when a compatible 23.1 compiler/toolchain is unavailable and rejects an incompatible or falsely labeled compiler.
+- AC-6: Focused tests cover discovery precedence, exact version admission, missing-tool behavior, cross/freestanding target invocation, and browser-demo compilation without placeholder passes or fabricated runtime stubs.
+- AC-7: The ad-hoc bootstrap path completes with the migrated toolchain or produces retained evidence of a concrete upstream 23.1 incompatibility after at most three fix cycles; the exact candidate binary, commands, versions, hashes, logs, and unsupported behavior are recorded.
+- AC-8: The browser-demo client builds successfully with Clang/LLVM 23.1, is staged into the SimpleOS image, and the canonical SimpleOS WM QEMU wrapper reaches boot and retains its required framebuffer, font, keyboard, pointer, and browser-content evidence bundle.
+- AC-9: Required compiler/core/lib/MCP checks, direct-runtime and numbered-artifact guards, rendering source-coupling guard, SPipe quality/docgen checks, and relevant bootstrap/browser-demo/QEMU gates pass once against final unchanged inputs.
+- AC-10: Operator guides, bootstrap setup documentation, generated/manual SPipe documentation, changelog, and all changed workflow references consistently describe the 23.1 toolchain and recovery/install procedure; no stale 18/20 instructions remain in owned scope.
+- AC-11: Final verification audits every AC against retained evidence and reports `STATUS: PASS`; any genuinely unsupported Clang/LLVM 23.1 behavior remains a concrete open blocker rather than a compatibility fallback or downgraded warning.
+
+## Scope Exclusions
+- Vendored LLVM/Clang source and third-party package internals are inventory-only unless an owned integration patch is required.
+- Unrelated GPU-offload, WM event-routing, ARM64 kernel, and compiler work in the primary dirty worktree is not merged into this branch.
+- Release tagging and pushing are excluded unless separately requested after verification PASS.
+
+## Cooperative Review
+- Local source inventory sidecar: bounded read-only research of owned Clang/LLVM references and call chains.
+- Domain sidecar: authoritative Clang/LLVM 23.1 compatibility, packaging, target, and removed-feature research.
+- Verification sidecar: bounded read-only bootstrap/browser-demo/QEMU gate and artifact analysis.
+- Merge owner and final reviewer: root Codex agent.
+- Shared interfaces: `resolve_clang_23_1_toolchain`, `validate_clang_23_1_toolchain`, and existing browser-demo/QEMU wrapper interfaces unless research proves established repository names should be retained.
+- Manual flow steps: `Inspect the installed Clang 23.1 toolchain`; `Build the browser demo with the admitted compiler`; `Run the ad-hoc bootstrap smoke`; `Boot SimpleOS and exercise browser content`; `Validate retained rendering and input evidence`.
+- Setup/checker helpers: reuse existing setup and evidence wrappers where possible; any new placeholder must use `fail(...)` until implemented.
+- Generated-manual review owner: root Codex agent after sidecar findings are merged.
+
+## Phase
+verification-blocked
+
+## Log
+- dev: Created state file with 11 acceptance criteria (type: feature).
+- research: Merged local, domain, and gate sidecars; user-selected final requirements written for the 23.1 family with rc2 truthfulness.
+- design: Architecture, detail design, system plan, agent tasks, executable SSpec, and mirrored operator manual created.
+- implementation: Pure-Simple backend, SimpleOS guest filesystem/tool launch, explicit provider builder, and browser build admission migrated in parallel.
+- blocker: Upstream inkwell 0.9/llvm-sys 221 stop at LLVM 22; Rust in-process LLVM 23.1 integration cannot be completed without an upstream release or maintained fork.
+- verify: Signed rc2 provider source accepted after importing and fingerprint-checking the release key; bounded provider build active.
+- verify: Provider, coherent target smoke, browser ELF build, staging, disk image, and focused contracts passed.
+- blocker: Fullscreen QEMU exhausted three cycles. `native_probe/simple` fabricated `rt_array_sort`; the older external Phase artifact did not reach current scanout/desktop readiness; no fourth cycle was run.
+- verify: A later bounded current-source run passed the sort and concrete software-dispatch blockers and rendered Browser, Hello, and Clang surfaces, then failed closed because Aetheric shorthand retained 73 raw layer bytes and produced no material receipt.
+- implementation: Reused the existing architecture/detail artifacts and restored the typed `parse_background_layers` path lost by tree-restore commit `7f5a55fa46e`; one reproducible linear layer plus base color now retains full GAP-2 stops/angle while unsupported layers remain a raw rejection witness.
+- implementation: QEMU evidence now correlates software with solid/CPU receipts and host GPU with solid/CPU/Metal receipts; every path still requires rendered status, a strong digest, exact theme/source, and no rejection marker.
+- verify: Migration contract passed 5/5 and both evidence wrappers passed shell syntax. The focused browser renderer and gradient specs reached the pre-existing `browser_renderer_protocol.spl` multiline-import parser failure before assertions; the QEMU wrapper contract also hit existing self-host interpolation semantics (`font_guest_path`, `handled_text`) after 5 passes. The three-cycle QEMU cap remains exhausted, so AC-8/9/11 are not marked complete in this session.
+- implementation: A current-source focused x86_64 guest proved the custom-property loss in two owners: chained text concatenation erased its intermediate type into numeric `rt_any_add`, and dynamic `.index_of(":")` lowered through the unresolved freestanding path. The collector now keeps every concatenation statically `text`, and state parsing uses the existing `find_from` byte-search primitive.
+- implementation: Backdrop admission no longer depends on freestanding `starts_with`/`split`/`to_i64`; it parses the exact ASCII grammar with bounded `byte_at` decimal accumulation and retains the 4px realized-blur and 300% saturation limits.
+- verify: The retained focused Clang 23.1 guest passed exact collector/state/resolution/background/gradient/backdrop/memo receipts, including `backdrop-admission value=true:4:1700`, and exited through the expected debug port without a fault.
+- verify: Canonical QEMU cycle 1 isolated backdrop admission. Cycle 2 cleared admission but exposed a page fault in a provisional global `rt_any_add` widening; that unsafe change was reverted and replaced with the typed producer fix. Cycle 3 rebuilt 6 modules with 725 cached and reached CPU-entry/font rendering without rejection or fault.
+- blocker: Cycle 3 exhausted the 180-second readiness window while allocating repeated 1,048,576-element draw/font arrays and emitted neither desktop/browser-ready nor framebuffer/input/content evidence. The mandatory three-cycle cap is reached; AC-8, AC-9, and AC-11 remain incomplete and no fourth run was attempted.

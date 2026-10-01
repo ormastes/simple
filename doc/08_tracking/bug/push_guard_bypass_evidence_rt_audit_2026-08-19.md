@@ -1,4 +1,8 @@
 # Hook bypass evidence — 2026-08-19 (lane rt-audit, 1 docs commit)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `git push` was run with `--no-verify`. This records WHY, with evidence, per
 `.claude/rules/vcs.md`'s requirement that a bypass never be silent. It is the
@@ -67,3 +71,4 @@ The real fix is redeploying `bin/simple` from a tree that carries the
 this guard will keep blocking every lane on this host, and every lane will keep
 bypassing it — which is how a fail-closed guard degrades into a rubber stamp.
 Tracked here so the second occurrence is not mistaken for a one-off.
+

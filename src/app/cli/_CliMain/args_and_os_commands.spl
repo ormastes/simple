@@ -18,6 +18,9 @@ use app.io.cli_ops.{fault_set_stack_overflow_detection, fault_set_max_recursion_
 use app.io.cli_ops.{_cli_eprint}
 use app.io.cli_commands.{cli_handle_linkers, cli_run_file}
 use app.cli.cli_helpers.{print_cli_help, read_sdn_run_config}
+use app.io.env_ops.{env_set}
+use os.cli.{handle_os, os_parse_arch_arg, os_parse_log_arg, os_log_arg_error, os_parse_scenario_arg, print_os_help}
+use os.qemu_runner.{arch_from_name, build_os, build_scenario, get_target, scenario_exists, scenario_by_name_direct}
 
 # `dashboard` is a deprecated alias for the real LLM agent dashboard (`agents`).
 # Both delegate to src/app/llm_dashboard/main.spl (TUI by default, --web/--ios
@@ -386,3 +389,63 @@ fn apply_fault_detection(flags: GlobalFlags):
         fault_set_timeout(flags.timeout_secs)
     if flags.execution_limit > 0:
         fault_set_execution_limit(flags.execution_limit)
+
+# ---------------------------------------------------------------------------
+# `simple os …` handled inline by the unified CLI.
+#
+# The `os` command used to exist only as file delegation to
+# src/app/os/main.spl, so `app.cli.main.handle_os_inline` — which two specs
+# import and which the top-level CLI needs to dispatch `os` without shelling
+# out — resolved nowhere.
+# Bug: doc/08_tracking/bug/app_modules_referenced_by_specs_exist_nowhere_2026-08-04.md
+# Specs: test/01_unit/app/cli/cli_os_spec.spl
+#        test/01_unit/app/cli/os_build_dispatch_spec.spl
+#
+# `os build` uses get_target (the per-platform kernel SMOKE lane), not
+# get_qemu_target (the filesystem-backed ACCEPTANCE lane): a build must produce
+# the bare kernel target, while run/test want the staged userland payloads.
+fn handle_os_build_inline(args: [text]) -> i64:
+    val log_mode = os_parse_log_arg(args)
+    val log_error = os_log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val scenario_name = os_parse_scenario_arg(args)
+    if scenario_name == "__missing_scenario__":
+        print "Error: --scenario requires a value"
+        return 1
+    # SIMPLE_OS_LOG_MODE is exported only once the request is known-valid and
+    # a build is actually about to run, and always restored afterwards: a
+    # rejected command must leave the caller's environment untouched.
+    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    if scenario_name != "":
+        if not scenario_exists(scenario_name):
+            print "Error: unknown scenario '{scenario_name}'"
+            return 1
+        env_set("SIMPLE_OS_LOG_MODE", log_mode)
+        val scenario_ok = build_scenario(scenario_by_name_direct(scenario_name))
+        env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+        return if scenario_ok: 0 else: 1
+    val arch_name = os_parse_arch_arg(args)
+    if arch_name == "__missing_arch__":
+        print "Error: --arch/--target requires a value"
+        return 1
+    val arch = arch_from_name(arch_name)
+    if not arch.?:
+        print "Error: unknown architecture '{arch_name}'"
+        print "Run 'simple os targets' for supported architectures."
+        return 1
+    val arch_value = arch.unwrap()
+    env_set("SIMPLE_OS_LOG_MODE", log_mode)
+    val target = get_target(arch_value)
+    val ok = build_os(target)
+    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+    if ok: 0 else: 1
+
+fn handle_os_inline(args: [text]) -> i64:
+    if args.len() == 0:
+        print_os_help()
+        return 0
+    if args[0] == "build":
+        return handle_os_build_inline(if args.len() > 1: args[1:] else: [])
+    handle_os(args)

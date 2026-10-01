@@ -1,0 +1,79 @@
+# codex-system-test
+# @req AC-5
+"""Draw IR v2 executor command-kind admission.
+
+The production v2 executor renders RECT, TEXT, and resolved IMAGE commands.
+EDGE, PATH, GROUP, and PORT remain schema-admitted but must return an explicit
+typed fallback receipt until their shared execution behavior lands.
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_edge,
+    draw_ir_batch,
+    draw_ir_edge_command,
+    draw_ir_embedding_config,
+    draw_ir_group_command,
+    draw_ir_image_command,
+    draw_ir_path_command,
+    draw_ir_point,
+    draw_ir_port_command,
+    draw_ir_rect,
+    draw_ir_text
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult,
+    engine2d_draw_ir_adv_batch_with_images,
+    engine2d_resolved_draw_ir_image
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn expect_draw_ir_kind_result(result: Engine2dDrawIrAdvResult):
+    expect(result.rendered_command_count).to_equal(3)
+    expect(result.skipped_command_count).to_equal(4)
+    expect(result.fallback_required).to_be(true)
+    expect(result.fallback_reason).to_contain("edge")
+    expect(result.fallback_reason).to_contain("path")
+    expect(result.fallback_reason).to_contain("group")
+    expect(result.fallback_reason).to_contain("port")
+    # These pixels prove that RECT, TEXT, and resolved IMAGE passed through
+    # Engine2D rather than merely receiving a schema/counting receipt.
+    expect(result.pixels.len()).to_equal(24 * 24)
+    expect(result.pixels[0]).to_equal(0xffff0000u32)
+    expect(result.pixels[4 + 2 * 24]).to_equal(0xff00ff00u32)
+    expect(result.pixels[8 + 8 * 24]).to_equal(0xff0000ffu32)
+    # Typed-rejected geometry cannot alter the CPU target.
+    expect(result.pixels[16 + 1 * 24]).to_equal(0xff000000u32)
+    expect(result.pixels[12 + 12 * 24]).to_equal(0xff000000u32)
+
+describe "Draw IR v2 executor command kinds":
+    it "executes or explicitly rejects every schema-admitted command kind":
+        step("Execute or reject every Draw IR command kind")
+        var engine = Engine2D.create_with_backend(24, 24, "cpu")
+        engine.clear(0xff000000u32)
+        val points = [draw_ir_point(15, 1), draw_ir_point(20, 1)]
+        val edge = draw_ir_edge_command(
+            draw_edge("edge", "source", "target", "straight", points, []))
+        val batch = draw_ir_batch(
+            "schema-command-kinds", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "root", 0, 0, 24, 24, 0, 1000, false),
+            [
+                draw_ir_rect("rect", 0, 0, 2, 2, 0xffff0000u32),
+                draw_ir_text("text", 2, 2, "A", 0xff00ff00u32),
+                edge,
+                draw_ir_path_command("path", points, []),
+                draw_ir_image_command(
+                    "image", 8, 8, 1, 1, "image://kind", []),
+                draw_ir_group_command("group", "root"),
+                draw_ir_port_command("port", "group", 12, 12)
+            ])
+        val image = engine2d_resolved_draw_ir_image(
+            "image://kind", 1, 1, [0xff0000ffu32])
+
+        val result = engine2d_draw_ir_adv_batch_with_images(
+            engine, batch, false, [image])
+
+        expect_draw_ir_kind_result(result)
+        engine.shutdown()

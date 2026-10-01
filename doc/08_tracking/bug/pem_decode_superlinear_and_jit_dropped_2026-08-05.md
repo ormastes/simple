@@ -1,4 +1,8 @@
 # PEM/base64 decode is superlinear, and the whole module never JIT-compiles
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** PARTIALLY FIXED — accumulator fixed; the "dominant cause" was
 MISATTRIBUTED (see 2026-08-05 update below). PEM decode is still ~11.5 s for
@@ -239,3 +243,4 @@ grep -a 'jit-fallback' <log>   # confirms the module ran interpreted
 Score wall clock from outside the process. `SIMPLE_TIMEOUT_SECONDS=0` is required
 or a ~60 s CPU guard kills the 16,000-char run at exit 143 and it reads as a
 failure.
+

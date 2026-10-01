@@ -1,0 +1,146 @@
+# Exact deduplication for allocatable ELF SHF_MERGE sections. String sections
+# are split at NUL terminators (sh_entsize == 1); other sections are split into
+# fixed sh_entsize records. The plan owns aligned pooled bytes and maps every
+# original entity byte to its pooled offset, so relocation addends remain exact.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, elf_section_addralign, elf_section_entsize, elf_section_name
+}
+
+val SHF_ALLOC_MERGE: i64 = 0x2
+val SHF_MERGE_MERGE: i64 = 0x10
+val SHF_STRINGS_MERGE: i64 = 0x20
+
+struct ElfMergeEntry:
+    obj_idx: i64
+    section_idx: i64
+    input_offset: i64
+    size: i64
+    output_offset: i64
+
+struct ElfMergePlan:
+    data: [i64]
+    entries: [ElfMergeEntry]
+    has_sections: bool
+    align: i64
+    entsize: i64
+    strings: bool
+    metadata_compatible: bool
+
+fn _same_bytes(pool: [i64], at: i64, value: [i64]) -> bool:
+    if at < 0 or at + value.len() > pool.len():
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        if pool[at + i] != value[i]:
+            return false
+        i = i + 1
+    true
+
+fn _fragment_hash(value: [i64], entsize: i64, strings: bool) -> i64:
+    var hash: i64 = (5381 * 33 + entsize) & 0xffffffff
+    if strings:
+        hash = (hash * 33 + 1) & 0xffffffff
+    for byte in value:
+        hash = (hash * 33 + byte) & 0xffffffff
+    hash
+
+fn _find_fragment(pool: [i64], starts: [i64], value: [i64], alignment: i64) -> i64:
+    for at in starts:
+        if at % alignment == 0 and _same_bytes(pool, at, value):
+            return at
+    -1
+
+fn _align_up(value: i64, alignment: i64) -> i64:
+    if alignment <= 1:
+        return value
+    ((value + alignment - 1) / alignment) * alignment
+
+fn elf_merge_section(obj: ElfObject, section_idx: i64) -> bool:
+    val flags = obj.sections[section_idx].sh_flags
+    flags & SHF_ALLOC_MERGE != 0 and flags & SHF_MERGE_MERGE != 0
+
+fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePlan, text>:
+    """Pool identical merge entities in deterministic object/section order."""
+    var data: [i64] = []
+    var buckets: {i64: [i64]} = {}
+    var entries: [ElfMergeEntry] = []
+    var has_sections = false
+    var plan_align: i64 = 1
+    var plan_entsize: i64 = 0
+    var plan_strings = false
+    var metadata_compatible = true
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            if live[oi][si] and elf_merge_section(obj, si):
+                has_sections = true
+                val entsize = elf_section_entsize(obj, si)
+                val strings = obj.sections[si].sh_flags & SHF_STRINGS_MERGE != 0
+                if entsize <= 0:
+                    return Err("object {oi}: merge section {elf_section_name(obj, si)} has zero sh_entsize")
+                if strings and entsize != 1:
+                    return Err("object {oi}: merge-string section {elf_section_name(obj, si)} has unsupported sh_entsize {entsize}")
+                val sec = obj.sections[si]
+                if not strings and sec.sh_size % entsize != 0:
+                    return Err("object {oi}: merge section {elf_section_name(obj, si)} size is not a multiple of sh_entsize {entsize}")
+                var alignment = elf_section_addralign(obj, si)
+                if alignment < 1:
+                    alignment = 1
+                if alignment > plan_align:
+                    plan_align = alignment
+                # Like lld, every piece (string or fixed record) keeps the
+                # section's sh_addralign; .rodata.str1.8 relies on it.
+                val entity_alignment = alignment
+                if plan_entsize == 0:
+                    plan_entsize = entsize
+                    plan_strings = strings
+                else if plan_entsize != entsize or plan_strings != strings:
+                    metadata_compatible = false
+                var begin: i64 = 0
+                var cursor: i64 = 0
+                while cursor < sec.sh_size:
+                    val at_end = (strings and obj.raw[sec.sh_addr + cursor] == 0) or
+                        (not strings and cursor - begin + 1 == entsize)
+                    if at_end:
+                        var value: [i64] = []
+                        var p = begin
+                        while p <= cursor:
+                            value = value.push(obj.raw[sec.sh_addr + p] as i64)
+                            p = p + 1
+                        val hash = _fragment_hash(value, entsize, strings)
+                        var candidates: [i64] = []
+                        if buckets.has(hash):
+                            candidates = buckets[hash]
+                        var output = _find_fragment(data, candidates, value, entity_alignment)
+                        if output < 0:
+                            output = _align_up(data.len(), entity_alignment)
+                            while data.len() < output:
+                                data = data.push(0)
+                            buckets[hash] = candidates.push(output)
+                            for byte in value:
+                                data = data.push(byte)
+                        entries = entries.push(ElfMergeEntry(obj_idx: oi, section_idx: si,
+                            input_offset: begin, size: cursor - begin + 1, output_offset: output))
+                        begin = cursor + 1
+                    cursor = cursor + 1
+                if strings and begin != sec.sh_size:
+                    return Err("object {oi}: merge-string section {elf_section_name(obj, si)} is not NUL terminated")
+            si = si + 1
+        oi = oi + 1
+    Ok(ElfMergePlan(data: data, entries: entries, has_sections: has_sections,
+        align: plan_align, entsize: plan_entsize, strings: plan_strings,
+        metadata_compatible: metadata_compatible))
+
+fn elf_merge_offset(plan: ElfMergePlan, obj_idx: i64, section_idx: i64,
+        input_offset: i64) -> Result<i64, text>:
+    for entry in plan.entries:
+        if entry.obj_idx == obj_idx and entry.section_idx == section_idx and
+                input_offset >= entry.input_offset and input_offset < entry.input_offset + entry.size:
+            return Ok(entry.output_offset + input_offset - entry.input_offset)
+    Err("merge offset {input_offset} is outside an entity in object {obj_idx} section {section_idx}")
+
+export ElfMergeEntry, ElfMergePlan
+export elf_merge_section, elf_merge_sections, elf_merge_offset

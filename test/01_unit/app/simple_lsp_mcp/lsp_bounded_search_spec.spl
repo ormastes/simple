@@ -1,0 +1,206 @@
+# Bounded nested search for the LSP cross-file query paths (L9 gate G2).
+#
+# The cross-file query fallbacks in `app.cli.query_engine` shell out to
+# `grep -rn <pattern> src/ --include=*.spl` through `query_process_run`, which
+# has no timeout, no output bound and no depth bound: a pathological or very
+# large tree can stall the MCP server for an unbounded time.  These examples
+# pin the replacement walk: it is pure Simple, it never exceeds its declared
+# file / byte / depth / match budget, and when it stops early it says so
+# instead of returning a silently short answer.
+#
+# @req LSP-PERSIST-V4-SESSION
+
+use std.spec.*
+use std.nogc_sync_mut.lsp.lsp_bounded_search.*
+
+val FIXTURE_ROOT: text = "test/fixtures/lsp_bounded_search"
+
+describe "bounded nested search for LSP cross-file queries":
+    it "finds every word-boundary match inside a generous budget":
+        step("Search the fixture tree for a symbol with a budget larger than the tree")
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: 64, max_bytes: 1048576, max_depth: 8, max_matches: 64, max_wall_ms: 0)
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target", budget)
+        expect(found.truncated).to_be(false)
+        expect(found.truncation_reason).to_equal("")
+        # 6 flat callers + the definition file + the depth-3 caller.
+        expect(found.lines.len()).to_equal(8)
+        expect(found.files_scanned).to_equal(10)
+        step("Every emitted line uses the grep-compatible path:line:content shape")
+        for line in found.lines:
+            expect(line.starts_with(FIXTURE_ROOT + "/")).to_be(true)
+            expect(line.contains("bounded_needle_target")).to_be(true)
+
+    it "refuses to scan a file whose suffix was not requested":
+        step("The .txt fixture must never be read by a *.spl search")
+        val budget = lsp_bounded_search_budget_default_v1()
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "match", budget)
+        for line in found.lines:
+            expect(line.contains("notes.txt")).to_be(false)
+
+    it "truncates honestly when the tree is larger than the file budget":
+        step("Give the walk a file budget smaller than the fixture tree")
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: 3, max_bytes: 1048576, max_depth: 8, max_matches: 64, max_wall_ms: 0)
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target", budget)
+        expect(found.files_scanned).to_equal(3)
+        expect(found.truncated).to_be(true)
+        expect(found.truncation_reason).to_equal("budget:max_files")
+
+    it "truncates honestly when the tree is larger than the byte budget":
+        step("Give the walk a byte budget smaller than one pass over the tree")
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: 64, max_bytes: 40, max_depth: 8, max_matches: 64, max_wall_ms: 0)
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target", budget)
+        expect(found.truncated).to_be(true)
+        expect(found.truncation_reason).to_equal("budget:max_bytes")
+        expect(found.bytes_scanned <= 40 + 4096).to_be(true)
+
+    it "stops descending past the depth budget and says so":
+        step("Depth 0 keeps the root files and refuses every subdirectory")
+        # max_depth counts levels BELOW the root: 0 = the root directory only.
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: 64, max_bytes: 1048576, max_depth: 0, max_matches: 64, max_wall_ms: 0)
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target", budget)
+        expect(found.files_scanned).to_equal(6)
+        expect(found.truncated).to_be(true)
+        expect(found.truncation_reason).to_equal("budget:max_depth")
+        step("A coverage stop says so explicitly")
+        expect(lsp_bounded_search_truncation_note_v1(found)).to_contain("NOT searched")
+        for line in found.lines:
+            expect(line.contains("/a/")).to_be(false)
+
+    it "caps the emitted match list without losing the truncation flag":
+        step("Ask for at most two matches from a tree that has eight")
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: 64, max_bytes: 1048576, max_depth: 8, max_matches: 2, max_wall_ms: 0)
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target", budget)
+        expect(found.lines.len()).to_equal(2)
+        expect(found.truncated).to_be(true)
+        expect(found.truncation_reason).to_equal("budget:max_matches")
+        step("A match cap is reported as 'more matches exist', not as lost coverage")
+        val note = lsp_bounded_search_truncation_note_v1(found)
+        expect(note).to_contain("the whole tree was searched")
+        expect(note.contains("NOT searched")).to_be(false)
+
+    it "matches only whole words, never a substring of a longer identifier":
+        step("`needle` must not match `bounded_needle_target`")
+        val budget = lsp_bounded_search_budget_default_v1()
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "needle", budget)
+        expect(found.lines.len()).to_equal(0)
+
+    it "finds a declaration without the grep alternation pattern":
+        step("Declaration search returns the definition site only")
+        val budget = lsp_bounded_search_budget_default_v1()
+        val found = lsp_bounded_search_decl_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target", budget)
+        expect(found.lines.len()).to_equal(1)
+        expect(found.lines[0].contains("a/target.spl")).to_be(true)
+        expect(found.lines[0].contains("fn bounded_needle_target")).to_be(true)
+
+    it "restricts a declaration search to the requested keywords":
+        step("A type-definition search must not answer with a function")
+        val budget = lsp_bounded_search_budget_default_v1()
+        val types_only = lsp_bounded_search_decl_kinds_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target",
+            ["class ", "struct ", "enum ", "trait "], budget)
+        expect(types_only.lines.len()).to_equal(0)
+        val trait_hit = lsp_bounded_search_decl_kinds_v1(
+            FIXTURE_ROOT, ".spl", "BoundedNeedleTrait",
+            ["class ", "struct ", "enum ", "trait "], budget)
+        expect(trait_hit.lines.len()).to_equal(1)
+        expect(trait_hit.lines[0].contains("trait BoundedNeedleTrait")).to_be(true)
+
+    it "finds an impl block naming the symbol":
+        step("Impl search covers both `impl X` and `impl Trait for X`")
+        val budget = lsp_bounded_search_budget_default_v1()
+        val impls = lsp_bounded_search_impl_v1(
+            FIXTURE_ROOT, ".spl", "BoundedNeedleTrait", budget)
+        expect(impls.lines.len()).to_equal(1)
+        expect(impls.lines[0].contains("impl BoundedNeedleTrait for SampleThing")).to_be(true)
+        step("A line that merely mentions the symbol is not an impl")
+        val not_impl = lsp_bounded_search_impl_v1(
+            FIXTURE_ROOT, ".spl", "bounded_needle_target", budget)
+        expect(not_impl.lines.len()).to_equal(0)
+
+    it "returns an empty, non-truncated result for a missing root":
+        step("A root that does not exist is not an error and not a hang")
+        val budget = lsp_bounded_search_budget_default_v1()
+        val found = lsp_bounded_search_word_v1(
+            "test/fixtures/lsp_bounded_search_absent", ".spl", "anything", budget)
+        expect(found.lines.len()).to_equal(0)
+        expect(found.files_scanned).to_equal(0)
+        expect(found.truncated).to_be(false)
+
+    it "line-scans only the files the native prefilter admits":
+        step("`zz_other` appears in exactly one of the ten fixture .spl files")
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: 64, max_bytes: 1048576, max_depth: 8, max_matches: 64,
+            max_wall_ms: 0)
+        val found = lsp_bounded_search_word_v1(
+            FIXTURE_ROOT, ".spl", "zz_other", budget)
+        expect(found.files_scanned).to_equal(10)
+        step("Nine files were read and rejected natively, never split into lines")
+        expect(found.files_line_scanned).to_equal(1)
+        expect(found.lines.len()).to_equal(1)
+        expect(found.lines[0].contains("z/other.spl")).to_be(true)
+        expect(found.truncated).to_be(false)
+
+    it "covers this repository's whole src tree without truncating":
+        step("A default-budget search over src must be complete, not bounded-short")
+        # A cross-file answer that silently covers a fraction of the tree is a
+        # feature regression. The default budget is sized from a measured
+        # 16,569 file / 125.9 MB / 821 ms full scan, with max_wall_ms as the
+        # real bound and roughly 2x headroom on the file and byte caps.
+        # Built from the default budget but with the wall axis DISABLED. The
+        # coverage claim is about the file/byte/depth/match defaults; leaving
+        # the 5,000 ms clock live would make this example fail under host load
+        # (the same scan measured 549 ms idle and 3.05 s under a parallel spec
+        # sweep on this shared box) for reasons unrelated to coverage. The wall
+        # constant is pinned by value in the next example instead.
+        val d = lsp_bounded_search_budget_default_v1()
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: d.max_files, max_bytes: d.max_bytes,
+            max_depth: d.max_depth, max_matches: d.max_matches, max_wall_ms: 0)
+        val found = lsp_bounded_search_decl_v1(
+            "src", ".spl", "lsp_bounded_search_line_is_impl_v1", budget)
+        expect(found.truncated).to_be(false)
+        expect(found.truncation_reason).to_equal("")
+        expect(found.files_scanned > 16000).to_be(true)
+        expect(found.bytes_scanned > 120000000).to_be(true)
+        step("And the prefilter kept the line scanner off almost every file")
+        expect(found.files_line_scanned < 50).to_be(true)
+        expect(found.lines.len() >= 1).to_be(true)
+
+    it "sizes the default byte budget above the tree it must cover":
+        step("256 MiB is ~2x the 125.9 MB this repo's src .spl files occupy today")
+        expect(LSP_BOUNDED_SEARCH_MAX_BYTES_V1 >= 268435456).to_be(true)
+        expect(LSP_BOUNDED_SEARCH_MAX_FILES_V1 >= 40000).to_be(true)
+        step("And the wall axis leaves real margin over the measured scan")
+        expect(LSP_BOUNDED_SEARCH_MAX_WALL_MS_V1 >= 5000).to_be(true)
+
+    it "publishes a default budget that bounds all four axes":
+        step("No axis may be unbounded in the default budget")
+        val budget = lsp_bounded_search_budget_default_v1()
+        expect(budget.max_files > 0).to_be(true)
+        expect(budget.max_bytes > 0).to_be(true)
+        expect(budget.max_depth > 0).to_be(true)
+        expect(budget.max_matches > 0).to_be(true)
+        expect(budget.max_wall_ms > 0).to_be(true)
+
+    it "stops on the wall-clock budget before the file budget bites":
+        step("A zero-millisecond wall budget must stop the walk immediately")
+        val budget = LspBoundedSearchBudgetV1(
+            max_files: 64, max_bytes: 1048576, max_depth: 8, max_matches: 64,
+            max_wall_ms: 1)
+        val found = lsp_bounded_search_word_v1(
+            "src", ".spl", "lsp_bounded_search_line_has_word_v1", budget)
+        expect(found.truncated).to_be(true)
+        expect(found.truncation_reason).to_equal("budget:max_wall_ms")

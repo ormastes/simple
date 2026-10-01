@@ -1,0 +1,58 @@
+# Regression spec for vk2d_bench's status verdict. The bench used to print a
+# hardcoded "status=blocked reason=unconditional-submit-wait" literal
+# regardless of what the backend actually did — see
+# doc/08_tracking/bug/vk2d_bench_hardcoded_block_reason_2026-09-11.md.
+# vk2d_verdict() computes the verdict from real per-frame evidence instead.
+# Oracles below are absolute (exact status/reason/submits_per_frame), no
+# parity comparison.
+"""
+## Purpose and audience
+
+Covers `vk2d_verdict()`, the status-verdict computation for the Vulkan 2D C
+benchmark: pass on one fence completion per frame, blocked with a
+`multi-submit-per-frame:N` reason when fences outrun frames, blocked
+backend-unavailable on a non-vulkan backend, and blocked zero-frames when no
+frame ran. Intended audience: engineers maintaining the vk2d benchmark
+harness or its verdict logic, and reviewers of the generated scenario manual
+confirming the verdict is derived from real per-frame evidence rather than a
+hardcoded literal.
+"""
+
+use std.spec.{describe, it, expect, step}
+use .vk2d_bench.{vk2d_verdict}
+
+# @manual_section: vk2d_bench_verdict
+describe "vk2d_verdict":
+    it "reports pass when vulkan reports one fence completion per frame":
+        # @req REQ-VK2DBENCH-001
+        # @capture(statistics): verdict status/reason/submits_per_frame for a 1:1 vulkan fence-to-frame ratio
+        step("Compute the verdict for a vulkan run with one fence completion per frame")
+        val v = vk2d_verdict("vulkan", 300, 300)
+        expect(v.status).to_equal("pass")
+        expect(v.reason).to_equal("")
+        expect(v.submits_per_frame).to_equal(1)
+
+    it "reports blocked multi-submit-per-frame:2 when fences double frames":
+        # @req REQ-VK2DBENCH-002
+        # @capture(statistics): verdict status/reason/submits_per_frame for a 2:1 vulkan fence-to-frame ratio
+        step("Compute the verdict for a vulkan run where fence completions double the frame count")
+        val v = vk2d_verdict("vulkan", 300, 600)
+        expect(v.status).to_equal("blocked")
+        expect(v.reason).to_equal("multi-submit-per-frame:2")
+        expect(v.submits_per_frame).to_equal(2)
+
+    it "reports blocked backend-unavailable when the backend is not vulkan":
+        # @req REQ-VK2DBENCH-003
+        # @capture(statistics): verdict status/reason for a non-vulkan backend
+        step("Compute the verdict for a run on a non-vulkan backend")
+        val v = vk2d_verdict("cpu", 300, 300)
+        expect(v.status).to_equal("blocked")
+        expect(v.reason).to_equal("backend-unavailable")
+
+    it "reports blocked zero-frames when no frame ran":
+        # @req REQ-VK2DBENCH-004
+        # @capture(statistics): verdict status/reason when the frame count is zero
+        step("Compute the verdict for a vulkan run that produced zero frames")
+        val v = vk2d_verdict("vulkan", 0, 0)
+        expect(v.status).to_equal("blocked")
+        expect(v.reason).to_equal("zero-frames")

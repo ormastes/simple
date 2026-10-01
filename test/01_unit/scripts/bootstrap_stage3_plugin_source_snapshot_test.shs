@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-plugin-snapshot.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fixture=$tmp/source
+for leaf in src/compiler src/app src/lib src/plugins src/compositions examples/10_tooling; do
+    mkdir -p "$fixture/$leaf"
+done
+printf 'fn main(): 1\n' >"$fixture/src/compiler/main.spl"
+printf 'fn plugin_value(): 1\n' >"$fixture/src/plugins/marker.spl"
+BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_source_snapshot "$tmp/before" "$fixture"
+plugin_hex=$(printf src/plugins/marker.spl | od -An -tx1 | tr -d ' \n')
+grep -Eq "^file-hex:[0-9]+:$plugin_hex:" "$tmp/before"
+printf 'fn plugin_value(): 2\n' >"$fixture/src/plugins/marker.spl"
+bootstrap_stage3_source_snapshot "$tmp/mutated" "$fixture"
+! cmp -s "$tmp/before" "$tmp/mutated"
+printf 'fn plugin_added(): 3\n' >"$fixture/src/plugins/added.spl"
+bootstrap_stage3_source_snapshot "$tmp/added" "$fixture"
+! cmp -s "$tmp/mutated" "$tmp/added"
+rm "$fixture/src/plugins/marker.spl" "$fixture/src/plugins/added.spl"
+bootstrap_stage3_source_snapshot "$tmp/deleted" "$fixture"
+! cmp -s "$tmp/added" "$tmp/deleted"
+rmdir "$fixture/src/plugins"
+if bootstrap_stage3_source_snapshot "$tmp/missing" "$fixture" 2>"$tmp/error"; then
+    echo 'FAIL: missing plugin source authority admitted' >&2
+    exit 1
+fi
+grep -q 'missing authority root' "$tmp/error"
+echo 'PASS: plugin snapshot content, modification, addition, deletion, missing-root refusal'

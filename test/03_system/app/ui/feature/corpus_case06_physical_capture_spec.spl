@@ -1,0 +1,60 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, vulkan, corpus, fail_closed
+"""Case 06 rejects a constructed native frame after Web clip admission."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.renderdoc.corpus_case06_oracle.{
+    CORPUS_CASE06_FIXTURE_ID, CORPUS_CASE06_SOURCE_PATH,
+    CORPUS_CASE06_SOURCE_SHA256, CORPUS_CASE06_REFERENCE_PATH,
+    CORPUS_CASE06_REFERENCE_SHA256, CORPUS_CASE06_WIDTH,
+    CORPUS_CASE06_HEIGHT}
+use common.renderdoc.physical_vulkan_2d_qualification.{PreparedRenderScene}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_corpus_case06_gpu_scene_from_html}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{UpstreamSkiaGaneshFrame}
+use std.skia.backend.upstream_ganesh_vulkan.corpus_case06_capture_artifact.{
+    upstream_skia_corpus_case06_artifact}
+
+fn _prepared() -> PreparedRenderScene:
+    PreparedRenderScene(fixture_id: CORPUS_CASE06_FIXTURE_ID,
+        source_path: CORPUS_CASE06_SOURCE_PATH,
+        source_sha256: CORPUS_CASE06_SOURCE_SHA256,
+        scene_scope: "corpus-case06-rectangular-clip-only",
+        render_degraded: false, degrade_reason: "")
+
+fn _constructed_frame() -> UpstreamSkiaGaneshFrame:
+    UpstreamSkiaGaneshFrame(width: CORPUS_CASE06_WIDTH,
+        height: CORPUS_CASE06_HEIGHT, rgba_bytes: [],
+        provider_identity: 0x534b4941564b0001, device_identity: 0,
+        resource_id: 1, submission_token: 1, completion_token: 1,
+        readback_checksum: 0, backend_handle: 1)
+
+describe "corpus case 06 physical Vulkan boundary":
+    it "pins the authored source and independent clip reference":
+        # @req REQ-2D-006
+        step("Read the pinned case 06 source and reference")
+        expect(sha256_text(read_file(CORPUS_CASE06_SOURCE_PATH))).to_equal(
+            CORPUS_CASE06_SOURCE_SHA256)
+        expect(sha256_text(read_file(CORPUS_CASE06_REFERENCE_PATH))).to_equal(
+            CORPUS_CASE06_REFERENCE_SHA256)
+
+    it "rejects a constructed native frame after Web admission":
+        # @req REQ-2D-006
+        # @req NFR-2D-002
+        step("Admit the Web clip then reject a frame without device completion")
+        val html = read_file(CORPUS_CASE06_SOURCE_PATH)
+        match web_corpus_case06_gpu_scene_from_html(html):
+            case Err(reason): fail_test("Corpus Web admission failed: {reason}")
+            case Ok(web):
+                match upstream_skia_corpus_case06_artifact(
+                    _constructed_frame(), _prepared(), web):
+                    case Err(reason): expect(reason).to_equal(
+                        "upstream Skia corpus case 06 completion missing")
+                    case Ok(_): fail_test(
+                        "constructed clip frame became a physical artifact")

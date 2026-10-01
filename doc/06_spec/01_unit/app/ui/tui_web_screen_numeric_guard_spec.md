@@ -1,4 +1,4 @@
-# Tui Web Screen Numeric Guard Specification
+# @manual: primary
 
 > <details>
 
@@ -32,7 +32,36 @@ tui_web_screen_numeric_guard_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Tui Web Screen Numeric Guard Specification
+# @manual: primary
+
+Purpose: Verify tui web screen numeric guard.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/ui/tui_web_screen_numeric_guard_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Verify tui web screen numeric guard.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-UI-001
+doc/01_research/local/REQ-APP-UI-001.md
+doc/03_plan/sys_test/REQ-APP-UI-001.md
+doc/04_architecture/REQ-APP-UI-001.md
+doc/05_design/REQ-APP-UI-001.md
 
 ## Scenarios
 

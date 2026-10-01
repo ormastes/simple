@@ -1,4 +1,9 @@
 # db_atomic uses function-local SdnValue imports outside their scope
+## Closed 2026-09-16 — Status FIXED/RESOLVED 2026-08-02; module-scope imports plus regression coverage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED / RESOLVED 2026-08-02
 **Fix owner:** `codex-genuine-imports` (RESOLVED)
@@ -21,3 +26,4 @@ cannot own a type name used by the surrounding declaration signature.
 Both implementations now import `SdnValue` at module scope. Their parsing
 methods retain narrow body-local `parse` imports. The signature and match arms
 therefore share one genuine type owner without broadening parser ownership.
+

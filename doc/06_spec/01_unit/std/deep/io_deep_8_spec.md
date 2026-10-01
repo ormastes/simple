@@ -1,29 +1,4 @@
-# STDLIB Deep-Dive Test
-
-> 1. check
-
-<!-- sdn-diagram:id=io_deep_8_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=io_deep_8_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-io_deep_8_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=io_deep_8_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,7 +17,7 @@ io_deep_8_spec -> std
 | Category | Standard Library Deep Coverage |
 | Status | Implemented |
 | Source | `test/01_unit/std/deep/io_deep_8_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
@@ -51,16 +26,22 @@ io_deep_8_spec -> std
 
 #### basic 1
 
-1. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- basic 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("basic 1")
 check(true)
 ```
 
@@ -68,13 +49,13 @@ check(true)
 
 #### basic 2
 
-1. check
+- basic 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -85,16 +66,18 @@ check(1 == 1)
 
 #### basic 3
 
-1. check
+- basic 3
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("basic 3")
 check("a" == "a")
 ```
 
@@ -102,16 +85,18 @@ check("a" == "a")
 
 #### op 1
 
-1. check
+- op 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("op 1")
 
 check(1 + 1 == 2)
 ```
@@ -120,16 +105,18 @@ check(1 + 1 == 2)
 
 #### op 2
 
-1. check
+- op 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("op 2")
 check(5 - 3 == 2)
 ```
 
@@ -137,16 +124,18 @@ check(5 - 3 == 2)
 
 #### op 3
 
-1. check
+- op 3
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("op 3")
 check(2 * 3 == 6)
 ```
 
@@ -154,16 +143,18 @@ check(2 * 3 == 6)
 
 #### op 4
 
-1. check
+- op 4
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("op 4")
 check(10 / 2 == 5)
 ```
 
@@ -171,16 +162,18 @@ check(10 / 2 == 5)
 
 #### op 5
 
-1. check
+- op 5
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("op 5")
 check(10 % 3 == 1)
 ```
 
@@ -188,16 +181,18 @@ check(10 % 3 == 1)
 
 #### cmp 1
 
-1. check
+- cmp 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cmp 1")
 
 check(5 > 3)
 ```
@@ -206,16 +201,18 @@ check(5 > 3)
 
 #### cmp 2
 
-1. check
+- cmp 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cmp 2")
 check(3 < 5)
 ```
 
@@ -223,16 +220,18 @@ check(3 < 5)
 
 #### cmp 3
 
-1. check
+- cmp 3
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cmp 3")
 check(5 >= 5)
 ```
 
@@ -240,16 +239,18 @@ check(5 >= 5)
 
 #### cmp 4
 
-1. check
+- cmp 4
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cmp 4")
 check(5 <= 5)
 ```
 
@@ -257,16 +258,18 @@ check(5 <= 5)
 
 #### cmp 5
 
-1. check
+- cmp 5
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cmp 5")
 check(5 != 3)
 ```
 
@@ -274,16 +277,18 @@ check(5 != 3)
 
 #### bool 1
 
-1. check
+- bool 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("bool 1")
 
 check(true and true)
 ```
@@ -292,16 +297,18 @@ check(true and true)
 
 #### bool 2
 
-1. check
+- bool 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("bool 2")
 check(true or false)
 ```
 
@@ -309,16 +316,18 @@ check(true or false)
 
 #### bool 3
 
-1. check
+- bool 3
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("bool 3")
 check(not false)
 ```
 
@@ -326,331 +335,7 @@ check(not false)
 
 #### arr 1
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-val a = [1,2,3]
-check(a.len() == 3)
-```
-
-</details>
-
-#### arr 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val a = []
-check(a.len() == 0)
-```
-
-</details>
-
-#### arr 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val a = [1, 2, 3]
-check(a.len() == 3)
-```
-
-</details>
-
-#### arr 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val a = [1,2,3]
-check(a.len() == 3)
-```
-
-</details>
-
-#### arr 5
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var a = [1,2]
-val b = a.append(3)
-check(b.len() == 3)
-```
-
-</details>
-
-#### str 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-check("".len() == 0)
-```
-
-</details>
-
-#### str 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("a".len() == 1)
-```
-
-</details>
-
-#### str 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("test".len() == 4)
-```
-
-</details>
-
-#### str 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("hello".contains("ell"))
-```
-
-</details>
-
-#### str 5
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("test".starts_with("te"))
-```
-
-</details>
-
-#### str 6
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("test".ends_with("st"))
-```
-
-</details>
-
-#### opt 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-val o = Some(1)
-check(o.?)
-```
-
-</details>
-
-#### opt 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val o = nil
-check(not o.?)
-```
-
-</details>
-
-#### opt 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val o = Some(42)
-check(o? == 42)
-```
-
-</details>
-
-#### opt 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val o = nil
-check((o ?? 99) == 99)
-```
-
-</details>
-
-#### dict 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-val d = {"a": 1}
-check(d["a"] == 1)
-```
-
-</details>
-
-#### dict 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val d = {}
-check(true)
-```
-
-</details>
-
-#### dict 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val d = {"a": 1, "b": 2}
-check(d["a"] == 1)
-```
-
-</details>
-
-#### if 1
-
-1. check
-2. check
+- arr 1
 
 
 <details>
@@ -660,6 +345,367 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("arr 1")
+
+val a = [1,2,3]
+check(a.len() == 3)
+```
+
+</details>
+
+#### arr 2
+
+- arr 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 2")
+val a = []
+check(a.len() == 0)
+```
+
+</details>
+
+#### arr 3
+
+- arr 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 3")
+val a = [1, 2, 3]
+check(a.len() == 3)
+```
+
+</details>
+
+#### arr 4
+
+- arr 4
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 4")
+val a = [1,2,3]
+check(a.len() == 3)
+```
+
+</details>
+
+#### arr 5
+
+- arr 5
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("arr 5")
+var a = [1,2]
+val b = a.append(3)
+check(b.len() == 3)
+```
+
+</details>
+
+#### str 1
+
+- str 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 1")
+
+check("".len() == 0)
+```
+
+</details>
+
+#### str 2
+
+- str 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 2")
+check("a".len() == 1)
+```
+
+</details>
+
+#### str 3
+
+- str 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 3")
+check("test".len() == 4)
+```
+
+</details>
+
+#### str 4
+
+- str 4
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 4")
+check("hello".contains("ell"))
+```
+
+</details>
+
+#### str 5
+
+- str 5
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 5")
+check("test".starts_with("te"))
+```
+
+</details>
+
+#### str 6
+
+- str 6
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("str 6")
+check("test".ends_with("st"))
+```
+
+</details>
+
+#### opt 1
+
+- opt 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 1")
+
+val o = Some(1)
+check(o.?)
+```
+
+</details>
+
+#### opt 2
+
+- opt 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 2")
+val o = nil
+check(not o.?)
+```
+
+</details>
+
+#### opt 3
+
+- opt 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 3")
+val o = Some(42)
+check(o? == 42)
+```
+
+</details>
+
+#### opt 4
+
+- opt 4
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("opt 4")
+val o = nil
+check((o ?? 99) == 99)
+```
+
+</details>
+
+#### dict 1
+
+- dict 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("dict 1")
+
+val d = {"a": 1}
+check(d["a"] == 1)
+```
+
+</details>
+
+#### dict 2
+
+- dict 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("dict 2")
+val d = {}
+check(true)
+```
+
+</details>
+
+#### dict 3
+
+- dict 3
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("dict 3")
+val d = {"a": 1, "b": 2}
+check(d["a"] == 1)
+```
+
+</details>
+
+#### if 1
+
+- if 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("if 1")
 
 if true:
     check(true)
@@ -671,17 +717,18 @@ else:
 
 #### if 2
 
-1. check
-2. check
+- if 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("if 2")
 if false:
     check(false)
 else:
@@ -692,17 +739,18 @@ else:
 
 #### if 3
 
-1. check
-2. check
+- if 3
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("if 3")
 val x = 10
 if x > 5:
     check(true)
@@ -714,16 +762,18 @@ else:
 
 #### for 1
 
-1. check
+- for 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("for 1")
 
 var c = 0
 for i in 0..5:
@@ -735,16 +785,18 @@ check(c == 5)
 
 #### for 2
 
-1. check
+- for 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("for 2")
 
 var s = 0
 for i in 0..10:
@@ -756,17 +808,18 @@ check(s == 45)
 
 #### match 1
 
-1. Some
-2. nil: check
+- match 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("match 1")
 
 match Some(1):
     Some(x): check(x == 1)
@@ -777,17 +830,18 @@ match Some(1):
 
 #### match 2
 
-1. Some
-2. nil: check
+- match 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("match 2")
 
 match nil:
     Some(x): check(false)
@@ -798,16 +852,18 @@ match nil:
 
 #### nested 1
 
-1. check
+- nested 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("nested 1")
 
 for i in 0..3:
     for j in 0..3:
@@ -818,8 +874,76 @@ for i in 0..3:
 
 #### complex 1
 
-1. evens = evens append
-2. check
+- complex 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("complex 1")
+
+</details>
+
+#### text concat slice reverse
+
+- Verify: text concat slice reverse
+   - Expected: "abc" + "def" equals `abcdef`
+   - Expected: "abc".slice(1) equals `bc`
+   - Expected: "abc".reverse() equals `cba`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: text concat slice reverse")
+# oracle: "abcdef"/"bc"/"cba" — concat, slice from index 1, reverse
+expect("abc" + "def").to_equal("abcdef")
+expect("abc".slice(1)).to_equal("bc")
+expect("abc".reverse()).to_equal("cba")
+```
+
+</details>
+
+#### array sort
+
+- Verify: array sort
+   - Expected: [3, 1, 2].sorted() equals `[1, 2, 3]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array sort")
+# oracle: [1, 2, 3] — sorted() returns ascending order
+expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+```
+
+</details>
+
+#### array map filter
+
+- Verify: array map filter
+   - Expected: [3, 1, 2].map(fn (x: i64) -> i64: x + 1) equals `[4, 2, 3]`
+   - Expected: [3, 1, 2].filter(fn (x: i64) -> bool: x > 1) equals `[3, 2]`
 
 
 <details>
@@ -829,13 +953,95 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array map filter")
+# oracle: [4, 2, 3] — each element +1; [3, 2] — elements > 1 in order
+expect([3, 1, 2].map(fn (x: i64) -> i64: x + 1)).to_equal([4, 2, 3])
+expect([3, 1, 2].filter(fn (x: i64) -> bool: x > 1)).to_equal([3, 2])
+```
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+#### array membership and index
+
+- Verify: array membership and index
+   - Expected: [3, 1, 2] contains `2`
+   - Expected: [3, 1, 2] does not contain `9`
+   - Expected: [3, 1, 2].index_of(2) equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array membership and index")
+# oracle: true/2 — 2 is present at index 2
+expect([3, 1, 2].contains(2)).to_equal(true)
+expect([3, 1, 2].contains(9)).to_equal(false)
+expect([3, 1, 2].index_of(2)).to_equal(2)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### array append and len
+
+- Verify: array append and len
+   - Expected: arr.len() equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: arr[3] equals `4)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array append and len")
+# oracle: 4 — append grows the owner list by one and returns it
+var arr = [1, 2, 3]
+arr.append(4)
+expect(arr.len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect(arr[3]).to_equal(4)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### dict read
+
+- Verify: dict read
+   - Expected: d.len() equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d["a"] equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d.keys().len() equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: dict read")
+# oracle: 2/1/2 — two keys, value lookup, key count
+val d = {"a": 1, "b": 2}
+expect(d.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(d["a"]).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(d.keys().len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -852,3 +1058,51 @@ check(evens.len() == 2)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b748d6859bcec901ae18139f7331cf74e2cefeb7ae0d2ac22d6bd05d9e8393d4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b748d6859bcec901ae18139f7331cf74e2cefeb7ae0d2ac22d6bd05d9e8393d4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b748d6859bcec901ae18139f7331cf74e2cefeb7ae0d2ac22d6bd05d9e8393d4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/std/deep/io_deep_8_spec.spl
+mirror: doc/06_spec/01_unit/std/deep/io_deep_8_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/deep/io_deep_8_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/deep/io_deep_8_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/deep/io_deep_8_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'basic 1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/deep/io_deep_8_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'basic 2' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/deep/io_deep_8_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'basic 3' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

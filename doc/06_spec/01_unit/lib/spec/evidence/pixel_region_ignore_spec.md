@@ -17,6 +17,7 @@
 
 #### names a rectangular region of the captured image
 
+- names a rectangular region of the captured image
 - Select a 120x40 region at offset (16, 8) — a status bar, say
 - Confirm the rectangle round-trips exactly through the selector
    - Expected: pixel_region_x(region) equals `16`
@@ -30,10 +31,12 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("names a rectangular region of the captured image")
 step("Select a 120x40 region at offset (16, 8) — a status bar, say")
 val region = selector_pixel_region(16, 8, 120, 40)
 
@@ -51,6 +54,7 @@ expect(selector_kind_name(region.kind)).to_equal("pixel_region")
 
 #### keeps a large region's extent intact rather than truncating it
 
+- keeps a large region's extent intact rather than truncating it
 - Select a region spanning a 4K framebuffer
 - Confirm both extents survive the packing
    - Expected: pixel_region_width(region) equals `3840`
@@ -60,10 +64,12 @@ expect(selector_kind_name(region.kind)).to_equal("pixel_region")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("keeps a large region's extent intact rather than truncating it")
 # The rect is packed two-per-field; a naive 32-bit pack corrupts a 4K capture.
 step("Select a region spanning a 4K framebuffer")
 val region = selector_pixel_region(0, 0, 3840, 2160)
@@ -77,6 +83,7 @@ expect(pixel_region_height(region)).to_equal(2160)
 
 #### records why a region is masked instead of dropping it silently
 
+- records why a region is masked instead of dropping it silently
 - Mask the clock region, stating the reason it cannot be compared
 - Confirm the reason travelled with the check
 - Confirm the masked rectangle is still fully described
@@ -87,10 +94,12 @@ expect(pixel_region_height(region)).to_equal(2160)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("records why a region is masked instead of dropping it silently")
 step("Mask the clock region, stating the reason it cannot be compared")
 val clock = selector_pixel_region(900, 4, 100, 20)
 val ignored = check_ignore("clock", "wall-clock text differs on every capture")
@@ -108,6 +117,7 @@ expect(pixel_region_height(clock)).to_equal(20)
 
 #### pairs a masked region with a positive check over the rest of the image
 
+- pairs a masked region with a positive check over the rest of the image
 - Build an oracle that masks the clock but still checks the title bar
 - Confirm both checks are carried — the mask did not replace the oracle
    - Expected: spec.checks.len() equals `2`
@@ -116,10 +126,12 @@ expect(pixel_region_height(clock)).to_equal(20)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("pairs a masked region with a positive check over the rest of the image")
 # An oracle needs at least one positive claim; the comparator rejects an
 # all-ignore spec ("oracle has no positive production check"). This example
 # documents the shape a real GUI comparison must take.
@@ -144,7 +156,7 @@ expect(spec.checks.len()).to_equal(2)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/spec/evidence/pixel_region_ignore_spec.spl` |
-| Updated | 2026-08-11 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -164,3 +176,54 @@ Tests covering GUI image compare — ignore sections.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `82ce9c6bcff0d61385ccb27bde32fd41589911792a05cab6f0e56d392a870cac`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `82ce9c6bcff0d61385ccb27bde32fd41589911792a05cab6f0e56d392a870cac`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `82ce9c6bcff0d61385ccb27bde32fd41589911792a05cab6f0e56d392a870cac`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/lib/spec/evidence/pixel_region_ignore_spec.spl
+mirror: doc/06_spec/01_unit/lib/spec/evidence/pixel_region_ignore_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/spec/evidence/pixel_region_ignore_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/spec/evidence/pixel_region_ignore_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/spec/evidence/pixel_region_ignore_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/spec/evidence/pixel_region_ignore_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names a rectangular region of the captured image' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/spec/evidence/pixel_region_ignore_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps a large region's extent intact rather than truncating it' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/spec/evidence/pixel_region_ignore_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records why a region is masked instead of dropping it silently' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

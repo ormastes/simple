@@ -1,0 +1,783 @@
+# Backend session, compile-use, and retained object-result authority (Stage 6A.1a/b).
+# V1 providers report unknown CPU-feature acceptance. No result issued here is
+# inspection or execution evidence.
+
+use compiler.common.backend_plugin.model.{BackendPluginRequestV1}
+use compiler.backend.backend_plugin.loader.{load_backend}
+use compiler.backend.backend_plugin.session.{BackendSession}
+use compiler.backend.codegen_types.{CodegenOutput, CodegenOutputKind}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+use compiler.backend.linker.linker_wrapper_helpers.{write_elf_bytes_to_file}
+
+pub const BACKEND_SESSION_AUTHORITY_SCHEMA_V2: u16 = 2u16
+pub const BACKEND_SESSION_AUTHORITY_MAX_SESSIONS_V2: i64 = 64
+pub const BACKEND_SESSION_AUTHORITY_MAX_USES_V2: i64 = 256
+pub const BACKEND_SESSION_RESULT_MAX_BYTES_V2: i64 = 134217728
+pub const BACKEND_SESSION_RESULT_MAX_RETAINED_BYTES_V2: i64 = 268435456
+
+pub enum BackendSessionAuthorityErrorV2:
+    InvalidOwner
+    CapacityExceeded
+    CounterOverflow
+    LoadRejected(detail: text)
+    UnknownOrSubstituted
+    NotAccepting
+    UseUnknownOrSpent
+    UsesLive
+    NotClosed
+    TeardownFailed
+    CompileFailed(detail: text)
+    ObjectBytesUnavailable
+    ObjectTooLarge
+    ResultUnknownOrReleased
+    ResultsLive
+    ByteIntegrityFailed
+
+pub enum BackendSessionAuthorityStateV2:
+    Accepting
+    Closing
+    Closed
+
+pub struct BackendSessionAuthorityTokenV2:
+    owner_identity: u64
+    generation: u64
+    receipt_hash: text
+
+pub struct BackendSessionCompileUseTokenV2:
+    owner_identity: u64
+    generation: u64
+    use_id: u64
+
+pub struct BackendSessionResultTokenV2:
+    owner_identity: u64
+    generation: u64
+    use_id: u64
+    result_id: u64
+
+pub enum BackendSessionFeatureAcceptanceV2:
+    Unknown
+    AcceptedExact
+
+pub enum BackendSessionResultTerminalStatusV2:
+    Emitted
+
+pub enum BackendSessionCompileKindV2:
+    Module
+    Aot
+
+pub struct BackendSessionResultProjectionV2:
+    schema_version: u16
+    token: BackendSessionResultTokenV2
+    provider_identity: text
+    provider_version: text
+    backend_build_id: text
+    receipt_hash: text
+    target: text
+    cpu: text
+    optimization: text
+    compile_kind: BackendSessionCompileKindV2
+    compile_cpu_request: text
+    compile_opt_level_request: i64
+    compile_is_release: bool
+    requested_features: [text]
+    accepted_features: [text]
+    feature_acceptance: BackendSessionFeatureAcceptanceV2
+    kind: CodegenOutputKind
+    object_bytes: [u8]
+    object_sha256: text
+    object_byte_count: i64
+    envelope_sha256: text
+    terminal_status: BackendSessionResultTerminalStatusV2
+
+pub struct BackendSessionAuthorityProjectionV2:
+    schema_version: u16
+    generation: u64
+    provider_identity: text
+    receipt_hash: text
+    state: BackendSessionAuthorityStateV2
+    live_uses: i64
+
+struct _BackendSessionResultRecordV2:
+    token: BackendSessionResultTokenV2
+    object_bytes: [u8]
+    object_sha256: text
+    envelope_sha256: text
+    compile_kind: BackendSessionCompileKindV2
+    compile_cpu_request: text
+    compile_opt_level_request: i64
+    compile_is_release: bool
+
+struct _BackendSessionCompileUseRecordV2:
+    token: BackendSessionCompileUseTokenV2
+    attempted: bool
+    results: [_BackendSessionResultRecordV2]
+
+struct _BackendSessionAuthorityRecordV2:
+    token: BackendSessionAuthorityTokenV2
+    session: BackendSession
+    state: BackendSessionAuthorityStateV2
+    uses: [_BackendSessionCompileUseRecordV2]
+
+var _next_backend_session_owner_identity_v2: u64 = 1u64
+
+pub class BackendSessionAuthorityV2:
+    var owner_identity: u64
+    var next_generation: u64
+    var next_use_id: u64
+    var next_result_id: u64
+    var retained_bytes: i64
+    var records: [_BackendSessionAuthorityRecordV2]
+
+    pub static fn create() -> BackendSessionAuthorityV2:
+        val candidate = _next_backend_session_owner_identity_v2
+        val identity = if candidate == 0u64 or candidate == 0xffffffffffffffffu64:
+            0u64
+        else:
+            candidate
+        if identity != 0u64:
+            _next_backend_session_owner_identity_v2 = identity + 1u64
+        BackendSessionAuthorityV2(
+            owner_identity: identity, next_generation: 1u64,
+            next_use_id: 1u64, next_result_id: 1u64,
+            retained_bytes: 0, records: [])
+
+fn _backend_session_copy_bytes_v2(source: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in source:
+        copied.push(byte)
+    copied
+
+fn _backend_session_copy_texts_v2(source: [text]) -> [text]:
+    var copied: [text] = []
+    for value in source:
+        copied.push(value)
+    copied
+
+fn _backend_session_frame_v2(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _backend_session_result_envelope_sha256_v2(
+    record: _BackendSessionAuthorityRecordV2,
+    result_token: BackendSessionResultTokenV2,
+    object_sha256: text,
+    object_byte_count: i64,
+    compile_kind: BackendSessionCompileKindV2,
+    compile_cpu_request: text,
+    compile_opt_level_request: i64,
+    compile_is_release: bool
+) -> text:
+    val request = record.session.request
+    val descriptor = record.session.descriptor
+    var framed = "BackendSessionResultEnvelopeV2"
+    framed = framed + _backend_session_frame_v2(result_token.owner_identity.to_string())
+    framed = framed + _backend_session_frame_v2(result_token.generation.to_string())
+    framed = framed + _backend_session_frame_v2(result_token.use_id.to_string())
+    framed = framed + _backend_session_frame_v2(result_token.result_id.to_string())
+    framed = framed + _backend_session_frame_v2(descriptor.provider_identity)
+    framed = framed + _backend_session_frame_v2(descriptor.provider_version)
+    framed = framed + _backend_session_frame_v2(descriptor.build_id)
+    framed = framed + _backend_session_frame_v2(record.token.receipt_hash)
+    framed = framed + _backend_session_frame_v2(request.target)
+    framed = framed + _backend_session_frame_v2(request.cpu)
+    framed = framed + _backend_session_frame_v2(request.optimization)
+    framed = framed + _backend_session_frame_v2(
+        if compile_kind == BackendSessionCompileKindV2.Aot: "Aot" else: "Module")
+    framed = framed + _backend_session_frame_v2(compile_cpu_request)
+    framed = framed + _backend_session_frame_v2(compile_opt_level_request.to_string())
+    framed = framed + _backend_session_frame_v2(
+        if compile_is_release: "true" else: "false")
+    framed = framed + _backend_session_frame_v2(request.mir_abi_digest)
+    framed = framed + _backend_session_frame_v2(request.features.len().to_string())
+    for feature in request.features:
+        framed = framed + _backend_session_frame_v2(feature)
+    # V1 has no provider-confirmed feature set. Bind that absence explicitly.
+    framed = framed + _backend_session_frame_v2("Unknown")
+    framed = framed + _backend_session_frame_v2("0")
+    framed = framed + _backend_session_frame_v2("ObjectCode")
+    framed = framed + _backend_session_frame_v2(object_sha256)
+    framed = framed + _backend_session_frame_v2(object_byte_count.to_string())
+    framed = framed + _backend_session_frame_v2("Emitted")
+    sha256_text(framed)
+
+fn _backend_session_record_index_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2
+) -> i64:
+    if owner.owner_identity == 0u64 or token.owner_identity != owner.owner_identity:
+        return -1
+    var i = 0
+    while i < owner.records.len():
+        val stored = owner.records[i].token
+        # Stage2 native codegen can reject whole-struct token equality even
+        # when every field matches. Compare the authority identity explicitly.
+        if stored.owner_identity == token.owner_identity and
+           stored.generation == token.generation and
+           stored.receipt_hash == token.receipt_hash:
+            return i
+        i = i + 1
+    -1
+
+fn _backend_session_use_index_v2(
+    record: _BackendSessionAuthorityRecordV2,
+    token: BackendSessionCompileUseTokenV2
+) -> i64:
+    var i = 0
+    while i < record.uses.len():
+        val stored = record.uses[i].token
+        if stored.owner_identity == token.owner_identity and
+           stored.generation == token.generation and
+           stored.use_id == token.use_id:
+            return i
+        i = i + 1
+    -1
+
+fn _backend_session_result_index_v2(
+    use_record: _BackendSessionCompileUseRecordV2,
+    token: BackendSessionResultTokenV2
+) -> i64:
+    var i = 0
+    while i < use_record.results.len():
+        val stored = use_record.results[i].token
+        if stored.owner_identity == token.owner_identity and
+           stored.generation == token.generation and
+           stored.use_id == token.use_id and
+           stored.result_id == token.result_id:
+            return i
+        i = i + 1
+    -1
+
+pub fn backend_session_authority_open_v2(
+    owner: BackendSessionAuthorityV2,
+    request: BackendPluginRequestV1
+) -> Result<BackendSessionAuthorityTokenV2, BackendSessionAuthorityErrorV2>:
+    if owner.owner_identity == 0u64:
+        return Err(BackendSessionAuthorityErrorV2.InvalidOwner)
+    if owner.records.len() >= BACKEND_SESSION_AUTHORITY_MAX_SESSIONS_V2:
+        return Err(BackendSessionAuthorityErrorV2.CapacityExceeded)
+    if owner.next_generation == 0u64 or owner.next_generation == 0xffffffffffffffffu64:
+        return Err(BackendSessionAuthorityErrorV2.CounterOverflow)
+    # The V1 loader cannot attest that requested CPU features were accepted.
+    # Keep this owner feature-free until a provider-owned acceptance receipt exists.
+    if request.features.len() > 0:
+        return Err(BackendSessionAuthorityErrorV2.LoadRejected(
+            "backend feature acceptance is unavailable for V2 sessions"))
+    val loaded = match load_backend(request):
+        case Ok(session): session
+        case Err(error):
+            return Err(BackendSessionAuthorityErrorV2.LoadRejected(
+                "{error.code()}: {error.diagnostic()}"))
+    val token = BackendSessionAuthorityTokenV2(
+        owner_identity: owner.owner_identity,
+        generation: owner.next_generation,
+        receipt_hash: loaded.receipt.hash())
+    owner.records.push(_BackendSessionAuthorityRecordV2(
+        token: token, session: loaded,
+        state: BackendSessionAuthorityStateV2.Accepting, uses: []))
+    owner.next_generation = owner.next_generation + 1u64
+    Ok(token)
+
+pub fn backend_session_authority_project_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2
+) -> Result<BackendSessionAuthorityProjectionV2, BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    val record = owner.records[index]
+    Ok(BackendSessionAuthorityProjectionV2(
+        schema_version: BACKEND_SESSION_AUTHORITY_SCHEMA_V2,
+        generation: token.generation,
+        provider_identity: record.session.descriptor.provider_identity,
+        receipt_hash: token.receipt_hash,
+        state: record.state,
+        live_uses: record.uses.len()))
+
+pub fn backend_session_authority_use_acquire_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2
+) -> Result<BackendSessionCompileUseTokenV2, BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    var record = owner.records[index]
+    if (record.state != BackendSessionAuthorityStateV2.Accepting or
+            not record.session.is_open()):
+        return Err(BackendSessionAuthorityErrorV2.NotAccepting)
+    if record.uses.len() >= BACKEND_SESSION_AUTHORITY_MAX_USES_V2:
+        return Err(BackendSessionAuthorityErrorV2.CapacityExceeded)
+    if owner.next_use_id == 0u64 or owner.next_use_id == 0xffffffffffffffffu64:
+        return Err(BackendSessionAuthorityErrorV2.CounterOverflow)
+    val use_token = BackendSessionCompileUseTokenV2(
+        owner_identity: owner.owner_identity,
+        generation: token.generation, use_id: owner.next_use_id)
+    record.uses.push(_BackendSessionCompileUseRecordV2(
+        token: use_token, attempted: false, results: []))
+    owner.records[index] = record
+    owner.next_use_id = owner.next_use_id + 1u64
+    Ok(use_token)
+
+fn _backend_session_claim_use_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2
+) -> Result<i64, BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    var record = owner.records[index]
+    # Acquiring a use pins lifetime; it does not authorize starting work after
+    # close. Already retained results remain projectable/releasable while the
+    # owner drains, but an unused token must not start a provider operation.
+    if record.state != BackendSessionAuthorityStateV2.Accepting:
+        return Err(BackendSessionAuthorityErrorV2.NotAccepting)
+    val use_index = _backend_session_use_index_v2(record, use_token)
+    if use_index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
+    if (use_token.owner_identity != owner.owner_identity or
+            use_token.generation != token.generation or
+            record.uses[use_index].attempted):
+        return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
+    var use_record = record.uses[use_index]
+    use_record.attempted = true
+    record.uses[use_index] = use_record
+    owner.records[index] = record
+    Ok(index)
+
+pub fn backend_session_authority_compile_module_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    module: MirModule
+) -> Result<CodegenOutput, BackendSessionAuthorityErrorV2>:
+    val index = match _backend_session_claim_use_v2(owner, token, use_token):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    var record = owner.records[index]
+    var retained = record.session
+    val compiled = retained.compile_module(module)
+    record.session = retained
+    owner.records[index] = record
+    match compiled:
+        case Ok(output): Ok(output)
+        case Err(error): Err(BackendSessionAuthorityErrorV2.CompileFailed(
+            error.to_text()))
+
+fn _backend_session_retain_object_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    object_bytes: [u8],
+    compile_kind: BackendSessionCompileKindV2,
+    compile_cpu_request: text,
+    compile_opt_level_request: i64,
+    compile_is_release: bool
+) -> Result<BackendSessionResultTokenV2, BackendSessionAuthorityErrorV2>:
+    if owner.next_result_id == 0u64 or owner.next_result_id == 0xffffffffffffffffu64:
+        return Err(BackendSessionAuthorityErrorV2.CounterOverflow)
+    if object_bytes.len() == 0:
+        return Err(BackendSessionAuthorityErrorV2.ObjectBytesUnavailable)
+    val byte_count = object_bytes.len()
+    if byte_count > BACKEND_SESSION_RESULT_MAX_BYTES_V2:
+        return Err(BackendSessionAuthorityErrorV2.ObjectTooLarge)
+    if owner.retained_bytes < 0 or
+       owner.retained_bytes > BACKEND_SESSION_RESULT_MAX_RETAINED_BYTES_V2 - byte_count:
+        return Err(BackendSessionAuthorityErrorV2.CapacityExceeded)
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    var record = owner.records[index]
+    val use_index = _backend_session_use_index_v2(record, use_token)
+    if use_index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
+    val result_token = BackendSessionResultTokenV2(
+        owner_identity: owner.owner_identity, generation: token.generation,
+        use_id: use_token.use_id, result_id: owner.next_result_id)
+    val copied = _backend_session_copy_bytes_v2(object_bytes)
+    var use_record = record.uses[use_index]
+    val object_sha256 = sha256_u8_hex(copied)
+    val recorded_cpu_request = if compile_kind == BackendSessionCompileKindV2.Module:
+        record.session.request.cpu
+    else:
+        compile_cpu_request
+    use_record.results.push(_BackendSessionResultRecordV2(
+        token: result_token, object_bytes: copied,
+        object_sha256: object_sha256,
+        envelope_sha256: _backend_session_result_envelope_sha256_v2(
+            record, result_token, object_sha256, byte_count,
+            compile_kind, recorded_cpu_request, compile_opt_level_request,
+            compile_is_release),
+        compile_kind: compile_kind,
+        compile_cpu_request: recorded_cpu_request,
+        compile_opt_level_request: compile_opt_level_request,
+        compile_is_release: compile_is_release))
+    record.uses[use_index] = use_record
+    owner.records[index] = record
+    owner.next_result_id = owner.next_result_id + 1u64
+    owner.retained_bytes = owner.retained_bytes + byte_count
+    Ok(result_token)
+
+pub fn backend_session_authority_compile_module_result_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    module: MirModule
+) -> Result<BackendSessionResultTokenV2, BackendSessionAuthorityErrorV2>:
+    """Compile once and retain exact object bytes under the live use.
+
+    A V1 backend supplies no accepted CPU-feature set, so every result is
+    projected with Unknown acceptance even when its request has no features.
+    """
+    if owner.next_result_id == 0u64 or owner.next_result_id == 0xffffffffffffffffu64:
+        return Err(BackendSessionAuthorityErrorV2.CounterOverflow)
+    val output = match backend_session_authority_compile_module_v2(
+        owner, token, use_token, module):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    if not output.has_object_code or output.kind != CodegenOutputKind.ObjectCode:
+        return Err(BackendSessionAuthorityErrorV2.ObjectBytesUnavailable)
+    _backend_session_retain_object_v2(
+        owner, token, use_token, output.object_code,
+        BackendSessionCompileKindV2.Module, "", -1, false)
+
+pub fn backend_session_authority_compile_aot_result_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    module: MirModule,
+    is_release: bool,
+    opt_level: i64,
+    target_cpu: text,
+    storage_bindings: [MirStorageViewSiteBindingV1]
+) -> Result<BackendSessionResultTokenV2, BackendSessionAuthorityErrorV2>:
+    """Retain the built-in or dynamic AOT producer's in-memory object bytes."""
+    if owner.next_result_id == 0u64 or owner.next_result_id == 0xffffffffffffffffu64:
+        return Err(BackendSessionAuthorityErrorV2.CounterOverflow)
+    val index = match _backend_session_claim_use_v2(owner, token, use_token):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    var record = owner.records[index]
+    var retained = record.session
+    val compiled = retained.compile_aot_module(
+        module, is_release, opt_level, target_cpu, storage_bindings)
+    record.session = retained
+    owner.records[index] = record
+    match compiled:
+        case Err(error):
+            Err(BackendSessionAuthorityErrorV2.CompileFailed(error.to_text()))
+        case Ok(output):
+            if val object_bytes = output.object_code:
+                _backend_session_retain_object_v2(
+                    owner, token, use_token, object_bytes,
+                    BackendSessionCompileKindV2.Aot, target_cpu,
+                    opt_level, is_release)
+            else:
+                Err(BackendSessionAuthorityErrorV2.ObjectBytesUnavailable)
+
+pub fn backend_session_authority_result_project_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    result_token: BackendSessionResultTokenV2
+) -> Result<BackendSessionResultProjectionV2, BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    val record = owner.records[index]
+    val use_index = _backend_session_use_index_v2(record, use_token)
+    if use_index < 0 or use_token.owner_identity != owner.owner_identity or
+       use_token.generation != token.generation:
+        return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
+    val use_record = record.uses[use_index]
+    val result_index = _backend_session_result_index_v2(use_record, result_token)
+    if result_index < 0 or result_token.owner_identity != owner.owner_identity or
+       result_token.generation != token.generation or
+       result_token.use_id != use_token.use_id:
+        return Err(BackendSessionAuthorityErrorV2.ResultUnknownOrReleased)
+    val result = use_record.results[result_index]
+    if result.object_sha256 != sha256_u8_hex(result.object_bytes):
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+    if result.envelope_sha256 != _backend_session_result_envelope_sha256_v2(
+        record, result_token, result.object_sha256, result.object_bytes.len(),
+        result.compile_kind, result.compile_cpu_request,
+        result.compile_opt_level_request, result.compile_is_release):
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+    val request = record.session.request
+    val descriptor = record.session.descriptor
+    Ok(BackendSessionResultProjectionV2(
+        schema_version: BACKEND_SESSION_AUTHORITY_SCHEMA_V2,
+        token: result_token,
+        provider_identity: descriptor.provider_identity,
+        provider_version: descriptor.provider_version,
+        backend_build_id: descriptor.build_id,
+        receipt_hash: token.receipt_hash,
+        target: request.target, cpu: request.cpu,
+        optimization: request.optimization,
+        compile_kind: result.compile_kind,
+        compile_cpu_request: result.compile_cpu_request,
+        compile_opt_level_request: result.compile_opt_level_request,
+        compile_is_release: result.compile_is_release,
+        requested_features: _backend_session_copy_texts_v2(request.features),
+        accepted_features: [],
+        feature_acceptance: BackendSessionFeatureAcceptanceV2.Unknown,
+        kind: CodegenOutputKind.ObjectCode,
+        object_bytes: _backend_session_copy_bytes_v2(result.object_bytes),
+        object_sha256: result.object_sha256,
+        object_byte_count: result.object_bytes.len(),
+        envelope_sha256: result.envelope_sha256,
+        terminal_status: BackendSessionResultTerminalStatusV2.Emitted))
+
+pub fn backend_session_authority_result_release_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    result_token: BackendSessionResultTokenV2
+) -> Result<(), BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    var record = owner.records[index]
+    val use_index = _backend_session_use_index_v2(record, use_token)
+    if use_index < 0 or use_token.owner_identity != owner.owner_identity or
+       use_token.generation != token.generation:
+        return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
+    var use_record = record.uses[use_index]
+    val result_index = _backend_session_result_index_v2(use_record, result_token)
+    if result_index < 0 or result_token.owner_identity != owner.owner_identity or
+       result_token.generation != token.generation or
+       result_token.use_id != use_token.use_id:
+        return Err(BackendSessionAuthorityErrorV2.ResultUnknownOrReleased)
+    val byte_count = use_record.results[result_index].object_bytes.len()
+    if byte_count > owner.retained_bytes:
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+    var kept: [_BackendSessionResultRecordV2] = []
+    var i = 0
+    while i < use_record.results.len():
+        if i != result_index:
+            kept.push(use_record.results[i])
+        i = i + 1
+    use_record.results = kept
+    record.uses[use_index] = use_record
+    owner.records[index] = record
+    owner.retained_bytes = owner.retained_bytes - byte_count
+    Ok(())
+
+pub fn backend_session_authority_compile_aot_into_path_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    module: MirModule,
+    is_release: bool,
+    opt_level: i64,
+    target_cpu: text,
+    storage_bindings: [MirStorageViewSiteBindingV1],
+    object_path: text,
+    diagnostic_path: text
+) -> Result<i64, BackendSessionAuthorityErrorV2>:
+    val index = match _backend_session_claim_use_v2(owner, token, use_token):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    var record = owner.records[index]
+    var retained = record.session
+    val status = retained.compile_aot_into_path(
+        module, is_release, opt_level, target_cpu, storage_bindings,
+        object_path, diagnostic_path)
+    record.session = retained
+    owner.records[index] = record
+    Ok(status)
+
+pub fn backend_session_authority_use_release_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2
+) -> Result<(), BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    var record = owner.records[index]
+    val use_index = _backend_session_use_index_v2(record, use_token)
+    if (use_index < 0 or use_token.owner_identity != owner.owner_identity or
+            use_token.generation != token.generation):
+        return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
+    if record.uses[use_index].results.len() > 0:
+        return Err(BackendSessionAuthorityErrorV2.ResultsLive)
+    var kept: [_BackendSessionCompileUseRecordV2] = []
+    var i = 0
+    while i < record.uses.len():
+        if i != use_index:
+            kept.push(record.uses[i])
+        i = i + 1
+    record.uses = kept
+    owner.records[index] = record
+    Ok(())
+
+pub fn backend_session_authority_close_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2
+) -> Result<(), BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    var record = owner.records[index]
+    if record.state == BackendSessionAuthorityStateV2.Closed:
+        return Ok(())
+    record.state = BackendSessionAuthorityStateV2.Closing
+    owner.records[index] = record
+    if record.uses.len() > 0:
+        return Err(BackendSessionAuthorityErrorV2.UsesLive)
+    var retained = record.session
+    val closed = retained.close()
+    record.session = retained
+    if not closed:
+        owner.records[index] = record
+        return Err(BackendSessionAuthorityErrorV2.TeardownFailed)
+    record.state = BackendSessionAuthorityStateV2.Closed
+    owner.records[index] = record
+    Ok(())
+
+pub fn backend_session_authority_release_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2
+) -> Result<(), BackendSessionAuthorityErrorV2>:
+    val index = _backend_session_record_index_v2(owner, token)
+    if index < 0:
+        return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+    if owner.records[index].state != BackendSessionAuthorityStateV2.Closed:
+        return Err(BackendSessionAuthorityErrorV2.NotClosed)
+    var kept: [_BackendSessionAuthorityRecordV2] = []
+    var i = 0
+    while i < owner.records.len():
+        if i != index:
+            kept.push(owner.records[i])
+        i = i + 1
+    owner.records = kept
+    Ok(())
+
+# The driver carries this facade rather than the raw V1 session. Its provider
+# remains reachable only through generation and compile-use checks above.
+pub class BackendSessionOwnedLeaseV2:
+    var authority: BackendSessionAuthorityV2
+    var token: BackendSessionAuthorityTokenV2
+    backend_name: text
+    receipt_hash: text
+    var retired: bool
+
+    pub static fn open(
+        request: BackendPluginRequestV1
+    ) -> Result<BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2>:
+        var authority = BackendSessionAuthorityV2.create()
+        val token = match backend_session_authority_open_v2(authority, request):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        val projection = match backend_session_authority_project_v2(authority, token):
+            case Ok(value): value
+            case Err(error):
+                _ = backend_session_authority_close_v2(authority, token)
+                _ = backend_session_authority_release_v2(authority, token)
+                return Err(error)
+        Ok(BackendSessionOwnedLeaseV2(
+            authority: authority, token: token,
+            backend_name: projection.provider_identity,
+            receipt_hash: projection.receipt_hash, retired: false))
+
+    fn compile_owned_aot_into_path_v2(
+        module: MirModule, is_release: bool, opt_level: i64, target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
+        diagnostic_path: text
+    ) -> i64:
+        if self.retired:
+            backend_aot_write_diagnostic(diagnostic_path,
+                "backend session lease is retired")
+            return 1
+        val use_token = match backend_session_authority_use_acquire_v2(
+            self.authority, self.token):
+            case Ok(value): value
+            case Err(error):
+                backend_aot_write_diagnostic(diagnostic_path,
+                    "backend session use rejected: {error.to_text()}")
+                return 1
+        if self.backend_name == "cranelift":
+            # Preserve Cranelift's existing direct file publication, but let
+            # the session owner retain and verify the exact bytes first.
+            val issued = backend_session_authority_compile_aot_result_v2(
+                self.authority, self.token, use_token, module, is_release,
+                opt_level, target_cpu, storage_bindings)
+            match issued:
+                case Err(error):
+                    _ = backend_session_authority_use_release_v2(
+                        self.authority, self.token, use_token)
+                    backend_aot_write_diagnostic(diagnostic_path,
+                        "backend session AOT result rejected: {error.to_text()}")
+                    return 1
+                case Ok(result_token):
+                    var status = 1
+                    match backend_session_authority_result_project_v2(
+                        self.authority, self.token, use_token, result_token):
+                        case Err(error):
+                            backend_aot_write_diagnostic(diagnostic_path,
+                                "backend session AOT result failed integrity: {error.to_text()}")
+                        case Ok(result):
+                            match write_elf_bytes_to_file(
+                                object_path, result.object_bytes):
+                                case Ok(_): status = 0
+                                case Err(error):
+                                    backend_aot_write_diagnostic(diagnostic_path,
+                                        "backend session AOT object write failed: {error}")
+                    val result_released = backend_session_authority_result_release_v2(
+                        self.authority, self.token, use_token, result_token)
+                    val use_released = backend_session_authority_use_release_v2(
+                        self.authority, self.token, use_token)
+                    if result_released.is_err() or use_released.is_err():
+                        backend_aot_write_diagnostic(diagnostic_path,
+                            "backend session AOT result or compile use could not be released")
+                        return 1
+                    return status
+        val compiled = backend_session_authority_compile_aot_into_path_v2(
+            self.authority, self.token, use_token, module, is_release,
+            opt_level, target_cpu, storage_bindings, object_path,
+            diagnostic_path)
+        val released = backend_session_authority_use_release_v2(
+            self.authority, self.token, use_token)
+        if released.is_err():
+            backend_aot_write_diagnostic(diagnostic_path,
+                "backend session compile use could not be released")
+            return 1
+        match compiled:
+            case Ok(status): status
+            case Err(error):
+                backend_aot_write_diagnostic(diagnostic_path,
+                    "backend session compile rejected: {error.to_text()}")
+                1
+
+    me close() -> bool:
+        if self.retired:
+            return true
+        if backend_session_authority_close_v2(self.authority, self.token).is_err():
+            return false
+        if backend_session_authority_release_v2(self.authority, self.token).is_err():
+            return false
+        self.retired = true
+        true
+
+export BackendSessionAuthorityV2, BackendSessionAuthorityErrorV2
+export BackendSessionOwnedLeaseV2
+export BackendSessionAuthorityTokenV2, BackendSessionCompileUseTokenV2
+export BackendSessionResultTokenV2, BackendSessionResultProjectionV2
+export BackendSessionFeatureAcceptanceV2, BackendSessionResultTerminalStatusV2
+export BackendSessionCompileKindV2
+export BackendSessionAuthorityStateV2, BackendSessionAuthorityProjectionV2
+export BACKEND_SESSION_AUTHORITY_SCHEMA_V2
+export BACKEND_SESSION_RESULT_MAX_BYTES_V2
+export BACKEND_SESSION_RESULT_MAX_RETAINED_BYTES_V2
+export backend_session_authority_open_v2, backend_session_authority_project_v2
+export backend_session_authority_use_acquire_v2
+export backend_session_authority_compile_module_v2
+export backend_session_authority_compile_module_result_v2
+export backend_session_authority_compile_aot_result_v2
+export backend_session_authority_result_project_v2
+export backend_session_authority_result_release_v2
+export backend_session_authority_compile_aot_into_path_v2
+export backend_session_authority_use_release_v2
+export backend_session_authority_close_v2, backend_session_authority_release_v2

@@ -1,4 +1,8 @@
 # Stage 3 HIR contract model partial integration
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: FIX IMPLEMENTED; native verification pending
 - Date: 2026-08-14
@@ -42,3 +46,4 @@ fragile positional `HirFunction` pattern used only to read `is_extern`.
   without these unresolved names.
 - The produced Stage 3 must then pass the existing hello and module-qualified
   field-layout probes.  Rust-seed execution is not acceptance evidence.
+

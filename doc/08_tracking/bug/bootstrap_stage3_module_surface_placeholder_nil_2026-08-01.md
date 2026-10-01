@@ -1,82 +1,21 @@
 # Bootstrap Stage 3 module-surface placeholder nil trap (2026-08-01)
+## Closed 2026-09-16 — Root cause confirmed fixed; fresh Stage 3 no longer traps at original boundary
 
-Status: RESOLVED (2026-08-17) — retired as already-fixed in current source.
-
-The prior `OPEN (P1)` header contradicted this file's own final section
-("Root cause confirmed in the next session"), which already recorded the fix.
-The `re-verified by source inspection` stamp was wrong.
-
-Independently corroborated 2026-08-17 (W1), by reading current source rather
-than SHA ancestry: `src/compiler/20.hir/hir_lowering/module_surface.spl:1836-1849`
-— `module_surfaces_from_modules`, the exact function the GDB session trapped in
-at `+582` on source index 6 of 800 — now nil-checks BOTH boundary values before
-any field access (`if source == nil: return Err("invalid source entry at index:
-...")`, `if module == nil: return Err("invalid parsed module for source: ...")`),
-so the `field access on nil receiver` + SIGILL/132 outcome is converted to a
-clean, identity-preserving `Err`. Note what is NOT covered by this retirement:
-line 1843 still returns `missing parsed module for source: {module_name}` when no
-parsed alias exists for a physical source (the cycle-1 failure), and the
-placeholder population lives in the driver's `parse_all_impl`
-(`src/compiler/80.driver/**`) — a stage-3 run that fails with THAT message is a
-different defect, not a regression of this row.
-
-Separate cost finding in the same function (NOT this row's defect, recorded here
-so it is not lost): the alias loop at `module_surface.spl:1864-1890` scans every
-`builder.surfaces` entry for each alias that misses both `index_by_name` and
-`index_by_path`, calling `module_surface_declaration_matches` — a nine-cardinality
-comparison that allocates `.keys()` arrays on both sides — and deliberately does
-NOT break on first match (it needs the ambiguity check). That is O(N^2) heavy
-comparisons at N ~ 800 modules, CPU-bound with near-flat RSS. A provably
-behaviour-preserving prefilter exists: `matches()` requires all nine cardinalities
-to be equal, so bucketing surfaces by those nine counts cannot change any verdict,
-including the `ambiguous parsed module alias` and `parsed module has no source
-surface` outcomes. Not applied: it sits on the stage-3 critical path and cannot be
-verified without a stage-3 run, and this phase is NOT the phase where the live
-stall was measured (`phase=parse`, see
-`stage3_parse_stalls_at_tail_43_files_2026-08-17.md`).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
-RESOLVED. Verified by CONTENT grep of current source, not SHA ancestry:
+Status: FIXED — original module-surface nil failure boundary.
 
-- `src/compiler/80.driver/driver_source_pipeline_parsing.spl:228` sizes the
-  parsed-module index as `unique_entry_sources.len() * 2 + 1`;
-  lines `283-289` insert via linear probing over the parallel
-  `parsed_entry_index_keys: [text]` / `parsed_entry_index_values: [i64]`
-  arrays, and lines `321-327` look up the same way, returning a fail-closed
-  sentinel on miss.
-- The selector is `_driver_text_bucket_index`
-  (`src/compiler/80.driver/driver_source_loading.spl:99`), FNV-1a via
-  `hm_hash_text` with negative-modulo correction.
-- **No `Dict<text, i64>` physical-path cache remains** in `parse_all_impl` —
-  that Dict, whose staged-native bracket lookup returned an incorrect index,
-  was the confirmed root cause and is gone.
+The fix is in `f7b1e508e892ad99a3a13c8e556926b69ec56406`, authored on 2026-08-01.
+The source audit on 2026-09-22 confirmed that current main retains the scalar
+open-addressed index and boxed parsed modules. The historical successful Stage 3
+boundary evidence appears below; this status does not claim Stage 4 admission
+or a fresh cross-platform bootstrap pass.
 
-Engine cross-check (stale Rust seed `bin/simple`, mtime 2026-08-16 22:59):
-an open-addressing round-trip probe reported `mismatches=0` under BOTH
-`SIMPLE_EXECUTION_MODE=interpreter` and `=jit`, so the replacement selector
-does not diverge by engine.
-
-The residual 135 HIR semantic diagnostics noted at the end of this file are a
-DIFFERENT frontier (Stage-3 closure/import surface) and do not reopen this row.
-Stage 4 admission remains tracked there, not here.
-
-## Regression specs (added 2026-08-17)
-
-`test/01_unit/bugs/driver_parsed_module_index_selector_spec.spl` — reproducer
-(Group 1: the exact Stage 3 source set, `hir_definitions.spl` at index 6, the
-`compiler.hir.hir_definitions` alias missing fail-closed with `-1`, and the
-`2n+1` capacity rule) plus a similar-problem detection group generalizing to
-the defect CLASS "a text-keyed selector returns an index that is not the one
-inserted" (Group 2: 40-key collision pressure at minimum capacity, index-range
-containment, long shared-prefix paths, in-place re-insert, and a
-`Dict<text, i64>`-vs-array-oracle cross-check — the precise comparison the
-pre-fix code failed).
-
-- After: `Results: 10 total, 10 passed, 0 failed`
-- Ablation (return the neighbour slot's value, i.e. the original
-  wrong-index signature): `Results: 10 total, 2 passed, 8 failed` — both
-  groups detect it, so the specs are not vacuous.
+Audit: [source attribution and execution limits](../../09_report/bootstrap_stage3_placeholder_nil_source_audit_2026-09-22.md).
 
 ## Reproduction authority
 
@@ -110,7 +49,7 @@ runtime error: field access on nil receiver
 The third result reached the mandatory verify/fix cap. Do not repeat the same
 Stage 2/3 commands unchanged.
 
-## Required next investigation
+## Historical next investigation (superseded by the confirmed fix below)
 
 Instrument the bootstrap-only `parse_all_impl` placeholder population and
 `module_surfaces_from_modules` handoff with the source module name, canonical

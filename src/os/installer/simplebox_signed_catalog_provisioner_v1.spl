@@ -12,6 +12,7 @@ use std.common.contracts.execution.simpleos_executable_v1.{
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    decode_simple_artifact_manifest_v1_signing_bytes,
     encode_simple_artifact_manifest_v1_signing_bytes
 }
 use std.common.structural.wire.{
@@ -246,6 +247,43 @@ pub fn simplebox_signed_catalog_record_decode_v1(
     val canonical = simplebox_signed_catalog_record_encode_v1(candidate)
     if not canonical.? or canonical.unwrap() != external_record_bytes: return nil
     Some(candidate)
+
+pub fn simplebox_signed_catalog_manifest_projection_v1(
+    external_record_bytes: [u8],
+) -> SimpleArtifactManifest?:
+    """Recover the exact typed SAM1 projection carried by canonical SCR1.
+
+    This grants no trust. It exists so an external-media consumer need not
+    accept a second caller-authored manifest object beside the SCR1 bytes.
+    """
+    if external_record_bytes.len() == 0 or
+        external_record_bytes.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        not wire_check_envelope(
+            external_record_bytes, 0, wire_magic("SCR1"), 1):
+        return nil
+    var reader = _Scr1ReaderV1(
+        data: external_record_bytes, offset: wire_envelope_len(), ok: true)
+    _ = reader.read_text(4096)
+    val alias_count = reader.read_u32()
+    if not reader.ok or alias_count < 0 or alias_count > 64: return nil
+    var alias_index: i64 = 0
+    while alias_index < alias_count:
+        _ = reader.read_text(4096)
+        alias_index = alias_index + 1
+    _ = reader.read_text(64)
+    _ = reader.read_text(64)
+    val detached_signature = reader.read_text(512)
+    _ = reader.read_text(64)
+    val encoded_sam1 = reader.read_bytes(131072)
+    if not reader.ok or reader.offset != external_record_bytes.len(): return nil
+    val projection = decode_simple_artifact_manifest_v1_signing_bytes(
+        encoded_sam1, detached_signature)
+    if not projection.?: return nil
+    val manifest = projection.unwrap().manifest
+    if not simplebox_signed_catalog_record_decode_v1(
+        external_record_bytes, manifest).?:
+        return nil
+    Some(manifest)
 
 pub fn simplebox_signed_catalog_candidate_plan_v1(
     target: ManifestTarget,

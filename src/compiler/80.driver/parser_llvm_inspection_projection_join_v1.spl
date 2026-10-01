@@ -1,0 +1,182 @@
+# Strict data-only join for independently decoded LLVM readobj and objdump
+# projections. It establishes cross-stream coherence, not tool or execution
+# authority, and deliberately leaves ISA feature classification to a decoder
+# that can prove it from instruction bytes and operands.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.driver.parser_llvm_readobj_codec_v1.*
+use compiler.driver.parser_llvm_readobj_relocation_codec_v1.*
+use compiler.driver.parser_llvm_readobj_group_codec_v1.*
+use compiler.driver.parser_llvm_objdump_codec_v1.*
+use compiler.driver.parser_external_inspection_contract_v1.{
+    ParserInspectionSectionV1, ParserInspectionRelocationV1,
+    ParserInspectionInstructionV1}
+
+pub enum ParserLlvmInspectionJoinErrorV1:
+    SchemaMismatch
+    SectionMismatch
+    RelocationMismatch
+    GroupMismatch
+    InstructionMismatch
+
+pub struct ParserLlvmInspectionDataV1:
+    known_section_indices: [i64]
+    executable_sections: [ParserInspectionSectionV1]
+    executable_relocations: [ParserInspectionRelocationV1]
+    instructions: [ParserInspectionInstructionV1]
+    group_digest: text
+    projection_digest: text
+
+fn _has_index_lij(values: [i64], wanted: i64) -> bool:
+    for value in values:
+        if value == wanted: return true
+    false
+
+fn _same_indices_lij(left: [i64], right: [i64]) -> bool:
+    if left.len() != right.len(): return false
+    for i in 0..left.len():
+        if left[i] != right[i]: return false
+    true
+
+fn _digest_shape_lij(value: text) -> bool:
+    if value.len() != 64: return false
+    for i in 0..value.len():
+        val c = value.char_at(i)
+        if not ((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f')): return false
+    true
+
+fn _exec_section_lij(sections: [ParserLlvmReadobjSectionV1], index: i64
+) -> ParserLlvmReadobjSectionV1?:
+    for section in sections:
+        if section.section_index == index and section.executable: return section
+    nil
+
+pub fn parser_llvm_inspection_join_v1(readobj: ParserLlvmReadobjProjectionV1,
+    relocations: ParserLlvmRelocationProjectionV1,
+    groups: ParserLlvmGroupProjectionV1,
+    objdump: ParserLlvmObjdumpProjectionV1
+) -> Result<ParserLlvmInspectionDataV1, ParserLlvmInspectionJoinErrorV1>:
+    if (readobj.format != "elf64-x86-64" or readobj.architecture != "x86_64" or
+        readobj.address_size != "64bit" or readobj.object_type != "Relocatable" or
+        readobj.machine != "Advanced Micro Devices X86-64"):
+        return Err(ParserLlvmInspectionJoinErrorV1.SchemaMismatch)
+    if relocations.known_section_indices.len() != readobj.sections.len():
+        return Err(ParserLlvmInspectionJoinErrorV1.SectionMismatch)
+    var known: [i64] = []
+    var executable: [ParserInspectionSectionV1] = []
+    for position in 0..readobj.sections.len():
+        val section = readobj.sections[position]
+        if section.section_index != position or relocations.known_section_indices[position] != position:
+            return Err(ParserLlvmInspectionJoinErrorV1.SectionMismatch)
+        known.push(position)
+        if section.executable:
+            if section.byte_count <= 0 or not _digest_shape_lij(section.section_data_digest):
+                return Err(ParserLlvmInspectionJoinErrorV1.SectionMismatch)
+            executable.push(ParserInspectionSectionV1(section_index: position,
+                name: section.name, file_offset: section.file_offset,
+                byte_count: section.byte_count, byte_digest: section.section_data_digest))
+    if executable.len() != readobj.executable_section_count or
+       executable.len() != objdump.executable_section_count:
+        return Err(ParserLlvmInspectionJoinErrorV1.SectionMismatch)
+
+    var group_rows: [text] = []
+    var derived_grouped_exec: [i64] = []
+    var prior_group_index = -1
+    for group in groups.groups:
+        if (group.group_section_index <= prior_group_index or
+            not _has_index_lij(known, group.group_section_index) or
+            not _has_index_lij(known, group.symbol_table_section_index) or
+            group.signature == "" or group.member_section_indices.len() == 0):
+            return Err(ParserLlvmInspectionJoinErrorV1.GroupMismatch)
+        var members: [text] = []
+        var seen_members: [i64] = []
+        for member in group.member_section_indices:
+            if not _has_index_lij(known, member) or _has_index_lij(seen_members, member):
+                return Err(ParserLlvmInspectionJoinErrorV1.GroupMismatch)
+            seen_members.push(member)
+            if _exec_section_lij(readobj.sections, member).is_some():
+                if _has_index_lij(derived_grouped_exec, member):
+                    return Err(ParserLlvmInspectionJoinErrorV1.GroupMismatch)
+                derived_grouped_exec.push(member)
+            members.push(member.to_text())
+        group_rows.push(group.group_section_index.to_text() + ":" +
+            group.symbol_table_section_index.to_text() + ":" +
+            group.signature_symbol_index.to_text() + ":" + group.signature.len().to_text() +
+            ":" + group.signature + ":" + group.comdat.to_text() + ":" + members.join(","))
+        prior_group_index = group.group_section_index
+    if not _same_indices_lij(derived_grouped_exec, groups.grouped_executable_section_indices):
+        return Err(ParserLlvmInspectionJoinErrorV1.GroupMismatch)
+    val group_digest = sha256_text("simple/parser-llvm-groups/v1\n" + group_rows.join("\n"))
+
+    var normalized_relocations: [ParserInspectionRelocationV1] = []
+    for relocation in relocations.relocations:
+        if (not _has_index_lij(known, relocation.relocation_section_index) or
+            not _has_index_lij(known, relocation.patched_section_index) or
+            (relocation.symbol_section_index >= 0 and
+             not _has_index_lij(known, relocation.symbol_section_index))):
+            return Err(ParserLlvmInspectionJoinErrorV1.RelocationMismatch)
+        val source = _exec_section_lij(readobj.sections, relocation.patched_section_index)
+        if source.is_some():
+            if relocation.section_offset < 0 or relocation.section_offset >= source.unwrap().byte_count:
+                return Err(ParserLlvmInspectionJoinErrorV1.RelocationMismatch)
+            val symbol_identity = relocation.symbol_index.to_text() + ":" +
+                relocation.symbol_name.len().to_text() + ":" + relocation.symbol_name
+            normalized_relocations.push(ParserInspectionRelocationV1(
+                section_index: relocation.patched_section_index,
+                section_offset: relocation.section_offset,
+                relocation_type: relocation.relocation_type,
+                symbol_identity: symbol_identity,
+                target_section_index: relocation.symbol_section_index))
+
+    var normalized_instructions: [ParserInspectionInstructionV1] = []
+    if objdump.instruction_count != objdump.instructions.len():
+        return Err(ParserLlvmInspectionJoinErrorV1.InstructionMismatch)
+    var expected_section_position = 0
+    var expected_offset = 0
+    for instruction in objdump.instructions:
+        val section = _exec_section_lij(readobj.sections, instruction.section_index)
+        if (section.is_none() or section.unwrap().name != instruction.section_name or
+            instruction.section_offset < 0 or
+            instruction.bytes.len() > section.unwrap().byte_count - instruction.section_offset or
+            instruction.byte_digest != sha256_u8_hex(instruction.bytes) or
+            not instruction.recognized):
+            return Err(ParserLlvmInspectionJoinErrorV1.InstructionMismatch)
+        while expected_section_position < executable.len() and
+              executable[expected_section_position].section_index < instruction.section_index:
+            if expected_offset != executable[expected_section_position].byte_count:
+                return Err(ParserLlvmInspectionJoinErrorV1.InstructionMismatch)
+            expected_section_position = expected_section_position + 1
+            expected_offset = 0
+        if (expected_section_position >= executable.len() or
+            instruction.section_index != executable[expected_section_position].section_index or
+            instruction.section_offset != expected_offset):
+            return Err(ParserLlvmInspectionJoinErrorV1.InstructionMismatch)
+        expected_offset = expected_offset + instruction.bytes.len()
+        normalized_instructions.push(ParserInspectionInstructionV1(
+            section_index: instruction.section_index,
+            section_offset: instruction.section_offset,
+            byte_count: instruction.bytes.len(), byte_digest: instruction.byte_digest,
+            opcode_identity: instruction.opcode_identity, required_feature: "",
+            recognized: instruction.recognized))
+    while expected_section_position < executable.len():
+        if expected_offset != executable[expected_section_position].byte_count:
+            return Err(ParserLlvmInspectionJoinErrorV1.InstructionMismatch)
+        expected_section_position = expected_section_position + 1
+        expected_offset = 0
+
+    var rows: [text] = [readobj.file_label, group_digest]
+    for section in executable:
+        rows.push("S:" + section.section_index.to_text() + ":" + section.name + ":" +
+            section.file_offset.to_text() + ":" + section.byte_count.to_text() + ":" +
+            section.byte_digest)
+    for relocation in normalized_relocations:
+        rows.push("R:" + relocation.section_index.to_text() + ":" +
+            relocation.section_offset.to_text() + ":" + relocation.relocation_type + ":" +
+            relocation.symbol_identity + ":" + relocation.target_section_index.to_text())
+    for instruction in normalized_instructions:
+        rows.push("I:" + instruction.section_index.to_text() + ":" +
+            instruction.section_offset.to_text() + ":" + instruction.byte_count.to_text() +
+            ":" + instruction.byte_digest + ":" + instruction.opcode_identity)
+    Ok(ParserLlvmInspectionDataV1(known_section_indices: known,
+        executable_sections: executable, executable_relocations: normalized_relocations,
+        instructions: normalized_instructions, group_digest: group_digest,
+        projection_digest: sha256_text("simple/parser-llvm-inspection-data/v1\n" + rows.join("\n"))))

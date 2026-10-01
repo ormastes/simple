@@ -1,13 +1,106 @@
 <!-- codex-design -->
 # Shared Multilingual GPU Fonts System Test Plan
 
+## Active scope override — SimpleOS fonts with Stage 2
+
+This is the active completion plan. It supersedes the broader cross-platform
+GPU plan below for the current delivery, while retaining that material as
+future work.
+
+### Goal
+
+Complete pinned multilingual font loading, shaping, Draw IR materialization,
+and visible SimpleOS desktop rendering using a provenance-recorded pure-Simple
+Stage 2 compiler plus standalone runner/docgen artifacts. Do not wait for a
+Stage 3/Stage 4 full CLI or unavailable non-SimpleOS GPU hosts.
+
+The resulting done mark is `SIMPLEOS_STAGE2_FONT: PASS`; it must not be
+presented as completion of the deferred cross-platform native-GPU matrix.
+
+### Active items and estimate
+
+| Item | Required result | Estimate |
+|---|---|---:|
+| Stage 2 runner | Build a fresh core-C capsule, link `font_evidence_runner`, and pass deliberate-red plus zero-example calibration | 1–2 h |
+| Font assets | Verify pinned bytes, licenses, notices, hashes, sizes, and SimpleOS image paths | 1–2 h |
+| Registered-only shaping | Shape the accepted Hindi, Arabic, and Urdu witnesses from registered bytes without host font ABI/filesystem access | 1–3 h |
+| SimpleOS material path | Preserve a handle-free glyph run through Draw IR and prepare a nonempty batch through the existing `FontRenderer` | 1–2 h |
+| QEMU proof | Boot the canonical desktop, verify guest font identity, retain an independent framebuffer crop, and correlate keyboard/pointer input with the rendered frame | 2–6 h |
+| Evidence handoff | Generate zero-stub manuals, record exact commands/hashes, review the scoped matrix, then commit/push | 1–2 h |
+
+Expected duration: 8–12 hours when the runner and QEMU paths are healthy;
+allow 1–2 days for bounded repair of runner-link or guest-boot failures.
+
+### Focused executable set
+
+Run only this scoped set:
+
+- `test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl`
+- `test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl`
+- `test/01_unit/lib/skia/selected_devanagari_spec.spl`
+- `test/01_unit/lib/skia/selected_arabic_spec.spl`
+- `test/01_unit/os/port/simpleos_font_bundle_spec.spl`
+- `test/02_integration/os/port/simpleos_font_asset_staging_spec.spl`
+- `test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl`
+- `test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl`
+- `test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl`
+- `test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl`
+
+### Execution order
+
+1. Record the Stage 2 binary path/SHA-256 and build a core-C capsule containing
+   every runner symbol, including `rt_file_create_excl`.
+2. Build the standalone `src/app/test/font_evidence_runner.spl`; require the
+   deliberate-red and zero-example fixtures to exit 1 with their exact markers.
+3. Run the manifest, shaping, and asset-staging specs with nonzero examples and
+   zero failures.
+4. Build the SimpleOS image with the exact pinned font bytes and notices.
+5. Boot the canonical SimpleOS desktop and retain guest path/length/hash,
+   registered-only shaping, Draw IR/batch identity, QMP framebuffer crop, and
+   input/frame correlation evidence.
+6. Generate the ten scoped manuals with the standalone Stage 2 docgen and
+   require `0 stubs`.
+7. Record `SIMPLEOS_STAGE2_FONT: PASS` only after independent review of all
+   scoped evidence.
+
+### Non-blocking warnings and deferred work
+
+The following do not block this scoped goal:
+
+- docgen length, prose, capitalization, metadata, or other presentation
+  warnings when the manual has `0 stubs` and exposes the required steps and
+  evidence;
+- unrelated compiler warnings or cleanup that does not affect the Stage 2
+  runner, selected font bytes, SimpleOS build, or QEMU execution;
+- Stage 3/Stage 4 full-CLI admission;
+- Web/hosted desktop, Engine3D, CUDA, ROCm/HIP, Metal, DirectX, and
+  cross-platform native-GPU promotion;
+- the deferred cross-platform performance NFR matrix.
+
+Crashes, timeouts, zero executed examples, missing font bytes, hash/length
+mismatch, host-font access after registered-only mode, an empty glyph batch,
+missing QEMU pixels, or an uncorrelated input/frame receipt remain blocking.
+Software or source-only evidence cannot replace the SimpleOS QEMU framebuffer
+oracle.
+
+### Scoped pass criteria
+
+Pass requires all ten focused specs to execute with real assertions, the runner
+calibration to fail exactly as designed, guest font identity to match the
+pinned manifest, accepted Hindi/Arabic/Urdu shaping to produce nonempty
+handle-free material, the canonical SimpleOS desktop to render those pixels,
+the independent crop and input/frame receipts to agree, and all ten manuals to
+report `0 stubs`.
+
+Everything below this section is deferred reference for the original
+cross-platform GPU goal and is not part of `SIMPLEOS_STAGE2_FONT: PASS`.
+
 ## Scope
 
-Twelve executable/manual pairs comprise seven system SSpecs for manifest/assets,
+Eleven executable/manual pairs comprise seven system SSpecs for manifest/assets,
 exact-face shaping, shared 2D/3D batch, Web/GUI/WM routing, portable emission,
-generated CUDA handoff, and native graphics readback, plus five focused unit
-gates for runtime configuration, selected Arabic/Devanagari faces, and release
-asset layout. Among the
+generated CUDA handoff, and native graphics readback, plus four focused unit
+gates for selected Arabic/Devanagari faces and release asset layout. Among the
 system SSpecs, the first five exercise host-available contracts; the sixth is a
 focused conditional CUDA gate, and the seventh is a fail-closed promotion gate
 whose three independent live evidence rows remain unavailable.
@@ -39,13 +132,12 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
 
-Focused unit gates (execution pending; per-row manual status):
+Focused exact-face unit gates (execution pending; per-row manual status):
 
 | Executable SSpec | Generated manual |
 |---|---|
 | `test/01_unit/lib/skia/selected_devanagari_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md` |
 | `test/01_unit/lib/skia/selected_arabic_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_arabic_spec.md` |
-| `test/01_unit/lib/common/text_layout/font_render_config_spec.spl` | `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md` (manual draft; canonical generation pending) |
 | `test/01_unit/app/release/install_font_assets_spec.spl` | `doc/06_spec/01_unit/app/release/install_font_assets_spec.md` (manual draft; canonical generation pending) |
 | `test/01_unit/app/release/release_archive_layout_spec.spl` | `doc/06_spec/01_unit/app/release/release_archive_layout_spec.md` (manual draft; canonical generation pending) |
 
@@ -61,7 +153,7 @@ Visible primary steps:
 
 - `step("Load the pinned multilingual font manifest")`
 - `step("Accept exact-face-bound simple-script shaping")`
-- `step("Prepare one shared font batch for 2D and 3D")`
+- `step("Prepare one shared font batch for 2D")`
 - `step("Emit the selected font composite program and plan compilation")`
 - `step("Prove native submission and device readback")`
 
@@ -114,27 +206,7 @@ Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
 assert their named oracle; any pending helper fails explicitly. New assertions
 use built-in matchers only.
 
-### Frozen module-boundary vocabulary
-
-Surface-verification agents reuse these exact steps:
-
-- `step("Trace the production font and event boundary")`
-- `step("Submit the boundary output to its canonical consumer")`
-- `step("Correlate visible pixels and input with one frame identity")`
-- `step("Reject disconnected stale or replayed evidence")`
-
-Shared checker names are `expect_production_boundary_identity`,
-`expect_canonical_consumer_submission`, `expect_correlated_frame_evidence`, and
-`expect_disconnected_evidence_rejected`. Existing lane-local helpers may
-implement them; no new shared abstraction is required. A temporary checker
-must call `fail(...)` or `assert(false)` and therefore cannot produce PASS.
-
-Each lane records producer, consumer, carried identity, positive visible/event
-oracle, negative disconnect/replay oracle, executable spec, manual, and runtime
-status. Source wiring checks supplement but never replace current pure-Simple
-execution and independent pixel/event evidence.
-
-REQ-015 reuses `step("Prepare one shared font batch for 2D and 3D")` and
+REQ-015 reuses `step("Prepare one shared font batch for 2D")` and
 `expect_shared_font_batch`. The checker exercises
 `prepare_text_configured`, `prepare_text_with_advances_configured`,
 `prepare_glyph_run_configured`, and `prepare_selected_glyph_run_configured`
@@ -160,7 +232,7 @@ behavior.
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; canonical SimpleOS pixels | canonical-owner dependency exclusion, canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, pinned cross-verified pixel hash, and wrapper/kernel/FAT32 hash recomputation are source-covered; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | twelve executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 12/12 manual files are present and preserve module scope prose, but the new configuration manual and two release manuals still await canonical generation and their executable specs remain unadmitted, so 0/12 pairs are accepted |
+| REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 11/11 canonical manuals now regenerate with zero stubs and preserve module scope prose, but their executable specs remain unadmitted, so 0/11 pairs are accepted |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; the reduced 2D spec links and the mutex receiver fault is fixed, but all three cycles still exit 132 before results |
 
 | NFR | Evidence | Pass condition | Current evidence |
@@ -210,11 +282,10 @@ collector produces a passing durable record.
 
 ## Environment and order
 
-Use the self-hosted release binary. Run the twelve specs in this order: manifest,
+Use the self-hosted release binary. Run the eleven specs in this order: manifest,
 shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA generated
 handoff, native readback, `selected_devanagari_spec.spl`,
-`selected_arabic_spec.spl`, `font_render_config_spec.spl`,
-`install_font_assets_spec.spl`, and
+`selected_arabic_spec.spl`, `install_font_assets_spec.spl`, and
 `release_archive_layout_spec.spl`. Native specs require a declared promoted
 graphics backend/driver; other backends may provide compile-only rows. Pin
 fixtures, viewport, premultiplication, rounding, warmups, samples, and percentile
@@ -261,7 +332,7 @@ compatibility bitmap renderers as supporting evidence rather than PASS.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, twelve zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, eleven zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or
@@ -273,28 +344,3 @@ frame owner must execute the canonical composition, platform backends must only
 present final pixels, and the SimpleOS row must retain the independent QEMU
 framebuffer crop. No private renderer, font loader, atlas, or cache may be added
 to close the evidence gap.
-
-## REQ-011 production-surface verification — 2026-07-24
-
-The focused campaign keeps six independent fail-closed rows:
-
-1. Engine2D `cpu_simd` and Vulkan selected-font draw with absolute glyph pixels,
-   CPU oracle, and exact readback provenance.
-2. HTML/WebIR layout identity and ordered advances in the exact submitted Draw
-   IR frame, correlated with focus, keyboard, pointer, timing, and animation.
-3. GUI widget-tree text/style/bounds in the exact submitted Draw IR frame,
-   correlated with focus, keyboard, and pointer delivery.
-4. Hosted `SharedWmScene -> DrawIrComposition -> Engine2D` live glyph capture,
-   correlated with focus, move/maximize/restore, keyboard, pointer, WM state,
-   and frame generation.
-5. Canonical SimpleOS desktop boot with guest font path/length/hash, guest glyph
-   marker, independent QMP `pmemsave` crop, and injected input correlated with
-   IRQ, WM state, and frame generation.
-6. Canonical RV64 SimpleOS desktop boot with a guest-reported pinned font
-   path/length/hash, an RV64-only QMP crop, and VirtIO keyboard/pointer input
-   correlated with guest WM state and frame generation.
-
-An unavailable Vulkan device or an unbootable QEMU image remains an explicit
-failed/unavailable row. Software fallback, a compatibility renderer, serial
-markers without pixels, or pixels without correlated events cannot satisfy the
-row.

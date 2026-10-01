@@ -1,4 +1,9 @@
 # BUG: GRUB-EFI multiboot1 faults loading the oversized merged ring-3 kernel
+## Closed 2026-09-16 — ...erged ring-3 kernel **Status:** RESOLVED 2026-07-11 — merged ring-3 kernel now boots under
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-07-11 — merged ring-3 kernel now boots under OVMF to
 `[sshd] accept loop start` and completes the `ssh root@127.0.0.1 /FSEXEC.ELF`
@@ -55,3 +60,4 @@ OVMF proxies UEFI firmware but not hardware: real NIC driver (Intel/Realtek vs
 virtio-net), real NVMe controller quirks vs QEMU's model, ACPI + framebuffer
 (GRUB reports "no suitable video mode found"), and booting off a real GPT/ESP
 USB stick rather than QEMU VVFAT.
+

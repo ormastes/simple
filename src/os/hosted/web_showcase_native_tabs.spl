@@ -1,0 +1,104 @@
+# Explicit native showcase behavior. This does not emulate JavaScript APIs.
+# Semantic target IDs come from HostedWebContentSession's live DOM hit routes.
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_attr, be_dom_node_for_route}
+use std.gc_async_mut.gpu.browser_engine.web_showcase_tabs.{
+    WebShowcaseState, web_showcase_state, web_showcase_focus_key,
+    web_showcase_activate_focused, web_showcase_activate_pointer}
+
+pub fn web_showcase_native_target_index(state: WebShowcaseState, target_id: text) -> i32:
+    var i = 0
+    while i < state.tabs.len():
+        if target_id == "tab-" + state.tabs[i].id:
+            return i
+        i = i + 1
+    -1
+
+pub fn web_showcase_native_publish(
+    session: HostedWebContentSession, state: WebShowcaseState
+) -> Result<bool, text>:
+    if (state.tabs.len() != 7 or state.focused_index < 0 or
+        state.focused_index >= state.tabs.len() or state.selected_index < 0 or
+        state.selected_index >= state.tabs.len()):
+        return Err("invalid-showcase-tab-state")
+    val index = match session.browser.current_dom_identity_index():
+        Some(value): value
+        nil: return Err("invalid_document")
+    var updates: [BrowserDomPresentationAttribute] = []
+    var i = 0
+    while i < state.tabs.len():
+        val tab = state.tabs[i]
+        val tab_route = match index.route_for_author_id("tab-" + tab.id):
+            Some(route): route
+            nil: return Err("missing-showcase-tab")
+        val panel_route = match index.route_for_author_id("panel-" + tab.id):
+            Some(route): route
+            nil: return Err("missing-showcase-panel")
+        val tab_node = match be_dom_node_for_route(session.browser.dom_root(), index, tab_route):
+            Some(node): node
+            nil: return Err("stale_target")
+        val panel_node = match be_dom_node_for_route(session.browser.dom_root(), index, panel_route):
+            Some(node): node
+            nil: return Err("stale_target")
+        if (be_dom_get_attr(tab_node, "role") != "tab" or
+            be_dom_get_attr(tab_node, "aria-controls") != "panel-" + tab.id or
+            be_dom_get_attr(panel_node, "role") != "tabpanel"):
+            return Err("invalid-showcase-tab-binding")
+        updates.push(BrowserDomPresentationAttribute(
+            route: tab_route, name: "aria-selected",
+            value: Some(if i == state.selected_index: "true" else: "false")))
+        updates.push(BrowserDomPresentationAttribute(
+            route: tab_route, name: "tabindex",
+            value: Some(if i == state.focused_index: "0" else: "-1")))
+        val hidden: text? = if i == state.selected_index: nil else: Some("hidden")
+        updates.push(BrowserDomPresentationAttribute(
+            route: panel_route, name: "hidden", value: hidden))
+        i = i + 1
+    val committed = session.browser.apply_dom_presentation_attributes(updates)?
+    val focused_id = "tab-" + state.tabs[state.focused_index].id
+    val focus_route = match index.route_for_author_id(focused_id):
+        Some(route): route
+        nil: return Err("missing-showcase-tab")
+    val _ = session.browser.dispatch_dom_event_route(focus_route, "focus", false, false)?
+    session.render_session.document_revision = -1
+    session.published_body_html = session.browser.current_style_html + session.browser.current_body_html
+    session.mutation_revision = session.mutation_revision + 1
+    Ok(committed)
+
+pub fn web_showcase_native_pointer(
+    session: HostedWebContentSession, state: WebShowcaseState,
+    target_id: text, activated: bool
+) -> Result<WebShowcaseState, text>:
+    val index = web_showcase_native_target_index(state, target_id)
+    if not activated or index < 0:
+        return Ok(state)
+    val next = web_showcase_activate_pointer(state, index)
+    val _ = web_showcase_native_publish(session, next)?
+    Ok(next)
+
+pub fn web_showcase_native_key(
+    session: HostedWebContentSession, state: WebShowcaseState,
+    target_id: text, keycode: i64, pressed: bool
+) -> Result<WebShowcaseState, text>:
+    val index = web_showcase_native_target_index(state, target_id)
+    if not pressed or index < 0:
+        return Ok(state)
+    val key = if keycode == 39: "ArrowRight"
+        elif keycode == 37: "ArrowLeft"
+        elif keycode == 36: "Home"
+        elif keycode == 35: "End"
+        elif keycode == 13: "Enter"
+        elif keycode == 32: "Space"
+        else: ""
+    if key == "":
+        return Ok(state)
+    val focused = WebShowcaseState(
+        tabs: state.tabs, focused_index: index, selected_index: state.selected_index)
+    val next = if key == "Enter" or key == "Space":
+        web_showcase_activate_focused(focused, key)
+    else:
+        web_showcase_focus_key(focused, key)
+    val _ = web_showcase_native_publish(session, next)?
+    Ok(next)

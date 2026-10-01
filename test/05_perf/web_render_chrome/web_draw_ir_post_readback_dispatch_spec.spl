@@ -1,0 +1,194 @@
+"""
+## Purpose and audience
+
+Purpose: rendering the same page repeatedly in ONE process must keep returning a
+full frame. Before 2026-09-11 the SECOND render returned an EMPTY buffer and
+every render after it was permanently demoted to the CPU, because one refused
+`vulkan_sffi_bind_pipeline` quarantined a command buffer the driver would not
+discard, which pinned `vulkan_sffi_reap_dependency_quarantine()` at false for the
+life of the process and shut the dispatch gate for EVERY Vulkan Engine2D --
+including freshly created ones. Audience: engineers changing the Vulkan Engine2D
+batch/quarantine paths.
+
+## Operator workflow
+
+1. Run `bin/simple test test/05_perf/web_render_chrome/web_draw_ir_post_readback_dispatch_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Needs a real Vulkan device. Every scenario SKIPS (asserting nothing) when the
+web lane does not resolve to the Vulkan backend, so the spec is inert on hosts
+without one rather than falsely green -- the guard is checked and reported in
+each scenario.
+
+Measured on Apple M4 / MoltenVK: before the fix this page rendered
+`684000, 0, 684000(CPU), ...`; after it, 684000 on every frame.
+
+This spec deliberately drives the REAL web route rather than the Engine2D API.
+An API-level reproduction was written first and does NOT reproduce the defect
+(five primitive classes, all green -- see
+build/perf/pixel_mismatch_2026-09-11/probe_bisect.spl).
+
+## KNOWN WEAKNESS -- read before trusting a green run here
+
+**This spec is NOT yet proven to discriminate the fix it was written for, and a
+green run is therefore not evidence that the fix is present.** Measured
+2026-09-11 with the `dispatched = 0` downgrade in
+`_dispatch_framebuffer_checked` deliberately sabotaged to a no-op:
+
+- `build/perf/pixel_mismatch_2026-09-11/probe_frames8.spl`, run via
+  `simple run`, reproduced the defect exactly -- `684000, 0, 684000, 0, ...`;
+- this spec, same binary, same env, same page, same render call, stayed
+  **6 examples, 0 failures**, and a diagnostic print confirmed it really did
+  render six full 684000-pixel frames rather than skipping.
+
+So something about the spec-runner process -- not a vacuous guard, which was
+ruled out by that print -- prevents the failing path from being reached. Until
+that is understood, the discriminating evidence for the fix is the probe, not
+this spec. What this spec does pin honestly: the route returns full, stable,
+self-consistent frames across repeated renders and across readback -> dispatch
+cycles, which is a real invariant worth keeping.
+
+Known gap: the frame that takes the failed dispatch is correctly demoted to the
+CPU fallback and returns a FULL-LENGTH buffer, but is not rendered on the device.
+Asserting `source=device_readback` for it would require fixing the underlying
+`bind_pipeline` refusal, which is below the Simple boundary. See
+doc/08_tracking/bug/vulkan_post_readback_dispatch_fails_latches_cpu_fallback_2026-09-11.md.
+"""
+
+# @tag: web, draw-ir, gpu, vulkan, device, regression
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name_with_reason}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.io_runtime.{read_file}
+
+val PAGE_W = 900
+val PAGE_H = 760
+val PAGE_PIXELS = 684000
+
+fn _vulkan_lane_available() -> bool:
+    val resolved = simple_web_resolved_engine2d_backend_name_with_reason(
+        PAGE_W, PAGE_H, "vulkan")
+    resolved.0 == "vulkan"
+
+fn _sanity_html() -> text:
+    read_file("examples/06_io/ui/sample_web_renderer_sanity.html") ?? ""
+
+describe("web Draw IR survives a readback -> dispatch cycle on a real device"):
+
+    context("reproduce: the page renders repeatedly in one process"):
+
+        it("returns a full frame on every one of six renders"):
+            # THE regression oracle. Before the fix the SECOND render returned 0
+            # pixels and the route never touched the device again; the count is
+            # absolute, not a tolerance.
+            #
+            # The lane guard is the FIRST RENDER ITSELF, deliberately, and this
+            # scenario must not call the backend resolver: resolving parks a
+            # warm engine in the slot pool, and with that engine reused for
+            # every render no teardown happens, no command-buffer handle is
+            # recycled, and the defect does not occur at all. A guard that
+            # suppresses the bug it guards is worse than no guard -- measured
+            # 2026-09-11, an earlier draft of this spec stayed GREEN with the
+            # fix sabotaged for exactly that reason. Render 1 succeeds even on
+            # the broken build, so using it as the liveness probe is safe.
+            val html = _sanity_html()
+            expect(html.len() > 0).to_equal(true)
+            val first = simple_web_render_html_to_pixels_with_engine2d_backend(
+                html, PAGE_W, PAGE_H, "vulkan")
+            expect(first.len()).to_equal(PAGE_PIXELS)
+            var frame = 2
+            while frame <= 6:
+                val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(
+                    html, PAGE_W, PAGE_H, "vulkan")
+                expect(pixels.len()).to_equal(PAGE_PIXELS)
+                frame = frame + 1
+
+        it("renders the same page to the same pixels across renders"):
+            # Full length alone would admit a frame of garbage. Pin fixed points
+            # and require the repeated render to agree with the first. Same
+            # no-resolver rule as above.
+            val html = _sanity_html()
+            val first = simple_web_render_html_to_pixels_with_engine2d_backend(
+                html, PAGE_W, PAGE_H, "vulkan")
+            if first.len() == 0:
+                expect(true).to_equal(true)
+                return
+            val second = simple_web_render_html_to_pixels_with_engine2d_backend(
+                html, PAGE_W, PAGE_H, "vulkan")
+            expect(first.len()).to_equal(PAGE_PIXELS)
+            expect(second.len()).to_equal(PAGE_PIXELS)
+            val probe = PAGE_W * 40 + 40
+            expect(second[probe]).to_equal(first[probe])
+            expect(second[0]).to_equal(first[0])
+            expect(second[PAGE_PIXELS - 1]).to_equal(first[PAGE_PIXELS - 1])
+
+    context("generalize: readback -> dispatch cycles across primitive classes"):
+
+        it("keeps an engine on the device across three rect cycles"):
+            if not _vulkan_lane_available():
+                expect(true).to_equal(true)
+                return
+            val e = Engine2D.create_with_backend_fast(PAGE_W, PAGE_H, "vulkan")
+            var cycle = 1
+            while cycle <= 3:
+                e.clear(0xFF102030u32)
+                e.draw_rect_filled(10, 10, 100, 80, 0xFFFF0000u32)
+                val rb = e.read_pixels_with_source()
+                expect(rb.pixels.len()).to_equal(PAGE_PIXELS)
+                expect(rb.source).to_equal("device_readback")
+                cycle = cycle + 1
+
+        it("keeps an engine usable across three clipped-rect cycles"):
+            if not _vulkan_lane_available():
+                expect(true).to_equal(true)
+                return
+            val e = Engine2D.create_with_backend_fast(PAGE_W, PAGE_H, "vulkan")
+            var cycle = 1
+            while cycle <= 3:
+                e.clear(0xFF102030u32)
+                e.set_clip(0, 0, 400, 300)
+                e.draw_rect_filled(10, 10, 100, 80, 0xFF00FF00u32)
+                e.clear_clip()
+                val rb = e.read_pixels_with_source()
+                expect(rb.pixels.len()).to_equal(PAGE_PIXELS)
+                cycle = cycle + 1
+
+        it("keeps an engine usable across three text cycles"):
+            if not _vulkan_lane_available():
+                expect(true).to_equal(true)
+                return
+            val e = Engine2D.create_with_backend_fast(PAGE_W, PAGE_H, "vulkan")
+            var cycle = 1
+            while cycle <= 3:
+                e.clear(0xFF102030u32)
+                e.draw_text(20, 40, "readback cycle", 0xFFFFFFFFu32, 16)
+                val rb = e.read_pixels_with_source()
+                expect(rb.pixels.len()).to_equal(PAGE_PIXELS)
+                cycle = cycle + 1
+
+        it("survives an engine torn down while a successor keeps rendering"):
+            # The shape that recycles a command-buffer handle between engines --
+            # the trigger for the refused bind_pipeline. The successor must keep
+            # producing full frames even if one of its dispatches is refused.
+            if not _vulkan_lane_available():
+                expect(true).to_equal(true)
+                return
+            val first = Engine2D.create_with_backend_fast(PAGE_W, PAGE_H, "vulkan")
+            first.clear(0xFF102030u32)
+            first.draw_rect_filled(10, 10, 100, 80, 0xFFFF0000u32)
+            expect(first.read_pixels_with_source().pixels.len()).to_equal(PAGE_PIXELS)
+            first.shutdown()
+            val second = Engine2D.create_with_backend_fast(PAGE_W, PAGE_H, "vulkan")
+            var cycle = 1
+            while cycle <= 3:
+                second.clear(0xFF203040u32)
+                second.draw_rect_filled(20, 20, 120, 90, 0xFF00FF00u32)
+                expect(second.read_pixels_with_source().pixels.len()).to_equal(PAGE_PIXELS)
+                cycle = cycle + 1

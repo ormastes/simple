@@ -21,6 +21,7 @@ pub mod blocks;
 pub mod build_mode;
 pub mod codegen;
 pub mod compilability;
+pub mod decorator_apply;
 pub mod compilation_context;
 pub mod concurrent_providers;
 pub mod context_pack;
@@ -59,6 +60,7 @@ pub mod pattern_case_naming;
 pub mod mock;
 pub mod module_resolver;
 pub mod monomorphize;
+pub mod native_build_sffi;
 pub mod optimizations;
 pub mod parallel;
 pub mod pattern_analysis;
@@ -84,6 +86,8 @@ pub mod trait_coherence;
 pub mod type_check;
 pub mod type_inference_config;
 pub mod units;
+pub mod bounded_cache;
+pub mod display_path;
 pub mod perf_counters;
 pub mod value;
 pub mod value_bridge;
@@ -219,12 +223,17 @@ const LLVM_AND_CRANELIFT_NATIVE_BACKENDS: &[NativeCodegenBackend] =
 pub fn is_native_codegen_backend_available(backend: NativeCodegenBackend) -> bool {
     match backend {
         NativeCodegenBackend::Cranelift => true,
+        // This API describes the Rust seed's executable backends. The
+        // pure-Simple bootstrap compiler has a separate runtime LLVM loader,
+        // but a SIMPLE_LLVM_PATH value cannot add inkwell code that was not
+        // compiled into this binary.
         NativeCodegenBackend::Llvm => cfg!(feature = "llvm"),
     }
 }
 
 pub fn default_native_codegen_backend() -> NativeCodegenBackend {
-    if is_native_codegen_backend_available(NativeCodegenBackend::Llvm) {
+    // The seed can only default to a backend compiled into this binary.
+    if cfg!(feature = "llvm") {
         NativeCodegenBackend::Llvm
     } else {
         NativeCodegenBackend::Cranelift

@@ -1,0 +1,143 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.admission.*
+use std.nogc_sync_mut.composition.environment_variants.policy.*
+
+fn digest(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn snapshot_v1() -> EnvironmentSnapshotV1:
+    val features = EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))
+    EnvironmentSnapshotV1(
+        descriptor_size: 232u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: ENV_ARCH_X86_64_V1,
+        os_id: 1u32, abi_id: 1u32, object_format_id: 1u32,
+        endian_id: 1u16, pointer_width_bits: 64u16,
+        snapshot_identity: digest(1u64), snapshot_generation: 1u64,
+        execution_domain_identity: digest(2u64),
+        hardware_features: features, os_usable_features: features,
+        policy_allowed_features: features, vector_state_mode: ENV_VECTOR_FIXED_V1,
+        vector_length_bits: 256u32, loader_permission_bits: 3u64,
+        allowed_effect_bits: 3u64, numerical_contract_id: 1u32,
+        resource_layout_digest: digest(17u64),
+        gpu_devices: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+
+fn descriptor_v1(identity: u64, required_offset: u32) -> VariantDescriptorV1:
+    val one = EnvironmentArenaRangeV1(offset: required_offset, count: 1u32)
+    val empty = EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_STATIC_V1, provider_identity: digest(10u64),
+        variant_identity: digest(identity), contract_identity: digest(11u64),
+        contract_major: 1u16, contract_minor: 0u16, abi_digest: digest(12u64),
+        semantic_identity: digest(13u64), grammar_identity: digest(14u64),
+        program_identity: digest(15u64), artifact_digest: digest(16u64),
+        artifact_location: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32,
+        required_object_format_id: 1u32, required_endian_id: 1u16,
+        required_pointer_width_bits: 64u16, required_loader_permission_bits: 1u64,
+        required_cpu_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1, words: one),
+        required_os_state_words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        required_vector_state_mode: ENV_VECTOR_FIXED_V1, required_vector_length_bits: 256u32,
+        required_device_api: 0u32, minimum_device_api_version: 0u32,
+        required_device_features: empty,
+        required_memory_domain_bits: 0u64, required_effect_bits: 0u64,
+        minimum_device_buffer_bytes: 0u64, minimum_workgroup_invocations: 0u32,
+        minimum_queue_family_count: 0u32,
+        numerical_contract_id: 1u32, resource_layout_digest: digest(17u64),
+        dependencies: empty, assurance_receipt_digest: digest(18u64),
+        startup_budget_us: 10u64, max_session_bytes: 4096u64,
+        max_inflight_operations: 4u32)
+
+fn ceiling_v1() -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))
+
+describe "Environment variant admission V1":
+    it "checks eligibility before preference ranking":
+        val snapshot = snapshot_v1()
+        val preferred_but_ineligible = descriptor_v1(2u64, 3u32)
+        val scalar = descriptor_v1(3u64, 0u32)
+        val features = [1u64, 1u64, 1u64, 8u64]
+        expect(variant_eligibility_reason_v1(
+            snapshot, preferred_but_ineligible, features, [], []))
+            .to_equal(ENV_ADMISSION_CPU_FEATURES_MISSING_V1)
+        expect(variant_select_index_v1(
+            snapshot, [preferred_but_ineligible, scalar], features, [], [],
+            ENV_POLICY_PREFER_V1, digest(2u64), 0u16, 0u64, 0u16,
+            ceiling_v1())).to_equal(1)
+
+    it "records bounded deterministic rejection reasons":
+        val snapshot = snapshot_v1()
+        val bad = descriptor_v1(4u64, 3u32)
+        val rejected = variant_collect_rejections_v1(
+            snapshot, [bad], [1u64, 1u64, 1u64, 8u64], [], [],
+            ENV_POLICY_PREFER_V1, digest(4u64), 0u16, 0u64, 0u16,
+            ceiling_v1())
+        expect(rejected.len()).to_equal(1)
+        expect(rejected[0].reason_code).to_equal(ENV_ADMISSION_CPU_FEATURES_MISSING_V1)
+        expect(rejected[0].phase_code).to_equal(ENV_PHASE_DESCRIPTOR_V1)
+
+    it "rejects ABI, permission, effect, and vector-state mismatches before ranking":
+        var candidate = descriptor_v1(5u64, 0u32)
+        candidate.required_abi_id = 2u32
+        expect(variant_eligibility_reason_v1(snapshot_v1(), candidate, [1u64], [], []))
+            .to_equal(ENV_ADMISSION_ABI_MISMATCH_V1)
+        candidate = descriptor_v1(5u64, 0u32)
+        candidate.required_loader_permission_bits = 4u64
+        expect(variant_eligibility_reason_v1(snapshot_v1(), candidate, [1u64], [], []))
+            .to_equal(ENV_ADMISSION_LOADER_PERMISSION_MISSING_V1)
+        candidate = descriptor_v1(5u64, 0u32)
+        candidate.required_effect_bits = 4u64
+        expect(variant_eligibility_reason_v1(snapshot_v1(), candidate, [1u64], [], []))
+            .to_equal(ENV_ADMISSION_EFFECT_NOT_ALLOWED_V1)
+        candidate = descriptor_v1(5u64, 0u32)
+        candidate.required_vector_length_bits = 512u32
+        expect(variant_eligibility_reason_v1(snapshot_v1(), candidate, [1u64], [], []))
+            .to_equal(ENV_ADMISSION_VECTOR_STATE_MISMATCH_V1)
+
+    it "rejects insufficient GPU API and resource limits":
+        var candidate = descriptor_v1(6u64, 0u32)
+        candidate.required_device_api = 7u32
+        candidate.minimum_device_api_version = 3u32
+        candidate.required_memory_domain_bits = 1u64
+        candidate.minimum_device_buffer_bytes = 4096u64
+        candidate.minimum_workgroup_invocations = 64u32
+        candidate.minimum_queue_family_count = 2u32
+        var snapshot = snapshot_v1()
+        snapshot.gpu_devices.count = 1u32
+        var device = EnvironmentGpuDeviceV1(
+            device_identity: digest(90u64), api_id: 7u32, api_version: 2u32,
+            enabled_feature_words: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32),
+            memory_domain_bits: 1u64, max_buffer_bytes: 2048u64,
+            max_workgroup_invocations: 32u32, queue_family_count: 1u32)
+        expect(variant_eligibility_reason_v1(snapshot, candidate, [1u64], [], [device]))
+            .to_equal(ENV_ADMISSION_DEVICE_UNAVAILABLE_V1)
+        device.api_version = 3u32
+        device.max_buffer_bytes = 4096u64
+        device.max_workgroup_invocations = 64u32
+        device.queue_family_count = 2u32
+        expect(variant_eligibility_reason_v1(snapshot, candidate, [1u64], [], [device]))
+            .to_equal(ENV_ADMISSION_OK_V1)
+
+    it "admits an empty OS-state requirement on a feature-reporting host":
+        var candidate = descriptor_v1(7u64, 0u32)
+        candidate.required_os_state_words = EnvironmentArenaRangeV1(
+            offset: 0u32, count: 0u32)
+        expect(variant_eligibility_reason_v1(
+            snapshot_v1(), candidate, [1u64], [], []))
+            .to_equal(ENV_ADMISSION_OK_V1)
+
+    it "fails closed on an over-capacity catalog":
+        val descriptors: [VariantDescriptorV1] = []
+        # The cap check is exercised without allocating an unbounded catalog
+        # by using the fixed maximum plus one only when the runtime supports it.
+        expect(variant_select_index_v1(
+            snapshot_v1(), descriptors, [1u64, 1u64, 1u64], [], [],
+            ENV_POLICY_PREFER_V1, digest(0u64), 0u16, 0u64, 0u16,
+            ceiling_v1())).to_equal(-1)

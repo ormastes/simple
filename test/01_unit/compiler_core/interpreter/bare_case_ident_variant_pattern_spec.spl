@@ -1,0 +1,125 @@
+# Executable proof for
+#   doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+#   doc/08_tracking/bug/match_bare_ident_const_irrefutable_2026-07-20.md
+#
+# Both records were open for the PURE-SIMPLE seams after the Rust seed's two
+# engines were fixed on 2026-08-02. This spec drives `match_pattern` in
+# src/compiler/10.frontend/core/interpreter/eval.spl through `eval_expr` over a
+# hand-built AST, so no deployed self-hosted binary is needed -- the Rust seed
+# is only the HOST; the subject is the `.spl` evaluator read from the tree.
+#
+# Defect: a bare CAPITALIZED identifier in `case` position that is not a
+# globally-declared variant fell through to the binder branch, bound the
+# scrutinee to a local of that name, and matched EVERY value. Every later arm --
+# including `case _:` -- became unreachable and was silently dropped. That is
+# Probe A of the 2026-08-01 record, reproduced here on the pure-Simple engine.
+#
+# Deliberately narrow, so under-reporting is the failure mode: a lowercase
+# binder is untouched, and a NON-enum scrutinee is untouched (Probe B, the
+# const-in-case-position shape, stays open -- this engine cannot tell a const
+# pattern from a binder without const resolution).
+
+use compiler.frontend.core.ast_expr.{expr_int_lit, expr_string_lit, expr_ident, expr_match_expr, expr_reset}
+use compiler.frontend.core.ast.{arm_new}
+use compiler.frontend.core.ast_stmt.{stmt_expr_stmt}
+use compiler.core.interpreter.eval.{eval_expr, eval_reset, eval_get_error}
+use compiler.core.interpreter.env.{env_reset, env_define}
+use compiler.core.interpreter.value.{val_reset, val_make_int, val_get_int, val_get_text}
+use compiler.core.interpreter.ops.{ops_clear_error}
+use compiler.core.interpreter.eval_tables.{enum_table_reset, enum_table_register}
+use compiler.core.interpreter.eval_access.{eval_enum_variant_call}
+
+describe "Interpreter bare-identifier case patterns":
+    fn fresh():
+        expr_reset()
+        val_reset()
+        eval_reset()
+        env_reset()
+        enum_table_reset()
+        ops_clear_error()
+
+    fn bind_color(variant: text):
+        enum_table_register("Color", ["Red", "Green", "Blue"])
+        env_define("c", eval_enum_variant_call("Color", variant, []))
+
+    fn arm_lit(pattern_eid: i64, out: text) -> i64:
+        arm_new(pattern_eid, -1, [stmt_expr_stmt(expr_string_lit(out, -1), -1)])
+
+    # ---- control: the fixture really builds a boxed enum and matches it ----
+    # Without this, "the bogus arm no longer fires" could be satisfied by the
+    # scrutinee never being an enum at all.
+
+    it "matches a bare nullary variant arm against a boxed enum":
+        fresh()
+        bind_color("Green")
+        val m = expr_match_expr(expr_ident("c", -1),
+            [arm_lit(expr_ident("Green", -1), "GREEN"), arm_lit(expr_ident("_", -1), "WILDCARD")], -1)
+        expect(val_get_text(eval_expr(m))).to_equal("GREEN")
+        expect(eval_get_error()).to_equal("")
+
+    it "does not match a bare nullary variant arm naming a different variant":
+        fresh()
+        bind_color("Green")
+        val m = expr_match_expr(expr_ident("c", -1),
+            [arm_lit(expr_ident("Red", -1), "RED"), arm_lit(expr_ident("_", -1), "WILDCARD")], -1)
+        expect(val_get_text(eval_expr(m))).to_equal("WILDCARD")
+
+    # ---- reproduction: Probe A, an identifier that is no variant at all ----
+
+    it "does not let an undeclared capitalized arm swallow a later variant arm":
+        fresh()
+        bind_color("Green")
+        val m = expr_match_expr(expr_ident("c", -1), [
+            arm_lit(expr_ident("NotAVariant", -1), "BOGUS-ARM-CAPTURED"),
+            arm_lit(expr_ident("Green", -1), "GREEN"),
+            arm_lit(expr_ident("_", -1), "WILDCARD")], -1)
+        expect(val_get_text(eval_expr(m))).to_equal("GREEN")
+        expect(eval_get_error()).to_equal("")
+
+    it "does not let an undeclared capitalized arm swallow the wildcard arm":
+        fresh()
+        bind_color("Blue")
+        val m = expr_match_expr(expr_ident("c", -1), [
+            arm_lit(expr_ident("NotAVariant", -1), "BOGUS-ARM-CAPTURED"),
+            arm_lit(expr_ident("Green", -1), "GREEN"),
+            arm_lit(expr_ident("_", -1), "WILDCARD")], -1)
+        expect(val_get_text(eval_expr(m))).to_equal("WILDCARD")
+
+    it "does not let a SCREAMING_SNAKE arm swallow later arms on an enum":
+        fresh()
+        bind_color("Green")
+        val m = expr_match_expr(expr_ident("c", -1), [
+            arm_lit(expr_ident("WS_OPCODE_TEXT", -1), "CONST-ARM-CAPTURED"),
+            arm_lit(expr_ident("Green", -1), "GREEN")], -1)
+        expect(val_get_text(eval_expr(m))).to_equal("GREEN")
+
+    # ---- features that MUST be preserved ----
+
+    it "keeps a lowercase arm on an enum an irrefutable binder":
+        fresh()
+        bind_color("Green")
+        val m = expr_match_expr(expr_ident("c", -1), [
+            arm_lit(expr_ident("other", -1), "BOUND"),
+            arm_lit(expr_ident("_", -1), "WILDCARD")], -1)
+        expect(val_get_text(eval_expr(m))).to_equal("BOUND")
+
+    it "still binds the scrutinee to a lowercase arm name":
+        fresh()
+        val arm = arm_new(expr_ident("bound", -1), -1, [stmt_expr_stmt(expr_ident("bound", -1), -1)])
+        expect(val_get_int(eval_expr(expr_match_expr(expr_int_lit(7, -1), [arm], -1)))).to_equal(7)
+
+    it "leaves a capitalized arm on a NON-enum scrutinee a binder":
+        # Probe B of the record stays open on purpose: `match opcode: case
+        # WS_OPCODE_TEXT:` with an i64 subject still binds, because this engine
+        # cannot tell a const pattern from a binder. Pinning it here means a
+        # future const-resolution fix has to change this row deliberately.
+        fresh()
+        val arm = arm_new(expr_ident("WS_OPCODE_TEXT", -1), -1,
+            [stmt_expr_stmt(expr_ident("WS_OPCODE_TEXT", -1), -1)])
+        expect(val_get_int(eval_expr(expr_match_expr(expr_int_lit(2, -1), [arm], -1)))).to_equal(2)
+
+    it "leaves the wildcard arm matching everything":
+        fresh()
+        bind_color("Red")
+        val m = expr_match_expr(expr_ident("c", -1), [arm_lit(expr_ident("_", -1), "WILDCARD")], -1)
+        expect(val_get_text(eval_expr(m))).to_equal("WILDCARD")

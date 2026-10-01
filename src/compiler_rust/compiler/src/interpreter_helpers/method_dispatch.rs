@@ -110,17 +110,13 @@ pub(crate) fn call_method_on_value(
             }
             "find_str" | "find" | "index_of" => {
                 // Keep nested temporary-text dispatch aligned with the ordinary
-                // string-method path. `find` and `find_str` retain their one-arg
-                // contract; only `index_of(needle, start)` consumes a byte offset.
-                // Without these aliases, `source.substring(start).find(needle)`
-                // reached METHOD_NOT_FOUND even though binding the substring first
-                // dispatched correctly.
+                // string-method path. All three aliases consume the optional
+                // byte offset `(needle, start)`; `find`/`find_str` used to drop
+                // it silently and answer from position 0. Without these aliases,
+                // `source.substring(start).find(needle)` reached METHOD_NOT_FOUND
+                // even though binding the substring first dispatched correctly.
                 if let Some(Value::Str(needle)) = _args.first() {
-                    let start_raw = if method == "index_of" {
-                        _args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0)
-                    } else {
-                        0
-                    };
+                    let start_raw = _args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
                     let start = start_raw.max(0) as usize;
                     let bytes = s.as_bytes();
                     let nb = needle.as_bytes();

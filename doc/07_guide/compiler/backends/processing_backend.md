@@ -1,31 +1,12 @@
 # Processing Backend Guide
 
-**Status:** Partial — shared FillU32/FillRect artifacts and focused native Vulkan lane available
+**Status:** Partial — `FillU32` CPU/Vulkan slice available
 
 The processing backend is the planned portable compute layer underneath
 `std.gpu`, draw APIs, and ML matops. It should use the current CUDA/Vulkan
 runtime hooks, RISC-V cross targets, and conservative VHDL backend without
 pretending that the repository already contains a full RISC-V64 mobile-style
 GPGPU.
-
-## Available Today
-
-`std.common.processing.processing_ir` provides the validated `FillU32` IR value
-and CPU oracle. `std.gc_async_mut.processing.vulkan_fill_u32` executes it through
-the existing Vulkan SFFI and returns device-read bytes. The SimpleOS QEMU host
-service negotiates this as Vulkan processing and requires exact CPU parity.
-Fresh x86_64, AArch64, and RV64 QEMU probes report checksum `1792` with zero
-mismatches for 256 elements filled with `7`. CUDA, Metal, compiler kernel
-lowering, and a public device/queue API remain unavailable.
-
-Vulkan ProcessingIR promotes a receipt only after the shared SFFI owner proves
-fenced completion and dependency release. A known-safe but ineligible result is
-torn down without readback; unknown completion retains dependent resources and
-the device. The canonical Vulkan SFFI owner serializes and deduplicates those
-transfers, reaps them only after device-idle, and refuses shutdown while a
-dependency remains unreleased. Submitted commands and fences stay exclusively
-owned by the native runtime; a provably unsubmitted command whose discard
-failed remains in the Simple owner until discard can be retried safely.
 
 ## Target Stack
 
@@ -71,7 +52,7 @@ unsupported recursion.
 
 ## Implementation Order
 
-1. ProcessingIR and CPU golden backend. (`FillU32` runtime slice complete.)
+1. ProcessingIR and CPU golden backend.
 2. Vulkan/SPIR-V lowering for `@kernel` and `@vulkan_kernel`.
 3. `std.processing` device, buffer, queue, fence, and event APIs.
 4. Matops: GEMM, reduce, softmax, layernorm, attention.
@@ -81,29 +62,6 @@ unsupported recursion.
 8. `simplegpu64` SIMT soft-GPGPU.
 
 ## Verification
-
-Run the compiler-produced FillRect qualification on a prepared physical Vulkan
-host:
-
-```text
-bin/simple test test/02_integration/rendering/vulkan_compiler_fill_rect_live_spec.spl --mode=interpreter
-```
-
-The test lowers a fixed 6×5 rectangle through frontend, HIR, MIR, and the
-Vulkan backend; runs `spirv-as` and `spirv-val --target-env vulkan1.3`; requires
-a discrete or integrated Vulkan device; submits the exact resulting binary;
-and compares all 256 raw pixels with the row-major CPU oracle. A software ICD,
-CPU mirror, missing device identity, or absent validator is not PASS evidence.
-
-The shared operator sequence is
-`processing_backend_host_probe` → `compile_processing_backend_artifact` →
-`validate_processing_backend_artifact` →
-`run_processing_backend_device_probe` →
-`check_processing_backend_oracle_parity`. Artifacts use a v2 semantic key over
-operation, target, value, count, dimensions, stride, and rectangle coordinates.
-Invalidate on any semantic, ABI, compiler, validator, driver, or device change.
-Compilation/validation are cold paths; submission/readback are hot paths and
-must not invoke external compilers or scan the tree.
 
 Every new backend lane needs the same golden scenarios:
 

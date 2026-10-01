@@ -1,4 +1,8 @@
 # `check-store-open-acid.shs` cannot run on macOS aarch64 — and the recorded blocker is not the one that fires here
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-17
 - Area: enterprise_store / native ACID evidence / pre-existing gate portability
@@ -447,3 +451,4 @@ stage 2 measures "the store module compiles standalone-native", which is a
 compiler-completeness property. Treating it as an AC-5/AC-6 blocker mis-attributes
 a compiler gap (`native_codegen_missing_slice_lowering_2026-08-21.md`) to the
 database work, and sends people to fix the wrong lane.
+

@@ -1,0 +1,52 @@
+# AVX2 candidate-byte primitive only. Lexical state resolution remains scalar.
+pub const PARSER_LEXICAL_CLASSIFIER_ABI_V1: text = "x86_64-sysv:u32(const-u8x32*,u8)"
+pub const PARSER_LEXICAL_CLASSIFIER_INTERFACE_HANDLE_V1: u64 = 0x4c45584d41534b31u64
+pub const PARSER_LEXICAL_CLASSIFIER_CODE_SIZE_V1: u64 = 25u64
+pub struct ParserLexicalCandidateMasksV1:
+    single_quote: u32
+    double_quote: u32
+    backslash: u32
+    hash: u32
+    newline: u32
+    slash: u32
+    star: u32
+    braces: u32
+    structural_delimiters: u32
+pub enum ParserLexicalClassifierErrorV1:
+    RequiresExactBlock
+    Avx2Unavailable
+
+# Exact callable ABI: u32 classify_one(const u8* block32, u8 needle).
+# It performs one unaligned 32-byte load and never reads beyond that block.
+pub fn parser_lexical_avx2_one_mask_callable_bytes_v1(avx2_os_usable: bool
+) -> Result<[i64], ParserLexicalClassifierErrorV1>:
+    if not avx2_os_usable: return Err(ParserLexicalClassifierErrorV1.Avx2Unavailable)
+    Ok([0xC5, 0xFE, 0x6F, 0x07,       # vmovdqu ymm0,[rdi]
+        0xC5, 0xF9, 0x6E, 0xCE,       # vmovd xmm1,esi
+        0xC4, 0xE2, 0x7D, 0x78, 0xC9, # vpbroadcastb ymm1,xmm1
+        0xC5, 0xFD, 0x74, 0xC1,       # vpcmpeqb ymm0,ymm0,ymm1
+        0xC5, 0xFD, 0xD7, 0xC0,       # vpmovmskb eax,ymm0
+        0xC5, 0xF8, 0x77,             # vzeroupper
+        0xC3])                         # ret
+
+fn _mask_plc(bytes: [u8], needle: u8) -> u32:
+    var result = 0u32; var i = 0
+    while i < 32:
+        if bytes[i] == needle: result = result | (1u32 << (i as u32))
+        i = i + 1
+    result
+
+pub fn parser_lexical_candidate_masks_scalar_v1(bytes: [u8]
+) -> Result<ParserLexicalCandidateMasksV1, ParserLexicalClassifierErrorV1>:
+    if bytes.len() != 32: return Err(ParserLexicalClassifierErrorV1.RequiresExactBlock)
+    val sq = _mask_plc(bytes, 39u8); val dq = _mask_plc(bytes, 34u8)
+    val bs = _mask_plc(bytes, 92u8); val hash = _mask_plc(bytes, 35u8)
+    val nl = _mask_plc(bytes, 10u8); val slash = _mask_plc(bytes, 47u8)
+    val star = _mask_plc(bytes, 42u8); val lb = _mask_plc(bytes, 123u8)
+    val rb = _mask_plc(bytes, 125u8); val braces = lb | rb
+    val structural = braces | _mask_plc(bytes, 40u8) | _mask_plc(bytes, 41u8) |
+        _mask_plc(bytes, 91u8) | _mask_plc(bytes, 93u8) | _mask_plc(bytes, 44u8) |
+        _mask_plc(bytes, 58u8)
+    Ok(ParserLexicalCandidateMasksV1(single_quote: sq, double_quote: dq,
+        backslash: bs, hash: hash, newline: nl, slash: slash, star: star,
+        braces: braces, structural_delimiters: structural))

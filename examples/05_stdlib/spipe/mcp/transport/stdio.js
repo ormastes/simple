@@ -9,10 +9,12 @@ export function createLineHandler(router, write) {
       const response = router(message);
       if (response !== undefined) write(`${stableJson(response)}\n`);
     } catch (error) {
-      // Legacy SPipe reports handler and parse failures with a null id. Keep
-      // that wire behavior through the protocol-neutral Wave 1 extraction;
-      // request-id preservation belongs to the later versioned MCP migration.
-      write(`${stableJson(errorResult(null, error))}\n`);
+      // JSON-RPC clients match responses by request id; a null id makes error
+      // replies unmatchable and looks like a hung call. Preserve the id of the
+      // offending message when one was parsed (parse failures keep a null id,
+      // matching JSON-RPC 2.0 for errors without an id).
+      const id = message !== null && typeof message === "object" && "id" in message ? message.id : null;
+      write(`${stableJson(errorResult(id, error))}\n`);
     }
   };
 }

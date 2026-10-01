@@ -1,0 +1,90 @@
+"""Startup must not pay for stdlib-variant roots that cannot exist.
+
+`stdlib_root_candidates` (`src/compiler_rust/compiler/src/stdlib_variant.rs`)
+runs once per stdlib module resolution. Two costs ride on it:
+
+1. it calls `active_simd_tier()` -> `host_cpu_config()`, which re-stats
+   `$HOME/.cache/simple/host/<triple>/cpu_config.sdn` on EVERY call. That
+   re-stat is deliberate (an on-disk edit must be seen mid-process) and is NOT
+   the defect -- the defect is calling it once per resolution;
+2. it returns `<root>/variants/<tier>` candidate roots, and each caller then
+   builds and probes a whole subtree under every one of them.
+
+This repo has no `src/lib/variants/` and no `src/std/variants/` directory, so
+every such candidate is a guaranteed miss and every path probed under it is a
+doomed syscall. Measured on the 2026-09-12 seed, `simple check --help` spent
+314 stats on `cpu_config.sdn` and 802 syscalls on paths under those two
+nonexistent roots; `simple test <one tiny spec>` spent 3,436 and 10,105.
+
+The guard is one `p_is_dir` on the `variants/` directory itself, taken BEFORE
+the tier is resolved. `p_is_dir` is memoized per path by `fs_probe`, so the
+whole family collapses to a single stat. Behaviour is unchanged because a
+candidate root that is not a directory can never yield an existing file, and no
+caller does anything with the candidate list except probe the filesystem with it.
+
+`compute_var_roots` (`module_resolver/var_overlay.rs`) is the same defect one
+layer out: it re-read `config/var.sdn` and `variants/__init__.spl` on every
+resolution (132 times each in the `test` entry above).
+"""
+
+use std.spec.*
+use std.fs.{read_file}
+use std.io_runtime.{process_run}
+
+val GATE: text = "scripts/check/check-stdlib-variant-probe-waste.shs"
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+describe "stdlib variant probe waste":
+    it "proves the gate discriminates before it is trusted":
+        val (out, code) = run_sh("sh " + GATE + " --selftest 2>&1")
+        print "[perf] selftest: " + out
+        expect(code).to_equal(0)
+        expect(out).to_contain("PASS — 3 selftest fixture(s) checked, 0 failures")
+
+    it "guards the variant candidate roots behind one directory probe":
+        val source = read_file("src/compiler_rust/compiler/src/stdlib_variant.rs")
+        expect(source).to_contain("pub fn stdlib_root_candidates_present(root: &Path) -> Vec<PathBuf>")
+        expect(source).to_contain("fn variant_container_dir(root: &Path) -> Option<PathBuf>")
+        expect(source).to_contain("p_is_dir(&container)")
+
+    it "reaches the guard from every stdlib resolution call site":
+        expect(read_file("src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs"))
+            .to_contain("stdlib_root_candidates_present(&stdlib_candidate)")
+        expect(read_file("src/compiler_rust/compiler/src/pipeline/module_loader.rs"))
+            .to_contain("stdlib_root_candidates_present(&stdlib_candidate)")
+        expect(read_file("src/compiler_rust/compiler/src/module_resolver/resolution.rs"))
+            .to_contain("stdlib_root_candidates_present(&root)")
+
+    it "memoizes the variant overlay roots per project root":
+        val source = read_file("src/compiler_rust/compiler/src/module_resolver/var_overlay.rs")
+        expect(source).to_contain("VAR_ROOTS_CACHE")
+        expect(source).to_contain("fn compute_var_roots_uncached(project_root: &Path) -> Vec<PathBuf>")
+
+    it "spends no startup syscall on a variant root that cannot exist":
+        val (out, code) = run_sh("sh " + GATE + " --lane default"
+            + " --max-cpu-config 0 --max-missing-variant-root 0 --max-var-sdn-opens 1 2>&1")
+        print "[perf] " + out
+        expect(code).to_equal(0)
+        expect(out).to_contain("missing_variant_root=0")
+        expect(out).to_contain("cpu_config=0")
+        expect(out.contains("stats=0 ")).to_equal(false)
+
+    it "spends none on the interpreter lane either":
+        # `cpu_config` is NOT budgeted to 0 here. The interpreter lane still
+        # stats it once per resolution from `compute_cache_key`
+        # (`interpreter_module/path_resolution.rs:69`), which hashes
+        # `active_simd_tier_name()` into the resolution cache key so that a
+        # mid-process tier change invalidates it. That is pinned behaviour --
+        # `cache_key_changes_with_configured_active_tier_without_override`
+        # asserts the key changes when the config file is rewritten -- so it is
+        # a separate, reported finding, not something this row may silently
+        # optimise away. Measured 353 -> 132 as a side effect of the guard.
+        val (out, code) = run_sh("sh " + GATE + " --lane interpreter"
+            + " --max-cpu-config 200 --max-missing-variant-root 0 --max-var-sdn-opens 1 2>&1")
+        print "[perf] " + out
+        expect(code).to_equal(0)
+        expect(out).to_contain("missing_variant_root=0")
+        expect(out.contains("stats=0 ")).to_equal(false)

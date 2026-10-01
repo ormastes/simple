@@ -1,0 +1,74 @@
+"""
+# RV64 PMM ABI has one real provider
+
+The pure-Simple RV64 PMM facade owns the semantic implementation and exports
+the historical C ABI names. Probe entries may consume those names privately,
+but must use the exact signed 64-bit result contract and fail closed unless the
+provider reports `1`. The native linker must not fabricate overlapping PMM or
+memory-map definitions.
+"""
+
+use std.spec.*
+
+val ABI_OWNER: text = "src/os/kernel/arch/riscv64/noalloc_pmm_runtime.spl"
+val LINK_SOURCE: text = "src/compiler/70.backend/backend/llvm_native_link.spl"
+val SSH_ENTRY: text = "examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl"
+val X25519_ENTRY: text = "examples/09_embedded/simple_os/arch/riscv64/x25519_probe_entry.spl"
+val DESKTOP_ENTRY: text = "examples/09_embedded/simple_os/arch/riscv64/desktop_service_entry.spl"
+val BOOT_ENTRY: text = "src/os/kernel/arch/riscv64/boot.spl"
+val FPGA_ENTRY: text = "src/os/kernel/arch/riscv64/fpga_boot.spl"
+val STARFIVE_ENTRY: text = "src/os/kernel/arch/riscv64/starfive/entry.spl"
+val FABRICATED_BASELINE: text = "config/simpleos_fabricated_rt_baseline.sdn"
+
+describe "RV64 PMM source and link ownership contract":
+    it "keeps semantic Simple names behind the historical C ABI":
+        val owner = file_read(ABI_OWNER)
+        expect(owner).to_contain("@export(\"C\", name: \"rt_riscv_noalloc_pmm_init\")\nfn rv64_noalloc_pmm_initialize(")
+        expect(owner).to_contain("fn rv64_noalloc_pmm_initialize(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> i64:")
+        expect(owner).to_contain("@export(\"C\", name: \"rt_riscv_qemu_ram_base\")\nfn rv64_qemu_ram_base() -> u64:")
+        expect(owner).to_contain("@export(\"C\", name: \"rt_riscv_qemu_heap_start\")\nfn rv64_qemu_heap_start() -> u64:")
+
+    it "does not fabricate policy-owned definitions in the native linker":
+        val linker = file_read(LINK_SOURCE)
+        expect(linker.contains("int rt_riscv_noalloc_pmm_init(")).to_be(false)
+        expect(linker.contains("int64_t rt_riscv_noalloc_pmm_init(")).to_be(false)
+        expect(linker.contains("uint64_t rt_riscv_qemu_ram_base(void){return")).to_be(false)
+        expect(linker.contains("uint64_t rt_riscv_qemu_ram_size(void){return")).to_be(false)
+        expect(linker.contains("uint64_t rt_riscv_qemu_reserved_end(void){return")).to_be(false)
+        expect(linker.contains("uint64_t rt_riscv_qemu_heap_start(void){return")).to_be(false)
+        expect(linker.contains("uint64_t rt_riscv_qemu_heap_size(void){return")).to_be(false)
+
+    it "requires exact i64 success in both private C-ABI probe entries":
+        val ssh = file_read(SSH_ENTRY)
+        val x25519 = file_read(X25519_ENTRY)
+        val signature = "extern fn rt_riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> i64"
+        for entry in [ssh, x25519]:
+            expect(entry).to_contain(signature)
+            expect(entry).to_contain("val pmm_ready = rt_riscv_noalloc_pmm_init(")
+            expect(entry).to_contain("if pmm_ready != 1:\n        riscv_noalloc_boot_idle()\n        return\n    riscv_noalloc_heap_init")
+            expect(entry.contains("rt_riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> bool")).to_be(false)
+
+    it "fails closed before heap and services in every semantic PMM boot caller":
+        val boot = file_read(BOOT_ENTRY)
+        val fpga = file_read(FPGA_ENTRY)
+        val starfive = file_read(STARFIVE_ENTRY)
+        val desktop = file_read(DESKTOP_ENTRY)
+        expect(boot).to_contain("val pmm_ready = rv64_noalloc_pmm_initialize(")
+        expect(boot).to_contain("if pmm_ready != 1:\n        riscv_noalloc_boot_idle()\n        return\n    riscv_noalloc_heap_init")
+        expect(fpga).to_contain("if kria_pmm_ready != 1:\n        riscv_noalloc_boot_idle()\n        return\n\n    riscv_noalloc_heap_init")
+        expect(fpga).to_contain("if litex_pmm_ready != 1:\n        riscv_noalloc_boot_idle()\n        return\n\n    riscv_noalloc_heap_init")
+        expect(starfive).to_contain("if pmm_ready != 1:\n        riscv_noalloc_boot_idle()\n        return\n    riscv_noalloc_heap_init")
+        expect(desktop).to_contain("extern fn rt_riscv_noalloc_pmm_init_default() -> i64")
+        expect(desktop).to_contain("val pmm_ready = rt_riscv_noalloc_pmm_init_default()\n    if pmm_ready != 1:\n        _fail()\n        return\n\n    if not _init_network()")
+
+    it "does not retain the six retired PMM and QEMU-map stubs in the fabricated baseline":
+        val baseline = file_read(FABRICATED_BASELINE)
+        for retired_stub in [
+            "rt_riscv_qemu_ram_base",
+            "rt_riscv_qemu_ram_size",
+            "rt_riscv_qemu_reserved_end",
+            "rt_riscv_qemu_heap_start",
+            "rt_riscv_qemu_heap_size",
+            "rt_riscv_noalloc_pmm_init"
+        ]:
+            expect(baseline.contains(retired_stub)).to_be(false)

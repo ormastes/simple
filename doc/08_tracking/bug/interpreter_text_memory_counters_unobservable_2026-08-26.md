@@ -1,4 +1,8 @@
 # Interpreter text-memory counters are unobservable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -24,3 +28,4 @@ the exercised text representation. Add parity tests against native runtime
 counters and a negative test proving that a deliberate allocation changes at
 least one counter. Until then, receipts must use
 `counter_status=unavailable` and retain isolated RSS/HWM evidence separately.
+

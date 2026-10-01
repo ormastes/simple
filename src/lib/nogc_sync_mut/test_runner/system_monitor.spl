@@ -3,13 +3,14 @@
 # Part of self-protecting test runner
 
 use std.nogc_sync_mut.io.process_ops.{shell_int, shell_output_default}
-use std.io.{host_os}
+use std.nogc_sync_mut.io.env_ops.{host_os}
 use std.io_runtime.{file_read}
 
 use std.io_runtime.{file_exists}
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 
 use std.io_runtime.{thread_sleep}
+use std.io_runtime.{getpid}
 
 # ============================================================================
 # Data Structures
@@ -159,6 +160,96 @@ fn system_exceeds_threshold(cpu_limit: f64, mem_limit: f64) -> (bool, text):
 
     (false, "")
 
+# ============================================================================
+# Self (process-tree) resource measurement
+# ============================================================================
+#
+# `system_exceeds_threshold` above samples the WHOLE BOX. On a shared
+# machine that means the runner aborts its own suite because of other
+# people's processes: measured 2026-08-23, the system tree was unrunnable
+# at 88% memory used, none of it the runner's. A watchdog that stops your
+# run for someone else's memory is not self-protection, it is a denial of
+# service with extra steps.
+#
+# These functions measure only the runner's OWN process group -- the
+# runner plus every child it spawned, which is exactly the footprint it is
+# responsible for and the only thing it can act on by stopping.
+
+fn self_tree_rss_mb() -> i64:
+    """Resident memory of this runner's own process group, in MB.
+
+    Returns -1 when it cannot be measured, which callers MUST treat as
+    "unknown", never as zero.
+    """
+    if not is_linux():
+        return -1
+    # Keyed on the runner's REAL pid, obtained in-process.
+    #
+    # Two earlier shapes were tried and MEASURED WRONG, recorded so they
+    # are not retried: (a) `ps -o pgid= -p $$` in one shell_int and
+    # `ps -o rss= -g <pgid>` in another returns ~0, because each shell_int
+    # spawns its own shell in its own process group, so by the second call
+    # the group captured in the first has no members left; (b) `ps --pgid`
+    # measured 0 on this host where `-g` measured non-zero, so the two
+    # flags are not interchangeable. A single `ps` call keyed on our own
+    # pid avoids both traps.
+    val self_pid = getpid()
+    if self_pid <= 0:
+        return -1
+    val rss_kb = shell_int("ps -o rss= -p {self_pid} --ppid {self_pid} 2>/dev/null | awk '{{t+=$1}} END {{print t+0}}'", -1)
+    if rss_kb <= 0:
+        return -1
+    rss_kb / 1024
+
+fn self_tree_cpu_percent() -> f64:
+    """Aggregate CPU% of this runner's own process group.
+
+    Returns -1.0 when it cannot be measured.
+    """
+    if not is_linux():
+        return -1.0
+    val self_pid = getpid()
+    if self_pid <= 0:
+        return -1.0
+    # x10 then /10 because shell_int is integer-only; one decimal place is
+    # far more precision than a percentage threshold needs.
+    val tenths = shell_int("ps -o pcpu= -p {self_pid} --ppid {self_pid} 2>/dev/null | awk '{{t+=$1}} END {{printf \"%d\", (t*10)+0.5}}'", -1)
+    if tenths < 0:
+        return -1.0
+    tenths.to_f64() / 10.0
+
+fn self_tree_exceeds_threshold(cpu_limit: f64, mem_limit: f64) -> (bool, text):
+    """Watchdog predicate over the runner's OWN process tree.
+
+    Same AND semantics as `system_exceeds_threshold` (both CPU and memory
+    must be exceeded), for the same reason: a compile spike with healthy
+    memory is not a reason to destroy a run.
+
+    **Scope, stated rather than implied:** the runner's own process plus
+    its DIRECT children -- the spec processes it spawns, which is where
+    the footprint actually lives. A grandchild (a spec that itself spawns
+    a process) is not counted. That is a real limitation and still
+    enormously closer to the truth than sampling the whole machine.
+
+    **Fails OPEN on unmeasurable data, deliberately.** If the tree cannot
+    be measured we do NOT abort. Aborting on data we could not read is the
+    exact failure this function exists to remove, and the real bound on the
+    runner's footprint is the per-test memory clamp, not this sampler. An
+    unmeasurable watchdog that stays quiet loses a safety net; one that
+    fires blindly loses the whole run.
+    """
+    val rss_mb = self_tree_rss_mb()
+    val cpu = self_tree_cpu_percent()
+    if rss_mb < 0 or cpu < 0.0:
+        return (false, "")
+    val total_mb = get_system_memory_total_mb()
+    if total_mb <= 0:
+        return (false, "")
+    val mem_pct = (rss_mb.to_f64() / total_mb.to_f64()) * 100.0
+    if cpu > cpu_limit and mem_pct > mem_limit:
+        return (true, "runner process tree: cpu={cpu}%>{cpu_limit}% AND memory={mem_pct}% ({rss_mb}MB of {total_mb}MB)>{mem_limit}%")
+    (false, "")
+
 fn get_system_free_memory_gb() -> i64:
     if is_linux():
         # Single awk command — no subshell per value
@@ -292,12 +383,24 @@ fn get_macos_cpu_percent() -> f64:
     Falls back to top if iostat unavailable.
     """
     # Try iostat first (fast: ~0.1s)
-    # iostat output line: "          disk0       cpu    load average"
-    # Data line: "  0.00  0  0.00    2  1 97"  (us sy id)
+    # iostat header is THREE groups, not two:
+    #     "          disk0       cpu    load average"
+    #     "    KB/t  tps  MB/s  us sy id   1m   5m   15m"
+    # so a data line is "   16.14 5166 81.41  48 17 35  23.79 14.28 11.65".
+    # The LAST three fields are the 1m/5m/15m LOAD AVERAGES, not "us sy id":
+    # `$NF` reads the 15-minute load average and the old code then computed
+    # `100 - load15` as "CPU used". Measured 2026-09-06 on this host at
+    # load15=11.65 with a genuinely saturated CPU (id=0), that yielded
+    # cpu_percent=89 rather than 100, and on an idle box with load15=2 it
+    # yields 98 — i.e. the reading was ALWAYS above any sane threshold,
+    # regardless of real CPU. That is what made system_exceeds_threshold()
+    # degenerate into a memory-only test and abort six of eight
+    # plan-acceptance sweep shards with rc=42 before a single spec ran.
+    # Idle is the field three positions before the end, whatever the disk
+    # group's width (a second disk adds three more leading columns).
     val output = shell_output_default("iostat -c 2 -w 1 2>/dev/null | tail -1", "")
     if output != "":
-        # Last 3 numbers are: user sys idle
-        val idle_val = shell_int("echo '{output}' | awk '{print $NF}' | cut -d. -f1", -1)
+        val idle_val = shell_int("echo '{output}' | awk '{print $(NF-3)}' | cut -d. -f1", -1)
         if idle_val >= 0 and idle_val <= 100:
             val used = 100 - idle_val
             return used * 1.0
@@ -478,7 +581,7 @@ fn get_windows_cpu_percent() -> f64:
     Tries: PowerShell → wmic → typeperf (for MinGW/MSVC where PS may be unavailable).
     """
     # 1) PowerShell (preferred, Windows 10+)
-    val ps_output = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_Processor).LoadPercentage\" 2>nul", "")
+    val ps_output = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_Processor).LoadPercentage\"", "")
     if ps_output != "":
         val cleaned = strip_cr(ps_output).trim()
         if cleaned != "":
@@ -486,7 +589,7 @@ fn get_windows_cpu_percent() -> f64:
             return cpu_i * 1.0
 
     # 2) wmic (deprecated but available on older Windows, also works in MinGW)
-    val wmic_output = shell_output_default("wmic cpu get loadpercentage 2>nul", "")
+    val wmic_output = shell_output_default("wmic cpu get loadpercentage", "")
     if wmic_output != "":
         val wmic_output_clean = strip_cr(wmic_output)
         val lines = wmic_output_clean.split("\n")
@@ -497,7 +600,7 @@ fn get_windows_cpu_percent() -> f64:
                 return cpu_i * 1.0
 
     # 3) typeperf (available in all Windows environments including MSVC dev shell)
-    val tp_output = shell_output_default("typeperf \"\\Processor(_Total)\\% Processor Time\" -sc 1 2>nul | findstr /v \"Time Path\" | findstr \",\"", "")
+    val tp_output = shell_output_default("typeperf \"\\Processor(_Total)\\% Processor Time\" -sc 1 | findstr /v \"Time Path\" | findstr \",\"", "")
     if tp_output != "":
         # Output: "MM/DD/YYYY HH:MM:SS.fff","12.345"
         val cleaned = strip_cr(tp_output).trim()
@@ -528,7 +631,7 @@ fn get_windows_memory_total_mb() -> i64:
     Tries: PowerShell → wmic → systeminfo (MinGW/MSVC compatible).
     """
     # 1) PowerShell
-    val ps_output = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\" 2>nul", "")
+    val ps_output = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\"", "")
     if ps_output != "":
         val cleaned = strip_cr(ps_output).trim()
         val kb = shell_int("echo {cleaned}", 0)
@@ -536,7 +639,7 @@ fn get_windows_memory_total_mb() -> i64:
             return kb / 1024
 
     # 2) wmic
-    val wmic_output = shell_output_default("wmic os get totalvisiblememorysize 2>nul", "")
+    val wmic_output = shell_output_default("wmic os get totalvisiblememorysize", "")
     if wmic_output != "":
         val wmic_output_clean = strip_cr(wmic_output)
         val lines = wmic_output_clean.split("\n")
@@ -548,7 +651,7 @@ fn get_windows_memory_total_mb() -> i64:
                     return kb / 1024
 
     # 3) systeminfo (slowest, but works everywhere including MSVC dev shell)
-    val si_output = shell_output_default("systeminfo 2>nul | findstr /C:\"Total Physical Memory\"", "")
+    val si_output = shell_output_default("systeminfo | findstr /C:\"Total Physical Memory\"", "")
     if si_output != "":
         # Format: "Total Physical Memory:     32,678 MB"
         val cleaned = strip_cr(si_output).trim()
@@ -565,8 +668,8 @@ fn get_windows_memory_used_mb() -> i64:
     Tries: PowerShell → wmic → systeminfo (MinGW/MSVC compatible).
     """
     # 1) PowerShell
-    val ps_total = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\" 2>nul", "")
-    val ps_free = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory\" 2>nul", "")
+    val ps_total = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize\"", "")
+    val ps_free = shell_output_default("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory\"", "")
     if ps_total != "" and ps_free != "":
         val total_kb = shell_int("echo {strip_cr(ps_total).trim()}", 0)
         val free_kb = shell_int("echo {strip_cr(ps_free).trim()}", 0)
@@ -574,8 +677,8 @@ fn get_windows_memory_used_mb() -> i64:
             return (total_kb - free_kb) / 1024
 
     # 2) wmic
-    val wmic_total = shell_output_default("wmic os get totalvisiblememorysize 2>nul", "")
-    val wmic_free = shell_output_default("wmic os get freephysicalmemory 2>nul", "")
+    val wmic_total = shell_output_default("wmic os get totalvisiblememorysize", "")
+    val wmic_free = shell_output_default("wmic os get freephysicalmemory", "")
     if wmic_total != "" and wmic_free != "":
         val wmic_total_clean = strip_cr(wmic_total)
         val total_lines = wmic_total_clean.split("\n")
@@ -588,8 +691,8 @@ fn get_windows_memory_used_mb() -> i64:
                 return (total_kb - free_kb) / 1024
 
     # 3) systeminfo — parse both Total and Available
-    val si_total = shell_output_default("systeminfo 2>nul | findstr /C:\"Total Physical Memory\"", "")
-    val si_avail = shell_output_default("systeminfo 2>nul | findstr /C:\"Available Physical Memory\"", "")
+    val si_total = shell_output_default("systeminfo | findstr /C:\"Total Physical Memory\"", "")
+    val si_avail = shell_output_default("systeminfo | findstr /C:\"Available Physical Memory\"", "")
     if si_total != "" and si_avail != "":
         val total_mb = shell_int("echo '{strip_cr(si_total).replace(\",\", \"\")}' | grep -oE '[0-9]+' | tail -1", 0)
         val avail_mb = shell_int("echo '{strip_cr(si_avail).replace(\",\", \"\")}' | grep -oE '[0-9]+' | tail -1", 0)

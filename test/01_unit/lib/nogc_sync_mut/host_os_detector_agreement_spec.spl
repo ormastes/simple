@@ -1,0 +1,118 @@
+use std.spec
+use std.io_runtime.{host_os, host_arch, platform_name, env_get_nullable, env_set_process, env_remove_process}
+use std.platform.{host_os as platform_host_os}
+use std.nogc_sync_mut.env.platform.{detect_os, is_windows}
+use std.nogc_sync_mut.env.variables.{env_unset}
+use std.sffi.platform.{platform_name_raw}
+
+fn restore_host_detector_env(key: text, original: text?):
+    if original == nil:
+        env_remove_process(key)
+    else:
+        env_set_process(key, original!)
+
+fn check_host_detectors_with_env(os_value: text, ostype_value: text):
+    val expected_os = detect_os()
+    val expected_arch = host_arch()
+    val saved_os = env_get_nullable("OS")
+    val saved_ostype = env_get_nullable("OSTYPE")
+    val set_os = env_set_process("OS", os_value)
+    val set_ostype = env_set_process("OSTYPE", ostype_value)
+    val observed_os = host_os()
+    val observed_platform = platform_host_os()
+    val observed_detect = detect_os()
+    val observed_arch = host_arch()
+    # Restore process state before assertions so a failing expectation cannot
+    # leak the forged environment into subsequent tests.
+    restore_host_detector_env("OS", saved_os)
+    restore_host_detector_env("OSTYPE", saved_ostype)
+    expect(set_os).to_equal(true)
+    expect(set_ostype).to_equal(true)
+    expect(observed_os).to_equal(expected_os)
+    expect(observed_platform).to_equal(expected_os)
+    expect(observed_detect).to_equal(expected_os)
+    expect(observed_arch).to_equal(expected_arch)
+
+# doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md
+#
+# Four independent PRs (#941, #944, #945, #947) each found
+# std.nogc_sync_mut.env.platform.detect_os() answering "not Windows" while
+# std.io_runtime.host_os() answered "windows" correctly, in the SAME process,
+# on a real Windows host, inside the Stage 2 bootstrap sanity harness's
+# in-process native-build. The traced root cause was FIVE independently
+# declared `extern fn rt_platform_name` signatures (some `-> text`, some
+# `-> text?`) across std.sffi.platform, std.nogc_sync_mut.io_runtime,
+# std.nogc_sync_mut.fs.host_path, std.nogc_sync_mut.env.types and std.sys.pty
+# -- the same "co-compiled definitions with differing signatures" class of
+# defect this compiler already warns about for `file_read_text_at`, where a
+# JIT call site can dispatch to the wrong definition. All call sites were
+# consolidated onto the single declaration in std.sffi.platform.
+#
+# This spec pins the invariant the fix restores: every host-OS detector in
+# the tree must agree with every other one, in-process, everywhere (not just
+# on Windows -- the POSIX branches were left byte-identical by the fix, so
+# this must also hold on Linux/macOS/BSD).
+describe "host OS detectors agree with each other":
+    it "ignores a forged Windows OS and Linux OSTYPE":
+        check_host_detectors_with_env("Windows_NT", "linux-gnu")
+
+    it "ignores a forged Unix OS and BSD OSTYPE":
+        check_host_detectors_with_env("Darwin", "freebsd14")
+
+    it "ignores empty OS and OSTYPE values":
+        check_host_detectors_with_env("", "")
+
+    it "agrees across every public host-OS resolver":
+        val a = host_os()
+        val b = platform_host_os()
+        val c = detect_os()
+        val raw = platform_name_raw()
+
+        expect(a).to_equal(b)
+        expect(a).to_equal(c)
+
+        # platform_name_raw()/platform_name() report a compiled-in primitive
+        # that collapses every BSD to "unix" and only ever answers one of
+        # windows/macos/linux/unix -- so it only needs to AGREE with the
+        # richer detectors when it names windows/macos/linux specifically.
+        if raw == "windows" or raw == "macos" or raw == "linux":
+            expect(a).to_equal(raw)
+            expect(platform_name()).to_equal(raw)
+
+        # is_windows() must be consistent with host_os() == "windows".
+        expect(is_windows()).to_equal(a == "windows")
+
+    it "ignores contradictory OS and OSTYPE on a runtime-known host":
+        val raw = platform_name_raw()
+        if raw == "windows" or raw == "macos" or raw == "linux" or raw == "freebsd" or raw == "illumos" or raw == "solaris" or raw == "unix":
+            val saved_os = env_get_nullable("OS")
+            val saved_ostype = env_get_nullable("OSTYPE")
+            val expected_os = host_os()
+            val expected_arch = host_arch()
+
+            # On Windows, spoof Unix; on Unix, spoof Windows. Both variables
+            # are restored before any assertion can leave this test.
+            val spoofed_os = if raw == "windows": "Linux" else: "Windows_NT"
+            val spoofed_ostype = if raw == "windows": "linux" else: "win32"
+            val set_os = env_set_process("OS", spoofed_os)
+            val set_ostype = env_set_process("OSTYPE", spoofed_ostype)
+            val actual_os = host_os()
+            val actual_arch = host_arch()
+            val actual_platform_os = platform_host_os()
+            val actual_detect_os = detect_os()
+
+            if saved_os == nil:
+                env_unset("OS")
+            else:
+                env_set_process("OS", saved_os!)
+            if saved_ostype == nil:
+                env_unset("OSTYPE")
+            else:
+                env_set_process("OSTYPE", saved_ostype!)
+
+            expect(set_os).to_equal(true)
+            expect(set_ostype).to_equal(true)
+            expect(actual_os).to_equal(expected_os)
+            expect(actual_arch).to_equal(expected_arch)
+            expect(actual_platform_os).to_equal(expected_os)
+            expect(actual_detect_os).to_equal(expected_os)

@@ -1,7 +1,8 @@
 # Compiled checker pure-parser parity gaps
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -42,11 +43,7 @@ identifier falls from 21 to eight, and keyword receiver remains four. The
 remaining 15 diagnostics are owned by later class, pattern, comprehension, or
 primary-expression lanes, including six `static fn nil` methods, two `me fn`
 methods, tuple binding, comprehension `_`, three keyword receivers, one
-`while val` pattern, and one generic-call surface. Their owners now retain
-exact plus adjacent coverage in `parser_category_c_spec.spl`, including
-malformed pattern recovery. The available stale diagnostic runner terminated
-before a verdict for the expanded fixture, so the immutable 43-path admitted
-checker replay remains pending.
+`while val` pattern, and one generic-call surface.
 
 Focused exact, adjacent, and malformed-to-valid recovery coverage passes 8/8
 in `test/01_unit/compiler/parser/parser_category_c_spec.spl`. Strict checker
@@ -136,3 +133,4 @@ manifest checker; do not modify invalid source merely to hide a parser gap.
 Batch parser-state leakage was investigated and disproved by a two-file minimal
 pair.  The aggregate checker correctly reports one failing file of two; passing
 members of a nonzero batch are not false positives.
+

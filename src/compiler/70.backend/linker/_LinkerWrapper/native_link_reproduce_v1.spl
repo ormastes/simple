@@ -1,0 +1,44 @@
+# Opt-in exact input capture for a Linux LLD native link. The LLD archive
+# contains the response file and the bytes of every input opened by the link.
+# Keep this outside the normal native-link path unless evidence is requested.
+
+use std.io_runtime.{file_exists, file_hash_sha256, file_write}
+
+pub fn native_link_reproduce_reason_v1(
+    archive_path: text, output_path: text, os_name: text, linker_name: text
+) -> text:
+    if archive_path == "":
+        return ""
+    if os_name != "linux" or linker_name != "lld":
+        return "native-link-reproduce-requires-linux-lld"
+    if not archive_path.starts_with("/") or
+            not archive_path.ends_with(".tar") or
+            archive_path == output_path:
+        return "native-link-reproduce-path-invalid"
+    if file_exists(archive_path) or file_exists(archive_path + ".receipt"):
+        return "native-link-reproduce-path-exists"
+    ""
+
+pub fn native_link_reproduce_finish_v1(
+    archive_path: text, output_path: text, linker_path: text
+) -> text:
+    if archive_path == "":
+        return ""
+    if not file_exists(archive_path) or not file_exists(output_path) or
+            not file_exists(linker_path):
+        return "native-link-reproduce-output-missing"
+    val archive_digest = file_hash_sha256(archive_path)
+    val output_digest = file_hash_sha256(output_path)
+    val linker_digest = file_hash_sha256(linker_path)
+    if archive_digest.len() != 64 or output_digest.len() != 64 or
+            linker_digest.len() != 64:
+        return "native-link-reproduce-hash-failed"
+    val receipt = "simple-native-link-reproduce-v1\n" +
+        "archive_sha256={archive_digest}\n" +
+        "output_sha256={output_digest}\n" +
+        "linker_sha256={linker_digest}\n"
+    if not file_write(archive_path + ".receipt", receipt):
+        return "native-link-reproduce-receipt-write-failed"
+    ""
+
+export native_link_reproduce_reason_v1, native_link_reproduce_finish_v1

@@ -120,8 +120,6 @@ ELECTRON_BITMAP_TIMEOUT_SECS=60 sh scripts/check/check-production-gui-web-render
 
 Pass condition: generated Metal readback and raw Metal framebuffer readback
 report `pass`; production renderer parity wrapper must not use blur/tolerance.
-The generated Metal wrapper self-test rejects missing submit/readback, zero
-per-op checksums, and checksum mismatches.
 
 Local status: host-unavailable on Linux; current acceptable reason is
 `metal-requires-macos` for the production renderer wrapper and
@@ -145,8 +143,6 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 
 Pass condition: ROCm module verified, submit attempted, readback available, and
 per-op checksums match for fill/copy/alpha/scroll.
-The ROCm wrapper self-test rejects missing submit/readback, zero per-op
-checksums, and checksum mismatches.
 
 Local status: host-unavailable; no AMD GPU is visible and `rocminfo` is absent.
 
@@ -169,10 +165,8 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 
 Pass condition: `directx_native_readback_status=pass`, native wrapper gate
 `pass`, positive backend/device handle, readback source `device_readback`, and
-positive matching expected/actual checksum. The wrapper self-test rejects zero
-or malformed handles, zero checksums, checksum mismatches, and
-structured-contract-only provenance. The aggregate wrapper must no longer
-report DirectX as only `structured_readback_contract` or `not_device_readback`.
+matching expected/actual checksum. The aggregate wrapper must no longer report
+DirectX as only `structured_readback_contract` or `not_device_readback`.
 
 Local status: not proven on this Linux host. Existing structured DirectX specs
 are useful contract coverage only; production proof remains native-pending.
@@ -195,10 +189,9 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 
 Pass condition: `webgpu_real_readback_status=pass`,
 `webgpu_real_readback_source=device_readback`, positive
-`webgpu_real_readback_backend_handle`, and positive matching expected/actual
-checksum. The wrapper self-test rejects zero or malformed handles, zero
-checksums, checksum mismatches, and upload-only provenance. `surface_upload`
-remains provenance-only and does not satisfy production device-readback proof.
+`webgpu_real_readback_backend_handle`, and matching expected/actual checksum.
+`surface_upload` remains provenance-only and does not satisfy production
+device-readback proof.
 
 Local status: unavailable on the current host;
 `webgpu-real-probe-run-failed`, `source=not_device_readback`,

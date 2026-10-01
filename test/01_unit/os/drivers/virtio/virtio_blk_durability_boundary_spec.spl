@@ -1,0 +1,115 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{read_file}
+use os.drivers.virtio._VirtioBlk.driver_class.{virtio_blk_validate_completion, virtio_blk_flush_transition, virtio_blk_request_owner_transition, virtio_blk_reset_acknowledged, virtio_blk_descriptor_tail, virtio_blk_dma_transfer_len, virtio_blk_next_write_epoch}
+
+describe "ARM64 VirtIO-BLK durability boundary":
+    it "quarantines device-owned write descriptors after an indeterminate completion":
+        step("inspect the write timeout ownership transition")
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/block_device_impl.spl")
+        val timeout_start = source.index_of("if not self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS):")
+        val timeout_end = source.index_of("return Result.Err(\"virtio-blk write timeout\")")
+        val timeout_path = source.slice(timeout_start, timeout_end)
+
+        expect(timeout_path.contains("_virtio_blk_request_indeterminate()" )).to_equal(true)
+        expect(timeout_path.contains("_virtq_free_desc")).to_equal(false)
+        expect(timeout_path.contains("_virtio_blk_free_dma")).to_equal(false)
+
+    it "publishes durability only through a completed negotiated FLUSH":
+        step("inspect the durability-provider implementation")
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/block_device_impl.spl")
+
+        expect(source.contains("impl BlockDeviceDurabilityPortV1 for VirtioBlkDriver:")).to_equal(true)
+        expect(source.contains("self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS)")).to_equal(true)
+        expect(source.contains("virtio-blk flush timeout; durability indeterminate")).to_equal(true)
+        expect(source.contains("Err(\"virtio-blk FUA is not negotiated; use acknowledged FLUSH\")")).to_equal(true)
+
+    it "checks the exact used-ring head before reclaiming descriptor ownership":
+        step("inspect the used-ring completion check")
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/driver_class.spl")
+
+        expect(source.contains("virtio_blk_validate_completion(")).to_equal(true)
+        expect(source.contains("queue quarantined after indeterminate completion")).to_equal(true)
+        expect(source.contains("VIRTIO_STATUS_FAILED")).to_equal(true)
+
+    it "rejects stale skipped and wrong-head completions while allowing a retry":
+        step("exercise the production used-ring transition validator")
+        val first = virtio_blk_validate_completion(7, 8, 12, 12)
+        expect(first.is_ok()).to_equal(true)
+        expect(first.unwrap()).to_equal(8)
+
+        expect(virtio_blk_validate_completion(8, 8, 12, 12).is_err()).to_equal(true)
+        expect(virtio_blk_validate_completion(8, 10, 12, 12).is_err()).to_equal(true)
+        expect(virtio_blk_validate_completion(8, 9, 12, 11).is_err()).to_equal(true)
+
+        val retry = virtio_blk_validate_completion(8, 9, 12, 12)
+        expect(retry.is_ok()).to_equal(true)
+        expect(retry.unwrap()).to_equal(9)
+
+    it "accepts exactly one completion across used-index wraparound":
+        step("exercise the 16-bit VirtIO used-index boundary")
+        val wrapped = virtio_blk_validate_completion(65535, 0, 3, 3)
+        expect(wrapped.is_ok()).to_equal(true)
+        expect(wrapped.unwrap()).to_equal(0)
+
+    it "publishes only the writes ordered before a successful flush":
+        step("exercise the production durability transition")
+        val published = virtio_blk_flush_transition(4, 2, 4, true)
+        expect(published.is_ok()).to_equal(true)
+        expect(published.unwrap()).to_equal(4)
+        expect(virtio_blk_flush_transition(4, 2, 5, true).is_err()).to_equal(true)
+        expect(virtio_blk_flush_transition(4, 2, 4, false).is_err()).to_equal(true)
+        expect(virtio_blk_flush_transition(4, 4, 3, true).is_err()).to_equal(true)
+
+    it "keeps zero-copy DMA leased until completion or reset acknowledgement":
+        step("exercise competing admission, quarantine, and reset acknowledgement")
+        val acquired = virtio_blk_request_owner_transition(0, true)
+        expect(acquired.is_ok()).to_equal(true)
+        expect(acquired.unwrap()).to_equal(1)
+        expect(virtio_blk_request_owner_transition(0, false).is_err()).to_equal(true)
+        expect(virtio_blk_request_owner_transition(1, false).is_err()).to_equal(true)
+        expect(virtio_blk_request_owner_transition(2, false).is_err()).to_equal(true)
+        expect(virtio_blk_reset_acknowledged(0)).to_equal(true)
+        expect(virtio_blk_reset_acknowledged(128)).to_equal(false)
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/driver_operations.spl")
+        val owner = read_file("src/os/drivers/virtio/_VirtioBlk/driver_class.spl")
+        expect(source.contains("return Result.Err(\"virtio-blk caller-owned DMA requires a scoped device lease\")")).to_equal(false)
+        expect(owner.contains("DMA ownership cannot return")).to_equal(true)
+
+    it "rejects DMA overflow and out-of-capacity ranges without changing the hot path":
+        step("exercise the production DMA bounds validator")
+        val valid = virtio_blk_dma_transfer_len(1024, 8, 4, 512, 2048)
+        expect(valid.is_ok()).to_equal(true)
+        expect(valid.unwrap()).to_equal(2048)
+        expect(virtio_blk_dma_transfer_len(1024, 8, 0, 512, 2048).is_err()).to_equal(true)
+        expect(virtio_blk_dma_transfer_len(1024, 1023, 2, 512, 2048).is_err()).to_equal(true)
+        expect(virtio_blk_dma_transfer_len(1024, 8, 4, 512, 2047).is_err()).to_equal(true)
+        expect(virtio_blk_dma_transfer_len(0, 8, 8388608, 512, 0xFFFFFFFFu64).is_err()).to_equal(true)
+
+    it "encodes VirtIO descriptor flags and next index in their ABI fields":
+        step("exercise the production descriptor tail encoder")
+        expect(virtio_blk_descriptor_tail(1, 7)).to_equal(0x00070001)
+        expect(virtio_blk_descriptor_tail(2, 0)).to_equal(2)
+
+    it "fails closed instead of wrapping the ordered write epoch":
+        step("exercise the production write-epoch transition")
+        val next = virtio_blk_next_write_epoch(41)
+        expect(next.is_ok()).to_equal(true)
+        expect(next.unwrap()).to_equal(42)
+        expect(virtio_blk_next_write_epoch(0xFFFFFFFFFFFFFFFFu64).is_err()).to_equal(true)
+
+    it "polls only the used header and completed element":
+        step("guard the timeout path against whole-ring cache invalidation")
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/driver_class.spl")
+        expect(source.contains("_virtio_blk_sync_for_cpu(g_virtio_blk_used_addr, 4)")).to_equal(true)
+        expect(source.contains("_virtio_blk_sync_for_cpu(used_elem_addr, 8)")).to_equal(true)
+        expect(source.contains("used_ring_bytes")).to_equal(false)
+
+    it "constructs an owned sector once while DMA ownership is held":
+        step("guard the early read path against bump-heap growth by repeated push")
+        val block = read_file("src/os/drivers/virtio/_VirtioBlk/block_device_impl.spl")
+        val operations = read_file("src/os/drivers/virtio/_VirtioBlk/driver_operations.spl")
+        expect(block.contains("buffer.push(0)")).to_equal(false)
+        val construct_at = operations.index_of("val output = dma_raw_bytes_to_array(data_addr, data_len.to_u64())")
+        val release_at = operations.index_of("_virtio_blk_request_completed()", construct_at)
+        expect(construct_at >= 0).to_equal(true)
+        expect(release_at > construct_at).to_equal(true)

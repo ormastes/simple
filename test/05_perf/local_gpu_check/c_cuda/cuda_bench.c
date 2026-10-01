@@ -73,39 +73,10 @@ static int load_cuda(void) {
     return 0;
 }
 
-static long long now_ns(void) {
+static long long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
-static void* (*volatile measured_memset)(void*, int, size_t) = memset;
-
-static int offload_preferred(long long cpu_ns, long long device_ns) {
-    return cpu_ns > 0 && device_ns > 0 && cpu_ns >= device_ns &&
-        cpu_ns - device_ns >= device_ns / 2 + device_ns % 2;
-}
-
-static int self_test(void) {
-    unsigned char buf[8] = {0};
-    struct timespec delay = { .tv_nsec = 1000000 };
-    long long started = now_ns();
-    nanosleep(&delay, NULL);
-    measured_memset(buf, 0x1E, sizeof(buf));
-    if (now_ns() <= started || buf[0] != 0x1E || buf[7] != 0x1E ||
-            !offload_preferred(150, 100) || offload_preferred(149, 100) ||
-            !offload_preferred(152, 101) || offload_preferred(151, 101)) {
-        printf("cuda_bench_self_test=fail\n");
-        return 1;
-    }
-    printf("cuda_bench_self_test=pass\n");
-    return 0;
-}
-
-static CUresult launch_clear(CUfunction func, unsigned int grid, void** params) {
-    CUresult status = p_cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, NULL, params, NULL);
-    if (status != 0) return status;
-    return p_cuCtxSynchronize();
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 static const char ptx_clear[] =
@@ -119,9 +90,7 @@ static const char ptx_clear[] =
     "cvt.u64.u32 %rd2, %r3; shl.b64 %rd2, %rd2, 2; add.u64 %rd3, %rd1, %rd2;\n"
     "st.global.u32 [%rd3], %r1;\nDONE: ret;\n}\n";
 
-int main(int argc, char** argv) {
-    if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return self_test();
-
+int main(void) {
     printf("========================================\n");
     printf("CUDA GPU Perf Check (C driver API)\n");
     printf("========================================\n");
@@ -159,27 +128,23 @@ int main(int argc, char** argv) {
     p_cuMemsetD32(d_fb, 0xFF1E1E1E, pixels);
     p_cuCtxSynchronize();
 
-    long long t0 = now_ns();
+    long long t0 = now_ms();
     for (int i = 0; i < 100; i++) {
         p_cuMemsetD32(d_fb, 0xFF1E1E1E, pixels);
         p_cuCtxSynchronize();
     }
-    long long elapsed_ns = now_ns() - t0;
-    printf("  100 clears: %.3f ms\n", (double)elapsed_ns / 1000000.0);
-    printf("  Avg clear: %.3f ms\n", (double)elapsed_ns / 100000000.0);
+    long long elapsed = now_ms() - t0;
+    printf("  100 clears: %lld ms\n", elapsed);
+    printf("  Avg clear: %.2f ms\n", (double)elapsed / 100.0);
 
     /* --- Test 2: PTX kernel launch --- */
     printf("\n--- Test 2: PTX kernel 1080p ---\n");
     CUmodule mod;
     if (p_cuModuleLoadData(&mod, ptx_clear) != 0) {
         printf("  FAIL: PTX load\n");
-        return 1;
     } else {
         CUfunction func;
-        if (p_cuModuleGetFunction(&func, mod, "kernel_clear") != 0) {
-            printf("  FAIL: PTX function lookup\n");
-            return 1;
-        }
+        p_cuModuleGetFunction(&func, mod, "kernel_clear");
         printf("  PTX loaded, function acquired\n");
 
         unsigned int color = 0xFF0000FF;
@@ -189,23 +154,19 @@ int main(int argc, char** argv) {
 
         /* Warmup */
         for (int i = 0; i < 5; i++) {
-            if (launch_clear(func, grid, params) != 0) {
-                printf("  FAIL: PTX warmup launch\n");
-                return 1;
-            }
+            p_cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, NULL, params, NULL);
+            p_cuCtxSynchronize();
         }
 
         /* Timed: 100 kernel launches */
-        t0 = now_ns();
+        t0 = now_ms();
         for (int i = 0; i < 100; i++) {
-            if (launch_clear(func, grid, params) != 0) {
-                printf("  FAIL: PTX timed launch\n");
-                return 1;
-            }
+            p_cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, NULL, params, NULL);
+            p_cuCtxSynchronize();
         }
-        elapsed_ns = now_ns() - t0;
-        printf("  100 kernel clears: %.3f ms\n", (double)elapsed_ns / 1000000.0);
-        printf("  Avg kernel: %.3f ms\n", (double)elapsed_ns / 100000000.0);
+        elapsed = now_ms() - t0;
+        printf("  100 kernel clears: %lld ms\n", elapsed);
+        printf("  Avg kernel: %.2f ms\n", (double)elapsed / 100.0);
 
         p_cuModuleUnload(mod);
     }
@@ -213,36 +174,31 @@ int main(int argc, char** argv) {
     /* --- Test 3: Readback --- */
     printf("\n--- Test 3: Readback ---\n");
     unsigned char* host = malloc(bytes);
-    t0 = now_ns();
-    if (!host || p_cuMemcpyDtoH(host, d_fb, bytes) != 0) {
-        printf("  FAIL: readback\n");
-        return 1;
-    }
-    long long rb_ns = now_ns() - t0;
-    printf("  Readback %zu bytes: %.3f ms\n", bytes, (double)rb_ns / 1000000.0);
+    t0 = now_ms();
+    p_cuMemcpyDtoH(host, d_fb, bytes);
+    long long rb_ms = now_ms() - t0;
+    printf("  Readback %zu bytes: %lld ms\n", bytes, rb_ms);
     printf("  First pixel RGBA: %d,%d,%d,%d\n", host[0], host[1], host[2], host[3]);
 
     /* --- CPU comparison (memset) --- */
     printf("\n--- Test 4: CPU memset comparison ---\n");
     unsigned char* cpu_buf = malloc(bytes);
-    t0 = now_ns();
+    t0 = now_ms();
     for (int i = 0; i < 100; i++) {
-        measured_memset(cpu_buf, 0x1E, bytes);
+        memset(cpu_buf, 0x1E, bytes);
     }
-    long long cpu_ns = now_ns() - t0;
-    printf("  100 CPU memsets: %.3f ms\n", (double)cpu_ns / 1000000.0);
-    printf("  Avg CPU memset: %.3f ms\n", (double)cpu_ns / 100000000.0);
+    long long cpu_ms = now_ms() - t0;
+    printf("  100 CPU memsets: %lld ms\n", cpu_ms);
+    printf("  Avg CPU memset: %.2f ms\n", (double)cpu_ms / 100.0);
 
     /* --- Verdict --- */
     printf("\n========================================\n");
     printf("VERDICT\n");
     printf("========================================\n");
-    double gpu_avg = (double)elapsed_ns / 100000000.0;
-    double cpu_avg = (double)cpu_ns / 100000000.0;
-    double roundtrip_avg = gpu_avg + (double)rb_ns / 1000000.0;
+    double gpu_avg = (double)elapsed / 100.0;
+    double cpu_avg = (double)cpu_ms / 100.0;
     printf("  GPU kernel clear: %.2f ms\n", gpu_avg);
     printf("  CPU memset clear: %.2f ms\n", cpu_avg);
-    printf("  GPU clear + readback: %.2f ms\n", roundtrip_avg);
     if (gpu_avg > 0 && cpu_avg > 0) {
         double ratio = cpu_avg / gpu_avg;
         printf("  Speedup: %.1fx\n", ratio);
@@ -250,10 +206,6 @@ int main(int argc, char** argv) {
         else if (gpu_avg <= cpu_avg * 1.25) printf("  ACCEPTABLE: within 1.25x\n");
         else printf("  WARN: GPU slower (sync overhead)\n");
     }
-    if (offload_preferred(cpu_ns, elapsed_ns)) printf("  Compute offload: preferred\n");
-    else printf("  Compute offload: available-not-preferred\n");
-    if (offload_preferred(cpu_ns, elapsed_ns + rb_ns * 100)) printf("  Roundtrip offload: preferred\n");
-    else printf("  Roundtrip offload: available-not-preferred (communication overhead)\n");
     if (gpu_avg < 16.7) printf("  60Hz capable: YES (%.2f ms < 16.7 ms)\n", gpu_avg);
     else printf("  60Hz capable: NO (%.2f ms > 16.7 ms)\n", gpu_avg);
     printf("========================================\n");

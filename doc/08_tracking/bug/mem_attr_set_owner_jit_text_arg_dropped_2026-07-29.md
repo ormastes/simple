@@ -1,4 +1,9 @@
 # Bug: `rt_mem_attr_set_owner` owner name dropped under JIT/native engine
+## Closed 2026-09-16 — Status RESOLVED same day; signature fixed, JIT probe and spec 2/2 verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found:** 2026-07-29, while writing `test/03_system/check/mem_attr_report_spec.spl`
 **Status:** RESOLVED same day.
@@ -85,3 +90,4 @@ half of attribution, only the *byte-counting* half.
 `SIMPLE_EXECUTION_MODE=interpreter` on its child-process fixture run so the
 owner name resolves correctly; it does not assert on byte counts (which are
 legitimately 0 under the interpreter for the reason above).
+

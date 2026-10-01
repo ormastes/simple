@@ -1,0 +1,47 @@
+#!/bin/sh
+# grep_hint.shs — PreToolUse(Grep) HINT. FAIL-OPEN.
+#
+# Parity with the context-mode plugin's GREP_GUIDANCE (its core/routing.mjs:171),
+# minus the noise: silent when the call is already bounded (output_mode
+# `count` / `files_with_matches`, or a `head_limit`). Otherwise adds context
+# pointing at simple_ctx_execute / simple_ctx_batch_execute so only a
+# summary or ranked hits enter the transcript.
+#
+# Fail-open: any parse problem exits 0 with no output.
+#
+# Selftest: sh .claude/hooks/grep_hint.shs --selftest
+set -u
+HOOK_DIR=$(dirname "$0")
+. "$HOOK_DIR/ctx_common.shs" || exit 0
+
+ctx_decide() {   # $1 = output_mode, $2 = 1 when head_limit present, $3 = pattern
+    [ -n "$3" ] || return 0
+    case "$1" in count|files_with_matches) return 0 ;; esac
+    [ "$2" = "1" ] && return 0
+    ctx_emit_hint "Grep in content mode can flood the transcript. Prefer simple-mcp: simple_ctx_execute(language: shell, code: \"grep -rn '$3' <path> | head -50\") returns stdout only from a bounded sandbox, or simple_ctx_batch_execute(commands, queries) indexes the full result and returns ranked hits. Grep with output_mode: count / files_with_matches or a head_limit is fine."
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    fail=0
+    out=$(ctx_decide "" 0 "rt_")
+    case "$out" in *'"additionalContext"'*simple_ctx_execute*) ;; *) echo "selftest FAIL: content grep not hinted"; fail=1 ;; esac
+    out=$(ctx_decide content 0 "x")
+    case "$out" in *'"additionalContext"'*) ;; *) echo "selftest FAIL: explicit content mode not hinted"; fail=1 ;; esac
+    out=$(ctx_decide count 0 x);              [ -z "$out" ] || { echo "selftest FAIL: count hinted"; fail=1; }
+    out=$(ctx_decide files_with_matches 0 x); [ -z "$out" ] || { echo "selftest FAIL: files_with_matches hinted"; fail=1; }
+    out=$(ctx_decide content 1 x);            [ -z "$out" ] || { echo "selftest FAIL: head_limit hinted"; fail=1; }
+    out=$(ctx_decide "" 0 "");                [ -z "$out" ] || { echo "selftest FAIL: empty pattern hinted"; fail=1; }
+    [ "$fail" -eq 0 ] && echo "PASS — grep_hint selftest: 2 hinted, 4 silent"
+    exit "$fail"
+fi
+
+ctx_read_input || exit 0
+pattern=$(ctx_json_str pattern) || exit 0
+mode=$(ctx_json_str output_mode) || exit 0
+has_limit=0
+if printf '%s' "$HOOK_INPUT" | grep -Eq '"head_limit"[[:space:]]*:[[:space:]]*[0-9]'; then
+    has_limit=1
+fi
+ctx_decide "$mode" "$has_limit" "$pattern"
+exit 0

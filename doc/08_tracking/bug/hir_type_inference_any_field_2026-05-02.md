@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: RESOLVED — all 7 residual files now compile cleanly with 0 `Cannot infer field type` and 0 `Failed t
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Bug: HIR type-inference emits `Cannot infer field type: struct 'ANY' field '<X>'` (134 errors block bootstrap stage 4)
 
 Status: RESOLVED — all 7 residual files now compile cleanly with 0 `Cannot infer field type` and 0 `Failed t
@@ -189,8 +203,8 @@ Stage-4 log `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.l
 | `src/app/llm_dashboard/main.spl` | `bytes` |
 | `src/app/web_dashboard/server.spl` | `bytes` |
 | `src/compiler/90.tools/fix/main.spl` | `replacements` |
-| `src/compiler/90.tools/lint/_LintMain/lint_checks.spl` | `description` |
-| `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl` | `replacements` |
+| `src/compiler/90.tools/lint/main_part2.spl` | `description` |
+| `src/compiler/90.tools/lint/main_part4.spl` | `replacements` |
 
 **Root cause (Class 3):** `[WARN] Failed to load imported types` from cross-module imports. The type-loader fails to resolve e.g. `lib.common.llm.output_gate`, `common.ui.glass.tokens`, `std.tooling.easy_fix` in the context of these files, so the struct fields become `ANY`-typed receivers. Example WARN:
 ```
@@ -232,7 +246,7 @@ as an array/string intrinsic in the field-access path"):
 - Seed Cranelift codegen — `"len" | "length" => rt_len` in `instr/calls.rs`
   (fallback + `sffi_alias_target`), `instr/methods.rs` (typed Array/String/Dict/Tuple),
   `instr/closures_structs.rs`. Commit `a8dc6fac`.
-- Pure-Simple main lowering — `_MirLoweringExpr/method_calls_literals.spl:81` routes typed `.length()`
+- Pure-Simple main lowering — `mir_lowering_expr_part3.spl:81` routes typed `.length()`
   through `len_runtime_symbol_for_hir_type` (type-KIND `case Str/Array/Dict`) like `.len()`.
   Commit `b5391184`. Matches interpreter's existing `"len" | "length"`.
 

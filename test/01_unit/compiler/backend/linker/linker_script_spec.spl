@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that linker_script - number parser.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-BACKEND-001 — stable requirement identity for this spec.
-
 # Linker Script Parser Unit Tests
 #
 # Tests for linker_script.spl: tokenizer, number parser,
@@ -19,43 +12,35 @@ use compiler.backend.linker.linker_script.{
     ld_parse_entry, ld_parse_memory, ld_parse_sections,
     ld_parse,
     ld_script_new, ld_has_entry, ld_find_region, ld_find_section,
-    ld_section_count, ld_region_count
+    ld_section_count, ld_region_count,
+    LdStmtKind, ld_print, ld_tokens_equivalent
 }
+use std.io_runtime.{file_read}
 
 # ============================================================================
 # 1. Number Parser
 # ============================================================================
 
-use std.spec.step
-
 describe "linker_script - number parser":
     it "parses decimal number":
-        step("Verify: parses decimal number")
-        # @req: REQ-COMPILER-BACKEND-001
         expect(ld_parse_number("1234")).to_equal(1234)
 
     it "parses hex with 0x prefix":
-        step("Verify: parses hex with 0x prefix")
         expect(ld_parse_number("0x1000")).to_equal(4096)
 
     it "parses hex uppercase digits":
-        step("Verify: parses hex uppercase digits")
         expect(ld_parse_number("0xAB")).to_equal(171)
 
     it "parses K suffix as 1024 multiplier":
-        step("Verify: parses K suffix as 1024 multiplier")
         expect(ld_parse_number("256K")).to_equal(262144)
 
     it "parses M suffix as 1048576 multiplier":
-        step("Verify: parses M suffix as 1048576 multiplier")
         expect(ld_parse_number("1M")).to_equal(1048576)
 
     it "returns 0 for empty string":
-        step("Verify: returns 0 for empty string")
         expect(ld_parse_number("")).to_equal(0)
 
     it "parses zero":
-        step("Verify: parses zero")
         expect(ld_parse_number("0")).to_equal(0)
 
 # ============================================================================
@@ -64,42 +49,36 @@ describe "linker_script - number parser":
 
 describe "linker_script - tokenizer":
     it "tokenizes ENTRY(_start) into 5 tokens":
-        step("Verify: tokenizes ENTRY(_start) into 5 tokens")
         val tokens = ld_tokenize("ENTRY(_start)")
-        expect(tokens.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
+        expect(tokens.len()).to_equal(5)
 
     it "first token is Word ENTRY":
-        step("Verify: first token is Word ENTRY")
         val tokens = ld_tokenize("ENTRY(_start)")
-        expect(tokens[0].kind).to_equal(LdTokenKind.Word)
+        expect(tokens[0].kind == LdTokenKind.Word).to_equal(true)
         expect(tokens[0].value).to_equal("ENTRY")
 
     it "produces correct token sequence for ENTRY(_start)":
-        step("Verify: produces correct token sequence for ENTRY(_start)")
         val tokens = ld_tokenize("ENTRY(_start)")
-        expect(tokens[1].kind).to_equal(LdTokenKind.LParen)
-        expect(tokens[2].kind).to_equal(LdTokenKind.Word)
+        expect(tokens[1].kind == LdTokenKind.LParen).to_equal(true)
+        expect(tokens[2].kind == LdTokenKind.Word).to_equal(true)
         expect(tokens[2].value).to_equal("_start")
-        expect(tokens[3].kind).to_equal(LdTokenKind.RParen)
-        expect(tokens[4].kind).to_equal(LdTokenKind.Eof)
+        expect(tokens[3].kind == LdTokenKind.RParen).to_equal(true)
+        expect(tokens[4].kind == LdTokenKind.Eof).to_equal(true)
 
     it "tokenizes empty string to single Eof":
-        step("Verify: tokenizes empty string to single Eof")
         val tokens = ld_tokenize("")
-        expect(tokens.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(tokens.len()).to_equal(1)
         expect(tokens[0].kind).to_equal(LdTokenKind.Eof)
 
     it "skips block comments":
-        step("Verify: skips block comments")
         val tokens = ld_tokenize("/* comment */ ENTRY(x)")
         # Should have Word(ENTRY), LParen, Word(x), RParen, Eof
         expect(tokens[0].value).to_equal("ENTRY")
         expect(tokens[2].value).to_equal("x")
 
     it "tokenizes hex number as Number kind":
-        step("Verify: tokenizes hex number as Number kind")
         val tokens = ld_tokenize("0x1000")
-        expect(tokens[0].kind).to_equal(LdTokenKind.Number)
+        expect(tokens[0].kind == LdTokenKind.Number).to_equal(true)
         expect(tokens[0].value).to_equal("0x1000")
 
 # ============================================================================
@@ -108,17 +87,14 @@ describe "linker_script - tokenizer":
 
 describe "linker_script - ENTRY directive":
     it "parses ENTRY(_start)":
-        step("Verify: parses ENTRY(_start)")
         val script = ld_parse("ENTRY(_start)").unwrap()
         expect(script.entry).to_equal("_start")
 
     it "parses ENTRY(main)":
-        step("Verify: parses ENTRY(main)")
         val script = ld_parse("ENTRY(main)").unwrap()
         expect(script.entry).to_equal("main")
 
     it "ld_has_entry returns true for parsed script":
-        step("Verify: ld_has_entry returns true for parsed script")
         val script = ld_parse("ENTRY(_start)").unwrap()
         expect(ld_has_entry(script)).to_equal(true)
 
@@ -128,36 +104,31 @@ describe "linker_script - ENTRY directive":
 
 describe "linker_script - MEMORY block":
     it "parses two memory regions":
-        step("Verify: parses two memory regions")
         val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K }"
         val script = ld_parse(input).unwrap()
-        expect(ld_region_count(script)).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(ld_region_count(script)).to_equal(2)
 
     it "first region is FLASH with rx attrs":
-        step("Verify: first region is FLASH with rx attrs")
         val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K }"
         val script = ld_parse(input).unwrap()
         expect(script.memory[0].name).to_equal("FLASH")
         expect(script.memory[0].attrs).to_equal("rx")
-        expect(script.memory[0].origin).to_equal(134217728)  # oracle: 134217728 — named expected value from the requirement
-        expect(script.memory[0].length).to_equal(262144)  # oracle: 262144 — named expected value from the requirement
+        expect(script.memory[0].origin).to_equal(134217728)
+        expect(script.memory[0].length).to_equal(262144)
 
     it "second region is RAM with rwx attrs":
-        step("Verify: second region is RAM with rwx attrs")
         val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K }"
         val script = ld_parse(input).unwrap()
         expect(script.memory[1].name).to_equal("RAM")
         expect(script.memory[1].attrs).to_equal("rwx")
 
     it "ld_find_region finds existing region":
-        step("Verify: ld_find_region finds existing region")
         val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }"
         val script = ld_parse(input).unwrap()
         val region = ld_find_region(script, "FLASH")
         expect(region != nil).to_equal(true)
 
     it "ld_find_region returns nil for nonexistent region":
-        step("Verify: ld_find_region returns nil for nonexistent region")
         val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }"
         val script = ld_parse(input).unwrap()
         val region = ld_find_region(script, "NONEXIST")
@@ -172,34 +143,29 @@ describe "linker_script - MEMORY block":
 
 describe "linker_script - SECTIONS block":
     it "parses three output sections":
-        step("Verify: parses three output sections")
         val input = "SECTIONS { .text : { *(.text) *(.text*) } > FLASH .data : { *(.data) } > RAM .bss : { *(.bss) } > RAM }"
         val script = ld_parse(input).unwrap()
-        expect(ld_section_count(script)).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(ld_section_count(script)).to_equal(3)
 
     it "first section is .text with FLASH region":
-        step("Verify: first section is .text with FLASH region")
         val input = "SECTIONS { .text : { *(.text) *(.text*) } > FLASH .data : { *(.data) } > RAM }"
         val script = ld_parse(input).unwrap()
         expect(script.sections[0].name).to_equal(".text")
         expect(script.sections[0].region).to_equal("FLASH")
 
     it "first section has two input patterns":
-        step("Verify: first section has two input patterns")
         val input = "SECTIONS { .text : { *(.text) *(.text*) } > FLASH }"
         val script = ld_parse(input).unwrap()
-        expect(script.sections[0].inputs.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(script.sections[0].inputs.len()).to_equal(2)
         expect(script.sections[0].inputs[0].pattern).to_equal(".text")
 
     it "ld_find_section finds existing section":
-        step("Verify: ld_find_section finds existing section")
         val input = "SECTIONS { .text : { *(.text) } > FLASH }"
         val script = ld_parse(input).unwrap()
         val section = ld_find_section(script, ".text")
         expect(section != nil).to_equal(true)
 
     it "ld_find_section returns nil for nonexistent section":
-        step("Verify: ld_find_section returns nil for nonexistent section")
         val input = "SECTIONS { .text : { *(.text) } > FLASH }"
         val script = ld_parse(input).unwrap()
         val section = ld_find_section(script, ".nonexist")
@@ -214,12 +180,11 @@ describe "linker_script - SECTIONS block":
 
 describe "linker_script - complete script":
     it "parses full script with ENTRY, MEMORY, and SECTIONS":
-        step("Verify: parses full script with ENTRY, MEMORY, and SECTIONS")
         val input = "ENTRY(_start) MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K } SECTIONS { .text : { *(.text) } > FLASH .data : { *(.data) } > RAM }"
         val script = ld_parse(input).unwrap()
         expect(script.entry).to_equal("_start")
-        expect(ld_region_count(script)).to_equal(2)  # oracle: 2 — named expected value from the requirement
-        expect(ld_section_count(script)).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(ld_region_count(script)).to_equal(2)
+        expect(ld_section_count(script)).to_equal(2)
         expect(ld_has_entry(script)).to_equal(true)
 
 # ============================================================================
@@ -228,14 +193,12 @@ describe "linker_script - complete script":
 
 describe "linker_script - convenience functions":
     it "ld_script_new creates empty script":
-        step("Verify: ld_script_new creates empty script")
         val script = ld_script_new()
         expect(script.entry).to_equal("")
-        expect(ld_section_count(script)).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(ld_region_count(script)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(ld_section_count(script)).to_equal(0)
+        expect(ld_region_count(script)).to_equal(0)
 
     it "ld_has_entry returns false for empty script":
-        step("Verify: ld_has_entry returns false for empty script")
         val script = ld_script_new()
         expect(ld_has_entry(script)).to_equal(false)
 
@@ -245,13 +208,230 @@ describe "linker_script - convenience functions":
 
 describe "linker_script - section with explicit address":
     it "parses section with explicit address":
-        step("Verify: parses section with explicit address")
         val input = "SECTIONS { .isr_vector 0x08000000 : { *(.isr_vector) } }"
         val script = ld_parse(input).unwrap()
-        expect(script.sections[0].address).to_equal(134217728)  # oracle: 134217728 — named expected value from the requirement
+        expect(script.sections[0].address).to_equal(134217728)
 
     it "section without address has address -1":
-        step("Verify: section without address has address -1")
         val input = "SECTIONS { .text : { *(.text) } > FLASH }"
         val script = ld_parse(input).unwrap()
-        expect(script.sections[0].address).to_equal(-1)  # oracle: -1 — named expected value from the requirement
+        expect(script.sections[0].address).to_equal(-1)
+
+# ============================================================================
+# 9. Boot-layout constructs (lane A9)
+# ============================================================================
+
+describe "linker_script - boot layout constructs":
+    it "parses PHDRS with FLAGS and :phdr placement":
+        val input = "PHDRS { text PT_LOAD FLAGS(5); data PT_LOAD FLAGS(6); } SECTIONS { .text : { *(.text) } :text .data : { *(.data) } :data }"
+        val script = ld_parse(input).unwrap()
+        expect(script.phdrs.len()).to_equal(2)
+        expect(script.phdrs[0].name).to_equal("text")
+        expect(script.phdrs[0].phdr_type).to_equal("PT_LOAD")
+        expect(script.phdrs[0].flags_expr).to_equal("5")
+        expect(script.sections[1].phdrs[0]).to_equal("data")
+
+    it "parses AT(...) LMA expression and address expression":
+        val input = "SECTIONS { .text ALIGN(4096) : AT(ADDR(.text) - 0xFFFFFFFF80000000) { *(.text) } }"
+        val script = ld_parse(input).unwrap()
+        expect(script.sections[0].address_expr).to_equal("ALIGN(4096)")
+        expect(script.sections[0].lma_expr).to_equal("ADDR(.text) - 0xFFFFFFFF80000000")
+
+    it "parses KEEP patterns as keep inputs":
+        val input = "SECTIONS { .reqs : { KEEP(*(.limine_reqs)) KEEP(*(.limine_reqs.*)) *(.other) } }"
+        val script = ld_parse(input).unwrap()
+        val sec = script.sections[0]
+        expect(sec.inputs.len()).to_equal(3)
+        expect(sec.inputs[0].keep).to_equal(true)
+        expect(sec.inputs[1].pattern).to_equal(".limine_reqs.*")
+        expect(sec.inputs[2].keep).to_equal(false)
+
+    it "parses (NOLOAD), inner ALIGN and dot increment":
+        val input = "SECTIONS { .stack (NOLOAD) : ALIGN(16) { _stack_bottom = .; . = ALIGN(2K); . += 64K; _stack_top = .; } > RAM }"
+        val script = ld_parse(input).unwrap()
+        val sec = script.sections[0]
+        expect(sec.section_type).to_equal("NOLOAD")
+        expect(sec.align_expr).to_equal("16")
+        expect(sec.body.len()).to_equal(4)
+        expect(sec.body[1].kind == LdStmtKind.Assign).to_equal(true)
+        expect(sec.body[1].expr).to_equal("ALIGN(2K)")
+        expect(sec.body[2].kind == LdStmtKind.AddAssign).to_equal(true)
+        expect(sec.body[2].expr).to_equal("64K")
+        expect(sec.region).to_equal("RAM")
+
+    it "parses OUTPUT_FORMAT, OUTPUT_ARCH, PROVIDE and ASSERT":
+        val input = "OUTPUT_ARCH(riscv) OUTPUT_FORMAT(\"elf64-littleriscv\") SECTIONS { .data : { PROVIDE(__global_pointer$ = . + 0x800); } ASSERT(. < 0x90000000, \"kernel too big\") }"
+        val script = ld_parse(input).unwrap()
+        expect(script.output_format).to_equal("elf64-littleriscv")
+        expect(script.output_arch).to_equal("riscv")
+        expect(script.sections[0].body[0].kind == LdStmtKind.Provide).to_equal(true)
+        expect(script.sections[0].body[0].symbol).to_equal("__global_pointer$")
+        expect(script.sections[0].body[0].expr).to_equal(". + 0x800")
+        val last = script.commands[script.commands.len() - 1]
+        expect(last.stmt.kind == LdStmtKind.Assert).to_equal(true)
+        expect(last.stmt.message).to_equal("kernel too big")
+
+    it "rejects an unknown directive instead of skipping it":
+        expect(ld_parse("FROBNICATE(x)").is_err()).to_equal(true)
+
+fn _ld_roundtrip(arch: text) -> text:
+    val path = "src/os/kernel/arch/{arch}/linker.ld"
+    val src = file_read(path)
+    if src.len() == 0:
+        return "empty read: {path}"
+    val first = ld_parse(src)
+    if first.is_err():
+        return "parse failed: {first.unwrap_err()}"
+    val printed = ld_print(first.unwrap())
+    if not ld_tokens_equivalent(src, printed):
+        return "printed script is not token-equivalent to {path}"
+    val second = ld_parse(printed)
+    if second.is_err():
+        return "reparse failed: {second.unwrap_err()}"
+    if ld_print(second.unwrap()) != printed:
+        return "print is not idempotent for {path}"
+    "ok"
+
+describe "linker_script - round-trips all 6 src/os/kernel/arch/*/linker.ld":
+    it "round-trips x86_64":
+        expect(_ld_roundtrip("x86_64")).to_equal("ok")
+    it "round-trips arm64":
+        expect(_ld_roundtrip("arm64")).to_equal("ok")
+    it "round-trips riscv64":
+        expect(_ld_roundtrip("riscv64")).to_equal("ok")
+    it "round-trips riscv32":
+        expect(_ld_roundtrip("riscv32")).to_equal("ok")
+    it "round-trips arm32":
+        expect(_ld_roundtrip("arm32")).to_equal("ok")
+    it "round-trips x86_32":
+        expect(_ld_roundtrip("x86_32")).to_equal("ok")
+    it "token equivalence detects a dropped AT() bias (round-trip is not vacuous)":
+        val src = file_read("src/os/kernel/arch/x86_64/linker.ld")
+        val printed = ld_print(ld_parse(src).unwrap())
+        val mutated = printed.replace("AT(ADDR(.text) - 0xFFFFFFFF80000000)", "AT(ADDR(.text))")
+        expect(ld_tokens_equivalent(src, mutated)).to_equal(false)
+
+# ============================================================================
+# 10. Every in-tree linker script (git ls-files '*.ld', 50 files, 2026-09-19)
+# ============================================================================
+
+val ALL_LD_SCRIPTS: [text] = [
+    "examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld",
+    "examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld",
+    "examples/09_embedded/simple_os/arch/arm32/fs_exec_linker.ld",
+    "examples/09_embedded/simple_os/arch/arm32/linker.ld",
+    "examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld",
+    "examples/09_embedded/simple_os/arch/arm64/linker.ld",
+    "examples/09_embedded/simple_os/arch/common/linker_arm_common.ld",
+    "examples/09_embedded/simple_os/arch/common/linker_riscv_common.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/ghdl_linux_acceptance_linker.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/linker.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/linker_tiny.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/linker_tiny64.ld",
+    "examples/09_embedded/simple_os/arch/riscv64/ghdl_boot_info_linker.ld",
+    "examples/09_embedded/simple_os/arch/riscv64/linker.ld",
+    "examples/09_embedded/simple_os/arch/x86_32/linker.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/boot/multiboot2_elf64_loader.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/hello_user/user.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/linker.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/linker_low1mb.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/memory_leveling_qemu.ld",
+    "examples/09_embedded/simpleos_nvme_fw/baremetal_rv32/linker.ld",
+    "src/compiler/70.backend/baremetal/arm/linker.ld",
+    "src/compiler/70.backend/baremetal/cortex_m33/linker.ld",
+    "src/compiler/70.backend/baremetal/cortex_m33/linker_ra4m1.ld",
+    "src/compiler/70.backend/baremetal/cortex_m33/linker_stm32u585.ld",
+    "src/compiler/70.backend/baremetal/riscv/linker.ld",
+    "src/compiler/70.backend/baremetal/x86_64/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/arm/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/riscv/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/riscv32/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/test/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/x86/linker.ld",
+    "src/os/kernel/arch/arm32/cosmos/cosmos_linker.ld",
+    "src/os/kernel/arch/arm32/linker.ld",
+    "src/os/kernel/arch/arm64/linker.ld",
+    "src/os/kernel/arch/riscv32/fpga_linker.ld",
+    "src/os/kernel/arch/riscv32/linker.ld",
+    "src/os/kernel/arch/riscv64/fpga_linker.ld",
+    "src/os/kernel/arch/riscv64/linker.ld",
+    "src/os/kernel/arch/riscv64/platform/fpga_linker.ld",
+    "src/os/kernel/arch/riscv64/starfive_jh7110_linker.ld",
+    "src/os/kernel/arch/x86_32/linker.ld",
+    "src/os/kernel/arch/x86_64/linker.ld",
+    "src/os/kernel/arch/x86_64/up_squared/linker.ld",
+    "src/os/realtime/boot/arm.ld",
+    "src/os/realtime/boot/riscv32.ld",
+    "src/os/realtime/boot/x86_64.ld",
+    "test/02_integration/os/cosmos/cosmos_abort_contract_test.ld",
+    "test/fixtures/baremetal/stm_semihost_smoke.ld",
+]
+
+fn _ld_roundtrip_path(path: text) -> text:
+    val src = file_read(path)
+    if src.len() == 0:
+        return "empty read: {path}"
+    val first = ld_parse(src)
+    if first.is_err():
+        return "{path}: {first.unwrap_err()}"
+    val printed = ld_print(first.unwrap())
+    if not ld_tokens_equivalent(src, printed):
+        return "{path}: printed script is not token-equivalent"
+    val second = ld_parse(printed)
+    if second.is_err():
+        return "{path}: reparse failed: {second.unwrap_err()}"
+    if ld_print(second.unwrap()) != printed:
+        return "{path}: print is not idempotent"
+    "ok"
+
+describe "linker_script - every in-tree .ld script":
+    it "parses and round-trips all 50 scripts":
+        var failures: [text] = []
+        for path in ALL_LD_SCRIPTS:
+            val r = _ld_roundtrip_path(path)
+            if r != "ok":
+                failures = failures.push(r)
+        expect(failures).to_equal([])
+        expect(ALL_LD_SCRIPTS.len()).to_equal(50)
+
+describe "linker_script - operators, INCLUDE, EXTERN, bare names":
+    it "tokenizes compound and bitwise operators instead of dropping them":
+        val tokens = ld_tokenize("a <= b >= c ! d & e % f ~ g")
+        expect(tokens[1].kind == LdTokenKind.Op).to_equal(true)
+        expect(tokens[1].value).to_equal("<=")
+        expect(tokens[3].value).to_equal(">=")
+        expect(tokens[5].value).to_equal("!")
+        expect(tokens[7].value).to_equal("&")
+        expect(tokens[9].value).to_equal("%")
+        expect(tokens[11].value).to_equal("~")
+
+    it "keeps an unknown character as a token and rejects it by name":
+        val tokens = ld_tokenize("ENTRY(@)")
+        expect(tokens[2].kind == LdTokenKind.Unknown).to_equal(true)
+        expect(tokens[2].value).to_equal("@")
+        val r = ld_parse("ENTRY(_start) _x = 0x1000 @ 4;")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("'@'")).to_equal(true)
+
+    it "parses ASSERT with <= and ORIGIN/LENGTH":
+        val script = ld_parse("ASSERT(_stack_top <= ORIGIN(RAM) + LENGTH(RAM), \"Stack overflows RAM\")").unwrap()
+        expect(script.top_stmts[0].kind == LdStmtKind.Assert).to_equal(true)
+        expect(script.top_stmts[0].expr).to_equal("_stack_top <= ORIGIN(RAM) + LENGTH(RAM)")
+
+    it "keeps INCLUDE as an unresolved directive node":
+        val script = ld_parse("INCLUDE \"common.ld\"").unwrap()
+        expect(script.top_stmts[0].kind == LdStmtKind.Include).to_equal(true)
+        expect(script.top_stmts[0].message).to_equal("common.ld")
+
+    it "parses EXTERN symbol lists":
+        val script = ld_parse("ENTRY(_entry32) EXTERN(_entry32 _other)").unwrap()
+        expect(script.top_stmts[0].kind == LdStmtKind.Extern).to_equal(true)
+        expect(script.top_stmts[0].patterns).to_equal(["_entry32", "_other"])
+
+    it "parses unquoted OUTPUT_FORMAT and quoted OUTPUT_ARCH":
+        val script = ld_parse("OUTPUT_FORMAT(elf32-i386) OUTPUT_ARCH(\"riscv\")").unwrap()
+        expect(script.output_format).to_equal("elf32-i386")
+        expect(script.output_format_quoted).to_equal(false)
+        expect(script.output_arch).to_equal("riscv")
+        expect(script.output_arch_quoted).to_equal(true)

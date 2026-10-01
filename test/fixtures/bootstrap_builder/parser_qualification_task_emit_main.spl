@@ -1,0 +1,71 @@
+# Canonical build-task emitter for a fresh materialized qualification workspace.
+use app.io.args_ops.{get_args}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1}
+use std.common.build_manager.codec.{builder_encode_task_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_exists, file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_atomic_write}
+use app.bootstrap_builder.parser_qualification_capture.{parser_qualification_sources_v1}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 5: return 2
+    val root = args[1]
+    val producer = args[2]
+    val target = args[3]
+    var directories = ["runtime", "toolchain"]
+    var inputs: [BuildInputV1] = []
+    var cursor = 0
+    while cursor < directories.len():
+        if directories.len() > 4096: return 3
+        val relative = directories[cursor]
+        cursor = cursor + 1
+        val entries = match dir_list_optional(root + "/" + relative):
+            case Some(value): value
+            case _: return 4
+        for name in entries:
+            val path = relative + "/" + name
+            if dir_exists(root + "/" + path): directories = directories.push(path)
+            else:
+                if not file_is_regular_no_follow(root + "/" + path): return 5
+                inputs = inputs.push(BuildInputV1(path, file_hash_sha256_or_empty(root + "/" + path)))
+                if inputs.len() > 4096: return 6
+    var config_directories = ["src/compiler", "src/app", "src/lib", "src/compositions"]
+    if dir_exists(root + "/src/plugins"): config_directories = config_directories.push("src/plugins")
+    var config_cursor = 0
+    while config_cursor < config_directories.len():
+        if config_directories.len() > 65536: return 9
+        val directory = config_directories[config_cursor]
+        config_cursor = config_cursor + 1
+        val entries = match dir_list_optional(root + "/" + directory):
+            case Some(value): value
+            case _: return 10
+        for name in entries:
+            val path = directory + "/" + name
+            if dir_exists(root + "/" + path): config_directories = config_directories.push(path)
+            elif name.ends_with(".sdn") and name != "simple.sdn":
+                if not file_is_regular_no_follow(root + "/" + path): return 11
+                inputs = inputs.push(BuildInputV1(path, file_hash_sha256_or_empty(root + "/" + path)))
+                if inputs.len() > 4096: return 12
+    var argv = ["native-build", "--target", target, "--backend", "llvm", "--runtime-bundle", "core-c-bootstrap",
+        "--source", "src/compositions/kernel_llvm_cranelift", "--source", "src/compiler", "--source", "src/app",
+        "--source", "src/lib", "--entry-closure", "--threads", "1", "--cache-dir", root + "/cache",
+        "--mode", "one-binary", "--entry", "src/compiler/80.driver/driver_managed_parse_group_main.spl",
+        "--runtime-path", root + "/runtime", "-o", root + "/out/parser-worker.exe"]
+    if dir_exists(root + "/src/plugins"): argv = argv.push("--source").push("src/plugins")
+    val producer_digest = file_hash_sha256_or_empty(producer)
+    val temporary = BuildTaskV1("parser-worker-qualification", 1, "parse-worker", producer_digest,
+        sha256_text("capture-pending"), sha256_text(builder_encode_task_v1(BuildTaskV1("provider-pins", 1, "pins",
+        producer_digest, sha256_text("pins"), sha256_text("pins"), [], producer, [], inputs, ["out/pins"], sha256_text("pins"), 1))),
+        [], producer, argv, inputs, ["out/parser-worker.exe"], sha256_text(root), 180000)
+    val capture = match parser_qualification_sources_v1(root, temporary):
+        case Ok(value): value
+        case Err(reason):
+            print "FAIL source closure: {reason}"
+            return 7
+    val task = BuildTaskV1(temporary.id, 1, temporary.phase, producer_digest, sha256_text(capture),
+        temporary.toolchain_digest, [], producer, argv, inputs, temporary.outputs, temporary.cache_key, temporary.timeout_ms)
+    val encoded = builder_encode_task_v1(task)
+    if encoded == "" or not file_atomic_write(args[4], encoded): return 8
+    print "PASS canonical qualification build task source={task.source_digest} inputs={inputs.len()}"
+    0

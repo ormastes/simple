@@ -1,0 +1,363 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
+use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1, cold_hir_semantic_seed_v1}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{ColdHirPackageOutputV1, cold_hir_package_index_from_outputs_v1}
+use compiler.driver.cache.cold_hir_package_publication_v1.{cold_hir_package_publish_verified_v1}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, PackageArchivePublishInputV1,
+    package_archive_receipt_decode_v1, package_archive_publish_scc_v1
+}
+use compiler.driver.cache.cas_batch_transaction.{cas_batch_lookup_receipt_digest_v1}
+use compiler.driver.cache.cas_store.{cas_blob_path, cas_get}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_open_verified_v1, pinned_archive_read_member_v1,
+    pinned_archive_close_v1
+}
+use compiler.driver.cache.package_module_index.{
+    package_module_index_read_current_v1,
+    package_module_index_encode_v1, package_module_index_decode_v1
+}
+use compiler.driver.cache.package_module_index_builder.{PackageModuleIndexBuildAuthorityV1, PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex, sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn compact_module(name: text, imports: [HirImport]) -> HirModule:
+    HirModule(name: name, path: "/frozen/{name}.spl", imports: imports,
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn compact_inventory() -> CompileSourceInventoryV1:
+    val empty = sha256_text("")
+    CompileSourceInventoryV1(1, 1, [
+        CompileSourceInventoryEntryV1("a.spl", sha256_text("source-a"),
+            empty, empty, empty, empty, 8),
+        CompileSourceInventoryEntryV1("b.spl", sha256_text("source-b"),
+            empty, empty, empty, empty, 8)])
+
+fn compact_authority(digest: text) -> PackageModuleIndexBuildAuthorityV1:
+    PackageModuleIndexBuildAuthorityV1(
+        sha256_text("producer"), "root", "revision", "commit", "tree",
+        digest, ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "llvm-lib",
+            [], "debug", "abi-v1", [], []))
+
+fn compact_output(module: HirModule, inventory: CompileSourceInventoryV1,
+    digest: text) -> ColdHirPackageOutputV1:
+    val source = "source-{module.name}"
+    val seed: ColdHirSemanticSeedV1 = cold_hir_semantic_seed_v1(
+        module, "/frozen", "{module.name}.spl", source,
+        inventory, digest).unwrap()
+    ColdHirPackageOutputV1(seed, hir_abi_interface_encoded_v1(module).unwrap(),
+        "package-{module.name}", sha256_text(source),
+        sha256_text("export-{module.name}"),
+        sha256_text("initializer-{module.name}"),
+        sha256_text("provider-{module.name}"), sha256_text(""),
+        sha256_text("interface-archive-{module.name}"),
+        sha256_text("action-archive-{module.name}"), "",
+        PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
+
+fn compact_persisted_archive_fixture(
+    root: text, scoped: bool, corrupt_interface: bool,
+    large_archive: bool = false, invalid_utf8: bool = false
+) ->
+        (PackageModuleIndexBuildAuthorityV1, CompileSourceInventoryV1,
+         ColdHirPackageOutputV1, bool):
+    val empty = sha256_text("")
+    var inventory = CompileSourceInventoryV1(1, 1, [
+        CompileSourceInventoryEntryV1("a.spl", sha256_text("source-a"),
+            empty, empty, empty, empty, 8)])
+    if scoped:
+        inventory.entries = inventory.entries.push(
+            CompileSourceInventoryEntryV1("c.spl", sha256_text("source-c"),
+                empty, empty, empty, empty, 8))
+    var authority = compact_authority(
+        compile_source_inventory_digest_v1(inventory))
+    if scoped:
+        authority.scope_entry_source_identity = "a.spl"
+    val module = compact_module("a", [])
+    var output = compact_output(
+        module, inventory, authority.inventory_digest)
+    val symbol_digest = sha256_text("foo")
+    val compile_digest = sha256_text("compile")
+    val interface_content = if corrupt_interface:
+        "not-a-symbol"
+    else:
+        "symbol|foo|function|i64|{symbol_digest}"
+    val action_prefix = "action|compile|function|foo|{compile_digest}"
+    val action_content = if invalid_utf8:
+        action_prefix + "é".slice(0, 1)
+    elif large_archive:
+        action_prefix + "x".repeat(131072)
+    else:
+        action_prefix
+    output.interface_archive_digest = sha256_text(interface_content)
+    output.action_archive_digest = sha256_text(action_content)
+    val preview = cold_hir_package_index_from_outputs_v1(
+        authority, inventory, [output])
+    if preview.is_err():
+        return (authority, inventory, output, false)
+    val generation = preview.unwrap()
+    val entry = generation.entries[0]
+    val archive_authority = PackageArchiveAuthorityV1(
+        generation.producer_digest, generation.root_generation,
+        generation.variant_digest, generation.scv_revision_id,
+        generation.scv_tree_id, generation.inventory_digest)
+    val published = package_archive_publish_scc_v1(
+        root, entry.scc_identity, archive_authority,
+        [PackageArchivePublishInputV1(
+            entry, [], interface_content, action_content, true)])
+    (authority, inventory, output, published)
+
+describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
+    it "reads the persisted 542-byte archive through its pinned receipt":
+        val root = "build/tmp/cold-hir-pinned/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false)
+        expect(archive_published).to_be(true)
+        val built = cold_hir_package_index_from_outputs_v1(
+            authority, inventory, [output])
+        expect(built.is_ok()).to_be(true)
+        if built.is_ok():
+            val entry = built.unwrap().entries[0]
+            val aggregate_action_digest = sha256_text(entry.action_digest)
+            val receipt_digest = cas_batch_lookup_receipt_digest_v1(
+                root, entry.package_identity, aggregate_action_digest)
+            expect(receipt_digest != nil).to_be(true)
+            if receipt_digest != nil:
+                val encoded = cas_get(root, receipt_digest.unwrap())
+                expect(encoded != nil).to_be(true)
+                if encoded != nil:
+                    val receipt = package_archive_receipt_decode_v1(
+                        encoded.unwrap())
+                    expect(receipt != nil).to_be(true)
+                    if receipt != nil:
+                        val admitted = receipt.unwrap()
+                        val blob_path = cas_blob_path(
+                            root, admitted.archive_digest)
+                        expect(blob_path.starts_with(root + "/")).to_be(true)
+                        if blob_path.starts_with(root + "/"):
+                            val archive_blob = cas_get(root, admitted.archive_digest)
+                            expect(archive_blob != nil).to_be(true)
+                            if archive_blob != nil:
+                                val archive_bytes = text_to_utf8_bytes(archive_blob.unwrap())
+                                expect(sha256_u8_hex(archive_bytes)).to_equal(admitted.archive_digest)
+                                val stream = sha256_stream_v1_new()
+                                expect(sha256_stream_v1_update(stream, archive_bytes)).to_be(true)
+                                expect(sha256_stream_v1_finish_hex(stream).unwrap()).to_equal(admitted.archive_digest)
+                            val relative = blob_path.substring(
+                                root.len() + 1, blob_path.len())
+                            val opened = pinned_archive_open_verified_v1(
+                                root, relative, admitted)
+                            expect(opened.is_ok()).to_be(true)
+                            if opened.is_ok():
+                                var capability = opened.unwrap()
+                                val payload = pinned_archive_read_member_v1(
+                                    &capability, "interface.smf")
+                                expect(payload.is_ok()).to_be(true)
+                                if payload.is_ok():
+                                    expect(sha256_u8_hex(payload.unwrap())).to_equal(
+                                        output.interface_archive_digest)
+                                expect(pinned_archive_close_v1(capability).is_ok()).to_be(true)
+
+    it "verifies a persisted 131 KiB archive through its pinned receipt":
+        val root = "build/tmp/cold-hir-pinned-large/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false, true)
+        expect(archive_published).to_be(true)
+        val built = cold_hir_package_index_from_outputs_v1(
+            authority, inventory, [output])
+        expect(built.is_ok()).to_be(true)
+        if built.is_ok():
+            val entry = built.unwrap().entries[0]
+            val aggregate_action_digest = sha256_text(entry.action_digest)
+            val receipt_digest = cas_batch_lookup_receipt_digest_v1(
+                root, entry.package_identity, aggregate_action_digest)
+            expect(receipt_digest != nil).to_be(true)
+            if receipt_digest != nil:
+                val encoded = cas_get(root, receipt_digest.unwrap())
+                expect(encoded != nil).to_be(true)
+                if encoded != nil:
+                    val receipt = package_archive_receipt_decode_v1(
+                        encoded.unwrap())
+                    expect(receipt != nil).to_be(true)
+                    if receipt != nil:
+                        val admitted = receipt.unwrap()
+                        val last = admitted.members[admitted.members.len() - 1]
+                        expect(last.offset + last.extent > 131072u64).to_be(true)
+                        val blob_path = cas_blob_path(root, admitted.archive_digest)
+                        val relative = blob_path.substring(
+                            root.len() + 1, blob_path.len())
+                        val opened = pinned_archive_open_verified_v1(
+                            root, relative, admitted)
+                        expect(opened.is_ok()).to_be(true)
+                        if opened.is_ok():
+                            var capability = opened.unwrap()
+                            val payload = pinned_archive_read_member_v1(
+                                &capability, "interface.smf")
+                            expect(payload.is_ok()).to_be(true)
+                            if payload.is_ok():
+                                expect(sha256_u8_hex(payload.unwrap())).to_equal(
+                                    output.interface_archive_digest)
+                            expect(pinned_archive_close_v1(capability).is_ok()).to_be(true)
+
+    it "binds an entry-closure V3 graph to the full frozen inventory":
+        val base = compact_inventory()
+        val empty = sha256_text("")
+        val inventory = CompileSourceInventoryV1(1, 1, [
+            base.entries[0], base.entries[1],
+            CompileSourceInventoryEntryV1("c.spl", sha256_text("source-c"),
+                empty, empty, empty, empty, 8)])
+        val digest = compile_source_inventory_digest_v1(inventory)
+        var authority = compact_authority(digest)
+        authority.scope_entry_source_identity = "a.spl"
+        val a = compact_module("a", [HirImport("b", [], false, Span.empty())])
+        val b = compact_module("b", [])
+        val c = compact_module("c", [])
+        val outputs = [compact_output(a, inventory, digest),
+            compact_output(b, inventory, digest)]
+        val built = cold_hir_package_index_from_outputs_v1(
+            authority, inventory, outputs)
+        expect(built.is_ok()).to_be(true)
+        if built.is_ok():
+            val generation = built.unwrap()
+            expect(generation.schema_version).to_equal(3)
+            expect(generation.entries.len()).to_equal(2)
+            expect(generation.inventory_digest).to_equal(digest)
+            expect(generation.scope_entry_source_identity).to_equal("a.spl")
+            val encoded = package_module_index_encode_v1(generation)
+            val decoded = package_module_index_decode_v1(encoded)
+            expect(decoded.valid).to_be(true)
+            if decoded.valid:
+                expect(decoded.generation!.scope_entry_source_identity).to_equal("a.spl")
+        val omitted_import = cold_hir_package_index_from_outputs_v1(
+            authority, inventory, [outputs[0]])
+        expect(omitted_import.is_err()).to_be(true)
+        var wrong_scope = authority
+        wrong_scope.scope_entry_source_identity = "c.spl"
+        val absent_root = cold_hir_package_index_from_outputs_v1(
+            wrong_scope, inventory, outputs)
+        expect(absent_root.is_err()).to_be(true)
+        val excess = cold_hir_package_index_from_outputs_v1(
+            authority, inventory,
+            [outputs[0], outputs[1], compact_output(c, inventory, digest)])
+        expect(excess.is_err()).to_be(true)
+
+    it "derives reverse edges and builds a complete graph without HIR bodies":
+        val inventory = compact_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val a = compact_module("a", [HirImport("b", [], false, Span.empty())])
+        val b = compact_module("b", [])
+        val built = cold_hir_package_index_from_outputs_v1(
+            compact_authority(digest), inventory,
+            [compact_output(a, inventory, digest),
+             compact_output(b, inventory, digest)])
+        expect(built.is_ok()).to_be(true)
+        if built.is_err():
+            print "compact-index-error={built.unwrap_err()}"
+        else:
+            val generation = built.unwrap()
+            expect(generation.schema_version).to_equal(2)
+            expect(generation.entries.len()).to_equal(2)
+            expect(generation.entries[0].direct_imports).to_equal(["b"])
+            expect(generation.entries[1].reverse_dependents).to_equal(["a"])
+
+    it "rejects stale ABI bytes and incomplete source coverage":
+        val inventory = compact_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val a = compact_module("a", [])
+        val b = compact_module("b", [])
+        var bad = compact_output(a, inventory, digest)
+        bad.abi_payload = "stale"
+        val stale = cold_hir_package_index_from_outputs_v1(
+            compact_authority(digest), inventory,
+            [bad, compact_output(b, inventory, digest)])
+        expect(stale.is_err()).to_be(true)
+        expect(stale.unwrap_err()).to_equal("cold-export-smf-typed-abi-mismatch")
+        val incomplete = cold_hir_package_index_from_outputs_v1(
+            compact_authority(digest), inventory,
+            [compact_output(b, inventory, digest)])
+        expect(incomplete.is_err()).to_be(true)
+        expect(incomplete.unwrap_err()).to_equal(
+            "index-builder-source-coverage-incomplete")
+
+    it "publishes only after decoding a persisted package archive":
+        val root = "build/tmp/cold-hir-publish/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false)
+        expect(archive_published).to_be(true)
+        val published = cold_hir_package_publish_verified_v1(
+            root, authority, inventory, [output], "")
+        expect(published.is_ok()).to_be(true)
+        if published.is_err():
+            print "cold-publish-error={published.unwrap_err()}"
+        val current = package_module_index_read_current_v1(root)
+        expect(current.valid).to_be(true)
+        if current.valid:
+            expect(current.generation!.entries.len()).to_equal(1)
+
+    it "rejects mismatched archive payload before moving CURRENT":
+        val root = "build/tmp/cold-hir-reject/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false)
+        expect(archive_published).to_be(true)
+        var stale = output
+        stale.interface_archive_digest = sha256_text("stale-interface")
+        val rejected = cold_hir_package_publish_verified_v1(
+            root, authority, inventory, [stale], "")
+        expect(rejected.is_err()).to_be(true)
+        if rejected.is_err():
+            expect(rejected.unwrap_err()).to_equal(
+                "cold-publish-archive-payload-mismatch:a")
+        expect(package_module_index_read_current_v1(root).valid).to_be(false)
+
+    it "publishes a scoped V3 graph after verifying its reached archive":
+        val root = "build/tmp/cold-hir-scope/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, true, false)
+        expect(archive_published).to_be(true)
+        val published = cold_hir_package_publish_verified_v1(
+            root, authority, inventory, [output], "")
+        expect(published.is_ok()).to_be(true)
+        val current = package_module_index_read_current_v1(root)
+        expect(current.valid).to_be(true)
+        if current.valid:
+            expect(current.generation!.schema_version).to_equal(3)
+            expect(current.generation!.entries.len()).to_equal(1)
+            expect(current.generation!.scope_entry_source_identity).to_equal("a.spl")
+
+    it "refuses a digest-valid archive whose interface cannot be installed":
+        val root = "build/tmp/cold-hir-invalid-interface/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, true)
+        expect(archive_published).to_be(true)
+        val rejected = cold_hir_package_publish_verified_v1(
+            root, authority, inventory, [output], "")
+        expect(rejected.is_err()).to_be(true)
+        if rejected.is_err():
+            expect(rejected.unwrap_err()).to_equal(
+                "cold-publish-archive-decode-invalid:package-a")
+        expect(package_module_index_read_current_v1(root).valid).to_be(false)
+
+    it "rejects an invalid UTF-8 member before moving CURRENT":
+        val root = "build/tmp/cold-hir-invalid-utf8/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false, false, true)
+        expect(archive_published).to_be(true)
+        if archive_published:
+            val rejected = cold_hir_package_publish_verified_v1(
+                root, authority, inventory, [output], "")
+            expect(rejected.is_err()).to_be(true)
+            if rejected.is_err():
+                expect(rejected.unwrap_err()).to_equal(
+                    "cold-publish-archive-member-utf8-invalid:package-a")
+            expect(package_module_index_read_current_v1(root).valid).to_be(false)

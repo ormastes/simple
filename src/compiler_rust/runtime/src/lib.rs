@@ -9,6 +9,40 @@
 
 include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 
+#[cfg(all(target_os = "macos", not(feature = "native-all-provider")))]
+mod cocoa_dynload_owner;
+
+// runtime_memory.c is always linked into the bootstrap runtime and provides
+// the allocator used by struct lowering.  Some already-materialized generated
+// symbol tables omitted this one provider even though they retained its paired
+// receiver validator, which made the JIT demote an entire source module.  Add
+// the real C entry at registration time so a cached/generated table cannot
+// suppress the provider.
+#[cfg(feature = "runtime-symbol-table")]
+unsafe extern "C" {
+    fn rt_struct_alloc(size: i64) -> *mut u8;
+}
+
+#[cfg(feature = "runtime-symbol-table")]
+static REGISTERED_RUNTIME_SYMBOL_ENTRIES: std::sync::OnceLock<Box<[simple_runtime_abi::RuntimeSymbolEntry]>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "runtime-symbol-table")]
+fn static_runtime_symbol_entries() -> &'static [simple_runtime_abi::RuntimeSymbolEntry] {
+    REGISTERED_RUNTIME_SYMBOL_ENTRIES
+        .get_or_init(|| {
+            let mut entries = RUNTIME_SYMBOL_ENTRIES.to_vec();
+            if !entries.iter().any(|entry| entry.name == "rt_struct_alloc") {
+                entries.push(simple_runtime_abi::RuntimeSymbolEntry::new(
+                    "rt_struct_alloc",
+                    rt_struct_alloc as *const u8,
+                ));
+            }
+            entries.into_boxed_slice()
+        })
+        .as_ref()
+}
+
 // The build script consumes this scanner directly; include it in the library
 // test target as well so its definition/prototype discrimination is executed.
 #[cfg(test)]
@@ -26,11 +60,18 @@ pub mod compress;
 pub mod concurrency;
 pub mod concurrent;
 pub mod coverage;
+pub mod cache_daemon_host_authority_v1;
+pub mod cache_daemon_process_v1;
+pub mod cache_host_authority_v1;
 pub mod cuda_runtime;
+pub mod process_observation_v4_twins;
 pub mod debug;
+pub mod directx_submission_twins;
 pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
+pub mod gpu_provider_twins;
+pub mod gui_html_session_twins;
 pub mod host_gpu_lane;
 pub mod memory;
 pub mod mem_snapshot;
@@ -55,6 +96,7 @@ pub mod monoio_waker;
 pub mod vulkan;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
+pub mod x86_simd_probe;
 
 /// Stable metadata queried by the core runtime before it admits this artifact
 /// as a dynamically loaded GPU provider. Operation tables are backend-specific
@@ -93,12 +135,14 @@ fn register_static_runtime_symbols_with_abi() {
 }
 pub mod parallel;
 pub mod packed_byte_adapters;
+pub mod sdl_native_bridge;
 pub mod sandbox;
 pub mod security_runtime;
 /// UTF-8 slice-boundary audit (counting mode). See the module docs: this is
 /// stage 1 of the mid-codepoint-slice rollout and is DEFAULT OFF.
 pub mod text_slice_audit;
 pub mod value;
+mod file_view;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
 // symbol registration is enabled. Tiny standalone binaries do not need these
@@ -395,7 +439,7 @@ pub extern "C" fn simple_runtime_abi_version() -> u32 {
 
 pub fn register_static_runtime_symbols() {
     #[cfg(feature = "runtime-symbol-table")]
-    let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
+    let _ = simple_runtime_abi::register_static_runtime_symbols(static_runtime_symbol_entries());
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
@@ -434,6 +478,51 @@ fn runtime_symbol_table_contains_monotonic_time() {
     let second = now();
     assert!(first >= 0);
     assert!(second >= first);
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
+fn runtime_symbol_table_contains_char_from_code() {
+    let entry = RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "rt_char_from_code")
+        .expect("char-from-code provider must be registered so the seed JIT does not de-JIT");
+    assert!(!entry.ptr.is_null());
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table", not(feature = "runtime-tls")))]
+#[test]
+fn runtime_symbol_table_excludes_disabled_tls_providers() {
+    // `rt_tls_{new,get,set,...}` are unrelated thread-local-storage owners;
+    // pin only the cfg-gated network transport surface from net_tls.rs.
+    let transport_names = [
+        "rt_tls_client_connect",
+        "rt_tls_client_connect_with_sni",
+        "rt_tls_client_connect_address_with_sni_timeout",
+        "rt_tls_client_write",
+        "rt_tls_client_read_checked",
+        "rt_tls_client_write_timeout",
+        "rt_tls_client_read_timeout_checked",
+        "rt_tls_client_close",
+        "rt_tls_get_protocol_version",
+        "rt_tls_get_cipher_suite",
+        "rt_tls_get_negotiated_alpn",
+        "rt_tls_is_handshake_complete",
+        "rt_tls_server_accept",
+        "rt_tls_server_close_connection",
+        "rt_tls_server_create",
+        "rt_tls_server_create_from_der",
+        "rt_tls_server_read_checked",
+        "rt_tls_server_shutdown",
+        "rt_tls_server_write",
+        "rt_tls_server_write_bytes",
+    ];
+    for name in transport_names {
+        assert!(
+            !RUNTIME_SYMBOL_ENTRIES.iter().any(|entry| entry.name == name),
+            "cfg-disabled TLS transport provider leaked into the runtime table: {name}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
@@ -551,11 +640,11 @@ fn runtime_symbol_table_checked_offset_read_resolves_exact_provider() {
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
 fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
-    let allocator = RUNTIME_SYMBOL_ENTRIES
+    let allocator = static_runtime_symbol_entries()
         .iter()
         .find(|entry| entry.name == "rt_struct_alloc")
         .expect("struct allocator provider must be registered");
-    let validator = RUNTIME_SYMBOL_ENTRIES
+    let validator = static_runtime_symbol_entries()
         .iter()
         .find(|entry| entry.name == "rt_struct_receiver_valid")
         .expect("struct receiver validator provider must be registered");
@@ -618,6 +707,28 @@ pub extern "C" fn rt_load_barrier() {
 #[no_mangle]
 pub extern "C" fn rt_store_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+}
+
+/// Optimization barrier for constant-time code -- returns its argument.
+///
+/// Contract: `extern fn rt_black_box(value: i64) -> i64`
+/// (`src/os/crypto/scram_common.spl:17`; `src/lib/common/crypto/constant_time.spl:7`
+/// spells the return `i64?`, which is a Simple-side nullability annotation
+/// over the same raw-i64 C ABI -- cf. `extern fn rt_free(ptr: i64) -> i64?`
+/// against `void rt_free(void*)`).
+///
+/// Semantically the identity function, but the optimizer must not be able
+/// to see that: callers (`ct_eq`, HTTP Basic auth, SCRAM) XOR-accumulate a
+/// difference and test it once, and without a barrier the compiler may
+/// rewrite that into an early-exit branch, reintroducing exactly the
+/// data-dependent timing the accumulate loop removes.
+///
+/// The C runtime defines this symbol WEAKLY (`runtime_native.c`, next to
+/// `rt_memory_barrier`) so this strong definition wins in any link that
+/// carries both -- same precedence rule as `rt_heap_live_bytes`.
+#[no_mangle]
+pub extern "C" fn rt_black_box(value: i64) -> i64 {
+    std::hint::black_box(value)
 }
 
 #[no_mangle]
@@ -805,6 +916,7 @@ pub use value::{
     rt_array_set_len_known_text,
     rt_array_set,
     rt_array_set_text,
+    rt_collection_set,
     rt_typed_bytes_u8_push,
     rt_typed_bytes_u8_data_at,
     rt_typed_words_u32_at,
@@ -848,6 +960,7 @@ pub use value::{
     rt_dict_set_i64_raw,
     // Enum operations
     rt_enum_check_discriminant,
+    rt_enum_check_variant,
     rt_enum_discriminant,
     rt_enum_id,
     rt_enum_new,
@@ -981,24 +1094,19 @@ pub use value::{
     rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_drain_line, rt_io_tcp_flush,
     rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout,
-    rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len,
-    rt_io_udp_bind, rt_io_udp_close, rt_io_udp_connect, rt_io_udp_local_addr, rt_io_udp_recv,
-    rt_io_udp_recv_from, rt_io_udp_send, rt_io_udp_send_to, rt_io_udp_set_broadcast,
-    rt_io_udp_set_nonblocking, rt_io_udp_set_read_timeout,
+    rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len, rt_io_udp_bind,
+    rt_io_udp_close, rt_io_udp_connect, rt_io_udp_local_addr, rt_io_udp_recv, rt_io_udp_recv_from, rt_io_udp_send,
+    rt_io_udp_send_to, rt_io_udp_set_broadcast, rt_io_udp_set_nonblocking, rt_io_udp_set_read_timeout,
 };
 
 #[cfg(feature = "runtime-tls")]
 pub use value::{
     rt_tls_client_close, rt_tls_client_connect, rt_tls_client_connect_with_sni,
-    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read_checked,
-    rt_tls_client_read_timeout_checked,
-    rt_tls_client_write, rt_tls_client_write_timeout,
-    rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn, rt_tls_get_protocol_version,
-    rt_tls_is_handshake_complete, rt_tls_server_accept,
-    rt_tls_server_close_connection, rt_tls_server_create,
-    rt_tls_server_create_from_der, rt_tls_server_read_checked,
-    rt_tls_server_shutdown, rt_tls_server_write,
-    rt_tls_server_write_bytes,
+    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
+    rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
+    rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
+    rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read_checked, rt_tls_server_shutdown,
+    rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export contract violation types and SFFI functions (CTR-050-054)

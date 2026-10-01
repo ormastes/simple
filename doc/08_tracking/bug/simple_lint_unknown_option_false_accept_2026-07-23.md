@@ -1,4 +1,8 @@
 # Simple lint silently accepted unknown options — 2026-07-23
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED / PURE-SIMPLE QUALIFICATION PENDING
 
@@ -20,3 +24,4 @@ covers unknown, bare-profile, empty-profile, and JSON unknown-option cases.
 
 A fresh pure-Simple Stage 4 CLI must run the focused contract and public lint
 smoke before qualification.
+

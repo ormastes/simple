@@ -51,23 +51,12 @@ Host input
 
 - Simple owns: GUI AST, state, layout policy, event ids, dirty regions, IR
   schemas, cache invalidation, and CPU oracle behavior.
-- WM lifecycle uses the scalar `common.ui.wm_window_state` owner; minimized,
-  closing, and closed windows reject input, and restore preserves whether the
-  minimized window was Normal or Maximized.
-- SimpleOS GUI handles retain tree/focus state; local sessions are reconstructed
-  at dispatch/render boundaries, with capture released on up/minimize/close.
-- Normalized key events classify press-only WM shortcuts before widget routing;
-  releases and unreserved Ctrl bindings remain client events.
-- Web material provenance is captured from loop-local computed style before
-  the freestanding `[Style]` boundary; animated material receipts fail closed.
 - Plugin owns: capability probe, cost model, batch preparation, GPU/CPU
   execution, readback, and fallback reports.
 - Backend lane split: drawing backends own framebuffer-visible draw/present/
   readback; processing backends own compute kernels, generated artifacts,
   filters, and offload. Combined backends are explicit lane plans.
 - Wrappers own: host process/window/webview integration and input/present IPC.
-- Sandboxed browser wheel deltas use one bounded coalescing slot; the worker
-  owns clamped scroll plus matching Draw IR and hit-index coordinates.
 - TUI boundary: `app.ui.tui` and the TUI widget shim must not import GUI, web,
   TUI-web, browser, HTML renderer, or CSS implementations.
 - Renderer capabilities: `app.ui.render.capability` declares HTML/CSS/TUI
@@ -75,9 +64,8 @@ Host input
   import `app.ui.render.html_widgets` directly.
 - CSS is component-scoped: adapters call `css_for_components([...])` for only
   the style payloads their surface needs.
-- Startup dynSMF: file IO, net IO, render2d, web renderer, GUI renderer,
-  TUI renderer, and UI HTML use checked `build/dynsmf/*.smf` autoload with
-  arg/env opt-outs
+- Startup dynSMF: file IO, net IO, render2d, web renderer, GUI renderer, and
+  TUI renderer use checked `build/dynsmf/*.smf` autoload with arg/env opt-outs
   and session unload/reload evidence.
 - Preferred next refactor: typed GUI AST -> WebRender IR -> Draw IR; resolve
   GUI/HTML AST and CSS before Draw IR, then keep source kind/id and style
@@ -97,12 +85,8 @@ Host input
 - Simple2D hook: `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` accepts
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
   URI-only image commands fail closed until resolved-image input is supplied;
-  the advanced path renders caller-provided resolved ARGB buffers, including
-  Vulkan nearest-neighbor COPY and checked transparent src-over after opaque
-  initialization, but does not decode PNG, JPEG, or WebP bytes. CSS-background
-  images carry canonical tile, clip-shape, and corner-radius metadata; rounded
-  masking stays in the sampling pass and all such work shares one
-  framebuffer-sized composition budget.
+  the advanced path renders caller-provided resolved ARGB buffers but does not
+  decode PNG, JPEG, or WebP bytes.
 - Engine2D split contract: `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
 - No-GC Draw IR runtime queue owner:
   `src/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl`.
@@ -150,28 +134,8 @@ Host input
   Its Readback Matrix exposes submit/readback columns, and its Spark/normal-LLM
   table exposes a compact `linux_gui_web` event id / queue packet / readback
   source / checksum row plus DirectX native verdict and gate fields.
-  Retained RenderDoc and framebuffer artifacts must remain regular no-follow
-  paths with current receipt-matching hashes.
   Linux Metal and ROCm/HIP remain typed unavailable without matching host
   runtimes.
-- SimpleOS RV64 desktop uses the same backend-readback bar:
-  `simpleos_engine2d_vulkan_required_evidence_keys()` requires Vulkan backend,
-  `vulkan-engine2d` scene, Simple2D command status, Vulkan device name,
-  viewport, checksum, nonblank readback, and QEMU GPU readback before the QEMU
-  Simple2D/Engine2D path can pass.
-- `qemu_riscv64_engine2d_vulkan_bridge_plan()` is the SimpleOS bridge target:
-  QEMU `virtio_gpu` drawing, Vulkan Engine2D processing, `draw_ir-to-engine2d`
-  Simple2D commands, device readback, QMP screendump readback,
-  `capture-simple`, and the shared WM comparison scene are all required.
-- Windows artifact normalization uses
-  `scripts/check/check-simpleos-engine2d-renderdoc-evidence.ps1` to emit
-  Engine2D Vulkan, SimpleOS RenderDoc, and bridge rows for the aggregate
-  checker. `simpleos_engine2d_vulkan_bridge_status` is diagnostic; live
-  completion still depends on the Engine2D Vulkan/readback gate.
-- Add `-ProbeHostVulkan` to that normalizer or to the combined SimpleOS wrapper
-  for Windows host readiness rows. Passing `vulkaninfo` and installed browsers
-  are diagnostics only; SDK tools, focused browser backing, SimpleOS readback,
-  and RenderDoc capture still gate Vulkan claims.
 - Current runtime gaps: compiler/interpreter GPU packets consume the active
   backend handle, submit at lane begin, and complete after lane end, but still
   complete as typed `UNAVAILABLE` when none is registered; `SUBMITTED` is
@@ -194,28 +158,9 @@ Host input
   Qualcomm, Vulkan, DirectX, and portable fallback lanes; the automatic probe
   order starts at Metal because native surfaces need a preinitialized
   framebuffer.
-- SimpleOS x86_64, AArch64, and RV64 production desktops all lower the shared
-  WM scene through Draw IR and `Engine2dWmFrameExecutor`. RV64 VirtIO mode
-  discovery/present is an architecture transport facade, not a private render
-  path.
 - Font offload uses `engine2d_font_offload_backend_order()` for vector and
   bitmap glyph preparation, with readback/checksum parity against the CPU
   reference path before a backend is treated as valid.
-- Web semantic/layout preserves inherited/cascaded `font-family` in existing
-  Draw IR computed-style metadata. Draw IR owns no font bytes or atlas material.
-  Execution stays on the bitmap default until web layout and Engine2D paint
-  share one resolved provider/metric identity; paint-only TTF selection is an
-  invalid shortcut. Production web pixels and SimpleOS image packaging remain
-  open; SimpleOS needs one hash-pinned immutable-data manifest shared by its
-  image builders.
-- Resolved-font target: `FontRenderer.resolve_font_metrics` supplies one stable
-  manifest identity plus exact advances to Web layout; Draw IR carries only
-  `font-family`/`font-identity`/`font-advance-widths`, and Engine2D verifies the
-  same identity before paint. Legacy commands without identity remain bitmap.
-- Opt-in `Engine2D.load_font` is separate: CPU `spl_fonts` raster/layout,
-  per-engine glyph cache, then one tight payload blended by the drawing backend.
-  UTF-8 local paths are supported; the face/layout is a serialized
-  process-global singleton. The unspecified default remains bitmap text.
 - Text fallback hot path: AA glyph loops touch only glyph coverage pixels; the
   prefilled buffer owns advance gaps and font-size padding rows as background.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts
@@ -231,11 +176,9 @@ Host input
 | `src/lib/common/ui/draw_ir_sdn.spl` | SDN interchange skin over Draw IR |
 | `src/lib/common/ui/draw_ir_drawio.spl` | Draw.io mxGraph interchange skin over Draw IR |
 | `src/lib/common/ui/window_scene.spl` | WM scene, event target translation, scene layout keys |
-| `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene → ordered Draw IR composition with top-level content IMAGE projection |
+| `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene → Draw IR composition |
 | `src/lib/common/ui/wm_runtime_dispatch.spl` | WM dispatch command adapter for host shells |
-| `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | Engine2D Draw IR executor (rect/text/resolved image, present, CPU fallback) |
-| `src/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_adv.spl` | Optional host runtime-queue adapter, separate from the baremetal core closure |
-| `src/os/compositor/engine2d_wm_frame_executor.spl` | Shared x86_64 production/AArch64 boot-desktop WM DrawIR/Engine2D frame owner; invalid or nested-unresolved content fails closed |
+| `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | Engine2D Draw IR executor (rect/text, CPU fallback) |
 | `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split |
 | `src/app/ui.render/capability.spl` | Implementation-free renderer capabilities |
 | `src/app/ui.render/widgets.spl` | TUI-only compatibility renderer shim |
@@ -258,8 +201,6 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
   unavailable states explicitly.
 - hot path: no full-tree scans, repeated file reads, subprocess retry loops, or
   per-frame device probing.
-- Engine2D override frames release on replacement and owner disable/shutdown;
-  non-owner rendering preserves the active frame.
 - dependency gates: non-capable lanes prove no HTML/CSS/GUI/web closure.
 - dynSMF startup: enabled artifacts must exist and start with `SMF\0` before
   `smf_dlopen`.
@@ -276,24 +217,6 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
   compositions lift through `sgtti_snapshot_from_draw_ir_batch` /
   `sgtti_snapshot_from_draw_ir_composition` before Engine2D pixel readback.
   New specs use `std.spec`; `std.spipe` is compatibility only.
-
-Host pin state has one persistence owner (`HostTaskbarRuntime`) and is projected
-by stable `app_id` through scalar accessors into the compositor's shared
-`TaskbarModel`. Idle pinned slots emit a release-inside scalar launch request;
-the application runtime, not compositor chrome, owns creation. The host demo
-keeps its desktop alive after close and consumes that request to reopen.
-
-Host maximize respects the 48/56-pixel work-area insets; restore preserves a
-pre-minimize maximized state before returning to the exact normal rectangle.
-Minimize/maximize/close cancel target-scoped chrome interactions.
-Alt+Tab skips minimized windows; taskbar activation restores them.
-Resize requires explicit pointer capture; button events never reuse stale
-chrome coordinates.
-New presses clear stale capture before hit testing.
-Middle/right buttons reach compositor state but not the primary-only widget
-reducer.
-Host taskbar draw and hit lanes share 56-pixel slots.
-Running taskbar colors derive focus/minimize state from the shared scene.
 
 ## GUI Sanity Apps
 

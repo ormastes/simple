@@ -1,4 +1,8 @@
 # Rust Seed Accepts Reserved `on` Identifier
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The Rust seed accepted `val on = ...` in `src/os/hosted/hosted_entry.spl`, while
 the stage3 pure-Simple discovery parser rejected it with `expected pattern,
@@ -8,3 +12,4 @@ false green result.
 Production code now uses `fullscreen_enabled`. Parser conformance should add a
 shared negative fixture so seed and self-hosted frontends reject reserved
 identifiers consistently with a source location.
+

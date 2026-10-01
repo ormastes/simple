@@ -1,4 +1,8 @@
 # font_renderer: SIGSEGV in simple_runtime::value::heap after glyph layout, on the Rust seed's `run` evaluator
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** STILL OPEN 2026-08-10 (re-verified twice, see "Re-verification"
 and "Re-verification attempt 2" below — original SIGSEGV signature could not
@@ -262,3 +266,4 @@ unattended budget to run the interpreter-fallback repro to completion.
   pixel check) is blocked by whichever of these two bugs is reached first on
   a given evaluator; on `bin/simple test` specifically, that is the
   `validate_selected_font_asset` crash, not this one.
+

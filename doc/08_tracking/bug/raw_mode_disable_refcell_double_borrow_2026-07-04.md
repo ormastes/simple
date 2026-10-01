@@ -1,4 +1,9 @@
 # rt_terminal_disable_raw_mode panics "RefCell already borrowed" (SIGABRT on every raw-mode quit)
+## Closed 2026-09-16 — ...s first), then the process aborts. ## Fix (one-liner shape) Copy the saved termios out and
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-07-04
 - Status: OPEN (diagnosed, one-line fix identified, seed rebuild required)
@@ -90,3 +95,4 @@ is quiet).
 - The `office slides-gui-live` / `sheet-gui-live` non-TTY safety path
   (piped stdin: one frame + notice + exit 0) is unaffected — enable fails
   on a pipe, so disable is never reached.
+

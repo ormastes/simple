@@ -254,4 +254,44 @@ impl Fat32Core:
             i = i + 1
         self._find_short_entry_in_dir(dir_cluster, target_name)
 
+    me fn debug_dir_scan_v1(dir_cluster: u32, target_name: text) -> text:
+        """Bring-up diagnostic: re-run one directory lookup with per-stage
+        evidence (chain length, cached cluster bytes, parsed entry names,
+        raw 8.3 parse, final verdict). Pure/text-only so hosted conformance
+        specs can link it; the aarch64 lane prints the result from the
+        os-side open-fail probe."""
+        var out = "cluster={dir_cluster}"
+        val chain_rc = self.follow_chain(dir_cluster)
+        if chain_rc.is_ok():
+            val chain_len = chain_rc.unwrap().len()
+            out = out + " chain={chain_len}"
+        else:
+            out = out + " chain=err"
+        val data_rc = self.read_cluster(dir_cluster)
+        if data_rc.is_ok():
+            val data = data_rc.unwrap()
+            out = out + " dlen={data.len()} b0={data[0]} b1={data[1]} b11={data[11]} b32={data[32]} b33={data[33]}"
+            val sn0 = _parse_short_name(data, 0)
+            val sn32 = _parse_short_name(data, 32)
+            out = out + " sn0={sn0} sn32={sn32}"
+        else:
+            out = out + " data=err"
+        val entries_rc = self.read_dir_entries(dir_cluster)
+        if entries_rc.is_ok():
+            val entries = entries_rc.unwrap()
+            val n = entries.len()
+            out = out + " entries={n}"
+            val lower_target = _lower_text(target_name)
+            var i = 0
+            while i < n:
+                val en = _lower_text(entries[i].name)
+                val mark = if en == lower_target: "=T" else: ""
+                out = out + " [{entries[i].name} sz={entries[i].size} lo={en}{mark}]"
+                i = i + 1
+        else:
+            out = out + " entries=err"
+        val found = self.find_entry_in_dir(dir_cluster, target_name)
+        out = out + (if found.is_ok(): " found=ok" else: " found=err")
+        out
+
 export Fat32Core

@@ -1,4 +1,8 @@
 # Strict stage3 self-host body failures
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 A strict cached stage2 linked, but contained 62 uppercase weak definitions and
 was not acceptable evidence. Stage3 invalidated the compiler-dependent objects,
@@ -54,3 +58,4 @@ driver initializer, `app/llm_caret`, and `app/leak_finder`. If a later strict
 stage3 still visits those application trees, capture discovery trace evidence:
 their bodies are not legitimate bootstrap dependencies and must not be fixed
 merely to make the oversized closure compile.
+

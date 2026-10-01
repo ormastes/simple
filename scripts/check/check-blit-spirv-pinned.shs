@@ -1,0 +1,290 @@
+#!/bin/sh
+# check-blit-spirv-pinned.shs -- the checked-in `spirv_blit()` SPIR-V words must
+# be exactly what glslangValidator produces from the checked-in `_glsl_blit()`
+# GLSL.
+#
+#   sh scripts/check/check-blit-spirv-pinned.shs [--selftest]
+#
+# Why this exists: the image blit/src-over kernel exists TWICE in the tree --
+# as readable GLSL in backend_vulkan_glsl.spl `_glsl_blit()`, and as ~6.8 KB of
+# hex in backend_vulkan_spirv_raster_blobs.spl `spirv_blit()`. The device runs
+# the hex. Until 2026-09-12 the hex was hand-assembled with spirv-dis/spirv-as,
+# and the two drifted: the blob carried the frozen CPU src-over formula
+# (0x01020304 over 0x10203040 -> 0x101E2D3C) while the GLSL still carried the
+# old pre-unpremultiply one (-> 0x101F2F3F). Every other guard in this repo
+# checks structure or compilability; none of them recompiles a shader, so a
+# GLSL edit that is never regenerated -- or a regeneration that is never
+# committed -- leaves a tree that builds, tests green, and runs the WRONG
+# kernel. Sibling of scripts/check/check-rect-batch-spirv-pinned.shs, which
+# does the same job for the rect-batch kernel.
+#
+# Mechanism: extract the GLSL through scripts/tool/extract-blit-glsl.shs (the
+# same extractor the generator uses, so they cannot disagree about what "the
+# GLSL" is), recompile it, transcribe with scripts/tool/spirv-to-spl-words.shs,
+# and compare the byte body AND the `# sha256:` pin line inside `spirv_blit()`
+# against the committed module, byte for byte.
+#
+# Verdict is the LAST line of stdout, same convention as the pre-push guards:
+#   PASS  -- <n> byte(s) compared, ...            exit 0
+#   FAIL  -- ...                                  exit 1
+#   ERROR -- nothing was checked (<reason>)       exit 2
+# Non-vacuity is absolute: a run that compared 0 bytes is ERROR, and a host with
+# no glslangValidator is ERROR, never a pass -- absence of a compiler is absence
+# of evidence.
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+glsl_spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl"
+blob_spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl"
+words_tool="$repo_root/scripts/tool/spirv-to-spl-words.shs"
+extract_glsl="$repo_root/scripts/tool/extract-blit-glsl.shs"
+
+oops() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+find_glslang() {
+    if [ -n "${GLSLANG:-}" ]; then echo "$GLSLANG"; return; fi
+    for cand in /opt/homebrew/bin/glslangValidator /usr/local/bin/glslangValidator \
+                /usr/bin/glslangValidator; do
+        if [ -x "$cand" ]; then echo "$cand"; return; fi
+    done
+    command -v glslangValidator 2>/dev/null || true
+}
+
+# Region-scoped extraction: `spirv_blit()` is one of many blobs in that module,
+# so a whole-file grep (what the rect-batch guard can safely do, its module
+# holding exactly one blob) would splice every kernel together.
+extract_blob_bytes() {
+    awk '
+    /^fn spirv_blit\(\)/ { inblit = 1 }
+    inblit && $0 == "    ]" { inblit = 0; next }
+    inblit { print }
+    ' "$1" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]u8' | sed 's/^0x//; s/u8$//' | tr 'A-F' 'a-f'
+}
+extract_blob_sha() {
+    awk '
+    /^fn spirv_blit\(\)/ { inblit = 1 }
+    inblit && $0 == "    ]" { inblit = 0 }
+    inblit && /^    # sha256: / { print $3; exit }
+    ' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Core comparison, factored so --selftest can point it at fixtures.
+# Sets CMP_BYTES and CMP_REASON; returns 0 pass, 1 mismatch, 2 could-not-check.
+# ---------------------------------------------------------------------------
+compare_pair() {
+    _glsl="$1"; _blob="$2"; _glslang="$3"
+    CMP_BYTES=0; CMP_REASON=""
+    [ -f "$_glsl" ] || { CMP_REASON="missing GLSL module: $_glsl"; return 2; }
+    [ -f "$_blob" ] || { CMP_REASON="missing blob module: $_blob"; return 2; }
+
+    _tmp="${TMPDIR:-/tmp}/blit_spirv_pin.$$.$(date +%s 2>/dev/null || echo 0)"
+    mkdir -p "$_tmp"
+
+    if ! sh "$extract_glsl" "$_glsl" > "$_tmp/blit.comp" 2>"$_tmp/eerr"; then
+        CMP_REASON="GLSL extraction failed: $(head -2 "$_tmp/eerr" | tr '\n' ' ')"
+        rm -rf "$_tmp"; return 2
+    fi
+    if [ ! -s "$_tmp/blit.comp" ]; then
+        CMP_REASON="extracted GLSL is empty"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    if ! "$_glslang" -V --target-env vulkan1.1 -o "$_tmp/a.spv" "$_tmp/blit.comp" \
+            >"$_tmp/log" 2>&1; then
+        CMP_REASON="glslangValidator failed on the extracted GLSL: $(head -3 "$_tmp/log" | tr '\n' ' ')"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    if ! sh "$words_tool" "$_tmp/a.spv" 4 > "$_tmp/words" 2>"$_tmp/werr"; then
+        CMP_REASON="transcription failed: $(head -2 "$_tmp/werr" | tr '\n' ' ')"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    _fresh_sha=$(head -1 "$_tmp/words" | awk '{print $3}')
+    tail -n +2 "$_tmp/words" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]u8' \
+        | sed 's/^0x//; s/u8$//' | tr 'A-F' 'a-f' > "$_tmp/fresh_bytes"
+    extract_blob_bytes "$_blob" > "$_tmp/blob_bytes"
+
+    _nf=$(wc -l < "$_tmp/fresh_bytes" | tr -d ' ')
+    _ns=$(wc -l < "$_tmp/blob_bytes" | tr -d ' ')
+    if [ "$_nf" -eq 0 ]; then
+        CMP_REASON="freshly compiled module transcribed to 0 bytes"
+        rm -rf "$_tmp"; return 2
+    fi
+    if [ "$_ns" -eq 0 ]; then
+        CMP_REASON="no 0xNNu8 bytes found inside spirv_blit() in $_blob"
+        rm -rf "$_tmp"; return 2
+    fi
+    CMP_BYTES="$_nf"
+
+    _pinned_sha=$(extract_blob_sha "$_blob")
+    if [ -z "$_pinned_sha" ]; then
+        CMP_REASON="spirv_blit() in $_blob carries no '# sha256:' pin line"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    if [ "$_nf" -ne "$_ns" ]; then
+        CMP_REASON="byte count differs: committed $_ns, freshly compiled $_nf"
+        rm -rf "$_tmp"; return 1
+    fi
+    if ! cmp -s "$_tmp/fresh_bytes" "$_tmp/blob_bytes"; then
+        _off=$(cmp "$_tmp/fresh_bytes" "$_tmp/blob_bytes" 2>&1 | head -1)
+        _first=$(diff "$_tmp/blob_bytes" "$_tmp/fresh_bytes" | head -4 | tr '\n' ' ')
+        CMP_REASON="committed spirv_blit() words differ from freshly compiled _glsl_blit() ($_off; first diff: $_first)"
+        rm -rf "$_tmp"; return 1
+    fi
+    if [ "$_pinned_sha" != "$_fresh_sha" ]; then
+        CMP_REASON="pinned sha256 $_pinned_sha != freshly compiled $_fresh_sha"
+        rm -rf "$_tmp"; return 1
+    fi
+    rm -rf "$_tmp"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest: fatal, runs before every real scan. Fixtures are written HERE, not
+# copied from the tree, so an edit to the real kernel cannot disarm the guard.
+# ---------------------------------------------------------------------------
+write_fixture_glsl() {
+    # $1 = path, $2 = the channel divisor expression to use ("out_a" or "255u")
+    cat > "$1" <<FIXTURE
+fn _glsl_blit() -> text:
+    """Fixture kernel."""
+    r"""#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0) buffer Framebuffer { uint data[]; } fb;
+layout(set = 0, binding = 1) buffer SourcePixels { uint data[]; } src;
+layout(push_constant) uniform PushConstants { int n; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint s = src.data[i];
+    uint d = fb.data[i];
+    uint sa = s >> 24u;
+    uint inv = 255u - sa;
+    uint dst_weight = ((d >> 24u) * inv) / 255u;
+    uint out_a = sa + dst_weight;
+    if (out_a == 0u) return;
+    uint out_b = (((s & 255u) * sa) + ((d & 255u) * dst_weight)) / $2;
+    fb.data[i] = (out_a << 24u) | out_b;
+}
+"""
+FIXTURE
+}
+
+write_fixture_blob() {
+    # $1 = path, $2 = words file
+    {
+        echo "fn spirv_blit() -> [u8]:"
+        echo '    """Fixture blob."""'
+        echo "    $(head -1 "$2")"
+        echo "    ["
+        tail -n +2 "$2"
+        echo "    ]"
+    } > "$1"
+}
+
+selftest() {
+    _g="$1"
+    _t="${TMPDIR:-/tmp}/blit_spirv_pin_selftest.$$"
+    mkdir -p "$_t"
+
+    write_fixture_glsl "$_t/ok.spl" "out_a"
+    sh "$extract_glsl" "$_t/ok.spl" > "$_t/ok.comp" 2>/dev/null \
+        || { echo "selftest: extractor failed on fixture" >&2; rm -rf "$_t"; return 1; }
+    "$_g" -V --target-env vulkan1.1 -o "$_t/ok.spv" "$_t/ok.comp" >/dev/null 2>&1 \
+        || { echo "selftest: could not compile fixture 1" >&2; rm -rf "$_t"; return 2; }
+    sh "$words_tool" "$_t/ok.spv" 4 > "$_t/ok.words"
+    write_fixture_blob "$_t/ok_blob.spl" "$_t/ok.words"
+
+    # Fixture 1 -- an honestly regenerated pair must PASS.
+    if ! compare_pair "$_t/ok.spl" "$_t/ok_blob.spl" "$_g"; then
+        echo "selftest FIXTURE 1 (clean pair must PASS) failed: $CMP_REASON" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 2 -- ONE tampered word in the blob must FAIL. This is the
+    # "someone hand-edited the hex" case.
+    awk '!t && /^    0x/ { sub(/0x00u8/, "0x7Fu8"); if ($0 ~ /0x7Fu8/) t = 1 } { print }' \
+        "$_t/ok_blob.spl" > "$_t/tampered.spl"
+    if cmp -s "$_t/ok_blob.spl" "$_t/tampered.spl"; then
+        echo "selftest FIXTURE 2 could not tamper any word" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _rc=0; compare_pair "$_t/ok.spl" "$_t/tampered.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 2 (tampered word must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 3 -- the actual incident: the GLSL blend formula moves back to the
+    # pre-unpremultiply `/255u` and the blob is NOT regenerated. Must FAIL.
+    write_fixture_glsl "$_t/stale.spl" "255u"
+    if cmp -s "$_t/ok.spl" "$_t/stale.spl"; then
+        echo "selftest FIXTURE 3 could not edit the GLSL divisor" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _rc=0; compare_pair "$_t/stale.spl" "$_t/ok_blob.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 3 (stale blob vs edited GLSL must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 4 -- a blob with a correct body but a tampered sha pin must FAIL.
+    sed 's/^    # sha256: ./    # sha256: 0/' "$_t/ok_blob.spl" > "$_t/badsha.spl"
+    _rc=0; compare_pair "$_t/ok.spl" "$_t/badsha.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 4 (tampered sha pin must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 5 -- a blob with no bytes at all must be ERROR, never a pass.
+    {
+        echo "fn spirv_blit() -> [u8]:"
+        echo "    # sha256: deadbeef  (0 bytes)"
+        echo "    ["
+        echo "    ]"
+    } > "$_t/empty.spl"
+    _rc=0; compare_pair "$_t/ok.spl" "$_t/empty.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 2 ]; then
+        echo "selftest FIXTURE 5 (empty blob must ERROR with 2) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    rm -rf "$_t"
+    return 0
+}
+
+glslang=$(find_glslang)
+[ -n "$glslang" ] || oops "glslangValidator not found; set GLSLANG=/path/to/glslangValidator"
+[ -x "$glslang" ] || oops "glslangValidator at $glslang is not executable"
+[ -f "$words_tool" ] || oops "missing $words_tool"
+[ -f "$extract_glsl" ] || oops "missing $extract_glsl"
+
+st_rc=0
+selftest "$glslang" || st_rc=$?
+if [ "$st_rc" -eq 2 ]; then
+    oops "selftest could not run (see stderr)"
+elif [ "$st_rc" -ne 0 ]; then
+    echo "FAIL — selftest failed; the guard itself is broken, nothing was checked"
+    exit 1
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 5 selftest fixture(s) checked, guard behaves correctly"
+    exit 0
+fi
+
+rc=0
+compare_pair "$glsl_spl" "$blob_spl" "$glslang" || rc=$?
+if [ "$rc" -eq 2 ]; then
+    oops "$CMP_REASON"
+elif [ "$rc" -eq 1 ]; then
+    echo "FAIL — $CMP_REASON"
+    exit 1
+fi
+if [ "${CMP_BYTES:-0}" -eq 0 ]; then
+    oops "comparison reported 0 bytes"
+fi
+echo "PASS — $CMP_BYTES byte(s) compared, spirv_blit() is exactly glslangValidator output for _glsl_blit()"
+exit 0

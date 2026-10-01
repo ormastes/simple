@@ -1,4 +1,9 @@
 # `parse_full_frontend` crashes on some single-item `use MODULE.{name}` imports
+## Closed 2026-09-16 — Status RESOLVED; fixture brace-escape fix + regression spec, both test trees converged
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-07-29, lane IMP1) — root cause was NOT in the
 frontend; see "Actual root cause" below. No `src/compiler/10.frontend/**`
@@ -173,3 +178,4 @@ Completed 2026-08-10 in commit `6f66d2a6c9885c70fd8fb0163e445cadd0881e1c`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+

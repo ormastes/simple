@@ -18,6 +18,7 @@ Semantics enforced (NVMe-faithful):
 """
 
 use nvme_types.*
+use nvme_payload.*
 use nvme_admin_types.*
 use hil_queue.*   # bool_to_i64
 
@@ -31,6 +32,8 @@ struct QueueSet:
     cq_cid:    [i64]   # ring storage, (MAX+1)*MAX_QUEUE_SIZE
     cq_status: [i64]
     cq_data:   [i64]
+    cq_page:   [PageData]   # block 0 of the completion payload — compat view of cq_pages[slot][0]
+    cq_pages:  [[PageData]] # the REAL completion payload: every block TRANSFERRED, per CQ slot
     # submission queues, indexed by qid
     sq_active: [i64]
     sq_size:   [i64]
@@ -44,6 +47,11 @@ struct QueueSet:
     sq_lba:    [i64]
     sq_nblk:   [i64]
     sq_data:   [i64]
+    sq_page:   [PageData]   # block 0 of the host payload — compat view of sq_pages[slot][0]
+    sq_pages:  [[PageData]] # the REAL host payload: one page per BLOCK, per SQ slot
+    sq_haspg:  [i64]        # 1 => sq_page is authoritative for this slot
+    sq_prp1:   [i64]        # PRP descriptor — ADDRESSING, kept out of sq_data
+    sq_prp2:   [i64]
     rr:        i64     # round-robin cursor for fair servicing
 
 fn queue_set_new() -> QueueSet:
@@ -77,25 +85,41 @@ fn queue_set_new() -> QueueSet:
     var cq_cid:    [i64] = []
     var cq_status: [i64] = []
     var cq_data:   [i64] = []
+    var cq_page:   [PageData] = []
+    var cq_pages:  [[PageData]] = []
     var sq_cid:    [i64] = []
     var sq_nsid:   [i64] = []
     var sq_op:     [i64] = []
     var sq_lba:    [i64] = []
     var sq_nblk:   [i64] = []
     var sq_data:   [i64] = []
+    var sq_page:   [PageData] = []
+    var sq_pages:  [[PageData]] = []
+    var sq_haspg:  [i64] = []
+    var sq_prp1:   [i64] = []
+    var sq_prp2:   [i64] = []
     var j: i64 = 0
     while j < cells:
         cq_cid.push(0)
         cq_status.push(0)
         cq_data.push(0)
+        cq_page.push(page_zero())
+        var cq_empty: [PageData] = []
+        cq_pages.push(cq_empty)
         sq_cid.push(0)
         sq_nsid.push(1)
         sq_op.push(0)
         sq_lba.push(0)
         sq_nblk.push(0)
         sq_data.push(0)
+        sq_page.push(page_zero())
+        var sq_empty: [PageData] = []
+        sq_pages.push(sq_empty)
+        sq_haspg.push(0)
+        sq_prp1.push(0)
+        sq_prp2.push(0)
         j = j + 1
-    QueueSet(cq_active: cq_active, cq_size: cq_size, cq_head: cq_head, cq_tail: cq_tail, cq_len: cq_len, cq_cid: cq_cid, cq_status: cq_status, cq_data: cq_data, sq_active: sq_active, sq_size: sq_size, sq_cqid: sq_cqid, sq_head: sq_head, sq_tail: sq_tail, sq_len: sq_len, sq_cid: sq_cid, sq_nsid: sq_nsid, sq_op: sq_op, sq_lba: sq_lba, sq_nblk: sq_nblk, sq_data: sq_data, rr: 1)
+    QueueSet(cq_active: cq_active, cq_size: cq_size, cq_head: cq_head, cq_tail: cq_tail, cq_len: cq_len, cq_cid: cq_cid, cq_status: cq_status, cq_data: cq_data, cq_page: cq_page, cq_pages: cq_pages, sq_active: sq_active, sq_size: sq_size, sq_cqid: sq_cqid, sq_head: sq_head, sq_tail: sq_tail, sq_len: sq_len, sq_cid: sq_cid, sq_nsid: sq_nsid, sq_op: sq_op, sq_lba: sq_lba, sq_nblk: sq_nblk, sq_data: sq_data, sq_page: sq_page, sq_pages: sq_pages, sq_haspg: sq_haspg, sq_prp1: sq_prp1, sq_prp2: sq_prp2, rr: 1)
 
 fn qid_in_range(qid: i64) -> bool:
     qid >= 1 and qid <= MAX_IO_QUEUES
@@ -248,7 +272,12 @@ impl QueueSet:
         me.sq_op[slot]   = c.opcode
         me.sq_lba[slot]  = c.lba
         me.sq_nblk[slot] = c.nblocks
-        me.sq_data[slot] = c.data
+        me.sq_data[slot]  = c.data
+        me.sq_page[slot]  = c.page
+        me.sq_pages[slot] = c.pages
+        me.sq_haspg[slot] = bool_to_int(c.has_page)
+        me.sq_prp1[slot]  = c.prp1
+        me.sq_prp2[slot]  = c.prp2
         me.sq_tail[qid] = (me.sq_tail[qid] + 1) % size
         me.sq_len[qid] = me.sq_len[qid] + 1
         true
@@ -304,7 +333,12 @@ impl QueueSet:
         val data: i64 = me.sq_data[slot]
         me.sq_head[qid] = (me.sq_head[qid] + 1) % size
         me.sq_len[qid] = me.sq_len[qid] - 1
-        cmd_make_nsid(cid, nsid, op, lba, nblk, data)
+        # Rebuild the SQE from ALL of the ring's per-slot state — payload page and
+        # PRP descriptor included. Rebuilding via cmd_make_nsid alone silently
+        # dropped both, which is exactly how a widened payload used to die in the ring.
+        NvmeCmd(cid: cid, nsid: nsid, opcode: op, lba: lba, nblocks: nblk, data: data,
+                page: me.sq_page[slot], pages: me.sq_pages[slot], has_page: me.sq_haspg[slot] != 0,
+                prp1: me.sq_prp1[slot], prp2: me.sq_prp2[slot])
 
     # ── Completion ring (controller -> host) ─────────────────────────────────
     me cq_post(cqid: i64, p: NvmeCpl) -> bool:
@@ -329,6 +363,8 @@ impl QueueSet:
         me.cq_cid[slot]    = p.cid
         me.cq_status[slot] = p.status
         me.cq_data[slot]   = p.data
+        me.cq_page[slot]   = p.page
+        me.cq_pages[slot]  = p.pages
         me.cq_tail[cqid] = (me.cq_tail[cqid] + 1) % size
         me.cq_len[cqid] = me.cq_len[cqid] + 1
         true
@@ -387,7 +423,7 @@ impl QueueSet:
         val data:   i64 = me.cq_data[slot]
         me.cq_head[cqid] = (me.cq_head[cqid] + 1) % size
         me.cq_len[cqid] = me.cq_len[cqid] - 1
-        cpl_make(cid, status, data)
+        NvmeCpl(cid: cid, status: status, data: data, page: me.cq_page[slot], pages: me.cq_pages[slot])
 
     # ── Fair round-robin: next active SQ (qid>=1) with pending work, or NULL_IDX ─
     me next_pending_sq() -> i64:

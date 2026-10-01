@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+Purpose: Prove the streaming source-copy owner is released only after its final HIR consumer.
+Audience: compiler lifecycle and bootstrap-memory maintainers.
+"""
+# @req: REQ-COMPILER-DRIVER-001
+
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn between(source: text, start: text, finish: text) -> text:
+    val start_at = source.find(start)
+    if start_at < 0:
+        return ""
+    val tail = source[start_at:]
+    val finish_at = tail.find(finish)
+    if finish_at < 0:
+        return ""
+    tail[:finish_at]
+
+describe "streaming source owner release contract":
+    it "releases the duplicate owner after success checks and before eviction":
+        step("Verify: final HIR consumers precede owner reclamation")
+        val source = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val body = between(source,
+            "me lower_and_check_streaming_surfaces_impl()",
+            "me lower_and_check_impl()")
+        val shard_exit = body.find("rt_exit(0)")
+        val first_error_guard = body.find("if self.ctx.has_errors():")
+        val second_error_offset = body[first_error_guard + 1:].find("if self.ctx.has_errors():")
+        val second_error_guard = if second_error_offset >= 0:
+            first_error_guard + 1 + second_error_offset
+        else:
+            -1
+        val release = body.find("val reclaimed_streaming_owners = self.ctx.reclaim_streaming_source_contents_owner()")
+        val evict = body.find("self.ctx.evict_sources()")
+        expect(shard_exit).to_be_greater_than(-1)
+        expect(first_error_guard).to_be_greater_than(shard_exit)
+        expect(second_error_guard).to_be_greater_than(first_error_guard)
+        expect(release).to_be_greater_than(second_error_guard)
+        expect(evict).to_be_greater_than(release)
+
+    it "does not put owner reclamation in parse or failure branches":
+        step("Verify: negative lifecycle placements are absent")
+        val source = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val body = between(source,
+            "me lower_and_check_streaming_surfaces_impl()",
+            "me lower_and_check_impl()")
+        val release_token = "reclaim_streaming_source_contents_owner()"
+        expect(body.split(release_token).len()).to_equal(2)
+        val loop_prefix = body[:body.find("while hir_loop_pos < hir_visit_order.len()")]
+        expect(loop_prefix.contains(release_token)).to_be(false)
+        val shard_region = between(body, "if hir_shard_mode:", "# Collect-all summary")
+        expect(shard_region.contains(release_token)).to_be(false)
+
+    it "keeps VHDL outside the streaming owner lifecycle":
+        step("Verify: VHDL exclusion remains explicit")
+        val gates = file_read("src/compiler/80.driver/driver_phase_gates.spl")
+        val body = between(gates,
+            "fn driver_streaming_surface_enabled(ctx: CompileContext)",
+            "fn bootstrap_last_fixed_input")
+        expect(body.contains("ctx.options.backend != \"vhdl\"")).to_be(true)
+
+    it "clears aliases immediately after freeing owner buffers":
+        step("Verify: freed RuntimeValue aliases cannot escape")
+        val types = file_read("src/compiler/80.driver/driver_types.spl")
+        val body = between(types,
+            "me reclaim_streaming_source_contents_owner()",
+            "me source_contents_reclaimable()")
+        val free_at = body.find("rt_string_free(content)")
+        val clear_at = body.find("self.source_contents_owner = []")
+        expect(free_at).to_be_greater_than(-1)
+        expect(clear_at).to_be_greater_than(free_at)

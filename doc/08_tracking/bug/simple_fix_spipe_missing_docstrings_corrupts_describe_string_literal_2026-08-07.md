@@ -1,4 +1,8 @@
 # `bin/simple fix` on `spipe_missing_docstrings` corrupts `describe "..."` string literals
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** 2026-08-07, during notebook-lanes K1 implementation
 (`test/01_unit/lib/notebook/kernel_session_manager_spec.spl`).
@@ -39,3 +43,4 @@ implementation.
 Open — not yet investigated further. Recommend avoiding `bin/simple fix` on spec files
 with `spipe_missing_docstrings` active until fixed, and adding a spec such as this one
 as a regression case once the fixer's insertion-point logic is corrected.
+

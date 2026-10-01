@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)"
+COMMON_CHECKOUT="${SPIPE_HOME:-$ROOT/.spipe/spipe}"
+SETUP="$COMMON_CHECKOUT/scripts/setup-local-knowledge.sh"
+BOOTSTRAP="$ROOT/scripts/setup-spipe-local.shs"
+FIXTURE="$(mktemp -d)"
+trap 'rm -rf "$FIXTURE"' EXIT
+
+git init -q -b main "$FIXTURE/common"
+git -C "$FIXTURE/common" config user.name "SPipe Test"
+git -C "$FIXTURE/common" config user.email "spipe-test@example.invalid"
+mkdir -p "$FIXTURE/common/scripts" "$FIXTURE/common/plugin"
+printf 'fixture\n' > "$FIXTURE/common/plugin/index.md"
+cp "$SETUP" "$FIXTURE/common/scripts/"
+printf '%s\n' '{"name":"@simple-lang/spipe"}' > "$FIXTURE/common/package.json"
+git -C "$FIXTURE/common" add scripts plugin
+git -C "$FIXTURE/common" add package.json
+git -C "$FIXTURE/common" commit -qm fixture
+
+SPIPE_HOME="$FIXTURE/common" GIT_ALLOW_PROTOCOL=file sh "$SETUP" --mode user \
+  --destination "$FIXTURE/user/spipe" --common-url "$FIXTURE/common" \
+  --organization example-org --project personal-project --allow-local-source --yes >/dev/null
+test "$(readlink "$FIXTURE/user/spipe/common")" = "$FIXTURE/common"
+grep -Fqx 'local/' "$FIXTURE/user/spipe/.gitignore"
+grep -Fq 'organization:example-org|' "$FIXTURE/user/spipe/local/scopes.sdn"
+
+git init -q "$FIXTURE/project"
+git -C "$FIXTURE/project" config user.name "SPipe Test"
+git -C "$FIXTURE/project" config user.email "spipe-test@example.invalid"
+mkdir -p "$FIXTURE/project/scripts" "$FIXTURE/project/.spipe"
+cp "$BOOTSTRAP" "$FIXTURE/project/scripts/"
+git -C "$FIXTURE/project" add .
+git -C "$FIXTURE/project" commit -qm fixture
+GIT_ALLOW_PROTOCOL=file git clone -q "$FIXTURE/project" "$FIXTURE/clone"
+SPIPE_HOME="$FIXTURE/common" SPIPE_WORKSPACE="$FIXTURE/private" XDG_CONFIG_HOME="$FIXTURE/config" GIT_ALLOW_PROTOCOL=file \
+  sh "$FIXTURE/clone/scripts/setup-spipe-local.shs" --project cloned-project --yes >/dev/null
+test "$(readlink "$FIXTURE/clone/.spipe/common")" = "$FIXTURE/private/common"
+test "$(readlink "$FIXTURE/private/common")" = "$FIXTURE/common"
+grep -Fq 'project:cloned-project|' "$FIXTURE/config/spipe/scopes.sdn"
+
+test -d "$ROOT/doc/06_spec"
+test ! -e "$ROOT/doc/05_spec"
+test -f "$ROOT/doc/06_spec/FILE.md"
+grep -Fq 'Spec path mirrors test path' "$ROOT/doc/06_spec/FILE.md"
+grep -Fq 'var output_dir = "doc/06_spec"' "$ROOT/src/app/spipe_docgen/spipe_docgen/main.spl"
+! grep -Fq 'p = "test/" + p' "$ROOT/src/app/spipe_docgen/spipe_docgen/generator.spl"
+if find "$ROOT/doc/06_spec" -name '*_spec.spl' -print -quit | grep -q .; then
+  echo "executable spec found under doc/06_spec" >&2
+  exit 1
+fi
+
+LINK_SETUP="$COMMON_CHECKOUT/scripts/setup-spipe-links.sh"
+test -f "$LINK_SETUP"
+SPIPE_HOST_ROOT="$ROOT" sh "$LINK_SETUP" --dry-run |
+  grep -Fq 'would_install_root_manifest_hook .git/hooks/pre-commit'
+mkdir -p "$FIXTURE/not-a-workspace"
+SPIPE_HOST_ROOT="$FIXTURE/not-a-workspace" sh "$LINK_SETUP" --dry-run |
+  grep -Fq 'skip_root_manifest_hook missing_workspace_marker FILE.md'
+
+echo "STATUS: PASS spipe-local-knowledge-setup"

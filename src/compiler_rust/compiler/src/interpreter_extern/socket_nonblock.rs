@@ -36,17 +36,21 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
     if name == "rt_socket_nonblock_prepare" {
         let mode = match &args[1] {
             Value::Int(n) => *n,
-            other => return Err(CompileError::runtime(format!(
-                "{name}: argument 1 must be an int, got {other:?}"
-            ))),
+            other => {
+                return Err(CompileError::runtime(format!(
+                    "{name}: argument 1 must be an int, got {other:?}"
+                )))
+            }
         };
         return Ok(Value::Int(unsafe { rt_socket_nonblock_prepare(fd, mode) }));
     }
     let flags = match &args[1] {
         Value::Int(n) => *n,
-        other => return Err(CompileError::runtime(format!(
-            "{name}: argument 1 must be an int, got {other:?}"
-        ))),
+        other => {
+            return Err(CompileError::runtime(format!(
+                "{name}: argument 1 must be an int, got {other:?}"
+            )))
+        }
     };
     Ok(Value::Int(unsafe { rt_socket_nonblock_commit(fd, flags) }))
 }

@@ -1,0 +1,166 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/bs7-test.XXXXXX"); trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+fail() { echo "BS7 cohort test: FAIL — $*" >&2; exit 1; }
+reject() { if "$@" >/dev/null 2>&1; then fail "mutation accepted"; fi; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+PYTHON=$(command -v python3) || fail missing-python3
+
+printf 'stage=4\ncompiler_kind=pure-simple-stage4\n' >"$scratch/stage4.env"
+printf 'Hello World\n' >"$scratch/expected-stdout.txt"
+: >"$scratch/nogc.tsv"; : >"$scratch/providers.tsv"; : >"$scratch/samples.tsv"
+
+if [ "$(uname -s)" = Linux ]; then
+  CLANG=$(command -v clang) || fail missing-clang
+  LLD=$(command -v ld.lld) || fail missing-lld
+  STRIP=$(command -v llvm-strip) || fail missing-llvm-strip
+  mkdir -p "$scratch/fixture/native-build/v1"
+  cat >"$scratch/fixture/native-build/v1/module.c" <<'EOF'
+#include <stdint.h>
+extern void rt_println_str(const uint8_t *, uint64_t);
+int64_t __simple_main(void) {
+    static const uint8_t text[] = "Hello World";
+    rt_println_str(text, sizeof(text) - 1);
+    return 0;
+}
+EOF
+  cat >"$scratch/entry.c" <<'EOF'
+#include <stdint.h>
+extern int64_t __simple_main(void);
+int main(void) { return (int)__simple_main(); }
+EOF
+  cat >"$scratch/runtime.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+void rt_println_str(const uint8_t *text, uint64_t size) {
+    fwrite(text, 1, size, stdout);
+    fputc('\n', stdout);
+}
+EOF
+  (cd "$scratch" &&
+    "$CLANG" -Os -fPIE -ffunction-sections -fdata-sections -c fixture/native-build/v1/module.c -o fixture/native-build/v1/object.hello.o &&
+    "$CLANG" -Os -fPIE -ffunction-sections -fdata-sections -c entry.c -o entry.o &&
+    "$CLANG" -Os -fPIE -ffunction-sections -fdata-sections -c runtime.c -o runtime.o &&
+    "$CLANG" -fuse-ld=lld -Wl,--reproduce=hello-link.tar -Wl,--gc-sections -Wl,--icf=all -pie -o simple-unstripped fixture/native-build/v1/object.hello.o entry.o runtime.o &&
+    "$STRIP" --strip-all -o simple simple-unstripped) || fail fixture-simple-link
+  mkdir "$scratch/replay"
+  tar -xf "$scratch/hello-link.tar" -C "$scratch/replay" || fail fixture-archive-extract
+  python3 - "$scratch/replay/hello-link" <<'PY' || fail fixture-c-response
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+lines = (root / "response.txt").read_text().splitlines()
+modules = [line for line in lines if line.endswith(".o") and
+           "/native-build/v1/" in line and Path(line).name.startswith("object.")]
+outputs = [line for line in lines if line.startswith("-o ")]
+assert len(modules) == len(outputs) == 1
+(root / "response-c.txt").write_text("\n".join(
+    "-o c-unstripped" if line == outputs[0] else
+    "c-hello.o" if line == modules[0] else line for line in lines) + "\n")
+PY
+  "$CLANG" -Os -fPIE -ffunction-sections -fdata-sections -c \
+    "$ROOT/doc/09_report/compiler/evidence/target5_hello_same_entry_object_20260929.c" \
+    -o "$scratch/replay/hello-link/c-hello.o" || fail fixture-c-object
+  (cd "$scratch/replay/hello-link" && "$LLD" @response-c.txt &&
+    "$STRIP" --strip-all -o c c-unstripped) || fail fixture-c-link
+  cp "$scratch/replay/hello-link/c" "$scratch/c"
+  {
+    printf 'simple-native-link-reproduce-v1\n'
+    printf 'archive_sha256=%s\n' "$(hash_file "$scratch/hello-link.tar")"
+    printf 'output_sha256=%s\n' "$(hash_file "$scratch/simple-unstripped")"
+    printf 'linker_sha256=%s\n' "$(hash_file "$LLD")"
+  } >"$scratch/hello-link.tar.receipt"
+  C_UNSTRIPPED=$scratch/replay/hello-link/c-unstripped
+  C_SOURCE=$ROOT/doc/09_report/compiler/evidence/target5_hello_same_entry_object_20260929.c
+else
+  dd if=/dev/zero of="$scratch/simple" bs=1024 count=10 2>/dev/null
+  dd if=/dev/zero of="$scratch/c" bs=1024 count=10 2>/dev/null
+fi
+
+cp "$scratch/simple" "$scratch/simple.good"
+cp "$scratch/simple" "$scratch/interpreter"
+cp "$scratch/interpreter" "$scratch/interpreter.good"
+sample_hash=$(hash_file "$scratch/interpreter")
+python_hash=$(hash_file "$PYTHON")
+i=1; while [ "$i" -le 30 ]; do
+  printf 'sample|simple|%s|100|100|0|%s\n' "$i" "$sample_hash" >>"$scratch/samples.tsv"
+  printf 'sample|python|%s|100|100|0|%s\n' "$i" "$python_hash" >>"$scratch/samples.tsv"
+  i=$((i+1))
+done
+
+produce() {
+  if [ "$(uname -s)" = Linux ]; then
+    (cd "$scratch" && "$ROOT/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
+      --mode development --output-dir out --samples samples.tsv --simple-binary simple --interpreter-binary interpreter --c-binary c --python-binary "$PYTHON" \
+      --c-reference matched-startup-v1 --stage4-receipt stage4.env --nogc-inventory nogc.tsv \
+      --provider-trace providers.tsv --format-allowance-bytes 0 \
+      --matched-simple-unstripped simple-unstripped --matched-c-unstripped "$C_UNSTRIPPED" \
+      --matched-c-source "$C_SOURCE" --matched-archive hello-link.tar \
+      --matched-expected-stdout expected-stdout.txt \
+      --matched-archive-receipt hello-link.tar.receipt --matched-clang "$CLANG" \
+      --matched-lld "$LLD" --matched-strip "$STRIP")
+  else
+    (cd "$scratch" && "$ROOT/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
+      --mode development --output-dir out --samples samples.tsv --simple-binary simple --interpreter-binary interpreter --c-binary c --python-binary "$PYTHON" \
+      --c-reference matched-startup-v1 --stage4-receipt stage4.env --nogc-inventory nogc.tsv \
+      --provider-trace providers.tsv --format-allowance-bytes 0)
+  fi
+}
+check() {
+  if [ "$(uname -s)" = Linux ]; then
+    "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
+      --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
+      --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
+      --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
+      --provider-trace "$scratch/out/provider-trace.tsv" \
+      --matched-simple-unstripped "$scratch/simple-unstripped" --matched-c-unstripped "$C_UNSTRIPPED" \
+      --matched-c-source "$C_SOURCE" --matched-archive "$scratch/hello-link.tar" \
+      --matched-expected-stdout "$scratch/expected-stdout.txt" \
+      --matched-archive-receipt "$scratch/hello-link.tar.receipt" --matched-clang "$CLANG" \
+      --matched-lld "$LLD" --matched-strip "$STRIP"
+  else
+    "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
+      --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
+      --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
+      --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
+      --provider-trace "$scratch/out/provider-trace.tsv"
+  fi
+}
+
+produce >/dev/null || fail clean-producer
+check >/dev/null || fail clean-checker
+if [ "$(uname -s)" = Linux ]; then
+  reject "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
+    --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
+    --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
+    --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
+    --provider-trace "$scratch/out/provider-trace.tsv"
+fi
+printf 'collector\n' >"$scratch/out/nogc-inventory.tsv"; reject check; : >"$scratch/out/nogc-inventory.tsv"
+printf 'provider\n' >"$scratch/out/provider-trace.tsv"; reject check; : >"$scratch/out/provider-trace.tsv"
+printf 'stage=3\ncompiler_kind=rust-seed\n' >"$scratch/stage4.env"; reject check
+printf 'stage=4\ncompiler_kind=pure-simple-stage4\n' >"$scratch/stage4.env"
+sed -i.bak 's/sample_count=30/sample_count=29/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
+printf x >>"$scratch/simple"; reject check; cp "$scratch/simple.good" "$scratch/simple"
+printf x >>"$scratch/interpreter"; reject check; cp "$scratch/interpreter.good" "$scratch/interpreter"
+sed -i.bak 's/c_reference_kind=matched-startup-v1/c_reference_kind=bare-c/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
+cp "$scratch/out/samples.tsv" "$scratch/out/samples.good"
+cp "$scratch/out/receipt.env" "$scratch/out/receipt.good"
+sed -i.bak "1s/$sample_hash/0000000000000000000000000000000000000000000000000000000000000000/" "$scratch/out/samples.tsv"
+sed -i.bak "s/^samples_sha256=.*/samples_sha256=$(hash_file "$scratch/out/samples.tsv")/" "$scratch/out/receipt.env"
+reject check
+mv "$scratch/out/samples.good" "$scratch/out/samples.tsv"
+mv "$scratch/out/receipt.good" "$scratch/out/receipt.env"
+if [ "$(uname -s)" = Linux ]; then
+  sed -i.bak 's/^matched_archive_sha256=./matched_archive_sha256=0/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
+  cp "$scratch/hello-link.tar.receipt" "$scratch/hello-link.tar.receipt.good"
+  printf x >>"$scratch/hello-link.tar.receipt"; reject check; mv "$scratch/hello-link.tar.receipt.good" "$scratch/hello-link.tar.receipt"
+  cp "$scratch/expected-stdout.txt" "$scratch/expected-stdout.good"
+  printf 'other\n' >"$scratch/expected-stdout.txt"; reject check
+  sed -i.bak "s/^matched_expected_stdout_sha256=.*/matched_expected_stdout_sha256=$(hash_file "$scratch/expected-stdout.txt")/" "$scratch/out/receipt.env"
+  reject check
+  mv "$scratch/expected-stdout.good" "$scratch/expected-stdout.txt"
+  mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
+fi
+echo 'BS7 cohort test: PASS — clean cohort, label-only refusal, and matched-link/stdout/sample evidence mutations'

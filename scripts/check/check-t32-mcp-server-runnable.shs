@@ -1,0 +1,118 @@
+#!/bin/sh
+# check-t32-mcp-server-runnable.shs
+#
+# Gate for doc/08_tracking/bug/seed_interpreter_segv_on_undefined_function_call_2026-09-12.md
+#
+# Two silences stacked when `t32_mcp_server` broke on 2026-09-12:
+#   1. the entry called json helper names that no longer existed, and the seed
+#      interpreter answers an unresolved CALL with a bare SIGSEGV (rc=139) and
+#      an empty stderr;
+#   2. the Windows wrapper ended its exec line with `2>nul`, so even the seed's
+#      own banner was discarded.
+#
+# This gate closes both: it drives a real MCP handshake + tools/list through the
+# entry and asserts a clean exit with a real response, and it refuses any
+# generated t32_mcp_server wrapper that throws stderr away.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) run, ...            exit 0
+#   FAIL  — ...                              exit 1
+#   ERROR — nothing was checked (<reason>)   exit 2
+# A run that performed 0 checks is ERROR, never a pass.
+#
+# Exit statuses are read DIRECTLY into a variable on the line after the
+# invocation, never through a pipe: a pipeline's $? is the last command's.
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+entry="$repo_root/examples/10_tooling/trace32_tools/t32_mcp/main.spl"
+checks=0
+failures=''
+
+runner=''
+for c in "$repo_root/bin/simple.exe" "$repo_root/bin/simple"; do
+  if [ -x "$c" ]; then runner="$c"; break; fi
+done
+
+run_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
+}
+
+# --- selftest: the gate's own premise must hold -------------------------------
+# An unresolved call MUST still SEGV on this binary. If it no longer does, the
+# interpreter was fixed and this gate's framing needs revisiting -- that is a
+# reason to look, not to silently keep passing.
+selftest() {
+  st_dir=$(mktemp -d) || { echo "selftest: mktemp failed" >&2; exit 2; }
+  printf 'fn main():\n    no_such_fn()\n' > "$st_dir/undef.spl"
+  run_timeout 60 "$runner" run "$st_dir/undef.spl" >/dev/null 2>&1
+  st_rc=$?
+  printf 'fn main():\n    print("ok")\n' > "$st_dir/ok.spl"
+  run_timeout 60 "$runner" run "$st_dir/ok.spl" > "$st_dir/ok.out" 2>/dev/null
+  st_ok_rc=$?
+  st_ok_txt=$(cat "$st_dir/ok.out" 2>/dev/null)
+  rm -rf "$st_dir"
+  if [ "$st_ok_rc" -ne 0 ] || [ "$st_ok_txt" != "ok" ]; then
+    echo "selftest: control program did not run cleanly (rc=$st_ok_rc out=<$st_ok_txt>)" >&2
+    exit 2
+  fi
+  if [ "$st_rc" -eq 0 ]; then
+    echo "selftest: an unresolved call now exits 0 -- the premise of this gate changed" >&2
+    exit 2
+  fi
+  echo "selftest: ok (unresolved call rc=$st_rc, control rc=0)"
+}
+
+# --- preconditions ------------------------------------------------------------
+[ -n "$runner" ] || { echo "ERROR — nothing was checked (no simple binary under bin/)"; exit 2; }
+[ -f "$entry" ] || { echo "ERROR — nothing was checked (missing entry $entry)"; exit 2; }
+
+selftest
+
+# --- check 1: the server answers initialize + tools/list ----------------------
+work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"gate","version":"1"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+} > "$work/req.json"
+
+run_timeout 180 "$runner" run "$entry" < "$work/req.json" > "$work/res.json" 2> "$work/res.err"
+srv_rc=$?
+checks=$((checks + 1))
+if [ "$srv_rc" -ne 0 ]; then
+  failures="$failures handshake-rc=$srv_rc"
+fi
+checks=$((checks + 1))
+if ! grep -q '"serverInfo"' "$work/res.json" 2>/dev/null; then
+  failures="$failures no-serverInfo-in-response"
+fi
+checks=$((checks + 1))
+if ! grep -q '"tools"' "$work/res.json" 2>/dev/null; then
+  failures="$failures no-tools-list-in-response"
+fi
+rm -rf "$work"
+
+# --- check 2: no generated wrapper discards stderr ----------------------------
+wrappers=0
+for w in "$repo_root"/bin/release/*/t32_mcp_server.cmd "$repo_root"/bin/t32_mcp_server; do
+  [ -f "$w" ] || continue
+  wrappers=$((wrappers + 1))
+  checks=$((checks + 1))
+  if grep -qiE '2> *nul' "$w" 2>/dev/null; then
+    failures="$failures stderr-discarded:${w#$repo_root/}"
+  fi
+done
+
+# --- verdict ------------------------------------------------------------------
+if [ "$checks" -eq 0 ]; then
+  echo "ERROR — nothing was checked (no checks executed)"
+  exit 2
+fi
+if [ -n "$failures" ]; then
+  echo "FAIL — $checks check(s) run, offenders:$failures"
+  exit 1
+fi
+echo "PASS — $checks check(s) run, MCP handshake + tools/list clean, $wrappers wrapper(s) preserve stderr"
+exit 0

@@ -1,4 +1,8 @@
 # SimpleOS ARM32 process mapping integration blocker — 2026-08-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Current safe prerequisite
 
@@ -41,3 +45,4 @@ ARM32 short-descriptor root. It owns PT_LOAD frames and L2 tables, performs
 copy/zero/readback, and retains residual resources after partial rollback.
 No test, build, SPipe, benchmark, optimizer, bootstrap, or runtime verification
 was run for this update, so it does not establish ARM32 execution readiness.
+

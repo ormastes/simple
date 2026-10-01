@@ -1,0 +1,85 @@
+"""Pin completion rules for the SimpleOS positioned FD bridge."""
+
+use std.spec.*
+use os.kernel.fs.open_file_description_owner_v1.{
+    OpenFileDescriptionAccessV1, OpenFileDescriptionBackendBindingV1,
+    OpenFileDescriptionIoKindV1, OpenFileDescriptionStateV1,
+    OpenFileDescriptionBackendCloseOutcomeV1,
+    open_file_description_create_v1, open_file_description_pin_io_v1,
+    open_file_description_resolve_io_dispatch_v1,
+    open_file_description_cancel_undispatched_io_v1,
+    open_file_description_complete_io_indeterminate_v1,
+    open_file_description_snapshot_v1, open_file_description_begin_close_v1,
+    open_file_description_resolve_close_backend_v1,
+    open_file_description_finalize_close_v1
+}
+use os.kernel.fs.fd_table_descriptor_owner_v1.{
+    FdTaskLifecycleKeyV1, fd_descriptor_context_create_v1,
+    fd_descriptor_install_v1, fd_descriptor_reserve_close_v1,
+    fd_descriptor_snapshot_v1, fd_descriptor_context_destroy_v1,
+    fd_descriptor_context_exists_v1
+}
+
+fn _completion_test_ofd(id: u64):
+    open_file_description_create_v1(
+        OpenFileDescriptionAccessV1.ReadWrite, 0u32,
+        OpenFileDescriptionBackendBindingV1(
+            file_object_id: id, file_object_generation: 1u32,
+            backend_kind: 1u8),
+        9u64).unwrap()
+
+describe "positioned OFD pin completion":
+    it "cancels only an undispatched pin and preserves the shared offset":
+        val ofd = _completion_test_ofd(99001u64)
+        val first = open_file_description_pin_io_v1(
+            ofd, OpenFileDescriptionIoKindV1.Read, 0u64, 4u64).unwrap()
+        expect(open_file_description_complete_io_indeterminate_v1(first).is_err()).to_be(true)
+        val cancelled = open_file_description_cancel_undispatched_io_v1(first).unwrap()
+        expect(cancelled.shared_offset).to_equal(9u64)
+        expect(cancelled.close_ready.is_some()).to_be(false)
+        expect(open_file_description_snapshot_v1(ofd).unwrap().state).to_equal(
+            OpenFileDescriptionStateV1.Active)
+        val second = open_file_description_pin_io_v1(
+            ofd, OpenFileDescriptionIoKindV1.Read, 0u64, 4u64).unwrap()
+        expect(open_file_description_cancel_undispatched_io_v1(second).is_ok()).to_be(true)
+        val close = open_file_description_begin_close_v1(ofd).unwrap().ticket.unwrap()
+        expect(open_file_description_resolve_close_backend_v1(close).is_ok()).to_be(true)
+        expect(open_file_description_finalize_close_v1(
+            close, OpenFileDescriptionBackendCloseOutcomeV1.Confirmed).is_ok()).to_be(true)
+
+    it "quarantines a dispatched pin when progress is unknown":
+        val ofd = _completion_test_ofd(99002u64)
+        val pin = open_file_description_pin_io_v1(
+            ofd, OpenFileDescriptionIoKindV1.Write, 0u64, 4u64).unwrap()
+        expect(open_file_description_resolve_io_dispatch_v1(pin).is_ok()).to_be(true)
+        expect(open_file_description_cancel_undispatched_io_v1(pin).is_err()).to_be(true)
+        val unknown = open_file_description_complete_io_indeterminate_v1(pin).unwrap()
+        expect(unknown.shared_offset).to_equal(9u64)
+        expect(unknown.close_ready.is_some()).to_be(false)
+        expect(open_file_description_snapshot_v1(ofd).unwrap().state).to_equal(
+            OpenFileDescriptionStateV1.CloseQuarantined)
+        expect(open_file_description_pin_io_v1(
+            ofd, OpenFileDescriptionIoKindV1.Write, 0u64, 4u64).is_err()).to_be(true)
+        val close = open_file_description_begin_close_v1(ofd).unwrap()
+        expect(close.complete).to_be(false)
+        expect(close.failure).to_equal("ofd-io-indeterminate")
+        expect(close.ticket.is_some()).to_be(false)
+        expect(open_file_description_snapshot_v1(ofd).unwrap().ref_count).to_equal(0u32)
+
+    it "retains a quarantined descriptor until its task context is destroyed":
+        val key = FdTaskLifecycleKeyV1(
+            task_id: 99003u64, lifecycle_generation: 1u64)
+        expect(fd_descriptor_context_create_v1(key).is_ok()).to_be(true)
+        val ofd = _completion_test_ofd(99003u64)
+        expect(fd_descriptor_install_v1(key, 7, ofd, 0u32).is_ok()).to_be(true)
+        val pin = open_file_description_pin_io_v1(
+            ofd, OpenFileDescriptionIoKindV1.Write, 0u64, 4u64).unwrap()
+        expect(open_file_description_resolve_io_dispatch_v1(pin).is_ok()).to_be(true)
+        expect(open_file_description_complete_io_indeterminate_v1(pin).is_ok()).to_be(true)
+        expect(fd_descriptor_reserve_close_v1(key, 7).is_err()).to_be(true)
+        expect(fd_descriptor_snapshot_v1(key, 7).is_ok()).to_be(true)
+        val destroyed = fd_descriptor_context_destroy_v1(key).unwrap()
+        expect(destroyed.complete).to_be(false)
+        expect(destroyed.failure).to_equal("ofd-io-indeterminate")
+        expect(destroyed.released_count).to_equal(1u32)
+        expect(fd_descriptor_context_exists_v1(key)).to_be(false)

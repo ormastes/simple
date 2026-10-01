@@ -1,13 +1,12 @@
+use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::module::Module;
 use inkwell::targets::{Target, TargetTriple};
 use inkwell::values::AnyValue;
-use inkwell::OptimizationLevel;
 
 use std::env::temp_dir;
-use std::fs::{remove_file, File};
-use std::io::Read;
+use std::fs::{self, remove_file};
 use std::path::Path;
 
 #[test]
@@ -24,11 +23,7 @@ fn test_write_bitcode_to_path() {
     module.add_function("my_fn", fn_type, None);
     module.write_bitcode_to_path(&path);
 
-    let mut contents = Vec::new();
-    let mut file = File::open(&path).expect("Could not open temp file");
-
-    file.read_to_end(&mut contents).expect("Unable to verify written file");
-
+    let contents = fs::read(&path).expect("Could not read back written file.");
     assert!(!contents.is_empty());
 
     remove_file(&path).unwrap();
@@ -141,28 +136,28 @@ fn test_write_and_load_memory_buffer() {
     );
 
     let memory_buffer2 = module.write_bitcode_to_memory();
-    let object_file = memory_buffer2.create_object_file();
+    let binary_file = memory_buffer2.create_binary_file(None);
 
-    assert!(object_file.is_err());
+    assert!(binary_file.is_err());
 }
 
 #[test]
 fn test_garbage_ir_fails_create_module_from_ir() {
     let context = Context::create();
-    let memory_buffer = MemoryBuffer::create_from_memory_range(b"garbage ir data", "my_ir");
+    let memory_buffer = MemoryBuffer::create_from_memory_range(b"garbage ir data\0", "my_ir");
 
-    assert_eq!(memory_buffer.get_size(), 15);
-    assert_eq!(memory_buffer.as_slice(), b"garbage ir data");
+    assert_eq!(memory_buffer.get_size(), 16);
+    assert_eq!(memory_buffer.as_slice(), b"garbage ir data\0");
     assert!(context.create_module_from_ir(memory_buffer).is_err());
 }
 
 #[test]
 fn test_garbage_ir_fails_create_module_from_ir_copy() {
     let context = Context::create();
-    let memory_buffer = MemoryBuffer::create_from_memory_range_copy(b"garbage ir data", "my_ir");
+    let memory_buffer = MemoryBuffer::create_from_memory_range_copy(b"garbage ir data\0", "my_ir");
 
-    assert_eq!(memory_buffer.get_size(), 15);
-    assert_eq!(memory_buffer.as_slice(), b"garbage ir data");
+    assert_eq!(memory_buffer.get_size(), 16);
+    assert_eq!(memory_buffer.as_slice(), b"garbage ir data\0");
     assert!(context.create_module_from_ir(memory_buffer).is_err());
 }
 
@@ -182,6 +177,7 @@ fn test_get_struct_type() {
 #[test]
 fn test_get_struct_type_global_context() {
     unsafe {
+        #[allow(deprecated)]
         Context::get_global(|context| {
             let module = context.create_module("my_module");
 
@@ -221,7 +217,7 @@ fn test_get_struct_type_global_context() {
 #[test]
 fn test_parse_from_buffer() {
     let context = Context::create();
-    let garbage_buffer = MemoryBuffer::create_from_memory_range(b"garbage ir data", "my_ir");
+    let garbage_buffer = MemoryBuffer::create_from_memory_range(b"garbage ir data\0", "my_ir");
     let module_result = Module::parse_bitcode_from_buffer(&garbage_buffer, &context);
 
     assert!(module_result.is_err());
@@ -310,7 +306,7 @@ fn test_clone() {
 }
 
 #[test]
-fn test_print_to_file() {
+fn test_print_to_file_good_path() {
     let context = Context::create();
     let module = context.create_module("mod");
     let void_type = context.void_type();
@@ -322,18 +318,36 @@ fn test_print_to_file() {
     builder.position_at_end(basic_block);
     builder.build_return(None).unwrap();
 
-    let bad_path = Path::new("/tmp/some/silly/path/that/sure/doesn't/exist");
-
-    assert_eq!(
-        module.print_to_file(bad_path).unwrap_err().to_str(),
-        Ok("No such file or directory")
-    );
-
     let mut temp_path = temp_dir();
 
     temp_path.push("module");
 
     assert!(module.print_to_file(&temp_path).is_ok());
+}
+
+#[test]
+fn test_print_to_file_bad_path() {
+    let context = Context::create();
+    let module = context.create_module("mod");
+    let void_type = context.void_type();
+    let fn_type = void_type.fn_type(&[], false);
+    let f = module.add_function("f", fn_type, None);
+    let basic_block = context.append_basic_block(f, "entry");
+    let builder = context.create_builder();
+
+    builder.position_at_end(basic_block);
+    builder.build_return(None).unwrap();
+
+    #[cfg(unix)]
+    let bad_path = Path::new("/tmp/some/silly/path/that/sure/doesn't/exist");
+    #[cfg(windows)]
+    let bad_path = Path::new("/does/not/exist/hopefully");
+
+    match module.print_to_file(bad_path).unwrap_err().to_str() {
+        Ok("no such file or directory") | Ok("No such file or directory") => (),
+        Ok(err) => panic!("Some other error: {err}"),
+        Err(_) => panic!("Should have failed."),
+    }
 }
 
 #[test]
@@ -346,7 +360,6 @@ fn test_get_set_target() {
     assert_eq!(module.get_name().to_str(), Ok("mod"));
     assert_eq!(module.get_triple(), TargetTriple::create(""));
 
-    #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
     assert_eq!(module.get_source_file_name().to_str(), Ok("mod"));
 
     module.set_name("mod2");
@@ -355,13 +368,10 @@ fn test_get_set_target() {
     assert_eq!(module.get_name().to_str(), Ok("mod2"));
     assert_eq!(module.get_triple(), triple);
 
-    #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
-    {
-        module.set_source_file_name("foo.rs");
+    module.set_source_file_name("foo.rs");
 
-        assert_eq!(module.get_source_file_name().to_str(), Ok("foo.rs"));
-        assert_eq!(module.get_name().to_str(), Ok("mod2"));
-    }
+    assert_eq!(module.get_source_file_name().to_str(), Ok("foo.rs"));
+    assert_eq!(module.get_name().to_str(), Ok("mod2"));
 }
 
 #[test]
@@ -438,40 +448,37 @@ fn test_linking_modules() {
 
 #[test]
 fn test_metadata_flags() {
-    #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
-    {
-        let context = Context::create();
-        let module = context.create_module("my_module");
+    let context = Context::create();
+    let module = context.create_module("my_module");
 
-        use inkwell::module::FlagBehavior;
+    use inkwell::module::FlagBehavior;
 
-        assert!(module.get_flag("some_key").is_none());
+    assert!(module.get_flag("some_key").is_none());
 
-        let md = context.metadata_string("lots of metadata here");
+    let md = context.metadata_string("lots of metadata here");
 
-        module.add_metadata_flag("some_key", FlagBehavior::Error, md);
+    module.add_metadata_flag("some_key", FlagBehavior::Error, md);
 
-        // These have different addresses but same value
-        assert!(module.get_flag("some_key").is_some());
+    // These have different addresses but same value
+    assert!(module.get_flag("some_key").is_some());
 
-        let f64_type = context.f64_type();
-        let f64_val = f64_type.const_float(std::f64::consts::PI);
+    let f64_type = context.f64_type();
+    let f64_val = f64_type.const_float(std::f64::consts::PI);
 
-        assert!(module.get_flag("some_key2").is_none());
+    assert!(module.get_flag("some_key2").is_none());
 
-        module.add_basic_value_flag("some_key2", FlagBehavior::Error, f64_val);
+    module.add_basic_value_flag("some_key2", FlagBehavior::Error, f64_val);
 
-        assert!(module.get_flag("some_key2").is_some());
+    assert!(module.get_flag("some_key2").is_some());
 
-        let struct_val = context.const_struct(&[f64_val.into()], false);
+    let struct_val = context.const_struct(&[f64_val.into()], false);
 
-        assert!(module.get_flag("some_key3").is_none());
+    assert!(module.get_flag("some_key3").is_none());
 
-        module.add_basic_value_flag("some_key3", FlagBehavior::Error, struct_val);
+    module.add_basic_value_flag("some_key3", FlagBehavior::Error, struct_val);
 
-        assert!(module.get_flag("some_key3").is_some());
-        assert!(module.verify().is_ok());
-    }
+    assert!(module.get_flag("some_key3").is_some());
+    assert!(module.verify().is_ok());
 }
 
 #[test]
@@ -508,4 +515,11 @@ fn test_double_ee_from_same_module() {
         .expect("Could not create Execution Engine");
 
     assert!(module.create_interpreter_execution_engine().is_err());
+}
+
+#[test]
+fn test_verify() {
+    let context = Context::create();
+    let module = context.create_module("a");
+    assert!(module.verify().is_ok());
 }

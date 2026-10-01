@@ -1,0 +1,66 @@
+use std.common.json.{json_parse, json_to_array, json_to_boolean, json_to_number, json_to_string, json_object_get}
+use app.lint.provider.cpp.model.{CppDiagnosticV1, CppTextEditV1}
+
+pub struct ClangStructuredOutputV1:
+    valid: bool
+    diagnostics: [CppDiagnosticV1]
+    reason: text
+
+fn _required_text_v1(record: any, key: text) -> text:
+    if val value = json_object_get(record, key):
+        if val extracted = json_to_string(value):
+            return extracted
+    ""
+
+fn _required_u64_v1(record: any, key: text) -> u64:
+    if val value = json_object_get(record, key):
+        if val extracted = json_to_number(value):
+            if extracted >= 0.0:
+                return extracted as u64
+    0
+
+fn _has_nonnegative_number_v1(record: any, key: text) -> bool:
+    if val value = json_object_get(record, key):
+        if val extracted = json_to_number(value):
+            return extracted >= 0.0
+    false
+
+fn _severity_valid_v1(severity: text) -> bool:
+    severity == "error" or severity == "warning" or severity == "note"
+
+fn _optional_bool_v1(record: any, key: text) -> bool:
+    if val value = json_object_get(record, key):
+        if val extracted = json_to_boolean(value):
+            return extracted
+    false
+
+fn _parse_fixes_v1(record: any, path: text, revision: u64) -> [CppTextEditV1]:
+    var fixes: [CppTextEditV1] = []
+    if val raw_fixes = json_object_get(record, "fixes"):
+        if val entries = json_to_array(raw_fixes):
+            for entry in entries:
+                val start_byte = _required_u64_v1(entry, "start_byte")
+                val end_byte = _required_u64_v1(entry, "end_byte")
+                val replacement = _required_text_v1(entry, "replacement")
+                if end_byte >= start_byte:
+                    fixes.push(CppTextEditV1(path, revision, start_byte, end_byte, replacement, _optional_bool_v1(entry, "machine_applicable")))
+    fixes
+
+pub fn parse_clang_structured_output_v1(output: text, revision: u64) -> ClangStructuredOutputV1:
+    val parsed = json_parse(output)
+    if parsed == nil:
+        return ClangStructuredOutputV1(false, [], "clang worker output is malformed JSON")
+    if val records = json_to_array(parsed):
+        var diagnostics: [CppDiagnosticV1] = []
+        for record in records:
+            val rule = _required_text_v1(record, "rule")
+            val severity = _required_text_v1(record, "severity")
+            val path = _required_text_v1(record, "path")
+            val message = _required_text_v1(record, "message")
+            val start_byte = _required_u64_v1(record, "start_byte")
+            val end_byte = _required_u64_v1(record, "end_byte")
+            if rule == "" or not _severity_valid_v1(severity) or path == "" or message == "" or not _has_nonnegative_number_v1(record, "start_byte") or not _has_nonnegative_number_v1(record, "end_byte") or end_byte < start_byte:
+                return ClangStructuredOutputV1(false, [], "clang diagnostic record is incomplete or has an invalid range")
+            diagnostics.push(CppDiagnosticV1(rule, severity, path, revision, start_byte, end_byte, message, _parse_fixes_v1(record, path, revision)))
+        return ClangStructuredOutputV1(true, diagnostics, "")
+    ClangStructuredOutputV1(false, [], "clang worker output root must be an array")

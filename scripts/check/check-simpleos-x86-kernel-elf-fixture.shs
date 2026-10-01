@@ -1,0 +1,86 @@
+#!/bin/sh
+# Reproduce the defined-weak-symbol gate on real freestanding ELF files and
+# retain a bounded link/gate wall-time and peak-RSS receipt.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+GATE="$ROOT_DIR/scripts/check/check-simpleos-x86-kernel-elf.shs"
+TIME_BIN=${TIME_BIN:-/usr/bin/time}
+CLANG_BIN=${CLANG:-clang}
+LD_LLD_BIN=${LD_LLD:-ld.lld}
+TIME_LIMIT_SECONDS=${SIMPLEOS_ELF_FIXTURE_TIME_LIMIT_SECONDS:-10}
+RSS_LIMIT_KIB=${SIMPLEOS_ELF_FIXTURE_RSS_LIMIT_KIB:-131072}
+
+fail() {
+    echo "[x86-kernel-elf-fixture] ERROR: $*" >&2
+    exit 1
+}
+
+write_sources() {
+    fixture_dir=$1
+    cat >"$fixture_dir/approved.c" <<'EOF'
+__attribute__((weak)) long spl_handle_mmap(
+    unsigned long a0, unsigned long a1, unsigned long a2,
+    unsigned long a3, unsigned long a4, unsigned long a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -1;
+}
+void _start(void) {}
+EOF
+    cat >"$fixture_dir/unrelated.c" <<'EOF'
+__attribute__((weak)) long generated_nil_stub(void) { return 0; }
+void _start(void) { (void)generated_nil_stub(); }
+EOF
+}
+
+run_fixture() {
+    fixture_dir=$1
+    write_sources "$fixture_dir"
+    "$CLANG_BIN" --target=x86_64-unknown-none -ffreestanding -fno-pic \
+        -c -o "$fixture_dir/approved.o" "$fixture_dir/approved.c"
+    "$LD_LLD_BIN" -m elf_x86_64 -static -e _start \
+        -o "$fixture_dir/approved.elf" "$fixture_dir/approved.o"
+    "$CLANG_BIN" --target=x86_64-unknown-none -ffreestanding -fno-pic \
+        -c -o "$fixture_dir/unrelated.o" "$fixture_dir/unrelated.c"
+    "$LD_LLD_BIN" -m elf_x86_64 -static -e _start \
+        -o "$fixture_dir/unrelated.elf" "$fixture_dir/unrelated.o"
+
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 sh "$GATE" "$fixture_dir/approved.elf" >/dev/null
+    if sh "$GATE" "$fixture_dir/approved.elf" >/dev/null 2>&1; then
+        fail "approved weak fallback passed without the explicit opt-in"
+    fi
+    if SIMPLE_ALLOW_FREESTANDING_STUBS=1 sh "$GATE" "$fixture_dir/unrelated.elf" >/dev/null 2>&1; then
+        fail "unrelated generated weak stub passed under the opt-in"
+    fi
+}
+
+if [ "${1:-}" = "--fixture" ]; then
+    [ "$#" -eq 2 ] || fail "usage: $0 --fixture DIR"
+    run_fixture "$2"
+    exit 0
+fi
+[ "$#" -eq 0 ] || fail "usage: $0"
+[ -x "$TIME_BIN" ] || fail "GNU time is required: $TIME_BIN"
+command -v "$CLANG_BIN" >/dev/null 2>&1 || fail "Clang is required: $CLANG_BIN"
+command -v "$LD_LLD_BIN" >/dev/null 2>&1 || fail "LLD is required: $LD_LLD_BIN"
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-elf-weak-fixture.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+timing="$work/time.env"
+"$TIME_BIN" -f 'elapsed_seconds=%e\nmax_rss_kib=%M' -o "$timing" \
+    sh "$0" --fixture "$work"
+
+elapsed=$(sed -n 's/^elapsed_seconds=//p' "$timing")
+max_rss=$(sed -n 's/^max_rss_kib=//p' "$timing")
+case "$elapsed" in ''|*[!0-9.]*) fail "invalid elapsed-time receipt: $elapsed" ;; esac
+case "$max_rss" in ''|*[!0-9]*) fail "invalid max-RSS receipt: $max_rss" ;; esac
+awk -v actual="$elapsed" -v limit="$TIME_LIMIT_SECONDS" \
+    'BEGIN { exit !(actual <= limit) }' || fail "link/gate time ${elapsed}s exceeds ${TIME_LIMIT_SECONDS}s"
+[ "$max_rss" -le "$RSS_LIMIT_KIB" ] \
+    || fail "link/gate max RSS ${max_rss} KiB exceeds ${RSS_LIMIT_KIB} KiB"
+
+echo "simpleos_elf_weak_fixture=pass"
+echo "simpleos_elf_weak_fixture_elapsed_seconds=$elapsed"
+echo "simpleos_elf_weak_fixture_max_rss_kib=$max_rss"
+echo "simpleos_elf_weak_fixture_time_limit_seconds=$TIME_LIMIT_SECONDS"
+echo "simpleos_elf_weak_fixture_rss_limit_kib=$RSS_LIMIT_KIB"

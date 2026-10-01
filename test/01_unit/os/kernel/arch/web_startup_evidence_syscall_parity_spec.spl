@@ -1,0 +1,39 @@
+use std.spec.{describe, it, expect}
+use os.kernel.types.syscall_types.{syscall_id_web_startup_evidence_consume}
+use os.userlib.web_startup.{
+    web_startup_result_admitted_v1, web_startup_admission_consume_v1,
+    web_startup_admission_endpoint_v1
+}
+
+describe("WEB startup evidence ABI parity"):
+    it("reserves a distinct ABI after occupied dataset and queue IDs"):
+        expect(syscall_id_web_startup_evidence_consume()).to_equal(132u64)
+        expect(web_startup_result_admitted_v1(1)).to_equal(true)
+        expect(web_startup_result_admitted_v1(0)).to_equal(false)
+        expect(web_startup_result_admitted_v1(-38)).to_equal(false)
+
+    it("routes x86_64 ARM64 and RV64 to the same WEB-only owner"):
+        val x86 = file_read("src/os/kernel/arch/x86_64/interrupt.spl")
+        val rv64 = file_read("src/os/kernel/arch/riscv64/syscall.spl")
+        val arm64 = file_read(
+            "examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val shim = file_read("src/os/kernel/abi/syscall_shim.spl")
+        val common = file_read("src/os/kernel/ipc/syscall.spl")
+        expect(x86).to_contain("args.id == 132")
+        expect(rv64).to_contain("args.id == 132u64")
+        expect(arm64).to_contain("case 132:")
+        expect(arm64).to_contain("spl_handle_web_startup_evidence_consume_v1")
+        expect(shim).to_contain("spl_handle_web_startup_evidence_consume_v1")
+        expect(common).to_contain("_handle_web_startup_evidence_consume")
+
+    it("keeps userlib admission opaque and endpoint projection read-only"):
+        val userlib = file_read("src/os/userlib/web_startup.spl")
+        expect(userlib).to_contain("pub(package) class WebStartupAdmissionV1")
+        expect(userlib).to_contain("pub struct WebStartupEndpointProjectionV1")
+        expect(userlib).to_contain("syscall(132u64")
+        expect(userlib).to_contain("web_startup_admission_endpoint_v1")
+        expect(userlib).to_contain("SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1")
+
+    it("does not redirect the established server ABI 116"):
+        val server = file_read("src/os/userlib/server_startup.spl")
+        expect(server).to_contain("syscall(116u64")

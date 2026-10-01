@@ -1,0 +1,134 @@
+# Package capability types shared only by the H2 request/response owners.
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use std.nogc_sync_mut.atomic.{AtomicBool, MemoryOrdering, atomic_bool_new}
+
+pub(package) class WebH2ResponseAuthorityStateV1:
+    connection_epoch: u64
+    bound: bool
+    response_owner_instance: u64
+    cancelled: bool
+    revoked_streams: [i64]
+    last_consumed_stream_id: i64
+    mutex_handle: i64
+    poisoned: AtomicBool
+
+pub struct WebH2ResponseOwnerBindingV1:
+    _connection_epoch: u64
+    _response_owner_instance: u64
+    _authority: WebH2ResponseAuthorityStateV1
+
+pub struct WebH2ResponseAdmissionReceiptV1:
+    _connection_epoch: u64
+    _response_owner_instance: u64
+    _stream_id: i64
+    _stream_generation: u64
+    _lifecycle_nonce: u64
+    _authority: WebH2ResponseAuthorityStateV1
+
+pub struct WebH2LocalGoawayCutoffV1:
+    _connection_epoch: u64
+    _response_owner_instance: u64
+    _highest_completed_stream_id: i64
+
+var web_h2_response_owner_instance_counter_v1: u64 = 0u64
+val web_h2_response_owner_allocator_mutex_v1: i64 = mutex_raw_create()
+val web_h2_response_owner_allocator_poison_v1: AtomicBool = atomic_bool_new(
+    web_h2_response_owner_allocator_mutex_v1 <= 0)
+
+pub(package) fn web_h2_allocate_response_owner_instance_v1() -> u64:
+    if web_h2_response_owner_allocator_poison_v1.load(MemoryOrdering.SeqCst): return 0u64
+    if web_h2_response_owner_allocator_mutex_v1 <= 0 or not mutex_raw_lock(web_h2_response_owner_allocator_mutex_v1):
+        web_h2_response_owner_allocator_poison_v1.store(true, MemoryOrdering.SeqCst)
+        return 0u64
+    if web_h2_response_owner_instance_counter_v1 == 18446744073709551615u64:
+        if not mutex_raw_unlock(web_h2_response_owner_allocator_mutex_v1):
+            web_h2_response_owner_allocator_poison_v1.store(true, MemoryOrdering.SeqCst)
+        return 0u64
+    web_h2_response_owner_instance_counter_v1 = web_h2_response_owner_instance_counter_v1 + 1u64
+    val instance = web_h2_response_owner_instance_counter_v1
+    if not mutex_raw_unlock(web_h2_response_owner_allocator_mutex_v1):
+        web_h2_response_owner_allocator_poison_v1.store(true, MemoryOrdering.SeqCst)
+        return 0u64
+    instance
+
+pub(package) fn web_h2_response_authority_new_v1(instance: u64) -> WebH2ResponseAuthorityStateV1:
+    val mutex_handle = mutex_raw_create()
+    WebH2ResponseAuthorityStateV1(connection_epoch: 0u64, bound: false,
+        response_owner_instance: instance, cancelled: false,
+        revoked_streams: [], last_consumed_stream_id: 0,
+        mutex_handle: mutex_handle,
+        poisoned: atomic_bool_new(instance == 0u64 or mutex_handle <= 0))
+
+fn _web_h2_authority_unlock_v1(state: WebH2ResponseAuthorityStateV1) -> bool:
+    if mutex_raw_unlock(state.mutex_handle): return true
+    state.poisoned.store(true, MemoryOrdering.SeqCst)
+    false
+
+pub(package) fn web_h2_response_authority_revoke_all_v1(state: WebH2ResponseAuthorityStateV1) -> bool:
+    if state.poisoned.load(MemoryOrdering.SeqCst): return false
+    if state.mutex_handle <= 0 or not mutex_raw_lock(state.mutex_handle):
+        state.poisoned.store(true, MemoryOrdering.SeqCst)
+        return false
+    state.cancelled = true
+    _web_h2_authority_unlock_v1(state)
+
+pub(package) fn web_h2_response_authority_bind_v1(state: WebH2ResponseAuthorityStateV1, connection_epoch: u64) -> bool:
+    if state.poisoned.load(MemoryOrdering.SeqCst): return false
+    if state.mutex_handle <= 0 or not mutex_raw_lock(state.mutex_handle):
+        state.poisoned.store(true, MemoryOrdering.SeqCst)
+        return false
+    if state.cancelled or state.bound or connection_epoch == 0u64 or state.response_owner_instance == 0u64:
+        state.cancelled = true
+        _ = _web_h2_authority_unlock_v1(state)
+        return false
+    state.bound = true
+    state.connection_epoch = connection_epoch
+    _web_h2_authority_unlock_v1(state)
+
+pub(package) fn web_h2_response_authority_revoke_stream_v1(state: WebH2ResponseAuthorityStateV1, stream_id: i64) -> bool:
+    if state.poisoned.load(MemoryOrdering.SeqCst): return false
+    if state.mutex_handle <= 0 or not mutex_raw_lock(state.mutex_handle):
+        state.poisoned.store(true, MemoryOrdering.SeqCst)
+        return false
+    if state.revoked_streams.len() >= 64u64:
+        state.cancelled = true
+        _ = _web_h2_authority_unlock_v1(state)
+        return false
+    for prior in state.revoked_streams:
+        if prior == stream_id:
+            return _web_h2_authority_unlock_v1(state)
+    state.revoked_streams.push(stream_id)
+    _web_h2_authority_unlock_v1(state)
+
+pub(package) fn web_h2_response_authority_consume_v1(state: WebH2ResponseAuthorityStateV1, stream_id: i64) -> bool:
+    if state.poisoned.load(MemoryOrdering.SeqCst): return false
+    if state.mutex_handle <= 0 or not mutex_raw_lock(state.mutex_handle):
+        state.poisoned.store(true, MemoryOrdering.SeqCst)
+        return false
+    if state.cancelled or stream_id <= state.last_consumed_stream_id:
+        _ = _web_h2_authority_unlock_v1(state)
+        return false
+    for revoked in state.revoked_streams:
+        if revoked == stream_id:
+            _ = _web_h2_authority_unlock_v1(state)
+            return false
+    state.last_consumed_stream_id = stream_id
+    _web_h2_authority_unlock_v1(state)
+
+pub(package) fn web_h2_response_authority_valid_v1(state: WebH2ResponseAuthorityStateV1, stream_id: i64) -> bool:
+    if state.poisoned.load(MemoryOrdering.SeqCst): return false
+    if state.mutex_handle <= 0 or not mutex_raw_lock(state.mutex_handle):
+        state.poisoned.store(true, MemoryOrdering.SeqCst)
+        return false
+    if state.cancelled:
+        _ = _web_h2_authority_unlock_v1(state)
+        return false
+    for revoked in state.revoked_streams:
+        if revoked == stream_id:
+            _ = _web_h2_authority_unlock_v1(state)
+            return false
+    _web_h2_authority_unlock_v1(state)
+
+export WebH2ResponseOwnerBindingV1, WebH2ResponseAdmissionReceiptV1
+export WebH2LocalGoawayCutoffV1

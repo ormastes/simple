@@ -1,4 +1,9 @@
 # Rust Async Process Unread-Pipe Hang
+## Closed 2026-09-16 — Status: Fixed in source 2026-07-17 for native SFFI and interpreter owners
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -17,3 +22,4 @@ Both Rust owners now inherit stdout and stderr, matching the C owner and the
 PID-only API contract. The test-runner source contract requires inherited
 streams in both implementations. The lifecycle unit tests also require a timed
 wait to retain the child and a subsequent kill to reap it.
+

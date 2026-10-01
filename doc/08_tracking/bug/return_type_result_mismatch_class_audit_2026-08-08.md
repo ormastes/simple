@@ -176,3 +176,11 @@ touched in this pass: `src/compiler/{10.frontend,20.hir,50.mir,70.backend}/**`
 is out of scope for this worker, so that subfamily is **blocked-out-of-scope**,
 not unproven-absent. Retitle/rescope this record to the `src/compiler/` family
 rather than leaving `validation.spl` as its `file:`.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Already fully audited with clear ownership boundaries (22 sites owned by the
+src/compiler/ refactor-damage family, 2 unrelated sites already fixed, ~29
+remaining genuinely out of scope pending a from-scratch classifier re-run).
+Re-deriving the classifier to find new candidates is out of this lane's
+per-bug budget. No change made.

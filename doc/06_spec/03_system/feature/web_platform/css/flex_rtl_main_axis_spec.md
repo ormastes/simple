@@ -1,71 +1,113 @@
 # CSS Flex RTL Main Axis
 
-> Row flex layout composes `direction` with `flex-direction`, keeps the stable
-> `order` sort, and applies each wrapped line's gaps, justification, and auto
-> margins before lowering nested content through canonical Draw IR.
+> This bounded integer-pixel scenario proves that `direction` reverses the row
 
 | Tests | Active | Skipped | Pending |
-|-------|--------|---------|---------|
+|-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# CSS Flex RTL Main Axis
+
+This bounded integer-pixel scenario proves that `direction` reverses the row
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Status | Active source; qualified execution held |
-| Requirements | REQ-WEB-BROWSER-003, 004, 021 |
+| Category | Other |
+| Status | Active |
 | Source | `test/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.spl` |
-| Updated | 2026-07-31 |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Claim Boundary
+This bounded integer-pixel scenario proves that `direction` reverses the row
+flex main axis without changing DOM/order sorting, through canonical Web
+semantics, layout, Draw IR, and Engine2D.
 
-The scenario proves bounded integer geometry and exact software pixels for LTR,
-RTL, direct `row-reverse`, `flex-flow: row-reverse nowrap`, wrapped stable
-ordering, a nested descendant, per-line `space-between` plus column gaps, and a
-physical auto margin. It does not claim column-axis reversal or native GPU
-evidence.
+## Scenarios
 
-## Scenario
+### REQ-WEB-BROWSER-003/004/021: CSS RTL row-flex main axis
 
-### should place ordered children from main-start for RTL and LTR
+#### should place ordered children from main-start for RTL and LTR
 
-1. **Parse the styled document**
-   - Parse 8-by-2 nowrap LTR and RTL controls.
-   - Parse LTR/RTL direct `row-reverse` controls, an LTR
-     `flex-flow: row-reverse nowrap` shorthand control, a 4-by-4 ordered nested
-     wrap, and 7-pixel wrapped justification and auto-margin controls.
-2. **Resolve the winning computed style**
-   - RTL remains the winning `direction`.
-   - Both direct reverse controls and the shorthand control retain computed
-     `flex_direction=row-reverse`; the value is not collapsed to `row` before
-     layout.
-3. **Emit canonical Draw IR geometry and paint**
-   - RTL row items occupy x=6 and x=4; the LTR negative control uses x=0 and
-     x=2.
-   - LTR `row-reverse` uses x=6/x=4 while RTL `row-reverse` composes back to
-     x=0/x=2.
-   - The LTR `flex-flow` shorthand control also uses x=6/x=4.
-   - Stable `order` puts the blue item at x=2 and red at x=0 on the first
-     wrapped line. The nested 1-by-2 descendant remains attached at `(2,2)`.
-   - Per-line `space-between` plus the one-pixel column gap yields x=5/x=0;
-     the next line starts at x=5. A physical auto margin also yields x=5/x=0.
-4. **Render exact Engine2D pixels**
-   - The complete 8-by-2 nowrap, direct reverse, shorthand reverse, 4-by-4
-     ordered/nested wrap, 7-by-4 justified wrap, and 7-by-2 auto-margin pixel
-     buffers must equal their ARGB oracles.
-   - No command may be skipped.
+**Scenario capture:** artifact after_step
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-The mirrored executable scenario contains the full HTML fixtures, semantic and
-Draw IR lookup helpers, exact geometry assertions, and complete pixel arrays.
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Parse the styled document")
-step("Resolve the winning computed style")
-step("Emit canonical Draw IR geometry and paint")
-step("Render exact Engine2D pixels")
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WEB-BROWSER-003/004/021
 ```
 
 </details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003/004/021`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1f256e1b4466848c02cf6b70e2e978f9d8029f1dc362914ce96b9d9dc0cc5a75`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1f256e1b4466848c02cf6b70e2e978f9d8029f1dc362914ce96b9d9dc0cc5a75`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1f256e1b4466848c02cf6b70e2e978f9d8029f1dc362914ce96b9d9dc0cc5a75`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=85 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.spl:108:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should place ordered children from main-start for RTL and LTR' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/flex_rtl_main_axis_spec.spl:108:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should place ordered children from main-start for RTL and LTR' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

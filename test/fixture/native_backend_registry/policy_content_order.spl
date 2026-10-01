@@ -1,0 +1,92 @@
+# Native bootstrap regression for content-ordered backend admission. The real
+# registry/ABI are exercised; these descriptor-only ports refuse compilation.
+use common.plugin.iface_id.{ParamHeader}
+use compiler.backend.backend.backend_types.{BackendKind, CompileError}
+use compiler.backend.codegen_types.{CodegenOutput, CodegenOutputKind}
+use compiler.backend.backend_port.{BackendDescV1, BackendPortV1, CodegenParamsV1, backend_port_header, backend_port_host_iface}
+use compiler.backend.backend.static_backend_registry.{BackendLinkClass, StaticBackendEntryV1, StaticBackendSelectionError, static_backend_entry_v1, validate_k1_static_backend_table_v1, install_k1_static_backend_table_v1, installed_k1_static_backend_table_v1, select_static_backend_v1}
+use compiler.mir.mir_instructions.{MirModule}
+
+var fixture_name_cranelift: text = ""
+var fixture_name_interpreter: text = ""
+var fixture_name_llvm: text = ""
+var fixture_name_cranelift_jit: text = ""
+
+fn fixture_descriptor(name: text) -> BackendDescV1:
+    BackendDescV1(ParamHeader("simple.codegen.BackendDescV1", 1, 0, 0),
+        name, ["*"], ["fixture-selection"], "fixture-content-order", [])
+
+fn fixture_cranelift_descriptor() -> BackendDescV1:
+    fixture_descriptor(fixture_name_cranelift)
+
+fn fixture_interpreter_descriptor() -> BackendDescV1:
+    fixture_descriptor(fixture_name_interpreter)
+
+fn fixture_llvm_descriptor() -> BackendDescV1:
+    fixture_descriptor(fixture_name_llvm)
+
+fn fixture_cranelift_jit_descriptor() -> BackendDescV1:
+    fixture_descriptor(fixture_name_cranelift_jit)
+
+fn fixture_refuse_compile(params: CodegenParamsV1, module: MirModule) -> Result<CodegenOutput, CompileError>:
+    Err(CompileError("descriptor-only fixture cannot compile", "fixture", false, nil))
+
+fn fixture_supports(capability: text) -> bool:
+    capability == "fixture-selection"
+
+fn fixture_entry(kind: BackendKind, describe_fn: fn() -> BackendDescV1,
+        link_class: BackendLinkClass) -> StaticBackendEntryV1:
+    val port = BackendPortV1(backend_port_header(), backend_port_host_iface(),
+        describe_fn, fixture_refuse_compile, fixture_supports, [])
+    static_backend_entry_v1(kind, link_class, port, CodegenOutputKind.ObjectCode)
+
+fn fixture_selected(name: text, table: [StaticBackendEntryV1]) -> bool:
+    match select_static_backend_v1(name, table):
+        case Ok(entry): entry.kind.to_text() == name
+        case _: false
+
+fn fixture_rejects_table(table: [StaticBackendEntryV1]) -> bool:
+    match select_static_backend_v1("absent", table):
+        case Err(StaticBackendSelectionError.InvalidTable(_)): true
+        case _: false
+
+fn main() -> i64:
+    # Seed names in descending content order; descriptors return independently
+    # stored strings so their allocation order cannot authorize the table.
+    fixture_name_llvm = "ll" + "vm"
+    fixture_name_interpreter = "inter" + "preter"
+    fixture_name_cranelift_jit = "cranelift" + "-jit"
+    fixture_name_cranelift = "crane" + "lift"
+    val c = fixture_entry(BackendKind.Cranelift, fixture_cranelift_descriptor, BackendLinkClass.KernelLinked)
+    val i = fixture_entry(BackendKind.Interpreter, fixture_interpreter_descriptor, BackendLinkClass.KernelLinked)
+    val l = fixture_entry(BackendKind.Llvm, fixture_llvm_descriptor, BackendLinkClass.KernelLinked)
+    val j = fixture_entry(BackendKind.CraneliftJit, fixture_cranelift_jit_descriptor, BackendLinkClass.PluginStatic)
+    val table = [c, i, l]
+    if not validate_k1_static_backend_table_v1("llvm-cranelift", table): return 10
+    if validate_k1_static_backend_table_v1("unknown", table): return 11
+    if validate_k1_static_backend_table_v1("llvm-cranelift", []): return 12
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [c, i]): return 13
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [c, l, i]): return 14
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [i, c, l]): return 15
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [i, l, c]): return 16
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [l, c, i]): return 17
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [l, i, c]): return 18
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [c, i, i]): return 19
+    val plugin_llvm = fixture_entry(BackendKind.Llvm, fixture_llvm_descriptor, BackendLinkClass.PluginStatic)
+    if validate_k1_static_backend_table_v1("llvm-cranelift", [c, i, plugin_llvm]): return 20
+    if not fixture_selected("llvm", table): return 21
+    if not fixture_selected("interpreter", table): return 22
+    if not fixture_selected("cranelift-jit", [c, j]): return 23
+    if not fixture_rejects_table([j, c]): return 24
+    if not fixture_rejects_table([i, i]): return 25
+    fixture_name_cranelift = ""
+    if validate_k1_static_backend_table_v1("llvm-cranelift", table): return 26
+    if not fixture_rejects_table(table): return 27
+    fixture_name_cranelift = "wrong-name"
+    if validate_k1_static_backend_table_v1("llvm-cranelift", table): return 28
+    if not fixture_rejects_table(table): return 29
+    fixture_name_cranelift = "crane" + "lift"
+    if not install_k1_static_backend_table_v1("llvm-cranelift", table): return 30
+    if not fixture_selected("llvm", installed_k1_static_backend_table_v1()): return 31
+    print "native K1 backend content-order regression: PASS (22 checks)"
+    0

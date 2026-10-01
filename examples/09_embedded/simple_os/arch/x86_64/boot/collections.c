@@ -202,7 +202,7 @@ RuntimeValue __rt_btreemap_new(void)
 {
     SortedMap *m = (SortedMap *)malloc(sizeof(SortedMap));
     if (!m) return NIL_VALUE;
-    m->hdr.type = HEAP_BTREEMAP;
+    runtime_heap_header_init(&m->hdr, HEAP_BTREEMAP);
     m->hdr.size = (uint32_t)sizeof(SortedMap);
     m->len = 0;
     m->cap = SORTEDMAP_INIT_CAP;
@@ -351,7 +351,7 @@ RuntimeValue __rt_btreeset_new(void)
 {
     SortedMap *m = (SortedMap *)malloc(sizeof(SortedMap));
     if (!m) return NIL_VALUE;
-    m->hdr.type = HEAP_BTREESET;
+    runtime_heap_header_init(&m->hdr, HEAP_BTREESET);
     m->hdr.size = (uint32_t)sizeof(SortedMap);
     m->len = 0;
     m->cap = SORTEDMAP_INIT_CAP;

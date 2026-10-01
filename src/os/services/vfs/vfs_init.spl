@@ -58,6 +58,7 @@ use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemLease, NvmeFilesystemConsu
 use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
+use std.fs_driver.nvfs_posix_driver.{nvfs_posix_pread_bytes_owned}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use common.string_core.{str_char_at, char_from_code}
 use std.fs_driver.nvfs_posix_driver.{nvfs_posix_pread_bytes_owned}
@@ -71,10 +72,10 @@ use os.kernel.loader.app_registry.{
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
 extern fn serial_println(msg: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
-extern fn simpleos_fat32_path_read_buffer_addr() -> u64
-extern fn simpleos_fat32_read_path(path: text) -> i64
-extern fn simpleos_fat32_read_path_size(path: text) -> i64
-extern fn simpleos_fat32_read_path_array(path: text) -> [u8]
+use os.services.vfs.c_nvme_block_adapter.{
+    c_fat32_bridge_backed, c_fat32_path_read_buffer_addr, c_fat32_read_path,
+    c_fat32_read_path_size, c_fat32_read_path_array
+}
 
 # Largest pinned font is 25,125,512 bytes; keep pure-Simple reads bounded.
 val FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432
@@ -89,7 +90,7 @@ val HOSTED_NVFS_ROOT_MAX_FILE_BYTES: i64 = 536870912
 # ============================================================================
 
 fn _vfs_c_fat32_bridge_allowed() -> bool:
-    g_vfs_initialized and not vfs_boot_storage_is_pure_simple()
+    g_vfs_initialized and not vfs_boot_storage_is_pure_simple() and c_fat32_bridge_backed()
 
 # `g_vfs_abs_path` / `g_vfs_root_path` / `_vfs_text_to_bytes` used to be
 # duplicated verbatim here. Deleted by lane VFSBYPASS — the path helpers are
@@ -250,18 +251,18 @@ fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
 fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
     if not _vfs_c_fat32_bridge_allowed():
         return []
-    val signed_size = simpleos_fat32_read_path_size(path)
+    val signed_size = c_fat32_read_path_size(path)
     if signed_size <= 4:
         return []
     val file_size = signed_size.to_u64()
     if file_size > C_FAT32_PATH_READ_BUFFER_MAX:
         return []
-    val read_result = simpleos_fat32_read_path(path)
+    val read_result = c_fat32_read_path(path)
     if read_result != 0:
         return []
-    if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
+    if not _known_app_has_elf_magic(c_fat32_path_read_buffer_addr()):
         return []
-    _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), file_size)
+    _copy_bytes_from_addr(c_fat32_path_read_buffer_addr(), file_size)
 
 fn _cache_lazy_exec_bytes(path: text, bytes: [u8]) -> [u8]:
     app_registry_cache_bytes(path, bytes)
@@ -285,14 +286,14 @@ pub fn g_vfs_read_fat32_path_bytes(path: text) -> [u8]:
         return []
     if path == "":
         return []
-    val signed_size = simpleos_fat32_read_path_size(path)
+    val signed_size = c_fat32_read_path_size(path)
     if signed_size <= 0:
         return []
     val file_size = signed_size.to_u64()
     if file_size > C_FAT32_PATH_READ_BUFFER_MAX:
         log_raw_println("[vfs-root] c_fat32_path_read_oversize path={path} bytes={file_size}")
         return []
-    val out = simpleos_fat32_read_path_array(path)
+    val out = c_fat32_read_path_array(path)
     if out.len() <= 0 or out.len().to_u64() != file_size:
         log_raw_println("[vfs-root] c_fat32_path_read_failed path={path} bytes={out.len()} expected={file_size}")
         return []
@@ -725,20 +726,20 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
     # Compatibility fallback for transitional C FAT32 bridge readers.
     val root_name = g_vfs_root_path(name)
     if _vfs_c_fat32_bridge_allowed():
-        val direct_size = simpleos_fat32_read_path_size(name)
+        val direct_size = c_fat32_read_path_size(name)
         if direct_size > 0:
             return Some(VfsFileSize(bytes: direct_size))
-        val root_size = simpleos_fat32_read_path_size(root_name)
+        val root_size = c_fat32_read_path_size(root_name)
         if root_size > 0:
             return Some(VfsFileSize(bytes: root_size))
         val alias_name = _vfs_exec_disk_alias(name)
         if alias_name != name:
-            val alias_size = simpleos_fat32_read_path_size(alias_name)
+            val alias_size = c_fat32_read_path_size(alias_name)
             if alias_size > 0:
                 return Some(VfsFileSize(bytes: alias_size))
         val root_alias = _vfs_exec_disk_alias(root_name)
         if root_alias != root_name:
-            val root_alias_size = simpleos_fat32_read_path_size(root_alias)
+            val root_alias_size = c_fat32_read_path_size(root_alias)
             if root_alias_size > 0:
                 return Some(VfsFileSize(bytes: root_alias_size))
     val abs = g_vfs_abs_path(name)

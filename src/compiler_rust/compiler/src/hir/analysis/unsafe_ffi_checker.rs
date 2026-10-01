@@ -295,9 +295,7 @@ mod tests {
 
     #[test]
     fn rejects_call_with_imported_extern_identity() {
-        let mut module = lower(
-            "fn spl_imported_probe() -> i64:\n    1\nfn run() -> i64:\n    spl_imported_probe()\n",
-        );
+        let mut module = lower("fn spl_imported_probe() -> i64:\n    1\nfn run() -> i64:\n    spl_imported_probe()\n");
         module.extern_fn_names.insert("spl_imported_probe".to_owned());
         let violations = check_unsafe_ffi(&module);
         assert_eq!(violations.len(), 1);

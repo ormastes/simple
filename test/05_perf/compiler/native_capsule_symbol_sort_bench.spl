@@ -1,0 +1,65 @@
+# Native-capsule symbol ordering microbenchmark.
+#
+# This isolates the deterministic symbol ordering used while hashing frozen MIR
+# capsules.  Reverse input exercises the former quadratic path consistently.
+
+use compiler.driver.driver_types.{native_capsule_sorted_symbol_ids_v1}
+use compiler.hir.hir_types.{SymbolId}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn reverse_symbols(count: i64) -> [SymbolId]:
+    var symbols: [SymbolId] = []
+    var id = count - 1
+    while id >= 0:
+        symbols.push(SymbolId(id: id))
+        id = id - 1
+    symbols
+
+fn sorted_sequence_checksum(symbols: [SymbolId]) -> i64:
+    var checksum: i64 = 0
+    var index: i64 = 0
+    while index < symbols.len():
+        if symbols[index].id != index:
+            return -1
+        checksum = checksum + (index + 1) * (symbols[index].id + 1)
+        index = index + 1
+    checksum
+
+fn main():
+    val symbol_count: i64 = 4096
+    val iterations: i64 = 5
+
+    if native_capsule_sorted_symbol_ids_v1([]).len() != 0:
+        print "native_capsule_symbol_sort_error=empty-input"
+        return
+    val singleton = native_capsule_sorted_symbol_ids_v1([SymbolId(id: 7)])
+    if singleton.len() != 1 or singleton[0].id != 7:
+        print "native_capsule_symbol_sort_error=singleton-input"
+        return
+    val tail_sorted = native_capsule_sorted_symbol_ids_v1(reverse_symbols(4097))
+    if sorted_sequence_checksum(tail_sorted) < 0:
+        print "native_capsule_symbol_sort_error=partial-tail-order"
+        return
+
+    val symbols = reverse_symbols(symbol_count)
+
+    var endpoint_checksum: i64 = 0
+    val started = rt_time_now_unix_micros()
+    var iteration: i64 = 0
+    while iteration < iterations:
+        val sorted = native_capsule_sorted_symbol_ids_v1(symbols)
+        endpoint_checksum = endpoint_checksum + sorted[0].id
+            + sorted[symbol_count - 1].id
+        iteration = iteration + 1
+    val elapsed = rt_time_now_unix_micros() - started
+    val checksum = sorted_sequence_checksum(
+        native_capsule_sorted_symbol_ids_v1(symbols))
+    if checksum < 0 or endpoint_checksum != (symbol_count - 1) * iterations:
+        print "native_capsule_symbol_sort_error=timed-result-order"
+        return
+
+    print "native_capsule_symbol_sort_count={symbol_count}"
+    print "native_capsule_symbol_sort_iterations={iterations}"
+    print "native_capsule_symbol_sort_checksum={checksum}"
+    print "native_capsule_symbol_sort_elapsed_us={elapsed}"

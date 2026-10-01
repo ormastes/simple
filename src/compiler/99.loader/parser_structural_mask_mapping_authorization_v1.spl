@@ -1,0 +1,144 @@
+# Inert authenticated pre-map boundary for the PAR-03 raw callable artifact.
+# The callable byte array is the complete admitted artifact in this V1.  This
+# contract does not authorize extracting an unrecorded code unit from a larger
+# library and performs no mapping, activation, or execution.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use compiler.driver.environment_variant_composite_publication_v1.{
+    EnvironmentCompositePublicationV1, environment_composite_publication_sidecars_valid_v1
+}
+use compiler.driver.environment_composite_publication_receipt_v1.{
+    environment_composite_receipt_mark_eligible_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.{
+    artifact_exact_bytes_match_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.*
+
+pub enum ParserStructuralMappingAuthorizationErrorV1:
+    EmptyCode
+    InvalidCodeByte
+    InvalidPublication
+    ParserFacetMissing
+    ParserFacetAmbiguous
+    SelectedRootMismatch
+    ArtifactDigestMismatch
+    LifecycleEvidenceRejected
+
+pub struct ParserStructuralMappingAuthorizationV1:
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    plan_digest: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    provider_generation: u64
+    parser_interface_major: u16
+    parser_interface_minor: u16
+    code_size: u64
+    abi_digest: EnvironmentDigest256V1
+    contract_identity: EnvironmentDigest256V1
+    semantic_identity: EnvironmentDigest256V1
+    grammar_identity: EnvironmentDigest256V1
+    program_identity: EnvironmentDigest256V1
+    required_cpu_features: EnvironmentFeatureSetV1
+    required_vector_state_mode: u16
+    required_vector_length_bits: u32
+    provider_interface_handle: u64
+    eligible_receipt: EnvironmentVariantReceiptV1
+
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+fn _read64(raw: [i64], at: i64) -> u64:
+    var value = 0u64
+    for i in 0..8:
+        value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    value
+
+fn _code_digest(code: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(code)
+    EnvironmentDigest256V1(w0: _read64(raw, 0), w1: _read64(raw, 8),
+        w2: _read64(raw, 16), w3: _read64(raw, 24))
+
+pub fn parser_structural_mapping_authorize_v1(
+    publication: EnvironmentCompositePublicationV1,
+    lifecycle_receipt: EnvironmentVariantReceiptV1,
+    callable_artifact_bytes: [i64]
+) -> Result<ParserStructuralMappingAuthorizationV1,
+            ParserStructuralMappingAuthorizationErrorV1>:
+    if callable_artifact_bytes.len() == 0:
+        return Err(ParserStructuralMappingAuthorizationErrorV1.EmptyCode)
+    for byte in callable_artifact_bytes:
+        if byte < 0 or byte > 255:
+            return Err(ParserStructuralMappingAuthorizationErrorV1.InvalidCodeByte)
+    if not environment_composite_publication_sidecars_valid_v1(publication):
+        return Err(ParserStructuralMappingAuthorizationErrorV1.InvalidPublication)
+    var parser_index: i64 = -1
+    var i = 0
+    while i < publication.facet_bindings.len():
+        if publication.facet_bindings[i].facet_id == ENV_FACET_FRONTEND_V1:
+            if parser_index >= 0:
+                return Err(ParserStructuralMappingAuthorizationErrorV1.ParserFacetAmbiguous)
+            parser_index = i
+        i = i + 1
+    if parser_index < 0:
+        return Err(ParserStructuralMappingAuthorizationErrorV1.ParserFacetMissing)
+    val binding = publication.facet_bindings[parser_index]
+    val descriptor = publication.root_descriptor
+    if not _same(binding.provider_identity, publication.admission.root_provider_identity) or
+       not _same(binding.variant_identity, publication.admission.root_variant_identity) or
+       binding.provider_generation == 0u64:
+        return Err(ParserStructuralMappingAuthorizationErrorV1.SelectedRootMismatch)
+    if not _same(descriptor.provider_identity, binding.provider_identity) or
+       not _same(descriptor.variant_identity, binding.variant_identity) or
+       descriptor.contract_major != binding.interface_major or
+       descriptor.contract_minor < binding.interface_minor:
+        return Err(ParserStructuralMappingAuthorizationErrorV1.SelectedRootMismatch)
+    var root_artifact = EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+    var root_generation = 0u64
+    i = 0
+    while i < publication.admission.admitted_artifacts.len():
+        val row = publication.admission.admitted_artifacts[i]
+        if _same(row.provider_identity, binding.provider_identity) and
+           _same(row.variant_identity, binding.variant_identity):
+            if root_generation != 0u64:
+                return Err(ParserStructuralMappingAuthorizationErrorV1.SelectedRootMismatch)
+            root_artifact = row.artifact_digest
+            root_generation = row.provider_generation
+        i = i + 1
+    if root_generation == 0u64 or root_generation != binding.provider_generation:
+        return Err(ParserStructuralMappingAuthorizationErrorV1.SelectedRootMismatch)
+    if not _same(descriptor.artifact_digest, root_artifact):
+        return Err(ParserStructuralMappingAuthorizationErrorV1.SelectedRootMismatch)
+    val observed = _code_digest(callable_artifact_bytes)
+    if not artifact_exact_bytes_match_v1(root_artifact, observed):
+        return Err(ParserStructuralMappingAuthorizationErrorV1.ArtifactDigestMismatch)
+    val identity = EnvironmentVariantReceiptIdentityV1(
+        provider_identity: binding.provider_identity, variant_identity: binding.variant_identity,
+        artifact_digest: root_artifact,
+        environment_identity: publication.admission.plan.environment_identity,
+        environment_generation: publication.admission.plan.environment_generation,
+        provider_generation: binding.provider_generation)
+    val eligible = environment_composite_receipt_mark_eligible_v1(
+        lifecycle_receipt, identity, publication)
+    if eligible.is_err():
+        return Err(ParserStructuralMappingAuthorizationErrorV1.LifecycleEvidenceRejected)
+    Ok(ParserStructuralMappingAuthorizationV1(
+        provider_identity: binding.provider_identity, variant_identity: binding.variant_identity,
+        artifact_digest: root_artifact, plan_digest: publication.admission.plan.plan_digest,
+        environment_identity: publication.admission.plan.environment_identity,
+        environment_generation: publication.admission.plan.environment_generation,
+        provider_generation: binding.provider_generation,
+        parser_interface_major: binding.interface_major,
+        parser_interface_minor: binding.interface_minor,
+        code_size: callable_artifact_bytes.len() as u64,
+        abi_digest: descriptor.abi_digest, contract_identity: descriptor.contract_identity,
+        semantic_identity: descriptor.semantic_identity,
+        grammar_identity: descriptor.grammar_identity, program_identity: descriptor.program_identity,
+        required_cpu_features: descriptor.required_cpu_features,
+        required_vector_state_mode: descriptor.required_vector_state_mode,
+        required_vector_length_bits: descriptor.required_vector_length_bits,
+        provider_interface_handle: binding.interface_handle,
+        eligible_receipt: eligible.unwrap()))

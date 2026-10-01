@@ -1,4 +1,8 @@
 # native-build's class surface misses a newly added field across modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (P1 — aborts the native-build worker). Re-triaged 2026-08-17;
 not reproduced in isolation, see "Re-triage" below.
@@ -116,3 +120,4 @@ beside the class.
 
 Found while working the compiler `.spl` slice; the accessor workaround is in the
 same change that filed this row.
+

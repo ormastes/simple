@@ -71,7 +71,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 | Flexbox | Full | Partial | 55.6% WPT (10/18) |
 | Grid | Full | Partial | Exists in examples tree, not wired |
 | Colors (hsl, currentColor) | Full | Partial | 30% WPT (3/10) |
-| Display modes | Full | block/inline/inline-block/flex/contents basics | Focused inline-block semantic/layout/Draw IR oracle; advanced baseline alignment and flow-root remain open |
+| Display modes | Full | block/inline/flex only | 0% WPT (0/5); no contents, flow-root |
 | Backgrounds | Full | Partial | 20% WPT (1/5) |
 | Positioning | Full | Partial | 20% WPT (1/5) |
 | Normal flow | Full | Partial | 0% WPT (0/2) |
@@ -263,11 +263,6 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Port `examples/11_advanced/browser/feature/layout/float.spl` → canonical engine
 - Implement float clearing, float context, float positioning per CSS 2.1 spec
 - Land CSS quick wins: `hsl()`/`hsla()`, `currentColor`, `display: inline-flex`, `display: flow-root`, `display: contents`, `list-style: none`, `flex-flow` shorthand
-- Basic `display:inline-block` now retains its computed value, participates as
-  one atomic box in the existing inline run, respects explicit/percentage
-  content width plus padding/border/margins, wraps between atomic boxes, and
-  lowers exact border boxes to Draw IR. Baseline alignment remains explicit in
-  the unsupported ledger.
 - Add `calc()` for length values
 
 **Gate:** WPT pass rate >= 65% (currently 37.8%). Float category >= 80%. All 132 corpus pages still exact match.
@@ -282,9 +277,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Port `examples/11_advanced/browser/feature/parser/html_tokenizer.spl` + tree builder (5 state files) → canonical engine, replacing the current minimal parser
 - Implement missing insertion modes: in_head, in_select, in_template, after_after_body, foreign_content
 - Complete normal flow: margin collapse, inline formatting context, anonymous block generation
-- Fixed `<table>` formatting is implemented for direct and row-grouped cells,
-  captions, padding/borders, and bounded `colspan`; auto column sizing,
-  `rowspan`, and collapsed-border conflict resolution remain.
+- Add `<table>` layout (basic — rows, cells, auto column sizing)
 
 **Gate:** WHATWG tokenizer test suite >= 90% pass. Normal flow WPT 100% (2/2 → 2/2). Table rendering for Wikipedia-class pages. 132 corpus still green.
 
@@ -892,18 +885,3 @@ Ordering rationale: Each milestone builds on the previous. Floats and CSS quick 
 - W3C WGSL Candidate Recommendation Draft, 2026-05-07: https://www.w3.org/TR/WGSL/
 - MDN WebGPU API, checked 2026-05-12: secure-context only and not Baseline across all widely used browsers.
 - Chrome WebGPU overview: https://developer.chrome.com/docs/web-platform/webgpu/overview
-
-## 10. Reviewed bounded hardening state (2026-07-31)
-
-Current source review advances bounded prerequisites only: DOM identity,
-rollback, and stale-worker cleanup are integrated through `2155e6a31fc`; disabled
-UI dispatch is reviewed in `fbecc67eb77`; hosted form-action is conservatively
-host-owned in `c91fdc0e67b`; and CORS unsafe-header preflight is wired in
-`bf7dfff029a`. TLS/mixed-content source controls are present, but live evidence
-is HELD.
-
-`f57d9bc4600` + `782477146a9` pass static review for unused layout keys and an
-empty final keyframe. Animation lifecycle/multi-list stays RED. The reviewed
-gap stack `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` + `ca91c19d7f8` covers
-supported `N`/`Npx`, duplicate, `initial`, `unset`, and default-parent-inherit
-only; nonzero `inherit`, `revert-layer`, and qualified execution remain RED.

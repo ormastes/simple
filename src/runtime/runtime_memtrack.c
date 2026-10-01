@@ -218,7 +218,11 @@ int64_t spl_memtrack_snapshot(void) {
 
 void spl_memtrack_dump_since(int64_t snapshot_id, const char* out_path) {
     if (!out_path) return;
+#if defined(_WIN32)
+    FILE* f = fopen(out_path, "wb"); /* explicit binary; "w" text-translates LF->CRLF */
+#else
     FILE* f = fopen(out_path, "w");
+#endif
     if (!f) return;
 
     if (g_entries) {
@@ -270,7 +274,7 @@ int64_t spl_memtrack_live_bytes(void) {
  * Standalone C builds define nothing and keep the fallbacks, as before. */
 #if defined(SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS)
 /* Rust's value::heap owns these; defining them here would be a duplicate. */
-#elif defined(__GNUC__) || defined(__clang__)
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
 __attribute__((weak)) int64_t rt_heap_live_bytes(void) {
     return g_live_bytes;
 }
@@ -279,6 +283,12 @@ __attribute__((weak)) int64_t rt_heap_peak_bytes(void) {
     return g_peak_bytes;
 }
 #else
+/* MSVC (no weak attribute) and Windows-GNUC both land here. On MinGW a
+ * GNU-style weak definition becomes a `.weak.NAME.ref` COFF alias that
+ * ld.exe drops under --gc-sections, leaving rt_heap_*_bytes undefined at
+ * link (measured 2026-08-31 on the hosted mingw link) — so Windows takes
+ * the strong definition; the Rust-provider case is already excluded by
+ * SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS above. */
 int64_t rt_heap_live_bytes(void) {
     return g_live_bytes;
 }

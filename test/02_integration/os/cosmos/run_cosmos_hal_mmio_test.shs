@@ -5,31 +5,163 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
 source_dir="$root/src/os/kernel/arch/arm32/cosmos"
 test_source="$root/test/02_integration/os/cosmos/cosmos_hal_mmio_test.c"
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-hal-mmio.XXXXXX")
-fsbl_vectors="$root/test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv"
-fsbl_oracle="$root/test/fixtures/os/cosmos/cosmos_fsbl_oracle.c"
-production_fsbl="$source_dir/cosmos_fsbl.c"
 trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
 
-[ -s "$fsbl_vectors" ] || {
-    echo "missing Cosmos FSBL vector fixture: $fsbl_vectors" >&2
-    exit 1
+simple_bin="${SIMPLE_BIN:-$root/bin/simple}"
+[ -x "$simple_bin" ] || {
+    echo "BLOCKED: missing executable pure-Simple compiler: $simple_bin" >&2
+    exit 2
 }
-export COSMOS_FSBL_VECTOR_TSV="$fsbl_vectors"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+simple_canonical=$(bootstrap_stage3_canonical_file "$simple_bin") || {
+    echo "BLOCKED: cannot resolve pure-Simple compiler canonically" >&2
+    exit 2
+}
+simple_provenance="${SIMPLE_PROVENANCE:-${simple_canonical}.provenance.env}"
+stage4_verify_candidate_provenance \
+    "$simple_provenance" "$simple_canonical" "$root" || {
+    echo "BLOCKED: Cosmos FSBL integration requires admitted Stage-4 provenance" >&2
+    exit 2
+}
+simple_bin="$simple_canonical"
+ECC_OBJECT_HELPER="$root/test/02_integration/os/cosmos/cosmos_nfc_ecc_object.shs"
+. "$ECC_OBJECT_HELPER"
+SIMPLE_BIN="$simple_bin" cosmos_build_host_ecc_policy_object \
+    "$root" "$source_dir" "$build_dir"
+simple_sha_admitted="$(bootstrap_stage3_hash_file "$simple_bin")"
+simple_provenance_sha_admitted="$(
+    bootstrap_stage3_hash_file "$simple_provenance"
+)"
+simple_identity=$($simple_bin --version 2>&1 || true)
+case "$simple_identity" in
+    *"Rust-built Simple binary is a bootstrap seed"*)
+        echo "BLOCKED: Cosmos FSBL integration requires an admitted self-host compiler" >&2
+        exit 2
+        ;;
+esac
 
-semantic_c_hash() {
-    [ "$(grep -c '^#include "cosmos_hal.h"$' "$1")" -eq 1 ] || return 1
-    sed -n '/^#include "cosmos_hal.h"$/,$p' "$1" | sha256sum | awk '{print $1}'
-}
-oracle_sha=$(semantic_c_hash "$fsbl_oracle") || {
-    echo "invalid Cosmos FSBL oracle extraction: $fsbl_oracle" >&2
+SIMPLE_LIB="$root/src" "$simple_bin" native-build \
+    --backend llvm \
+    --source "$source_dir" \
+    --entry-closure \
+    --entry "$source_dir/cosmos_fsbl.spl" \
+    --target x86_64-unknown-linux-gnu \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$build_dir/simple-cache" \
+    -o "$build_dir/cosmos_fsbl_simple.o"
+SIMPLE_LIB="$root/src" "$simple_bin" native-build \
+    --backend llvm \
+    --source "$source_dir" \
+    --entry-closure \
+    --entry "$source_dir/cosmos_nvme_pcie_policy.spl" \
+    --target x86_64-unknown-linux-gnu \
+    --emit-object \
+    --no-mangle \
+    --cache-dir "$build_dir/simple-pcie-policy-cache" \
+    -o "$build_dir/cosmos_nvme_pcie_policy_simple.o"
+
+stage4_verify_candidate_provenance \
+    "$simple_provenance" "$simple_bin" "$root" || {
+    echo "FAIL: pure-Simple compiler provenance changed during host emission" >&2
     exit 1
 }
-production_sha=$(semantic_c_hash "$production_fsbl") || {
-    echo "invalid production Cosmos FSBL extraction: $production_fsbl" >&2
+[ "$(bootstrap_stage3_hash_file "$simple_bin")" = "$simple_sha_admitted" ] &&
+    [ "$(bootstrap_stage3_hash_file "$simple_provenance")" = \
+        "$simple_provenance_sha_admitted" ] || {
+    echo "FAIL: pure-Simple compiler or provenance changed during host emission" >&2
     exit 1
 }
-[ "$oracle_sha" = "$production_sha" ] || {
-    echo "Cosmos FSBL oracle has drifted from production C" >&2
+
+readelf_bin="${READELF:-readelf}"
+command -v "$readelf_bin" >/dev/null 2>&1 || {
+    echo "BLOCKED: readelf is required for Cosmos FSBL object admission" >&2
+    exit 2
+}
+simple_header=$("$readelf_bin" -hW "$build_dir/cosmos_fsbl_simple.o")
+printf '%s\n' "$simple_header" | grep -Eq 'Class:[[:space:]]+ELF64' &&
+    printf '%s\n' "$simple_header" | grep -Eq 'Type:[[:space:]]+REL' &&
+    printf '%s\n' "$simple_header" |
+        grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64' || {
+    echo "FAIL: expected an ELF64 x86-64 relocatable FSBL object" >&2
+    exit 1
+}
+simple_symbols=$("$readelf_bin" -sW "$build_dir/cosmos_fsbl_simple.o")
+for symbol in \
+    __cosmos_fsbl_policy_coverage_reset \
+    __cosmos_fsbl_policy_coverage_mask \
+    __cosmos_fsbl_policy_coverage_required \
+    __cosmos_fsbl_policy_coverage_decisions \
+    cosmos_fsbl_validate_handoff \
+    cosmos_fsbl_selftest
+do
+    printf '%s\n' "$simple_symbols" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "FAIL: missing or duplicate pure-Simple export: $symbol" >&2
+        exit 1
+    }
+done
+for symbol in cosmos_fsbl_bridge_is_qemu cosmos_fsbl_bridge_read32; do
+    printf '%s\n' "$simple_symbols" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 == "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "FAIL: invalid pure-Simple bridge dependency: $symbol" >&2
+        exit 1
+    }
+done
+simple_undefined=$(
+    printf '%s\n' "$simple_symbols" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)
+[ "$simple_undefined" = "cosmos_fsbl_bridge_is_qemu
+cosmos_fsbl_bridge_read32" ] || {
+    echo "FAIL: unexpected pure-Simple FSBL object dependency closure" >&2
+    printf '%s\n' "$simple_undefined" >&2
+    exit 1
+}
+printf '%s\n' "$simple_symbols" |
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                         $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' || {
+    echo "FAIL: pure-Simple FSBL object defines an entry/runtime symbol" >&2
+    exit 1
+}
+policy_symbols=$("$readelf_bin" -sW \
+    "$build_dir/cosmos_nvme_pcie_policy_simple.o")
+for symbol in cosmos_nvme_pcie_policy_status_fields_valid \
+    cosmos_nvme_pcie_policy_status_word \
+    cosmos_nvme_pcie_policy_io_sq_valid \
+    cosmos_nvme_pcie_policy_io_sq_word1 \
+    cosmos_nvme_pcie_policy_io_cq_valid \
+    cosmos_nvme_pcie_policy_io_cq_word1
+do
+    printf '%s\n' "$policy_symbols" |
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' || {
+        echo "FAIL: missing or duplicate pure-Simple PCIe policy export: $symbol" >&2
+        exit 1
+    }
+done
+policy_undefined=$(
+    printf '%s\n' "$policy_symbols" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' |
+        LC_ALL=C sort -u
+)
+[ -z "$policy_undefined" ] || {
+    echo "FAIL: unexpected pure-Simple PCIe policy dependency closure" >&2
+    printf '%s\n' "$policy_undefined" >&2
     exit 1
 }
 
@@ -44,27 +176,25 @@ cc \
     -include "$source_dir/cosmos_profile_openssd2_8ch8way_v300.h" \
     -I"$source_dir" \
     "$test_source" \
-    "$fsbl_oracle" \
+    "$source_dir/cosmos_fsbl.c" \
     "$source_dir/cosmos_nfc.c" \
+    "$source_dir/cosmos_nfc_ecc_bridge.c" \
     "$source_dir/cosmos_pcie.c" \
+    "$source_dir/cosmos_nvme_pcie_policy_bridge.c" \
+    "$build_dir/cosmos_fsbl_simple.o" \
+    "$build_dir/cosmos_nfc_ecc_simple.o" \
+    "$build_dir/cosmos_nvme_pcie_policy_simple.o" \
     -o "$build_dir/cosmos_hal_mmio_test"
 
-# One normal process per case isolates the production drivers' private static
-# state. Its normal exit also lets any enabled process coverage handler flush;
-# the former fork()+_exit() children bypassed exit handlers.
-case_count=$("$build_dir/cosmos_hal_mmio_test" --count)
-case "$case_count" in
-    ''|*[!0-9]*)
-        echo "invalid cosmos HAL case count: $case_count" >&2
-        exit 1
-        ;;
-esac
-[ "$case_count" -gt 0 ] || {
-    echo "invalid cosmos HAL case count: $case_count" >&2
-    exit 1
-}
-case_index=0
-while [ "$case_index" -lt "$case_count" ]; do
-    "$build_dir/cosmos_hal_mmio_test" "$case_index"
-    case_index=$((case_index + 1))
-done
+"$build_dir/cosmos_hal_mmio_test"
+
+cc \
+    -std=c11 -O2 -g \
+    -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2 \
+    -Wno-int-to-pointer-cast \
+    -I"$source_dir" \
+    "$root/test/02_integration/os/cosmos/cosmos_fsbl_qemu_contract_test.c" \
+    "$build_dir/cosmos_fsbl_simple.o" \
+    -o "$build_dir/cosmos_fsbl_qemu_contract_test"
+
+"$build_dir/cosmos_fsbl_qemu_contract_test"

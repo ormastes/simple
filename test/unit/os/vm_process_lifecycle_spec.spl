@@ -1,0 +1,21 @@
+use std.spec.{describe, it, expect}
+use os._QemuRunner.vm_process_lifecycle.{VmLifecycleState, vm_lifecycle_reserve, vm_lifecycle_mark_launched, vm_lifecycle_mark_ready, vm_lifecycle_begin_operation, vm_lifecycle_shutdown, vm_lifecycle_cleanup}
+
+describe "VM process lifecycle contract":
+    it "requires launch and nonce readiness before operation":
+        var life = vm_lifecycle_reserve(2222, "/serial", "/qmp", "0123456789abcdef", 1000)
+        expect life.state == VmLifecycleState.Reserved
+        life = vm_lifecycle_mark_launched(life, 42)
+        expect life.state == VmLifecycleState.Launched
+        life = vm_lifecycle_mark_ready(life, "SIMPLEOS_QEMU_NONCE=0123456789abcdef")
+        expect life.state == VmLifecycleState.Ready
+        life = vm_lifecycle_begin_operation(life)
+        expect life.state == VmLifecycleState.Running
+        life = vm_lifecycle_cleanup(vm_lifecycle_shutdown(life, false))
+        expect life.cleanup_complete
+
+    it "fails closed on wrong challenge and records timeout":
+        var life = vm_lifecycle_mark_launched(vm_lifecycle_reserve(2222, "/s", "/q", "0123456789abcdef", 10), 7)
+        life = vm_lifecycle_mark_ready(life, "SIMPLEOS_QEMU_NONCE=wrong")
+        expect life.state == VmLifecycleState.Launched
+        expect vm_lifecycle_shutdown(life, true).state == VmLifecycleState.TimedOut

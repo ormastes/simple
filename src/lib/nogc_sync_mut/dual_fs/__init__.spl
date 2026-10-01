@@ -1,0 +1,296 @@
+"""
+dual_fs — switchable pure-Simple <-> native-lib file I/O with differential
+effect comparison.
+
+@tag:stdlib
+
+WHY THIS EXISTS
+---------------
+The function registry is flat and keyed on NAME ALONE, so three different
+`file_write_text` definitions coexist in this tree and whichever one wins a
+call site is not always the one the caller meant:
+
+  * src/lib/nogc_sync_mut/file_system/file_ops.spl:60  -> validates, returns
+    `true`, performs NO I/O.
+  * src/lib/nogc_async_mut/file_system/file_ops.spl:59 -> the same mock.
+  * src/lib/gc_async_mut/file_system/file_ops.spl:18   -> delegates to
+    std.io_runtime.file_write, which really writes.
+
+Measured on this tree (build/scratch/probe3.spl):
+    std.file_system.file_write_text -> returned=true exists=false size=-1
+
+That mock cost hours because every checkpoint reported success. The sibling
+incident is doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md:
+an extern with no runtime backing returns nil rather than failing.
+
+RELATION TO THE EXISTING PRIOR ART
+----------------------------------
+This is the effect-comparing sibling of `scripts/check/check-dual-run-shadow.shs`
+and `std.common.spec.dual_run`, not a replacement. Those compare RETURN
+VALUES (`dual_check_f64` / `_text` / `_i64` / `_bool` / `_bytes`) and would
+have called the mock above an AGREEMENT: both sides return `true`. This
+module keeps their verdict vocabulary (`DualVerdict`, `dual_summarize`,
+`dual_verdict_report`) and adds the missing axis — the observable world after
+the call — via `FsEffect` / `dual_check_fs_effect` in that same module.
+
+It is also the concrete instrument for rung 2 of the HAL twin discipline
+(doc/07_guide/os/hal/pure_simple_hal.md §2, "bootstrap C keeps a Simple
+twin, verifiable against its twin and eventually replaceable by it"): the
+twin here is a *file I/O* twin rather than a numeric one, so twin equivalence
+can only be judged by effects.
+
+THE SWITCH
+----------
+    SIMPLE_FS_PROVIDER = native | pure | diff        (unset => native)
+
+`native` is today's behaviour BY CONSTRUCTION: it calls
+`std.io_runtime.file_write` / `read_file_text`, the exact path existing
+callers already take. Unset therefore changes nothing for any caller.
+
+HONEST LIMITATION
+-----------------
+Like `std.common.spec.dual_run`, this dual-runs inside specs and tools, not on
+live production traffic. `diff` mode also costs two writes and two probes per
+operation, so it is a verification mode, not a default.
+"""
+
+use std.io_runtime.{file_write, read_file_text}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.common.spec.dual_run.{FsEffect, DualVerdict, dual_check_fs_effect}
+
+# ---------------------------------------------------------------------------
+# Raw runtime externs.
+#
+# The PROBE reads the world through these directly and never through either
+# implementation under test. That is not stylistic: if the probe read back
+# through `std.file_system.file_read_text` and that reader were mocked too, a
+# mocked writer and a mocked reader would corroborate each other and the
+# comparison would certify a lie. The probe's honesty is the harness's whole
+# value, so its dependencies are the narrowest possible.
+# ---------------------------------------------------------------------------
+@unsafe(reason: "raw runtime ABI for the effect probe", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw runtime ABI for the effect probe", capabilities: [ffi])
+extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "raw runtime ABI for the effect probe", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw runtime ABI for the effect probe", capabilities: [ffi])
+extern fn rt_file_mode(path: text) -> i64
+@unsafe(reason: "raw runtime ABI for the effect probe", capabilities: [ffi])
+extern fn rt_file_remove(path: text) -> bool
+@unsafe(reason: "raw runtime ABI for the provider switch", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw runtime ABI at the syscall boundary", capabilities: [ffi])
+extern fn rt_file_write_text(path: text, content: text) -> bool
+@unsafe(reason: "raw runtime ABI at the syscall boundary", capabilities: [ffi])
+extern fn rt_dir_create_all(path: text) -> bool
+
+# ---------------------------------------------------------------------------
+# Provider switch
+# ---------------------------------------------------------------------------
+
+pub val FS_PROVIDER_NATIVE: text = "native"
+pub val FS_PROVIDER_PURE: text = "pure"
+pub val FS_PROVIDER_DIFF: text = "diff"
+
+# `?? ""` is load-bearing, not defensive noise: rt_env_get is declared `-> text`
+# here but the interpreter can hand back nil for an unset variable, and an
+# unguarded `.len()` on that result is a documented crash
+# (src/lib/gc_async_mut/gpu/engine2d/engine.spl:1175). An unset switch MUST
+# degrade to today's behaviour, never to a fault.
+pub fn fs_provider() -> text:
+    var raw = ""
+    unsafe(capabilities: [ffi]):
+        raw = rt_env_get("SIMPLE_FS_PROVIDER") ?? ""
+    if raw == FS_PROVIDER_PURE:
+        return FS_PROVIDER_PURE
+    if raw == FS_PROVIDER_DIFF:
+        return FS_PROVIDER_DIFF
+    # Anything else — unset, empty, "native", or a typo — is today's path.
+    # A typo silently selecting an experimental provider would be a worse
+    # failure than a typo being ignored.
+    FS_PROVIDER_NATIVE
+
+# ---------------------------------------------------------------------------
+# The effect probe
+# ---------------------------------------------------------------------------
+
+# FNV-1a over the read-back bytes, computed here rather than borrowed from
+# std.common.crypto: the digest must not depend on any symbol that is itself
+# a migration candidate, or the harness's own oracle moves under it.
+fn _digest_of(content: text) -> text:
+    var h = 2166136261
+    var i = 0
+    val bytes = content.bytes()
+    while i < bytes.len():
+        h = h ^ bytes[i]
+        h = (h * 16777619) % 4294967296
+        i = i + 1
+    "fnv1a:{h}"
+
+# Observe the filesystem at `path`. `returned`/`err` are supplied by the
+# caller (they are the operation's own signal); everything else is read from
+# the world.
+pub fn probe_effect(path: text, returned: bool, err: text) -> FsEffect:
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(path)
+    if not exists:
+        # size -1 / digest "" / mode -1 is the ABSENT shape. It must be
+        # distinguishable from an empty file that really exists (size 0), or a
+        # writer that creates nothing and a writer that truncates to zero would
+        # compare equal.
+        return FsEffect(returned: returned, err: err, exists: false, size: -1, digest: "", mode: -1)
+    var size = -1
+    var mode = -1
+    var content = ""
+    unsafe(capabilities: [ffi]):
+        size = rt_file_size(path)
+        mode = rt_file_mode(path)
+        content = rt_file_read_text(path) ?? ""
+    FsEffect(returned: returned, err: err, exists: true, size: size, digest: _digest_of(content), mode: mode)
+
+pub fn scrub(path: text) -> bool:
+    var removed = false
+    unsafe(capabilities: [ffi]):
+        removed = rt_file_remove(path)
+    removed
+
+# Create a sandbox directory explicitly.
+#
+# Callers must NOT rely on a writer's own parent-directory retry to bring the
+# sandbox into existence, because whether that retry runs is precisely one of
+# the things under test — see
+# doc/08_tracking/bug/io_runtime_file_write_resolves_to_retryless_twin_2026-09-06.md,
+# where `use std.io_runtime.{file_write}` was measured resolving to a
+# same-signature definition WITHOUT the retry. A harness whose fixture setup
+# depends on the behaviour it is measuring cannot report on that behaviour.
+pub fn ensure_dir(path: text) -> bool:
+    var created = false
+    unsafe(capabilities: [ffi]):
+        created = rt_dir_create_all(host_path_native(path))
+    created
+
+# ---------------------------------------------------------------------------
+# The two providers, one call site per operation
+# ---------------------------------------------------------------------------
+
+# (a) native lib: exactly what callers do today.
+pub fn fs_write_text_native(path: text, content: text) -> bool:
+    file_write(path, content)
+
+pub fn fs_read_text_native(path: text) -> text:
+    read_file_text(path)
+
+# (b) pure Simple: same contract, expressed above the syscall boundary.
+#
+# NOTE the honest floor — `rt_file_write_text` is still the C/SFFI syscall
+# leaf and CANNOT be pure Simple until a raw-syscall provider lands (see the
+# migration plan §6). What IS pure here is everything above that leaf: the
+# absent-parent retry, the truncate-then-write ordering, and the error
+# mapping, which is where all three of this tree's `file_write` variants
+# actually disagree with one another.
+#
+# FOUND BY THIS HARNESS, 2026-09-06: the first draft of this provider called
+# rt_file_write_text and returned. It agreed with the native provider on every
+# case where the parent directory already existed, and DIVERGED the moment the
+# sandbox directory was absent — `exists=false/true`, four of six spec cases
+# red. That is the R3 composition layer in miniature, and it is exactly the
+# policy the native side carries at io_runtime.spl:227-243: writing into a
+# nonexistent directory no-ops SILENTLY at the runtime
+# (bug interp_examples_dir_f64_zero_and_write_noop_2026-07-03), so the parent
+# must be created and the write retried once. Restating that policy here in
+# pure Simple is the point of the exercise, not a workaround for the test.
+pub fn fs_write_text_pure(path: text, content: text) -> bool:
+    val native_path = host_path_native(path)
+    var wrote = false
+    unsafe(capabilities: [ffi]):
+        wrote = rt_file_write_text(native_path, content)
+    if wrote:
+        return true
+    val sep_idx = path.rfind("/")
+    if sep_idx <= 0:
+        return false
+    val parent = path.substring(0, sep_idx)
+    var parent_exists = false
+    unsafe(capabilities: [ffi]):
+        parent_exists = rt_file_exists(host_path_native(parent))
+    # A parent that already exists means the failure was not a missing
+    # directory, so retrying would only mask the real error.
+    if parent_exists:
+        return false
+    unsafe(capabilities: [ffi]):
+        rt_dir_create_all(host_path_native(parent))
+    var retried = false
+    unsafe(capabilities: [ffi]):
+        retried = rt_file_write_text(native_path, content)
+    retried
+
+pub fn fs_read_text_pure(path: text) -> text:
+    val native_path = host_path_native(path)
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(native_path)
+    # Missing file maps to "" rather than to a fault, matching
+    # std.io_runtime.read_file_text's Err(_) -> "" arm. This mapping is part of
+    # the contract being compared, so it is written explicitly rather than
+    # inherited.
+    if not exists:
+        return ""
+    var content = ""
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(native_path) ?? ""
+    content
+
+# ---------------------------------------------------------------------------
+# The wrapper: ONE call site per operation
+# ---------------------------------------------------------------------------
+
+# With the switch unset this is `file_write(path, content)` and nothing else —
+# no probe, no second write, no comparison. `diff` mode is NOT reachable from
+# here: comparing in place would need two distinct paths to write to, and a
+# wrapper that silently redirected a caller's path would be its own hazard.
+# Callers that want differential coverage call `dual_fs_write_text_diff`
+# explicitly with a sandbox pair, which is what the spec and the gate do.
+pub fn dual_fs_write_text(path: text, content: text) -> bool:
+    if fs_provider() == FS_PROVIDER_PURE:
+        return fs_write_text_pure(path, content)
+    fs_write_text_native(path, content)
+
+pub fn dual_fs_read_text(path: text) -> text:
+    if fs_provider() == FS_PROVIDER_PURE:
+        return fs_read_text_pure(path)
+    fs_read_text_native(path)
+
+# ---------------------------------------------------------------------------
+# Differential mode
+# ---------------------------------------------------------------------------
+
+# Run BOTH implementations against two distinct sandbox paths and compare the
+# resulting worlds field-wise.
+#
+# HOW THIS CATCHES A WRITE THAT RETURNS SUCCESS WITHOUT WRITING:
+#   side A (mock)   -> returned=true  exists=false size=-1 digest=''
+#   side B (native) -> returned=true  exists=true  size=13 digest='fnv1a:...'
+# The `returned` field AGREES — which is precisely why return-value comparison
+# missed it — and `exists`, `size` and `digest` all diverge. The verdict names
+# them, so the report reads "the write returned true and created no file"
+# rather than "pair diverged".
+#
+# Both paths are scrubbed first so a leftover file from a previous run cannot
+# make a non-writing side look like a writing one.
+pub fn dual_fs_write_text_diff(
+    name: text,
+    path_a: text,
+    path_b: text,
+    content: text,
+    write_a: fn(text, text) -> bool,
+    write_b: fn(text, text) -> bool,
+) -> DualVerdict:
+    scrub(path_a)
+    scrub(path_b)
+    val ra = write_a(path_a, content)
+    val rb = write_b(path_b, content)
+    val ea = probe_effect(path_a, ra, "")
+    val eb = probe_effect(path_b, rb, "")
+    dual_check_fs_effect(name, ea, eb)

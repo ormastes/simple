@@ -34,11 +34,11 @@ It complements `.codex/skills/sync/SKILL.md`.
    test "$FILE_COUNT_AFTER" -ge "$FILE_COUNT_BEFORE"
    ```
 
-6. Move and push only the current session-owned work bookmark:
+6. Move and push `main`:
 
    ```bash
-   jj bookmark set work/<kind>/<work-id>-<slug> -r @-
-   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark work/<kind>/<work-id>-<slug>
+   jj bookmark set main -r @-
+   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
    ```
 
 If HTTPS push fails because an environment `GH_TOKEN` or `GITHUB_TOKEN` is
@@ -47,11 +47,8 @@ credential. Do not print tokens and do not embed them in remote URLs.
 
 ```bash
 env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git
-env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark work/<kind>/<work-id>-<slug>
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 ```
-
-Never move or push `main`, `release/*`, `candidate/*`, or `v*` here. Submit the
-work bookmark to the protected integration or release authority.
 
 ## Orphan And Stale Heads
 

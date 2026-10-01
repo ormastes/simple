@@ -1,0 +1,162 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use std.io.{file_delete, time_now_unix_micros}
+use std.env.platform.{get_temp_dir}
+use app.optimize.collection_plan_cli.{collection_plan_source_sites, collection_plan_explain_file}
+use app.optimize.sprof_collection_profile.{
+    SprofCollectionMetric, sprof_source_module_identity_from_text,
+    sprof_write_collection_profile_file_with_metrics
+}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
+
+extern fn rt_getpid() -> i64
+
+val COLLECTION_PLAN_SOURCE = "test/02_integration/compiler/probe_profile_switchable_cli_feedback.spl"
+val COLLECTION_PLAN_FIELD_SOURCE = "test/02_integration/compiler/profile_switchable_attribute_it_spec.spl"
+val COLLECTION_PLAN_GENERIC_SOURCE = "test/02_integration/compiler/probe_profile_switchable_collision_replay.spl"
+
+describe "collection explanation uses parser-issued attributed sites":
+    it "keeps typed factory and instance new initializers unproved":
+        """REQ-PSC-006: A method named new does not prove default adaptive thresholds."""
+        for initializer in ["Factory.new()", "instance.new()"]:
+            val source = "fn main():\n    @collection_algorithm(\"auto\")\n    val chosen: AdaptiveTextSet = " + initializer + "\n"
+            val parsed = collection_plan_source_sites(source, "factory_new_collection.spl")
+            expect(parsed != nil).to_be(true)
+            val sites = parsed.unwrap()
+            expect(sites.len()).to_equal(1)
+            expect(sites[0].direct_new).to_be(false)
+
+    it "recognizes the matching zero argument adaptive constructor":
+        """REQ-PSC-006: Only the known family constructor proves its default policy."""
+        val source = "fn main():\n    @collection_algorithm(\"auto\")\n    val chosen: AdaptiveTextSet = AdaptiveTextSet.new()\n"
+        val parsed = collection_plan_source_sites(source, "direct_new_collection.spl")
+        expect(parsed != nil).to_be(true)
+        expect(parsed.unwrap().len()).to_equal(1)
+        expect(parsed.unwrap()[0].direct_new).to_be(true)
+
+    it "finds each attributed initializer with its source attribute":
+        val source = read_file_text(COLLECTION_PLAN_SOURCE)
+        val parsed = collection_plan_source_sites(source, COLLECTION_PLAN_SOURCE)
+        expect(parsed != nil).to_be(true)
+        val sites = parsed.unwrap()
+        expect(sites.len()).to_equal(4)
+        var auto_count = 0
+        var linear_count = 0
+        for site in sites:
+            expect(site.site_id).to_start_with("ast://")
+            expect(site.direct_new).to_be(true)
+            if site.attribute == "auto":
+                auto_count = auto_count + 1
+            elif site.attribute == "linear":
+                linear_count = linear_count + 1
+        expect(auto_count).to_equal(3)
+        expect(linear_count).to_equal(1)
+
+    it "includes a named nested function in the attributed local site":
+        val source = "fn outer():\n    fn left():\n        @collection_algorithm(\"auto\")\n        val chosen = AdaptiveTextSet.new()\n    fn right():\n        @collection_algorithm(\"auto\")\n        val chosen = AdaptiveTextSet.new()\n"
+        val parsed = collection_plan_source_sites(source, "nested_collection_owner.spl")
+        expect(parsed != nil).to_be(true)
+        val sites = parsed.unwrap()
+        expect(sites.len()).to_equal(2)
+        var left = ""
+        var right = ""
+        for site in sites:
+            if site.site_id.contains("/outer/left/local/chosen#"):
+                left = site.site_id
+            if site.site_id.contains("/outer/right/local/chosen#"):
+                right = site.site_id
+        expect(left).to_start_with("ast://")
+        expect(right).to_start_with("ast://")
+        expect(left == right).to_be(false)
+
+    it "includes attributed class field defaults":
+        val source = read_file_text(COLLECTION_PLAN_FIELD_SOURCE)
+        val parsed = collection_plan_source_sites(source, COLLECTION_PLAN_FIELD_SOURCE)
+        expect(parsed != nil).to_be(true)
+        var set_field = false
+        var map_field = false
+        for site in parsed.unwrap():
+            if site.site_id.contains("/AttributedHolder/items#"):
+                set_field = site.collection_type == "AdaptiveTextSet" and site.attribute == "ordered"
+            if site.site_id.contains("/AttributedMapHolder/items#"):
+                map_field = site.collection_type == "AdaptiveTextMap" and site.attribute == "ordered"
+        expect(set_field).to_be(true)
+        expect(map_field).to_be(true)
+
+    it "explains a forced algorithm on a typed factory initializer":
+        val source = read_file_text(COLLECTION_PLAN_FIELD_SOURCE)
+        val parsed = collection_plan_source_sites(source, COLLECTION_PLAN_FIELD_SOURCE)
+        expect(parsed != nil).to_be(true)
+        var factory_site = ""
+        for site in parsed.unwrap():
+            if site.site_id.contains("/FactoryAttributedHolder/items#"):
+                expect(site.direct_new).to_be(false)
+                expect(site.attribute).to_equal("ordered")
+                factory_site = site.site_id
+        expect(factory_site).to_start_with("ast://")
+        val report = collection_plan_explain_file(
+            COLLECTION_PLAN_FIELD_SOURCE, "", "", "x86_64-v3", factory_site)
+        expect(report).to_contain("selected=ordered")
+        expect(report).to_contain("evidence=source-attribute")
+        expect(report).to_contain("guard.initializer=unproved-custom-initializer")
+
+    it "explains default initial storage only for the requested site":
+        val source = read_file_text(COLLECTION_PLAN_SOURCE)
+        val parsed = collection_plan_source_sites(source, COLLECTION_PLAN_SOURCE)
+        expect(parsed != nil).to_be(true)
+        val sites = parsed.unwrap()
+        val report = collection_plan_explain_file(
+            COLLECTION_PLAN_SOURCE, "", "", "x86_64-v3", sites[0].site_id
+        )
+        expect(report).to_contain("site=" + sites[0].site_id)
+        expect(report).to_contain("selected=linear")
+        expect(report).to_contain("guard.typed_mir=unconnected")
+
+    it "reports the generic key guard and automatic demotion fallback":
+        val source = read_file_text(COLLECTION_PLAN_GENERIC_SOURCE)
+        val parsed = collection_plan_source_sites(source, COLLECTION_PLAN_GENERIC_SOURCE)
+        expect(parsed != nil).to_be(true)
+        var generic_site = ""
+        for site in parsed.unwrap():
+            if site.collection_type == "AdaptiveMap" and site.attribute == "auto":
+                generic_site = site.site_id
+        expect(generic_site).to_start_with("ast://")
+        val report = collection_plan_explain_file(
+            COLLECTION_PLAN_GENERIC_SOURCE, "", "", "x86_64-v3", generic_site)
+        expect(report).to_contain("guard.key_order=native-order-checked-on-keyed-use")
+        expect(report).to_contain("forced-ordered-key-error")
+        expect(report).to_contain("unsupported-key-demotion")
+
+    it "explains a measured collision-driven ordered auto choice":
+        val source = read_file_text(COLLECTION_PLAN_SOURCE)
+        val parsed = collection_plan_source_sites(source, COLLECTION_PLAN_SOURCE)
+        expect(parsed != nil).to_be(true)
+        var site_id = ""
+        for site in parsed.unwrap():
+            if site.attribute == "auto" and site_id == "":
+                site_id = site.site_id
+        expect(site_id).to_start_with("ast://")
+        val target = "x86_64-v3"
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: site_id, target_profile_id: target, sample_count: 1,
+            size_p95: 100, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 20
+        )
+        val metrics: [SprofCollectionMetric] = [
+            SprofCollectionMetric(site_id: site_id, target_profile_id: target, name: "hash_probe_count", value: 100),
+            SprofCollectionMetric(site_id: site_id, target_profile_id: target, name: "hash_collision_count", value: 40)
+        ]
+        val path = get_temp_dir() + "/simple_collection_explain_{rt_getpid()}_{time_now_unix_micros()}.sprof"
+        val identity = sprof_source_module_identity_from_text(COLLECTION_PLAN_SOURCE, source)
+        expect(sprof_write_collection_profile_file_with_metrics(
+            path, identity, "collision-workload", [], [prior], metrics)).to_be(true)
+        val report = collection_plan_explain_file(
+            COLLECTION_PLAN_SOURCE, path, "collision-workload", target, site_id)
+        expect(report).to_contain("selected=ordered")
+        expect(report).to_contain("profile.hash_probes_p95=100")
+        expect(report).to_contain("profile.hash_collisions_p95=40")
+        expect(report).to_contain("rejected.hash=profile-hash-collisions")
+        expect(report).to_contain("guard.live_hash_collision=window=32")
+        expect(file_delete(path)).to_be(true)

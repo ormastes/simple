@@ -1,4 +1,9 @@
 # Vulkan Provider Archive Extraction
+## Closed 2026-09-16 — source fixed; focused linker regression 13/13; remaining readback tracked separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -60,3 +65,4 @@ implementation remains a separate runtime concern.
 
 The remaining readback failure is tracked separately in
 `native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.
+

@@ -1,0 +1,71 @@
+# Run-path probe for
+# doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md
+#
+# Prints canonical `KEY=VALUE` lines so the sibling spec can run this probe
+# under both the interpreter and the JIT and compare the answers, in addition
+# to checking each answer against an independently-computed oracle
+# (EXPECTED_TOTAL, computed via `d.keys()` + indexing, never via `.items()`).
+
+fn main():
+    var d: {text: i64} = {"a": 1, "b": 2, "c": 3}
+
+    var expected_total = 0
+    for k in d.keys():
+        expected_total = expected_total + d[k]
+
+    # Defect 1 shape: bare two-name pattern over `.items()`.
+    var unparen_total = 0
+    for k, v in d.items():
+        unparen_total = unparen_total + v
+
+    # Same iteration, parenthesized tuple pattern -- must agree.
+    var paren_total = 0
+    for (k, v) in d.items():
+        paren_total = paren_total + v
+
+    # Every (key, value) pair `.items()` yields must have value == d[key],
+    # and every key it yields must be a real key of d.
+    var kv_match = 1
+    var count = 0
+    for pair in d.items():
+        count = count + 1
+        val k = pair.0
+        val v = pair.1
+        if d[k] != v:
+            kv_match = 0
+        if not d.keys().contains(k):
+            kv_match = 0
+
+    var count_match = 1
+    if count != d.keys().len():
+        count_match = 0
+
+    # Pin (b), the `.entries()` alias of the same bare two-name pattern.
+    var entries_bare_total = 0
+    for k, v in d.entries():
+        entries_bare_total = entries_bare_total + v
+
+    # Pin (a), REVERSED 2026-09-12: a bare comma pattern is ALWAYS a tuple
+    # destructure, whatever the iterable is. `for i, pair in
+    # [(1, 2), (3, 4)]:` therefore binds i=1,pair=2 then i=3,pair=4 -- the
+    # same as `for (i, pair) in ...` -- NOT the old enumerate shorthand
+    # (i = 0, 1; pair = the tuple). The seed's enumerate shorthand was a
+    # seed-only feature the pure-Simple compiler never had and the seed's own
+    # JIT never implemented; it was removed rather than propagated. Enumerate
+    # intent is now spelled `.enumerate()`. See doc/08_tracking/bug/
+    # seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+    var first_sum = 0
+    var second_repr = ""
+    for i, pair in [(1, 2), (3, 4)]:
+        first_sum = first_sum + i
+        second_repr = second_repr + pair.to_string() + ";"
+
+    print("EXPECTED_TOTAL=" + expected_total.to_string())
+    print("UNPAREN_TOTAL=" + unparen_total.to_string())
+    print("PAREN_TOTAL=" + paren_total.to_string())
+    print("KV_MATCH=" + kv_match.to_string())
+    print("COUNT_MATCH=" + count_match.to_string())
+    print("ENTRIES_BARE_TOTAL=" + entries_bare_total.to_string())
+    print("FIRST_SUM=" + first_sum.to_string())
+    print("SECOND_REPR=" + second_repr)
+    print("PROBE_DONE")

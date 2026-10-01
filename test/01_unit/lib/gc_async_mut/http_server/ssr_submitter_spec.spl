@@ -1,0 +1,56 @@
+"""Canonical hosted SSR async adapter specification."""
+
+use std.spec
+use std.gc_async_mut.http_server.ssr_submitter.{
+    SsrAsyncConfig, render_ssr_request, register_ssr_async_handler
+}
+use std.http_server.handler.{HandlerRegistry}
+use std.http_server.types.{HttpRequestData, default_location_config}
+use std.http_server.response.{serialize_response_bytes}
+
+fn ssr_request(method: text, body: text) -> HttpRequestData:
+    HttpRequestData(
+        method: method,
+        path: "/render",
+        query: "",
+        version: "HTTP/1.1",
+        headers: [("Content-Type", "text/html")],
+        body: body,
+        params: {},
+        peer_addr: "127.0.0.1"
+    )
+
+describe "canonical hosted SSR submitter":
+    it "registers a reachable handler through the current HTTP registry ABI":
+        var registry = HandlerRegistry.new()
+        val config = SsrAsyncConfig.production(8, 8, 4096, "cpu")
+        expect(register_ssr_async_handler(registry, "server-render", config)).to_equal(true)
+        var location = default_location_config()
+        location.pattern = "/render"
+        location.match_type = "exact"
+        location.handler_type = "server-render"
+        val response = registry.dispatch("server-render",
+            ssr_request("POST", "<html><body><p>route</p></body></html>"), location)
+        expect(response.status).to_equal(200)
+        expect(response.headers).to_contain(("Content-Type", "image/png"))
+
+    it "renders in-memory HTML to a PNG through the canonical web Engine2D route":
+        val config = SsrAsyncConfig.production(8, 8, 4096, "cpu")
+        val response = render_ssr_request(
+            ssr_request("POST", "<html><body><p>Simple SSR</p></body></html>"),
+            config
+        )
+        expect(response.status).to_equal(200)
+        expect(response.headers).to_contain(("Content-Type", "image/png"))
+        expect(response.body_bytes.len()).to_be_greater_than(8)
+        expect(response.body_bytes[0]).to_equal(137u8)
+        expect(response.body_bytes[1]).to_equal(80u8)
+        val wire = serialize_response_bytes(response)
+        expect(wire).to_contain(137u8)
+        expect(wire).to_contain(80u8)
+
+    it "fails explicitly before rendering invalid or oversized requests":
+        val config = SsrAsyncConfig.production(8, 8, 16, "cpu")
+        expect(render_ssr_request(ssr_request("GET", "<p>x</p>"), config).status).to_equal(405)
+        expect(render_ssr_request(ssr_request("POST", ""), config).status).to_equal(400)
+        expect(render_ssr_request(ssr_request("POST", "<p>payload is too large</p>"), config).status).to_equal(413)

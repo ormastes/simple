@@ -1,0 +1,59 @@
+use std.spec.*
+use std.nogc_sync_mut.src.collections.ordered_text_set.OrderedTextSet
+
+describe "OrderedTextSet balanced storage":
+    it "keeps sorted inserts logarithmically shallow":
+        var tree = OrderedTextSet.new()
+        for index in 0..1024:
+            expect(tree.insert("key-{index}")).to_be(true)
+        expect(tree.len()).to_equal(1024)
+        expect(tree.tree_height()).to_be_less_than(20)
+        expect(tree.contains_key("key-1023")).to_be(true)
+        expect(tree.contains_key("absent")).to_be(false)
+
+    it "preserves keys through left, right, and double rotations":
+        var tree = OrderedTextSet.new()
+        for key in ["m", "a", "z", "c", "b", "y", "x", "q", "r"]:
+            expect(tree.insert(key)).to_be(true)
+        expect(tree.insert("c")).to_be(false)
+        expect(tree.keys()).to_equal(["a", "b", "c", "m", "q", "r", "x", "y", "z"])
+        expect(tree.len()).to_equal(9)
+
+    it "rebalances leaf, one-child, and two-child removals":
+        var tree = OrderedTextSet.new()
+        for key in ["m", "a", "z", "c", "b", "y", "x", "q", "r"]:
+            tree.insert(key)
+        expect(tree.remove("missing")).to_be(false)
+        expect(tree.remove("m")).to_be(true)
+        expect(tree.remove("y")).to_be(true)
+        expect(tree.remove("a")).to_be(true)
+        expect(tree.keys()).to_equal(["b", "c", "q", "r", "x", "z"])
+        expect(tree.len()).to_equal(6)
+        expect(tree.tree_height()).to_be_less_than(6)
+
+    it "keeps values attached to keys through replacement and two-child removal":
+        var tree = OrderedTextSet.new()
+        expect(tree.put_value("m", "middle")).to_be(true)
+        expect(tree.put_value("a", "first")).to_be(true)
+        expect(tree.put_value("z", "last")).to_be(true)
+        expect(tree.put_value("q", "successor")).to_be(true)
+        expect(tree.put_value("q", "updated")).to_be(false)
+        expect(tree.remove("m")).to_be(true)
+        expect(tree.get_value("m")).to_be_nil()
+        expect(tree.get_value("q") ?? "").to_equal("updated")
+        expect(tree.get_value("a") ?? "").to_equal("first")
+        expect(tree.get_value("z") ?? "").to_equal("last")
+        expect(tree.entries().len()).to_equal(3)
+
+    it "reuses removed slots during sustained churn":
+        var tree = OrderedTextSet.new()
+        for index in 0..128:
+            tree.insert("key-{index}")
+        val allocated = tree.allocated_slots()
+        for index in 0..128:
+            expect(tree.remove("key-{index}")).to_be(true)
+        expect(tree.len()).to_equal(0)
+        for index in 128..256:
+            expect(tree.insert("key-{index}")).to_be(true)
+        expect(tree.allocated_slots()).to_equal(allocated)
+        expect(tree.len()).to_equal(128)

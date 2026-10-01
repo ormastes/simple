@@ -1,4 +1,8 @@
 # Test-tree divergence step-over record — llm_caret agent_workspace landing (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Range: `a5932becd23..ebc6f0a5c51` (feat(llm_caret): real tmux sessions + detached
 worktrees per agent). Verdict from
@@ -880,3 +884,4 @@ as required by `.claude/rules/vcs.md`:
     unit:test_runner/mode_filter_spec.spl
     unit:tools/cat_spec.spl
     unit:tools/simple_os_primary_spec.spl
+

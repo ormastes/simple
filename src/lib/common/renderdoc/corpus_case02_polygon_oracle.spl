@@ -1,0 +1,280 @@
+# Independent ideal-area pixels for pinned corpus case 02. No Web DrawIR,
+# Chromium screenshot, Vulkan backend, or RenderDoc event data enters this model.
+
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_hash_sha256}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use common.renderdoc.final_output_pixels.{
+    FinalOutputCapture, final_output_canonical_rgba}
+
+pub val CORPUS_CASE02_FIXTURE_ID: text = "corpus-02-fractional-edges-v1"
+pub val CORPUS_CASE02_SOURCE_PATH: text =
+    "test/fixtures/html_css/corpus/cases/02-fractional-edges.html"
+pub val CORPUS_CASE02_SOURCE_SHA256: text =
+    "5ad0ddd4a7848160e220c116c7c7f21872a7f184d3444a2d97990e88da10bfe1"
+pub val CORPUS_CASE02_RGBA_SHA256: text =
+    "8b59b0b26ab92d1a436639b9b65c1ab28388f4871c3b05890eae982189884d4d"
+pub val CORPUS_CASE02_WIDTH: i32 = 640
+pub val CORPUS_CASE02_HEIGHT: i32 = 480
+pub val CORPUS_CASE02_EDGE_MAX_CHANNEL_DELTA: i64 = 16
+pub val CORPUS_CASE02_EDGE_MAX_MEAN_CHANNEL_DELTA: i64 = 4
+
+val _CASE02_COS7: f64 = 0.992546151641322
+val _CASE02_SIN7: f64 = 0.12186934340514748
+val _CASE02_AREA_EPSILON: f64 = 1.0e-12
+
+struct Case02Point:
+    x: f64
+    y: f64
+
+struct Case02OracleImage:
+    rgba: [i64]
+    edge_mask: [bool]
+    tile_interior_pixels: i64
+    bar_interior_pixels: i64
+    exterior_pixels: i64
+    tile_edge_pixels: i64
+    bar_edge_pixels: i64
+
+struct Case02OracleVerdict:
+    passed: bool
+    exact_mismatch_pixels: i64
+    edge_excess_pixels: i64
+    edge_channel_abs_sum: i64
+    edge_channel_count: i64
+    edge_max_channel_delta: i64
+
+fn _case02_abs(value: f64) -> f64:
+    if value < 0.0: 0.0 - value else: value
+
+fn _case02_abs_i64(value: i64) -> i64:
+    if value < 0: 0 - value else: value
+
+fn _case02_min(a: f64, b: f64) -> f64:
+    if a < b: a else: b
+
+fn _case02_max(a: f64, b: f64) -> f64:
+    if a > b: a else: b
+
+fn _case02_transform(x: f64, y: f64, tx: f64, ty: f64) -> Case02Point:
+    Case02Point(
+        x: _CASE02_COS7 * x - _CASE02_SIN7 * y + tx,
+        y: _CASE02_SIN7 * x + _CASE02_COS7 * y + ty)
+
+fn _case02_tile_polygon() -> [Case02Point]:
+    # T(left,top) * T(origin) * T(translate) * R(7deg) * T(-origin).
+    val tx = 40.25 + 90.25 + 0.25 - _CASE02_COS7 * 90.25 +
+        _CASE02_SIN7 * 50.0
+    val ty = 50.5 + 50.0 + 0.25 - _CASE02_SIN7 * 90.25 -
+        _CASE02_COS7 * 50.0
+    [_case02_transform(0.0, 0.0, tx, ty),
+        _case02_transform(180.5, 0.0, tx, ty),
+        _case02_transform(180.5, 100.0, tx, ty),
+        _case02_transform(0.0, 100.0, tx, ty)]
+
+fn _case02_axis(point: Case02Point, axis: i32) -> f64:
+    if axis == 0: point.x else: point.y
+
+fn _case02_inside(value: f64, limit: f64, keep_greater: bool) -> bool:
+    if keep_greater: value >= limit else: value <= limit
+
+fn _case02_clip_polygon(poly: [Case02Point], axis: i32,
+    limit: f64, keep_greater: bool) -> [Case02Point]:
+    if poly.len() == 0:
+        return []
+    var out: [Case02Point] = []
+    var previous = poly[poly.len() - 1]
+    var previous_value = _case02_axis(previous, axis)
+    var previous_inside = _case02_inside(previous_value, limit, keep_greater)
+    for current in poly:
+        val current_value = _case02_axis(current, axis)
+        val current_inside = _case02_inside(current_value, limit, keep_greater)
+        if current_inside != previous_inside:
+            val t = (limit - previous_value) / (current_value - previous_value)
+            out.push(Case02Point(
+                x: previous.x + t * (current.x - previous.x),
+                y: previous.y + t * (current.y - previous.y)))
+        if current_inside:
+            out.push(current)
+        previous = current
+        previous_value = current_value
+        previous_inside = current_inside
+    out
+
+fn _case02_polygon_area(poly: [Case02Point]) -> f64:
+    if poly.len() < 3:
+        return 0.0
+    var twice_area = 0.0
+    var index = 0
+    while index < poly.len():
+        val next = if index + 1 < poly.len(): index + 1 else: 0
+        twice_area = twice_area + (
+            poly[index].x * poly[next].y - poly[next].x * poly[index].y)
+        index = index + 1
+    _case02_abs(twice_area) * 0.5
+
+fn _case02_clamp_coverage(area: f64) -> f64:
+    val bounded = _case02_max(0.0, _case02_min(1.0, area))
+    if bounded < _CASE02_AREA_EPSILON:
+        return 0.0
+    if bounded > 1.0 - _CASE02_AREA_EPSILON:
+        return 1.0
+    bounded
+
+fn _case02_tile_coverage(x: i32, y: i32,
+    polygon: [Case02Point]) -> f64:
+    # These conservative bounds contain every transformed vertex.
+    if x < 25 or x > 238 or y < 25 or y > 177:
+        return 0.0
+    val left = x.to_f64()
+    val top = y.to_f64()
+    var clipped = _case02_clip_polygon(polygon, 0, left, true)
+    clipped = _case02_clip_polygon(clipped, 0, left + 1.0, false)
+    clipped = _case02_clip_polygon(clipped, 1, top, true)
+    clipped = _case02_clip_polygon(clipped, 1, top + 1.0, false)
+    _case02_clamp_coverage(_case02_polygon_area(clipped))
+
+fn _case02_bar_coverage(x: i32, y: i32) -> f64:
+    # Authored untransformed bar: [290.5,293) x [40.25,320.75).
+    if x < 289 or x > 294 or y < 39 or y > 322:
+        return 0.0
+    val left = x.to_f64()
+    val top = y.to_f64()
+    val overlap_x = _case02_max(0.0,
+        _case02_min(left + 1.0, 293.0) - _case02_max(left, 290.5))
+    val overlap_y = _case02_max(0.0,
+        _case02_min(top + 1.0, 320.75) - _case02_max(top, 40.25))
+    _case02_clamp_coverage(overlap_x * overlap_y)
+
+fn _case02_channel(foreground: i64, coverage: f64) -> i64:
+    # Opaque SrcOver in encoded sRGB channel space; positive half-up rounding.
+    (255.0 * (1.0 - coverage) + foreground.to_f64() * coverage + 0.5).to_i64()
+
+fn case02_analytic_oracle() -> Result<Case02OracleImage, text>:
+    if not file_is_regular_no_follow(CORPUS_CASE02_SOURCE_PATH) or
+        file_hash_sha256(CORPUS_CASE02_SOURCE_PATH) != CORPUS_CASE02_SOURCE_SHA256:
+        return Err("case02-pinned-source-mismatch")
+    val polygon = _case02_tile_polygon()
+    var rgba: [i64] = []
+    var edge_mask: [bool] = []
+    var tile_interior: i64 = 0
+    var bar_interior: i64 = 0
+    var exterior: i64 = 0
+    var tile_edge: i64 = 0
+    var bar_edge: i64 = 0
+    var y = 0
+    while y < CORPUS_CASE02_HEIGHT:
+        var x = 0
+        while x < CORPUS_CASE02_WIDTH:
+            val tile = _case02_tile_coverage(x, y, polygon)
+            val bar = _case02_bar_coverage(x, y)
+            if tile > 0.0 and bar > 0.0:
+                return Err("case02-authored-shapes-overlap")
+            var foreground: i64 = 255
+            var green: i64 = 255
+            var blue: i64 = 255
+            var coverage = 0.0
+            var edge = false
+            if tile > 0.0:
+                foreground = 36
+                green = 123
+                blue = 222
+                coverage = tile
+                if tile == 1.0: tile_interior = tile_interior + 1
+                else: tile_edge = tile_edge + 1
+                edge = tile != 1.0
+            elif bar > 0.0:
+                foreground = 17
+                green = 17
+                blue = 17
+                coverage = bar
+                if bar == 1.0: bar_interior = bar_interior + 1
+                else: bar_edge = bar_edge + 1
+                edge = bar != 1.0
+            else:
+                exterior = exterior + 1
+            rgba.push(_case02_channel(foreground, coverage))
+            rgba.push(_case02_channel(green, coverage))
+            rgba.push(_case02_channel(blue, coverage))
+            rgba.push(255)
+            edge_mask.push(edge)
+            x = x + 1
+        y = y + 1
+    if rgba.len() != 1228800 or edge_mask.len() != 307200:
+        return Err("case02-oracle-shape-mismatch")
+    if (tile_interior != 17730 or bar_interior != 558 or
+        exterior != 287998 or tile_edge != 629 or bar_edge != 285):
+        return Err("case02-oracle-region-count-mismatch")
+    if bytes_to_hex(sha256_bytes(rgba)) != CORPUS_CASE02_RGBA_SHA256:
+        return Err("case02-oracle-rgba-digest-mismatch")
+    Ok(Case02OracleImage(
+        rgba: rgba, edge_mask: edge_mask,
+        tile_interior_pixels: tile_interior,
+        bar_interior_pixels: bar_interior, exterior_pixels: exterior,
+        tile_edge_pixels: tile_edge, bar_edge_pixels: bar_edge))
+
+fn case02_compare_canonical_rgba(actual: [i64]) -> Result<Case02OracleVerdict, text>:
+    val oracle = case02_analytic_oracle()?
+    if actual.len() != oracle.rgba.len():
+        return Err("case02-canonical-byte-length-mismatch")
+    var exact_mismatch: i64 = 0
+    var edge_excess: i64 = 0
+    var edge_sum: i64 = 0
+    var edge_count: i64 = 0
+    var edge_max: i64 = 0
+    var pixel: i64 = 0
+    while pixel < oracle.edge_mask.len():
+        val offset = pixel * 4
+        var channel = 0
+        while channel < 4:
+            val value = actual[offset + channel]
+            if value < 0 or value > 255:
+                return Err("case02-canonical-byte-out-of-range")
+            channel = channel + 1
+        if oracle.edge_mask[pixel]:
+            var pixel_excess = actual[offset + 3] != 255
+            channel = 0
+            while channel < 3:
+                val delta = _case02_abs_i64(
+                    actual[offset + channel] - oracle.rgba[offset + channel])
+                edge_sum = edge_sum + delta
+                edge_count = edge_count + 1
+                if delta > edge_max: edge_max = delta
+                if delta > CORPUS_CASE02_EDGE_MAX_CHANNEL_DELTA:
+                    pixel_excess = true
+                channel = channel + 1
+            if pixel_excess: edge_excess = edge_excess + 1
+        elif (actual[offset] != oracle.rgba[offset] or
+                actual[offset + 1] != oracle.rgba[offset + 1] or
+                actual[offset + 2] != oracle.rgba[offset + 2] or
+                actual[offset + 3] != 255):
+            exact_mismatch = exact_mismatch + 1
+        pixel = pixel + 1
+    Ok(Case02OracleVerdict(
+        passed: exact_mismatch == 0 and edge_excess == 0 and
+            edge_sum <= edge_count * CORPUS_CASE02_EDGE_MAX_MEAN_CHANNEL_DELTA,
+        exact_mismatch_pixels: exact_mismatch,
+        edge_excess_pixels: edge_excess,
+        edge_channel_abs_sum: edge_sum,
+        edge_channel_count: edge_count,
+        edge_max_channel_delta: edge_max))
+
+fn case02_capture_matches_oracle(
+    capture: FinalOutputCapture) -> Result<Case02OracleVerdict, text>:
+    val metadata = capture.metadata
+    if metadata.fixture_id != CORPUS_CASE02_FIXTURE_ID or
+        metadata.fixture_digest != CORPUS_CASE02_SOURCE_SHA256 or
+        metadata.width != CORPUS_CASE02_WIDTH.to_i64() or
+        metadata.height != CORPUS_CASE02_HEIGHT.to_i64() or
+        metadata.crop_x != 0 or metadata.crop_y != 0 or
+        metadata.crop_width != CORPUS_CASE02_WIDTH.to_i64() or
+        metadata.crop_height != CORPUS_CASE02_HEIGHT.to_i64():
+        return Err("case02-capture-domain-mismatch")
+    val canonical = match final_output_canonical_rgba(capture):
+        case Ok(value): value
+        case Err(error): return Err("case02-capture-" + error.code)
+    case02_compare_canonical_rgba(canonical)
+
+export Case02OracleImage, Case02OracleVerdict,
+    case02_analytic_oracle, case02_compare_canonical_rgba,
+    case02_capture_matches_oracle

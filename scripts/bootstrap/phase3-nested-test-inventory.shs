@@ -1,0 +1,276 @@
+#!/bin/sh
+# Discover tests owned by Git submodules for the Phase 3 full-test inventory.
+# The parent index is authoritative.  A missing checkout, a checkout at the
+# wrong commit, or an empty module without an explicit policy is a discovery
+# failure; none can silently shrink the admitted suite.
+
+set -u
+
+usage() {
+  cat >&2 <<'EOF'
+usage: phase3-nested-test-inventory.shs discover SOURCE_ROOT [POLICY_FILE] [RECEIPT_FILE]
+
+Writes canonical Phase 3 TSV rows to stdout.  POLICY_FILE defaults to
+scripts/bootstrap/phase3-nested-test-policy.tsv below SOURCE_ROOT.
+When RECEIPT_FILE is supplied, successful discovery atomically records every
+recursive module path, pinned/actual commit, and policy classification.
+EOF
+  exit 64
+}
+
+fail() {
+  printf 'phase3-nested-test-inventory: %s\n' "$*" >&2
+  exit 1
+}
+
+[ "$#" -ge 2 ] && [ "$#" -le 4 ] || usage
+[ "$1" = discover ] || usage
+source_root=$2
+[ -d "$source_root" ] || fail "source-root-missing: $source_root"
+source_root=$(CDPATH= cd -- "$source_root" && pwd -P) ||
+  fail "source-root-unresolvable: $source_root"
+policy=${3:-$source_root/scripts/bootstrap/phase3-nested-test-policy.tsv}
+[ -f "$policy" ] || fail "policy-missing: $policy"
+receipt=${4:-}
+if [ -n "$receipt" ]; then
+  receipt_parent=$(dirname -- "$receipt")
+  [ -d "$receipt_parent" ] || fail "receipt-parent-missing: $receipt_parent"
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] ||
+      fail "receipt-path-not-regular: $receipt"
+    rm -f -- "$receipt" || fail "receipt-cannot-clear: $receipt"
+  fi
+fi
+
+tmp_root=${TMPDIR:-/tmp}
+scratch=$(mktemp -d "$tmp_root/phase3-nested-inventory.XXXXXX") ||
+  fail "cannot-create-scratch"
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+rows=$scratch/rows.tsv
+seen_policy=$scratch/seen-policy.txt
+receipt_rows=$scratch/receipt-rows.tsv
+: >"$rows"
+: >"$seen_policy"
+: >"$receipt_rows"
+scan_serial=0
+
+tab=$(printf '\t')
+
+# Validate the policy up front.  Comments and one canonical header are allowed.
+# A reason is a stable machine-readable slug so receipts do not depend on prose
+# or host-local diagnostics.
+policy_rows=$scratch/policy.tsv
+: >"$policy_rows"
+policy_line=0
+while IFS= read -r line || [ -n "$line" ]; do
+  policy_line=$((policy_line + 1))
+  case "$line" in
+    ''|'#'*) continue ;;
+    "category${tab}path${tab}reason") continue ;;
+  esac
+  old_ifs=$IFS
+  IFS=$tab
+  set -- $line
+  IFS=$old_ifs
+  [ "$#" -eq 3 ] || fail "policy-malformed-line-$policy_line"
+  category=$1
+  module_path=$2
+  reason=$3
+  case "$category" in
+    required-no-tests|optional-no-tests|platform-ineligible) ;;
+    *) fail "policy-invalid-category-$policy_line: $category" ;;
+  esac
+  case "$module_path" in
+    ''|/*|../*|*/../*|*/..|.|*"$tab"*|*[!A-Za-z0-9._/-]*)
+      fail "policy-invalid-path-$policy_line: $module_path" ;;
+  esac
+  case "$reason" in
+    ''|*[!a-z0-9._-]*) fail "policy-invalid-reason-$policy_line: $reason" ;;
+  esac
+  if awk -F '\t' -v p="$module_path" '$2 == p { found=1 } END { exit !found }' \
+      "$policy_rows"; then
+    fail "policy-duplicate-path: $module_path"
+  fi
+  printf '%s\t%s\t%s\n' "$category" "$module_path" "$reason" >>"$policy_rows"
+done <"$policy"
+
+policy_for() {
+  pf_path=$1
+  awk -F '\t' -v p="$pf_path" '$2 == p { print $1 "\t" $3 }' "$policy_rows"
+}
+
+mark_policy_seen() {
+  printf '%s\n' "$1" >>"$seen_policy"
+}
+
+scan_repo() {
+  local sr_repo sr_prefix sr_top sr_serial sr_links sr_links_next sr_links_raw
+  local sr_expected sr_relative sr_inventory_path sr_checkout
+  local sr_expected_checkout sr_expected_parent sr_expected_leaf sr_actual_top
+  local sr_actual sr_tests sr_tests_raw sr_test sr_policy sr_category sr_reason
+  local sr_receipt_category sr_receipt_reason
+  local sr_kind sr_status_file old_ifs
+  sr_repo=$1
+  sr_prefix=$2
+  sr_top=$(git -C "$sr_repo" rev-parse --show-toplevel 2>/dev/null) ||
+    fail "nested-module-not-a-git-worktree: ${sr_prefix:-.}"
+  sr_top=$(CDPATH= cd -- "$sr_top" && pwd -P) ||
+    fail "nested-module-root-unresolvable: ${sr_prefix:-.}"
+  [ "$sr_top" = "$sr_repo" ] ||
+    fail "nested-module-ambiguous-root: ${sr_prefix:-.}"
+
+  scan_serial=$((scan_serial + 1))
+  sr_serial=$scan_serial
+  sr_links=$scratch/links.$sr_serial
+  sr_links_next=$scratch/links-next.$sr_serial
+  sr_links_raw=$scratch/links-raw.$sr_serial
+  : >"$sr_links_next"
+  git -C "$sr_repo" -c core.quotePath=false ls-files --stage \
+    >"$sr_links_raw" 2>/dev/null ||
+    fail "gitlink-discovery-error: ${sr_prefix:-.}"
+  while IFS="$tab" read -r sr_meta sr_path; do
+      set -- $sr_meta
+      [ "${1:-}" = 160000 ] || continue
+      [ "$#" -eq 3 ] || fail "gitlink-malformed-index-row: ${sr_prefix:-.}"
+      printf '%s\t%s\n' "$2" "$sr_path"
+  done <"$sr_links_raw" >"$sr_links_next"
+  LC_ALL=C sort -t "$tab" -k2,2 "$sr_links_next" >"$sr_links" ||
+    fail "gitlink-sort-error: ${sr_prefix:-.}"
+
+  while IFS="$tab" read -r sr_expected sr_relative; do
+    [ -n "$sr_relative" ] || continue
+    case "$sr_relative" in
+      '"'*|''|/*|../*|*/../*|*/..|.|*"$tab"*)
+        fail "gitlink-invalid-path: ${sr_prefix}${sr_relative}" ;;
+    esac
+    sr_inventory_path=${sr_prefix}${sr_relative}
+    sr_checkout=$sr_repo/$sr_relative
+    [ -d "$sr_checkout" ] && [ ! -L "$sr_checkout" ] ||
+      fail "nested-module-uninitialized: $sr_inventory_path"
+    [ -e "$sr_checkout/.git" ] && [ ! -L "$sr_checkout/.git" ] ||
+      fail "nested-module-uninitialized: $sr_inventory_path"
+    sr_checkout=$(CDPATH= cd -- "$sr_checkout" && pwd -P) ||
+      fail "nested-module-unresolvable: $sr_inventory_path"
+    sr_expected_checkout=$sr_repo/$sr_relative
+    sr_expected_parent=$(dirname -- "$sr_expected_checkout")
+    sr_expected_leaf=$(basename -- "$sr_expected_checkout")
+    sr_expected_parent=$(CDPATH= cd -- "$sr_expected_parent" && pwd -P) ||
+      fail "nested-module-parent-unresolvable: $sr_inventory_path"
+    [ "$sr_checkout" = "$sr_expected_parent/$sr_expected_leaf" ] ||
+      fail "nested-module-path-alias: $sr_inventory_path"
+    sr_actual_top=$(git -C "$sr_checkout" rev-parse --show-toplevel 2>/dev/null) ||
+      fail "nested-module-not-a-git-worktree: $sr_inventory_path"
+    sr_actual_top=$(CDPATH= cd -- "$sr_actual_top" && pwd -P) ||
+      fail "nested-module-root-unresolvable: $sr_inventory_path"
+    [ "$sr_actual_top" = "$sr_checkout" ] ||
+      fail "nested-module-ambiguous-root: $sr_inventory_path"
+    sr_actual=$(git -C "$sr_checkout" rev-parse HEAD 2>/dev/null) ||
+      fail "nested-module-head-unreadable: $sr_inventory_path"
+    [ "$sr_actual" = "$sr_expected" ] ||
+      fail "nested-module-pin-mismatch: $sr_inventory_path"
+    sr_status_file=$scratch/status.$sr_serial
+    git -C "$sr_checkout" status --porcelain --untracked-files=all \
+      >"$sr_status_file" 2>/dev/null ||
+      fail "nested-module-status-unreadable: $sr_inventory_path"
+    [ ! -s "$sr_status_file" ] ||
+      fail "nested-module-dirty: $sr_inventory_path"
+    sr_tests=$scratch/tests.$sr_serial
+    sr_tests_raw=$scratch/tests-raw.$sr_serial
+    : >"$sr_tests"
+    git -C "$sr_checkout" -c core.quotePath=false ls-files \
+      >"$sr_tests_raw" 2>/dev/null ||
+      fail "nested-test-discovery-error: $sr_inventory_path"
+    while IFS= read -r sr_test; do
+        case "$sr_test" in
+          test/*_spec.spl|test/*_test.spl|test/*_test.shs)
+            printf '%s\n' "$sr_test" ;;
+        esac
+    done <"$sr_tests_raw" | LC_ALL=C sort -u >"$sr_tests" ||
+      fail "nested-test-discovery-error: $sr_inventory_path"
+
+    sr_policy=$(policy_for "$sr_inventory_path")
+    sr_category=
+    sr_reason=
+    if [ -n "$sr_policy" ]; then
+      old_ifs=$IFS
+      IFS=$tab
+      set -- $sr_policy
+      IFS=$old_ifs
+      sr_category=$1
+      sr_reason=$2
+      mark_policy_seen "$sr_inventory_path"
+    fi
+    sr_receipt_category=${sr_category:--}
+    sr_receipt_reason=${sr_reason:--}
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$sr_inventory_path" "$sr_expected" "$sr_actual" \
+      "$sr_receipt_category" "$sr_receipt_reason" >>"$receipt_rows"
+
+    if [ -s "$sr_tests" ]; then
+      case "$sr_category" in
+        required-no-tests|optional-no-tests)
+          fail "no-tests-policy-contradicted: $sr_inventory_path" ;;
+        platform-ineligible)
+          while IFS= read -r sr_test; do
+            case "$sr_test" in *.shs) sr_kind=shell-unit ;; *) sr_kind=simple-spec ;; esac
+            printf 'nested\t%s\tnested\tskip\t%s/%s\t%s\n' \
+              "$sr_kind" "$sr_inventory_path" "$sr_test" "$sr_reason" >>"$rows"
+          done <"$sr_tests"
+          ;;
+        '')
+          while IFS= read -r sr_test; do
+            case "$sr_test" in *.shs) sr_kind=shell-unit ;; *) sr_kind=simple-spec ;; esac
+            [ -f "$sr_checkout/$sr_test" ] && [ ! -L "$sr_checkout/$sr_test" ] ||
+              fail "nested-test-not-materialized: $sr_inventory_path/$sr_test"
+            printf 'nested\t%s\tnested\texecute\t%s/%s\t-\n' \
+              "$sr_kind" "$sr_inventory_path" "$sr_test" >>"$rows"
+          done <"$sr_tests"
+          ;;
+      esac
+    else
+      case "$sr_category" in
+        required-no-tests)
+          printf 'nested\trequired-no-tests\tnested\texecute\t%s\t-\n' \
+            "$sr_inventory_path" >>"$rows" ;;
+        optional-no-tests|platform-ineligible)
+          printf 'nested\t%s\tnested\tskip\t%s\t%s\n' \
+            "$sr_category" "$sr_inventory_path" "$sr_reason" >>"$rows" ;;
+        '') fail "nested-module-empty-without-policy: $sr_inventory_path" ;;
+      esac
+    fi
+
+    scan_repo "$sr_checkout" "$sr_inventory_path/"
+  done <"$sr_links"
+}
+
+scan_repo "$source_root" ""
+
+# A policy row must match one current, recursively discovered gitlink.  This
+# prevents a deleted/renamed module from leaving behind an apparently valid
+# skip receipt.
+while IFS="$tab" read -r category module_path reason; do
+  [ -n "$module_path" ] || continue
+  [ "$(grep -Fxc -- "$module_path" "$seen_policy" || :)" -eq 1 ] ||
+    fail "policy-stale-or-unused: $module_path"
+done <"$policy_rows"
+
+if [ -n "$receipt" ]; then
+  receipt_parent=$(dirname -- "$receipt")
+  receipt_leaf=$(basename -- "$receipt")
+  receipt_tmp=$(mktemp "$receipt_parent/.${receipt_leaf}.tmp.XXXXXX") ||
+    fail "receipt-temp-create-failed: $receipt"
+  {
+    printf 'path\tpinned_sha\tactual_sha\tpolicy_category\tpolicy_reason\n'
+    LC_ALL=C sort -t "$tab" -k1,1 -u "$receipt_rows"
+  } >"$receipt_tmp" || {
+    rm -f -- "$receipt_tmp"
+    fail "receipt-write-failed: $receipt"
+  }
+  mv -f -- "$receipt_tmp" "$receipt" || {
+    rm -f -- "$receipt_tmp"
+    fail "receipt-publish-failed: $receipt"
+  }
+fi
+
+printf 'surface\tcategory\trunner\tdisposition\tpath\treason\n'
+LC_ALL=C sort -t "$tab" -k5,5 -u "$rows"

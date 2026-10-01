@@ -1,4 +1,9 @@
 # Dirty-working-copy triage: 1,525 files left by ~20 spend-limit-killed sessions
+## Closed 2026-09-16 — triage completed and landed as d7213eb6174 plus 3 commits; post-landing tree health verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-17. Landed as `d7213eb6174` (src, 69), `fb87405c18e` (test, 160),
 `a9a463eb061` (scripts, 25), `2868222ffbc` (docs, 1053).
@@ -62,3 +67,4 @@ rather than deleted — dropping them from disk is not this lane's call.
 
 114,906 files (band 90,000–150,000); `src/` 16 entries (band 13..25);
 `src/runtime` 218 files (canary >= 150).
+

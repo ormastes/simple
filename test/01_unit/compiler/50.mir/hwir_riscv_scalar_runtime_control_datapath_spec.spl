@@ -1,0 +1,64 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_control_datapath.{
+    strict_riscv_scalar_runtime_control_datapath}
+
+fn control_inputs(instruction: i64, pc: i64, lhs: i64, rhs: i64) -> [HwHostInput]:
+    [HwHostInput.bits("canonical_instruction", instruction),
+        HwHostInput.bits("instruction_rs1_field", (instruction >> 15) & 31),
+        HwHostInput.bits("pc_before", pc),
+        HwHostInput.bits("rs1_value", lhs), HwHostInput.bits("rs2_value", rhs)]
+
+describe "runtime scalar control datapath":
+    it "extracts dynamic branch jump and jalr immediates and targets":
+        val module = strict_riscv_scalar_runtime_control_datapath(
+            "runtime_control_rv32", CoreConfig.rv32()).unwrap()
+        val branch = evaluate_strict_comb_hwir(module,
+            control_inputs(0xFE208EE3, 0x100, 1, 2)).unwrap()
+        expect(branch.value_of("branch_immediate").unwrap()).to_equal(0xFFFFFFFC)
+        expect(branch.value_of("branch_target").unwrap()).to_equal(0xFC)
+        val jump = evaluate_strict_comb_hwir(module,
+            control_inputs(0x008000EF, 0x100, 0, 0)).unwrap()
+        expect(jump.value_of("jump_immediate").unwrap()).to_equal(8)
+        expect(jump.value_of("jal_target").unwrap()).to_equal(0x108)
+        val jalr = evaluate_strict_comb_hwir(module,
+            control_inputs(0xFFF100E7, 0, 0x102, 0)).unwrap()
+        expect(jalr.value_of("jalr_immediate").unwrap()).to_equal(0xFFFFFFFF)
+        expect(jalr.value_of("jalr_target").unwrap()).to_equal(0x100)
+
+    it "distinguishes signed and unsigned branch predicates":
+        val module = strict_riscv_scalar_runtime_control_datapath(
+            "runtime_control_predicates", CoreConfig.rv64()).unwrap()
+        val result = evaluate_strict_comb_hwir(module,
+            control_inputs(0x00000063, 0, -1, 1)).unwrap()
+        expect(result.value_of("branch_eq").unwrap()).to_equal(0)
+        expect(result.value_of("branch_ne").unwrap()).to_equal(1)
+        expect(result.value_of("branch_lt").unwrap()).to_equal(1)
+        expect(result.value_of("branch_ge").unwrap()).to_equal(0)
+        expect(result.value_of("branch_ltu").unwrap()).to_equal(0)
+        expect(result.value_of("branch_geu").unwrap()).to_equal(1)
+
+    it "reports fixed-product IALIGN after JALR bit-zero clearing":
+        val rv32 = strict_riscv_scalar_runtime_control_datapath(
+            "runtime_control_ialign32", CoreConfig.rv32()).unwrap()
+        val word = evaluate_strict_comb_hwir(rv32,
+            control_inputs(0x000100E7, 0x102, 0x102, 0)).unwrap()
+        expect(word.value_of("jalr_target").unwrap()).to_equal(0x102)
+        expect(word.value_of("jalr_target_misaligned").unwrap()).to_equal(1)
+        val rv64 = strict_riscv_scalar_runtime_control_datapath(
+            "runtime_control_ialign64", CoreConfig.rv64()).unwrap()
+        val aligned = evaluate_strict_comb_hwir(rv64,
+            control_inputs(0x000100E7, 0, 0x104, 0)).unwrap()
+        expect(aligned.value_of("jalr_target_misaligned").unwrap()).to_equal(0)
+        val x0 = evaluate_strict_comb_hwir(rv32,
+            control_inputs(0x000000E7, 0, 0x1234, 0)).unwrap()
+        expect(x0.value_of("jalr_target").unwrap()).to_equal(0)
+
+    it "has deterministic graph identity and rejects an empty name":
+        val first = strict_riscv_scalar_runtime_control_datapath(
+            "runtime_control_hash", CoreConfig.rv32()).unwrap()
+        val second = strict_riscv_scalar_runtime_control_datapath(
+            "runtime_control_hash", CoreConfig.rv32()).unwrap()
+        expect(first.structural_sha256()).to_equal(second.structural_sha256())
+        expect(strict_riscv_scalar_runtime_control_datapath("", CoreConfig.rv32()).is_err()).to_be(true)

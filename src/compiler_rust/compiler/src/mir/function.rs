@@ -316,6 +316,9 @@ pub struct MirModule {
     /// Integer array literal initial values for module-level `val`/`var`.
     /// These require runtime allocation before `main`.
     pub global_init_arrays: std::collections::HashMap<String, crate::hir::HirGlobalArrayInit>,
+    /// Design A.5 `@section/@align/@global` data items: raw byte images
+    /// emitted as placed LLVM constant arrays, never tagged heap values.
+    pub raw_data_items: Vec<crate::hir::HirRawDataItem>,
     /// Struct-literal global initializers needing runtime allocation.
     pub global_init_structs: std::collections::HashMap<String, crate::hir::HirGlobalStructInit>,
     /// Function-valued global initializers for module-level `val`/`var`.
@@ -372,6 +375,7 @@ impl MirModule {
             global_init_values: std::collections::HashMap::new(),
             global_init_strings: std::collections::HashMap::new(),
             global_init_arrays: std::collections::HashMap::new(),
+            raw_data_items: Vec::new(),
             global_init_structs: std::collections::HashMap::new(),
             global_init_functions: std::collections::HashMap::new(),
             dynamic_init_globals: std::collections::HashSet::new(),

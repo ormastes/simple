@@ -1,0 +1,290 @@
+#!/bin/sh
+# Consume only the immutable, candidate-bound native Phase 7 deployment receipt.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+receipt=
+candidate=
+composition_receipt=
+expected_mode=
+
+fail() {
+  echo "PHASE7 DEPLOYMENT PREREQUISITE: BLOCKED — $*" >&2
+  exit 1
+}
+
+usage() {
+  fail "usage: $0 --receipt=PATH --candidate=PATH --composition-receipt=PATH --mode=one-binary|dynload"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --receipt=*) receipt=${arg#*=} ;;
+    --candidate=*) candidate=${arg#*=} ;;
+    --composition-receipt=*) composition_receipt=${arg#*=} ;;
+    --mode=*) expected_mode=${arg#*=} ;;
+    *) usage ;;
+  esac
+done
+
+[ -n "$receipt" ] && [ -n "$candidate" ] && [ -n "$composition_receipt" ] || usage
+case "$expected_mode" in one-binary|dynload) ;; *) usage ;; esac
+
+hash_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    fail missing-sha256-tool
+  fi
+}
+
+canonical_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  directory=$(CDPATH= cd -P -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) || return 1
+  resolved=$directory/$(basename -- "$1")
+  [ -f "$resolved" ] && [ ! -L "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
+}
+
+field() {
+  key=$1
+  input=$2
+  count=$(awk -F= -v key="$key" '$1 == key { n++ } END { print n+0 }' "$input")
+  [ "$count" -eq 1 ] || fail "missing-or-duplicate-field:$key"
+  awk -v key="$key" 'index($0, key "=") == 1 { print substr($0, length(key) + 2) }' "$input"
+}
+
+require_equal() {
+  key=$1
+  expected=$2
+  input=$3
+  actual=$(field "$key" "$input")
+  [ "$actual" = "$expected" ] || fail "field-mismatch:$key"
+}
+
+require_sha() {
+  key=$1
+  input=$2
+  value=$(field "$key" "$input")
+  case "$value" in ''|*[!0-9a-f]*) fail "invalid-sha256:$key" ;; esac
+  [ "${#value}" -eq 64 ] || fail "invalid-sha256:$key"
+}
+
+normalize_architecture() {
+  case "$1" in
+    arm64|aarch64) echo arm64 ;;
+    x86_64|amd64) echo x86_64 ;;
+    *) return 1 ;;
+  esac
+}
+
+receipt_real=$(canonical_file "$receipt") || fail receipt-missing-symlinked-or-noncanonical
+[ ! -w "$receipt_real" ] || fail receipt-is-not-immutable
+
+# Check authority class before any candidate lookup: a portable or BLOCKED
+# summary must fail for its own class, not accidentally pass when paths exist.
+require_equal schema simple-kernel-phase7-native-pass-v1 "$receipt_real"
+require_equal status PASS "$receipt_real"
+require_equal reason qualified "$receipt_real"
+require_equal evidence_class NATIVE_EXECUTION "$receipt_real"
+require_equal native_execution true "$receipt_real"
+require_equal deployment_authorization ALLOW "$receipt_real"
+require_equal translated_execution false "$receipt_real"
+
+if ! awk -F= '
+  /^[A-Za-z0-9_]+=/ {
+    if ($1 == "schema" || $1 == "status" || $1 == "reason" ||
+        $1 == "evidence_class" || $1 == "native_execution" ||
+        $1 == "deployment_authorization" || $1 == "producer_path" ||
+        $1 == "producer_sha256" || $1 == "host_system" ||
+        $1 == "architecture" || $1 == "candidate_architecture" ||
+        $1 == "translated_execution" || $1 == "policy" ||
+        $1 == "coverage_cutover" || $1 == "simple_abi_policy" ||
+        $1 == "plugin_manifest_policy" || $1 == "coverage_implementation" ||
+        $1 == "performance_threshold_mode" ||
+        $1 == "performance_baseline_scope" ||
+        $1 == "performance_steady_rss_percent" ||
+        $1 == "performance_growth_percent" ||
+        $1 == "performance_warm_request_count" || $1 == "mode" ||
+        $1 == "policy_authority_path" || $1 == "policy_authority_sha256" ||
+        $1 == "candidate_path" || $1 == "candidate_sha256" ||
+        $1 == "child_binary_path" || $1 == "child_binary_sha256" ||
+        $1 == "child_identity_binding" || $1 == "child_identity_verified" ||
+        $1 == "composition_receipt_path" ||
+        $1 == "composition_receipt_sha256" ||
+        $1 == "candidate_manifest_path" || $1 == "candidate_manifest_sha256" ||
+        $1 == "stage3_acceptance_path" || $1 == "stage3_acceptance_sha256" ||
+        $1 == "stage4_provenance_path" || $1 == "stage4_provenance_sha256" ||
+        $1 == "spipe_log_path" || $1 == "spipe_log_sha256" ||
+        $1 == "coverage_artifact_path" || $1 == "coverage_artifact_sha256" ||
+        $1 == "mode_evidence_path" || $1 == "mode_evidence_sha256" ||
+        $1 == "startup_samples_path" || $1 == "startup_samples_sha256" ||
+        $1 == "performance_receipt_path" || $1 == "performance_receipt_sha256" ||
+        $1 == "performance_samples_path" || $1 == "performance_samples_sha256" ||
+        $1 == "performance_baseline_receipt_path" ||
+        $1 == "performance_baseline_receipt_sha256" ||
+        $1 == "performance_baseline_evidence_path" ||
+        $1 == "performance_baseline_evidence_sha256" ||
+        $1 == "performance_server_sha256" ||
+        $1 == "child_apk_consumption" || $1 == "source_rewrite_gate" ||
+        $1 == "spipe_results" || $1 == "policy_root_runtime" ||
+        $1 == "bootstrap_runtime" || $1 == "produced_binary_gate" ||
+        $1 == "composition_receipt_gate" || $1 == "mode_gate" ||
+        $1 == "startup_budget" || $1 == "performance_gate") next
+  }
+  { bad=1 }
+  END { exit bad }
+' "$receipt_real"; then
+  fail receipt-has-unknown-or-malformed-fields
+fi
+
+producer_path=$(field producer_path "$receipt_real")
+[ "$producer_path" = scripts/check/check-kernel-phase7-matrix.shs ] || fail producer-path-mismatch
+require_sha producer_sha256 "$receipt_real"
+[ "$(field producer_sha256 "$receipt_real")" = "$(hash_file "$root/$producer_path")" ] ||
+  fail producer-bytes-mismatch
+
+host_arch=$(normalize_architecture "$(uname -m)") || fail unsupported-host-architecture
+require_equal architecture "$host_arch" "$receipt_real"
+require_equal candidate_architecture "$host_arch" "$receipt_real"
+require_equal host_system "$(uname -s)" "$receipt_real"
+if [ "$(uname -s)" = Darwin ] && command -v sysctl >/dev/null 2>&1; then
+  translated=$(sysctl -in sysctl.proc_translated 2>/dev/null || echo 0)
+  [ "$translated" != 1 ] || fail translated-execution-is-not-native-authority
+fi
+
+authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+authority=$root/$authority_path
+require_equal policy llvm-cranelift "$receipt_real"
+require_equal coverage_cutover atomic-apk-only "$receipt_real"
+require_equal simple_abi_policy v1 "$receipt_real"
+require_equal plugin_manifest_policy simple-sdn "$receipt_real"
+require_equal coverage_implementation apk-only "$receipt_real"
+require_equal performance_threshold_mode baseline-relative-10-percent "$receipt_real"
+require_equal performance_baseline_scope admitted-per-architecture-receipt "$receipt_real"
+require_equal performance_steady_rss_percent 110 "$receipt_real"
+require_equal performance_growth_percent 10 "$receipt_real"
+require_equal performance_warm_request_count 20 "$receipt_real"
+require_equal mode "$expected_mode" "$receipt_real"
+require_equal policy_authority_path "$authority_path" "$receipt_real"
+require_equal policy_authority_sha256 "$(hash_file "$authority")" "$receipt_real"
+
+candidate_real=$(canonical_file "$candidate") || fail candidate-missing-symlinked-or-noncanonical
+candidate_sha=$(hash_file "$candidate_real")
+require_equal candidate_path "$candidate_real" "$receipt_real"
+require_equal candidate_sha256 "$candidate_sha" "$receipt_real"
+require_equal child_binary_path "$candidate_real" "$receipt_real"
+require_equal child_binary_sha256 "$candidate_sha" "$receipt_real"
+require_equal child_identity_binding SIMPLE_BINARY "$receipt_real"
+require_equal child_identity_verified pass "$receipt_real"
+
+composition_real=$(canonical_file "$composition_receipt") || fail composition-receipt-missing-symlinked-or-noncanonical
+composition_sha=$(hash_file "$composition_real")
+require_equal composition_receipt_path "$composition_real" "$receipt_real"
+require_equal composition_receipt_sha256 "$composition_sha" "$receipt_real"
+require_equal schema simple-bootstrap-k1-composition-receipt-v1 "$composition_real"
+require_equal status pass "$composition_real"
+require_equal policy llvm-cranelift "$composition_real"
+require_equal build_mode "$expected_mode" "$composition_real"
+require_equal simple_abi_policy v1 "$composition_real"
+require_equal plugin_manifest_policy simple-sdn "$composition_real"
+require_equal coverage_cutover_policy atomic-apk-only "$composition_real"
+require_equal coverage_implementation apk-only "$composition_real"
+require_equal policy_authority_path "$authority_path" "$composition_real"
+require_equal policy_authority_sha256 "$(hash_file "$authority")" "$composition_real"
+
+for key in candidate_manifest stage3_acceptance stage4_provenance spipe_log \
+    coverage_artifact mode_evidence startup_samples performance_receipt \
+    performance_samples performance_baseline_receipt performance_baseline_evidence; do
+  path=$(field "${key}_path" "$receipt_real")
+  evidence_real=$(canonical_file "$path") || fail "evidence-missing-symlinked-or-noncanonical:$key"
+  [ "$evidence_real" = "$path" ] || fail "evidence-path-not-canonical:$key"
+  require_sha "${key}_sha256" "$receipt_real"
+  [ "$(field "${key}_sha256" "$receipt_real")" = "$(hash_file "$evidence_real")" ] ||
+    fail "evidence-bytes-mismatch:$key"
+done
+
+performance_receipt=$(field performance_receipt_path "$receipt_real")
+performance_baseline=$(field performance_baseline_receipt_path "$receipt_real")
+performance_samples=$(field performance_samples_path "$receipt_real")
+performance_baseline_evidence=$(field performance_baseline_evidence_path "$receipt_real")
+authority_document=doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md
+authority_document_sha256=$(hash_file "$root/$authority_document")
+require_equal schema macos-m4-residency-baseline-v1 "$performance_baseline"
+require_equal status ADMITTED "$performance_baseline"
+require_equal requirement_id MBH-NFR-003 "$performance_baseline"
+require_equal selection_policy baseline-relative-10-percent "$performance_baseline"
+require_equal decision_source user-final-performance-authority-2026-09-02 "$performance_baseline"
+require_equal architecture "$host_arch" "$performance_baseline"
+require_equal request_count 20 "$performance_baseline"
+require_equal producer_sha256 "$candidate_sha" "$performance_baseline"
+require_equal authority_document "$authority_document" "$performance_baseline"
+require_equal authority_document_sha256 "$authority_document_sha256" "$performance_baseline"
+require_equal baseline_evidence_sha256 "$(hash_file "$performance_baseline_evidence")" "$performance_baseline"
+require_equal performance_baseline_receipt_sha256 "$(hash_file "$performance_baseline")" "$receipt_real"
+
+baseline_rss=$(field baseline_rss_kib "$performance_baseline")
+case "$baseline_rss" in ''|*[!0-9]*|0) fail invalid-baseline-rss ;; esac
+performance_server_sha=$(field server_sha256 "$performance_baseline")
+require_equal performance_server_sha256 "$performance_server_sha" "$receipt_real"
+require_equal schema macos-bootstrap-long-lived-residency-gate-v3 "$performance_receipt"
+require_equal status PASS "$performance_receipt"
+require_equal architecture "$host_arch" "$performance_receipt"
+require_equal request_count 20 "$performance_receipt"
+require_equal producer_sha256 "$candidate_sha" "$performance_receipt"
+require_equal server_sha256 "$performance_server_sha" "$performance_receipt"
+require_equal baseline_rss_kib "$baseline_rss" "$performance_receipt"
+require_equal baseline_receipt_sha256 "$(hash_file "$performance_baseline")" "$performance_receipt"
+require_equal baseline_evidence_sha256 "$(hash_file "$performance_baseline_evidence")" "$performance_receipt"
+require_equal authority_document_sha256 "$authority_document_sha256" "$performance_receipt"
+require_equal decision_source user-final-performance-authority-2026-09-02 "$performance_receipt"
+require_equal threshold_mode baseline-relative-10-percent "$performance_receipt"
+require_equal steady_rss_limit_percent 110 "$performance_receipt"
+require_equal growth_limit_percent 10 "$performance_receipt"
+require_equal samples_sha256 "$(hash_file "$performance_samples")" "$performance_receipt"
+observed_rss=$(field observed_max_steady_rss_kib "$performance_receipt")
+observed_growth=$(field observed_nonnegative_growth_kib "$performance_receipt")
+case "$observed_rss" in ''|*[!0-9]*|0) fail invalid-observed-steady-rss ;; esac
+case "$observed_growth" in ''|*[!0-9]*) fail invalid-observed-rss-growth ;; esac
+[ $((observed_rss * 100)) -le $((baseline_rss * 110)) ] || fail steady-rss-policy-exceeded
+[ $((observed_growth * 100)) -le $((baseline_rss * 10)) ] || fail rss-growth-policy-exceeded
+sample_verdict=$(awk -F '\t' -v expected_sha="$performance_server_sha" '
+  NR == 1 {
+    if ($0 != "sequence\trequest_id\tpid\tprocess_start_token\texecutable_sha256\trss_kib\thwm_kib") exit 1
+    next
+  }
+  {
+    sequence=NR-1
+    if (NF != 7 || $1 != sequence || $2 != "m4-residency-" sequence ||
+        $3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[0-9a-f]{64}$/ ||
+        $5 != expected_sha || $6 !~ /^[1-9][0-9]*$/ ||
+        $7 !~ /^[1-9][0-9]*$/ || $7 < $6) exit 1
+    if (sequence == 1) { pid=$3; token=$4; first_hwm=$7; previous_hwm=$7; max_rss=$6 }
+    else {
+      if ($3 != pid || $4 != token || $7 < previous_hwm) exit 1
+      previous_hwm=$7
+      if ($6 > max_rss) max_rss=$6
+    }
+    count++
+  }
+  END {
+    if (count != 20) exit 1
+    print max_rss " " previous_hwm-first_hwm
+  }
+' "$performance_samples") || fail invalid-native-performance-samples
+[ "$sample_verdict" = "$observed_rss $observed_growth" ] || fail performance-receipt-does-not-match-samples
+
+for gate in child_apk_consumption source_rewrite_gate spipe_results \
+    policy_root_runtime bootstrap_runtime produced_binary_gate \
+    composition_receipt_gate mode_gate startup_budget performance_gate; do
+  require_equal "$gate" pass "$receipt_real"
+done
+
+printf '%s\n' 'phase7_deployment_prerequisite=PASS'
+printf 'phase7_receipt_path=%s\n' "$receipt_real"
+printf 'phase7_receipt_sha256=%s\n' "$(hash_file "$receipt_real")"
+printf 'candidate_sha256=%s\n' "$candidate_sha"
+printf 'architecture=%s\n' "$host_arch"
+printf 'mode=%s\n' "$expected_mode"

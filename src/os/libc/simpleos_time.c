@@ -12,6 +12,8 @@
 #include "include/sys/types.h"
 #include "include/string.h"
 #include "include/stdio.h"
+#include "include/errno.h"
+#include <stdint.h>
 
 extern int64_t simpleos_syscall(int64_t, int64_t, int64_t, int64_t,
                                  int64_t, int64_t);
@@ -22,7 +24,11 @@ extern int errno;
  * ==================================================================== */
 
 int clock_gettime(clockid_t clk_id, struct timespec *tp) {
-    int64_t buf[2]; /* [seconds, nanoseconds] */
+    if (!tp) {
+        errno = EFAULT;
+        return -1;
+    }
+    int64_t buf[2] = {0, 0}; /* [seconds, nanoseconds] */
     int64_t r = simpleos_syscall(50, (int64_t)clk_id, (int64_t)(uintptr_t)buf,
                                   0, 0, 0);
     if (r < 0) {
@@ -36,6 +42,10 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp) {
 
 int gettimeofday(struct timeval *tv, void *tz) {
     (void)tz;
+    if (!tv) {
+        errno = EFAULT;
+        return -1;
+    }
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) < 0) return -1;
     tv->tv_sec  = ts.tv_sec;
@@ -57,9 +67,24 @@ clock_t clock(void) {
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
-    int64_t nanos = (int64_t)req->tv_sec * 1000000000LL + (int64_t)req->tv_nsec;
-    simpleos_syscall(51, nanos, 0, 0, 0, 0);
+    const int64_t nanos_per_second = 1000000000LL;
+    if (!req || req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= nanos_per_second) {
+        errno = req ? EINVAL : EFAULT;
+        return -1;
+    }
+    if ((int64_t)req->tv_sec > (INT64_MAX - (int64_t)req->tv_nsec) / nanos_per_second) {
+        errno = ERANGE;
+        return -1;
+    }
+    int64_t nanos = (int64_t)req->tv_sec * nanos_per_second + (int64_t)req->tv_nsec;
+    int64_t result = simpleos_syscall(51, nanos, 0, 0, 0, 0);
+    if (result < 0) {
+        errno = (int)(-result);
+        return -1;
+    }
     if (rem) {
+        /* Kernel sleep has no partial-remainder receipt; only report zero
+         * after an acknowledged completion. */
         rem->tv_sec  = 0;
         rem->tv_nsec = 0;
     }
@@ -81,7 +106,50 @@ static int _is_leap(int year) {
     return (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
 }
 
+/* SimpleOS currently exposes a deterministic proleptic-Gregorian subset from
+ * 1970 through 9999.  Keep conversion bounded so malformed `time_t` input
+ * cannot turn calendar conversion into a multi-million-year loop. */
+static int64_t _days_before_year(int year) {
+    int64_t days = 0;
+    for (int current = 1970; current < year; ++current)
+        days += _is_leap(current) ? 366 : 365;
+    return days;
+}
+
+static int _normalize_calendar_month(const struct tm *tm, int *year_out,
+                                     int *month_out) {
+    int64_t year = (int64_t)tm->tm_year + 1900LL;
+    int64_t month = (int64_t)tm->tm_mon;
+    year += month / 12LL;
+    month %= 12LL;
+    if (month < 0) {
+        month += 12LL;
+        year--;
+    }
+    if (year < 1970LL || year > 9999LL) return 0;
+    *year_out = (int)year;
+    *month_out = (int)month;
+    return 1;
+}
+
+static int _calendar_tm_valid(const struct tm *tm) {
+    if (!tm || tm->tm_year < 70 || tm->tm_year > 8099 ||
+        tm->tm_mon < 0 || tm->tm_mon >= 12 ||
+        tm->tm_hour < 0 || tm->tm_hour > 23 ||
+        tm->tm_min < 0 || tm->tm_min > 59 ||
+        tm->tm_sec < 0 || tm->tm_sec > 60) return 0;
+    int days[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int year = tm->tm_year + 1900;
+    if (_is_leap(year)) days[1] = 29;
+    return tm->tm_mday >= 1 && tm->tm_mday <= days[tm->tm_mon];
+}
+
 struct tm *gmtime(const time_t *timer) {
+    const int64_t max_calendar_seconds = _days_before_year(10000) * 86400LL - 1;
+    if (!timer || *timer < 0 || (int64_t)*timer > max_calendar_seconds) {
+        errno = timer ? ERANGE : EFAULT;
+        return NULL;
+    }
     time_t t = *timer;
 
     /* Seconds within the day */
@@ -124,25 +192,39 @@ struct tm *localtime(const time_t *timer) {
 }
 
 time_t mktime(struct tm *tm) {
-    time_t result = 0;
-    int target_year = tm->tm_year + 1900;
-
-    for (int y = 1970; y < target_year; y++) {
-        result += _is_leap(y) ? 366 * 86400 : 365 * 86400;
+    if (!tm) {
+        errno = EFAULT;
+        return (time_t)-1;
+    }
+    int year, month;
+    if (!_normalize_calendar_month(tm, &year, &month)) {
+        errno = ERANGE;
+        return (time_t)-1;
     }
 
-    int leap = _is_leap(target_year);
-    _days_in_month[1] = leap ? 29 : 28;
+    int64_t days = _days_before_year(year);
+    for (int m = 0; m < month; ++m)
+        days += _is_leap(year) && m == 1 ? 29 : _days_in_month[m];
+    days += (int64_t)tm->tm_mday - 1LL;
 
-    for (int m = 0; m < tm->tm_mon; m++) {
-        result += _days_in_month[m] * 86400;
+    int64_t seconds = (int64_t)tm->tm_hour * 3600LL +
+                      (int64_t)tm->tm_min * 60LL + (int64_t)tm->tm_sec;
+    int64_t day_adjust = seconds / 86400LL;
+    seconds %= 86400LL;
+    if (seconds < 0) {
+        seconds += 86400LL;
+        day_adjust--;
+    }
+    days += day_adjust;
+    if (days < 0 || days >= _days_before_year(10000)) {
+        errno = ERANGE;
+        return (time_t)-1;
     }
 
-    result += (time_t)(tm->tm_mday - 1) * 86400;
-    result += (time_t)tm->tm_hour * 3600;
-    result += (time_t)tm->tm_min * 60;
-    result += (time_t)tm->tm_sec;
-
+    time_t result = (time_t)(days * 86400LL + seconds);
+    struct tm *normalized = gmtime(&result);
+    if (!normalized) return (time_t)-1;
+    *tm = *normalized;
     return result;
 }
 
@@ -154,11 +236,11 @@ time_t mktime(struct tm *tm) {
 
 /* Write a zero-padded decimal of `digits` width into buf */
 static size_t _fmt_dec(char *buf, size_t max, size_t pos, int val, int digits) {
-    char tmp[8];
+    char tmp[32];
     int len = 0;
-    int v = val < 0 ? -val : val;
+    uint64_t v = val < 0 ? (uint64_t)(-(int64_t)val) : (uint64_t)val;
     do {
-        tmp[len++] = '0' + (char)(v % 10);
+        tmp[len++] = '0' + (char)(v % 10U);
         v /= 10;
     } while (v > 0);
     while (len < digits) tmp[len++] = '0';
@@ -170,6 +252,19 @@ static size_t _fmt_dec(char *buf, size_t max, size_t pos, int val, int digits) {
 }
 
 size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
+    if (!fmt || !tm) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (max == 0) return 0;
+    if (!s) {
+        errno = EFAULT;
+        return 0;
+    }
+    if (!_calendar_tm_valid(tm)) {
+        errno = EINVAL;
+        return 0;
+    }
     size_t pos = 0;
 
     while (*fmt && pos < max) {

@@ -482,8 +482,6 @@ run_tier() {
     _failed_ids=$(awk '$2 != "pass" {printf "%s ", $1}' "$_work/verdicts" | sed 's/ *$//')
     _failed_n=$(awk '$2 != "pass"' "$_work/verdicts" | wc -l | tr -d ' ')
     _error_ids=$(awk '$2 == "error" {printf "%s ", $1}' "$_work/verdicts" | sed 's/ *$//')
-    rm -rf "$_work" "$_rows"
-
     # Both of these are "we did not reach a real verdict for everything
     # selected", never a pass and never a plain FAIL either -- a FAIL claims
     # every row ran and at least one genuinely found a problem, which is not
@@ -491,10 +489,12 @@ run_tier() {
     # no value.
     if [ "$_killed" = 1 ]; then
         echo "run-gate-tier: ERROR — nothing was checked (tier '$_tier' exceeded its ${_budget_s}s budget; killed row(s): $_error_ids)" >&2
+        rm -rf "$_work" "$_rows"
         return 2
     fi
     if [ "$_bad_placeholder" = 1 ]; then
         echo "run-gate-tier: ERROR — nothing was checked (tier '$_tier': row(s) never ran, missing placeholder value(s): $_error_ids)" >&2
+        rm -rf "$_work" "$_rows"
         return 2
     fi
     if [ "$_failed_n" -gt 0 ]; then
@@ -503,9 +503,11 @@ run_tier() {
             echo "--- row $_fid log ---"
             cat "$_work/$_fid.log" 2>/dev/null || echo "(no log)"
         done
+        rm -rf "$_work" "$_rows"
         return 1
     fi
     echo "PASS — $_checked row(s) checked, 0 failed"
+    rm -rf "$_work" "$_rows"
     return 0
 }
 
@@ -559,14 +561,14 @@ EOF
     cat > "$ST_T/m3.sdn" <<EOF
 $HDR
     g-ok, local, false, tree, "sh -c 'exit 0'", -, -, "ok"
-    g-bad, local, false, tree, "sh -c 'exit 1'", -, -, "fails"
+    g-bad, local, false, tree, "sh -c 'echo fixture-cause; exit 1'", -, -, "fails"
 EOF
     out=$(sh "$0" --tier local --manifest-file "$ST_T/m3.sdn" --budget 20 --jobs 4 --results "$ST_T/r3.out" 2>"$ST_T/r3.err")
     rc=$?
-    if [ "$rc" -eq 1 ] && grep -q '^g-bad fail$' "$ST_T/r3.out" && grep -q '^g-ok pass$' "$ST_T/r3.out"; then
-        st_report ok "(S3) a failing row FAILs the tier and is recorded 'fail'"
+    if [ "$rc" -eq 1 ] && grep -q '^g-bad fail$' "$ST_T/r3.out" && grep -q '^g-ok pass$' "$ST_T/r3.out" && printf '%s\n' "$out" | grep -q 'fixture-cause'; then
+        st_report ok "(S3) a failing row FAILs the tier, records 'fail', and shows its log"
     else
-        st_report bad "(S3) a failing row FAILs the tier and is recorded 'fail'" "rc=$rc out=$(cat "$ST_T/r3.out" 2>/dev/null)"
+        st_report bad "(S3) a failing row FAILs the tier, records 'fail', and shows its log" "rc=$rc out=$(cat "$ST_T/r3.out" 2>/dev/null)"
     fi
 
     # (4) 0 selected rows is ERROR, never a pass.

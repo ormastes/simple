@@ -1,4 +1,8 @@
 # native-build: std.env closure blocked by unsupported array/text methods
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity:** medium (loud fail — no silent wrongness; blocks any native-build
 entry that transitively imports std.env.variables / std.path)
@@ -98,3 +102,4 @@ env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 \
   bin/simple native-build --entry /tmp/env_facade.spl -o /tmp/env_facade_bin --clean
 # tip: unresolved name: rt_env_get / name; after fixes: unresolved method call: find/join/last/pop
 ```
+

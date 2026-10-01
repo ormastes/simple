@@ -1,9 +1,12 @@
 # Deployed release binary: single-file `simple test` hangs on ALL specs (stale Jul-11 seed)
+## Obsolete 2026-09-16 — stale Jul-11 seed (sha 561767c6615bc013) long replaced per later redeploy records; fresh seed recorded clean
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-17
 **Severity:** high (blocks single-file spec runs repo-wide on the deployed binary)
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** OPEN — hypothesis pending fresh-seed confirmation
 
 ## 2026-07-18 native-owner update
 
@@ -61,3 +64,4 @@ lane S63) so the true self-hosted binary can be redeployed.
 - app.io.mod import cycle — refuted; see the refutation section in
   `S61_interpreter_stack_overflow_app_io_mod_2026-07-17.md`.
 - Test-runner infra importing the suspect modules — repo-wide grep negative.
+

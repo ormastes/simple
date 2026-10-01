@@ -1,0 +1,114 @@
+# Strict direct-2D SkPicture producer for the shared DrawIR contract.
+# Only opaque, untransformed, non-antialiased filled rectangles are admitted.
+# Scan the complete picture before allocating any DrawIR command.
+
+use std.skia.entity.picture.{SkPicture, SkPictureOpKind}
+use std.skia.entity.enums.{SkPaintStyle, SkBlendMode}
+use std.common.numeric_round.{is_inf_f64, is_nan_f64}
+use common.ui.draw_ir.{
+    DrawIrComposition, DrawIrCommand, DRAW_IR_BACKEND_GPU,
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    draw_ir_fractional_rect, draw_ir_rect
+}
+
+fn _skia_draw_ir_finite(value: f64) -> bool:
+    not is_nan_f64(value) and not is_inf_f64(value)
+
+fn _skia_draw_ir_unsupported_kind(kind: SkPictureOpKind) -> text:
+    if kind == SkPictureOpKind.Save: return "Save"
+    if kind == SkPictureOpKind.SaveLayer: return "SaveLayer"
+    if kind == SkPictureOpKind.Restore: return "Restore"
+    if kind == SkPictureOpKind.DrawOval: return "DrawOval"
+    if kind == SkPictureOpKind.DrawPath: return "DrawPath"
+    if kind == SkPictureOpKind.DrawText: return "DrawText"
+    if kind == SkPictureOpKind.DrawImage: return "DrawImage"
+    if kind == SkPictureOpKind.ClipRect: return "ClipRect"
+    if kind == SkPictureOpKind.SetMatrix: return "SetMatrix"
+    if kind == SkPictureOpKind.DrawPaint: return "DrawPaint"
+    if kind == SkPictureOpKind.DrawPoints: return "DrawPoints"
+    if kind == SkPictureOpKind.DrawRRect: return "DrawRRect"
+    if kind == SkPictureOpKind.DrawTextBlob: return "DrawTextBlob"
+    "unknown"
+
+fn _skia_draw_ir_rect_issue(left: f64, top: f64, right: f64, bottom: f64,
+    width: i32, height: i32) -> text:
+    if not _skia_draw_ir_finite(left) or not _skia_draw_ir_finite(top) or
+        not _skia_draw_ir_finite(right) or not _skia_draw_ir_finite(bottom):
+        return "rectangle-coordinate-nonfinite"
+    if right <= left or bottom <= top:
+        return "rectangle-empty-or-inverted"
+    if not _skia_draw_ir_finite(right - left) or not _skia_draw_ir_finite(bottom - top):
+        return "rectangle-size-nonfinite"
+    if left < 0.0 or top < 0.0 or right > width.to_f64() or bottom > height.to_f64():
+        return "rectangle-outside-canvas"
+    ""
+
+# Returns the first unsupported operation with its index. The resulting
+# composition is created only after this scan succeeds for every operation.
+fn _skia_picture_draw_ir_issue(picture: SkPicture, width: i32, height: i32) -> text:
+    if picture.op_count != picture.ops.len().to_i64():
+        return "picture-op-count-mismatch"
+    var index = 0
+    for op in picture.ops:
+        var issue = ""
+        if op.kind != SkPictureOpKind.DrawRect:
+            issue = "unsupported-op: {_skia_draw_ir_unsupported_kind(op.kind)}"
+        elif op.paint.style != SkPaintStyle.Fill:
+            issue = "paint-style"
+        elif op.paint.anti_alias:
+            issue = "paint-anti-alias"
+        elif op.paint.blend_mode != SkBlendMode.SrcOver:
+            issue = "paint-blend-mode"
+        elif op.paint.color < 0 or op.paint.color > 0xFFFFFFFF:
+            issue = "paint-color-range"
+        elif ((op.paint.color >> 24) & 0xFF) != 255:
+            issue = "paint-alpha"
+        else:
+            issue = _skia_draw_ir_rect_issue(
+                op.rect.left, op.rect.top, op.rect.right, op.rect.bottom,
+                width, height)
+        if issue == "" and index == 0 and (op.rect.left != 0.0 or
+            op.rect.top != 0.0 or op.rect.right != width.to_f64() or
+            op.rect.bottom != height.to_f64()):
+            issue = "integer-full-surface-clear-required-first"
+        if issue != "":
+            return "op {index}: {issue}"
+        index = index + 1
+    ""
+
+# Convert a strict direct-2D slice of SkPicture to shared DrawIR. The first
+# full-surface clear is exact integer geometry; later rectangles retain f64.
+pub fn skia_picture_to_draw_ir_strict(picture: SkPicture, width: i32, height: i32) -> Result<DrawIrComposition, text>:
+    if width <= 0 or height <= 0:
+        return Err("invalid-canvas-size")
+    # The recorded cull may constrain replay. Admit only an exact surface-sized
+    # recording until crop and clip semantics have a shared DrawIR encoding.
+    val cull = picture.cull_rect
+    if cull.left != 0.0 or cull.top != 0.0 or
+        cull.right != width.to_f64() or cull.bottom != height.to_f64():
+        return Err("picture-cull-not-full-surface")
+    if picture.ops.len() == 0:
+        return Err("picture-empty")
+    val issue = _skia_picture_draw_ir_issue(picture, width, height)
+    if issue != "":
+        return Err(issue)
+
+    var commands: [DrawIrCommand] = []
+    var index = 0
+    for op in picture.ops:
+        val rect = op.rect
+        if index == 0:
+            # Both Vulkan backends require an unambiguous opaque initializer.
+            commands.push(draw_ir_rect("rect-{index}", 0, 0,
+                width, height, op.paint.color.to_u32()))
+        else:
+            commands.push(draw_ir_fractional_rect(
+                "rect-{index}", rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top,
+                op.paint.color.to_u32()))
+        index = index + 1
+    val batch = draw_ir_batch("skia-picture", DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("skia-picture-surface", "skia-picture",
+            0, 0, width, height, 0, 1000, false), commands)
+    Ok(draw_ir_composition("skia-picture", "skia-picture",
+        DRAW_IR_BACKEND_GPU, [batch]))

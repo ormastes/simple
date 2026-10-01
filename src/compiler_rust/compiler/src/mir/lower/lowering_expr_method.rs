@@ -2,7 +2,7 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use super::lowering_di::builtin_type_name;
-use crate::hir::{BinOp, DispatchMode, HirExpr, HirType, TypeId};
+use crate::hir::{BinOp, DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -150,6 +150,87 @@ impl<'a> MirLowerer<'a> {
         simple_runtime::value::hash_variant_discriminant(variant_name) as i64
     }
 
+    /// Erased-at-HIR Result receivers still need the interpreter's Option
+    /// contract. Build the same receiver-once projection used by typed HIR,
+    /// using existing MIR Option constructors instead of a new runtime ABI.
+    fn lower_result_option_projection(&mut self, receiver: &HirExpr, variant: &str) -> MirLowerResult<VReg> {
+        use crate::mir::effects::LocalKind;
+        use crate::mir::function::MirLocal;
+
+        let local_idx = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: "$result_option_subject".to_string(),
+                ty: receiver.ty,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+        let subject = HirExpr {
+            kind: HirExprKind::Local(local_idx),
+            ty: receiver.ty,
+        };
+        let condition = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_check_variant".to_string(),
+                args: vec![
+                    subject.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(2),
+                        ty: TypeId::I64,
+                    },
+                    HirExpr {
+                        kind: HirExprKind::Integer(Self::enum_variant_discriminant(variant)),
+                        ty: TypeId::I64,
+                    },
+                ],
+            },
+            ty: TypeId::BOOL,
+        };
+        let some = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    kind: HirExprKind::Global("Option::Some".to_string()),
+                    ty: TypeId::ANY,
+                }),
+                args: vec![HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_payload".to_string(),
+                        args: vec![subject],
+                    },
+                    ty: TypeId::ANY,
+                }],
+            },
+            ty: TypeId::ANY,
+        };
+        let none = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    kind: HirExprKind::Global("Option::None".to_string()),
+                    ty: TypeId::ANY,
+                }),
+                args: vec![],
+            },
+            ty: TypeId::ANY,
+        };
+        self.lower_expr(&HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx,
+                value: Box::new(receiver.clone()),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(some),
+                        else_branch: Some(Box::new(none)),
+                    },
+                    ty: TypeId::ANY,
+                }),
+            },
+            ty: TypeId::ANY,
+        })
+    }
+
     pub(super) fn lower_method_call_expr(
         &mut self,
         receiver: &HirExpr,
@@ -190,14 +271,14 @@ impl<'a> MirLowerer<'a> {
                         .or_else(|| self.enum_payload_type_for_method_receiver(effective_ty))
                     {
                         return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
+                            "rt_unwrap_or_trap",
                             std::slice::from_ref(receiver),
                             payload_ty,
                         );
                     }
                     if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
                         return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
+                            "rt_unwrap_or_trap",
                             std::slice::from_ref(receiver),
                             TypeId::ANY,
                         );
@@ -221,6 +302,15 @@ impl<'a> MirLowerer<'a> {
                             TypeId::ANY,
                         );
                     }
+                }
+                "ok" | "err"
+                    if self.type_registry.is_some_and(|registry| {
+                        registry.get_type_name(receiver.ty) == Some("Result")
+                            || registry.get_type_name(effective_ty) == Some("Result")
+                    }) =>
+                {
+                    let variant = if method == "ok" { "Ok" } else { "Err" };
+                    return self.lower_result_option_projection(receiver, variant);
                 }
                 "is_some" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "Some")
@@ -256,8 +346,12 @@ impl<'a> MirLowerer<'a> {
                             kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
                             ty: TypeId::I64,
                         };
-                        let args = [receiver.clone(), expected];
-                        return self.lower_builtin_call_expr("rt_enum_check_discriminant", &args, TypeId::BOOL);
+                        let expected_enum_id = HirExpr {
+                            kind: crate::hir::HirExprKind::Integer(0),
+                            ty: TypeId::I64,
+                        };
+                        let args = [receiver.clone(), expected_enum_id, expected];
+                        return self.lower_builtin_call_expr("rt_enum_check_variant", &args, TypeId::BOOL);
                     }
                 }
                 _ => {}
@@ -435,12 +529,47 @@ impl<'a> MirLowerer<'a> {
 
             let target = crate::mir::effects::CallTarget::from_name("rt_dict_set");
             return self.with_func(|func, current_block| {
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    // rt_dict_set returns an i8 success flag. `.set()` is a
+                    // mutating fluent method, so its expression value is the
+                    // receiver handle, as it is in the interpreter. Returning
+                    // the flag made successful calls look like nil after the
+                    // RuntimeValue conversion in the JIT.
+                    dest: None,
+                    target,
+                    args: vec![receiver_reg, key_reg, value_reg],
+                });
+                receiver_reg
+            });
+        }
+
+        // A structurally typed Dict has no nominal method owner. Emitting
+        // `Dict.contains_key` lets name-based codegen recovery discard that
+        // qualifier and bind an unrelated user method. Keep membership on the
+        // same key ABI as indexing: tagged integers/booleans, raw float bits.
+        if matches!(method, "has" | "has_key" | "contains" | "contains_key")
+            && args.len() == 1
+            && self.receiver_is_dict(receiver, receiver_local_ty)
+        {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let raw_key_reg = self.lower_expr(&args[0])?;
+            // Literal writes, indexing and typed mutation currently preserve
+            // raw float keys. Boxing only this read would make those keys miss.
+            let float_key = matches!(args[0].ty, TypeId::F32 | TypeId::F64)
+                || (args[0].ty == TypeId::ANY && matches!(args[0].kind, HirExprKind::Float(_)));
+            let key_reg = if float_key {
+                raw_key_reg
+            } else {
+                self.box_arg_for_any_param(raw_key_reg, &args[0])?
+            };
+            return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(dest),
-                    target,
-                    args: vec![receiver_reg, key_reg, value_reg],
+                    target: crate::mir::effects::CallTarget::from_name("rt_contains"),
+                    args: vec![receiver_reg, key_reg],
                 });
                 dest
             });
@@ -738,11 +867,11 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
-        // `d.entries()` on a Dict<K, V>: mirrors the interpreter's
-        // "entries"|"items" (interpreter_method/collections.rs) — an array
-        // of (key, value) tuples. `rt_dict_entries` (runtime/src/value/
-        // dict.rs) already exists and already had a linker manifest entry
-        // (common/src/runtime_symbols.rs, "for-in iteration over
+        // `d.entries()` / `d.items()` on a Dict<K, V>: mirrors the
+        // interpreter's "entries"|"items" (interpreter_method/collections.rs)
+        // — an array of (key, value) tuples. `rt_dict_entries` (runtime/src/
+        // value/dict.rs) already exists and already had a linker manifest
+        // entry (common/src/runtime_symbols.rs, "for-in iteration over
         // dicts/arrays") but was never declared in the codegen SFFI table
         // (codegen/runtime_sffi.rs) or wired to a dispatch arm, so it fell
         // through to `rt_method_not_found`. Returns a fresh array pointer —
@@ -754,7 +883,17 @@ impl<'a> MirLowerer<'a> {
         // order (the SAME already-known `dict.keys()`/`dict.values()`
         // ordering gap the audit doc calls out separately) — the result SET
         // matches, the SEQUENCE does not.
-        if method == "entries" && args.is_empty() && self.receiver_is_dict(receiver, receiver_local_ty) {
+        // `items` was originally left out of this `if` (only `entries` was
+        // checked) even though the HIR type-inference table above already
+        // treats them as aliases — that gap is
+        // doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md
+        // defect 2: `d.items()` fell through to `rt_method_not_found` under
+        // the default JIT while `d.entries()` (the exact same runtime call)
+        // already worked.
+        if matches!(method, "entries" | "items")
+            && args.is_empty()
+            && self.receiver_is_dict(receiver, receiver_local_ty)
+        {
             let receiver_reg = self.lower_expr(receiver)?;
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -1474,6 +1613,22 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // Dict owns a distinct length layout in each runtime. The generic
+        // LLVM length fast path only handles strings/arrays, so preserve the
+        // structural receiver and call the existing Dict owner directly.
+        if matches!(method, "len" | "length") && args.is_empty() && self.receiver_is_dict(receiver, receiver_local_ty) {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_dict_len"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
         if method == "len" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -1588,6 +1743,22 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U8))
         {
+            // FAM freestanding push ABI: capture the possibly relocated
+            // header and rebind it (see the general rt_array_push site below).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_typed_bytes_u8_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // The push helper returns bool (success), NOT the array. The value of
             // the `arr.push(x)` expression must be the (in-place mutated) array
             // itself, so `arr = arr.push(x)` keeps a valid array pointer instead
@@ -1610,6 +1781,22 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U32))
         {
+            // FAM freestanding push ABI: capture the possibly relocated
+            // header and rebind it (see the general rt_array_push site below).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_typed_words_u32_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // Push returns bool — yield the array as the expression value (see above).
             return self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();
@@ -1629,6 +1816,22 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U64))
         {
+            // FAM freestanding push ABI: capture the possibly relocated
+            // header and rebind it (see the general rt_array_push site below).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_typed_words_u64_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // Push returns bool — yield the array as the expression value (see above).
             return self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();
@@ -1773,7 +1976,14 @@ impl<'a> MirLowerer<'a> {
         // so `[T].index_of(v)` above is untouched; the receiver and needle
         // are tagged string handles like the one-arg `rt_index_of` route, and
         // `start` stays a raw i64 as `rt_text_find` expects.
-        if method == "index_of" && args.len() == 2 && !self.receiver_is_array(receiver, receiver_local_ty) {
+        // `find`/`find_str` are aliases of `index_of` and take the same
+        // optional start offset. They previously fell through to the 2-arg
+        // `rt_string_find` route, which DROPPED the offset and answered from
+        // position 0 without ever failing.
+        if matches!(method, "index_of" | "find" | "find_str")
+            && args.len() == 2
+            && !self.receiver_is_array(receiver, receiver_local_ty)
+        {
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -1787,6 +1997,28 @@ impl<'a> MirLowerer<'a> {
         }
 
         if is_array_append_method && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
+            // FAM freestanding push ABI (aarch64/arm32/x86_32 baremetal): the
+            // call returns the possibly realloc-moved array HEADER, and the
+            // bump heap always moves at grow. That return IS the post-push
+            // array value: yield it (so `arr = arr.push(x)` stores the new
+            // header) and store it back into the receiver's place (so a bare
+            // `arr.push(x)` statement in a loop stops re-pushing the stale
+            // pre-grow block — the 16,400-byte-per-push heap leak of
+            // doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_array_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // rt_array_push returns bool (success), NOT the array. The value of
             // the `arr.push(x)` expression must be the (in-place mutated) array
             // itself, so `arr = arr.push(x)` keeps a valid array pointer instead
@@ -1845,6 +2077,9 @@ impl<'a> MirLowerer<'a> {
         // bridge, mirroring u64. See
         // doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md.
         if method == "to_string" || method == "to_text" || method == "str" {
+            if receiver.ty == TypeId::CHAR {
+                return self.emit_to_string(receiver_reg, TypeId::CHAR);
+            }
             if receiver.ty == TypeId::U64 || receiver.ty == TypeId::I64 {
                 let raw_fn = if receiver.ty == TypeId::U64 {
                     "rt_raw_u64_to_string"
@@ -1972,7 +2207,62 @@ impl<'a> MirLowerer<'a> {
             .is_some_and(|name| name == "Result" || name == "Option")
             && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len());
 
-        let func_name = if wrapper_enum_builtin_collision {
+        // The receiver is type-erased AND the method name collides with the
+        // builtin-collection set that codegen claims BEFORE user-method
+        // resolution. Left bare, this call is routed to a tag-dispatching
+        // runtime helper (`rt_find`, `rt_index_get`, ...) that untags the
+        // receiver and reads a 32-bit type header — one that CLASS INSTANCES DO
+        // NOT CARRY. On riscv64/freestanding that misread traps and reboots the
+        // guest; on x86_64/aarch64 it silently returns the helper's `-1` miss
+        // sentinel instead of running the user's method, so the defect is
+        // LATENT on every arch rather than riscv64-specific.
+        //
+        // Recover the class from the local's single reaching definition and
+        // qualify the call, so it resolves like any other typed receiver. The
+        // narrow gate matters: this fires ONLY for names already in the
+        // collision set and ONLY for a receiver nothing else could type, so a
+        // genuine erased Dict/Array/text receiver still reaches the builtin and
+        // bug #62 is preserved untouched.
+        // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+        let erased_class_receiver_ty: Option<TypeId> = if !wrapper_enum_builtin_collision
+            && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len())
+            && self.type_registry.and_then(|r| r.get_type_name(receiver.ty)).is_none()
+            && receiver_local_ty
+                .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)))
+                .is_none()
+        {
+            match &receiver.kind {
+                crate::hir::HirExprKind::Local(idx) => self.erased_local_class_types.get(idx).copied(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let declared_trait_owner = match &receiver.kind {
+            crate::hir::HirExprKind::Local(index) => self
+                .local_type_name_hints
+                .get(index)
+                .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
+                .cloned(),
+            _ => None,
+        };
+
+        let func_name = if let Some(trait_name) = declared_trait_owner {
+            format!("{}.{}", trait_name, method)
+        } else if let Some(class_ty) = erased_class_receiver_ty
+            .filter(|_| !wrapper_enum_builtin_collision)
+            .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)).map(|n| (t, n)))
+            .map(|(_, n)| n)
+        {
+            if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                eprintln!(
+                    "[MIR-METHOD-DISPATCH] '{}' qualified via single-assignment class '{}' (erased receiver would otherwise be claimed by the builtin-collection heuristic)",
+                    method, class_ty
+                );
+            }
+            format!("{}.{}", class_ty, method)
+        } else if wrapper_enum_builtin_collision {
             if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                 eprintln!(
                     "[MIR-METHOD-DISPATCH] '{}' receiver resolved to Result/Option wrapper; routing as erased builtin instead of a nonexistent qualified method",
@@ -2032,7 +2322,6 @@ impl<'a> MirLowerer<'a> {
             method.to_string()
         };
 
-        let dispatch_receiver_ty = receiver_local_ty.unwrap_or(receiver.ty);
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch).
@@ -2041,7 +2330,7 @@ impl<'a> MirLowerer<'a> {
                 // concrete classes that merely share a method name with a trait
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
-                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name);
+                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name, args.len());
                 // Duck-typed trait (no `impl Trait for ...` anywhere in the
                 // unit, e.g. game2d's `App`/`GameBackend`): there is no vtable
                 // to dispatch through, so the old lowering emitted the

@@ -14,6 +14,39 @@ fn source_to_mir(source: &str) -> crate::mir::MirModule {
     lower_to_mir(&hir_module).expect("mir lower failed")
 }
 
+#[test]
+fn test_cranelift_jit_typed_dict_membership_present_and_missing_scalar_keys() {
+    let mir = source_to_mir(
+        "fn integer_keys() -> i64:\n    val map: Dict<i64, i64> = {1: 7}\n    if map.has(1) and map.contains_key(1) and not map.has_key(2) and not map.contains(2):\n        return 1\n    return 0\n\nfn boolean_keys() -> i64:\n    val map: Dict<bool, i64> = {true: 7}\n    if map.contains_key(true) and not map.contains_key(false):\n        return 1\n    return 0\n",
+    );
+    let mut em = LocalExecutionManager::cranelift().expect("initialize membership JIT");
+    em.compile_module(&mir).expect("compile runtime membership predicates");
+    assert_eq!(em.execute("integer_keys", &[]).expect("integer membership"), 1);
+    assert_eq!(em.execute("boolean_keys", &[]).expect("boolean membership"), 1);
+}
+
+#[test]
+fn test_cranelift_jit_typed_dict_float_literal_key_compatibility() {
+    let mir = source_to_mir(
+        "fn float_index() -> i64:\n    val map: Dict<f64, i64> = {1.0: 7}\n    return map[1.0]\n\nfn float_get() -> i64:\n    val map: Dict<f64, i64> = {1.0: 7}\n    return map.get(1.0)\n\nfn float_membership() -> i64:\n    val map: Dict<f64, i64> = {1.0: 7}\n    if map.has(1.0) and map.has_key(1.0) and map.contains(1.0) and map.contains_key(1.0) and not map.has(2.0) and not map.has_key(2.0) and not map.contains(2.0) and not map.contains_key(2.0):\n        return 1\n    return 0\n",
+    );
+    let mut em = LocalExecutionManager::cranelift().expect("initialize float key JIT");
+    em.compile_module(&mir).expect("compile float literal key paths");
+    assert_eq!(em.execute("float_index", &[]).expect("float literal index"), 7);
+    assert_eq!(em.execute("float_get", &[]).expect("float literal get"), 7);
+    assert_eq!(em.execute("float_membership", &[]).expect("float literal membership"), 1);
+}
+
+#[test]
+fn test_cranelift_jit_typed_dict_len_live_count() {
+    let mir = source_to_mir(include_str!("../../../../../test/fixtures/native/typed_dict_len/main.spl"));
+    let mut em = LocalExecutionManager::cranelift().expect("initialize Dict length JIT");
+    em.compile_module(&mir).expect("compile typed Dict length fixture");
+    for (name, expected) in [("dict_len_sequence", 0), ("dict_len_field", 2), ("dict_len_alias_field", 1), ("dict_len_alias_local", 3), ("dict_len_parameter_case", 2), ("dict_len_receiver_once", 1), ("dict_len_nominal", 23), ("dict_len_nominal_length", 28)] {
+        assert_eq!(em.execute(name, &[]).expect(name), expected, "{name}: raw live count or authored nominal result");
+    }
+}
+
 // =============================================================================
 // Cranelift JIT Tests
 // =============================================================================

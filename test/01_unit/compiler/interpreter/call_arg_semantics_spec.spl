@@ -1,0 +1,79 @@
+"""
+## Purpose and audience
+
+# Call Argument and Receiver Binding Regression Spec
+
+Reproduces three interpreter defects in argument / receiver binding:
+
+- named arguments were ignored on METHOD calls (values bound positionally),
+- a positional argument following a named one re-filled the already-named slot,
+- a `context obj:` block inside a function body never wrote its assignments
+  back to the enclosing frame (and was deleted outright by HIR lowering).
+
+Run `bin/simple test test/01_unit/compiler/interpreter/call_arg_semantics_spec.spl`
+and confirm 0 failed. Each expectation carries its oracle inline.
+"""
+
+describe "Named arguments on method calls":
+    it "reorders named arguments for an instance method":
+        class Math:
+            fn subtract(self, minuend, subtrahend):
+                return minuend - subtrahend
+
+        val m = Math {}
+        # 50 - 15, NOT 15 - 50
+        expect m.subtract(subtrahend=15, minuend=50) == 35
+
+    it "still binds positional method arguments in order":
+        class Math2:
+            fn subtract(self, minuend, subtrahend):
+                return minuend - subtrahend
+
+        val m = Math2 {}
+        expect m.subtract(50, 15) == 35
+
+describe "Positional argument after a named one":
+    it "fills the next unnamed struct field":
+        struct Point:
+            x: i64
+            y: i64
+        val y = 20
+        val point = Point(x: 10, y)
+        expect point.x == 10
+        expect point.y == 20
+
+    it "skips a named field in the middle":
+        struct Config:
+            host: text
+            port: i64
+            timeout: i64
+        val host = "localhost"
+        val timeout = 30
+        val config = Config(host, port: 8080, timeout)
+        expect config.port == 8080
+        expect config.timeout == 30
+
+describe "context block inside a function body":
+    it "runs the body and persists assignments":
+        class Calculator:
+            fn double(self, x):
+                return x * 2
+
+        val calc = Calculator {}
+        var res = 0
+        context calc:
+            res = double(21)
+        expect res == 42
+
+    it "reads self fields from the context object":
+        class Adder:
+            base: i64 = 10
+
+            fn add(self, x):
+                return self.base + x
+
+        val a = Adder { base: 30 }
+        var res = 0
+        context a:
+            res = add(12)
+        expect res == 42

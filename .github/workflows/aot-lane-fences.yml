@@ -37,6 +37,7 @@ name: AOT Lane Fences
 # regression" with "could not run at all".
 on:
   push:
+    branches: [main]
     paths:
       - 'scripts/check/check-native-*.shs'
       - 'scripts/check/check-rt-io-file-native-jit-stub.shs'
@@ -44,8 +45,14 @@ on:
       - 'scripts/check/check-aot-lane-fences.shs'
       - 'test/fixtures/**'
       - 'src/compiler/**'
+      - 'src/lib/nogc_sync_mut/sffi/dynamic.spl'
+      - 'src/lib/nogc_sync_mut/sffi/dynlib_exact_admission_v1.spl'
+      - 'src/lib/nogc_sync_mut/sffi/dynlib_snapshot_registry_v1.spl'
+      - 'src/lib/nogc_sync_mut/composition/environment_variants/callable_map_v1.spl'
+      - 'test/01_unit/lib/nogc_sync_mut/composition/environment_variants/callable_map_v1_spec.spl'
       - '.github/workflows/aot-lane-fences.yml'
   pull_request:
+    types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
     paths:
       - 'scripts/check/check-native-*.shs'
       - 'scripts/check/check-rt-io-file-native-jit-stub.shs'
@@ -53,6 +60,11 @@ on:
       - 'scripts/check/check-aot-lane-fences.shs'
       - 'test/fixtures/**'
       - 'src/compiler/**'
+      - 'src/lib/nogc_sync_mut/sffi/dynamic.spl'
+      - 'src/lib/nogc_sync_mut/sffi/dynlib_exact_admission_v1.spl'
+      - 'src/lib/nogc_sync_mut/sffi/dynlib_snapshot_registry_v1.spl'
+      - 'src/lib/nogc_sync_mut/composition/environment_variants/callable_map_v1.spl'
+      - 'test/01_unit/lib/nogc_sync_mut/composition/environment_variants/callable_map_v1_spec.spl'
       - '.github/workflows/aot-lane-fences.yml'
   schedule:
     - cron: '0 3 * * *'
@@ -64,7 +76,9 @@ concurrency:
 
 jobs:
   aot-lane-fences:
-    # Local ARM64 runners also advertise ubuntu-latest; this lane needs x86_64.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    # The repository's ARM64 self-hosted runners also advertise ubuntu-latest,
+    # but cannot sudo-install this job's LLVM 23 probe toolchain.
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -72,18 +86,38 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
 
-      # Unversioned llvm-as/opt/llc are required by
+      # The Rust backend requires exactly LLVM 23.1.1. apt.llvm.org's rolling
+      # llvm-23 packages can advance to 23.1.2 while keeping the same path;
+      # admit the reviewed upstream release bytes instead. Unversioned
+      # llvm-as/opt/llc are required by
       # check-native-option-bool-llvm-verify.shs and strace by
       # check-rt-io-file-native-jit-stub.shs. Both are checked for
       # availability by the fences themselves (exit 2 if missing) -- install
       # them here so a missing tool means something broke in this workflow,
       # not that the fence is unfenced-by-design.
-      - name: Install native toolchain and probe tools
+      - name: Install pinned LLVM 23.1.1 and probe tools
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18 llvm-18-dev libpolly-18-dev \
-            libfreetype6-dev libunwind-dev strace
-          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y libfreetype6-dev libunwind-dev strace
+          llvm_archive="$RUNNER_TEMP/LLVM-23.1.1-Linux-X64.tar.xz"
+          llvm_prefix="$RUNNER_TEMP/llvm-23.1.1"
+          gh release download llvmorg-23.1.1 --repo llvm/llvm-project \
+            --pattern 'LLVM-23.1.1-Linux-X64.tar.xz' --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' \
+            '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c' \
+            "$llvm_archive" | sha256sum --check
+          mkdir -p "$llvm_prefix"
+          tar -xJf "$llvm_archive" -C "$llvm_prefix" --strip-components=1
+          rm "$llvm_archive"
+          test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          test -x "$llvm_prefix/bin/clang"
+          test -x "$llvm_prefix/bin/llvm-as"
+          test -x "$llvm_prefix/bin/opt"
+          test -x "$llvm_prefix/bin/llc"
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -104,6 +138,26 @@ jobs:
           cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
           cargo build --profile bootstrap -p simple-compiler-backfill
 
+      # Context-pack reduction gate.
+      #
+      # Wired HERE, not in repo-hygiene.yml, because this guard EXECUTES the
+      # packer and so needs a runnable bin/simple. The hygiene lane is a
+      # source-text lane with no built binary: the guard correctly refused to
+      # report a pass there ("ERROR — nothing was checked: no runnable
+      # bin/simple; absence of a runner is absence of evidence"), which is the
+      # fail-closed behaviour we want, in the wrong place.
+      #
+      # Why it exists: src/app/context/main.spl advertises "90% reduction in
+      # LLM context tokens" while context_generate echoed the whole file and
+      # never filtered by target, so packs came out LARGER than their input
+      # (raw=9338 pack=9497) and stayed green. Fixed 2026-08-31; this gate
+      # asserts the size property so it cannot regress unnoticed.
+      - name: Context-pack reduction gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/setup/setup.shs || true
+          sh scripts/check/check-context-pack-reduces.shs
+
       - name: Build self-hosted stage3 compiler (native-build capable)
         id: pure_simple_bootstrap
         env:
@@ -113,11 +167,26 @@ jobs:
           # Admission is deliberately two-phase. First produce the narrowly
           # scoped Stage 2 trust root, then let the canonical producer measure
           # that exact parent, runtime snapshot, planner closure, and planner.
-          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+          SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=llvm \
             --mode=dynload \
             --full-bootstrap \
             --stop-after-stage2 \
+            --no-mcp \
+            --jobs=2
+          stage2="$(find build/bootstrap/stage2 -type f -name simple -print -quit)"
+          test -n "$stage2"
+          bootstrap_receipt="$PWD/build/bootstrap/aot-stage4-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage4 \
+            --reason=self-host-convergence-check \
+            --parent-compiler="$stage2" \
+            --out="$bootstrap_receipt"
+          SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=llvm \
+            --mode=dynload \
+            --full-bootstrap \
+            --bootstrap-receipt="$bootstrap_receipt" \
             --no-mcp \
             --jobs=2
           stage2="$(find build/bootstrap/stage2 -type f -name simple -print -quit)"
@@ -128,7 +197,7 @@ jobs:
             --reason=verify-landed-compiler-fix \
             --parent-compiler="$stage2" \
             --out="$bootstrap_receipt"
-          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+          SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --bootstrap-receipt="$bootstrap_receipt" \
             --resume-stage3-from-admitted=build/bootstrap
 
@@ -140,6 +209,19 @@ jobs:
           path: build/bootstrap/logs/**
           if-no-files-found: error
           retention-days: 7
+
+      # The exact-artifact test needs a source-compatible pure-Simple CLI and
+      # its Linux runtime. The seed cannot establish this admission result.
+      - name: Run sealed dynlib admission spec on pure-Simple Stage 3
+        timeout-minutes: 15
+        run: |
+          stage3="$(find build/bootstrap/stage3 -type f -name simple -print -quit)"
+          test -n "$stage3"
+          chmod +x "$stage3"
+          SIMPLE_LIB="$PWD/src" \
+            SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
+            "$stage3" test \
+              test/01_unit/lib/nogc_sync_mut/composition/environment_variants/callable_map_v1_spec.spl
 
       - name: Run AOT-lane fence aggregator
         id: aot_fences
@@ -167,3 +249,12 @@ jobs:
           path: build/check/aot-lane-fences/**
           if-no-files-found: warn
           retention-days: 14
+
+      # The JIT lane is unobservable to `bin/simple test` for the same reason
+      # the fences above exist. Two general seed defects (an extern declaration
+      # suppressing the SFFI alias; heap-boxed u64 rejected as an index) were
+      # first "covered" by *_spec.spl files that PASSED on the pre-fix seed,
+      # because specs never reach this lane. This gate is the non-vacuous
+      # replacement: verified RED on a pre-fix seed and GREEN on the fixed one.
+      - name: JIT index + SFFI alias regression gate
+        run: sh scripts/check/check-jit-index-and-sffi-alias.shs

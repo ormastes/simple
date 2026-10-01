@@ -1,0 +1,34 @@
+# Read-only join: no source discovery, Git process, or index mutation.
+use app.bug.workaround_index.{WorkaroundIndex}
+use std.database.bug.{BugDatabase, BugStatus}
+use std.database.checker.{DbIssue}
+
+fn workaround_issue(severity: text, kind: text, message: text) -> DbIssue:
+    DbIssue(db_name: "bug", severity: severity, issue_type: kind,
+        message: message, auto_fixable: false)
+
+fn workaround_issues(index: WorkaroundIndex, db: BugDatabase, bug_filter: text) -> [DbIssue]:
+    """Join stored source locations against current canonical bug state."""
+    var issues: [DbIssue] = []
+    if not index.complete:
+        issues.push(workaround_issue("warning", "workaround_index_incomplete",
+            "Workaround coverage is incomplete; run simple check-dbs --fullscan bugs"))
+    issues.push(workaround_issue("info", "workaround_index_revision",
+        "Workaround snapshot revision {index.revision}; current checkout freshness unchecked; refresh with a build or explicit fullscan"))
+    for link in index.links:
+        if bug_filter != "" and link.bug_id != bug_filter: continue
+        var message = "{link.bug_id}: workaround at {link.path}:{link.line}"
+        if link.reason != "": message = message + " — " + link.reason
+        if link.recover != "":
+            message = message + " (review original at {link.recover}; apply a narrow source edit)"
+        match db.get_bug(link.bug_id):
+            case Some(bug):
+                if bug.status == BugStatus.Fixed or bug.status == BugStatus.Closed:
+                    issues.push(workaround_issue("warning", "workaround_recovery_review",
+                        message + "; bug resolved: review, recover intended code, and remove obsolete marker"))
+                else:
+                    issues.push(workaround_issue("info", "workaround_link", message))
+            case nil:
+                issues.push(workaround_issue("error", "workaround_unknown_bug",
+                    message + "; canonical bug ID no longer exists"))
+    issues

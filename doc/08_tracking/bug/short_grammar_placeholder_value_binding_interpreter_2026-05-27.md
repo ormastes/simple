@@ -1,6 +1,12 @@
-# Short Grammar Placeholder Value Binding Fails in Interpreter Specs
+## Closed 2026-09-13 — JIT divergence issue, tracked separately
 
 Status: STALE 2026-05-29 — placeholder value binding works; mock_phase3_spec failure is pre-existing me-rece
+
+> Re-checked 2026-09-13 (Windows x86_64, seed `bin/simple` v1.0.0-rc.1): this closure stands for the INTERPRETER path — `["ready"].map("{_1}:migrated")` returns `ready:migrated` when the function is demoted to the interpreter. It does NOT hold under the Cranelift JIT, where every `text`-returning inline lambda yields a raw handle integer. Not reopened; the JIT divergence is tracked separately in `jit_inline_lambda_text_return_raw_handle_2026-09-13.md`.
+
+---
+
+# Short Grammar Placeholder Value Binding Fails in Interpreter Specs
 
 **Date:** 2026-05-27
 **Status:** STALE 2026-05-29 — placeholder value binding works; mock_phase3_spec failure is pre-existing me-receiver interpreter limitation, unrelated to placeholder grammar

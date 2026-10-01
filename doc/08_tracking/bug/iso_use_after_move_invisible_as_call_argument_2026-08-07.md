@@ -1,4 +1,8 @@
 # Bug: `iso` use-after-move is invisible to the borrow checker when the second use is a call argument
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-07
 - Status: OPEN (P2)
@@ -111,3 +115,4 @@ bug's directly-measured scope.
 `test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl` — left in the
 repo with 3/4 cases green and the `print x` case genuinely red, per repo
 policy (never weaken a failing test to make it pass).
+

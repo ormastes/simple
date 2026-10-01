@@ -1,7 +1,9 @@
 # Browser cookie public-suffix validation is missing
+## Closed 2026-09-16 — Resolution 2026-07-26: PSL owner implemented; specs not executed (compiler-blocked)
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -46,3 +48,4 @@ PSL version/update provenance.
 
 Focused specs cover each row, but have not been executed because the tracked
 target compiler failure exhausted its three allowed repair cycles.
+

@@ -1,0 +1,234 @@
+# @req: REQ-CSM-003, REQ-CSM-005
+
+use std.spec.*
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{
+    l78_acquire_scope_with_port_v4, l78_validate_scope_with_port_v4,
+    l78_close_scope_with_port_v4, l78_closed_scope_port_v4}
+use compiler.semantics.semantic_scope_issuers_v2.{
+    l78_issue_hook_with_port_v4, l78_closed_declaration_hook_v4,
+    l78_closed_trait_hook_v4, l78_closed_aspect_hook_v4,
+    l78_closed_macro_hook_v4, l78_closed_body_hook_v4}
+use compiler.driver.cache.gateway.semantic_scope_live_owner_v2.{
+    _l78_scope_registry_new_v4, _l78_scope_registry_issue_v4,
+    _l78_scope_registry_validate_v4, _l78_scope_registry_close_v4}
+use .fixtures.l78_scope_rr_ports_v4.{l78_fake_scope_port_v4}
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
+fn l78_digest_v4(value: text) -> text: value.repeat(64)
+
+fn l78_attempt_v4() -> L78AttemptKeyV4:
+    L78AttemptKeyV4(root_digest: l78_digest_v4("a"), generation: 7,
+        manifest_digest: l78_digest_v4("b"), profile_digest: l78_digest_v4("c"),
+        operation_digest: l78_digest_v4("d"))
+
+fn l78_limits_v4() -> L78LimitsV4:
+    L78LimitsV4(max_items: 8, max_bytes: 1024, max_steps: 3)
+
+fn l78_registry_limits_v4() -> L78LimitsV4:
+    L78LimitsV4(max_items: 4, max_bytes: 1024, max_steps: 8)
+
+fn l78_scope_request_v4() -> SemanticScopeAttemptLiveRequestV1:
+    val identity = SemanticScopeLiveIdentityV1(writer_instance_digest: l78_digest_v4("e"),
+        generation: 7, manifest_digest: l78_digest_v4("b"),
+        pin_snapshot_digest: l78_digest_v4("1"), generation_closure_digest: l78_digest_v4("2"),
+        binding_digest: l78_digest_v4("3"), query_domain_digest: l78_digest_v4("4"),
+        semantic_rules_digest: l78_digest_v4("c"), cancellation_epoch: 1)
+    SemanticScopeAttemptLiveRequestV1(identity: identity,
+        attempt_seal_digest: l78_digest_v4("6"), source_content_digest: l78_digest_v4("7"),
+        snapshot_semantic_digest: l78_digest_v4("8"))
+
+fn l78_contribution_request_v4(dimension: i64) -> SemanticScopeContributionLiveRequestV1:
+    SemanticScopeContributionLiveRequestV1(identity: l78_scope_request_v4().identity,
+        dimension_index: dimension, contribution_digest: l78_digest_v4("5"),
+        issuer_instance_digest: l78_digest_v4("9"), issuer_generation: 7,
+        authority_serial: 1)
+
+fn l78_attempt_digest_v4() -> text:
+    match l78_attempt_key_digest_v4(l78_attempt_v4()):
+        case Ok(value): value
+        case Err(_): panic("attempt digest must be canonical")
+
+fn l78_candidate_tokens_v4(count: i64) -> [L78OwnerTokenV4]:
+    var tokens: [L78OwnerTokenV4] = []
+    for index in 0..count:
+        tokens.push(L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+            kind: L78TokenKindV4.Candidate, owner_instance: index + 1,
+            slot: index + 1, epoch: 1, attempt_digest: l78_attempt_digest_v4()))
+    tokens
+
+describe "L78 scope runner V4 owner-returning boundaries [importance=critical; importance_weight=3]":
+    it "should carry the owner through acquire validate and close runners [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val acquired = l78_acquire_scope_with_port_v4(
+            l78_fake_scope_port_v4("scope_ok", 41, l78_attempt_v4(), l78_limits_v4()),
+            request)
+        val token = acquired.outcome.unwrap()
+        val validated = l78_validate_scope_with_port_v4(acquired.owner, token, request)
+        expect(validated.outcome).to_equal(Ok(token))
+        expect(validated.owner.events).to_equal(["scope.acquire", "scope.validate"])
+        val closed = l78_close_scope_with_port_v4(validated.owner, token)
+        expect(closed.outcome.is_ok()).to_be(true)
+        expect(closed.owner.events).to_equal(
+            ["scope.acquire", "scope.validate", "scope.close"])
+        expect(closed.owner.revoked_slots).to_equal([token.slot])
+        expect(closed.owner.active_slots).to_equal([])
+
+    it "should return the refusing owner from the validate runner [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val acquired = l78_acquire_scope_with_port_v4(
+            l78_fake_scope_port_v4("scope_stale", 41, l78_attempt_v4(), l78_limits_v4()),
+            request)
+        val token = acquired.outcome.unwrap()
+        val validated = l78_validate_scope_with_port_v4(acquired.owner, token, request)
+        expect(validated.outcome).to_equal(Err(L78BoundaryErrorV4.StaleToken))
+        expect(validated.owner.events).to_equal(["scope.acquire", "scope.validate"])
+
+    it "should keep the closed scope adapter unavailable through every runner [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val acquired = l78_acquire_scope_with_port_v4(
+            l78_closed_scope_port_v4("no live scope owner"), request)
+        expect(acquired.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        val token = L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+            kind: L78_KIND_SCOPE_V4, owner_instance: 41, slot: 1, epoch: 1,
+            attempt_digest: l78_attempt_digest_v4())
+        val validated = l78_validate_scope_with_port_v4(acquired.owner, token, request)
+        expect(validated.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(validated.owner.reason).to_equal("no live scope owner")
+        val closed = l78_close_scope_with_port_v4(validated.owner, token)
+        expect(closed.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(closed.owner.reason).to_equal("no live scope owner")
+
+    it "should keep all five closed semantic hooks unavailable and owner returning [importance=critical; importance_weight=3]":
+        val declaration = l78_issue_hook_with_port_v4(
+            l78_closed_declaration_hook_v4("no declaration owner"),
+            l78_contribution_request_v4(0))
+        expect(declaration.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(declaration.owner.dimension_index).to_equal(0)
+        expect(declaration.owner.reason).to_equal("no declaration owner")
+
+        val trait_hook = l78_issue_hook_with_port_v4(
+            l78_closed_trait_hook_v4("no trait owner"), l78_contribution_request_v4(1))
+        expect(trait_hook.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(trait_hook.owner.dimension_index).to_equal(1)
+
+        val aspect = l78_issue_hook_with_port_v4(
+            l78_closed_aspect_hook_v4("no aspect owner"), l78_contribution_request_v4(2))
+        expect(aspect.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(aspect.owner.dimension_index).to_equal(2)
+
+        val macro_hook = l78_issue_hook_with_port_v4(
+            l78_closed_macro_hook_v4("no macro owner"), l78_contribution_request_v4(3))
+        expect(macro_hook.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(macro_hook.owner.dimension_index).to_equal(3)
+
+        val body = l78_issue_hook_with_port_v4(
+            l78_closed_body_hook_v4("no body owner"), l78_contribution_request_v4(4))
+        expect(body.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(body.owner.dimension_index).to_equal(4)
+
+    it "should issue validate and close one bounded TestDouble registry row [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val attempt = l78_attempt_v4()
+        val registry = _l78_scope_registry_new_v4(41, l78_registry_limits_v4()).unwrap()
+        expect(registry.entries.len()).to_equal(0)
+        val issued = _l78_scope_registry_issue_v4(registry,
+            L78AuthorityDomainV4.TestDouble, request, attempt,
+            l78_candidate_tokens_v4(5))
+        val token = issued.outcome.unwrap()
+        expect(token.domain).to_equal(L78AuthorityDomainV4.TestDouble)
+        expect(token.kind).to_equal(L78_KIND_SCOPE_V4)
+        expect(token.owner_instance).to_equal(41)
+        expect(token.slot).to_equal(1)
+        expect(token.attempt_digest).to_equal(l78_attempt_digest_v4())
+        expect(issued.owner.entries.len()).to_equal(1)
+        expect(issued.owner.next_slot).to_equal(2)
+        expect(_l78_scope_registry_validate_v4(issued.owner, token, request, attempt)).to_equal(Ok(()))
+        val closed = _l78_scope_registry_close_v4(issued.owner, token)
+        expect(closed.outcome).to_equal(Ok(()))
+        expect(closed.owner.entries.len()).to_equal(1)
+        expect(closed.owner.next_slot).to_equal(2)
+        expect(_l78_scope_registry_close_v4(closed.owner, token).outcome).to_equal(
+            Err(L78BoundaryErrorV4.StaleToken))
+        expect(_l78_scope_registry_validate_v4(closed.owner, token, request, attempt)).to_equal(
+            Err(L78BoundaryErrorV4.StaleToken))
+
+    it "should never issue a Live registry row from the default owner [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val attempt = l78_attempt_v4()
+        val registry = _l78_scope_registry_new_v4(41, l78_registry_limits_v4()).unwrap()
+        val issued = _l78_scope_registry_issue_v4(registry,
+            L78AuthorityDomainV4.Live, request, attempt, l78_candidate_tokens_v4(5))
+        expect(issued.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        expect(issued.owner.entries.len()).to_equal(0)
+        expect(issued.owner.next_slot).to_equal(1)
+
+    it "should refuse incomplete foreign and over-bounded registry issuance [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val attempt = l78_attempt_v4()
+        val registry = _l78_scope_registry_new_v4(41, l78_registry_limits_v4()).unwrap()
+        val incomplete = _l78_scope_registry_issue_v4(registry,
+            L78AuthorityDomainV4.TestDouble, request, attempt, l78_candidate_tokens_v4(4))
+        expect(incomplete.outcome).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+        expect(incomplete.owner.entries.len()).to_equal(0)
+
+        var live_contributions = l78_candidate_tokens_v4(5)
+        live_contributions[2].domain = L78AuthorityDomainV4.Live
+        val foreign = _l78_scope_registry_issue_v4(registry,
+            L78AuthorityDomainV4.TestDouble, request, attempt, live_contributions)
+        expect(foreign.outcome).to_equal(Err(L78BoundaryErrorV4.ForeignToken))
+        expect(foreign.owner.entries.len()).to_equal(0)
+
+        var duplicate = l78_candidate_tokens_v4(5)
+        duplicate[4].owner_instance = duplicate[0].owner_instance
+        duplicate[4].slot = duplicate[0].slot
+        val conflict = _l78_scope_registry_issue_v4(registry,
+            L78AuthorityDomainV4.TestDouble, request, attempt, duplicate)
+        expect(conflict.outcome).to_equal(Err(L78BoundaryErrorV4.Conflict))
+
+        var wrong_profile = l78_scope_request_v4()
+        wrong_profile.identity.semantic_rules_digest = l78_digest_v4("f")
+        val mismatched = _l78_scope_registry_issue_v4(registry,
+            L78AuthorityDomainV4.TestDouble, wrong_profile, attempt,
+            l78_candidate_tokens_v4(5))
+        expect(mismatched.outcome).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+
+        val single = _l78_scope_registry_new_v4(41,
+            L78LimitsV4(max_items: 1, max_bytes: 1024, max_steps: 8)).unwrap()
+        val first = _l78_scope_registry_issue_v4(single,
+            L78AuthorityDomainV4.TestDouble, request, attempt, l78_candidate_tokens_v4(5))
+        expect(first.outcome.is_ok()).to_be(true)
+        val over = _l78_scope_registry_issue_v4(first.owner,
+            L78AuthorityDomainV4.TestDouble, request, attempt, l78_candidate_tokens_v4(5))
+        expect(over.outcome).to_equal(Err(L78BoundaryErrorV4.Bounds))
+        expect(over.owner.entries.len()).to_equal(1)
+        expect(over.owner.next_slot).to_equal(2)
+
+    it "should refuse closing a registry token the owner never issued [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val attempt = l78_attempt_v4()
+        val registry = _l78_scope_registry_new_v4(41, l78_registry_limits_v4()).unwrap()
+        val issued = _l78_scope_registry_issue_v4(registry,
+            L78AuthorityDomainV4.TestDouble, request, attempt, l78_candidate_tokens_v4(5))
+        val token = issued.outcome.unwrap()
+
+        var foreign_owner = token
+        foreign_owner.owner_instance = 42
+        expect(_l78_scope_registry_close_v4(issued.owner, foreign_owner).outcome).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+        var stale_epoch = token
+        stale_epoch.epoch = 9
+        expect(_l78_scope_registry_close_v4(issued.owner, stale_epoch).outcome).to_equal(
+            Err(L78BoundaryErrorV4.StaleToken))
+
+        var unknown_slot = token
+        unknown_slot.slot = 7
+        expect(_l78_scope_registry_close_v4(issued.owner, unknown_slot).outcome).to_equal(
+            Err(L78BoundaryErrorV4.Unavailable))
+
+        var tampered = token
+        tampered.attempt_digest = l78_digest_v4("0")
+        expect(_l78_scope_registry_close_v4(issued.owner, tampered).outcome).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))

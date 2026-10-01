@@ -1,4 +1,9 @@
 # The Simple binary cannot reach CUDA at all: `cuInit` returns 3 while ctypes on the same host returns 0
+## Closed 2026-09-16 — RETRACTED 2026-08-09; same binary shows cuInit=0, 2 devices; fork hypothesis refuted
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-09 (stream P7, native-tier device profile timing)
 **Status:** NOT REPRODUCIBLE — retracted 2026-08-09 by stream P13 on origin/main `7f4004e1ff1` with the SAME binary (md5 d96f87a191403fd53aca879ee689ecdf). cuInit returns 0 and 2 devices enumerate under every lane; the fork hypothesis is refuted. See the retraction section at the end of this file.
@@ -187,3 +192,4 @@ as unfalsifiable on its account.
 Verifying the new `SIMPLE_REQUIRE_GPU` switch exposed a **separate, fail-open
 defect**: env vars do not reach spec bodies under `bin/simple test`. See
 `doc/08_tracking/bug/env_gated_spec_switches_are_inert_under_test_daemon_2026-08-09.md`.
+

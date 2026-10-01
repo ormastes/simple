@@ -1,0 +1,106 @@
+#!/usr/bin/env sh
+# boot-simpleos-starfive-jh7110-board.shs -- boot SimpleOS on a physical StarFive
+# JH7110 (VisionFive-2 class) board: JTAG-load simpleos.elf into DRAM, then
+# `bootelf -s` it from the U-Boot prompt over serial and assert the boot markers.
+# Reproduces the sequence verified on the real board on 2026-09-27
+# (doc/00_llm_process/layer_expert/os/skill.md, "StarFive JH7110").
+#
+# Usage (root: the JTAG stage must release port B from ftdi_sio):
+#   sudo sh scripts/os/boot-simpleos-starfive-jh7110-board.shs [--no-stage]
+# Precondition: the board sits at the U-Boot prompt (`StarFive #`; interrupt
+#   autoboot with ^C on the serial console). Tigard: port A = serial console,
+#   port B = JTAG (scripts/os/openocd-tigard-jtag.cfg).
+# Env: STARFIVE_ELF / STARFIVE_RECEIPT   image + receipt (stage script defaults)
+#      STARFIVE_JTAG_KHZ                 default 1000 (verified; stage default is 100)
+#      STARFIVE_UART_PATH                default: Tigard port A via starfive-tigard-detect.shs
+#      STARFIVE_BOARD_LOG_DIR            default build/test-artifacts/starfive-jh7110/board
+# Output: key=value lines; last line is starfive_status=pass|fail|blocked.
+#
+# JTAG stage (scripts/os/stage-simpleos-starfive-jh7110-jtag.shs), verbatim:
+#   adapter speed $KHZ; targets jh7110.u74_hart2; halt
+#   load_image <elf> 0x48000000 bin; verify_image <elf> 0x48000000 bin; resume
+# Serial: `bootelf -s 0x48000000`. Observed: `## Starting application at
+#   0x40200000` -> STARFIVE entry -> console-ready -> filesystem-ready
+#   entries=bin,etc,README.txt -> BOOT OK -> STARFIVE shell-ready -> simpleos>
+#
+# LOAD TO DRAM ONLY -- never write SPI flash / eMMC / SD. A DRAM load is
+#   volatile; a power cycle restores stock boot. U-Boot's DRAM copy at
+#   0x40200000 is overwritten by the load, which is expected.
+# OpenOCD notes (0.12): under `openocd -c ...`, `reg` and `mdw` print NOTHING;
+#   use `echo [get_reg {pc}]` / `echo [read_memory <addr> 32 <n>]`. Tcl `get_reg`
+#   can return stale all-zero values, so `reg <name>` one-per-RPC over the tcl
+#   port is the reliable form:  printf '%s\032' 'reg pc' | nc -q 2 127.0.0.1 6666
+#   A static pc inside rt_starfive_uart_read (lwu 0x14(base); andi a0,1; beqz)
+#   is the shell's RX poll, NOT a hang -- the shell answers the next command.
+# ponytail: no tcl-port sanity probe here; the marker transcript is the evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+LOG_DIR="${STARFIVE_BOARD_LOG_DIR:-$ROOT_DIR/build/test-artifacts/starfive-jh7110/board}"
+KHZ="${STARFIVE_JTAG_KHZ:-1000}"
+STAGE=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-stage) STAGE=0 ;;
+        *) echo "usage: $0 [--no-stage]" >&2; exit 1 ;;
+    esac
+done
+mkdir -p "$LOG_DIR"
+
+if test -n "${STARFIVE_UART_PATH:-}"; then
+    UART_PATH="$STARFIVE_UART_PATH"
+else
+    DETECT="$("$ROOT_DIR/scripts/os/starfive-tigard-detect.shs")" || { printf '%s\n' "$DETECT"; exit 2; }
+    UART_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_uart_path=/ {print $2}')"
+fi
+test -c "$UART_PATH" || { echo "starfive_status=blocked"; echo "starfive_reason=uart-missing"; echo "uart_path=$UART_PATH"; exit 2; }
+
+if test "$STAGE" -eq 1; then
+    set +e
+    STARFIVE_JTAG_KHZ="$KHZ" STARFIVE_OPENOCD_STAGE_LOG="$LOG_DIR/openocd-stage.log" \
+        sh "$ROOT_DIR/scripts/os/stage-simpleos-starfive-jh7110-jtag.shs" > "$LOG_DIR/stage.receipt"
+    STAGE_RC=$?
+    set -e
+    cat "$LOG_DIR/stage.receipt"
+    test "$STAGE_RC" -eq 0 || { echo "starfive_status=fail"; echo "starfive_reason=jtag-stage-failed"; exit "$STAGE_RC"; }
+fi
+
+TRANSCRIPT="$LOG_DIR/uart-boot.log"
+: > "$TRANSCRIPT"
+stty -F "$UART_PATH" 115200 cs8 -cstopb -parenb -crtscts raw -echo clocal
+timeout 30 dd if="$UART_PATH" of="$TRANSCRIPT" bs=1 count=1048576 status=none &
+UART_PID=$!
+stop_capture() { kill "$UART_PID" 2>/dev/null || true; wait "$UART_PID" 2>/dev/null || true; }
+
+wait_for() { # wait_for <literal> <deadline_ms>
+    _start="$(date +%s%3N)"
+    while ! grep -aFq "$1" "$TRANSCRIPT"; do
+        sleep 0.05
+        test "$(( $(date +%s%3N) - _start ))" -lt "$2" || return 1
+    done
+}
+
+printf '\r' > "$UART_PATH"
+wait_for 'StarFive #' 3000 || { stop_capture; echo "starfive_status=blocked"; echo "starfive_reason=uboot-prompt-missing"; echo "uart_log=$TRANSCRIPT"; exit 2; }
+printf 'bootelf -s 0x48000000\r' > "$UART_PATH"
+wait_for 'STARFIVE shell-ready' 15000 || { stop_capture; echo "starfive_status=fail"; echo "starfive_reason=shell-timeout"; echo "uart_log=$TRANSCRIPT"; exit 1; }
+printf 'ls /\r' > "$UART_PATH"
+wait_for '/README.txt' 2000 || true
+stop_capture
+
+PREV=0
+for marker in 'STARFIVE entry' 'STARFIVE console-ready' 'STARFIVE filesystem-ready' 'BOOT OK' 'STARFIVE shell-ready'; do
+    LINE="$(grep -anF "$marker" "$TRANSCRIPT" | head -n 1 | cut -d: -f1)"
+    test -n "$LINE" || { echo "starfive_status=fail"; echo "starfive_reason=missing-boot-marker"; echo "missing_marker=$marker"; echo "uart_log=$TRANSCRIPT"; exit 1; }
+    test "$LINE" -gt "$PREV" || { echo "starfive_status=fail"; echo "starfive_reason=boot-marker-order"; echo "uart_log=$TRANSCRIPT"; exit 1; }
+    PREV="$LINE"
+done
+grep -aFq '/README.txt' "$TRANSCRIPT" || { echo "starfive_status=fail"; echo "starfive_reason=ls-root-incomplete"; echo "uart_log=$TRANSCRIPT"; exit 1; }
+
+echo "flow=jtag-stage+uboot-bootelf-s"
+echo "jtag_clock_khz=$KHZ"
+echo "load_address=0x48000000"
+echo "uart_path=$UART_PATH"
+echo "uart_log=$TRANSCRIPT"
+echo "flash_writes=0"
+echo "starfive_status=pass"

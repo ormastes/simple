@@ -25,9 +25,7 @@ compile-time check (e.g. the optional-field nil-access rule).
 
 1. **HIR stub** — `src/compiler/80.driver/driver.spl`, `lower_and_check_impl()`:
    - `sources.len() <= 0` branch (lines ~389–411): **real** lowering
-     (`lower_module` + `resolve_methods` + `run_effect_pass`). Constant folding
-     is owned by the typed MIR registry; the former semantic HIR pass walked
-     and rebuilt bodies but discarded the result, so it has been removed.
+     (`lower_module` + `resolve_methods` + `run_const_fold_pass` + `run_effect_pass`).
    - `sources.len() > 0` branch (lines ~412+): only `_driver_is_bootstrap_entry_source`
      gets `lowering.lower_module(...)`; every other module is built as an empty
      `HirModule(functions: {}, classes: {}, ...)` (lines ~432–449).
@@ -53,7 +51,7 @@ the ones already identified:
 
 1. **Option.map on a present bare value** — the interpreter represents `Some(x)`
    as the bare value, with no Some-fallback for Option methods, so
-   `fn_.return_type.map(...)` (`hir_lowering/_Items/declaration_lowering.spl`) errors
+   `fn_.return_type.map(...)` (`hir_lowering/items_part2_part2.spl`) errors
    "method 'map' not found on type 'Type'". Worked around at one callsite; others
    remain exposed.
 2. **`resolve.spl` MethodResolver method orphaning** — two indent-0 free functions

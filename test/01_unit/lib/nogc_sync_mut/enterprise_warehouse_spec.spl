@@ -1,0 +1,323 @@
+"""
+# Enterprise Warehouse Vertical — bins, putaway, FEFO/FIFO picking, pack
+
+## Overview
+
+An ops actor registers bins with a unit capacity, puts stock away into them, and
+picks it back out in First-Expired-First-Out order. Every write runs the frozen
+guarded sequence (session -> rbac -> validation -> idempotency -> effects in one
+UoW) and chains a sha256 audit record. Bin occupancy is never mutated in place:
+it is the pure fold `sum(putaway) - sum(picked)`.
+
+## Ordering rule proven here
+
+`wh_pick_list` orders candidate lots by `(expiry_day, row_id)` ascending. The
+FEFO half is proven by putting the LATER-expiring lot away FIRST and asserting
+the earlier-expiring lot is picked first anyway — so the result cannot be
+explained by insert order. The FIFO half is proven separately by two lots with
+the SAME expiry, where the earlier-inserted row must win. Together they pin the
+total order; row_id is unique so the plan is reproducible.
+
+## Guarded sequence proven (reproduce-first for each denial)
+
+| Rung | Denial reason | Scenario |
+|------|---------------|----------|
+| rbac | forbidden | a `sales` actor cannot register a bin |
+| state | not-found | putaway into a bin that was never registered |
+| state | conflict | putaway that would exceed the bin's capacity |
+| state | insufficient-stock | packing more than the bin currently holds |
+| idempotency | duplicate-key | replay returns recorded result, no second effect |
+
+Every denial reason asserted here is also run through `reason_allowed`, the
+frozen closed-set oracle: the warehouse-specific conditions "unknown bin" and
+"bin full" are DELIBERATELY expressed as the existing members `not-found` and
+`conflict` rather than as new reasons, because `foundation.reason_set()` is
+byte-fenced and widening it needs an ADR. This spec is what proves the mapping
+holds — an attempt to introduce a fresh reason string turns it red.
+
+Plus: short-pick handling (`short_qty > 0`, `complete: false`), pack confirmation
+freeing capacity, and tenant isolation of the bin registry.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (W23-FAN, warehouse).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_store.records.{audit_verify_chain, outbox_pending}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope,
+    reason_allowed
+}
+use std.nogc_sync_mut.enterprise_warehouse.warehouse.{
+    warehouse_setup, wh_bin_register, wh_putaway, wh_pack_confirm,
+    wh_bin_capacity, wh_bin_known, wh_bin_used, wh_bin_free,
+    wh_pick_list, wh_available_lots, wh_sort_fefo
+}
+
+fn db_path(name: text) -> text:
+    "build/test-artifacts/warehouse_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Distribution")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Logistics")
+
+fn ops_a() -> ActorContext:
+    ActorContext(actor_id: "ops-1", role: "ops")
+
+fn clerk_a() -> ActorContext:
+    ActorContext(actor_id: "clerk-1", role: "sales")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: "warehouse", payload: "")
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    warehouse_setup(store)
+    store
+
+describe "warehouse vertical — register a bin then put stock away":
+    it "ops registers A-01 with capacity 100 and putaway occupies it exactly":
+        step("Open a clean store")
+        val store = fresh_store("putaway")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+
+        step("An unregistered bin is UNKNOWN — capacity -1, free -1")
+        expect(wh_bin_known(store, "tenant-a", "A-01")).to_be(false)
+        expect(wh_bin_capacity(store, "tenant-a", "A-01")).to_equal(-1)
+        expect(wh_bin_free(store, "tenant-a", "A-01")).to_equal(-1)
+
+        step("Register A-01 in the pick zone with capacity 100")
+        val reg = wh_bin_register(store, s, t, ops, envelope("b-1"), "A-01", "pick", 100)
+        expect(reg.reason).to_equal("accepted")
+        expect(reason_allowed(reg.reason)).to_be(true)
+        expect(wh_bin_capacity(store, "tenant-a", "A-01")).to_equal(100)
+        expect(wh_bin_used(store, "tenant-a", "A-01")).to_equal(0)
+
+        step("Put away 30 units — occupancy 30, free 70")
+        val put = wh_putaway(store, s, t, ops, envelope("p-1"), "A-01", "SKU-1", "L1", 20260901, 30)
+        expect(put.reason).to_equal("accepted")
+        expect(wh_bin_used(store, "tenant-a", "A-01")).to_equal(30)
+        expect(wh_bin_free(store, "tenant-a", "A-01")).to_equal(70)
+
+        step("The audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "warehouse vertical — putaway into a full or unknown bin is denied":
+    it "reproduce: conflict when qty exceeds remaining capacity; not-found when the bin was never registered":
+        val store = fresh_store("denials")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+
+        step("Putaway into a bin that was never registered is denied not-found")
+        val ghost = wh_putaway(store, s, t, ops, envelope("p-ghost"), "Z-99", "SKU-1", "L1", 20260901, 1)
+        expect(ghost.ok).to_be(false)
+        expect(ghost.reason).to_equal("not-found")
+        expect(reason_allowed(ghost.reason)).to_be(true)
+
+        step("Register A-01 with capacity 10 and fill it to 8")
+        wh_bin_register(store, s, t, ops, envelope("b-2"), "A-01", "pick", 10)
+        expect(wh_putaway(store, s, t, ops, envelope("p-8"), "A-01", "SKU-1", "L1", 20260901, 8).reason).to_equal("accepted")
+        expect(wh_bin_free(store, "tenant-a", "A-01")).to_equal(2)
+
+        step("A further 3 units would exceed capacity (8+3 > 10) — denied conflict")
+        val overflow = wh_putaway(store, s, t, ops, envelope("p-over"), "A-01", "SKU-1", "L2", 20260901, 3)
+        expect(overflow.ok).to_be(false)
+        expect(overflow.reason).to_equal("conflict")
+        expect(reason_allowed(overflow.reason)).to_be(true)
+
+        step("No effect — occupancy is still 8")
+        expect(wh_bin_used(store, "tenant-a", "A-01")).to_equal(8)
+
+        step("Exactly filling the bin (8+2 == 10) IS accepted — the boundary is inclusive")
+        expect(wh_putaway(store, s, t, ops, envelope("p-fit"), "A-01", "SKU-1", "L3", 20260901, 2).reason).to_equal("accepted")
+        expect(wh_bin_free(store, "tenant-a", "A-01")).to_equal(0)
+        store_close(store)
+
+describe "warehouse vertical — pick list is FEFO":
+    it "the earlier-expiring lot is picked first even though it was put away LAST":
+        val store = fresh_store("fefo")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        wh_bin_register(store, s, t, ops, envelope("b-f1"), "A-01", "pick", 100)
+        wh_bin_register(store, s, t, ops, envelope("b-f2"), "A-02", "pick", 100)
+
+        step("Put the LATE lot (expires 20261201) away FIRST, then the EARLY lot (20260101)")
+        wh_putaway(store, s, t, ops, envelope("p-late"), "A-01", "SKU-1", "LATE", 20261201, 5)
+        wh_putaway(store, s, t, ops, envelope("p-early"), "A-02", "SKU-1", "EARLY", 20260101, 5)
+
+        step("A pick of 7 takes all 5 EARLY first, then 2 LATE — insert order does NOT explain this")
+        val plan = wh_pick_list(store, s, t, ops, "SKU-1", 7)
+        expect(plan.complete).to_be(true)
+        expect(plan.short_qty).to_equal(0)
+        expect(plan.picked_qty).to_equal(7)
+        expect(plan.lines.len()).to_equal(2)
+        expect(plan.lines[0].lot).to_equal("EARLY")
+        expect(plan.lines[0].bin_code).to_equal("A-02")
+        expect(plan.lines[0].qty).to_equal(5)
+        expect(plan.lines[1].lot).to_equal("LATE")
+        expect(plan.lines[1].qty).to_equal(2)
+        store_close(store)
+
+describe "warehouse vertical — FEFO ties break FIFO":
+    it "two lots with the SAME expiry are picked in putaway order (lowest row id first)":
+        val store = fresh_store("fifo")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        wh_bin_register(store, s, t, ops, envelope("b-t1"), "A-01", "pick", 100)
+        wh_bin_register(store, s, t, ops, envelope("b-t2"), "A-02", "pick", 100)
+
+        step("Two lots, identical expiry 20260601, put away in a known order")
+        wh_putaway(store, s, t, ops, envelope("p-first"), "A-01", "SKU-1", "FIRST", 20260601, 4)
+        wh_putaway(store, s, t, ops, envelope("p-second"), "A-02", "SKU-1", "SECOND", 20260601, 4)
+
+        step("The earlier-inserted lot is consumed first — FIFO on the expiry tie")
+        val plan = wh_pick_list(store, s, t, ops, "SKU-1", 6)
+        expect(plan.lines.len()).to_equal(2)
+        expect(plan.lines[0].lot).to_equal("FIRST")
+        expect(plan.lines[0].qty).to_equal(4)
+        expect(plan.lines[1].lot).to_equal("SECOND")
+        expect(plan.lines[1].qty).to_equal(2)
+
+        step("The ordering is TOTAL — a second identical call gives the same plan")
+        val again = wh_pick_list(store, s, t, ops, "SKU-1", 6)
+        expect(again.lines[0].lot).to_equal("FIRST")
+        expect(again.lines[1].lot).to_equal("SECOND")
+        store_close(store)
+
+describe "warehouse vertical — short pick is reported, not an error":
+    it "requesting more than is on hand returns every available line plus short_qty":
+        val store = fresh_store("short")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        wh_bin_register(store, s, t, ops, envelope("b-s"), "A-01", "pick", 100)
+        wh_putaway(store, s, t, ops, envelope("p-s"), "A-01", "SKU-1", "L1", 20260901, 3)
+
+        step("Ask for 10 when only 3 are on hand")
+        val plan = wh_pick_list(store, s, t, ops, "SKU-1", 10)
+        expect(plan.complete).to_be(false)
+        expect(plan.picked_qty).to_equal(3)
+        expect(plan.short_qty).to_equal(7)
+        expect(plan.lines.len()).to_equal(1)
+        expect(plan.lines[0].qty).to_equal(3)
+
+        step("A sku with no stock at all is a total short pick, still not an error")
+        val none = wh_pick_list(store, s, t, ops, "SKU-NONE", 5)
+        expect(none.lines.len()).to_equal(0)
+        expect(none.picked_qty).to_equal(0)
+        expect(none.short_qty).to_equal(5)
+        expect(none.complete).to_be(false)
+        store_close(store)
+
+describe "warehouse vertical — pack confirmation consumes stock and frees capacity":
+    it "packing 4 of 6 leaves 2 pickable and returns 4 units of bin capacity":
+        val store = fresh_store("pack")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        wh_bin_register(store, s, t, ops, envelope("b-p"), "A-01", "pick", 10)
+        wh_putaway(store, s, t, ops, envelope("p-p"), "A-01", "SKU-1", "L1", 20260901, 6)
+        expect(wh_bin_free(store, "tenant-a", "A-01")).to_equal(4)
+
+        step("Confirm a pack of 4 for order ord-1")
+        val pack = wh_pack_confirm(store, s, t, ops, envelope("k-1"), "ord-1", "A-01", "SKU-1", "L1", 4)
+        expect(pack.reason).to_equal("accepted")
+
+        step("Occupancy dropped to 2 and capacity was freed")
+        expect(wh_bin_used(store, "tenant-a", "A-01")).to_equal(2)
+        expect(wh_bin_free(store, "tenant-a", "A-01")).to_equal(8)
+
+        step("Only 2 remain pickable — the packed units are gone from the plan")
+        val plan = wh_pick_list(store, s, t, ops, "SKU-1", 6)
+        expect(plan.picked_qty).to_equal(2)
+        expect(plan.short_qty).to_equal(4)
+
+        step("Packing more than remains is denied insufficient-stock")
+        val greedy = wh_pack_confirm(store, s, t, ops, envelope("k-2"), "ord-2", "A-01", "SKU-1", "L1", 3)
+        expect(greedy.ok).to_be(false)
+        expect(greedy.reason).to_equal("insufficient-stock")
+        expect(reason_allowed(greedy.reason)).to_be(true)
+        expect(wh_bin_used(store, "tenant-a", "A-01")).to_equal(2)
+
+        step("The audit chain still recomputes after the pack")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "warehouse vertical — rbac denies an unauthorized actor":
+    it "reproduce: a sales actor cannot register a bin or put stock away (forbidden)":
+        val store = fresh_store("rbac")
+        val t = tenant_a()
+        val clerk = clerk_a()
+        val sc = session_for(clerk, t)
+
+        step("Attempt wh_bin_register as a sales role")
+        val r = wh_bin_register(store, sc, t, clerk, envelope("b-x"), "A-01", "pick", 100)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("forbidden")
+        expect(reason_allowed(r.reason)).to_be(true)
+
+        step("No bin was recorded")
+        expect(wh_bin_known(store, "tenant-a", "A-01")).to_be(false)
+
+        step("Putaway is gated on the SAME rung — rbac denies before the unknown-bin check")
+        val p = wh_putaway(store, sc, t, clerk, envelope("p-x"), "A-01", "SKU-1", "L1", 20260901, 1)
+        expect(p.ok).to_be(false)
+        expect(p.reason).to_equal("forbidden")
+        store_close(store)
+
+describe "warehouse vertical — idempotent replay and tenant isolation":
+    it "a replayed putaway key produces no second effect, and bins do not cross tenants":
+        val store = fresh_store("replay")
+        val ta = tenant_a()
+        val ops = ops_a()
+        val sa = session_for(ops, ta)
+        wh_bin_register(store, sa, ta, ops, envelope("b-r"), "A-01", "pick", 100)
+
+        step("Put away 5 under key same-key")
+        val first = wh_putaway(store, sa, ta, ops, envelope("same-key"), "A-01", "SKU-1", "L1", 20260901, 5)
+        expect(first.reason).to_equal("accepted")
+        val outbox_after_first = outbox_pending(store, "tenant-a").len()
+
+        step("Replay the SAME key with a DIFFERENT qty (9) — must not take effect")
+        val replay = wh_putaway(store, sa, ta, ops, envelope("same-key"), "A-01", "SKU-1", "L1", 20260901, 9)
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        expect(reason_allowed(replay.reason)).to_be(true)
+
+        step("No second effect — occupancy still 5, outbox unchanged")
+        expect(wh_bin_used(store, "tenant-a", "A-01")).to_equal(5)
+        expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after_first)
+
+        step("Tenant B does not see tenant A's bin A-01 at all")
+        val tb = tenant_b()
+        val ops_b = ActorContext(actor_id: "ops-b", role: "ops")
+        val sb = session_for(ops_b, tb)
+        expect(wh_bin_known(store, "tenant-b", "A-01")).to_be(false)
+        val cross = wh_putaway(store, sb, tb, ops_b, envelope("p-cross"), "A-01", "SKU-1", "L1", 20260901, 1)
+        expect(cross.reason).to_equal("not-found")
+
+        step("Tenant B registers its OWN A-01 with a different capacity; the two do not mix")
+        wh_bin_register(store, sb, tb, ops_b, envelope("b-rb"), "A-01", "bulk", 50)
+        expect(wh_bin_capacity(store, "tenant-a", "A-01")).to_equal(100)
+        expect(wh_bin_capacity(store, "tenant-b", "A-01")).to_equal(50)
+        expect(wh_bin_used(store, "tenant-b", "A-01")).to_equal(0)
+        store_close(store)

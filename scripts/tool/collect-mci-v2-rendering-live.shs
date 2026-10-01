@@ -1,0 +1,134 @@
+#!/bin/sh
+# Canonical owner for live MCI-v2 Vulkan/Engine2D collection.
+set -eu
+LC_ALL=C; export LC_ALL
+
+usage() { echo "usage: $0 --output DIR --mode live|fixture --signing-key PEM --key-id ID --trust-policy FILE --run-id ID --source-hash SHA256 --configuration-hash SHA256 --device ID --driver ID --queue ID [--captured-at-utc-ns NS]" >&2; exit 2; }
+out= mode= key= key_id= policy= run= source_hash= config_hash= device= driver= queue= captured=
+while [ "$#" -gt 0 ]; do case "$1" in
+ --output) out=$2; shift 2;; --mode) mode=$2; shift 2;; --signing-key) key=$2; shift 2;;
+ --key-id) key_id=$2; shift 2;; --trust-policy) policy=$2; shift 2;; --run-id) run=$2; shift 2;;
+ --source-hash) source_hash=$2; shift 2;; --configuration-hash) config_hash=$2; shift 2;;
+ --device) device=$2; shift 2;; --driver) driver=$2; shift 2;; --queue) queue=$2; shift 2;;
+ --captured-at-utc-ns) captured=$2; shift 2;; *) usage;; esac; done
+token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._:-]*) return 1;; esac; }
+sha() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+field() { [ "$(grep -c "^$1=" "$2")" -eq 1 ] || return 1; sed -n "s/^$1=//p" "$2"; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+hash_text() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+fail() { echo "BLOCKED: $1" >&2; exit 1; }
+[ "$mode" = live ] || [ "$mode" = fixture ] || usage
+[ -n "$out" ] && regular "$key" && regular "$policy" && token "$key_id" && token "$run" && sha "$source_hash" && sha "$config_hash" && token "$device" && token "$driver" && token "$queue" || usage
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+case "$out" in /*) :;; *) out=$root/$out;; esac
+case "$out" in *[!A-Za-z0-9_./:-]*) fail 'unsafe output path';; esac
+case "$out" in "$root"/*) :;; *) fail 'output escapes repository';; esac
+[ ! -e "$out" ] && [ ! -L "$out" ] || fail 'output must be a fresh path'
+walk=$root; rel=${out#"$root"/}; oldifs=$IFS; IFS=/
+for component in $rel; do walk=$walk/$component; [ ! -L "$walk" ] || fail 'symlink in output path'; done
+IFS=$oldifs
+work=$out/work; artifacts=$out/artifacts; receipts=$out/receipts
+mkdir -p "$work" "$artifacts" "$receipts"; chmod 0700 "$out" "$work" "$artifacts" "$receipts"
+snapshot() { before=$(stat -c '%d:%i:%s:%y:%z' "$1")/$(hash_file "$1"); cp -- "$1" "$2"; [ "$before" = "$(stat -c '%d:%i:%s:%y:%z' "$1")/$(hash_file "$1")" ] || fail 'collector input changed during snapshot'; }
+snapshot "$key" "$work/signing-key.pem"; snapshot "$policy" "$work/trust.env"; chmod 0600 "$work/signing-key.pem"; key=$work/signing-key.pem; policy=$work/trust.env
+[ "$(field policy_schema "$policy" 2>/dev/null || true)" = mci-rendering-live-command-trust-v1 ] || fail 'wrong trust policy schema'
+[ "$(field scope "$policy" 2>/dev/null || true)" = "$mode" ] || fail 'trust policy mode mismatch'
+[ "$(field collector_key_id "$policy" 2>/dev/null || true)" = "$key_id" ] || fail 'untrusted collector key id'
+[ "$(field allow_fixture "$policy" 2>/dev/null || true)" = true ] || [ "$mode" = live ] || fail 'fixture mode forbidden by policy'
+[ -n "$captured" ] || captured=$(date -u +%s)000000000
+
+binary=$work/simple_showcase_vulkan
+cache=$work/cache
+capture_root=$work/renderdoc
+readback=$work/device-readback.ppm
+cpu_readback=$work/cpu-readback.ppm
+gate_dir=$work/renderdoc-gate
+cmd_build="sh scripts/check/build-vulkan-drawir-showcase-native.shs bin/simple $binary $cache"
+cmd_run="/usr/bin/time -f %M -o $work/max-rss-kib env MCI_RENDERING_PROBE_DIR=$work/probe-source SIMPLE_SHOWCASE_CAPTURE=$readback SIMPLE_SHOWCASE_CPU_CAPTURE=$cpu_readback SIMPLE_SHOWCASE_FRAMES=20 $binary"
+cmd_rdoc="RDOC_OUTPUT_DIR=$capture_root RDOC_SIMPLE_BIN=$binary sh scripts/tool/renderdoc-evidence.shs capture-simple"
+cmd_gate="BUILD_DIR=$gate_dir RDOC_SIMPLE_EVIDENCE_ENV=$capture_root/simple/evidence.env sh scripts/check/check-renderdoc-simple-gate.shs"
+public=$work/collector-public.pem
+openssl pkey -in "$key" -pubout -out "$public" >/dev/null 2>&1 || fail 'invalid signing key'
+[ "$(field collector_public_key_sha256 "$policy" 2>/dev/null || true)" = "$(hash_file "$public")" ] || fail 'signing key not trusted'
+for binding in "engine2d_build:$cmd_build" "engine2d_run:$cmd_run" "renderdoc_capture:$cmd_rdoc" "renderdoc_replay_gate:$cmd_gate"; do
+ id=${binding%%:*}; command=${binding#*:}
+ [ "$(field "command_${id}_sha256" "$policy" 2>/dev/null || true)" = "$(hash_text "$command")" ] || fail "untrusted canonical command: $id"
+done
+
+emit_receipt() { id=$1 command=$2 code=$3 stdout=$4 stderr=$5; receipt=$receipts/$id.command.env; { echo receipt_schema=mci-rendering-live-command-v1; echo command_id=$id; echo run_id=$run; echo source_hash=$source_hash; echo configuration_hash=$config_hash; echo command=$command; echo exit_code=$code; echo stdout_sha256=$(hash_file "$stdout"); echo stderr_sha256=$(hash_file "$stderr"); } > "$receipt"; }
+run_command() { id=$1 command=$2; stdout=$artifacts/$id.stdout; stderr=$artifacts/$id.stderr; set +e; (cd "$root" && sh -c "$command") >"$stdout" 2>"$stderr"; code=$?; set -e; emit_receipt "$id" "$command" "$code" "$stdout" "$stderr"; [ "$code" -eq 0 ] || fail "$id exited $code"; }
+
+if [ "$mode" = live ]; then
+ run_command engine2d-build "$cmd_build"
+ run_command engine2d-run "$cmd_run"
+ rss_kib=$(sed -n '1p' "$work/max-rss-kib" 2>/dev/null || true)
+ case "$rss_kib" in ''|*[!0-9]*|0) fail 'bounded host receipt missing max RSS';; esac
+ echo $((rss_kib * 1024)) > "$work/probe-source/rss.bytes"
+ cp -- "$cpu_readback" "$work/probe-source/cpu.rgba"
+ cp -- "$readback" "$work/probe-source/device.rgba"
+ cp -- "$artifacts/engine2d-run.stdout" "$artifacts/interaction.raw"
+ cp -- "$artifacts/engine2d-run.stdout" "$artifacts/perf.raw"
+ run_command renderdoc-capture "$cmd_rdoc"
+ run_command renderdoc-replay-gate "$cmd_gate"
+ probe_source=${MCI_RENDERING_PROBE_SOURCE_DIR:-$work/probe-source}
+ "$root/scripts/tool/write-engine2d-rendering-raw-v1.shs" "$probe_source" "$work/raw-v1" || fail 'canonical Engine2D probe did not emit mci-rendering-raw-v1'
+ for primitive in "$work/raw-v1"/*; do [ "$(basename "$primitive")" = schema.env ] || cp -- "$primitive" "$artifacts/$(basename "$primitive")"; done
+ capture_env=$capture_root/simple/evidence.env
+ regular "$capture_env" || fail 'canonical RenderDoc evidence record missing'
+ rdc=$(field rdoc_capture_file "$capture_env" 2>/dev/null || true)
+ case "$rdc" in /*) :;; *) rdc=$root/$rdc;; esac
+ rdc_dir=$(CDPATH= cd -- "$(dirname -- "$rdc")" 2>/dev/null && pwd -P) || fail 'invalid .rdc parent'
+ case "$rdc_dir/$(basename -- "$rdc")" in "$work"/*) :;; *) fail 'canonical .rdc escapes collector work root';; esac
+ regular "$rdc" || fail 'canonical RenderDoc command produced no .rdc'
+ regular "$readback" || fail 'canonical Engine2D command produced no readback'
+ cp -- "$rdc" "$artifacts/frame.rdc"
+ cp -- "$readback" "$artifacts/device-readback.ppm"
+ release=true
+else
+ # Deterministic contract bytes exercise the adapter vocabulary only. They are
+ # signed as fixture/nonpromotable and never represent a GPU observation.
+ printf 'command\nglyph\nimage\n' > "$artifacts/packed.events"
+ printf fixture-composition > "$artifacts/composition.bin"
+ cp "$artifacts/composition.bin" "$artifacts/gui.drawir"; printf '<!-- drawir-unsupported-count=0 -->\n' > "$artifacts/web.drawir"
+ printf fixture-pixels > "$artifacts/cpu.rgba"; cp "$artifacts/cpu.rgba" "$artifacts/device.rgba"
+ composition_hash=$(hash_file "$artifacts/composition.bin"); packed_hash=$(hash_text 'draw-ir-packed-v3|arena=9001|generation=1|rows=1|1;')
+ printf 'packed_identity_schema=draw-ir-packed-identity-v3\narena_id=9001\ngeneration=1\nslot=0\nrow_count=1\ncomposition_bytes=19\ncomposition_sha256=%s\npacked_sha256=%s\nrow.0=1\n' "$composition_hash" "$packed_hash" > "$artifacts/packed.identity"
+ printf 'generation=1\narena_id=9001\ncomposition_hash=%s\npacked_store_hash=%s\nrender_accepted=true\nqueue_state=published_taken_completed\nbackend=vulkan\n' "$composition_hash" "$packed_hash" > "$artifacts/backend.env"
+ printf 'queue_id=fixture-q\nsubmit_id=fixture-s\nfence_id=fixture-f\n' > "$artifacts/queue.env"
+ printf RDOCfixture > "$artifacts/frame.rdc"; printf 'replay_open=pass\ngeneration=1\n' > "$artifacts/replay.log"
+ for dimension in allocation queue inflight; do printf 'capacity=1\nexact_admitted=1\nplus_one=2\nplus_one_reason=1\n' > "$artifacts/$dimension.events"; done
+ printf stable > "$artifacts/overflow.before"; cp "$artifacts/overflow.before" "$artifacts/overflow.after"
+ : > "$artifacts/fallback.events"; printf draw-command > "$artifacts/drawir.entries"; printf 'font_batch_count=1\natlas_upload_count=1\natlas_upload_bytes=1\nfont_cache_identity_count=1\n' > "$artifacts/transient-owner.env"
+ printf 'focus\nkey_input\npointer_down\npointer_up\nclick\n' > "$artifacts/interaction.events"
+ printf '1\n2\n' > "$artifacts/perf.samples"; printf 3 > "$artifacts/rss.bytes"
+ release=false
+fi
+
+manifest=$out/collector-manifest.env
+{
+ echo manifest_schema=mci-rendering-live-collector-v1
+ echo raw_vocabulary_schema=mci-rendering-raw-v1
+ echo artifact_mode=$mode
+ echo release_eligible=$release
+ echo run_id=$run
+ echo source_hash=$source_hash
+ echo configuration_hash=$config_hash
+ echo captured_at_utc_ns=$captured
+ echo device_identity=$device
+ echo driver_identity=$driver
+ echo queue_identity=$queue
+ echo collector_key_id=$key_id
+ echo command_engine2d_build=$cmd_build
+ echo command_engine2d_run=$cmd_run
+ echo command_renderdoc_capture=$cmd_rdoc
+ echo command_renderdoc_replay_gate=$cmd_gate
+ for f in "$artifacts"/* "$receipts"/*; do [ -f "$f" ] || continue; echo "artifact=$(basename "$f")|$(hash_file "$f")"; done
+ if [ "$mode" = fixture ]; then
+  echo nonpromotable_reason=contract-fixture-no-gpu-execution
+ fi
+} > "$manifest"
+openssl dgst -sha256 -sign "$key" -out "$out/collector-manifest.sig" "$manifest"
+echo rendering_collector_mode=$mode
+echo rendering_collector_release_eligible=$release
+echo rendering_collector_manifest=$manifest

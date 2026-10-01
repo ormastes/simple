@@ -1,0 +1,103 @@
+#!/bin/sh
+# bash_output_hint.shs — PreToolUse(Bash) HINT. FAIL-OPEN.
+#
+# Adds context (never blocks) when a Bash command is likely to print more
+# than ~20 lines. Points at simple_ctx_batch_execute / simple_ctx_execute so
+# only a summary or search hits enter the transcript.
+#
+# Heuristic, re-tuned 2026-08-28 against 1,982 real >20-line Bash results
+# from this project's transcripts (the first version fired on 2.9% of them,
+# because every segment of a compound command was individually "bounded"):
+#   1. compound commands with >= 3 statements (`;`, `&&`, `||`, newlines)
+#      accumulate output even when each piece is piped through head;
+#   2. explicit windows that are themselves large: `sed -n A,Bp` with
+#      B-A >= 20 or `,$p`, `head/tail -N` with N >= 25, grep `-A/-B/-C N`
+#      with N >= 20;
+#   3. shell loops (`for ... do`, `while ... do`);
+#   4. a verbose command form (cat, find, grep -r, git log/diff/show, test
+#      and build runs, ...) not bounded by a counting/quiet filter.
+# The original context-mode plugin hints on EVERY Bash call instead; this
+# hook stays silent on short git/mkdir/rm/mv/ls work on purpose.
+#
+# Fail-open: any parse problem exits 0 with no output.
+#
+# Selftest: sh .claude/hooks/bash_output_hint.shs --selftest
+set -u
+HOOK_DIR=$(dirname "$0")
+. "$HOOK_DIR/ctx_common.shs" || exit 0
+
+ctx_is_bounded() {
+    printf '%s' "$1" | grep -Eq '\|[[:space:]]*(head|tail|wc|grep -c|grep -q|cut|sort \| uniq -c)|(^|[[:space:]])(-q|--quiet|--stat|--oneline|-n[[:space:]]*[0-9]+|-c)([[:space:]]|$)'
+}
+ctx_is_verbose() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]|;&])((/usr/bin/|/bin/)?(cat|find|tree|rg|grep -[a-zA-Z]*[rRn]|ls -[a-zA-Z]*[Rl])|git (log|diff|show|blame|diff-tree)|bin/simple (test|lint|build|run)|cargo (build|test)|make|npm (test|run)|pytest|tail -f|journalctl|dmesg|strace)([[:space:]]|$)'
+}
+# Segments of a compound command, one per line.
+ctx_segments() {
+    printf '%s' "$1" | tr '\n' ';' | sed 's/&&/;/g; s/||/;/g' | tr ';' '\n' | sed 's/^[[:space:]]*//' | grep -v '^$' | grep -Ev '^(cd|export|echo|printf|mkdir|rm|mv|cp|touch|[A-Za-z_][A-Za-z0-9_]*=)'
+}
+ctx_big_window() {
+    cmd=$1
+    # sed -n 'A,Bp' / sed -n A,Bp / sed -n 'A,$p'
+    printf '%s' "$cmd" | grep -Eq "sed -n ['\"]?[0-9]+,\\\$p" && return 0
+    for pair in $(printf '%s' "$cmd" | grep -Eo "sed -n ['\"]?[0-9]+,[0-9]+p" | grep -Eo '[0-9]+,[0-9]+'); do
+        a=${pair%,*}; b=${pair#*,}
+        [ "$((b - a))" -ge 20 ] 2>/dev/null && return 0
+    done
+    for n in $(printf '%s' "$cmd" | grep -Eo '(head|tail) -n? ?[0-9]+' | grep -Eo '[0-9]+$'); do
+        [ "$n" -ge 25 ] 2>/dev/null && return 0
+    done
+    for n in $(printf '%s' "$cmd" | grep -Eo '(^|[[:space:]])-[ABC] ?[0-9]+' | grep -Eo '[0-9]+$'); do
+        [ "$n" -ge 20 ] 2>/dev/null && return 0
+    done
+    return 1
+}
+ctx_is_loop() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:];])(for|while)[[:space:]].*(;|[[:space:]])do([[:space:]]|$)'
+}
+ctx_decide() {
+    cmd=$1
+    [ -n "$cmd" ] || return 0
+    reason=""
+    nseg=$(ctx_segments "$cmd" | wc -l | tr -d ' ')
+    if [ "${nseg:-0}" -ge 3 ]; then
+        reason="$nseg output-producing statements in one call"
+    elif ctx_big_window "$cmd"; then
+        reason="an explicit window of 20+ lines"
+    elif ctx_is_loop "$cmd"; then
+        reason="a shell loop"
+    else
+        ctx_segments "$cmd" | while IFS= read -r seg; do
+            if ctx_is_verbose "$seg" && ! ctx_is_bounded "$seg"; then
+                echo verbose
+                break
+            fi
+        done | grep -q verbose && reason="an unbounded verbose command"
+    fi
+    [ -n "$reason" ] || return 0
+    ctx_emit_hint "This Bash command may print more than 20 lines ($reason). Prefer simple-mcp: simple_ctx_batch_execute(commands, queries) runs it, indexes the output and returns only search hits; simple_ctx_execute(language: shell, code) returns stdout only (capped at 100 KB, remainder searchable) from a bounded sandbox. Bash is best for git/mkdir/rm/mv and other short-output commands."
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    fail=0
+    for verbose in 'cat src/app/mcp/main.spl' 'grep -rn foo src/' 'git log' 'bin/simple test test/01_unit' 'find . -name "*.spl"' \
+                   'cd /w && /usr/bin/grep -n "assert" a.spl b.spl' "sed -n '30,140p' f.spl" 'sed -n 1,60p f' 'head -30 f.md' \
+                   'grep -n x f | head -20; echo ===; git log -1 --format=%B abc' 'for f in a b c; do wc -l $f; done' 'git show abc -- "*.spl" | grep -E "^[+-]" | head -80'; do
+        out=$(ctx_decide "$verbose")
+        case "$out" in *'"additionalContext"'*) ;; *) echo "selftest FAIL: no hint: $verbose"; fail=1 ;; esac
+    done
+    for quiet in 'git status' 'mkdir -p x' 'cat f | head -5' 'git log --oneline -n 3' 'grep -rn foo src/ | wc -l' '' 'sed -n 1,10p f' 'cd x && git rev-parse HEAD' 'ls' 'head -5 f && echo ok'; do
+        out=$(ctx_decide "$quiet")
+        [ -z "$out" ] || { echo "selftest FAIL: unexpected hint: $quiet"; fail=1; }
+    done
+    [ "$fail" -eq 0 ] && echo "PASS — bash_output_hint selftest: 12 hinted, 10 silent"
+    exit "$fail"
+fi
+
+ctx_read_input || exit 0
+command=$(ctx_json_str command) || exit 0
+# Hook input is JSON: the command's newlines arrive as the two characters \n.
+command=$(printf '%s' "$command" | sed 's/\\n/\n/g')
+ctx_decide "$command"
+exit 0

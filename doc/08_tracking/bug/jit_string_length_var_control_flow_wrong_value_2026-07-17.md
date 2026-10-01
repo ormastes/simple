@@ -1,4 +1,9 @@
 # JIT: `.length()` (not `.len()`) returns 0.0, and var reassigned in a loop/branch returns nil from string methods
+## Closed 2026-09-16 — Status FIXED; verified on deployed seed via bin/simple run; HIR regression coverage landed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-17
 - **Severity:** P2 (silent wrong result in compiled/JIT code; correct in interpreter)
@@ -105,8 +110,7 @@ Durable HIR coverage now lives in
 **Not in scope / noted for a future lane:** the pure-Simple self-hosted
 compiler (`src/compiler/`) has the identical `"len"`-only gap in several
 places (e.g. `10.frontend/core/compiler/cg_expr.spl:500`,
-`cg_helpers.spl:267`, ~~`10.frontend/core/interpreter/eval_methods.spl` ×3~~
-(dead duplicate, deleted `f97dfbbb8ee` — those 3 never ran),
+`cg_helpers.spl:267`, `10.frontend/core/interpreter/eval_methods.spl` ×3,
 `access_literal_assign_eval.spl:23`, `call_method_eval.spl:715`), while two
 other pure-Simple files (`50.mir/_MirLoweringExpr/expr_dispatch.spl`,
 `method_calls_literals.spl`) already correctly handle `"len" | "length"`
@@ -197,3 +201,4 @@ Not root-caused. Suggested starting points for a future lane:
 - Add JIT/AOT regression tests once fixed: `val s = "aa"; assert s.length() ==
   2` and a `var` reassigned inside `while`/`if` with `.length()`/`.char_at()`
   checked after each assignment.
+

@@ -1,39 +1,5 @@
 # Qemu Runner Specification
 
-> <details>
-
-<!-- sdn-diagram:id=qemu_runner_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=qemu_runner_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-qemu_runner_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=qemu_runner_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 31 | 31 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Qemu Runner Specification
-
 ## Scenarios
 
 ### Qemu runner serial routing
@@ -41,7 +7,7 @@ qemu_runner_spec -> os
 #### does not accept non-x86 QEMU exit code 1 as success
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -61,7 +27,7 @@ expect(is_qemu_success(arm64, 0)).to_equal(true)
 #### keeps isa-debug-exit success limited to x86 scenarios
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -82,7 +48,7 @@ expect(scenario_qemu_exit_success(arm64, 0)).to_equal(true)
 #### exposes a runner-facing protection serial acceptance gate
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -92,7 +58,7 @@ val an505_serial = "[BOOT] Platform: MPS2-AN505 (QEMU)\n[MPU] Enabled, 8 regions
 expect(qemu_protection_serial_accepts_hardening("mps2-an505", "enforce", "qemu", an505_serial)).to_equal(true)
 expect(qemu_protection_serial_reason("mps2-an505", "enforce", "none", an505_serial)).to_equal("missing-runtime-check")
 
-val detect_serial = "kind=pmsav8-mpu\nprotection_probe=pass\n"
+val detect_serial = "protection_probe=pass\n"
 expect(qemu_protection_serial_accepts_hardening("mps2-an505", "detect", "qemu", detect_serial)).to_equal(false)
 expect(qemu_protection_serial_reason("mps2-an505", "detect", "qemu", detect_serial)).to_equal("diagnostic-protection-mode:detect")
 
@@ -105,7 +71,7 @@ expect(qemu_protection_serial_reason("stm32u585-uno-q", "fault-test", "real-boar
 #### maps known QEMU scenarios to board protection gates
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -117,7 +83,7 @@ expect(qemu_scenario_protection_board_id(x64)).to_equal("x86_64-q35")
 expect(qemu_scenario_protection_serial_accepts_hardening(x64, "enforce", x64_serial)).to_equal(true)
 
 val rv64 = scenario_riscv64_hosted()
-val rv64_serial = "protection_probe=pass\nkind=riscv-sv39\nprotection_enabled=pass\nregion_contract=pass\nsatp_mode=Sv39\nTEST PASSED"
+val rv64_serial = "[PAGING] MMU enabled (SCTLR_EL1.M=1, C=1, I=1)\npage_contract=pass\nTEST PASSED"
 expect(qemu_scenario_protection_board_id(rv64)).to_equal("riscv64-virt")
 expect(qemu_scenario_protection_serial_accepts_hardening(rv64, "enforce", rv64_serial)).to_equal(true)
 
@@ -131,7 +97,7 @@ expect(qemu_scenario_protection_serial_reason(arm64, "enforce", "protection_prob
 #### enumerates 32-bit x86 as a first-class target
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -151,7 +117,7 @@ expect(found_x86_32).to_equal(true)
 #### launches the x86_32 kernel lane through the compatible QEMU frontend
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -174,7 +140,7 @@ expect(cmd).to_contain("build/os/simpleos_x86_32.elf")
 #### builds normal targets from the shared platform catalog
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -197,7 +163,7 @@ expect(arm32.qemu_system).to_equal("qemu-system-arm")
 #### routes default ARM QEMU targets to the fs-exec acceptance lane
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -215,11 +181,11 @@ expect(arm32.output).to_equal("build/os/simpleos_arm32_fs_exec.elf")
 
 #### requires four-app fs launch markers for ARM acceptance lanes
 
-- fail
+1. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -248,15 +214,17 @@ else:
 
 #### keeps ARM and RV64 marker helper surfaces aligned with catalog lanes
 
-- fail
+1. fail
    - Expected: arm_fs_exec_required_marker_fragments(scenario_arm32_virtio_fat32_smf()) equals `lane.required_serial_markers`
-- fail
+
+2. fail
    - Expected: riscv64_hosted_required_marker_fragments() equals `lane.required_serial_markers`
-- fail
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -286,7 +254,7 @@ else:
 #### routes default RISC-V QEMU targets to fs-backed acceptance lanes
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -304,18 +272,19 @@ expect(rv32.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")
 
 #### defines ARM VirtIO FAT32 SMF execution scenarios
 
-- fail
+1. fail
    - Expected: arm32.name equals `arm32-virtio-fat32-smf`
    - Expected: arm32.arch equals `Architecture.Arm32`
    - Expected: scenario_test_timeout_ms(arm32) equals `60000`
    - Expected: scenario_lane_kind(arm32) equals `SimpleOsLaneKind.FsExec`
    - Expected: arm32.memory equals `lane.qemu_memory`
    - Expected: arm32.qemu_extra equals `lane.qemu_extra`
-- fail
+
+2. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -358,16 +327,17 @@ else:
 
 #### builds QEMU commands with ARM loader and VirtIO block disks
 
-- fail
+1. fail
    - Expected: arm32_target.entry equals `lane.entry`
    - Expected: arm32_target.linker_script equals `lane.linker_script`
    - Expected: arm32_target.output equals `lane.output`
    - Expected: arm_fs_exec_disk_image_path(Architecture.Arm32) equals `lane.media_path_hint`
-- fail
+
+2. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -411,7 +381,7 @@ else:
 #### looks up ARM SMF scenarios by name
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -427,20 +397,23 @@ expect(arm_fs_exec_disk_image_path(Architecture.Arm32)).to_equal("build/os/fat32
 
 #### dispatches named ARM scenarios through catalog-backed lane kind, serial markers, and media
 
-- fail
-- fail
+1. fail
+
+2. fail
    - Expected: scenario_lane_kind(resolved_arm32) equals `SimpleOsLaneKind.FsExec`
    - Expected: scenario_test_timeout_ms(resolved_arm32) equals `60000`
    - Expected: arm_fs_exec_required_marker_fragments(resolved_arm32) equals `resolved_lane.required_serial_markers`
    - Expected: target.entry equals `resolved_lane.entry`
    - Expected: target.output equals `resolved_lane.output`
    - Expected: arm_fs_exec_disk_image_path(resolved_arm32.arch) equals `resolved_lane.media_path_hint`
-- fail
-- fail
+
+3. fail
+
+4. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -483,14 +456,14 @@ else:
 
 #### defines RISC-V VirtIO FAT32 SMF execution scenarios
 
-- fail
+1. fail
    - Expected: rv32.name equals `riscv32-virtio-fat32-smf`
    - Expected: rv32.arch equals `Architecture.Riscv32`
    - Expected: scenario_test_timeout_ms(rv32) equals `60000`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -524,7 +497,7 @@ expect(scenario_test_timeout_ms(rv32)).to_equal(60000)
 #### builds QEMU commands with RISC-V kernels and VirtIO block disks
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -554,16 +527,17 @@ expect(target32.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")
 
 #### keeps RV64 media-backed scenario targets aligned with catalog lanes
 
-- fail
+1. fail
    - Expected: hosted_target.entry equals `lane.entry`
    - Expected: hosted_target.linker_script equals `lane.linker_script`
    - Expected: hosted_target.output equals `lane.output`
    - Expected: riscv_fs_exec_disk_image_path(Architecture.Riscv64) equals `lane.media_path_hint`
-- fail
+
+2. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -596,16 +570,19 @@ else:
 
 #### dispatches named RISC-V scenarios to resolved catalog lanes
 
-- fail
-- fail
+1. fail
+
+2. fail
    - Expected: scenario_lane_kind(resolved_hosted) equals `SimpleOsLaneKind.HostedCompileSmoke`
    - Expected: scenario_test_timeout_ms(resolved_hosted) equals `120000`
    - Expected: riscv64_hosted_required_marker_fragments() equals `resolved_lane.required_serial_markers`
    - Expected: target.entry equals `resolved_lane.entry`
    - Expected: target.output equals `resolved_lane.output`
    - Expected: riscv_fs_exec_disk_image_path(resolved_hosted.arch) equals `resolved_lane.media_path_hint`
-- fail
-- fail
+
+3. fail
+
+4. fail
    - Expected: scenario_lane_kind(resolved_rv32) equals `SimpleOsLaneKind.FsExec`
    - Expected: scenario_test_timeout_ms(resolved_rv32) equals `60000`
    - Expected: _scenario_required_marker_fragments(resolved_rv32) equals `resolved_lane.required_serial_markers`
@@ -613,12 +590,14 @@ else:
    - Expected: target.linker_script equals `resolved_lane.linker_script`
    - Expected: target.output equals `resolved_lane.output`
    - Expected: riscv_fs_exec_disk_image_path(resolved_rv32.arch) equals `resolved_lane.media_path_hint`
-- fail
-- fail
+
+5. fail
+
+6. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -679,7 +658,7 @@ else:
 #### scopes RISC-V SMF native builds to arch-local sources
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -704,45 +683,10 @@ expect(os_native_build_sources(rv32_target)[0]).to_equal("build/os/generated")
 
 </details>
 
-#### rejects the Rust bootstrap seed and requires the native-build CLI contract
-
-The target compiler selector checks both `SIMPLE_BINARY` and `SIMPLE_BIN`
-before pure-Simple release candidates. Every candidate must pass a bounded
-version/seed check and the exact fail-fast native-build CLI contract for the
-requested backend token. This probe establishes command-surface liveness only;
-the real build remains authoritative for backend runtime/toolchain availability.
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val source = rt_file_read_text("src/os/_QemuRunner/os_build_run.spl")
-val start = source.find("fn _find_simple_binary_for_target")
-expect(start).to_be_greater_than(-1)
-val selector = source.slice(start, source.len())
-val explicit = selector.find("val env_bin = rt_env_get(\"SIMPLE_BINARY\")")
-val explicit_alias = selector.find("val env_simple_bin = rt_env_get(\"SIMPLE_BIN\")")
-expect(explicit).to_be_greater_than(-1)
-expect(explicit_alias).to_be_greater_than(explicit)
-expect(selector.contains("src/compiler_rust/target/")).to_equal(false)
-expect(source).to_contain("if _simple_binary_has_native_build_contract(cand, backend_name):\n            return cand\n    \"\"\n\nfn _build_sources")
-expect(source).to_contain("not stderr.contains(\"bootstrap seed only\")")
-expect(source).to_contain("\"--backend\", backend_name")
-expect(source).to_contain("\"--mode\", \"definitely-invalid-mode\"")
-expect(source).to_contain("exit_code == 1 and (stdout + \"\\n\" + stderr).contains(diagnostic)")
-expect(source).to_contain("if simple_bin == \"\":\n        _remove_stale_build_output(target)")
-expect(source).to_contain("phase=tooling FAILED: no runnable pure-Simple compiler")
-```
-
-</details>
-
 #### lets callers disable compiled OS logging through native-build args
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -754,28 +698,8 @@ val x64_args = os_native_build_args(x64_target, "llvm")
 expect(x64_args).to_contain("--log")
 expect(x64_args).to_contain("off")
 expect(os_native_build_sources(x64_target)[0]).to_equal("build/os/generated")
-expect(os_native_build_sources(x64_target)).to_contain("src")
+expect(os_native_build_sources(x64_target)).to_contain("src/os")
 expect(rt_env_set("SIMPLE_OS_LOG_MODE", "on")).to_equal(true)
-```
-
-</details>
-
-#### bounds wm simple web worker timeout below the OS build timeout
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val target = get_wm_simple_web_check_target()
-expect(default_os_build_backend_for_target(target)).to_equal("llvm")
-val args = os_native_build_args(target, "llvm")
-expect(args).to_contain("--timeout")
-expect(args).to_contain("870")
-expect(args).to_contain("--opt-level=none")
-expect(os_native_build_sources(target)).to_equal(["examples/09_embedded/simple_os/arch/x86_64"])
 ```
 
 </details>
@@ -783,7 +707,7 @@ expect(os_native_build_sources(target)).to_equal(["examples/09_embedded/simple_o
 #### looks up RISC-V SMF scenarios by name
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -799,14 +723,14 @@ expect(riscv_fs_exec_disk_image_path(Architecture.Riscv32)).to_equal("build/os/f
 
 #### defines a truthful RV64 hosted preflight scenario
 
-- fail
+1. fail
    - Expected: hosted_cmd[0] equals `qemu-system-riscv64`
    - Expected: hosted_target.entry equals `examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl`
    - Expected: hosted_target.output equals `build/os/simpleos_riscv64_hosted.elf`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -841,43 +765,10 @@ expect(hosted_target.output).to_equal("build/os/simpleos_riscv64_hosted.elf")
 
 </details>
 
-#### defines an RV64 X25519 diagnostic lane with live helper build inputs
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 20 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val probe = scenario_rv64_x25519_probe()
-expect(probe.name).to_equal("rv64-x25519-probe")
-expect(probe.arch).to_equal(Architecture.Riscv64)
-expect(scenario_name_or_missing("rv64-x25519-probe")).to_equal("rv64-x25519-probe")
-
-val target = scenario_target(probe)
-expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/x25519_probe_entry.spl")
-expect(target.output).to_equal("build/os/simpleos_riscv64_x25519_probe.elf")
-expect(default_os_build_backend_for_target(target)).to_equal("cranelift")
-expect(os_native_build_sources(target)).to_equal(["build/os/generated", "src", "examples"])
-expect(os_native_build_args(target, "cranelift")).to_contain("--timeout")
-expect(os_native_build_args(target, "cranelift")).to_contain("180")
-expect(os_native_build_env_prefix(target, "")).to_contain("SIMPLE_BOOT_MINIMAL=1")
-
-val cmd = build_scenario_command(probe, target.output)
-expect(cmd[0]).to_equal("qemu-system-riscv64")
-expect(cmd).to_contain("-kernel")
-expect(cmd).to_contain("build/os/simpleos_riscv64_x25519_probe.elf")
-expect(scenario_qemu_exit_success(probe, 124)).to_equal(true)
-expect(scenario_qemu_exit_success(probe, -1)).to_equal(true)
-```
-
-</details>
-
 #### uses per-platform x86_64 FAT32 media for filesystem scenarios
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -895,7 +786,7 @@ if val resolved = scenario:
 #### exposes the q35 pure NVMe perf catalog lane as a runnable x86_64 scenario
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -922,37 +813,12 @@ else:
 
 </details>
 
-#### routes the x64 GPU 2D scenario to the virtio-gpu test target
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val scenario = scenario_x64_gpu_2d()
-expect(scenario_name_or_missing("x64-gpu-2d")).to_equal("x64-gpu-2d")
-val target = scenario_target(scenario)
-expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl")
-expect(target.output).to_equal("build/os/simpleos_gpu_test_x86_64.elf")
-expect(os_native_build_sources(target)).to_equal(["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"])
-expect(os_native_build_env_prefix(target, "")).to_contain("SIMPLE_BOOTSTRAP=1")
-expect(os_native_build_env_prefix(target, "")).to_contain("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
-val cmd = build_scenario_command(scenario, target.output)
-expect(cmd).to_contain("virtio-gpu,disable-modern=on,disable-legacy=off")
-expect(cmd).to_contain("-vga")
-expect(cmd).to_contain("none")
-```
-
-</details>
-
 #### delegates physical NVMe perf scenario serial acceptance to the real hardware gate
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -979,13 +845,12 @@ val perf =
     "fs_consumers=fat32,nvfs,dbfs fat32_direct_io=read-write-through nvfs_direct_io=read-write-through dbfs_direct_io=read-write-through fat32_extent_source=freestanding-fat32-extents " +
     "nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena " +
     "c_bridge_used=false c_baseline_device=same-nvme c_baseline_scope=in-guest c_baseline_cache=direct " +
-    "vfat_baseline_device=same-nvme vfat_baseline_scope=in-guest vfat_baseline_cache=direct vfat_baseline_filesystem=vfat " +
     "common_logic_shared=true " +
     "allocation_per_io=false simple_read_iops=120000 simple_write_iops=90000 " +
     "simple_read_p99_us=800 simple_write_p99_us=1000 c_read_iops=100000 " +
     "c_write_iops=80000 c_read_p99_us=900 c_write_p99_us=1100 " +
     "queue_depth=64 warm_runs=5 max_rss_kib=32768 hardware_target=real-nvme " +
-    "qemu=false physical_runs=5 device_model=Samsung_PM9A3 device_serial=SN123456 " +
+    "qemu=false device_model=Samsung_PM9A3 device_serial=SN123456 " +
     "namespace_nsid=1 measured_on=real-device\n"
 val ready = access + perf + "TEST PASSED\n"
 val q35 = access + perf.replace("hardware_target=real-nvme qemu=false", "hardware_target=q35 qemu=true") + "TEST PASSED\n"
@@ -999,7 +864,7 @@ expect(qemu_scenario_serial_acceptance_reason(scenario, "", q35)).to_equal("miss
 #### keeps x64 desktop smoke diskless and leaves storage to the disk lane
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1016,7 +881,7 @@ val disk = get_scenario("x64-desktop-disk")
 expect(scenario_name_or_missing("x64-desktop-disk")).to_equal("x64-desktop-disk")
 if val resolved_disk = disk:
     val disk_cmd = build_scenario_command(resolved_disk, "build/os/simpleos_desktop_e2e_32.elf")
-    expect(disk_cmd).to_contain("nvme,serial=deadbeef,drive=nvm")
+    expect(disk_cmd).to_contain("drive=nvm")
     expect(disk_cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=nvm,format=raw")
 ```
 
@@ -1025,7 +890,7 @@ if val resolved_disk = disk:
 #### defines a UEFI-native x64 desktop disk boot scenario
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1071,11 +936,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 31 |
-| Active scenarios | 31 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-</details>

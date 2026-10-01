@@ -23,6 +23,13 @@ pub fn evaluate_module_with_di_and_aop(
     di_config: Option<&DiConfig>,
     aop_config: Option<&AopConfig>,
 ) -> Result<i32, CompileError> {
+    // Engine receipt: stamped HERE, inside the tree-walk interpreter's own
+    // module-evaluation entry, rather than at the CLI layer that requested a
+    // lane. Every demotion path in the driver ends up calling this function, so
+    // a program that was asked to run on the JIT and silently fell back stamps
+    // `interpreter` and the receipt reports what RAN. See
+    // `simple_common::engine_receipt`.
+    simple_common::engine_receipt::stamp(simple_common::engine_receipt::Engine::Interpreter);
     crate::memory_guard::MemoryGuard::init();
     set_di_config(di_config.cloned());
     set_aop_config(aop_config.cloned());

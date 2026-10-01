@@ -15,7 +15,35 @@ static void expect(const char* label, int64_t actual, int64_t wanted) {
     }
 }
 
+static void check_packed_integer_remove(void) {
+    const int64_t values[] = {
+        INT64_C(1) << 62, INT64_MAX, INT64_MIN,
+        -(INT64_C(1) << 60) - 1, -(INT64_C(1) << 60),
+        (INT64_C(1) << 60) - 1, INT64_C(1) << 60, -1, 0
+    };
+    const int64_t count = (int64_t)(sizeof(values) / sizeof(values[0]));
+    for (int dispatch = 0; dispatch < 2; dispatch++) {
+        SplArray* packed = rt_array_new_with_cap_u64(count);
+        for (int64_t i = 0; i < count; i++) rt_array_push(packed, values[i]);
+        int64_t receiver = (int64_t)(uintptr_t)packed;
+        for (int64_t i = 0; i < count; i++) {
+            int64_t removed = dispatch
+                ? rt_collection_remove(receiver, rt_value_int(0))
+                : rt_array_remove(receiver, 0);
+            /* Decode the return: heap boxes need not have equal addresses. */
+            expect(dispatch ? "packed dispatcher decoded value" : "packed direct decoded value",
+                   rt_value_as_int(removed), values[i]);
+            expect("packed length shrank", rt_array_len(packed), count - i - 1);
+            if (i + 1 < count) {
+                expect("packed tail shifted without truncation", rt_array_get(packed, 0), values[i + 1]);
+            }
+        }
+        rt_array_free(packed);
+    }
+}
+
 int main(void) {
+    check_packed_integer_remove();
     const int64_t nil = 3;
     const int64_t first = rt_string_new((const uint8_t*)"first", 5);
     const int64_t middle = rt_string_new((const uint8_t*)"middle", 6);

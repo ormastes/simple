@@ -1,4 +1,8 @@
 # Bug: `bin/simple check` superlinear blowup with multiple `me` methods on array-field structs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-06-29  
 **Status:** Open  
@@ -100,3 +104,4 @@ The type-checker appears to enumerate constraint combinations for array-field
 accesses per function per struct, leading to O(n! / k!) growth where n = total
 array accesses and k = method count. The run path (interpreter) does not perform
 this inference pass, so it is unaffected.
+

@@ -1,8 +1,8 @@
 use std::convert::TryInto;
 
+use inkwell::AddressSpace;
 use inkwell::context::Context;
 use inkwell::values::{FloatValue, IntValue, PhiValue, PointerValue};
-use inkwell::AddressSpace;
 
 #[test]
 fn test_phi_conversion() {
@@ -103,26 +103,16 @@ fn test_conversion_to_pointer_value() {
     let module = context.create_module("testing");
     let builder = context.create_builder();
 
-    // Create a function whose the first parameter is of IntType
+    // Create a function with no parameters
     let fn_type = context.void_type().fn_type(&[], false);
     let function = module.add_function("testing", fn_type, None);
     let basic_block = context.append_basic_block(function, "entry");
     builder.position_at_end(basic_block);
 
     // Create a PointerType instruction
-    #[cfg(not(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    )))]
+    #[cfg(feature = "typed-pointers")]
     let i64_ptr_type = context.i64_type().ptr_type(AddressSpace::default());
-    #[cfg(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    ))]
+    #[cfg(not(feature = "typed-pointers"))]
     let i64_ptr_type = context.ptr_type(AddressSpace::default());
     let alloca_instr = builder
         .build_alloca(i64_ptr_type, "alloca")
@@ -130,7 +120,7 @@ fn test_conversion_to_pointer_value() {
         .as_instruction()
         .unwrap();
 
-    // Test the instruction conversion to a FloatValue
+    // Test the instruction conversion to a PointerValue
     let ptr_conversion: Result<PointerValue, _> = alloca_instr.try_into();
     assert!(ptr_conversion.is_ok());
 

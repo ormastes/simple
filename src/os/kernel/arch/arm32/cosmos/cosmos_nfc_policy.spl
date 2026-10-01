@@ -1,0 +1,419 @@
+# Pure-Simple Cosmos+ Tiger4NSC NFC policy and state decisions.
+#
+# C owns volatile DMA/MMIO acquisition, atomic state, bounded polling, and
+# channel/way sequencing. Every C export below is scalar and allocation-free.
+
+pub val COSMOS_NFC_POLICY_OK: i32 = 0
+pub val COSMOS_NFC_POLICY_UNAVAILABLE: i32 = 1
+pub val COSMOS_NFC_POLICY_INVALID: i32 = 2
+pub val COSMOS_NFC_POLICY_TIMEOUT: i32 = 3
+pub val COSMOS_NFC_POLICY_HW_ERROR: i32 = 4
+pub val COSMOS_NFC_POLICY_RETRY: i32 = 5
+
+pub val COSMOS_NFC_POLICY_CHANNEL0_BASE: u32 = 0x43C00000u32
+pub val COSMOS_NFC_POLICY_CHANNEL_STRIDE: u32 = 0x00010000u32
+pub val COSMOS_NFC_POLICY_CHANNEL_COUNT: u32 = 8u32
+pub val COSMOS_NFC_POLICY_WAY_COUNT: u32 = 8u32
+pub val COSMOS_NFC_POLICY_MAX_OWNED_RANGES: u32 = 5u32
+pub val COSMOS_NFC_POLICY_ROWS_PER_BLOCK: u32 = 256u32
+pub val COSMOS_NFC_POLICY_LUN1_BASE_ROW: u32 = 0x00200000u32
+pub val COSMOS_NFC_POLICY_ROWS_PER_LUN: u32 = 0x00105800u32
+
+pub val COSMOS_NFC_POLICY_PAGE_DATA_BYTES: u32 = 16384u32
+pub val COSMOS_NFC_POLICY_PAGE_SPARE_BYTES: u32 = 256u32
+pub val COSMOS_NFC_POLICY_RAW_ROW_BYTES: u32 = 18048u32
+pub val COSMOS_NFC_POLICY_ERROR_INFO_BYTES: u32 = 44u32
+pub val COSMOS_NFC_POLICY_WORD_BYTES: u32 = 4u32
+pub val COSMOS_NFC_POLICY_TOGGLE_BYTES: u32 = 12u32
+
+pub val COSMOS_NFC_POLICY_DATA_POOL_BASE: u32 = 0x10000000u32
+pub val COSMOS_NFC_POLICY_DATA_POOL_END: u32 = 0x110FFFFFu32
+pub val COSMOS_NFC_POLICY_SPARE_POOL_BASE: u32 = 0x11100000u32
+pub val COSMOS_NFC_POLICY_SPARE_POOL_END: u32 = 0x11143FFFu32
+pub val COSMOS_NFC_POLICY_COMPLETION_POOL_BASE: u32 = 0x17000000u32
+pub val COSMOS_NFC_POLICY_COMPLETION_POOL_END: u32 = 0x170000FFu32
+pub val COSMOS_NFC_POLICY_STATUS_POOL_BASE: u32 = 0x17000100u32
+pub val COSMOS_NFC_POLICY_STATUS_POOL_END: u32 = 0x170001FFu32
+pub val COSMOS_NFC_POLICY_ERROR_POOL_BASE: u32 = 0x17000200u32
+pub val COSMOS_NFC_POLICY_ERROR_POOL_END: u32 = 0x17000CFFu32
+pub val COSMOS_NFC_POLICY_TOGGLE_POOL_BASE: u32 = 0x17000D00u32
+pub val COSMOS_NFC_POLICY_TOGGLE_POOL_END: u32 = 0x17001CFFu32
+
+pub val COSMOS_NFC_POLICY_STATUS_REPORT_DONE: u32 = 0x1u32
+pub val COSMOS_NFC_POLICY_STATUS_COMPLETE_MASK: u32 = 0x60u32
+pub val COSMOS_NFC_POLICY_STATUS_FAIL_MASK: u32 = 0x03u32
+pub val COSMOS_NFC_POLICY_TRANSFER_COMPLETE: u32 = 0xA5000001u32
+
+struct CosmosNfcPolicyDecisionCount:
+    decision_id: text
+    true_count: i64
+    false_count: i64
+
+struct CosmosNfcPolicyDecisionManifest:
+    manifest_id: text
+    decisions: [CosmosNfcPolicyDecisionCount]
+    decisions_hit: i64
+    decisions_total: i64
+
+fn _row_in_lun0(row_address: u32) -> bool:
+    row_address < COSMOS_NFC_POLICY_ROWS_PER_LUN
+
+fn _row_in_lun1(row_address: u32) -> bool:
+    row_address >= COSMOS_NFC_POLICY_LUN1_BASE_ROW and
+        row_address - COSMOS_NFC_POLICY_LUN1_BASE_ROW <
+            COSMOS_NFC_POLICY_ROWS_PER_LUN
+
+fn _channel_invalid(channel: u32) -> bool:
+    channel >= COSMOS_NFC_POLICY_CHANNEL_COUNT
+
+fn _way_invalid(way: u32) -> bool:
+    way >= COSMOS_NFC_POLICY_WAY_COUNT
+
+fn _range_contract_unbound(contract_bound: u32) -> bool:
+    contract_bound == 0u32
+
+fn _range_size_empty(size: u32) -> bool: size == 0u32
+fn _range_stride_empty(stride: u32) -> bool: stride == 0u32
+fn _range_below(address: u32, base: u32) -> bool: address < base
+fn _range_above(address: u32, end: u32) -> bool: address > end
+
+fn _range_unaligned(address: u32, base: u32, stride: u32) -> bool:
+    ((address - base) % stride) != 0u32
+
+fn _range_exceeds(address: u32, size: u32, end: u32) -> bool:
+    size - 1u32 > end - address
+
+fn _status_done(raw_report: u32) -> bool:
+    (raw_report & COSMOS_NFC_POLICY_STATUS_REPORT_DONE) != 0u32
+
+fn _status_complete(status: u32) -> bool:
+    (status & COSMOS_NFC_POLICY_STATUS_COMPLETE_MASK) ==
+        COSMOS_NFC_POLICY_STATUS_COMPLETE_MASK
+
+fn _status_failed(status: u32) -> bool:
+    (status & COSMOS_NFC_POLICY_STATUS_FAIL_MASK) != 0u32
+
+fn _timeout(status: i32) -> bool:
+    status == COSMOS_NFC_POLICY_TIMEOUT
+
+fn _decision_count(
+    decision_id: text,
+    outcomes: [bool]
+) -> CosmosNfcPolicyDecisionCount:
+    var true_count: i64 = 0
+    var false_count: i64 = 0
+    for outcome in outcomes:
+        if outcome:
+            true_count = true_count + 1
+        else:
+            false_count = false_count + 1
+    CosmosNfcPolicyDecisionCount(
+        decision_id: decision_id,
+        true_count: true_count,
+        false_count: false_count
+    )
+
+@export("C", name: "cosmos_nfc_policy_channel_base")
+pub fn cosmos_nfc_policy_channel_base(channel: u32) -> u32:
+    COSMOS_NFC_POLICY_CHANNEL0_BASE +
+        channel * COSMOS_NFC_POLICY_CHANNEL_STRIDE
+
+@export("C", name: "cosmos_nfc_policy_row_valid")
+pub fn cosmos_nfc_policy_row_valid(row_address: u32) -> i32:
+    if _row_in_lun0(row_address) or _row_in_lun1(row_address): 1 else: 0
+
+@export("C", name: "cosmos_nfc_policy_target_valid")
+pub fn cosmos_nfc_policy_target_valid(
+    channel: u32,
+    way: u32,
+    row_address: u32
+) -> i32:
+    if not _channel_invalid(channel) and not _way_invalid(way) and
+        cosmos_nfc_policy_row_valid(row_address) != 0:
+        return 1
+    0
+
+@export("C", name: "cosmos_nfc_policy_erase_row_valid")
+pub fn cosmos_nfc_policy_erase_row_valid(row_address: u32) -> i32:
+    if cosmos_nfc_policy_row_valid(row_address) == 0:
+        return 0
+    val lun_row = if row_address >= COSMOS_NFC_POLICY_LUN1_BASE_ROW:
+        row_address - COSMOS_NFC_POLICY_LUN1_BASE_ROW
+    else:
+        row_address
+    if (lun_row % COSMOS_NFC_POLICY_ROWS_PER_BLOCK) == 0u32: 1 else: 0
+
+@export("C", name: "cosmos_nfc_policy_dma_range_valid")
+pub fn cosmos_nfc_policy_dma_range_valid(
+    address: u32,
+    size: u32,
+    base: u32,
+    end: u32,
+    stride: u32,
+    contract_bound: u32
+) -> i32:
+    if _range_contract_unbound(contract_bound) or _range_size_empty(size) or
+        _range_stride_empty(stride) or _range_below(address, base) or
+        _range_above(address, end):
+        return 0
+    if _range_unaligned(address, base, stride):
+        return 0
+    if _range_exceeds(address, size, end): 0 else: 1
+
+@export("C", name: "cosmos_nfc_policy_data_valid")
+pub fn cosmos_nfc_policy_data_valid(
+    address: u32,
+    contract_bound: u32
+) -> i32:
+    cosmos_nfc_policy_dma_range_valid(
+        address, COSMOS_NFC_POLICY_PAGE_DATA_BYTES,
+        COSMOS_NFC_POLICY_DATA_POOL_BASE, COSMOS_NFC_POLICY_DATA_POOL_END,
+        COSMOS_NFC_POLICY_PAGE_DATA_BYTES, contract_bound
+    )
+
+@export("C", name: "cosmos_nfc_policy_raw_data_valid")
+pub fn cosmos_nfc_policy_raw_data_valid(
+    address: u32,
+    contract_bound: u32
+) -> i32:
+    cosmos_nfc_policy_dma_range_valid(
+        address, COSMOS_NFC_POLICY_RAW_ROW_BYTES,
+        COSMOS_NFC_POLICY_DATA_POOL_BASE, COSMOS_NFC_POLICY_DATA_POOL_END,
+        COSMOS_NFC_POLICY_PAGE_DATA_BYTES, contract_bound
+    )
+
+@export("C", name: "cosmos_nfc_policy_spare_valid")
+pub fn cosmos_nfc_policy_spare_valid(
+    address: u32,
+    contract_bound: u32
+) -> i32:
+    cosmos_nfc_policy_dma_range_valid(
+        address, COSMOS_NFC_POLICY_PAGE_SPARE_BYTES,
+        COSMOS_NFC_POLICY_SPARE_POOL_BASE, COSMOS_NFC_POLICY_SPARE_POOL_END,
+        COSMOS_NFC_POLICY_PAGE_SPARE_BYTES, contract_bound
+    )
+
+@export("C", name: "cosmos_nfc_policy_completion_valid")
+pub fn cosmos_nfc_policy_completion_valid(
+    address: u32,
+    contract_bound: u32
+) -> i32:
+    cosmos_nfc_policy_dma_range_valid(
+        address, COSMOS_NFC_POLICY_WORD_BYTES,
+        COSMOS_NFC_POLICY_COMPLETION_POOL_BASE,
+        COSMOS_NFC_POLICY_COMPLETION_POOL_END,
+        COSMOS_NFC_POLICY_WORD_BYTES, contract_bound
+    )
+
+@export("C", name: "cosmos_nfc_policy_status_report_valid")
+pub fn cosmos_nfc_policy_status_report_valid(
+    address: u32,
+    contract_bound: u32
+) -> i32:
+    cosmos_nfc_policy_dma_range_valid(
+        address, COSMOS_NFC_POLICY_WORD_BYTES,
+        COSMOS_NFC_POLICY_STATUS_POOL_BASE, COSMOS_NFC_POLICY_STATUS_POOL_END,
+        COSMOS_NFC_POLICY_WORD_BYTES, contract_bound
+    )
+
+@export("C", name: "cosmos_nfc_policy_error_info_valid")
+pub fn cosmos_nfc_policy_error_info_valid(
+    address: u32,
+    contract_bound: u32
+) -> i32:
+    cosmos_nfc_policy_dma_range_valid(
+        address, COSMOS_NFC_POLICY_ERROR_INFO_BYTES,
+        COSMOS_NFC_POLICY_ERROR_POOL_BASE, COSMOS_NFC_POLICY_ERROR_POOL_END,
+        COSMOS_NFC_POLICY_ERROR_INFO_BYTES, contract_bound
+    )
+
+@export("C", name: "cosmos_nfc_policy_toggle_valid")
+pub fn cosmos_nfc_policy_toggle_valid(
+    address: u32,
+    contract_bound: u32
+) -> i32:
+    cosmos_nfc_policy_dma_range_valid(
+        address, COSMOS_NFC_POLICY_TOGGLE_BYTES,
+        COSMOS_NFC_POLICY_TOGGLE_POOL_BASE, COSMOS_NFC_POLICY_TOGGLE_POOL_END,
+        COSMOS_NFC_POLICY_WORD_BYTES, contract_bound
+    )
+
+@export("C", name: "cosmos_nfc_policy_ranges_overlap")
+pub fn cosmos_nfc_policy_ranges_overlap(
+    first: u32,
+    first_size: u32,
+    second: u32,
+    second_size: u32
+) -> i32:
+    val overlap = if first < second:
+        second - first < first_size
+    else:
+        first - second < second_size
+    if overlap: 1 else: 0
+
+@export("C", name: "cosmos_nfc_policy_dma_reserve_args_valid")
+pub fn cosmos_nfc_policy_dma_reserve_args_valid(
+    channel: u32,
+    ranges_present: u32,
+    count: u32
+) -> i32:
+    if not _channel_invalid(channel) and ranges_present != 0u32 and
+        count != 0u32 and count <= COSMOS_NFC_POLICY_MAX_OWNED_RANGES:
+        return 1
+    0
+
+@export("C", name: "cosmos_nfc_policy_dma_finish_releases")
+pub fn cosmos_nfc_policy_dma_finish_releases(status: i32) -> i32:
+    if _timeout(status): 0 else: 1
+
+@export("C", name: "cosmos_nfc_policy_channel_result_faults")
+pub fn cosmos_nfc_policy_channel_result_faults(status: i32) -> i32:
+    if _timeout(status): 1 else: 0
+
+@export("C", name: "cosmos_nfc_policy_nand_status")
+pub fn cosmos_nfc_policy_nand_status(raw_report: u32) -> u32:
+    raw_report >> 1u32
+
+@export("C", name: "cosmos_nfc_policy_decode_status")
+pub fn cosmos_nfc_policy_decode_status(raw_report: u32) -> i32:
+    if not _status_done(raw_report):
+        return COSMOS_NFC_POLICY_INVALID
+    val status = cosmos_nfc_policy_nand_status(raw_report)
+    if not _status_complete(status):
+        return COSMOS_NFC_POLICY_UNAVAILABLE
+    if _status_failed(status):
+        return COSMOS_NFC_POLICY_HW_ERROR
+    COSMOS_NFC_POLICY_OK
+
+@export("C", name: "cosmos_nfc_policy_io_valid")
+pub fn cosmos_nfc_policy_io_valid(
+    target_valid: i32,
+    data_valid: i32,
+    spare_valid: i32,
+    status_valid: i32,
+    read: i32,
+    error_info_valid: i32,
+    completion_valid: i32
+) -> i32:
+    if target_valid == 0 or data_valid == 0 or spare_valid == 0 or
+        status_valid == 0:
+        return 0
+    if read != 0 and (error_info_valid == 0 or completion_valid == 0):
+        return 0
+    1
+
+@export("C", name: "cosmos_nfc_policy_raw_io_valid")
+pub fn cosmos_nfc_policy_raw_io_valid(
+    target_valid: i32,
+    raw_data_valid: i32,
+    completion_valid: i32,
+    status_valid: i32
+) -> i32:
+    if target_valid != 0 and raw_data_valid != 0 and
+        completion_valid != 0 and status_valid != 0:
+        return 1
+    0
+
+@export("C", name: "cosmos_nfc_policy_initialized_status")
+pub fn cosmos_nfc_policy_initialized_status(initialized: u32) -> i32:
+    if initialized != 0u32:
+        return COSMOS_NFC_POLICY_OK
+    COSMOS_NFC_POLICY_UNAVAILABLE
+
+@export("C", name: "cosmos_nfc_policy_contract_status")
+pub fn cosmos_nfc_policy_contract_status(contract_status: i32) -> i32:
+    if contract_status == COSMOS_NFC_POLICY_OK:
+        return COSMOS_NFC_POLICY_OK
+    COSMOS_NFC_POLICY_UNAVAILABLE
+
+@export("C", name: "cosmos_nfc_policy_locked_channel_status")
+pub fn cosmos_nfc_policy_locked_channel_status(
+    faulted: u32,
+    contract_status: i32
+) -> i32:
+    if faulted != 0u32 or contract_status != COSMOS_NFC_POLICY_OK:
+        return COSMOS_NFC_POLICY_HW_ERROR
+    COSMOS_NFC_POLICY_OK
+
+@export("C", name: "cosmos_nfc_policy_init_state_status")
+pub fn cosmos_nfc_policy_init_state_status(
+    initialized: u32,
+    init_failed: u32
+) -> i32:
+    if initialized != 0u32:
+        return COSMOS_NFC_POLICY_OK
+    if init_failed != 0u32:
+        return COSMOS_NFC_POLICY_HW_ERROR
+    COSMOS_NFC_POLICY_RETRY
+
+@export("C", name: "cosmos_nfc_policy_init_selftest_status")
+pub fn cosmos_nfc_policy_init_selftest_status(selftest_status: i32) -> i32:
+    if selftest_status == COSMOS_NFC_POLICY_OK:
+        return COSMOS_NFC_POLICY_OK
+    COSMOS_NFC_POLICY_INVALID
+
+@export("C", name: "cosmos_nfc_policy_init_contract_status")
+pub fn cosmos_nfc_policy_init_contract_status(contract_status: i32) -> i32:
+    contract_status
+
+@export("C", name: "cosmos_nfc_policy_raw_completion_status")
+pub fn cosmos_nfc_policy_raw_completion_status(completion_word: u32) -> i32:
+    if completion_word == COSMOS_NFC_POLICY_TRANSFER_COMPLETE:
+        return COSMOS_NFC_POLICY_OK
+    if completion_word == 0u32:
+        return COSMOS_NFC_POLICY_TIMEOUT
+    COSMOS_NFC_POLICY_HW_ERROR
+
+@export("C", name: "cosmos_nfc_policy_toggle_payload_word")
+pub fn cosmos_nfc_policy_toggle_payload_word(index: u32) -> u32:
+    if index == 0u32:
+        return 0x00000006u32
+    if index == 1u32:
+        return 0x00000008u32
+    if index == 2u32:
+        return 0x00000020u32
+    0u32
+
+pub fn cosmos_nfc_policy_decision_manifest() -> CosmosNfcPolicyDecisionManifest:
+    """Owner-derived true/false outcomes for every production predicate."""
+    val decisions = [
+        _decision_count("row.lun0", [_row_in_lun0(0u32), _row_in_lun0(COSMOS_NFC_POLICY_ROWS_PER_LUN)]),
+        _decision_count("row.lun1", [_row_in_lun1(COSMOS_NFC_POLICY_LUN1_BASE_ROW), _row_in_lun1(COSMOS_NFC_POLICY_LUN1_BASE_ROW - 1u32)]),
+        _decision_count("target.channel-invalid", [_channel_invalid(8u32), _channel_invalid(7u32)]),
+        _decision_count("target.way-invalid", [_way_invalid(8u32), _way_invalid(7u32)]),
+        _decision_count("range.contract-unbound", [_range_contract_unbound(0u32), _range_contract_unbound(1u32)]),
+        _decision_count("range.size-empty", [_range_size_empty(0u32), _range_size_empty(1u32)]),
+        _decision_count("range.stride-empty", [_range_stride_empty(0u32), _range_stride_empty(1u32)]),
+        _decision_count("range.below", [_range_below(0u32, 1u32), _range_below(1u32, 1u32)]),
+        _decision_count("range.above", [_range_above(2u32, 1u32), _range_above(1u32, 1u32)]),
+        _decision_count("range.unaligned", [_range_unaligned(5u32, 0u32, 4u32), _range_unaligned(4u32, 0u32, 4u32)]),
+        _decision_count("range.exceeds", [_range_exceeds(8u32, 5u32, 11u32), _range_exceeds(8u32, 4u32, 11u32)]),
+        _decision_count("status.done", [_status_done(1u32), _status_done(0u32)]),
+        _decision_count("status.complete", [_status_complete(0x60u32), _status_complete(0x40u32)]),
+        _decision_count("status.failed", [_status_failed(0x61u32), _status_failed(0x60u32)]),
+        _decision_count("state.timeout", [_timeout(COSMOS_NFC_POLICY_TIMEOUT), _timeout(COSMOS_NFC_POLICY_OK)]),
+        _decision_count("reserve.args", [cosmos_nfc_policy_dma_reserve_args_valid(0u32, 1u32, 1u32) != 0, cosmos_nfc_policy_dma_reserve_args_valid(8u32, 1u32, 1u32) != 0]),
+        _decision_count("dma.overlap", [cosmos_nfc_policy_ranges_overlap(0u32, 8u32, 4u32, 8u32) != 0, cosmos_nfc_policy_ranges_overlap(0u32, 4u32, 4u32, 4u32) != 0]),
+        _decision_count("io.normal", [cosmos_nfc_policy_io_valid(1, 1, 1, 1, 0, 0, 0) != 0, cosmos_nfc_policy_io_valid(1, 0, 1, 1, 0, 0, 0) != 0]),
+        _decision_count("io.read-tail", [cosmos_nfc_policy_io_valid(1, 1, 1, 1, 1, 1, 1) != 0, cosmos_nfc_policy_io_valid(1, 1, 1, 1, 1, 1, 0) != 0]),
+        _decision_count("io.raw", [cosmos_nfc_policy_raw_io_valid(1, 1, 1, 1) != 0, cosmos_nfc_policy_raw_io_valid(1, 1, 0, 1) != 0]),
+        _decision_count("state.initialized", [cosmos_nfc_policy_initialized_status(1u32) == COSMOS_NFC_POLICY_OK, cosmos_nfc_policy_initialized_status(0u32) == COSMOS_NFC_POLICY_OK]),
+        _decision_count("state.contract", [cosmos_nfc_policy_contract_status(COSMOS_NFC_POLICY_OK) == COSMOS_NFC_POLICY_OK, cosmos_nfc_policy_contract_status(COSMOS_NFC_POLICY_UNAVAILABLE) == COSMOS_NFC_POLICY_OK]),
+        _decision_count("state.locked", [cosmos_nfc_policy_locked_channel_status(0u32, COSMOS_NFC_POLICY_OK) == COSMOS_NFC_POLICY_OK, cosmos_nfc_policy_locked_channel_status(1u32, COSMOS_NFC_POLICY_OK) == COSMOS_NFC_POLICY_OK]),
+        _decision_count("init.already", [cosmos_nfc_policy_init_state_status(1u32, 0u32) == COSMOS_NFC_POLICY_OK, cosmos_nfc_policy_init_state_status(0u32, 0u32) == COSMOS_NFC_POLICY_OK]),
+        _decision_count("init.failed", [cosmos_nfc_policy_init_state_status(0u32, 1u32) == COSMOS_NFC_POLICY_HW_ERROR, cosmos_nfc_policy_init_state_status(0u32, 0u32) == COSMOS_NFC_POLICY_HW_ERROR]),
+        _decision_count("init.selftest", [cosmos_nfc_policy_init_selftest_status(COSMOS_NFC_POLICY_OK) == COSMOS_NFC_POLICY_OK, cosmos_nfc_policy_init_selftest_status(COSMOS_NFC_POLICY_HW_ERROR) == COSMOS_NFC_POLICY_OK]),
+        _decision_count("completion.complete", [cosmos_nfc_policy_raw_completion_status(COSMOS_NFC_POLICY_TRANSFER_COMPLETE) == COSMOS_NFC_POLICY_OK, cosmos_nfc_policy_raw_completion_status(0u32) == COSMOS_NFC_POLICY_OK]),
+        _decision_count("completion.pending", [cosmos_nfc_policy_raw_completion_status(0u32) == COSMOS_NFC_POLICY_TIMEOUT, cosmos_nfc_policy_raw_completion_status(2u32) == COSMOS_NFC_POLICY_TIMEOUT]),
+        _decision_count("toggle.index-valid", [cosmos_nfc_policy_toggle_payload_word(2u32) != 0u32, cosmos_nfc_policy_toggle_payload_word(3u32) != 0u32])
+    ]
+    var hit: i64 = 0
+    for decision in decisions:
+        if decision.true_count > 0 and decision.false_count > 0:
+            hit = hit + 1
+    CosmosNfcPolicyDecisionManifest(
+        manifest_id: "cosmos-nfc-pure-policy-v1",
+        decisions: decisions,
+        decisions_hit: hit,
+        decisions_total: decisions.len()
+    )

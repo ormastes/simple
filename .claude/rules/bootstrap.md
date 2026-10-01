@@ -7,6 +7,17 @@ alwaysApply: false
 ---
 # Bootstrap & Binary Architecture
 
+## Bootstrap failure collection
+
+During diagnosis, continue independently runnable build and test rows after
+failures. A usable immutable compiler plus minimum sanity may start the next
+diagnostic phase before formal admission; keep that lineage unadmitted. Crash or
+sanity failure blocks its dependent chain while independent work continues.
+Follow the
+[shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
 ## KNOWN BLOCKER (2026-08-06, check before redeploying): Stage 3 self-host fails
 
 > **STATUS UPDATE 2026-08-18 — the ByteOrder blocker below is STALE
@@ -16,7 +27,9 @@ alwaysApply: false
 > is GREEN (`Results: 1 total, 1 passed, 0 failed`), and a minimal
 > `use std.binary_io.{ByteOrder}` lazy-import probe resolves and runs clean
 > under `bin/simple run` (see `scripts/check/check-bootstrap-preflight.shs`,
-> which fences it). The BGS1 fix (`module_lowering.spl:952-955`) and the
+> which fences it). The BGS1 fix (`module_import_registration.spl:577-580` —
+> the long-standing `module_lowering.spl:952-955` citation here was WRONG; that
+> file is 503 lines and contains no such code, re-verified 2026-08-30) and the
 > `Effect` facade collision fix are on main; a 2026-08-09 full bootstrap
 > compiled all 803 Stage-2 files with 0 failures (125 MB non-vacuous binary).
 > Per the bug doc's final update, the live bootstrap concern is no longer this
@@ -94,21 +107,61 @@ bootstrap). The Rust seed (`src/compiler_rust/target/bootstrap/simple`) is
 - **`bin/release/simple` is fully self-sufficient** — in-process compilation, no subprocess calls
 - External tool calls: `clang`/`clang++`/`cl.exe`, `gcc`, `mold`/`lld`/`link.exe`, `llc`, `uname`/`cmd`, `which`/`where`
 
-## Incremental: Rebuild Only Pure-Simple
-Normal bootstrap is pure-Simple-only. It reuses the existing Rust seed/runtime
-and does not run cargo, even when Rust source hashes changed:
+## Incremental: rebuild ONLY pure-Simple
+When you changed **only `.spl` sources** (src/compiler, src/lib, src/app) and the
+Rust seed is unchanged, skip the cargo/Rust rebuild and re-run only the
+pure-Simple stages:
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple
 ```
+
+Bootstrap scheduling is selected separately with
+`--strategy=adhoc|normal|full`; it does not replace `--mode`:
+
+- `normal` is the default and reuses incremental caches. Once a compiler phase
+  is admitted, its tool builds and compiler/tool tests use immutable compiler
+  bytes plus isolated caches while the next compiler phase is allowed to run.
+  Memory admission may queue side work; it must never create a second writer to
+  a canonical cache.
+- `adhoc` runs only explicitly selected diagnostic work and is non-admitting by
+  default.
+- `full` promotes hash-identical normal receipts, runs the remaining complete
+  build/test DAG, terminalizes task crashes/timeouts, continues independent
+  work, marks descendants `BLOCKED_UPSTREAM`, and reports only after every task
+  is terminal. It does not imply deployment.
+
+Canonical hash mismatches remain fatal for admission, publication, release, and
+deployment. Warning-only mismatch handling is permitted solely for explicitly
+labeled temporary diagnostic rows.
+
+For the Windows/Linux parallel repair workflow, start dependent Phase 3/4
+diagnostic builds as soon as each required compiler binary exists while
+upstream admission continues. Freeze the producer bytes and source identity,
+isolate writable caches and outputs, and share CPU capacity within memory
+limits. This diagnostic scheduling rule does not change the admitted scheduler
+or its receipt requirements; binary existence is not admission evidence.
+
+Temporary source workarounds must link the owning canonical bug immediately
+before the affected block. Use the
+[bug-linked workaround workflow](../../doc/07_guide/tooling/bug_linked_workarounds.md)
+for marker syntax, indexed review, and narrow recovery (runtime qualification
+pending). Fix the owner, review related links, restore intended blocks, then
+rebuild the smallest valid scope. Never use a recovery hash for automatic
+checkout/reset or rewrite cache identities to force reuse.
+
+The ordinary `bootstrap-from-scratch.sh` entry automatically uses this
+supervisor. Explicit Stage-2 stop, Stage-3 recovery, receipt validation,
+target-VM, and diagnostic-sweep commands remain direct specialized lanes.
 - Reuses the existing `src/compiler_rust/target/bootstrap/simple` seed + runtime
-  lib; **never runs cargo** unless `--full-bootstrap` is passed. Errors out if
-  no seed exists yet.
+  lib; **never runs cargo** (even if it detects stale Rust sources — it prints a
+  note and proceeds). Errors out if no seed exists yet (build one with a full
+  bootstrap first).
 - "If the Rust seed can build the changed pure-Simple" is enforced by Stage 2: the
   seed recompiles the changed `.spl`. If Stage 2 fails, the new pure-Simple needs
-  a Rust feature the seed lacks — rerun with `--full-bootstrap`.
+  a Rust feature the seed lacks — drop `--pure-simple` and run a full bootstrap.
 - Combine with `--deploy` to swap `bin/release/<triple>/simple` (same smoke gate).
 - Pure-Simple build modes:
-  - `dynload` (default): reuse `build/bootstrap/native_cache` unless compiler/AOP/loader
+  - `dynload` (default): reuse `.simple/native_cache` unless compiler/AOP/loader
     inputs changed; native-build emits native plus SMF cache where supported.
   - `one-binary`: clear native cache and build the monolithic native executable.
 - Dependency tracing intentionally over-invalidates around AOP/MDSOC weaving,
@@ -130,35 +183,10 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   `run` rejection, and strict native build/execute of `p2_add.spl`.
 - Multiplatform bootstrap CI exercises both LLVM and Cranelift through that
   wrapper and uploads only the resulting pure-Simple Stage 2/Stage 3 binaries,
-  never the Rust seed as a platform artifact. Note (2026-07-18): the LLVM
-  stage-2 link currently fails with 62 undefined symbols (Windows CI runs that
-  step continue-on-error); Cranelift is the working stage-2/3 path. See
-  doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md.
+  never the Rust seed as a platform artifact.
 - The Linux Stage 3 artifact owns the strict x86_64/AArch64/RISC-V LLVM
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
-
-## Beta release-line convergence
-
-A long-running beta bootstrap lane periodically fetches and inspects `main` for
-new reviewed bug fixes: before each candidate attempt, after repairing a
-bootstrap failure, and before release admission. Discovery is read-only and produces a candidate list;
-it never cherry-picks automatically and never pushes a protected ref. Each
-selected fix must carry exact source SHA, review receipt, target-line base SHA,
-post-application SHA, and renewed focused evidence before the integration
-authority may update `release/X.Y`.
-
-`main` always remains the development trunk; the protected ref must not be
-rebased or repointed onto a release branch, made to track it, or absorb the
-whole release line. Normally a fix lands on `main` first and is then
-backported. If an emergency fix is developed on `release/X.Y` first, candidate
-qualification remains blocked until an equivalent reviewed forward-port is
-integrated into `main`. Bug fixes have no waiver. Genuinely release-specific
-compatibility work uses a distinct non-fix classification with reason, owner,
-and expiry. Bootstrap receipts record the last scanned `main` SHA and the
-backport/forward-port change identities so periodic scans are idempotent.
-Shared bug fixes may not remain release-only. The bootstrap worker prepares
-changes but never pushes `main` itself; protected integration authority does.
 
 ## Verification tiering — match the gate to the change
 
@@ -279,45 +307,75 @@ has soaked. Reaching the <20s kernel-rebuild goal additionally needs incremental
 **link** and cached entry-closure **discovery/import-map** — the two phases the
 object cache does not touch (they dominate kernel build wall time).
 
+## Is the lane actually dead? Resolve the PID before you say so (2026-09-14)
+
+**`pgrep -f 'bootstrap-from-scratch'` returning 0 does NOT mean the lane died.**
+The lane **execs into `scripts/bootstrap/resume-stage3-from-admitted.sh`**, so
+the running process has a different name and that pattern misses it. Two
+sessions made this exact mistake within an hour of each other on 2026-09-14, and
+one of them (this one) was one step from filing a fabricated "lane dies
+silently" harness bug against a process that was working normally.
+
+Resolve the real holder instead — the lock records it for you:
+
+```bash
+out=<the --resume-stage3-from-admitted output root>
+cat "$out.lock/pid"                     # the lane's own recorded pid
+ps -o pid,etime,time,rss,command -p "$(cat "$out.lock/pid")"
+pgrep -P <that pid>                     # walk the child chain to the worker
+ps -o pid,etime,time,rss -p <worker>    # CPU climbing + GB-scale RSS = alive
+```
+
+Measured on the run that was called dead: `31736 -> 38398 -> 38401`, worker at
+59 min elapsed, **53:48 CPU, 5.0 GB RSS**. Very much alive.
+
+**A second lane refusing to start is the lock WORKING, not a failure.** The
+refusal is printed, not silent:
+
+```
+mkdir: .../bootstrap.lock: File exists
+error: bootstrap output is locked: .../bootstrap.lock
+```
+
+If you see that, another lane owns the output root. Do not delete the lock
+without running the PID check above — `.simple/storage/build/bootstrap.lock` is
+not a stale-file problem by default, and removing a live one lets two lanes
+write one output root.
+
+**Do not mutate the tree or the output root under a running lane.** A
+native-build reads source from cwd, so a `git checkout`/rebase mid-run
+invalidates everything it reads afterwards; and a second Stage 2 into the same
+output root will replace `stage3/<triple>/stage2-admitted/simple` and
+`stage3-planner-admission.receipt` beneath the run using them (the running
+process keeps its open inode, so it survives — but its on-disk inputs no longer
+describe it, and its result is contaminated). One lane at a time, tree frozen
+for the duration.
+
+**Lane logs are fully buffered.** A 0-byte `logs/<triple>/stage3-native-build.log`
+on a live run means nothing has flushed yet, not that nothing happened. Confirm
+with `lsof -p <worker>` that it is the process's fd 1/2, and judge liveness from
+CPU/RSS rather than from log size.
+
 ## Bootstrap Commands
 ```bash
-# Normal pure-Simple bootstrap:
+# Full bootstrap (recommended):
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
-
-# Full Rust + pure-Simple bootstrap:
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
-
+# WARNING: --deploy replaces bin/release/<triple>/simple with the STAGE4 CLI
+# without any smoke gate. Verified broken 2026-06-11 (lint coredumps, test
+# silent no-op, -c exit 1). After --deploy, ALWAYS smoke-test:
+#   setsid timeout 30 bin/simple -c "print(1+1)"   # expect 2
+#   bin/simple lint <any .spl>                      # must not core dump
+# If broken, restore the working seed:
+#   cp src/compiler_rust/target/release/simple bin/release/<triple>/simple.new \
+#     && mv bin/release/<triple>/simple.new bin/release/<triple>/simple
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
-# Manual full-bootstrap seed/runtime rebuild:
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
-
-# Internal stage replay after a full-bootstrap seed exists:
+# Manual stages:
+cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all
 SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/stage2/<triple>/simple
 ```
-
-### Coordinated strategy supervisor
-
-Ordinary `--strategy=normal|full` runs now enter the compatibility scheduler in
-`scripts/bootstrap/bootstrap-strategy.sh`. The existing stage engine remains the
-only compiler/admission authority. At immutable Stage-2 smoke admission it
-continues immediately into Stage 3 while a reserved-resource task runs the
-broader Stage-2 hello-world native-build qualification. Descendants remain
-quarantined until the parent and engine receipts pass under the same generation
-lease. Late parent failure recursively invalidates Stage 2/3/4/deploy/release
-and preserves artifacts as tainted evidence.
-
-Do not bypass a scheduler failure by copying or deploying its Stage-3/4 output.
-Read `OUTPUT/scheduler/current.env`, then the named generation's
-`failure-manifest.env` and `invalidations/*.env`. Repair and mint a new planner
-receipt/generation. `--strategy=adhoc` is the explicit legacy/recovery route;
-coordinated `--clean-release` and `--mode=one-binary` currently fail closed
-rather than pretending their monolithic cache semantics are isolated.
-
-Full contract and evidence map:
-`doc/07_guide/tooling/bootstrap_speculative_scheduler.md`.
 
 ## Redeploy #79 Key Findings (2026-07-11)
 
@@ -344,14 +402,26 @@ hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`)
 
 See `.claude/memory/ref_architecture.md` for detailed architecture.
 
-## Seed-sibling refresh (2026-08-18) — distinct from a self-hosted redeploy
+## Reaching Stage 3 from a seed-rooted Stage 2 (site 20, closed 2026-09-13)
 
-The "do not hand-roll `cargo build --release`" warning above is about faking a
-SELF-HOSTED redeploy. Refreshing the deployed RUST SEED binary with a seed-side
-fix is legitimate and was done twice on 2026-08-18 (brace-escape lexer fix,
-cleanup_old_logs statx fix): `cd src/compiler_rust && CARGO_TARGET_DIR=<warm>
-cargo build --release --bin simple`, verify the fix on the fresh binary, then
-deploy `cp <bin> bin/release/<triple>/simple.new && mv ... simple` (never plain
-cp — Text file busy). Always record binary identity (size/mtime) and rerun a
-spec proving the fix on the DEPLOYED path. This does not change that default
-tooling should ultimately be the pure-Simple self-hosted binary.
+A trust-root Stage-2 lane (`--full-bootstrap --stop-after-stage2`, no receipt)
+publishes the Stage-2 admission receipt and the sanity/provenance parent pair,
+but until 2026-09-13 nothing invoked the LAST producer, so Stage 3 was
+unreachable (`bootstrap-policy-error: reason-receipt-required`). Add the typed
+reason to the same command and the planner receipt is produced for you:
+
+```bash
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap \
+  --stop-after-stage2 --mode=dynload --jobs=half \
+  --produce-stage3-receipt=verify-landed-compiler-fix
+# -> bootstrap-policy: stage3-planner-receipt=<output>/stage3-planner-admission.receipt
+# -> bootstrap-policy: resume with: ... --resume-stage3-from-admitted=<output> --bootstrap-receipt=<receipt>
+```
+
+The reason is yours to type — it is never defaulted and never invented; the
+producer validates it against its own allow-list
+(`bootstrap_planner_v2_reason_allowed`) and re-verifies the whole parent
+authority before emitting anything. The flag is REFUSED (exit 64) outside the
+trust-root Stage-2 lane rather than silently ignored, and a producer failure
+fails the run leaving no receipt. Pinned by
+`scripts/check/check-bootstrap-stage3-receipt-autowire.shs`.

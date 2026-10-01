@@ -1,5 +1,33 @@
+"""
+## Purpose and audience
+Executable spec of MEXH004, the one-diagnostic-per-unreachable-arm
+match-exhaustiveness dedup contract, for the lint and query-tooling
+maintainers who own `src/app/cli/query_lint_checks` and
+`src/compiler/semantics/lint/match_exhaustiveness`. Scope: diagnostic
+deduplication and token-span placement after a wildcard arm, in both the
+query JSON lane and the semantic lane. Out of scope: MEXH001-003 emission
+policy beyond the one missing-default span case pinned below.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/lint/mexh004_dedup_spec.spl — each scenario feeds match
+source lines through `_mexh_query` (query JSON diagnostics) or `analyze_match`
+(semantic warnings) and asserts the deduplicated result.
+## Compatibility and limitations
+Query-lane diagnostics are asserted by JSON substring (`"line":N`,
+`"col":N`), which couples this spec to the JSON field spelling. The semantic
+lane shares precedence with the query lane by construction; the final two
+scenarios pin that alignment.
+## Verification guidance and troubleshooting
+A failure means dedup dropped a real duplicate, emitted one per sibling
+instead of one per unreachable arm, mis-ordered diagnostics against source
+order, or moved a token span. Each scenario name names which contract broke.
+"""
+# Lifecycle: doc/01_research/local/simple_compiler_linter_performance_memory_bug_detection.md ;
+# doc/03_plan/infra/agent_sessions/lint_spec.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/compiler/simd/simd_lint_design.md
 # @feature: compiler-performance-memory-efficiency
-# @req: REQ-011
+# @manual_section: mexh004-dedup
 
 use std.spec.*
 use app.cli.query_lint_checks.{_check_match_exhaustiveness_text}
@@ -23,6 +51,9 @@ fn _mexh_arm(name: text) -> i64:
 
 describe "MEXH004 one diagnostic per unreachable arm":
     it "deduplicates query diagnostics after a wildcard in source order":
+        # @req REQ-011
+        # @capture(protocol_json): the three deduplicated JSON diagnostics in source order
+        step("Query a match with two wildcards followed by two duplicate bindings")
         val diagnostics = _mexh_query([
             "match value:",
             "    case _: 0",
@@ -30,7 +61,7 @@ describe "MEXH004 one diagnostic per unreachable arm":
             "    case value: 2",
             "    case value: 3"
         ])
-        expect(diagnostics.len()).to_equal(3)
+        expect(diagnostics.len()).to_equal(3)  # oracle: lines 3-5 are the only unreachable arms; the second wildcard itself is not re-reported
         expect(diagnostics[0]).to_contain("duplicate wildcard")
         expect(diagnostics[0]).to_contain("\"line\":3")
         expect(diagnostics[1]).to_contain("after wildcard")
@@ -39,64 +70,85 @@ describe "MEXH004 one diagnostic per unreachable arm":
         expect(diagnostics[2]).to_contain("\"line\":5")
 
     it "retains one pre-wildcard duplicate-pattern diagnostic":
+        # @req REQ-011
+        # @capture(protocol_json): the single pre-wildcard duplicate diagnostic
+        step("Query a match whose duplicate precedes its wildcard")
         val diagnostics = _mexh_query([
             "match value:",
             "    case value: 0",
             "    case value: 1",
             "    case _: 2"
         ])
-        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics.len()).to_equal(1)  # oracle: only the line-3 duplicate pattern is unreachable; the wildcard still covers the rest
         expect(diagnostics[0]).to_contain("duplicate pattern 'value'")
         expect(diagnostics[0]).to_contain("\"line\":3")
 
     it "does not classify a multiline wildcard body as another arm":
+        # @req REQ-011
+        # @capture(statistics): finding count for the multiline-wildcard fixture
+        step("Query a wildcard whose body continues on the next line")
         val diagnostics = _mexh_query([
             "match value:",
             "    case _:",
             "        do_work()"
         ])
-        expect(diagnostics.len()).to_equal(0)
+        expect(diagnostics.len()).to_equal(0)  # oracle: the indented body belongs to the wildcard arm, so zero diagnostics
 
     it "reports only the later sibling after a multiline wildcard body":
+        # @req REQ-011
+        # @capture(protocol_json): the single post-wildcard diagnostic
+        step("Query a sibling arm that follows a multiline wildcard body")
         val diagnostics = _mexh_query([
             "match value:",
             "    case _:",
             "        do_work()",
             "    case value: 1"
         ])
-        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics.len()).to_equal(1)  # oracle: only the line-4 sibling is unreachable after the wildcard
         expect(diagnostics[0]).to_contain("after wildcard")
         expect(diagnostics[0]).to_contain("\"line\":4")
 
     it "does not treat a nested case as an outer sibling arm":
+        # @req REQ-011
+        # @capture(statistics): finding count for the nested-case fixture
+        step("Query a nested case token indented under a wildcard body")
         val diagnostics = _mexh_query([
             "match value:",
             "    case _:",
             "        case nested: 1"
         ])
-        expect(diagnostics.len()).to_equal(0)
+        expect(diagnostics.len()).to_equal(0)  # oracle: the deeper indent is body text, not an outer sibling, so zero diagnostics
 
     it "emits the indented arm token span":
+        # @req REQ-011
+        # @capture(protocol_json): the col and end_col span fields of the arm diagnostic
+        step("Query two wildcard arms and read the second arm's token span")
         val diagnostics = _mexh_query([
             "match value:",
             "    case _: 0",
             "    case _: 1"
         ])
-        expect(diagnostics.len()).to_equal(1)
-        expect(diagnostics[0]).to_contain("\"col\":5")
-        expect(diagnostics[0]).to_contain("\"end_col\":13")
+        expect(diagnostics.len()).to_equal(1)  # oracle: one unreachable wildcard sibling (line 3)
+        expect(diagnostics[0]).to_contain("\"col\":5")  # oracle: 'case' starts at column 5 under the 4-space match indent
+        expect(diagnostics[0]).to_contain("\"end_col\":13")  # oracle: 'case _' ends at column 13, one past the wildcard token
 
     it "emits the indented match token span for missing default":
+        # @req REQ-011
+        # @capture(protocol_json): the code and span fields of the MEXH002 diagnostic
+        step("Query an indented match with no default arm")
         val diagnostics = _mexh_query([
             "    match value:",
             "        case value: 1"
         ])
-        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics.len()).to_equal(1)  # oracle: exactly the missing-default diagnostic
         expect(diagnostics[0]).to_contain("\"code\":\"MEXH002\"")
-        expect(diagnostics[0]).to_contain("\"col\":5")
-        expect(diagnostics[0]).to_contain("\"end_col\":16")
+        expect(diagnostics[0]).to_contain("\"col\":5")  # oracle: the doubly-indented match keyword starts at column 5
+        expect(diagnostics[0]).to_contain("\"end_col\":16")  # oracle: 'match value' ends at column 16, the span the fix-it underlines
 
     it "keeps semantic MEXH004 precedence aligned with query lint":
+        # @req REQ-011
+        # @capture(statistics): the three semantic warnings in emission order
+        step("Analyze the same wildcard-duplicate shape through the semantic lane")
         ast_reset()
         val warnings = analyze_match(-1, [
             _mexh_arm("_"),
@@ -104,17 +156,20 @@ describe "MEXH004 one diagnostic per unreachable arm":
             _mexh_arm("value"),
             _mexh_arm("value")
         ], "fixture", {})
-        expect(warnings.len()).to_equal(3)
+        expect(warnings.len()).to_equal(3)  # oracle: same dedup as the query lane — duplicate wildcard plus two after-wildcard arms
         expect(warnings[0].message).to_contain("duplicate wildcard")
         expect(warnings[1].message).to_contain("after wildcard")
         expect(warnings[2].message).to_contain("after wildcard")
 
     it "keeps semantic duplicate-pattern reporting before a wildcard":
+        # @req REQ-011
+        # @capture(statistics): the single semantic duplicate-pattern warning
+        step("Analyze a pre-wildcard duplicate through the semantic lane")
         ast_reset()
         val warnings = analyze_match(-1, [
             _mexh_arm("value"),
             _mexh_arm("value"),
             _mexh_arm("_")
         ], "fixture", {})
-        expect(warnings.len()).to_equal(1)
+        expect(warnings.len()).to_equal(1)  # oracle: the wildcard covers later arms, so only the explicit duplicate is reported
         expect(warnings[0].message).to_contain("duplicate pattern 'value'")

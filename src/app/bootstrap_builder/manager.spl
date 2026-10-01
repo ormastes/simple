@@ -1,0 +1,312 @@
+# Parent-owned deterministic scheduling. Workers receive encoded task values,
+# never this state. Only the caller publishes journal/cache records, after an
+# accepted transition. RUNNING and REAPED both reserve a host slot.
+use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1, BuildResultV1, BuildRunV1, builder_validate_run_v1, builder_validate_result_v1, builder_task_identity_v1}
+use std.common.build_manager.codec.{builder_encode_run_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct BuilderManagerV1:
+    run: BuildRunV1
+    tasks: [BuildTaskV1]
+    statuses: [text]
+    host_ids: [text]
+    error: text
+
+fn builder_manager_start(run: BuildRunV1) -> BuilderManagerV1:
+    """Validate the complete DAG before making any task dispatchable."""
+    var statuses: [text] = []
+    var hosts: [text] = []
+    for task in run.tasks:
+        statuses = statuses.push("PENDING")
+        hosts = hosts.push("")
+    BuilderManagerV1(run: run, tasks: run.tasks, statuses: statuses, host_ids: hosts, error: builder_validate_run_v1(run))
+
+fn builder_manager_task_index(state: BuilderManagerV1, task_id: text) -> i64:
+    for i in 0..state.tasks.len():
+        if state.tasks[i].id == task_id: return i
+    -1
+
+fn builder_manager_host_slots(state: BuilderManagerV1, host_id: text) -> i64:
+    var slots = 0
+    for host in state.run.hosts:
+        if host.id == host_id: slots = host.slots
+    for i in 0..state.tasks.len():
+        if state.host_ids[i] == host_id and (state.statuses[i] == "RUNNING" or state.statuses[i] == "REAPED"):
+            slots = slots - 1
+    slots
+
+fn builder_manager_dependencies_ready(state: BuilderManagerV1, index: i64) -> bool:
+    for dependency in state.tasks[index].dependencies:
+        val parent_index = builder_manager_task_index(state, dependency)
+        if parent_index < 0: return false
+        if state.statuses[parent_index] != "SUCCEEDED": return false
+    true
+
+fn builder_manager_ready(state: BuilderManagerV1) -> [i64]:
+    """Return ready task indices in manifest order, bounded by free host slots."""
+    var ready: [i64] = []
+    if state.error != "": return ready
+    var free_slots = 0
+    for host in state.run.hosts:
+        free_slots = free_slots + builder_manager_host_slots(state, host.id)
+    for i in 0..state.tasks.len():
+        if ready.len() >= free_slots: break
+        if state.statuses[i] == "PENDING" and builder_manager_dependencies_ready(state, i):
+            ready = ready.push(i)
+    ready
+
+fn builder_manager_cache_ready(state: BuilderManagerV1) -> [i64]:
+    """Cache admission uses no worker slots, including during lease recovery."""
+    var ready: [i64] = []
+    if state.error != "": return ready
+    for i in 0..state.tasks.len():
+        if state.statuses[i] == "PENDING" and builder_manager_dependencies_ready(state, i):
+            ready = ready.push(i)
+    ready
+
+fn builder_manager_dispatch(state: BuilderManagerV1, index: i64, host_id: text) -> BuilderManagerV1:
+    """Reserve one host slot before starting the worker process."""
+    var next = state
+    if next.error != "": return next
+    if index < 0 or index >= next.tasks.len():
+        next.error = "dispatch task index out of range"
+        return next
+    if next.statuses[index] != "PENDING" or not builder_manager_dependencies_ready(next, index):
+        next.error = "dispatch requires pending task with admitted dependencies"
+        return next
+    if builder_manager_host_slots(next, host_id) <= 0:
+        next.error = "dispatch host absent or full"
+        return next
+    next.statuses[index] = "RUNNING"
+    next.host_ids[index] = host_id
+    next
+
+fn builder_manager_reap(state: BuilderManagerV1, task_id: text, attempt: i64) -> BuilderManagerV1:
+    """Caller must reap the actual process handle before this transition."""
+    var next = state
+    if next.error != "": return next
+    val index = builder_manager_task_index(next, task_id)
+    if index < 0:
+        next.error = "reaped task is unknown"
+        return next
+    if next.statuses[index] != "RUNNING" or next.tasks[index].attempt != attempt:
+        next.error = "reaped task is not the active attempt"
+        return next
+    next.statuses[index] = "REAPED"
+    next
+
+fn builder_manager_output_error(task: BuildTaskV1, result: BuildResultV1, observed_outputs: [BuildInputV1]) -> text:
+    # The caller computes these digests from files, never from worker claims.
+    if result.outputs.len() != task.outputs.len() or observed_outputs.len() != task.outputs.len():
+        return "success requires every declared output and fresh parent digest"
+    for path in task.outputs:
+        var receipt_matches = 0
+        var observed_matches = 0
+        var receipt_digest = ""
+        var observed_digest = ""
+        for output in result.outputs:
+            if output.path == path:
+                receipt_matches = receipt_matches + 1
+                receipt_digest = output.digest
+        for output in observed_outputs:
+            if output.path == path:
+                observed_matches = observed_matches + 1
+                observed_digest = output.digest
+        if receipt_matches != 1 or observed_matches != 1:
+            return "output paths must match declarations exactly once"
+        if receipt_digest == "" or receipt_digest != observed_digest:
+            return "parent output digest does not match worker receipt"
+    ""
+
+fn builder_manager_block_dependents(state: BuilderManagerV1) -> BuilderManagerV1:
+    var next = state
+    var terminal_failure = false
+    for status in next.statuses:
+        if status == "FAILED" or status == "UNRESOLVED": terminal_failure = true
+    if not terminal_failure: return next
+    if not next.run.keep_going:
+        for i in 0..next.tasks.len():
+            if next.statuses[i] == "PENDING": next.statuses[i] = "BLOCKED"
+        return next
+    # At most |tasks| passes, even for reverse topological manifest order.
+    var changed = true
+    var rounds = 0
+    while changed and rounds < next.tasks.len():
+        changed = false
+        rounds = rounds + 1
+        for i in 0..next.tasks.len():
+            if next.statuses[i] == "PENDING":
+                for dependency in next.tasks[i].dependencies:
+                    val parent_index = builder_manager_task_index(next, dependency)
+                    if parent_index >= 0:
+                        if next.statuses[parent_index] == "FAILED" or next.statuses[parent_index] == "UNRESOLVED" or next.statuses[parent_index] == "BLOCKED":
+                            next.statuses[i] = "BLOCKED"
+                            changed = true
+                            break
+    next
+
+fn builder_manager_unresolved(state: BuilderManagerV1, task_id: text, attempt: i64) -> BuilderManagerV1:
+    """Reaped transport lacks a current receipt; preserve identity without retry."""
+    var next = state
+    if next.error != "": return next
+    val index = builder_manager_task_index(next, task_id)
+    if index < 0:
+        next.error = "unresolved task is unknown"
+        return next
+    if next.statuses[index] != "REAPED" or next.tasks[index].attempt != attempt:
+        next.error = "unresolved result requires the exact reaped attempt"
+        return next
+    next.statuses[index] = "UNRESOLVED"
+    builder_manager_block_dependents(next)
+
+fn builder_manager_accept(state: BuilderManagerV1, result: BuildResultV1, observed_outputs: [BuildInputV1]) -> BuilderManagerV1:
+    """Admit one reaped result. Invalid identity or output evidence fails closed."""
+    var next = state
+    if next.error != "": return next
+    val index = builder_manager_task_index(next, result.task_id)
+    if index < 0:
+        next.error = "result task is unknown"
+        return next
+    # An earlier attempt can finish transport delivery after a retry starts.
+    # Discard that delivery without reaping, releasing, or poisoning the current
+    # lease. The caller may quarantine the payload for diagnostics.
+    if result.attempt < next.tasks[index].attempt: return next
+    if next.statuses[index] != "REAPED":
+        next.error = "result admission requires a reaped worker"
+        return next
+    if result.host_id != next.host_ids[index]:
+        next.error = "result host differs from dispatched host"
+        return next
+    if not builder_manager_dependencies_ready(next, index):
+        next.error = "result admission requires freshly admitted dependencies"
+        return next
+    val task = next.tasks[index]
+    next.error = builder_validate_result_v1(task, result)
+    if next.error != "": return next
+    if result.status == "OK":
+        next.error = builder_manager_output_error(task, result, observed_outputs)
+        if next.error != "": return next
+        next.statuses[index] = "SUCCEEDED"
+    else:
+        if task.attempt < next.run.max_attempts:
+            var retry = task
+            retry.attempt = task.attempt + 1
+            next.tasks[index] = retry
+            next.statuses[index] = "PENDING"
+            next.host_ids[index] = ""
+        else:
+            next.statuses[index] = "FAILED"
+    builder_manager_block_dependents(next)
+
+fn builder_manager_resume(state: BuilderManagerV1, result: BuildResultV1, observed_outputs: [BuildInputV1]) -> BuilderManagerV1:
+    """Reuse exact-identity success only after rehashing every output locally."""
+    var next = state
+    if next.error != "": return next
+    val index = builder_manager_task_index(next, result.task_id)
+    if index < 0:
+        next.error = "cached task is unknown"
+        return next
+    if next.statuses[index] != "PENDING" or not builder_manager_dependencies_ready(next, index):
+        next.error = "cache admission requires pending task with admitted dependencies"
+        return next
+    if result.status != "OK":
+        next.error = "cached receipt is not successful"
+        return next
+    var known_host = false
+    for host in next.run.hosts:
+        if host.id == result.host_id: known_host = true
+    if not known_host:
+        next.error = "cached receipt host is absent from the run"
+        return next
+    next.error = builder_validate_result_v1(next.tasks[index], result)
+    if next.error != "": return next
+    next.error = builder_manager_output_error(next.tasks[index], result, observed_outputs)
+    if next.error != "": return next
+    next.statuses[index] = "SUCCEEDED"
+    next.host_ids[index] = result.host_id
+    next
+
+fn builder_manager_done(state: BuilderManagerV1) -> bool:
+    for status in state.statuses:
+        if status == "RUNNING" or status == "REAPED": return false
+        if status == "PENDING" and state.error == "": return false
+    true
+
+fn builder_manager_succeeded(state: BuilderManagerV1) -> bool:
+    if state.error != "": return false
+    for status in state.statuses:
+        if status != "SUCCEEDED": return false
+    true
+
+fn builder_manager_encode_v1(state: BuilderManagerV1) -> text:
+    """Persist parent scheduling state; worker handles remain caller-owned."""
+    val manifest = builder_encode_run_v1(state.run)
+    if manifest == "" or state.error != "": return ""
+    var content = "BUILDER_MANAGER_V1\t{sha256_text(manifest)}\n"
+    for i in 0..state.tasks.len():
+        val task = state.tasks[i]
+        content = content + "{task.id}\t{task.attempt}\t{state.statuses[i]}\t{state.host_ids[i]}\t{builder_task_identity_v1(task)}\n"
+    content
+
+fn builder_manager_decode_v1(run: BuildRunV1, content: text) -> Result<BuilderManagerV1, text>:
+    """Restore reserved slots. Caller must recover every live lease before dispatch."""
+    var state = builder_manager_start(run)
+    if state.error != "": return Err(state.error)
+    if content.len() > 16777216 or not content.ends_with("\n"):
+        return Err("invalid manager journal bound or terminator")
+    val lines = content.split("\n")
+    if lines.len() != run.tasks.len() + 2:
+        return Err("manager journal must contain every task exactly once")
+    val expected_header = "BUILDER_MANAGER_V1\t{sha256_text(builder_encode_run_v1(run))}"
+    if lines[0] != expected_header:
+        return Err("manager journal manifest identity differs")
+    for i in 0..run.tasks.len():
+        val fields = lines[i + 1].split("\t")
+        if fields.len() != 5 or fields[0] != run.tasks[i].id:
+            return Err("manager journal task order or fields differ")
+        var attempt = 0
+        for candidate in run.tasks[i].attempt..run.max_attempts + 1:
+            if fields[1] == "{candidate}": attempt = candidate
+        if attempt == 0: return Err("manager journal attempt outside run budget")
+        var task = run.tasks[i]
+        task.attempt = attempt
+        if fields[4] != builder_task_identity_v1(task):
+            return Err("manager journal current attempt identity differs")
+        val status = fields[2]
+        if status != "PENDING" and status != "SUCCEEDED" and status != "FAILED" and status != "BLOCKED" and status != "RUNNING" and status != "REAPED" and status != "UNRESOLVED":
+            return Err("unknown manager journal status")
+        if status == "FAILED" and attempt != run.max_attempts:
+            return Err("manager journal failure before retry budget exhausted")
+        var known_host = fields[3] == ""
+        for host in run.hosts:
+            if host.id == fields[3]: known_host = true
+        if not known_host: return Err("manager journal host is unknown")
+        if (status == "SUCCEEDED" or status == "FAILED" or status == "RUNNING" or status == "REAPED" or status == "UNRESOLVED") and fields[3] == "":
+            return Err("completed manager task requires a host")
+        state.tasks[i] = task
+        state.statuses[i] = status
+        state.host_ids[i] = fields[3]
+    # Check recorded dependency admission before resetting successes to pending.
+    for i in 0..state.tasks.len():
+        if state.statuses[i] == "SUCCEEDED" or state.statuses[i] == "FAILED" or state.statuses[i] == "RUNNING" or state.statuses[i] == "REAPED" or state.statuses[i] == "UNRESOLVED":
+            if not builder_manager_dependencies_ready(state, i):
+                return Err("manager journal completed task without admitted dependencies")
+    for i in 0..state.tasks.len():
+        if state.statuses[i] == "BLOCKED": state.statuses[i] = "PENDING"
+        if state.statuses[i] == "REAPED" or state.statuses[i] == "UNRESOLVED": state.statuses[i] = "RUNNING"
+    # Re-open descendants blocked only by unresolved transport. Permanent
+    # exhausted failures still block their descendants after restart. Preserve
+    # completed ancestors through that walk before scheduling their rehash.
+    state = builder_manager_block_dependents(state)
+    for i in 0..state.tasks.len():
+        if state.statuses[i] == "SUCCEEDED": state.statuses[i] = "PENDING"
+    Ok(state)
+
+export BuilderManagerV1
+export builder_manager_start, builder_manager_task_index, builder_manager_host_slots
+export builder_manager_dependencies_ready, builder_manager_ready, builder_manager_dispatch
+export builder_manager_cache_ready
+export builder_manager_reap, builder_manager_accept, builder_manager_resume
+export builder_manager_unresolved
+export builder_manager_done, builder_manager_succeeded
+export builder_manager_output_error, builder_manager_encode_v1, builder_manager_decode_v1

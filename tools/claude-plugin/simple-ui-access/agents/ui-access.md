@@ -1,3 +1,8 @@
+---
+name: ui-access
+description: "Operator agent for snapshot, find, act, and history workflows on Simple UI surfaces."
+---
+
 # UI Access Agent — Snapshot / Find / Act / History
 
 ## Role

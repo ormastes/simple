@@ -1,4 +1,8 @@
 # `type X = Y` does not resolve as a static-call receiver — `X.new()` sees nil
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — architectural (needs a Rust-seed interpreter name-resolution
 change, out of scope per repo rules; re-confirmed 2026-08-10)
@@ -121,19 +125,9 @@ pure-Simple side, but the bug and its architectural blocker are unchanged.
 - `type_alias_swapped_winner_is_inert_2026-08-01.md`
 - `flat_ast_export_from_and_type_alias_loss_2026-07-27.md`
 
-## Re-verification 2026-08-17
+## Triage 2026-09-13 (BUGFIX-7 lane)
 
-Re-read `src/compiler/35.semantics/lint/semantic_api/alias_registry.spl` in
-full. `alias_registry_populate` (line 211) still only builds a name -> immediate
-target lookup table for lint/VHDL consumption; there is still no code path in
-this file, or anywhere reachable from `35.semantics`, `30.types`, `90.tools`, or
-`95.interp`, that binds a type-alias name as a resolvable static-call receiver
-VALUE. That resolution (the actual bug) is produced by the Rust bootstrap seed's
-interpreter method dispatch (`src/compiler_rust/compiler/src/interpreter_method/mod.rs`),
-which remains out of scope per repo rules ("Seed is bootstrap-only").
+Record already states this is architectural, needing a Rust-seed interpreter
+name-resolution change, out of scope per repo rules, re-confirmed 2026-08-10.
+No change made.
 
-No pure-Simple file in this worker's scope lock owns receiver-value resolution
-for identifiers, so there is nothing to change here.
-
-**Verdict: BLOCKED (architectural — fix belongs in the Rust seed interpreter's
-name-resolution table, explicitly out of scope). No code change made.**

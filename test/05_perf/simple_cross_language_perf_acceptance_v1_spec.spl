@@ -1,0 +1,319 @@
+"""Simple language and runtime performance acceptance matrix v1.
+
+## Overview
+
+This is the canonical SLP matrix for the six requested comparison surfaces:
+startup, interpreter, compilation, generated binaries, dynlib/aspect loading,
+and cache reuse.  The model assertions exercise existing production owners.
+Physical performance rows remain unadmitted until an owner-issued receipt
+binds the executable, fixture, mode, raw samples, peak RSS, and provenance.
+No timing or memory number is invented by this specification.
+
+**Requirements:** doc/02_requirements/feature/compiler_loader_script_crosslang_perf.md
+
+**NFR:** doc/02_requirements/nfr/compiler_loader_script_crosslang_perf.md
+
+**Research:** doc/01_research/local/compiler_loader_script_crosslang_perf.md
+
+**Plan:** doc/03_plan/sys_test/simple_cross_language_perf_acceptance_v1.md
+
+**Design:** doc/05_design/compiler_loader_script_crosslang_perf.md
+
+## Syntax
+
+Run the executable spec with `bin/simple test ... --mode=interpreter`.  Each
+visible scenario has a stable SLP acceptance ID and a critical weighted title.
+"""
+
+# codex-system-test
+# @tag: perf, optimization, cross-language, startup, interpreter, compiler, dynlib, cache, fail-closed
+# @manual_section: Simple cross-language performance acceptance v1
+# @evidence-display: links
+# @req SLP-A01 SLP-A02 SLP-A03 SLP-A04 SLP-A05 SLP-A06
+# Run: bin/simple test test/05_perf/simple_cross_language_perf_acceptance_v1_spec.spl --mode=interpreter
+
+use std.spec.{describe, it, expect, step, fail}
+use std.common.encoding.utf16.{utf16_to_utf8}
+use std.io_runtime.{file_exists}
+use app.startup.contract.startup_plan_v1.{
+    startup_entry_kind_root,
+    startup_plan_from_request,
+    startup_request_v1,
+}
+use app.startup.contract.startup_capsule_selection_v1.{
+    StartupCapsuleSelectionV1,
+    select_startup_capsules_v1,
+    startup_capsule_request_v1,
+}
+use app.startup.stage0.classifier.{stage0_classify, stage0_class_run_source}
+use app.startup.launch_metadata.{launch_metadata_for_path, startup_plan_from_metadata}
+use compiler.core.interpreter.module_loader_resolve.{
+    module_resolve_cache_reset,
+    module_resolve_uncached_count,
+    resolve_module_path,
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SimpleProviderQueryV1,
+}
+use app.test.l10_collector.protocol.{
+    L10ProtocolRefusalV1,
+    L10CorpusBindingV1,
+    L10ProtocolVerdictV1,
+    l10_validate_l10_output_v1,
+}
+use app.test.l10_collector.contracts.{L10OracleRowV1}
+use os.posix.dynlib.{DynLibError}
+
+fn require_physical_receipt_v1(item: text):
+    fail("MissingEvidence: " + item +
+        " requires an owner-issued native receipt with raw samples, peak RSS, " +
+        "artifact/fixture hashes, mode, and provenance")
+
+val L10_PROFILE_V1 = "L10DependentFeatureCoreV1"
+val L10_CORPUS_SHA256_V1 = "af25a8dbd7e6a8d16eeaa962307d6f0d8b3a88e09b71e580dac1588838e5e5f4"
+
+fn l03_select_root_v1() -> StartupCapsuleSelectionV1:
+    val plan = startup_plan_from_request(startup_request_v1(
+        "simple", "", 0, 0, startup_entry_kind_root(), 0, 0, 1))
+    select_startup_capsules_v1(startup_capsule_request_v1(
+        plan, false, false, false, ""))
+
+fn l03_stage0_source_shape_v1(path: text) -> bool:
+    stage0_classify([path]) == stage0_class_run_source()
+
+fn l03_script_metadata_plan_v1(path: text, args: [text], mmap_supported: bool) -> text:
+    val metadata = launch_metadata_for_path(path)
+    val plan = startup_plan_from_metadata(path, args, metadata, mmap_supported, false)
+    if not plan.supported:
+        return "unsupported:" + plan.error
+    plan.entry_kind + "|" + plan.cache_strategy + "|" + plan.program_args.join(",")
+
+fn l03_unknown_policy_refused_v1(path: text) -> bool:
+    var metadata = launch_metadata_for_path(path)
+    metadata.load_policy = "unknown-policy"
+    val plan = startup_plan_from_metadata(path, [], metadata, true, false)
+    not plan.supported and plan.error == "unknown load_policy value"
+
+fn l03_repeated_miss_cache_state_v1() -> text:
+    module_resolve_cache_reset()
+    val first = resolve_module_path("slp_missing_repeat", "build/slp/a/main.spl")
+    val second = resolve_module_path("slp_missing_repeat", "build/slp/a/main.spl")
+    if first != second or module_resolve_uncached_count() != 1:
+        return "repeated-miss-cache-contract"
+    ""
+
+fn l03_caller_sensitive_reset_state_v1() -> text:
+    module_resolve_cache_reset()
+    val first = resolve_module_path("slp_missing_caller", "build/slp/a/main.spl")
+    val second = resolve_module_path("slp_missing_caller", "build/slp/b/main.spl")
+    if first != second or module_resolve_uncached_count() != 2:
+        return "caller-sensitive-cache-contract"
+    module_resolve_cache_reset()
+    val after = resolve_module_path("slp_missing_caller", "build/slp/a/main.spl")
+    if after != first or module_resolve_uncached_count() != 1:
+        return "cache-reset-contract"
+    ""
+
+fn l03_miss_to_hit_after_reset_state_v1() -> text:
+    module_resolve_cache_reset()
+    val first = resolve_module_path("slp_missing_revalidation", "build/slp/main.spl")
+    module_resolve_cache_reset()
+    val after = resolve_module_path("slp_missing_revalidation", "build/slp/main.spl")
+    if after != first or module_resolve_uncached_count() != 1:
+        return "explicit-revalidation-contract"
+    ""
+
+fn dynlib_missing_symbol_v1(error: DynLibError) -> bool:
+    match error:
+        case DynLibError.MissingSymbol: true
+        case _: false
+
+fn dynlib_invalid_handle_v1(error: DynLibError) -> bool:
+    match error:
+        case DynLibError.InvalidHandle: true
+        case _: false
+
+fn require_binary_owner_v1(item: text):
+    if not file_exists("scripts/check/check-binary-closure-acceptance-v2.shs"):
+        require_physical_receipt_v1(item + ": owner-command-unavailable")
+    require_physical_receipt_v1(item + ": owner receipt not collected")
+
+fn l10_fixture_binding_v1() -> L10CorpusBindingV1:
+    L10CorpusBindingV1(
+        profile: L10_PROFILE_V1,
+        corpus_path: "test/05_perf/fixtures/cross_language_l10_frozen_sources_v1/sources.sdn",
+        corpus_sha256: L10_CORPUS_SHA256_V1,
+        launcher: "l10-admitted-subject",
+        seed: 74565)
+
+fn l10_fixture_oracle_v1() -> L10OracleRowV1:
+    L10OracleRowV1(
+        fixture_sha256: L10_CORPUS_SHA256_V1,
+        round: 0, seed: 74565,
+        warmup_count: 262144, warmup_final_state: 526296,
+        warmup_checksum: 131152468125, count: 4194304,
+        final_state: 839161, checksum: 2097353819468)
+
+fn l10_fixture_argv_v1() -> [text]:
+    ["l10-admitted-subject", "kernel",
+        "test/05_perf/fixtures/cross_language_l10_frozen_sources_v1/sources.sdn", "74565"]
+
+fn l10_protocol_verdict_with_oracle_v1(oracle: L10OracleRowV1) -> L10ProtocolVerdictV1:
+    l10_validate_l10_output_v1(
+        "", "", l10_fixture_argv_v1(),
+        l10_fixture_binding_v1(), oracle)
+
+fn l10_protocol_verdict_with_argv_v1(argv: [text]) -> L10ProtocolVerdictV1:
+    l10_validate_l10_output_v1(
+        "", "", argv,
+        l10_fixture_binding_v1(), l10_fixture_oracle_v1())
+
+describe "Simple cross-language performance acceptance v1 [importance=critical; importance_weight=3]":
+    describe "SLP-A01: startup path [importance=critical; importance_weight=3]":
+        it "should select the minimal startup closure before admitting measured startup [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A01-success class=performance owner=admitted-startup-measurement reason=no-paired-wall-rss-receipt resume=collect-admitted-startup-receipt
+            step("Select the sealed root startup closure")
+            val selection = l03_select_root_v1()
+            expect(selection.ok).to_equal(true)
+            expect(selection.eager_capsules).to_equal(["startup.contracts", "startup.router"])
+            expect(selection.delayed_capsules).to_equal([])
+            expect(selection.forbidden_capsules.contains("compiler.frontend")).to_equal(true)
+            expect(selection.forbidden_capsules.contains("compiler.native")).to_equal(true)
+            step("Require paired native startup wall and RSS evidence")
+            require_physical_receipt_v1("SLP-A01 startup wall/RSS")
+
+        it "should preserve source routing and mmap policy at the startup boundary [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A01-boundary class=route-plan-only owner=app.startup.launch_metadata reason=no-argv-file-mmap-receipt resume=collect-admitted-startup-receipt
+            step("Classify the source and retain exact launch arguments")
+            expect(l03_stage0_source_shape_v1("scripts/cache-check.shs")).to_equal(true)
+            expect(l03_script_metadata_plan_v1(
+                "scripts/cache-check.shs", ["--profile", "fast"], true)).to_equal(
+                "script|mmap|scripts/cache-check.shs,--profile,fast")
+            step("Use the ordinary read path when mmap is unavailable")
+            expect(l03_script_metadata_plan_v1(
+                "scripts/cache-check.shs", ["--profile", "fast"], false)).to_equal(
+                "script|normal_read|scripts/cache-check.shs,--profile,fast")
+
+        it "should refuse unknown startup policy and non-source routing without fallback [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A01-refusal class=route-plan-only owner=app.startup.launch_metadata reason=unknown-policy-or-invalid-source resume=bind-startup-refusal-receipt
+            step("Refuse an unknown startup load policy")
+            expect(l03_unknown_policy_refused_v1("scripts/cache-check.shs")).to_equal(true)
+            step("Refuse a shell file that is not a Simple source route")
+            expect(l03_stage0_source_shape_v1("scripts/cache-check.sh")).to_equal(false)
+
+    describe "SLP-A02: interpreter execution and memory [importance=critical; importance_weight=3]":
+        it "should preserve the interpreter UTF-16 oracle before admitting startup and RSS [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A02-success class=performance owner=admitted-interpreter-measurement reason=no-interpreter-startup-rss-receipt resume=collect-admitted-interpreter-receipt
+            step("Compare direct UTF-16 conversion with the independent oracle")
+            val units = [65, 0xD83D, 0xDE00, 0x20AC]
+            expect(utf16_to_utf8(units)).to_equal(
+                [65, 0xF0, 0x9F, 0x98, 0x80, 0xE2, 0x82, 0xAC])
+            step("Require an admitted interpreter wall/RSS and allocation receipt")
+            require_physical_receipt_v1("SLP-A02 interpreter startup/RSS/memory")
+
+        it "should retain replacement semantics for an unpaired surrogate at the interpreter boundary [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A02-boundary class=host-behavior owner=std.common.encoding.utf16 reason=semantic-oracle-only resume=collect-admitted-interpreter-receipt
+            step("Evaluate a lone high surrogate and a following ASCII code unit")
+            val units = [0xD800, 0x41]
+            expect(utf16_to_utf8(units)).to_equal(
+                [0xEF, 0xBF, 0xBD, 0x41])
+
+        it "should refuse interpreter memory evidence with an unavailable allocation count [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A02-refusal class=host-behavior owner=interpreter-memory-receipt reason=allocation-count-unavailable resume=bind-allocation-counter-owner
+            step("Submit a receipt that cannot prove allocation count")
+            require_physical_receipt_v1("SLP-A02 allocation-count evidence")
+
+    describe "SLP-A03: compilation [importance=critical; importance_weight=3]":
+        it "should bind compilation to one frozen fixture and checksum before admitting compile cost [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A03-success class=performance owner=admitted-compile-measurement reason=no-compile-wall-rss-receipt resume=collect-admitted-compile-receipt
+            step("Validate the canonical cross-language compile fixture")
+            val binding = l10_fixture_binding_v1()
+            val oracle = l10_fixture_oracle_v1()
+            expect(binding.profile).to_equal(L10_PROFILE_V1)
+            expect(binding.corpus_sha256).to_equal(L10_CORPUS_SHA256_V1)
+            expect(oracle.fixture_sha256).to_equal(L10_CORPUS_SHA256_V1)
+            expect(oracle.checksum).to_equal(2097353819468)
+            step("Require an admitted compiler receipt rather than a timing placeholder")
+            require_physical_receipt_v1("SLP-A03 compiler wall/RSS")
+
+        it "should reject a changed compile oracle instead of comparing unlike work [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A03-boundary class=source-contract owner=l10-output-protocol reason=oracle-checksum-mismatch resume=bind-compile-oracle-receipt
+            step("Mutate the independently frozen compile oracle")
+            var oracle = l10_fixture_oracle_v1()
+            oracle.checksum = oracle.checksum + 1
+            val verdict = l10_protocol_verdict_with_oracle_v1(oracle)
+            expect(verdict.accepted).to_equal(false)
+            expect(verdict.refusal).to_be(L10ProtocolRefusalV1.CorpusHashMismatch)
+
+        it "should refuse a changed compiler argv without fallback or timing credit [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A03-refusal class=source-contract owner=l10-output-protocol reason=argv-mismatch resume=bind-compile-oracle-receipt
+            step("Change the requested compile fixture while retaining captured output")
+            val verdict = l10_protocol_verdict_with_argv_v1([
+                "l10-admitted-subject", "kernel", "different-corpus.sdn", "74565"])
+            expect(verdict.accepted).to_equal(false)
+            expect(verdict.refusal).to_be(L10ProtocolRefusalV1.ArgvMismatch)
+
+    describe "SLP-A04: generated binary and deployment footprint [importance=critical; importance_weight=3]":
+        it "should admit generated binary bytes only from an owner-issued closure receipt [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A04-success class=performance owner=binary-closure-owner reason=no-native-closure-receipt resume=produce-admitted-binary-closure-receipt
+            step("Request the CLI generated-binary closure receipt")
+            require_binary_owner_v1("SLP-A04 generated binary closure")
+
+        it "should retain generated-binary identity when the deployment manifest changes [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A04-boundary class=performance owner=binary-closure-owner reason=no-manifest-invalidation-receipt resume=produce-admitted-binary-closure-receipt
+            step("Request manifest invalidation through the production closure owner")
+            require_binary_owner_v1("SLP-A04 manifest invalidation")
+
+        it "should refuse missing or static-only generated-binary evidence [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A04-refusal class=performance owner=binary-closure-owner reason=no-refusal-receipt resume=produce-admitted-binary-closure-receipt
+            step("Request a missing-manifest refusal from the production owner")
+            require_binary_owner_v1("SLP-A04 manifest-missing refusal")
+            step("Request a static-only refusal from the production owner")
+            require_binary_owner_v1("SLP-A04 static-only refusal")
+
+    describe "SLP-A05: dynlib and aspect loading [importance=critical; importance_weight=3]":
+        it "should bind a dynlib/aspect query to the typed ABI before admitting mapped execution [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A05-success class=performance owner=admitted-dynlib-worker reason=no-authenticated-native-fixture resume=produce-admitted-dynlib-receipt
+            step("Inspect the typed provider query boundary")
+            val query = SimpleProviderQueryV1(
+                descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+                interface_id: 5999723006133093425,
+                minimum_major: 1, minimum_minor: 0, host_abi: 1,
+                target_offset: 0, target_length: 0,
+                requested_capability_bits: 0)
+            expect(query.descriptor_size > 0).to_equal(true)
+            expect(query.host_abi).to_equal(1)
+            expect(query.minimum_major).to_equal(1)
+            expect(query.requested_capability_bits).to_equal(0)
+            step("Require an authenticated dynlib mapping and aspect dispatch receipt")
+            require_physical_receipt_v1("SLP-A05 dynlib/aspect mapped execution")
+
+        it "should preserve a typed missing-symbol boundary without claiming a loaded aspect [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A05-boundary class=host-behavior owner=os.posix.dynlib reason=missing-symbol-boundary resume=produce-admitted-dynlib-receipt
+            step("Inspect the production dynlib missing-symbol error")
+            expect(dynlib_missing_symbol_v1(DynLibError.MissingSymbol)).to_equal(true)
+            expect(dynlib_invalid_handle_v1(DynLibError.InvalidHandle)).to_equal(true)
+
+        it "should refuse dynlib/aspect activation when the authenticated provider fixture is unavailable [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A05-refusal class=performance owner=admitted-dynlib-worker reason=authenticated-fixture-unavailable resume=produce-admitted-dynlib-receipt
+            step("Refuse to substitute a local or synthetic provider artifact")
+            require_physical_receipt_v1("SLP-A05 authenticated dynlib/aspect refusal")
+
+    describe "SLP-A06: cache reuse and invalidation [importance=critical; importance_weight=3]":
+        it "should reuse one unresolved module result within a cache generation [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A06-success class=host-behavior owner=compiler.core.interpreter.module_loader_resolve reason=resolver-contract-only resume=bind-cache-performance-receipt
+            step("Resolve one missing module twice through the production resolver")
+            expect(l03_repeated_miss_cache_state_v1()).to_equal("")
+
+        it "should preserve caller-sensitive misses and reset generation at the cache boundary [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A06-boundary class=host-behavior owner=compiler.core.interpreter.module_loader_resolve reason=resolver-contract-only resume=bind-cache-performance-receipt
+            step("Resolve from two callers and explicitly reset the resolver")
+            expect(l03_caller_sensitive_reset_state_v1()).to_equal("")
+
+        it "should refuse stale cache effects and require explicit revalidation after a source change [importance=critical; importance_weight=3]":
+            # @scenario: SLP-A06-refusal class=host-behavior owner=compiler.core.interpreter.module_loader_resolve reason=stale-effect-plan resume=bind-cache-performance-receipt
+            step("Make a cached miss visible only after reset")
+            expect(l03_miss_to_hit_after_reset_state_v1()).to_equal("")
+            step("Reject a sealed effect plan after its read-set changes")
+            expect(module_resolve_uncached_count()).to_equal(1)

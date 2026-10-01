@@ -1,4 +1,8 @@
 # `native-build bootstrap_main.spl` appears to stall after `source_closure 655/655 step 1/6 complete` (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** diagnosed; diagnosability fix applied (uncommitted); see "What remains".
 
@@ -271,3 +275,4 @@ Note on the "fingerprint hangs on `ast_stmt.spl` (idx=256)" reading of
 `p1/stage1.run2.log`: that run was killed by this lane at that moment to swap
 seeds; the fingerprint marker loop completed in every un-killed run
 (run1 543 s, run3 15 s).
+

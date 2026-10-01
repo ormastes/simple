@@ -812,6 +812,7 @@ impl<'a> Parser<'a> {
                     ty: None,
                     value,
                     visibility: Visibility::Public,
+                    attributes: vec![],
                 }));
             }
 

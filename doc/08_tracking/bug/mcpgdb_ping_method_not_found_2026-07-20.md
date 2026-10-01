@@ -1,7 +1,8 @@
 # `mcpgdb` app MCP server: `ping` now returns JSON-RPC "Method not found" instead of empty result
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/mcpgdb/main.spl` MCP JSON-RPC dispatch
@@ -47,11 +48,3 @@ Spec left unmodified — could not confirm from source whether dropping
 `ping` support was intentional; flagging as a genuine gap rather than
 guessing at a test-side fix.
 
-## Re-verification 2026-08-17 (app-rest lane) — ALREADY FIXED (content, not SHA)
-
-`src/app/mcpgdb/main.spl:454` serves via the shared SDK (`mcp_serve(t)`), and the
-shared router handles `ping` explicitly:
-`src/lib/nogc_sync_mut/mcp_sdk/server/router.spl:45` (also `:128`)
-`elif method == "ping": return jsonrpc_result(id, LB() + RB())` — i.e. the
-expected `"result":{}`. The `Method not found` path no longer covers `ping`.
-Verdict: ALREADY-FIXED by current source content. Closeable.

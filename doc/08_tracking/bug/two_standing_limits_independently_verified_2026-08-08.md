@@ -1,4 +1,8 @@
 # Two "standing limits" independently re-verified: shape-(d) 42/29 is stale; lexer harness DOES emit a verdict
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-08
 - **Context:** both numbers had been repeated in summaries without independent
@@ -116,3 +120,4 @@ do not treat silence as a pass) so this doesn't need re-deriving.
 - `doc/08_tracking/bug/impl_to_free_fn_refactor_family_sweep_2026-08-07.md`
 - `doc/08_tracking/bug/lexer_binary_octal_literal_suffix_split_and_digit_cap_2026-08-08.md`
 - `scripts/check/check-lexer-radix-literal-suffix.shs`
+

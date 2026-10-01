@@ -50,6 +50,25 @@ import KernelCapabilities.Basic
 namespace KernelCapabilities
 
 -- ============================================================
+-- § 0  Exact finite rights-mask oracle used by the FV2 source bridge
+-- ============================================================
+
+/-- Exact 9-bit abstraction of `capability_rights_allow`. Zero requested or
+    held rights fail closed; otherwise every requested bit must be held. -/
+def rightsAllow9 (held required : BitVec 9) : Bool :=
+  if required == 0 then false
+  else if held == 0 then false
+  else held &&& required == required
+
+/-- The executable 9-bit oracle has exactly the intended subset semantics. -/
+theorem rights_allow9_sound (held required : BitVec 9) :
+    rightsAllow9 held required = true ↔
+      required ≠ 0 ∧ held ≠ 0 ∧ held &&& required = required := by
+  simp [rightsAllow9]
+
+#print axioms rights_allow9_sound
+
+-- ============================================================
 -- § A  Auxiliary lemmas
 -- ============================================================
 

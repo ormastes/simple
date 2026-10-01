@@ -1,0 +1,304 @@
+"""O1 compositor-owned surface receipt and resource-retention contracts."""
+# @cover src/os/compositor/compositor_gpu_surface_owner.spl 90%
+
+use std.spec.*
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanFrameReceipt}
+use os.compositor.compositor_gpu_surface_owner.*
+
+fn receipt(frame: i64, submits: i64, fences: i64,
+           present_completed: bool = true) -> VulkanFrameReceipt:
+    VulkanFrameReceipt(
+        frame_index: frame,
+        framebuffer_width: 32,
+        framebuffer_height: 32,
+        dirty_rect_count: 1,
+        device_to_present_bytes: 4096,
+        device_to_present_rect_count: 1,
+        readback_requested: false,
+        readback_completed: false,
+        readback_bytes: 0,
+        present_attempted: true,
+        present_completed: present_completed,
+        present_mode: "window-swapchain",
+        device_present: present_completed,
+        host_cache_refresh_completed: false,
+        no_readback: true,
+        full_frame_fallback: false,
+        fallback_reason: "",
+        cpu_fallback_used: false,
+        completion_known: true,
+        backend_handle: 77,
+        device_identity: 11,
+        swapchain_identity: 22,
+        device_submit_count: submits,
+        device_fence_count: fences
+    )
+
+fn resources() -> [SimpleOsHostGpuImageResource]:
+    [simpleos_host_gpu_image_resource("window-content-1", 2, 2, [1u32, 2u32, 3u32, 4u32])]
+
+fn baseline() -> VulkanFrameReceipt:
+    receipt(0, 0, 0, false)
+
+fn finalized(frame: i64, submits: i64) -> VulkanFrameReceipt:
+    var result = receipt(frame, submits, submits, false)
+    result.present_attempted = false
+    result.present_mode = "device-retained"
+    result
+
+describe "compositor-owned GPU surface" :
+    it "keeps one offered resource snapshot through the receipt boundary":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        val offered = resources()
+        expect(owner.offer_frame(offered, baseline())).to_be(true)
+        expect(owner.retained_count()).to_equal(1)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val first = receipt(1, 1, 1)
+        expect(owner.observe_submission(first)).to_be(true)
+        expect(owner.observe_compute_completion(first)).to_be(true)
+        expect(owner.observe_present_receipt(first)).to_be(true)
+        expect(owner.retained_count()).to_equal(0)
+        expect(owner.current_frame_generation()).to_equal(1)
+        expect(owner.release_boundary()).to_equal("synchronous-present-receipt")
+        expect(owner.blocker_reason()).to_equal("provider-present-release-unavailable")
+
+    it "admits a retained-window present without a new compute submit":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        val first_resources = resources()
+        expect(owner.offer_frame(first_resources, baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val first = receipt(1, 1, 1)
+        expect(owner.observe_submission(first)).to_be(true)
+        expect(owner.observe_compute_completion(first)).to_be(true)
+        expect(owner.observe_present_receipt(first)).to_be(true)
+        expect(owner.offer_frame(first_resources, first)).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val retained = receipt(2, 1, 1)
+        expect(owner.observe_submission(retained)).to_be(true)
+        expect(owner.observe_compute_completion(retained)).to_be(true)
+        expect(owner.observe_present_receipt(retained)).to_be(true)
+        expect(owner.current_frame_generation()).to_equal(2)
+
+    it "separates surface epoch from physical device generation":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.current_surface_epoch()).to_equal(1)
+        expect(owner.current_device_generation()).to_equal(1)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.sync_target(40, 32, 77, 11, 22)).to_be(true)
+        expect(owner.current_surface_epoch()).to_equal(2)
+        expect(owner.current_device_generation()).to_equal(1)
+        expect(owner.sync_target(40, 32, 78, 11, 23)).to_be(true)
+        expect(owner.current_surface_epoch()).to_equal(3)
+        expect(owner.current_device_generation()).to_equal(1)
+        expect(owner.sync_target(40, 32, 79, 12, 24)).to_be(true)
+        expect(owner.current_surface_epoch()).to_equal(4)
+        expect(owner.current_device_generation()).to_equal(2)
+
+    it "rejects a second offer while resources remain owned":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        val offered = resources()
+        expect(owner.offer_frame(offered, baseline())).to_be(true)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(false)
+        expect(owner.offer_frame(offered, baseline())).to_be(false)
+        expect(owner.abort_offer()).to_be(true)
+        expect(owner.offer_frame(offered, baseline())).to_be(true)
+
+    it "rejects stale or incomplete provider receipts without releasing resources":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val exact_incomplete = receipt(1, 1, 0)
+        expect(owner.observe_submission(exact_incomplete)).to_be(true)
+        expect(owner.observe_compute_completion(exact_incomplete)).to_be(false)
+        expect(owner.retained_count()).to_equal(1)
+        expect(owner.abort_offer()).to_be(false)
+
+    it "quarantines an ambiguous provider failure without accepting or growing work":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        expect(owner.abort_offer()).to_be(false)
+        expect(owner.quarantine_after_provider_attempt(
+            "provider-attempt-unproven")).to_be(true)
+        expect(owner.has_pending_frame()).to_be(true)
+        expect(owner.retained_count()).to_equal(1)
+        expect(owner.offer_frame(resources(), baseline())).to_be(false)
+        expect(owner.close()).to_be(false)
+
+    it "rejects a stale provider frame and retains the exact offered snapshot":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        var offered = resources()
+        val retained_checksum = offered[0].pixel_checksum
+        expect(owner.offer_frame(offered, baseline())).to_be(true)
+        offered[0] = simpleos_host_gpu_image_resource(
+            "window-content-1", 2, 2, [9u32, 8u32, 7u32, 6u32])
+        expect(owner.begin_provider_attempt()).to_be(true)
+        expect(owner.observe_submission(receipt(2, 1, 1))).to_be(false)
+        expect(owner.has_pending_frame()).to_be(true)
+        expect(owner.retained_count()).to_equal(1)
+        expect(owner.retained_resources[0].pixel_checksum).to_equal(
+            retained_checksum)
+
+    it "admits an idle re-present with no new compute submission":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame([], baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val retained = receipt(1, 0, 0)
+        expect(owner.observe_submission(retained)).to_be(true)
+        expect(owner.observe_compute_completion(retained)).to_be(true)
+        expect(owner.observe_present_receipt(retained)).to_be(true)
+        expect(owner.retained_count()).to_equal(0)
+
+    it "requires the final receipt to prove zero readback":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val completed = receipt(1, 1, 1)
+        expect(owner.observe_submission(completed)).to_be(true)
+        expect(owner.observe_compute_completion(completed)).to_be(true)
+        var readback = completed
+        readback.no_readback = false
+        readback.readback_requested = true
+        readback.readback_completed = true
+        readback.readback_bytes = 4096
+        expect(owner.observe_present_receipt(readback)).to_be(false)
+        expect(owner.has_pending_frame()).to_be(true)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "admits the actual damaged compute-finalize then window-present chain":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        expect(owner.observe_compute_finalize(finalized(1, 3))).to_be(true)
+        expect(owner.retained_count()).to_equal(1)
+        val presented = receipt(2, 3, 3)
+        expect(owner.observe_submission(presented)).to_be(true)
+        expect(owner.observe_compute_completion(presented)).to_be(true)
+        expect(owner.observe_present_receipt(presented)).to_be(true)
+        expect(owner.current_frame_generation()).to_equal(2)
+        expect(owner.retained_count()).to_equal(0)
+        expect(owner.offer_frame([], presented)).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val idle = receipt(3, 3, 3)
+        expect(owner.observe_submission(idle)).to_be(true)
+        expect(owner.observe_compute_completion(idle)).to_be(true)
+        expect(owner.observe_present_receipt(idle)).to_be(true)
+
+    it "rejects presenting an arbitrary two-frame jump without its intermediate":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        expect(owner.observe_submission(receipt(2, 3, 3))).to_be(false)
+        expect(owner.state).to_equal(COMPOSITOR_GPU_SURFACE_QUARANTINED)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "requires one device-retained intermediate with matching target and counters":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        expect(owner.observe_compute_finalize(finalized(1, 3))).to_be(true)
+        expect(owner.observe_compute_finalize(finalized(1, 3))).to_be(false)
+        expect(owner.state).to_equal(COMPOSITOR_GPU_SURFACE_QUARANTINED)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "rejects counter rollback between compute-finalize and presentation":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        expect(owner.observe_compute_finalize(finalized(1, 3))).to_be(true)
+        expect(owner.observe_submission(receipt(2, 2, 2))).to_be(false)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "requires observed submission before compute completion":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        expect(owner.observe_compute_completion(receipt(0, 0, 0))).to_be(false)
+        expect(owner.observe_present_receipt(receipt(0, 0, 0))).to_be(false)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "resets receipt cursors only after an explicit idle provider replacement":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        val first = receipt(1, 1, 1)
+        expect(owner.observe_submission(first)).to_be(true)
+        expect(owner.observe_compute_completion(first)).to_be(true)
+        expect(owner.observe_present_receipt(first)).to_be(true)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(false)
+        expect(owner.prepare_provider_replacement()).to_be(true)
+        expect(owner.provider_generation).to_equal(2)
+        # Every raw Vulkan handle may be reused by the new executor.
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.prepare_provider_replacement()).to_be(false)
+        expect(owner.provider_generation).to_equal(2)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "fails closed when provider generations are exhausted":
+        var owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        owner.provider_generation = 9223372036854775807
+        expect(owner.prepare_provider_replacement()).to_be(false)
+        expect(owner.provider_generation).to_equal(9223372036854775807)
+        expect(owner.last_reason).to_equal("provider-generation-exhausted")
+
+    it "rejects an offer before a concrete provider target is bound":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        var unbound = baseline()
+        unbound.backend_handle = 0
+        unbound.device_identity = 0
+        unbound.swapchain_identity = 0
+        expect(owner.offer_frame(resources(), unbound)).to_be(false)
+        expect(owner.last_reason).to_equal("offer-target-unbound")
+        expect(owner.retained_count()).to_equal(0)
+
+    it "rejects an intermediate receipt for another framebuffer":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        var other = finalized(1, 1)
+        other.backend_handle = 78
+        expect(owner.observe_compute_finalize(other)).to_be(false)
+        expect(owner.state).to_equal(COMPOSITOR_GPU_SURFACE_QUARANTINED)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "rejects a host-cache refresh even when the readback flags disagree":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        expect(owner.offer_frame(resources(), baseline())).to_be(true)
+        expect(owner.begin_provider_attempt()).to_be(true)
+        var refreshed = receipt(1, 1, 1)
+        refreshed.host_cache_refresh_completed = true
+        expect(owner.observe_submission(refreshed)).to_be(true)
+        expect(owner.observe_compute_completion(refreshed)).to_be(true)
+        expect(owner.observe_present_receipt(refreshed)).to_be(false)
+        expect(owner.retained_count()).to_equal(1)
+
+    it "rejects resource capacity before retaining a snapshot":
+        val owner = CompositorGpuSurfaceOwner.create(7, 32, 32)
+        expect(owner.sync_target(32, 32, 77, 11, 22)).to_be(true)
+        val resource = resources()[0]
+        var too_many: [SimpleOsHostGpuImageResource] = []
+        for index in 0..65:
+            too_many.push(resource)
+        expect(owner.offer_frame(too_many, baseline())).to_be(false)
+        expect(owner.retained_count()).to_equal(0)
+        expect(owner.last_reason).to_equal("too-many-retained-resources")

@@ -220,33 +220,78 @@ fn char_from_byte(b: u8) -> text:
     val single: [u8] = [b]
     rt_bytes_to_text(single)
 
-"""Derive section index from symbol type byte."""
+"""Derive section index from symbol type byte.
+
+Widened to i64 before comparison, same fix and same reason as
+`parse_binding` below: `match sym_type: 0: ... 1: ... 5: ... _: ...` on the
+raw u8 never equality-matched a literal arm, so every symbol fell through to
+the default (0, code section) regardless of its real type byte. Masked until
+now because every symbol this reader has ever decoded was written as
+sym_type=0 (Function) -- `80.driver/smf_writer.spl:503`'s `build_symbol_entry`
+hardcodes it -- so the buggy default and the correct answer coincided.
+Measured 2026-09-19 (Fable review of lane A12): `derive_section_index(1)`
+(Data) returned 0 instead of 1."""
 fn derive_section_index(sym_type: u8) -> i32:
-    # Functions go in code section (0), data/constants in data section (1).
-    match sym_type:
-        0: 0   # Function -> code section
-        1: 1   # Data -> data section
-        5: 1   # Constant -> data section
-        _: 0   # Default to code section
+    val v = sym_type as i64
+    if v == 1:
+        1   # Data -> data section
+    else if v == 5:
+        1   # Constant -> data section
+    else:
+        0   # Function (and everything else) -> code section
 
-"""Parse symbol binding from byte value."""
+"""Parse symbol binding from byte value.
+
+Widened to i64 before comparison, deliberately -- matching the fix already
+applied to the (now-deleted) duplicate decoder that used to live in
+smf_reader.spl. Measured 2026-09-19: `match b: 0: ... 1: ... _: ...` on the
+raw u8 never equality-matched a literal arm, so every symbol decoded as the
+default (Local) regardless of its real binding byte -- discovered via the
+A12 SMF-read-dedup pin spec (smf_reader_obj_taker_pin_spec.spl), which
+caught a Global(1)-encoded symbol coming back Local. `if`/`else` on an
+explicit i64 widening avoids the u8-match hazard entirely."""
 fn parse_binding(b: u8) -> SymbolBinding:
-    match b:
-        0: SymbolBinding.Local
-        1: SymbolBinding.Global
-        2: SymbolBinding.Weak
-        _: SymbolBinding.Local
+    val v = b as i64
+    if v == 1:
+        SymbolBinding.Global
+    else if v == 2:
+        SymbolBinding.Weak
+    else:
+        SymbolBinding.Local
 
-"""Parse symbol type from byte value."""
+"""Parse symbol type from byte value.
+
+Widened to i64 before comparison, same fix and same reason as
+`parse_binding`: `match t: 0: ... 1: ... _: ...` on the raw u8 never
+equality-matched a literal arm, so every symbol decoded as the default
+(Function) regardless of its real type byte. Masked identically to
+`derive_section_index` above for the same reason (every real symbol in this
+tree is written as sym_type=0/Function today), and additionally masked in
+the now-thin `smf_reader.spl` shim, which used to force `ty` to `Unknown`
+via a `compat_symbol` wrapper to pin a DIFFERENT, now-deleted defect in that
+file's own (separate) decoder -- see
+doc/08_tracking/bug/smf_reader_memory_binding_decode_changes_exported_set_2026-09-19.md
+for the related exported-set behaviour change from fixing `parse_binding`.
+Measured 2026-09-19 (Fable review of lane A12): `parse_sym_type(1)` (Data)
+and `parse_sym_type(2)` (Type) both returned Function instead of the real
+type. `module_loader_compat.spl:1305` consumes `.ty` live via
+`_loader_symbol_type_from_smf`, so this was not cosmetic."""
 fn parse_sym_type(t: u8) -> SymbolType:
-    match t:
-        0: SymbolType.Function
-        1: SymbolType.Data
-        2: SymbolType.Type
-        3: SymbolType.Trait
-        4: SymbolType.ActorSymbol
-        5: SymbolType.Constant
-        _: SymbolType.Function
+    val v = t as i64
+    if v == 0:
+        SymbolType.Function
+    else if v == 1:
+        SymbolType.Data
+    else if v == 2:
+        SymbolType.Type
+    else if v == 3:
+        SymbolType.Trait
+    else if v == 4:
+        SymbolType.ActorSymbol
+    else if v == 5:
+        SymbolType.Constant
+    else:
+        SymbolType.Function
 
 # ============================================================================
 # Exports

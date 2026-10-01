@@ -27,7 +27,7 @@ llm_finetune_retry6_training_eval_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -296,12 +296,85 @@ expect(output).to_contain("STATUS: WARN llm-finetune-doctor")
 
 </details>
 
+#### surfaces retry6 target eval fields through fine-tune report
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val (output, exit_code) = run_spipe_command(["fine-tune-report", RETRY6_ATTEMPT_ID])
+
+expect(exit_code).to_equal(0)
+expect(output).to_contain("## Data Check Execution")
+expect(output).to_contain("data_check_execution: \"warn\"")
+expect(output).to_contain("data_check_status: \"STATUS: WARN retry6-training-eval-gate\"")
+expect(output).to_contain("result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("required_accuracy=90.0")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
+```
+
+</details>
+
+#### keeps fine-tune-ready blocked on retry6 data check gate
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val (output, exit_code) = run_spipe_command(["fine-tune-ready", RETRY6_ATTEMPT_ID])
+
+expect(exit_code).to_equal(1)
+expect(output).to_contain("data_check_gate_ready=pending")
+expect(output).to_contain("data_check_execution=warn")
+expect(output).to_contain("data_check_status=\"STATUS: WARN retry6-training-eval-gate\"")
+expect(output).to_contain("result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
+expect(output).to_contain("STATUS: FAIL llm-finetune-ready")
+```
+
+</details>
+
+#### surfaces retry6 gate fields through fine-tune next routing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val (output, exit_code) = run_spipe_command(["fine-tune-next", RETRY6_ATTEMPT_ID])
+
+expect(exit_code).to_equal(1)
+expect(output).to_contain("next_action=retry-data-research")
+expect(output).to_contain("next_attempt=llm_backed_app_server_dry_run_retry7")
+expect(output).to_contain("data_check_execution=warn")
+expect(output).to_contain("data_check_status=\"STATUS: WARN retry6-training-eval-gate\"")
+expect(output).to_contain("result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY")
+expect(output).to_contain("training_allowed=false")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

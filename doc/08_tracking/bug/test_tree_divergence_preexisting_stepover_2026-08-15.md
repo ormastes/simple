@@ -1,4 +1,8 @@
 # Test-tree divergence: recorded pre-existing step-over (2026-08-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Landing of the engine2d GPU-offload commit used the mechanical delta escape:
 `check-test-tree-divergence-delta.shs origin/main <NEW>` = PASS — 16
@@ -18,3 +22,4 @@ purpose. The referenced offender list is present at
 silent, which is exactly the rule's requirement. No code change is possible or
 needed. The underlying test-tree divergence backlog is tracked separately and
 is not this record.
+

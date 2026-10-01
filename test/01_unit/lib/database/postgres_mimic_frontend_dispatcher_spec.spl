@@ -1,0 +1,132 @@
+"""Parallel pgwire frontends share only the atomic database-owner gate."""
+
+use std.spec
+use std.database.postgres_mimic.{
+    PostgresMimicServer, PgDatabaseOwner,
+    PgResponse, PgResponseKind, PgWireSslPolicy,
+    PgDispatchGate, PgDispatchClaimResult, PgDispatchTakeResult,
+    PgDispatchCompletion,
+    PgFrontendActionKind, PgWireFrontendDispatcher
+}
+
+fn frontend_be32(value: i64) -> [i64]:
+    [value / 16777216, (value / 65536) % 256,
+        (value / 256) % 256, value % 256]
+
+fn frontend_startup(user: text) -> [i64]:
+    val payload = [0, 3, 0, 0] + "user".bytes() + [0] + user.bytes() +
+        [0] + "database".bytes() + [0] + "simple".bytes() + [0, 0]
+    frontend_be32(payload.len() + 4) + payload
+
+fn frontend_query(sql: text) -> [i64]:
+    val payload = sql.bytes() + [0]
+    [81] + frontend_be32(payload.len() + 4) + payload
+
+fn frontend_startup_completion(session_id: i64) -> PgDispatchCompletion:
+    PgDispatchCompletion(session_id: session_id, responses: [
+        PgResponse(kind: PgResponseKind.AuthenticationOk, tag: "", columns: [],
+            rows: [], sqlstate: "", message: "", transaction_status: "I"),
+        PgResponse(kind: PgResponseKind.ReadyForQuery, tag: "", columns: [],
+            rows: [], sqlstate: "", message: "", transaction_status: "I")
+    ], close_connection: false)
+
+describe "Postgres mimic parallel frontend dispatcher":
+    it "lets an owner copied before frontend submission observe and complete the job":
+        val database = PostgresMimicServer.memory().unwrap()
+        var owner = PgDatabaseOwner.create(database, 2)
+        # This is the real threaded-server ownership order: the owner keeps its
+        # gate value while a worker/frontend receives a copy before any job is
+        # submitted.
+        var frontend = PgWireFrontendDispatcher.create(9, owner.dispatch,
+            PgWireSslPolicy.Disabled, 256, 8, 512)
+
+        val submitted = frontend.feed(frontend_startup("simple"),
+            "simple", "simple", 0, 100)
+        expect(submitted[submitted.len() - 1].kind).to_equal(
+            PgFrontendActionKind.WaitOwner)
+        expect(owner.process_bounded(1, 1)).to_equal(1)
+
+        val ready = frontend.poll_owner(
+            "simple", "simple", 1, 100, 4096)
+        expect(ready[0].kind).to_equal(PgFrontendActionKind.Write)
+        expect(frontend.pending_job_id).to_equal(0)
+        expect(frontend.session_id).to_be_greater_than(0)
+        expect(owner.commands_started).to_equal(1)
+        expect(owner.commands_completed).to_equal(1)
+
+    it "retains one dispatcher state across a pipelined startup then query":
+        val database = PostgresMimicServer.memory().unwrap()
+        var owner = PgDatabaseOwner.create(database, 2)
+        var frontend = PgWireFrontendDispatcher.create(12, owner.dispatch,
+            PgWireSslPolicy.Disabled, 512, 8, 1024)
+
+        val submitted = frontend.feed(
+            frontend_startup("simple") + frontend_query("SELECT 1"),
+            "simple", "simple", 0, 100)
+        expect(submitted[submitted.len() - 1].kind).to_equal(
+            PgFrontendActionKind.WaitOwner)
+        expect(owner.process_bounded(1, 1)).to_equal(1)
+
+        val startup_ready = frontend.poll_owner(
+            "simple", "simple", 1, 100, 4096)
+        expect(startup_ready[0].kind).to_equal(PgFrontendActionKind.Write)
+        val established_session = frontend.session_id
+        expect(established_session).to_be_greater_than(0)
+        expect(frontend.pending_job_id).to_be_greater_than(0)
+        expect(owner.process_bounded(2, 1)).to_equal(1)
+
+        val query_ready = frontend.poll_owner(
+            "simple", "simple", 2, 100, 4096)
+        expect(query_ready[0].kind).to_equal(PgFrontendActionKind.Write)
+        expect(frontend.session_id).to_equal(established_session)
+        expect(frontend.pending_job_id).to_equal(0)
+        expect(frontend.closed).to_equal(false)
+        expect(owner.commands_started).to_equal(2)
+        expect(owner.commands_completed).to_equal(2)
+
+    it "admits two open clients before the database owner completes either":
+        var gate = PgDispatchGate.create(4)
+        var first = PgWireFrontendDispatcher.create(10, gate,
+            PgWireSslPolicy.Disabled, 256, 8, 512)
+        var second = PgWireFrontendDispatcher.create(11, gate,
+            PgWireSslPolicy.Disabled, 256, 8, 512)
+        val first_actions = first.feed(frontend_startup("simple"),
+            "simple", "simple", 0, 100)
+        val second_actions = second.feed(frontend_startup("simple"),
+            "simple", "simple", 0, 100)
+        expect(first_actions[first_actions.len() - 1].kind).to_equal(
+            PgFrontendActionKind.WaitOwner)
+        expect(second_actions[second_actions.len() - 1].kind).to_equal(
+            PgFrontendActionKind.WaitOwner)
+        expect(first_actions[first_actions.len() - 1].job_id ==
+            second_actions[second_actions.len() - 1].job_id).to_equal(false)
+        expect(gate.active_count()).to_equal(2)
+
+        val claimed_first = match gate.claim_next(1):
+            PgDispatchClaimResult.Claimed(job): job
+            PgDispatchClaimResult.Empty: fail("first frontend job was not retained")
+        expect(gate.complete(claimed_first.job_id,
+            frontend_startup_completion(101))).to_equal(true)
+        val first_ready = first.poll_owner("simple", "simple", 1, 100, 4096)
+        expect(first_ready[0].kind).to_equal(PgFrontendActionKind.Write)
+
+        val claimed_second = match gate.claim_next(2):
+            PgDispatchClaimResult.Claimed(job): job
+            PgDispatchClaimResult.Empty: fail("second frontend job was not retained")
+        expect(gate.complete(claimed_second.job_id,
+            frontend_startup_completion(102))).to_equal(true)
+        val second_ready = second.poll_owner("simple", "simple", 2, 100, 4096)
+        expect(second_ready[0].kind).to_equal(PgFrontendActionKind.Write)
+        expect(first.session_id).to_equal(101)
+        expect(second.session_id).to_equal(102)
+
+    it "cancels queued ownership when a frontend disconnects":
+        var gate = PgDispatchGate.create(2)
+        var frontend = PgWireFrontendDispatcher.create(20, gate,
+            PgWireSslPolicy.Disabled, 256, 8, 512)
+        val actions = frontend.feed(frontend_startup("simple"),
+            "simple", "simple", 0, 100)
+        val job_id = actions[actions.len() - 1].job_id
+        frontend.disconnect()
+        expect(frontend.closed).to_equal(true)
+        expect(gate.take(job_id)).to_equal(PgDispatchTakeResult.Gone)

@@ -1,5 +1,33 @@
-"""Release/main convergence is periodic, caller-selected, and never mutates Git."""
-# @req: REQ-004, REQ-005, REQ-006, REQ-009, REQ-016
+"""
+## Purpose and audience
+Contract for the release/main convergence planner and admission checker,
+owned by the release-process maintainers. Convergence is periodic,
+caller-selected, and never mutates Git: main stays an independent trunk,
+every eligible bug fix needs an explicit caller selection, release-first
+fixes need exact forward-port receipts, and admission only accepts
+protected-integration receipts whose inventory is exhaustive and
+graph-independent.
+## Operator workflow
+Run `simple run test/01_unit/app/release/convergence_spec.spl` after touching
+`app.release.convergence` (planner or admission logic) or the release
+automation that feeds it requests.
+## Compatibility and limitations
+Scenarios operate on the pure planner/admission data structures, so no Git
+network or working-copy state is touched. Fixture SHAs and receipts are
+40/64-character constants; the interval scenarios use fixed epoch seconds.
+## Verification guidance and troubleshooting
+Every rejection scenario names the exact operator-facing reason string; a
+reason-text change is a product contract change and must be updated here
+deliberately. A failure in the periodic scenario means the scan-interval gate
+moved; a failure in an admission scenario means a receipt invariant
+weakened. Rerun this single spec to reproduce.
+"""
+# Lifecycle: doc/01_research/domain/release_process_hardening.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/release_process_hardening.md ;
+# doc/05_design/release_process_hardening.md
+# @manual_section: release/main convergence planner
+
 use std.spec.{describe, it, expect, step}
 use app.release.convergence.{
     ReviewedBugFix, ConvergenceRequest, ConvergenceAdmissionRequest,
@@ -65,6 +93,8 @@ fn admission() -> ConvergenceAdmissionRequest:
 
 describe "Release/main convergence planner":
     it "binds periodic main-to-release bug-fix selection without mutation":
+        # @req REQ-RELEASE-CONV-001
+        # @capture(statistics): planner verdict fields for a due main-to-release scan
         step("Plan an occasional scan of main from the release line")
         val plan = plan_release_main_convergence(request("main_to_release", [reviewed_fix("main")], [sha_c()], true))
         expect(plan.valid).to_be(true)
@@ -81,22 +111,32 @@ describe "Release/main convergence planner":
         expect(plan.main_remains_independent).to_be(true)
 
     it "rejects automatic selection of an eligible main bug fix":
+        # @req REQ-RELEASE-CONV-002
+        # @capture(statistics): planner verdict for an unconfirmed caller selection
+        step("Plan a main-to-release scan without the caller selection confirmation")
         val plan = plan_release_main_convergence(request("main_to_release", [reviewed_fix("main")], [sha_c()], false))
         expect(plan.valid).to_be(false)
         expect(plan.reason).to_equal("caller must explicitly select eligible bug-fix SHAs")
 
     it "requires release-first fixes to be forwarded to main":
+        # @req REQ-RELEASE-CONV-003
+        # @capture(statistics): forward-port requirement with and without the target ref
+        step("Plan a release-to-main convergence with a complete forward port")
         val valid = plan_release_main_convergence(request("release_to_main", [reviewed_fix("release/1.0")], [sha_c()], true))
         expect(valid.valid).to_be(true)
         expect(valid.forward_port_required).to_be(true)
         expect(valid.forward_port_target_ref).to_equal("main")
 
+        step("Strip the forward-port fields and require the planner to reject the request")
         var missing = request("release_to_main", [reviewed_fix("release/1.0")], [sha_c()], true)
         missing.forward_port_required = false
         missing.forward_port_target_ref = ""
         expect(plan_release_main_convergence(missing).reason).to_equal("release-first fixes require a forward port to main")
 
     it "rejects treating main as a branch that tracks the release line":
+        # @req REQ-RELEASE-CONV-004
+        # @capture(statistics): planner verdict for a main-tracks-release request
+        step("Mark main as tracking the release line and require the planner to reject it")
         var invalid = request("main_to_release", [], [], false)
         invalid.main_tracks_release = true
         val plan = plan_release_main_convergence(invalid)
@@ -104,6 +144,9 @@ describe "Release/main convergence planner":
         expect(plan.reason).to_contain("main must remain an independent trunk")
 
     it "does not scan early or accept candidates before the interval":
+        # @req REQ-RELEASE-CONV-005
+        # @capture(statistics): scan-due gating before the interval elapses
+        step("Advance the clock past the last scan but short of the scan interval")
         var early = request("main_to_release", [], [], false)
         early.current_epoch_seconds = 120
         val plan = plan_release_main_convergence(early)
@@ -115,14 +158,20 @@ describe "Release/main convergence planner":
         expect(plan_release_main_convergence(early).valid).to_be(false)
 
     it "admits an exact protected-integration receipt in both directions":
+        # @req REQ-RELEASE-CONV-006
+        # @capture(statistics): admission counters for a complete protected-integration receipt
+        step("Check a complete protected-integration admission receipt in both directions")
         val checked = check_convergence_admission(admission())
         expect(checked.valid).to_be(true)
         expect(checked.mutation).to_equal("none")
-        expect(checked.main_to_release_selected_count).to_equal(1)
-        expect(checked.release_to_main_forward_ported_count).to_equal(1)
+        expect(checked.main_to_release_selected_count).to_equal(1)  # oracle: the receipt binds exactly one selected main shared fix for backport
+        expect(checked.release_to_main_forward_ported_count).to_equal(1)  # oracle: the receipt forward-ports exactly one release-first fix
         expect(checked.main_remains_independent).to_be(true)
 
     it "rejects an unselected shared main fix":
+        # @req REQ-RELEASE-CONV-007
+        # @capture(statistics): admission verdict with the main selection list emptied
+        step("Empty the main selection list and require admission to reject the receipt")
         var request = admission()
         request.main_to_release_selected_shas = []
         val checked = check_convergence_admission(request)
@@ -130,6 +179,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("every main shared fix must be explicitly selected for backport")
 
     it "rejects a selected main fix without an exact release backport binding":
+        # @req REQ-RELEASE-CONV-008
+        # @capture(statistics): admission verdict with every backport field emptied
+        step("Strip every release backport field and require admission to reject the receipt")
         var request = admission()
         request.main_to_release_backported_shas = []
         request.main_to_release_backport_result_shas = []
@@ -140,6 +192,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("every selected main fix requires a completed backport to the release line")
 
     it "rejects a release backport whose source was not selected":
+        # @req REQ-RELEASE-CONV-009
+        # @capture(statistics): admission verdict for an unselected backport source
+        step("Backport an unselected main SHA and require admission to reject the receipt")
         var request = admission()
         request.main_to_release_backported_shas = [sha_a()]
         val checked = check_convergence_admission(request)
@@ -147,6 +202,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("every selected main fix requires a completed backport to the release line")
 
     it "rejects a main backport receipt targeting a different protected line":
+        # @req REQ-RELEASE-CONV-010
+        # @capture(statistics): admission verdict for a backport targeting release/2.0
+        step("Retarget the backport receipt to a different protected line and require rejection")
         var request = admission()
         request.main_to_release_backport_target_refs = ["release/2.0"]
         val checked = check_convergence_admission(request)
@@ -154,6 +212,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("every selected main fix requires an exact backport receipt targeting the release line")
 
     it "rejects a missing release-first forward port":
+        # @req REQ-RELEASE-CONV-011
+        # @capture(statistics): admission verdict with every forward-port field emptied
+        step("Strip every release-first forward-port field and require rejection")
         var request = admission()
         request.release_to_main_forward_ported_shas = []
         request.release_to_main_forward_port_result_shas = []
@@ -164,6 +225,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("every reviewed release-first kind=fix requires a completed forward port to main")
 
     it "rejects an empty release-first classification that conceals inventory":
+        # @req REQ-RELEASE-CONV-012
+        # @capture(statistics): admission verdict for an emptied release-first classification
+        step("Empty the release-first classification and require rejection as concealing inventory")
         var request = admission()
         request.release_to_main_classified_shas = []
         request.release_to_main_classification_kinds = []
@@ -177,6 +241,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("every release-first inventory commit requires an exhaustive receipt-bound classification")
 
     it "requires every classified release-first fix to carry a main receipt":
+        # @req REQ-RELEASE-CONV-013
+        # @capture(statistics): admission verdict for a mis-targeted forward-port receipt
+        step("Retarget the forward-port receipt away from main and require rejection")
         var request = admission()
         request.release_to_main_forward_port_target_refs = ["release/1.0"]
         val checked = check_convergence_admission(request)
@@ -184,6 +251,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("every release-first fix requires an exact forward-port receipt targeting main")
 
     it "rejects a receipt not produced by protected integration":
+        # @req REQ-RELEASE-CONV-014
+        # @capture(statistics): admission verdict for a candidate_ci inventory origin
+        step("Rebrand the inventory origin as candidate CI and require rejection")
         var request = admission()
         request.inventory_origin = "candidate_ci"
         val checked = check_convergence_admission(request)
@@ -191,6 +261,9 @@ describe "Release/main convergence planner":
         expect(checked.reason).to_equal("convergence inventory must originate from protected integration")
 
     it "rejects a graph where either protected line absorbs the other":
+        # @req REQ-RELEASE-CONV-015
+        # @capture(statistics): admission verdict for a graph-dependence violation
+        step("Mark the protected lines as graph-dependent and require rejection")
         var request = admission()
         request.graph_independent = false
         val checked = check_convergence_admission(request)

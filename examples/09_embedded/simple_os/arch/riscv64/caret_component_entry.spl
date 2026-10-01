@@ -1,0 +1,112 @@
+# SimpleOS riscv64 in-guest CARET component sanity entry (OpenSBI real-firmware lane).
+#
+# Split out of toolchain_components_entry.spl. That combined entry compiled
+# cleanly but FAILED TO LINK: --entry-closure pulls the whole module closure of
+# every imported product module, and the union of those closures references
+# ~500 rt_* runtime entry points (sqlite, tcp, process, threads, SIMD, fs, time)
+# that the riscv64 freestanding runtime does not provide — it provides ~113.
+# The four components are therefore probed SEPARATELY, so that a component whose
+# own closure is thin enough to link is not held hostage by one whose is not,
+# and so the report can name exactly which component is blocked by what.
+#
+# Boot chain and forbidden-flag policy: identical to
+# hello_world_sbi_entry.spl — real OpenSBI v1.4 fw_payload via -bios only,
+# NEVER -kernel, NEVER isa-debug-exit. See that file for the full rationale.
+#
+# COMPILER: the RUST SEED. The pure-Simple self-hosted compiler cannot compile
+# anything in this tree yet.
+#
+# WHAT THIS PROVES: caret's real message helpers and real secret redactor run
+# inside the guest. A caret message is built as JSON by app.llm_caret.
+# json_helpers, a field is read back out by the real extractor, and the real
+# app.llm_caret.redact.redact is run over a string carrying an AWS-shaped
+# secret. The secret must NOT survive and the neighbouring non-secret text MUST
+# survive — two conditions in opposite directions, so the row cannot pass by
+# returning its input unchanged NOR by returning nothing.
+#
+# NONE of the caret logic is reimplemented here: this file supplies the input
+# literal, calls the product function, and prints what came back. A round-trip
+# answered by string handling written in this file would be exactly the vacuous
+# green this lane exists to rule out.
+#
+# Conventions (inherited, load-bearing):
+#   * Entry symbol is `spl_start`; boot/crt0.S -> boot_entry reaches it.
+#   * This directory is required for boot-object autodiscovery to find the
+#     sibling boot/ sources that provide serial_println.
+#   * NEVER interpolate an integer into text — that emits rt_raw_i64_to_string,
+#     which the freestanding runtime does not provide, and the link dies.
+
+use app.llm_caret.redact.{redact}
+use app.llm_caret.json_helpers.{jo2, jp, js, extract_json_string}
+
+@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
+extern fn serial_println(msg: text)
+
+fn _contains(haystack: text, needle: text) -> bool:
+    """Substring test written locally on purpose: this is gate plumbing, not
+    component logic, so implementing it here cannot launder a component pass."""
+    val h = haystack.len()
+    val n = needle.len()
+    if n == 0:
+        return true
+    if n > h:
+        return false
+    var i = 0
+    while i + n <= h:
+        var j = 0
+        var same = true
+        while j < n:
+            if haystack[i + j] != needle[j]:
+                same = false
+                j = n
+            else:
+                j = j + 1
+        if same:
+            return true
+        i = i + 1
+    false
+
+fn caret_component_row() -> i64:
+    """Build a caret message with the real JSON helpers, read it back with the
+    real extractor, and run the real redactor over a secret-bearing string."""
+    val msg = jo2(jp("role", js("user")), jp("content", js("CARET_RTT_CONTENT")))
+    serial_println("[caret] built message: " + msg)
+
+    val role = extract_json_string(msg, "role")
+    val content = extract_json_string(msg, "content")
+    serial_println("[caret] extracted role=" + role)
+    serial_println("[caret] extracted content=" + content)
+
+    val secret_bearing = "key AKIAIOSFODNN7EXAMPLE trails CARET_KEEPME"
+    val redacted = redact(secret_bearing)
+    serial_println("[caret] redacted: " + redacted)
+
+    var rc = 0
+    if role != "user":
+        serial_println("[caret] FAIL role did not round-trip")
+        rc = 1
+    if content != "CARET_RTT_CONTENT":
+        serial_println("[caret] FAIL content did not round-trip")
+        rc = 1
+    if _contains(redacted, "AKIAIOSFODNN7EXAMPLE"):
+        serial_println("[caret] FAIL the secret survived redaction")
+        rc = 1
+    if not _contains(redacted, "CARET_KEEPME"):
+        serial_println("[caret] FAIL redaction destroyed non-secret text")
+        rc = 1
+    if rc == 0:
+        serial_println("COMPONENT_CARET_SIMPLEOS_RISCV64_OK message round-tripped through the real helpers and the real redactor removed the secret")
+    rc
+
+fn spl_start():
+    """riscv64 in-guest caret sanity entry, reached from crt0.S -> boot_entry in
+    S-mode after OpenSBI's firmware-performed handover."""
+    serial_println("")
+    serial_println("[components] SimpleOS riscv64 in-guest toolchain components (OpenSBI fw_payload)")
+    serial_println("[components] serial up, exercising real product modules")
+    val rc = caret_component_row()
+    if rc == 0:
+        serial_println("[components] all component rows exited rc=0")
+    else:
+        serial_println("[components] at least one component row exited rc=nonzero")
+    serial_println("[components] parking")

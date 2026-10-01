@@ -24,7 +24,7 @@ System scenarios for `std.enterprise_payment` (lane `.spipe/simple_enterprise_su
 | Design | doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §7.1, §7.2, §10.2 |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/payment_boundary_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -71,6 +71,11 @@ Lane: .spipe/simple_enterprise_suite (W5-B).
 
 #### creates an intent, authorizes, captures, and pays the order atomically
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates an intent, authorizes, captures, and pays the order atomically
 - Create a pending intent for the created order
    - Expected: payment_intent_status(store, "tenant-a", "intent-1") equals `pending`
    - Expected: payment_intent_ref(store, "tenant-a", "intent-1") equals `ref`
@@ -88,10 +93,12 @@ Lane: .spipe/simple_enterprise_suite (W5-B).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates an intent, authorizes, captures, and pays the order atomically")
 step("Create a pending intent for the created order")
 val store = fresh_store("happy")
 val ref = create_pending(store, "int-key-1")
@@ -123,6 +130,7 @@ store_close(store)
 
 #### rejects a bad signature with invalid-record and NO state change
 
+- rejects a bad signature with invalid-record and NO state change
 - Send a captured webhook with a wrong signature
    - Expected: r.reason equals `invalid-record`
 - No state changed: intent still pending, order unpaid, no new events
@@ -134,10 +142,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects a bad signature with invalid-record and NO state change")
 val store = fresh_store("badsig")
 val ref = create_pending(store, "int-key-1")
 val before = intent_event_count(store, "tenant-a")
@@ -158,6 +168,7 @@ store_close(store)
 
 #### replays a provider_event_id with exactly one effect
 
+- replays a provider_event_id with exactly one effect
 - First captured webhook lands
    - Expected: first.reason equals `accepted`
 - Replaying the SAME provider_event_id returns the recorded result
@@ -171,10 +182,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replays a provider_event_id with exactly one effect")
 val store = fresh_store("dedupe")
 val ref = create_pending(store, "int-key-1")
 step("First captured webhook lands")
@@ -199,6 +212,7 @@ store_close(store)
 
 #### fails the intent and leaves the order untouched
 
+- fails the intent and leaves the order untouched
 - Provider webhook: failed
    - Expected: r.reason equals `accepted`
    - Expected: payment_intent_status(store, "tenant-a", "intent-1") equals `failed`
@@ -211,10 +225,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails the intent and leaves the order untouched")
 val store = fresh_store("failed")
 val ref = create_pending(store, "int-key-1")
 step("Provider webhook: failed")
@@ -236,6 +252,7 @@ store_close(store)
 
 #### flags stale pending intents and seeded intent/order divergence
 
+- flags stale pending intents and seeded intent/order divergence
 - Clean state reconciles clean (short clock, long ttl)
    - Expected: clean.pending_over_ttl.len() equals `0`
    - Expected: clean.captured_without_paid_order.len() equals `0`
@@ -254,10 +271,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("flags stale pending intents and seeded intent/order divergence")
 val store = fresh_store("reconcile")
 val ref = create_pending(store, "int-key-1")
 step("Clean state reconciles clean (short clock, long ttl)")
@@ -294,6 +313,7 @@ store_close(store)
 
 #### tenant B cannot drive tenant A's provider_ref
 
+- tenant B cannot drive tenant A's provider_ref
 - Tenant B sends a correctly signed capture for tenant A's ref
    - Expected: r.reason equals `not-found`
 - Tenant A's intent and order are untouched
@@ -304,10 +324,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tenant B cannot drive tenant A's provider_ref")
 val store = fresh_store("tenants")
 val ref = create_pending(store, "int-key-1")
 step("Tenant B sends a correctly signed capture for tenant A's ref")
@@ -316,7 +338,7 @@ val op_b = pay_op("pay-b")
 val payload = "{\"ref\":\"" + ref + "\"}"
 val r = payment_webhook_receive(store, session_for(op_b, tb), tb, op_b,
     envelope("wh-x", "payment.webhook.receive", payload),
-    provider(), ref, "captured", provider_sign(provider(), payload), "evt-x", 2000)
+    provider(), ref, "captured", provider_sign_webhook(provider(), "tenant-b", ref, "captured", "evt-x", payload), "evt-x", 2000)
 expect(r.ok).to_be(false)
 expect(r.reason).to_equal("not-found")
 step("Tenant A's intent and order are untouched")
@@ -331,6 +353,7 @@ store_close(store)
 
 #### derives identical statuses from a reopened store
 
+- derives identical statuses from a reopened store
 - Reopen the same database file
    - Expected: payment_intent_status(store2, "tenant-a", "intent-1") equals `captured`
    - Expected: sale_order_status(store2, "tenant-a", "order-100") equals `paid`
@@ -339,10 +362,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("derives identical statuses from a reopened store")
 val store = fresh_store("restart")
 val ref = create_pending(store, "int-key-1")
 signed_webhook(store, ref, "captured", "evt-1")
@@ -376,3 +401,51 @@ store_close(store2)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `28ccb78c67d3222b0a7d5b0dbc10d71bdfb91d20c276508d80fb4ab3e1cd3121`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `28ccb78c67d3222b0a7d5b0dbc10d71bdfb91d20c276508d80fb4ab3e1cd3121`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `28ccb78c67d3222b0a7d5b0dbc10d71bdfb91d20c276508d80fb4ab3e1cd3121`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
+
+SSpec documentization score: 87/100
+source: test/03_system/app/enterprise/payment_boundary_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/payment_boundary_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=80
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/payment_boundary_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/payment_boundary_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/payment_boundary_spec.spl:145:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates an intent, authorizes, captures, and pays the order atomically' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/payment_boundary_spec.spl:173:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a bad signature with invalid-record and NO state change' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/payment_boundary_spec.spl:190:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'replays a provider_event_id with exactly one effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+setup="$repo_root/test/riscv_isa_gate/setup_checked_in_rtl_fixture.shs"
+contract="$repo_root/test/01_unit/scripts/riscv_isa_gate_fixture_contract_test.shs"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+expect_red() {
+    name=$1
+    expression=$2
+    mutant="$tmp/$name.shs"
+    sed "$expression" "$setup" >"$mutant"
+    chmod +x "$mutant"
+    if cmp -s "$setup" "$mutant"; then
+        echo "mutation was not applied: $name" >&2
+        exit 1
+    fi
+    if RISCV_GATE_FIXTURE_SETUP_UNDER_TEST="$mutant" sh "$contract" \
+        >"$tmp/$name.out" 2>"$tmp/$name.err"; then
+        echo "mutation survived: $name" >&2
+        exit 1
+    fi
+}
+
+expect_red use_generated_build_core \
+    's|core_source="$repo_root/examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"|core_source="$repo_root/build/vhdl/rv32/rv32_exec_core.vhd"|'
+expect_red remove_entity_guard \
+    '/rv32_exec_core.*|| {/,/^[}]/d'
+expect_red remove_payload_memory_guard \
+    '/rv32_payload.*|| {/,/^[}]/d'
+expect_red remove_auxiliary_memory_guard \
+    '/^grep -Eq .*rv32_fat32\[\.]mem.*|| {$/,/^}$/d'
+expect_red remove_empty_target_guard \
+    '/^if \[ -n "$(find /,/^fi$/d'
+expect_red omit_auxiliary_memory_fixture \
+    '/rv32_fat32.mem"$/d'
+
+echo "PASS: checked-in RV32 ISA gate fixture contract kills all required mutations"

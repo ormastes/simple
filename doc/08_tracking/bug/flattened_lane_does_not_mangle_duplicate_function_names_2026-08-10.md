@@ -1,4 +1,9 @@
 # Module flattening does not mangle duplicate free-function names, so codegen cannot tell two `main`s apart
+## Closed 2026-09-16 — Status FIXED in JIT lane; R:42 verified, checks PASS 4/4 and 5/5
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED in the flattened HIR/codegen (JIT) lane, 2026-08-10.
 The six `cstart.spl` files are NOT yet buildable — see "What is still blocked".
@@ -252,3 +257,4 @@ fix, `simple compile src/os/kernel/arch/x86_64/cstart.spl --native` fails on
 `semantic: Undefined("undefined identifier: Result")`, downstream of the
 separately-tracked `MemoryRuntimeMapping.address_space_root` HIR error. No
 board-runnable claim follows from this change.
+

@@ -40,9 +40,18 @@ pub(crate) fn get_vreg_or_default<M: Module>(
     builder.ins().iconst(types::I64, 3)
 }
 
+/// `baremetal` selects the freestanding heap-tag vocabulary. It MUST come from
+/// the compilation target (`Target::is_baremetal()`, `common/src/target.rs`,
+/// threaded in as `InstrContext::baremetal`) and never be assumed: the
+/// freestanding tag numbers below OVERLAP hosted `HeapObjectType` values
+/// (`runtime/src/value/heap.rs`), so applying them on a hosted build turns an
+/// honest `-1` sentinel into a confidently wrong length read out of an
+/// unrelated field.
 pub(crate) fn inline_runtime_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
+    baremetal: bool,
+    fam_arrays: bool,
 ) -> cranelift_codegen::ir::Value {
     let invalid = builder.ins().iconst(types::I64, -1);
     let tag_mask = builder.ins().iconst(types::I64, 7);
@@ -72,6 +81,7 @@ pub(crate) fn inline_runtime_len_value(
     // case `d.len()`/`d.is_empty()` on an untyped-receiver dict fall through to
     // the -1 sentinel under the Cranelift JIT fast path.
     let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
+    // TODO: [codegen][P1] Reconcile the two heap-kind numbering schemes (HeapObjectType::Closure = 0x06 in runtime/src/value/heap.rs:14 vs RT_VALUE_HEAP_DICT 0x06 / RT_VALUE_HEAP_CLOSURE 0x03 in src/runtime/runtime_native.c:250,252) and add an acceptance test that .len() on a hosted closure returns -1 rather than its capture count -- see doc/08_tracking/bug/cranelift_inline_len_heap_tag_space_collision_dict_closure_2026-09-06.md (PR #403)
     // simple-core SplDict (freestanding / SimpleOS native-build) uses tag byte 6
     // with layout {tag@0, cap@8, len@16, items@32} — unlike RuntimeDict (tag 3,
     // len@8). Without this case `.len()`/`.values()` on an untyped/ANY-erased
@@ -79,16 +89,55 @@ pub(crate) fn inline_runtime_len_value(
     // dropping a synthesized `main` during in-guest HIR lowering (the SimpleOS
     // interpreter then reports "module has no main function").
     let is_spldict = builder.ins().icmp_imm(IntCC::Equal, object_type, 6);
+    // The riscv64/SimpleOS BAREMETAL runtime tags its dict with 11, not 3 or 6
+    // (examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c:48,
+    // `#define HEAP_DICT 11U`). Without this case an ANY-erased
+    // `Dict<SymbolId, HirFunction>` fell through to the -1 sentinel below, and
+    // -1 is the worst possible answer: `x.len() == 0` is FALSE while
+    // `while i < x.len()` runs ZERO times, so an emptiness guard cannot fire
+    // AND every loop over the dict silently does nothing. Measured in-guest
+    // under real OpenSBI: `hir.functions.len()` answered -1, HIR lowering
+    // dropped `main`, and the interpreter reported "module has no main
+    // function" -- exactly the failure the 6-tag comment above describes, from
+    // a third tag nobody had covered.
+    // See doc/08_tracking/bug/riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01.md
+    //
+    // Its layout is {HeapHeader hdr(8), uint64 len, uint64 cap, keys, vals}
+    // (baremetal_runtime_core.inc.c:2060-2068), so len sits at offset 8 -- the
+    // SAME offset as strings and arrays, and NOT SplDict's offset 16. It
+    // therefore joins the offset-8 group, not the spldict branch.
+    //
+    // TARGET-GATED, and it has to be: hosted `HeapObjectType::Unique` is 0x0B
+    // == 11 (runtime/src/value/heap.rs:19), so an ungated tag-11 arm would make
+    // `.len()` on a hosted Unique load its offset-8 word -- not a length -- and
+    // report it as one. That is the same silent-wrong-answer class this arm
+    // exists to remove, only aimed at the hosted lane. The predicate is
+    // `Target::is_baremetal()` (common/src/target.rs), the same one
+    // common_backend.rs already uses to disable PIC for freestanding targets;
+    // it reaches here as `InstrContext::baremetal`.
     // RuntimeString, RuntimeArray and RuntimeDict store len at offset 8.
     let has_len_str_arr = builder.ins().bor(is_string, is_array);
     let has_len_rt = builder.ins().bor(has_len_str_arr, is_dict);
-    let has_len = builder.ins().bor(has_len_rt, is_spldict);
+    let has_len_rt2 = if baremetal {
+        let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);
+        builder.ins().bor(has_len_rt, is_bm_dict)
+    } else {
+        has_len_rt
+    };
+    let has_len = builder.ins().bor(has_len_rt2, is_spldict);
     builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
     builder.seal_block(type_block);
 
     builder.switch_to_block(len_block);
     // SplDict keeps its entry count at offset 16; everything else at offset 8.
     // Separate blocks so off16 is never loaded on a (possibly smaller) non-dict.
+    //
+    // On FAM-array baremetal targets (aarch64/arm32/x86_32 C runtimes) the
+    // offset-8 length is a `u32` for arrays AND dicts
+    // (`RuntimeMap{u32 len; u32 cap; keys*; values*}`), while RuntimeString
+    // keeps its `u64 len` — so the offset-8 group splits by width there.
+    // Without the split, an inlined `.len()` on a 512-element sector buffer
+    // reads `len | cap<<32` = 2199023256064 (aarch64 clang-bringup Blocker 2).
     let spldict_len_block = builder.create_block();
     let other_len_block = builder.create_block();
     builder
@@ -102,9 +151,27 @@ pub(crate) fn inline_runtime_len_value(
     builder.seal_block(spldict_len_block);
 
     builder.switch_to_block(other_len_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    builder.ins().jump(done_block, &[len]);
-    builder.seal_block(other_len_block);
+    if fam_arrays {
+        let str_block = builder.create_block();
+        let arrdict_block = builder.create_block();
+        builder.ins().brif(is_string, str_block, &[], arrdict_block, &[]);
+        builder.seal_block(other_len_block);
+
+        builder.switch_to_block(str_block);
+        let str_len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+        builder.ins().jump(done_block, &[str_len]);
+        builder.seal_block(str_block);
+
+        builder.switch_to_block(arrdict_block);
+        let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+        let arrdict_len = builder.ins().uextend(types::I64, len32);
+        builder.ins().jump(done_block, &[arrdict_len]);
+        builder.seal_block(arrdict_block);
+    } else {
+        let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+        builder.ins().jump(done_block, &[len]);
+        builder.seal_block(other_len_block);
+    }
 
     builder.switch_to_block(done_block);
     let result = builder.block_params(done_block)[0];
@@ -115,6 +182,7 @@ pub(crate) fn inline_runtime_len_value(
 pub(crate) fn inline_runtime_array_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
 ) -> cranelift_codegen::ir::Value {
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(value, ptr_mask);
@@ -126,7 +194,15 @@ pub(crate) fn inline_runtime_array_len_value(
     builder.ins().brif(is_null, done_block, &[zero], len_block, &[]);
 
     builder.switch_to_block(len_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    // FAM baremetal runtimes store `u32 len` at offset 8 (cap follows at 12);
+    // the hosted layout stores `u64 len` at offset 8. An i64 load across the
+    // FAM pair returns len|cap<<32 — the 512<<32 seen in the aarch64 OS lane.
+    let len = if fam_arrays {
+        let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+        builder.ins().uextend(types::I64, len32)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+    };
     builder.ins().jump(done_block, &[len]);
     builder.seal_block(len_block);
 
@@ -134,6 +210,89 @@ pub(crate) fn inline_runtime_array_len_value(
     let result = builder.block_params(done_block)[0];
     builder.seal_block(done_block);
     result
+}
+
+/// Load a RuntimeArray length field as i64 for the target's layout.
+/// Hosted / riscv64 / x86_64 freestanding: `u64 len` at offset 8.
+/// FAM baremetal (aarch64/arm32/x86_32 C runtimes): `u32 len` at offset 8,
+/// zero-extended — an i64 load there would pair `len` with `cap`.
+pub(crate) fn array_len_i64(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) -> cranelift_codegen::ir::Value {
+    if fam_arrays {
+        let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+        builder.ins().uextend(types::I64, len32)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+    }
+}
+
+/// Load a RuntimeArray capacity field as i64 for the target's layout.
+/// Hosted: `u64 cap` at offset 16. FAM: `u32 cap` at offset 12, zero-extended.
+pub(crate) fn array_cap_i64(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) -> cranelift_codegen::ir::Value {
+    if fam_arrays {
+        let cap32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 12);
+        builder.ins().uextend(types::I64, cap32)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16)
+    }
+}
+
+/// RuntimeArray element storage base for the target's layout.
+/// Hosted: `RuntimeValue *data` at offset 24 (separate allocation).
+/// FAM: the items flexible-array member starts at offset 16, so the base is
+/// the header pointer itself plus 16 — there is NO pointer indirection.
+pub(crate) fn array_items_base(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) -> cranelift_codegen::ir::Value {
+    if fam_arrays {
+        builder.ins().iadd_imm(ptr_bits, 16)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24)
+    }
+}
+
+/// Store an updated RuntimeArray length field.
+/// Hosted: i64 at offset 8. FAM: i32 at offset 8 (the C `u32 len` field).
+pub(crate) fn store_array_len(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    len_i64: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) {
+    if fam_arrays {
+        let len32 = builder.ins().ireduce(types::I32, len_i64);
+        builder.ins().store(MemFlags::new(), len32, ptr_bits, 8);
+    } else {
+        builder.ins().store(MemFlags::new(), len_i64, ptr_bits, 8);
+    }
+}
+
+/// Decode one logical byte from a tagged RuntimeValue slot, mirroring the
+/// freestanding C `arm64_array_byte_at_raw_index`: integer-tagged slots carry
+/// the byte as ENCODE_INT(byte) (payload in bits 3..), any other slot's low
+/// byte is used directly.
+pub(crate) fn decode_byte_from_slot(
+    builder: &mut FunctionBuilder,
+    slot: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let zero = builder.ins().iconst(types::I64, 0);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let byte_mask = builder.ins().iconst(types::I64, 0xff);
+    let slot_tag = builder.ins().band(slot, tag_mask);
+    let slot_is_int = builder.ins().icmp(IntCC::Equal, slot_tag, zero);
+    let int_payload = builder.ins().sshr_imm(slot, 3);
+    let int_byte = builder.ins().band(int_payload, byte_mask);
+    let raw_byte = builder.ins().band(slot, byte_mask);
+    builder.ins().select(slot_is_int, int_byte, raw_byte)
 }
 
 /// Helper to create a string constant in module data and return (ptr, len) values.

@@ -233,25 +233,106 @@ EOT
         *"wrapper no longer delegates"*) [ "$rc" = 2 ] || { echo "selftest: fixture 6 exit $rc, want 2"; fails=$((fails+1)); } ;;
         *) echo "selftest: fixture 6 (early return) did not ERROR: $out"; fails=$((fails+1)) ;;
     esac
+    # Fixture 7: --rev must read the COMMITTED tree — sources AND allowlist —
+    # never the working checkout, and the two paths must genuinely DISAGREE.
+    # This is what keeps the 2026-09-06 wrong-tree fix from rotting: if --rev
+    # ever silently falls back to the working copy, this fixture fails.
+    if ! command -v git >/dev/null 2>&1; then
+        echo "selftest: fixture 7 skipped-as-failure — git unavailable, cannot verify --rev"
+        fails=$((fails+1))
+    else
+        cp -r "$TD/f1" "$TD/f7"
+        echo "Brandnew  fixture reason" > "$TD/f7/scripts/check/type_walk_projection_allowlist.txt"
+        ( cd "$TD/f7" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+        # Working copy ONLY: drop the allowlist entry that makes the committed
+        # tree pass. A working-tree scan now FAILs naming Brandnew; a
+        # committed-content scan must still PASS.
+        : > "$TD/f7/scripts/check/type_walk_projection_allowlist.txt"
+        out=$(ROOT="$TD/f7" sh "$0" --scan-only --rev HEAD 2>&1); rc=$?
+        case "$out" in
+            PASS*) : ;;
+            *) echo "selftest: fixture 7 --rev did not read committed content: $out"; fails=$((fails+1)) ;;
+        esac
+        out=$(ROOT="$TD/f7" sh "$0" --scan-only 2>&1); rc=$?
+        case "$out" in
+            *"FAIL"*Brandnew*) : ;;
+            *) echo "selftest: fixture 7 working-tree scan did not see the dirty allowlist: $out"; fails=$((fails+1)) ;;
+        esac
+    fi
     rm -rf "$TD"
     [ "$fails" = 0 ] && return 0
     echo "ERROR — nothing was checked (selftest failed: $fails fixture(s))"
     return 2
 }
 
-case "${1:-}" in
-    --scan-only)
-        MAT_FILE="$ROOT/src/compiler/10.frontend/parser_types_expr.spl"
-        PROJ_FILE="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl"
-        ALLOWLIST="$ROOT/scripts/check/type_walk_projection_allowlist.txt"
-        run_scan
-        exit $?
-        ;;
-    --selftest)
-        selftest
-        exit $?
-        ;;
-esac
+# --rev <REV> scans the COMMITTED tree at REV instead of the working checkout.
+#
+# Why it exists (2026-09-06): as a `tree`-mode push row this gate read the shared
+# WORKING CHECKOUT, not the commit being pushed. `_ref` in
+# run_manifest_push_gates is the sha off pre-push stdin, so under concurrent
+# agent load a tree-mode row reports on content that is not being pushed. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
+# Only three files matter here, so the materialisation is exactly those three —
+# INCLUDING the allowlist, because comparing committed sources against the
+# working copy's allowlist is still a wrong-tree verdict.
+MAT_REL=src/compiler/10.frontend/parser_types_expr.spl
+PROJ_REL=src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl
+ALLOW_REL=scripts/check/type_walk_projection_allowlist.txt
+
+materialise_rev() {
+    # $1 = rev. Echoes the scan root on success; returns non-zero on failure.
+    _rev=$1
+    _work=$(mktemp -d) || return 1
+    MATERIALISED_WORK=$_work
+    ( cd "$ROOT" && git archive "$_rev" -- "$MAT_REL" "$PROJ_REL" "$ALLOW_REL" ) 2>/dev/null \
+        | tar -x -C "$_work" 2>/dev/null
+    [ -f "$_work/$MAT_REL" ] || return 1
+    printf '%s\n' "$_work"
+}
+
+MODE=full
+REV=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --scan-only) MODE=scan; shift ;;
+        --selftest) MODE=selftest; shift ;;
+        --rev) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--rev needs a value)"; exit 2; }
+               REV="$2"; shift 2 ;;
+        --root) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--root needs a value)"; exit 2; }
+               ROOT="$2"; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+if [ "$MODE" = selftest ]; then
+    selftest
+    exit $?
+fi
+
+SCAN_ROOT="$ROOT"
+MATERIALISED_WORK=""
+if [ -n "$REV" ]; then
+    SCAN_ROOT=$(materialise_rev "$REV") || {
+        [ -n "$MATERIALISED_WORK" ] && rm -rf "$MATERIALISED_WORK"
+        echo "ERROR — nothing was checked (could not materialise $REV)"
+        exit 2
+    }
+    trap 'rm -rf "$MATERIALISED_WORK"' EXIT INT TERM
+fi
+
+MAT_FILE="$SCAN_ROOT/$MAT_REL"
+PROJ_FILE="$SCAN_ROOT/$PROJ_REL"
+ALLOWLIST="$SCAN_ROOT/$ALLOW_REL"
+
+if [ "$MODE" = scan ]; then
+    run_scan
+    exit $?
+fi
 
 selftest || exit 2
 run_scan

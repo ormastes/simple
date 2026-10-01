@@ -1,9 +1,10 @@
 # JIT: `i64?` optional payloads are reinterpreted as f64 and `!` unwrap always yields nil
 
 - **Date:** 2026-08-17
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
-- **Status:** OPEN
+- **Status:** FIXED 2026-08-31 (see "Root cause and fix" below). The
+  explicit-`return` half was fixed 2026-08-17; the implicit tail-expression
+  half stayed broken until 2026-08-31, which is why this record previously
+  carried contradictory FIXED/OPEN lines.
 - **Severity:** HIGH — silent wrong values, no error, on the engine ordinary
   programs actually run on. No spec in the suite can observe it.
 - **Area:** Cranelift JIT (`bin/simple run` default path)
@@ -100,3 +101,37 @@ test/01_unit/compiler/interpreter/probe_optional_unwrap_jit.spl` prints
 the run failed outright with `ERROR: test daemon request expired before
 execution` under concurrent load. Unrelated to the defect, but it is what makes
 verifying it affordable.
+
+## Root cause and fix (2026-08-31)
+
+The remaining half of this bug was the **implicit tail-expression return**.
+`HirStmt::Return` (`src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`)
+already applied `box_scalar_for_tagged_slot` / `unbox_scalar_for_raw_slot`, so
+`fn f() -> i64?: return 42` was correct. The `HirStmt::Expr` arm — whose value
+`lowering_core.rs:2030-2032` turns directly into `Terminator::Return` — applied
+neither, so `fn f() -> i64?: 42` returned the RAW word into a tagged return
+slot and the caller decoded it through the wrong tag:
+
+| declared return | tail-return value observed pre-fix |
+|---|---|
+| `i64?` returning `42` | `~2.08e-322` (bits of 42 read as f64) |
+| `f64?` returning `2.5` | `576601489791778816` (= bits(2.5) >> 3) |
+| `bool?` returning `true` | `nil` |
+
+`??` did not rescue any of them. Fixed by applying the same coercion pair at
+the tail-expression site. Probe:
+`test/01_unit/compiler/interpreter/probe_optional_tail_return_jit.spl`
+(8 FAILURES before, ALL PASS after, on `bin/simple run`).
+
+### Still open, filed separately rather than bundled here
+
+- **`Any?` tail or explicit return still yields `<value:0x7>`.**
+  `slot_holds_tagged_value` treats `T?` as `Pointer{inner}` and only accepts it
+  when `inner` is a raw scalar, so `Any?` (= `Pointer{ANY}`) is never boxed.
+  Plain `Any` is correct. Widening that predicate touches every `Let`/`Assign`/
+  argument site, so it was left out of a minimal fix.
+- **`if v != nil:` does not narrow `i64?` to `i64`.** The interpreter fails
+  closed (`error: semantic: type mismatch: cannot convert enum to int`); the
+  JIT accepts the same program and computes `42 << 3 = 336`. Two issues: the
+  narrowing itself is a language design decision, and the JIT silently
+  diverging from a program the semantic checker rejects is its own defect.

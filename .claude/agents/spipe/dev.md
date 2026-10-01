@@ -128,6 +128,15 @@ Your ONLY output is the state file with a goal and acceptance criteria.
 ## State File Template
 
 ```markdown
+
+## SPipe home routing
+
+Reusable core lives at `{home}/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `{home}/spipe` (`SPIPE_WORKSPACE`). `{home}/spipe/common` links to core and project
+`.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
+runtime state out of core. Preserve existing reversed layouts and pinned legacy
+submodules until explicit migration; never overwrite an occupied route.
+See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownership.
 # Feature: <short-name>
 
 ## Raw Request
@@ -176,10 +185,11 @@ and the helper step `step_bootstrap_platform_handoff_readiness`.
 
 Acceptance criteria must require the exact Gate 1-6 order: Stage 3 admission,
 x86_64 Linux Stage 4, candidate sanity/hash, four essential-tool markers,
-deployment plus a manual rollback procedure (no
-`rollback-bootstrap-deploy.shs` script exists yet; redeploy the retained
-`bin/release/<canonical-triple>/simple.pre_deploy` and re-run the same
-arithmetic smoke) and its command/exit/hash/arithmetic receipts, then platform
+deployment plus the rollback procedure — `sh scripts/bootstrap/
+rollback-bootstrap-deploy.shs <canonical-triple>` (fail-closed, `--dry-run`,
+`--selftest`; see
+`doc/08_tracking/todo/rollback_bootstrap_deploy_script_missing_2026-08-08.md`)
+— and its command/exit/hash/arithmetic receipts, then platform
 acceptance. They must
 state that another agent may own Stage 3 and that independent Stage 4 or
 external-host preparation cannot waive the Stage 3 receipt or publish PASS.

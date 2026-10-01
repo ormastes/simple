@@ -1,5 +1,36 @@
 # MCI-v2 Rendering Evidence Producer
 
+## Live collector command owner
+
+`scripts/tool/collect-mci-v2-rendering-live.shs` is the production collection
+owner. Its live mode alone executes the canonical bounded Engine2D native build,
+the Vulkan showcase/readback run, `renderdoc-evidence.shs capture-simple`, and
+the RenderDoc replay gate. The command strings are fixed by the collector and
+their exact hashes must be authorized by a
+`mci-rendering-live-command-trust-v1` policy for the selected mode and signing
+key. Callers cannot substitute an arbitrary shell command.
+
+Each live bundle retains every command receipt, stdout, stderr, raw device
+readback, raw `.rdc`, interaction transcript, and performance transcript. Its
+signed collector manifest binds run, source, configuration, capture time,
+device, driver, queue, exact commands, and every retained artifact hash. The
+private collector key signs the manifest; policy pins the corresponding public
+key hash and key ID.
+
+Fixture mode executes none of the GPU commands. Its signed manifest always says
+`artifact_mode=fixture`, `release_eligible=false`, and
+`nonpromotable_reason=contract-fixture-no-gpu-execution`. It is useful only for
+the host-independent interface contract and cannot be supplied as live proof.
+
+The frozen adapter vocabulary is `mci-rendering-raw-v1`: `packed.events`,
+`composition.bin`, `gui.drawir`, `web.drawir`, `cpu.rgba`, `device.rgba`,
+`backend.env`, `queue.env`, `frame.rdc`, `replay.log`, allocation/queue/inflight
+event streams, overflow before/after bytes, fallback events, DrawIR entries,
+interaction events, frame-time samples, and RSS bytes. The adapter
+`scripts/tool/adapt-mci-v2-rendering-bundle.shs` accepts no substitute names and
+recomputes the canonical 17 semantic rows. It emits the matching producer trust
+policy with exact `adapter:derive:<row>` command hashes.
+
 Run `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` for the
 host-only contract. It does not execute a GPU or claim hardware evidence.
 

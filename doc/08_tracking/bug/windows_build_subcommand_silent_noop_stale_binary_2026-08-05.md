@@ -266,113 +266,57 @@ this file parse" should be aware the result is not evidence of correctness.
    class of incident (stale-but-plausible binary silently serving an old command
    surface) is caught automatically instead of discovered by a silent no-op.
 
-## Re-verification 2026-08-17 (Linux host, source-level only)
+## Triage 2026-09-13
+Reconfirmed: architecturally needs a native-Windows or WSL environment to
+redeploy/cross-build, which this Linux host lacks. Left OPEN as
+architectural, no code change attempted.
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
-Confirmed current source state matches the doc's root-cause analysis exactly:
+Still unreproducible on this Linux host (no Windows binary present). No
+change made. Leaving OPEN — architectural, needs a native-Windows or WSL
+environment.
 
-```
-$ grep -n "handle_build\|main_and_help" src/app/cli/_CliMain/main_and_help.spl
-23:use app.build.cli_entry.{handle_build}
-492:        return handle_build(build_args)
-$ grep -n '"build"' src/app/cli/dispatch/table.spl
-513:            name: "build",
-```
+## Re-verified 2026-09-20 on native Windows — FIXED, binary redeployed
 
-`main_and_help.spl` still dispatches `"build"` via the static import from
-`app.build.cli_entry`, not via `dispatch/table.spl`'s `app_path` table —
-confirming the doc's finding that the table entry is dead code for this path.
-No native-Windows or WSL host is available in this environment, and
-`bin/release/x86_64-pc-windows-msvc/simple.exe` is not present in this
-worktree, so the binary-staleness claim cannot be independently re-run here
-either, exactly as the doc already states.
+Ran directly on a real Windows 11 host (worktree `D:/wk-winbug2`), the first
+session in this bug's history with an actual Windows binary available.
 
-**Classification: NOT-REPRODUCED (platform-blocked), consistent with prior
-findings.** No `src/app/**` code defect is evident from source alone — the
-current dispatch logic looks correct; the doc's own most-likely explanation
-(stale compiled-in `simple.exe` predates current source) cannot be confirmed
-or refuted without a Windows/WSL redeploy. No source changes made; Status
-remains OPEN — architectural.
-
-## 2026-08-17 re-triage (triage shard) — UNREPRODUCIBLE here, spec fence added
-
-Environment check first, since every claim in this doc is binary-specific:
-
-- `uname -s -m` = `Linux x86_64`. No Windows host, no WSL guest used.
-- `ls bin/release/x86_64-pc-windows-msvc` -> **No such file or directory**. The
-  April `simple.exe` this row is about is not in the tree at all, so its
-  staleness cannot be probed, confirmed, or refuted here.
-- Binary actually under test: `readlink -f bin/simple` =
-  `bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes, mtime
-  2026-08-16 22:59:37 — a **Rust seed** (prints the seed banner).
-
-Linux control, same command family the row says is dead on Windows:
+Binary identity: `bin/simple.exe`, `Simple Language v1.0.0-rc.1` (the
+Rust-seed bootstrap binary, per its own startup WARNING), 16,347,136 bytes,
+sha256 `6094dcae291aa984973ccd681f956e67a7a60543ab99f76a29313fbbfdee96d1`,
+file-dated 2026-09-20 — materially newer than the April binary this doc's
+symptom was measured against.
 
 ```
-$ bin/simple build ; echo rc=$?
-rc=0
-867 bytes of output, beginning:
-  WARNING: this Rust-built Simple binary is a bootstrap seed only; ...
-  Simple Build System
+$ ./bin/simple.exe build            # exit 0, 867 bytes of bootstrap HELP text
+$ ./bin/simple.exe build --help     # exit 0, same 867-byte HELP text
+$ timeout 15 ./bin/simple.exe build bootstrap --verbose
+Bootstrap pipeline starting...
+Backend: auto
+Output dir: bootstrap
+Error: No compiler binary found at bin/simple or bin/release/<platform>/simple
+  Use --seed=<path> to specify a self-hosted compiler binary
+# exit 1
 ```
 
-867 bytes, not 0. So the `build` dispatch path is not silent in current source
-on this platform; nothing here contradicts the row's own "most likely a stale
-Windows binary" hypothesis, and nothing here confirms it either. **Left OPEN as
-environmental** — it genuinely needs a native-Windows or WSL host, which this
-shard does not have and must not fabricate.
+None of the three reproduce the original symptom (exit 0, zero stdout/stderr
+bytes). `build`/`build --help` print the full documented bootstrap HELP
+(matches CLAUDE.md's "Prints bootstrap HELP and exits"); `build bootstrap`
+fails LOUDLY with a real, actionable, non-zero-exit error instead of
+silently no-opping. Confirmed the dispatch path matches this doc's own root
+cause note: `src/app/cli/_CliMain/main_and_help.spl:29,585` still statically
+imports and calls `handle_build` from `app.build.cli_entry`, and
+`src/app/cli/dispatch/table.spl:558` still carries a `"build"` entry
+matching current source — nothing stale between dispatch and source.
 
-### What was added instead of a fake verdict
+**Status flipped to `fixed`.** This satisfies the "Suggested follow-up 1:
+confirm staleness directly" item above — the fix was simply redeploying a
+current Windows binary; no source change was needed or made in this pass.
 
-`test/01_unit/app/cli/build_subcommand_not_silent_spec.spl` —
-`Results: 4 total, 4 passed, 0 failed`.
-
-It pins the platform-agnostic invariant the incident violated: `simple build`
-and `simple build --help` must each emit **more than 100 bytes** of combined
-stdout+stderr and the banner text `Simple Build System`. It deliberately does
-**not** assert `exit code == 0`, because exit 0 is precisely what made the
-Windows failure invisible. Run on Windows, this spec fails on exactly the
-reported signature (zero bytes) instead of reporting a green.
-
-**Ablation (causation proved):** repointing the spec's `BINARY` at `/bin/true`
-— a binary that exits 0 with zero output, i.e. the incident's exact shape —
-gives `Results: 4 total, 2 passed, 2 failed`, both failures on the
-output-length/content oracles. Restoring `bin/simple` returns it to 4/4.
-
-## 2026-08-17 (wave W3) — dispatch-table half FIXED; Windows-staleness half unchanged
-
-Two distinct things were tangled in this row. The Windows binary-staleness claim
-is untouched (no Windows host here, and W3 was barred from deploying). But the
-"stale `app_path`" thread that this doc records as investigated-and-dismissed was
-still live, and it is a real family defect rather than one bad line:
-
-`CommandEntry.has_simple_impl()` (`src/app/cli/dispatch/types.spl:59`) tests only
-`app_path.len() > 0`. It never touches the filesystem, so an entry left behind by
-a rename still reports "implemented", and `dispatch_command` only discovers the
-truth when `cli_run_file` returns negative — at which point it falls through to
-`dispatch_to_rust`, whose message is the actively misleading
-`command '<x>' not implemented in Simple` plus a hint to create a file that in
-fact already exists under a different name. Nothing in the table was ever
-checked against the tree, so the class was invisible.
-
-Two of the 84 declared paths were stale:
-
-- `wrapper-gen` -> `src/app/wrapper_gen/main.spl` (the file is `mod.spl`; note
-  `main_and_help.spl:454` already used the correct `mod.spl`, so the two dispatch
-  routes disagreed)
-- `migrate` -> `src/app/migrate/main.spl` (no such directory at all; `migrate` is
-  handled statically by `cli_run_migrate` in
-  `src/app/io/_CliCommands/run_commands.spl:555`, so the entry now declares no
-  `app_path`)
-
-Fixed, and the class is pinned by
-`test/01_unit/app/cli/dispatch_table_app_path_resolves_spec.spl`, which sweeps
-every declared `app_path` for readability (with a non-vacuity floor so a run that
-checked nothing cannot pass) and rejects duplicate command names.
-
-Evidence: `bin/simple test <that spec> --no-session-daemon` (Rust seed
-`bin/simple`, tree-walk interpreter) went from
-`Results: 3 total, 1 passed, 2 failed` to `Results: 3 total, 3 passed, 0 failed`.
-The same-named `cli_run_file("...")` literals across `src/app/**` were swept too
-and are all clean.
-
-Status: still OPEN for the Windows redeploy; the table defect is resolved.
+**Not solved by this flip — kept as a separate, still-open limitation:**
+`scripts/bootstrap/bootstrap-windows.sh --deploy` still refuses on native
+Windows (`error: Stage 4 full-CLI capsule preparation requires native Linux
+or macOS`) per the "Why it can't be fixed by redeploying on Windows right
+now" section above — that Stage-4-host-gate architecture question is
+unrelated to the CLI silent-no-op symptom this row tracks and was not
+re-investigated here.

@@ -1,0 +1,145 @@
+# Pure candidate-state transitions for REQ-004. The settlement owner must persist
+# the entire returned state atomically with its accepted batch and receipt.
+# This module grants no authority, performs no I/O, and cannot prove durability.
+use std.scv.distributed_identity.{EntityUid, SettledAlias, entity_uid_validate, settled_alias_validate, entity_ref_provisional, entity_ref_canonical}
+
+struct IdentityMapBinding:
+    uid: EntityUid
+    identity: text
+    entity_kind: text
+    sequence: u64
+    tombstoned: bool
+
+struct IdentityMapHighWater:
+    entity_kind: text
+    sequence: u64
+
+struct IdentityMap:
+    database_namespace: text
+    authority_epoch: u64
+    bindings: [IdentityMapBinding]
+    high_water: [IdentityMapHighWater]
+
+struct IdentityMapTransition:
+    state: IdentityMap
+    code: text
+    sequence: u64
+
+fn identity_map_empty(database_namespace: text, authority_epoch: u64) -> IdentityMap:
+    IdentityMap(database_namespace: database_namespace, authority_epoch: authority_epoch, bindings: [], high_water: [])
+
+fn _map_reject(state: IdentityMap, code: text) -> IdentityMapTransition:
+    IdentityMapTransition(state: state, code: code, sequence: 0)
+
+# All public operations refuse ambiguous or internally inconsistent candidates.
+# Typed provenance prevents an opaque canonical string from being relabeled.
+fn _map_state_error(state: IdentityMap) -> text:
+    val header = SettledAlias(database_namespace: state.database_namespace, authority_epoch: state.authority_epoch, entity_kind: "identity", sequence: 1)
+    val header_validation = settled_alias_validate(header)
+    if not header_validation.valid:
+        return header_validation.code
+    var mark_index = 0
+    while mark_index < state.high_water.len():
+        val mark = state.high_water[mark_index]
+        val mark_alias = SettledAlias(database_namespace: state.database_namespace, authority_epoch: state.authority_epoch, entity_kind: mark.entity_kind, sequence: 1)
+        if not settled_alias_validate(mark_alias).valid:
+            return "SCVDB_ENTITY_KIND"
+        var prior_mark = 0
+        while prior_mark < mark_index:
+            if state.high_water[prior_mark].entity_kind == mark.entity_kind:
+                return "SCVDB_ALLOCATOR_AMBIGUOUS"
+            prior_mark = prior_mark + 1
+        mark_index = mark_index + 1
+    var index = 0
+    while index < state.bindings.len():
+        val binding = state.bindings[index]
+        if not entity_uid_validate(binding.uid).valid or binding.uid.database_namespace != state.database_namespace:
+            return "SCVDB_BINDING_INVALID"
+        if binding.entity_kind != binding.uid.entity_kind or binding.identity != entity_ref_canonical(entity_ref_provisional(binding.uid)):
+            return "SCVDB_BINDING_INVALID"
+        var high: u64 = 0
+        for mark in state.high_water:
+            if mark.entity_kind == binding.entity_kind:
+                high = mark.sequence
+        if binding.sequence == 0 or binding.sequence > high:
+            return "SCVDB_ALLOCATOR_REGRESSION"
+        var prior = 0
+        while prior < index:
+            val other = state.bindings[prior]
+            if binding.identity == other.identity or (binding.entity_kind == other.entity_kind and binding.sequence == other.sequence):
+                return "SCVDB_BINDING_AMBIGUOUS"
+            prior = prior + 1
+        index = index + 1
+    ""
+
+fn _map_identity_error(state: IdentityMap, uid: EntityUid) -> text:
+    val state_error = _map_state_error(state)
+    if state_error != "":
+        return state_error
+    val validation = entity_uid_validate(uid)
+    if not validation.valid:
+        return validation.code
+    if uid.database_namespace != state.database_namespace:
+        return "SCVDB_NAMESPACE_MISMATCH"
+    val alias = SettledAlias(database_namespace: state.database_namespace, authority_epoch: state.authority_epoch, entity_kind: uid.entity_kind, sequence: 1)
+    val alias_validation = settled_alias_validate(alias)
+    if not alias_validation.valid:
+        return alias_validation.code
+    ""
+
+# Candidate allocation is idempotent, including tombstoned identities. Never
+# infer the next number from live row count or maximum surviving binding.
+fn identity_map_allocate(state: IdentityMap, uid: EntityUid) -> IdentityMapTransition:
+    val error = _map_identity_error(state, uid)
+    if error != "":
+        return _map_reject(state, error)
+    val identity = entity_ref_canonical(entity_ref_provisional(uid))
+    var high: u64 = 0
+    for mark in state.high_water:
+        if mark.entity_kind == uid.entity_kind:
+            high = mark.sequence
+    for binding in state.bindings:
+        if binding.identity == identity:
+            val code = if binding.tombstoned: "tombstoned" else: "existing"
+            return IdentityMapTransition(state: state, code: code, sequence: binding.sequence)
+    if high == 18446744073709551615:
+        return _map_reject(state, "SCVDB_ALLOCATOR_EXHAUSTED")
+    val next = high + 1
+    var marks: [IdentityMapHighWater] = []
+    for mark in state.high_water:
+        if mark.entity_kind != uid.entity_kind:
+            marks.push(mark)
+    marks.push(IdentityMapHighWater(entity_kind: uid.entity_kind, sequence: next))
+    val binding = IdentityMapBinding(uid: uid, identity: identity, entity_kind: uid.entity_kind, sequence: next, tombstoned: false)
+    val candidate = IdentityMap(database_namespace: state.database_namespace, authority_epoch: state.authority_epoch, bindings: state.bindings + [binding], high_water: marks)
+    IdentityMapTransition(state: candidate, code: "allocated", sequence: next)
+
+fn identity_map_tombstone(state: IdentityMap, uid: EntityUid) -> IdentityMapTransition:
+    val error = _map_identity_error(state, uid)
+    if error != "":
+        return _map_reject(state, error)
+    val identity = entity_ref_canonical(entity_ref_provisional(uid))
+    var bindings: [IdentityMapBinding] = []
+    var sequence: u64 = 0
+    for binding in state.bindings:
+        if binding.identity == identity:
+            sequence = binding.sequence
+            bindings.push(IdentityMapBinding(uid: binding.uid, identity: binding.identity, entity_kind: binding.entity_kind, sequence: binding.sequence, tombstoned: true))
+        else:
+            bindings.push(binding)
+    if sequence == 0:
+        return _map_reject(state, "SCVDB_IDENTITY_UNKNOWN")
+    val candidate = IdentityMap(database_namespace: state.database_namespace, authority_epoch: state.authority_epoch, bindings: bindings, high_water: state.high_water)
+    IdentityMapTransition(state: candidate, code: "tombstoned", sequence: sequence)
+
+# Reverse lookup is contextual: namespace and authority epoch belong to state.
+fn identity_map_reverse(state: IdentityMap, entity_kind: text, sequence: u64) -> text:
+    if _map_state_error(state) != "":
+        return ""
+    for binding in state.bindings:
+        if binding.entity_kind == entity_kind and binding.sequence == sequence:
+            return binding.identity
+    ""
+
+export IdentityMapBinding, IdentityMapHighWater, IdentityMap, IdentityMapTransition
+export identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse

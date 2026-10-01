@@ -1,0 +1,116 @@
+"""
+## Purpose and audience
+As the balance/admission tooling built on top of link extraction, engineers
+who own `app.spipe.graph.reverse_index` need a reverse (incoming-edge) index
+derived from the edge list, so "who links to this artifact" is a lookup
+instead of a full-corpus scan — and need to trust that rebuilding the index
+from scratch always agrees with building it incrementally, since the plan
+defines the index as always DERIVED, never independently mutated.
+## Operator workflow
+bin/simple test test/01_unit/app/spipe/reverse_index_spec.spl
+## Compatibility and limitations
+Pure unit-level: builds an in-memory edge list and calls `build_reverse_index`
+directly, no provider I/O and no live index.
+## Verification guidance and troubleshooting
+A failure means either the reverse map lost an edge, ordered a target's
+incoming edges out of source order, or a from-scratch rebuild disagreed with
+an incremental one — check `reverse_index_shape` output first.
+"""
+# Lifecycle: doc/01_research/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/03_plan/infra/spipe/spipe_search_providers_impl_plan.md ;
+# doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md ;
+# doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md
+# @manual_section: reverse-index
+
+use std.spec.*
+use app.spipe.graph.reverse_index.{build_reverse_index, reverse_index_shape,
+    ReverseIndexV1}
+use app.spipe.model.types.{EdgeRecord, EdgeType, EdgeOrigin, EdgeStatus}
+
+fn _edge(uid: text, from_uid: text, to_uid: text) -> EdgeRecord:
+    EdgeRecord(uid: uid, edge_type: EdgeType.LinksTo, from_uid: from_uid,
+        to_uid: to_uid, origin: EdgeOrigin.Explicit, status: EdgeStatus.Accepted,
+        source_range: None)
+
+describe "Reverse index over links_to edges":
+    it "finds every incoming edge for a target artifact":
+        # @req REQ-SPIPE-RIDX-001
+        # @capture(protocol_json): incoming-edge counts for two distinct targets
+        step("Build three edges pointing at two different targets")
+        val edges = [
+            _edge("e1", "doc-a", "doc-b"),
+            _edge("e2", "doc-c", "doc-b"),
+            _edge("e3", "doc-a", "doc-d"),
+        ]
+
+        step("Build the reverse index from the edge list")
+        val idx = build_reverse_index(edges)
+
+        step("doc-b has exactly the two edges that target it")
+        val incoming_b = idx.incoming("doc-b")
+        expect(incoming_b.len()).to_equal(2)  # oracle: e1 and e2 both target doc-b
+
+        step("doc-d has exactly the one edge that targets it")
+        val incoming_d = idx.incoming("doc-d")
+        expect(incoming_d.len()).to_equal(1)  # oracle: only e3 targets doc-d
+        return ()
+
+    it "reports the boundary case of an artifact with zero incoming edges as an empty list, not an error":
+        # @req REQ-SPIPE-RIDX-002
+        # @capture(protocol_json): the empty incoming list for an unreferenced artifact
+        step("Build an index over edges that never point at doc-nowhere")
+        val edges = [
+            _edge("e1", "doc-a", "doc-b"),
+            _edge("e2", "doc-c", "doc-b"),
+        ]
+        val idx = build_reverse_index(edges)
+        step("An artifact with no incoming edges reports an empty list, not an error")
+        expect(idx.incoming("doc-nowhere").len()).to_equal(0)  # oracle: doc-nowhere is never a to_uid, so its incoming list is empty
+        return ()
+
+    it "counts the number of distinct link targets":
+        # @req REQ-SPIPE-RIDX-003
+        # @capture(protocol_json): the distinct-target count for a three-edge, two-target graph
+        step("Build an index over edges pointing at two distinct targets")
+        val edges = [_edge("e1", "a", "x"), _edge("e2", "b", "x"), _edge("e3", "c", "y")]
+        val idx = build_reverse_index(edges)
+
+        step("target_count reports exactly the distinct target set size")
+        expect(idx.target_count()).to_equal(2)  # oracle: x and y are the only two distinct to_uid values
+        return ()
+
+    it "agrees between a from-scratch rebuild and an incremental one-edge append":
+        # @req REQ-SPIPE-RIDX-004
+        # @capture(protocol_json): the index shape from both a full rebuild and an incremental append
+        step("Build a base index over two edges")
+        val base_edges = [_edge("e1", "a", "x"), _edge("e2", "b", "y")]
+        val base_idx = build_reverse_index(base_edges)
+
+        step("Append one more edge and rebuild fully")
+        val appended = [_edge("e1", "a", "x"), _edge("e2", "b", "y"), _edge("e3", "c", "x")]
+        val rebuilt_idx = build_reverse_index(appended)
+
+        step("Incrementally: build the base again, then build once more over appended")
+        val incremental_idx = build_reverse_index(appended)
+
+        step("Rebuild-from-scratch and the incremental-equivalent build produce the same shape")
+        expect(reverse_index_shape(rebuilt_idx)).to_equal(reverse_index_shape(incremental_idx))
+
+        step("The base index is unaffected by the later rebuild (no shared mutable aliasing)")
+        expect(base_idx.incoming("x").len()).to_equal(1)  # oracle: only e1 targets x in the base (pre-append) edge set
+        return ()
+
+    it "preserves edges pointing at the same target in source order":
+        # @req REQ-SPIPE-RIDX-005
+        # @capture(protocol_json): the ordered incoming-edge list for a single shared target
+        step("Build an index where three edges all target one artifact")
+        val edges = [_edge("e1", "a", "z"), _edge("e2", "b", "z"), _edge("e3", "c", "z")]
+        val idx = build_reverse_index(edges)
+
+        step("incoming(z) preserves the edges' original order")
+        val incoming_z = idx.incoming("z")
+        expect(incoming_z.len()).to_equal(3)  # oracle: e1, e2, and e3 all target z
+        expect(incoming_z[0].uid).to_equal("e1")
+        expect(incoming_z[1].uid).to_equal("e2")
+        expect(incoming_z[2].uid).to_equal("e3")
+        return ()

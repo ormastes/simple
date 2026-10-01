@@ -13,6 +13,36 @@
 #include <ctype.h>
 #include <string.h>
 
+/* MSVC portability for the GCC/Clang attributes this file uses.
+ *
+ * - target(): MSVC has no per-function ISA attribute. On x64 SSE2 is baseline
+ *   and AVX2 intrinsics compile unconditionally, so dropping it is correct;
+ *   which kernel actually RUNS is still decided by the runtime dispatch table,
+ *   not by the attribute.
+ * - unused: MSVC does not warn about an unreferenced static inline, so there
+ *   is nothing to suppress.
+ * The predicate is the COMPILER, not the platform: clang targeting
+ * *-pc-windows-msvc defines _MSC_VER but supports both attributes, so gating
+ * on _MSC_VER alone would silently drop them there. GCC and Clang keep the
+ * real attributes byte for byte on every target. */
+/* MSVC has no __builtin_popcount; __popcnt is its intrinsic equivalent and is
+ * available on every x64 target (POPCNT is baseline for the SSE4.2-era ISA the
+ * AVX2 kernels below already require). Unresolved otherwise:
+ *     LNK2019: __builtin_popcount referenced in avx2_utf8_count_codepoints */
+#if defined(_MSC_VER) && !defined(__GNUC__) && !defined(__clang__)
+#include <intrin.h>
+#define __builtin_popcount(x) ((int)__popcnt((unsigned int)(x)))
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define RT_SIMD_TARGET(feature) __attribute__((target(feature)))
+#define RT_SIMD_UNUSED __attribute__((unused))
+#else
+#define RT_SIMD_TARGET(feature)
+#define RT_SIMD_UNUSED
+#endif
+
+
 /* Site ids + prototypes for the UTF-8 slice-boundary audit defined at the
  * bottom of this file. Declared locally (not in runtime.h) so the legacy C
  * translation units that are NOT linked with this file can take a weak
@@ -79,7 +109,7 @@ static int64_t scalar_utf8_count_codepoints(const uint8_t* data, uint64_t len) {
 
 #if SIMD_HAS_SSE2
 
-__attribute__((target("sse2")))
+RT_SIMD_TARGET("sse2")
 static int64_t sse2_utf8_count_codepoints(const uint8_t* data, uint64_t len) {
     int64_t count = 0;
     uint64_t i = 0;
@@ -115,7 +145,7 @@ static int64_t sse2_utf8_count_codepoints(const uint8_t* data, uint64_t len) {
 
 #if SIMD_CAN_AVX2
 
-__attribute__((target("avx2")))
+RT_SIMD_TARGET("avx2")
 static int64_t avx2_utf8_count_codepoints(const uint8_t* data, uint64_t len) {
     int64_t count = 0;
     uint64_t i = 0;
@@ -316,7 +346,7 @@ static int avx2_validate_chunk_scalar(const uint8_t* data, uint64_t full_len,
     return 1;
 }
 
-__attribute__((target("avx2")))
+RT_SIMD_TARGET("avx2")
 static int avx2_utf8_validate(const uint8_t* data, uint64_t len) {
     uint64_t i = 0;
 
@@ -347,7 +377,7 @@ static int avx2_utf8_validate(const uint8_t* data, uint64_t len) {
     return scalar_utf8_validate(data + tail_start, len - tail_start);
 }
 
-__attribute__((target("avx2")))
+RT_SIMD_TARGET("avx2")
 static int64_t avx2_utf8_find_invalid(const uint8_t* data, uint64_t len) {
     uint64_t i = 0;
 
@@ -381,7 +411,7 @@ static int64_t avx2_utf8_find_invalid(const uint8_t* data, uint64_t len) {
 
 #if SIMD_HAS_SSE2
 
-__attribute__((target("sse2")))
+RT_SIMD_TARGET("sse2")
 static int sse2_utf8_validate(const uint8_t* data, uint64_t len) {
     uint64_t i = 0;
 
@@ -403,7 +433,7 @@ static int sse2_utf8_validate(const uint8_t* data, uint64_t len) {
     return scalar_utf8_validate(data + tail_start, len - tail_start);
 }
 
-__attribute__((target("sse2")))
+RT_SIMD_TARGET("sse2")
 static int64_t sse2_utf8_find_invalid(const uint8_t* data, uint64_t len) {
     uint64_t i = 0;
 

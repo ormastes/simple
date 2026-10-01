@@ -1,0 +1,113 @@
+# codex-system-test
+# @manual: primary
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.driver.cache.action_key.{ActionDep, ResolutionProbe, interface_digest_of_source}
+use compiler.driver.cache.native_module_witness.{NativeModuleResolutionFactV1, NativeModuleLayoutFactV1, NativeModuleConfigFactV1, native_module_cache_witness_v1}
+use compiler.driver.driver_build.incremental.{native_module_cache_shadow_mismatch_v1, native_build_cache_scope_key}
+
+fn dep_fact(id: text, source: text) -> ActionDep:
+    ActionDep(module_id: id, iface_digest: interface_digest_of_source(source))
+
+fn resolution_fact(preferred: bool, generation: text) -> NativeModuleResolutionFactV1:
+    val probes = [ResolutionProbe(path: "/preferred/dep.spl", found: preferred), ResolutionProbe(path: "/fallback/dep.spl", found: true)]
+    val selected = if preferred: "/preferred/dep.spl" else: "/fallback/dep.spl"
+    NativeModuleResolutionFactV1(import_id: "dep", probes: probes, selected: selected, selected_count: 1, dir_generation: generation, resolver_version: "resolver-v1")
+
+fn layout_fact(digest: text) -> NativeModuleLayoutFactV1:
+    NativeModuleLayoutFactV1(owner_module_id: "dep", type_id: "Record", layout_digest: digest, owner_count: 1)
+
+fn config_fact() -> NativeModuleConfigFactV1:
+    NativeModuleConfigFactV1(compiler_identity: "compiler-a", target_identity: "x86_64-linux", options_identity: "opt=2", provider_identity: "llvm-a")
+
+fn witness(dep_source: text, preferred: bool, generation: text, layout: text):
+    native_module_cache_witness_v1("consumer", "consumer-mir-a", [dep_fact("dep", dep_source)], [resolution_fact(preferred, generation)], [layout_fact(layout)], config_fact())
+
+describe "native module cache invalidation production witness contract":
+    it "should produce a valid deterministic canonical witness":
+        # @req REQ-001 REQ-004 REQ-006
+        val first = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8")
+        val same = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8")
+        expect(first.valid).to_be(true)
+        expect(first.reason).to_equal("ok")
+        expect(first.digest()).to_equal(same.digest())
+        expect(first.digest().len()).to_equal(64)
+
+    it "should canonicalize dependency, resolution, and layout set ordering":
+        # @req REQ-001 REQ-004
+        val da = dep_fact("a", "fn a() -> i64:\n    1\n")
+        val db = dep_fact("b", "fn b() -> i64:\n    2\n")
+        val ra = NativeModuleResolutionFactV1(import_id: "a", probes: [ResolutionProbe(path: "/a", found: true)], selected: "/a", selected_count: 1, dir_generation: "g", resolver_version: "r")
+        val rb = NativeModuleResolutionFactV1(import_id: "b", probes: [ResolutionProbe(path: "/b", found: true)], selected: "/b", selected_count: 1, dir_generation: "g", resolver_version: "r")
+        val la = NativeModuleLayoutFactV1(owner_module_id: "a", type_id: "A", layout_digest: "la", owner_count: 1)
+        val lb = NativeModuleLayoutFactV1(owner_module_id: "b", type_id: "B", layout_digest: "lb", owner_count: 1)
+        val first = native_module_cache_witness_v1("consumer", "mir", [da, db], [ra, rb], [la, lb], config_fact())
+        val reversed = native_module_cache_witness_v1("consumer", "mir", [db, da], [rb, ra], [lb, la], config_fact())
+        expect(first.digest()).to_equal(reversed.digest())
+
+    it "should preserve the consumer witness for a dependency body-only edit":
+        # @req REQ-001 REQ-003 REQ-006
+        val before = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8")
+        val after = witness("fn value() -> i64:\n    99\n", false, "gen-a", "size8-align8")
+        expect(after.digest()).to_equal(before.digest())
+
+    it "should invalidate for dependency signature and referenced layout edits":
+        # @req REQ-001 REQ-006 REQ-007
+        val base = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8")
+        val signature = witness("fn value(x: i64) -> i64:\n    x\n", false, "gen-a", "size8-align8")
+        val layout = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size16-align8")
+        expect(signature.digest() == base.digest()).to_be(false)
+        expect(layout.digest() == base.digest()).to_be(false)
+
+    it "should invalidate when a higher-precedence resolution candidate appears":
+        # @req REQ-001 REQ-004 REQ-007
+        val before = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8")
+        val after = witness("fn value() -> i64:\n    1\n", true, "gen-b", "size8-align8")
+        expect(after.digest() == before.digest()).to_be(false)
+
+    it "should preserve a consumer when an unreferenced sibling interface changes":
+        # @req REQ-003 REQ-004 REQ-006
+        val before = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8")
+        val sibling_before = dep_fact("sibling", "fn sibling() -> i64:\n    1\n")
+        val sibling_after = dep_fact("sibling", "fn sibling(x: i64) -> i64:\n    x\n")
+        expect(sibling_before.iface_digest == sibling_after.iface_digest).to_be(false)
+        expect(witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8").digest()).to_equal(before.digest())
+
+    it "should fail closed when semantic facts are missing or ambiguous":
+        # @req REQ-002 REQ-005 REQ-006 REQ-008
+        val missing = native_module_cache_witness_v1("", "mir", [], [], [], config_fact())
+        val duplicate = dep_fact("dep", "fn f() -> i64:\n    1\n")
+        val ambiguous = native_module_cache_witness_v1("consumer", "mir", [duplicate, duplicate], [], [], config_fact())
+        expect(missing.valid).to_be(false)
+        expect(missing.reason).to_equal("missing-module-id")
+        expect(ambiguous.reason).to_equal("ambiguous-dependency-fact")
+        expect(missing.digest()).to_equal("")
+
+    it "should classify exact, corrupt, and legacy stored witness comparisons":
+        # @req REQ-002 REQ-003 REQ-005 REQ-008
+        val expected = witness("fn value() -> i64:\n    1\n", false, "gen-a", "size8-align8").digest()
+        expect(native_module_cache_shadow_mismatch_v1(expected, expected)).to_equal("match")
+        expect(native_module_cache_shadow_mismatch_v1("corrupt", expected)).to_equal("witness-mismatch")
+        expect(native_module_cache_shadow_mismatch_v1("", expected)).to_equal("legacy-missing")
+
+    it "should invalidate production scope for provider, target, options, and compiler identity":
+        # @req REQ-001 REQ-005 REQ-006 REQ-007
+        val base = native_build_cache_scope_key(Some("llvm"), Some("x86-64-v3"), ["+avx2"], 2, "compiler-a", "provider-a")
+        val provider = native_build_cache_scope_key(Some("llvm"), Some("x86-64-v3"), ["+avx2"], 2, "compiler-a", "provider-b")
+        val target = native_build_cache_scope_key(Some("llvm"), Some("aarch64"), ["+neon"], 2, "compiler-a", "provider-a")
+        val options = native_build_cache_scope_key(Some("llvm"), Some("x86-64-v3"), ["+avx2"], 3, "compiler-a", "provider-a")
+        val compiler = native_build_cache_scope_key(Some("llvm"), Some("x86-64-v3"), ["+avx2"], 2, "compiler-b", "provider-a")
+        expect(provider == base).to_be(false)
+        expect(target == base).to_be(false)
+        expect(options == base).to_be(false)
+        expect(compiler == base).to_be(false)
+
+    it "should authorize cross-revision reuse only through the complete witness":
+        # @req REQ-002 REQ-003 REQ-005 REQ-006 REQ-008
+        val source = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(source).to_contain("val cache_scope_root = base_cache_scope_root")
+        expect(source).to_contain("witness_reason == \"match\"")
+        expect(source).to_contain("decision-authority=per-module-complete-witness")
+        expect(source).to_contain("closure-comparison-only=")
+        expect(source.contains("authority=closure-wide-sources-fingerprint")).to_be(false)

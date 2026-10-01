@@ -1,0 +1,138 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# PASETO v4 base64url DECODE scope regression
+#
+# Bug: doc/08_tracking/bug/paseto_v4_tampered_token_signature_accepted_2026-07-20.md
+#
+# `_p4_b64u_decode` (src/os/crypto/paseto.spl) declared `idx3` inside the
+# `if i + 2 < clean_len:` branch and then read it from the SEPARATE
+# `if i + 3 < clean_len:` branch, so every decode of a 4-character base64url
+# group raised `semantic: variable 'idx3' not found`. That aborted EVERY
+# v4.local decrypt and v4.public verify — including the tamper-rejection
+# checks, which then reported "accepted" for a corrupted token.
+#
+# These examples pin the decode path through the public API. Each one asserts
+# a non-empty payload first, so a silently empty decode fails instead of
+# passing vacuously.
+
+use std.spec.step
+
+use std.spipe.*
+use os.crypto.paseto.{
+    paseto_v4_local_encrypt,
+    paseto_v4_local_decrypt,
+    paseto_v4_public_sign,
+    paseto_v4_public_verify,
+    PasetoLocalResult,
+    PasetoPublicResult
+}
+
+use os.crypto.ed25519.{ed25519_keypair_from_seed}
+
+# ============================================================================
+# Helpers (module-level to avoid it-block var mutation quirks)
+# ============================================================================
+
+fn _bytes_repeat(start: i64, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(((start + i) % 251).to_u8())
+        i = i + 1
+    out
+
+fn _local_key() -> [u8]:
+    _bytes_repeat(7, 32)
+
+fn _local_nonce() -> [u8]:
+    _bytes_repeat(31, 32)
+
+fn _sk_seed() -> [u8]:
+    _bytes_repeat(3, 32)
+
+fn _decrypted(token: [u8], key: [u8]) -> [u8]:
+    match paseto_v4_local_decrypt(token, [], [], key):
+        PasetoLocalResult.Ok(p): p
+        PasetoLocalResult.Err(_): []
+
+fn _decrypt_ok(token: [u8], key: [u8]) -> bool:
+    match paseto_v4_local_decrypt(token, [], [], key):
+        PasetoLocalResult.Ok(_): true
+        PasetoLocalResult.Err(_): false
+
+fn _payload_of(payload_len: i64) -> [u8]:
+    _bytes_repeat(64, payload_len)
+
+fn _roundtripped(payload_len: i64) -> [u8]:
+    val payload = _payload_of(payload_len)
+    val token = paseto_v4_local_encrypt(payload, [], [], _local_key(), _local_nonce())
+    _decrypted(token, _local_key())
+
+fn _roundtrip_len(payload_len: i64) -> i64:
+    val payload = _bytes_repeat(64, payload_len)
+    val token = paseto_v4_local_encrypt(payload, [], [], _local_key(), _local_nonce())
+    _decrypted(token, _local_key()).len().to_i64()
+
+
+fn _tampered_token(token: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < token.len():
+        if i == token.len() - 3:
+            # flip one base64url character of the payload body
+            if token[i] == 65u8:
+                out.push(66u8)
+            else:
+                out.push(65u8)
+        else:
+            out.push(token[i])
+        i = i + 1
+    out
+
+fn _verified(token: [u8], pk: [u8]) -> [u8]:
+    match paseto_v4_public_verify(token, [], [], pk):
+        PasetoPublicResult.Ok(p): p
+        PasetoPublicResult.Err(_): []
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "PASETO v4 local decrypt survives every base64url group length":
+    # payload lengths chosen so the encoded blob ends on each of the three
+    # residues mod 3, i.e. full 4-char groups and both padded tails.
+    it "24-byte payload round-trips (decoded length is non-zero)":
+        step("24-byte payload round-trips")
+        expect(_roundtrip_len(24)).to_equal(24)
+
+    it "25-byte payload round-trips byte-exact":
+        step("25-byte payload round-trips")
+        expect(_roundtripped(25).len().to_i64()).to_equal(25)
+        expect(_roundtripped(25)).to_equal(_payload_of(25))
+
+    it "26-byte payload round-trips byte-exact":
+        step("26-byte payload round-trips")
+        expect(_roundtripped(26).len().to_i64()).to_equal(26)
+        expect(_roundtripped(26)).to_equal(_payload_of(26))
+
+describe "PASETO v4 local decrypt rejects a tampered token":
+    it "a token with one flipped payload character fails the BLAKE2b MAC":
+        step("tampered local token rejected")
+        val payload = _bytes_repeat(64, 32)
+        val token = paseto_v4_local_encrypt(payload, [], [], _local_key(), _local_nonce())
+        # fail closed: the untampered token MUST decrypt, or the check is vacuous
+        expect(_decrypt_ok(token, _local_key())).to_equal(true)
+        expect(_decrypt_ok(_tampered_token(token), _local_key())).to_equal(false)
+
+describe "PASETO v4 public verify decodes its own signed token":
+    it "sign then verify returns the original payload":
+        step("public sign/verify round-trip")
+        val payload = _bytes_repeat(64, 33)
+        val kp = ed25519_keypair_from_seed(_sk_seed())
+        val pk = kp.1
+        val token = paseto_v4_public_sign(payload, [], [], _sk_seed(), pk)
+        # fail closed: an empty token would make the verify check vacuous
+        expect(token.len() > 0u64).to_equal(true)
+        expect(_verified(token, pk)).to_equal(payload)

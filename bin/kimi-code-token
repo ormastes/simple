@@ -1,0 +1,72 @@
+#!/bin/sh
+# Print a fresh Kimi Code OAuth access token, reusing the login made by the
+# `kimi` CLI (~/.kimi-code). Used by bin/k3 as Claude Code's apiKeyHelper.
+#
+# Kimi Code access tokens live 900s, so a static key cannot be exported once.
+# When the stored token has under KIMI_CODE_TOKEN_MIN_TTL (default 660s, above
+# k3's 600s apiKeyHelper cache TTL) left, this performs the same
+# refresh_token grant the kimi CLI does (form POST to <oauth_host>/api/oauth/token)
+# and writes the rotated tokens back to the SAME credentials file, so the kimi
+# CLI keeps working afterwards. Stdout carries only the token.
+set -eu
+
+KIMI_HOME=${KIMI_CODE_HOME:-${HOME}/.kimi-code}
+# ponytail: client_id copied from the kimi CLI bundle (packages/oauth constants);
+# shared across regions. Override with KIMI_CODE_CLIENT_ID if Kimi rotates it.
+client_id=${KIMI_CODE_CLIENT_ID:-17e5f671-d194-4dfb-9706-5516cb48c098}
+
+die() { printf 'kimi-code-token: %s\n' "$*" >&2; exit 1; }
+
+creds=${KIMI_CODE_CREDENTIALS:-}
+if [ -z "${creds}" ]; then
+    creds=$(ls -t "${KIMI_HOME}"/credentials/kimi-code*.json 2>/dev/null | head -n 1 || true)
+fi
+[ -n "${creds}" ] && [ -r "${creds}" ] || die "no Kimi Code login under ${KIMI_HOME}/credentials; run 'kimi' and log in first"
+
+field() { tr -d '\n\r' < "$2" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\).*/\1/p"; }
+
+access=$(field access_token "${creds}")
+refresh=$(field refresh_token "${creds}")
+expires_at=$(field expires_at "${creds}")
+expires_at=${expires_at%%.*}
+now=$(date +%s)
+
+if [ -n "${access}" ] && [ -n "${expires_at}" ] && [ $((expires_at - now)) -gt "${KIMI_CODE_TOKEN_MIN_TTL:-660}" ]; then
+    printf '%s\n' "${access}"
+    exit 0
+fi
+[ -n "${refresh}" ] || die "stored token expired and ${creds} has no refresh_token; run 'kimi' to log in again"
+
+host=${KIMI_CODE_OAUTH_HOST:-}
+if [ -z "${host}" ] && [ -r "${KIMI_HOME}/config.toml" ]; then
+    host=$(sed -n 's/^[[:space:]]*oauth_host[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${KIMI_HOME}/config.toml" | head -n 1)
+fi
+host=${host:-https://auth.kimi.com}
+device_id=$(cat "${KIMI_HOME}/device_id" 2>/dev/null || true)
+
+resp=$(curl -sS --max-time 30 -X POST "${host%/}/api/oauth/token" \
+    -H 'Content-Type: application/x-www-form-urlencoded' -H 'Accept: application/json' \
+    -H 'X-Msh-Platform: kimi_code_cli' ${device_id:+-H "X-Msh-Device-Id: ${device_id}"} \
+    --data-urlencode "client_id=${client_id}" \
+    --data-urlencode 'grant_type=refresh_token' \
+    --data-urlencode "refresh_token=${refresh}") || die "refresh request to ${host} failed"
+
+tmp="${creds}.tmp.$$"
+printf '%s' "${resp}" > "${tmp}"
+new_access=$(field access_token "${tmp}")
+new_refresh=$(field refresh_token "${tmp}")
+expires_in=$(field expires_in "${tmp}")
+scope=$(field scope "${tmp}")
+token_type=$(field token_type "${tmp}")
+rm -f "${tmp}"
+if [ -z "${new_access}" ] || [ -z "${expires_in}" ]; then
+    err=$(printf '%s' "${resp}" | tr -d '\n\r' | sed -n 's/.*"error[a-z_]*"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    die "refresh rejected (${err:-unexpected response}); run 'kimi' to log in again"
+fi
+new_refresh=${new_refresh:-${refresh}}
+
+umask 077
+printf '{"access_token": "%s", "refresh_token": "%s", "expires_at": %s, "scope": "%s", "token_type": "%s", "expires_in": %s}\n' \
+    "${new_access}" "${new_refresh}" "$((now + ${expires_in%%.*}))" "${scope}" "${token_type:-Bearer}" "${expires_in%%.*}" > "${tmp}"
+mv -f "${tmp}" "${creds}"
+printf '%s\n' "${new_access}"

@@ -5,9 +5,10 @@ use compiler.frontend.core.parser_decls.*
 # Declaration parsing: fn, extern fn, struct/class, enum.
 # Use/export/binding/impl declarations extracted to parser_decls_use.spl.
 
-use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
+use compiler.core.ast.{expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
 use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
-use compiler.core.ast.{expr_method_call, expr_bool_lit, expr_string_lit, expr_int_lit}
+use compiler.core.ast.{expr_method_call, expr_bool_lit, expr_int_lit}
+use compiler.frontend.core._AstExpr.nodes.{expr_ident, expr_string_lit}
 use compiler.core.ast.{stmt_expr_stmt}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
 use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
@@ -20,11 +21,12 @@ use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_g
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
-use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text, decl_set_rt_hal_flags}
+use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text, decl_set_rt_hal_flags, decl_set_asm_placement}
 use compiler.core.ast.{decl_set_unroll_factor, decl_set_pipeline_ii, decl_set_memory_banks}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_field_bits, decl_get_derives, decl_set_derives}
-use compiler.core.ast.{module_set_path, module_add_decl}
+use compiler.core.ast.{module_set_path}
+use compiler.frontend.core._Ast.module_state.{module_add_decl}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
@@ -620,6 +622,88 @@ fn parser_record_unsafe_annotation(decl_name: text):
     if PENDING_UNSAFE == 1:
         UNSAFE_ANNOTATIONS.push(decl_name + "|" + PENDING_UNSAFE_REASON + "|" + PENDING_UNSAFE_CAPS.join(","))
 
+fn parser_reset_pending_unsafe():
+    """Clear the pending `@unsafe` slots after they have been attached.
+
+    The module-decl loop clears these through
+    `parser_reset_pending_vhdl_decorators`, which also resets hardware/VHDL/
+    SFFI state that a class body never sets. Member-position attributes need
+    the narrow reset so one annotated method cannot leak its reason and
+    capabilities onto the next, unannotated one."""
+    PENDING_UNSAFE = 0
+    PENDING_UNSAFE_REASON = ""
+    PENDING_UNSAFE_CAPS = []
+
+fn parser_parse_member_attribute() -> bool:
+    """Parse ONE member-position `@name` / `@name(...)` attribute inside a
+    class, struct or trait body. Returns true when one was consumed.
+
+    Member-position decorators were only ever recognised as `@layer_field(...)`;
+    every other spelling fell through to `unexpected token in class body`, so
+    the 310 `@unsafe(reason: ..., capabilities: [...])` methods across
+    src/std/** and src/lib/** could not be parsed by the self-hosted frontend
+    at all (`src/std/nogc_sync_mut/atomic.spl:136` is the first one hit). The
+    module-decl loop in this file already accepts the same spelling on a
+    top-level `fn`; this is the member-position twin of that arm, capturing the
+    same metadata into the same PENDING_UNSAFE_* slots so
+    `parser_record_unsafe_annotation` still sees it.
+
+    Metadata-only, exactly like the top-level arm — no enforcement is added or
+    removed here (see the gap note on PENDING_UNSAFE above).
+
+    Refs: doc/08_tracking/bug/caret_suite_native_build_blocked_stage2_windows_2026-09-03.md (B1)"""
+    if par_kind_get() != 171:
+        return false
+    parser_advance()
+    if par_kind_get() != 6:
+        parser_error("expected attribute name after `@` in class body")
+        return true
+    val attr_name = par_text_get()
+    parser_advance()
+    var attr_reason = ""
+    var attr_caps: [text] = []
+    if par_kind_get() == 140:
+        parser_advance()
+        var depth = 1
+        while depth > 0:
+            val k = par_kind_get()
+            if k == 190:
+                # EOF inside the argument list: stop rather than spin. The
+                # surrounding member loop reports the real structural error.
+                break
+            if k == 140:
+                depth = depth + 1
+                parser_advance()
+                continue
+            if k == 141:
+                depth = depth - 1
+                parser_advance()
+                continue
+            if k == 6 and depth == 1:
+                val arg_name = par_text_get()
+                parser_advance()
+                if par_kind_get() == 161 or par_kind_get() == 100:
+                    parser_advance()
+                    if arg_name == "reason" and par_kind_get() == 3:
+                        attr_reason = parser_decorator_arg_text(par_text_get())
+                        parser_advance()
+                    elif arg_name == "capabilities" and par_kind_get() == 144:
+                        parser_advance()
+                        while par_kind_get() != 145 and par_kind_get() != 190:
+                            if par_kind_get() == 6:
+                                attr_caps.push(par_text_get())
+                            parser_advance()
+                        if par_kind_get() == 145:
+                            parser_advance()
+                continue
+            parser_advance()
+    if attr_name == "unsafe" or attr_name == "danger":
+        PENDING_UNSAFE = 1
+        PENDING_UNSAFE_REASON = attr_reason
+        PENDING_UNSAFE_CAPS = attr_caps
+    parser_skip_newlines_and_semicolons()
+    true
+
 fn parser_attr_token_text() -> text:
     """Text of the current token for decorator-argument capture.
 
@@ -655,6 +739,65 @@ var PENDING_DECL_ATTRS: [text] = []
 # Read by module_assembly.spl so the annotation reaches ParserEnum -> HirEnum
 # (doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md).
 var ENUM_ATTRIBUTES: [text] = []
+
+fn parser_pending_asm_placement() -> text:
+    """Asm-embedding contract (design A.2): the subset of the pending
+    decorator spellings that place or shape a function symbol
+    (`naked`, `section(...)`, `align(n)`, `global`, `noreturn`, `entry`,
+    `interrupt`, `export(C[,name:sym])`), "|"-joined for
+    decl_set_asm_placement. Everything else in PENDING_DECL_ATTRS keeps its
+    existing rt/gpu/vhdl routing. `export` is here because it fixes the
+    symbol's linkage name: dropped from the flat pool, HirFunction lost
+    `has_export_attr` and the MIR provider naming module-qualified every
+    `@export("C")` function (`os.kernel...cm33_policy_fs_add_file`), so the
+    Cortex-M shim could not link."""
+    if PENDING_DECL_ATTRS.len() == 0:
+        return ""
+    var out: [text] = []
+    for spelling in PENDING_DECL_ATTRS:
+        val paren = spelling.index_of("(")
+        val attr_name = if paren >= 0: spelling[0:paren] else: spelling
+        if attr_name == "naked" or attr_name == "section" or attr_name == "align" or attr_name == "global" or attr_name == "noreturn" or attr_name == "entry" or attr_name == "interrupt" or attr_name == "export":
+            out.push(spelling)
+    out.join("|")
+
+# Trailing decimal run inside a decorator spelling's parentheses, e.g.
+# "unroll(4)" -> 4, "pipeline(ii=3)" -> 3, "memory(banks=2)" -> 2. Returns 0
+# when the spelling carries no digits, so a malformed decorator leaves the
+# slot at its "absent" default rather than inventing a factor.
+fn parser_decorator_trailing_int(spelling: text) -> i64:
+    val digits = "0123456789"
+    var value: i64 = 0
+    var seen = false
+    var i: i64 = 0
+    while i < spelling.len():
+        val d = digits.index_of(spelling[i:i + 1])
+        if d >= 0:
+            value = value * 10 + d
+            seen = true
+        elif seen:
+            break
+        i = i + 1
+    if seen: value else: 0
+
+# W3.2: route the pending `@unroll(n)` / `@pipeline(ii=n)` / `@memory(banks=n)`
+# kernel decorators onto the decl the parser just produced. Until this ran, the
+# three setters were imported (line 25) but never called, so the VHDL kernel
+# backend always saw the zero defaults.
+fn parser_apply_pending_kernel_attrs(decl_idx: i64):
+    if decl_idx < 0:
+        return
+    for spelling in PENDING_DECL_ATTRS:
+        val paren = spelling.index_of("(")
+        if paren < 0:
+            continue
+        val attr_name = spelling[0:paren]
+        if attr_name == "unroll":
+            decl_set_unroll_factor(decl_idx, parser_decorator_trailing_int(spelling))
+        elif attr_name == "pipeline":
+            decl_set_pipeline_ii(decl_idx, parser_decorator_trailing_int(spelling))
+        elif attr_name == "memory":
+            decl_set_memory_banks(decl_idx, parser_decorator_trailing_int(spelling))
 
 fn parser_record_enum_attributes(enum_name: text):
     if PENDING_DECL_ATTRS.len() > 0:
@@ -805,6 +948,8 @@ fn parse_module_body():
             parser_skip_newlines_and_semicolons()
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
             if visible_decl >= 0:
+                decl_set_asm_placement(visible_decl, parser_pending_asm_placement())
+                parser_apply_pending_kernel_attrs(visible_decl)
                 if PENDING_HARDWARE == 1:
                     decl_set_hardware(visible_decl, 1)
                     decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
@@ -828,12 +973,16 @@ fn parse_module_body():
             parser_advance()
             if par_kind_get() == 20:
                 val d = parse_fn_decl(1)  # 1 = is_async
+                decl_set_asm_placement(d, parser_pending_asm_placement())
+                parser_apply_pending_kernel_attrs(d)
                 module_add_decl(d)
                 parser_reset_pending_vhdl_decorators()
             else:
                 parser_error("expected 'fn' after 'async'")
         elif par_kind_get() == 20:
             val d = parse_fn_decl(0)  # 0 = not async
+            decl_set_asm_placement(d, parser_pending_asm_placement())
+            parser_apply_pending_kernel_attrs(d)
             if PENDING_HARDWARE == 1:
                 decl_set_hardware(d, 1)
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
@@ -849,6 +998,40 @@ fn parse_module_body():
             val me_d = parse_fn_decl(0)
             module_add_decl(me_d)
             parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 30:
+            # Module-level static (canonical parse_static): `static fn` /
+            # `static me` route to the function parser; otherwise
+            # `static [mut] name [: type] = value` becomes a module-level
+            # binding — var when mutable, val otherwise. The pure AST has no
+            # separate static-storage node; the binding form preserves the
+            # name, type, and initializer through every downstream layer.
+            val static_start = lex_token_start_get()
+            val static_line = par_line_get()
+            val static_col = par_col_get()
+            parser_advance()
+            if par_kind_get() == 20 or par_kind_get() == 34:
+                val static_fn_d = parse_fn_decl(0)
+                module_add_decl(static_fn_d)
+                parser_reset_pending_vhdl_decorators()
+            else:
+                val static_is_mut = par_kind_get() == 6 and par_text_get() == "mut"
+                if static_is_mut:
+                    parser_advance()
+                val static_name = par_text_get()
+                parser_expect(6)
+                var static_type: i64 = 0
+                if par_kind_get() == TOK_COLON:
+                    parser_advance()
+                    static_type = parser_parse_type_with_union()
+                parser_expect(TOK_ASSIGN)
+                val static_init = parse_expr()
+                val static_span = flat_span_new(static_start, lex_token_start_get(), static_line, static_col)
+                val static_d = if static_is_mut:
+                    decl_var_binding(static_name, static_type, static_init, static_span)
+                else:
+                    decl_val_binding(static_name, static_type, static_init, static_span)
+                module_add_decl(static_d)
+                parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 25:
             parser_advance()
             val d = parse_extern_fn_decl()
@@ -1319,6 +1502,7 @@ fn parse_module_body():
                         else:
                             parser_warn("W-RT-PROFILE-001: implicit @rt defaults to critical; write @rt(critical)")
                     val rt_d = parse_fn_decl(0)
+                    decl_set_asm_placement(rt_d, parser_pending_asm_placement())
                     if is_hal_tag:
                         var rt_hal_flags = 1
                         var rt_hal_index = 1
@@ -1684,18 +1868,47 @@ fn parse_module_body():
             # Handle bare 'print' and 'from' at module level
             if par_kind_get() == 6:
                 if par_text_get() == "from":
-                    # from X import {Y, Z}
+                    # from X import {Y, Z} — X may be a relative path
+                    # (from ..core import {A}, from .sibling import {B}),
+                    # matching the use-decl relative forms and the canonical
+                    # parser. Leading dots become the same "..." / ".." / "."
+                    # path prefix spelling parse_use_decl produces.
                     parser_advance()
                     var from_path: text = ""
+                    if par_kind_get() == 173:
+                        parser_advance()
+                        from_path = "..."
+                    elif par_kind_get() == 165:
+                        parser_advance()
+                        from_path = ".."
+                        if par_kind_get() == 164:
+                            parser_advance()
+                            from_path = "..."
+                    elif par_kind_get() == 164:
+                        parser_advance()
+                        from_path = "."
+                    # Module path segments may be contextual keywords
+                    # (`from match import {match_pattern}`) — same acceptance
+                    # as the use-decl and mod-decl segment readers.
+                    var from_seg = ""
                     if par_kind_get() == 6:
-                        from_path = par_text_get()
+                        from_seg = par_text_get()
+                    else:
+                        from_seg = use_kw_segment_text(par_kind_get())
+                    if from_seg != "":
+                        from_path = from_path + from_seg
                         parser_advance()
                     while true:
                         if par_kind_get() != 164:
                             break
                         parser_advance()
+                        var from_seg2 = ""
                         if par_kind_get() == 6:
-                            from_path = from_path + "." + par_text_get()
+                            from_seg2 = par_text_get()
+                        else:
+                            from_seg2 = use_kw_segment_text(par_kind_get())
+                        if from_seg2 != "":
+                            from_path = from_path + "." + from_seg2
                             parser_advance()
                         else:
                             break
@@ -1717,9 +1930,17 @@ fn parse_module_body():
                                 break
                             if par_kind_get() == 190:
                                 break
-                            val from_is_name: bool = par_kind_get() == 6
+                            # Import-list names may be contextual keywords
+                            # (`from x import {type}`) — same acceptance as
+                            # the use-decl import list.
+                            var from_name: text = ""
+                            if par_kind_get() == 6:
+                                from_name = par_text_get()
+                            else:
+                                from_name = use_kw_segment_text(par_kind_get())
+                            val from_is_name: bool = from_name != ""
                             if from_is_name:
-                                from_names.push(par_text_get())
+                                from_names.push(from_name)
                                 parser_advance()
                             if par_kind_get() == 160:
                                 parser_advance()

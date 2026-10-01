@@ -190,12 +190,95 @@ fn output_has_zero_pass_summary(output: &str) -> bool {
     saw_passed_zero && saw_failed_zero
 }
 
-fn child_exit_error(exit_code: i32, passed: usize, failed: usize) -> Option<String> {
-    if exit_code != 0 && failed == 0 && passed == 0 {
-        Some(format!("Process exited with code {}", exit_code))
-    } else {
-        None
+/// True when `output` contains a `report_spec_file_verdict` line
+/// (`src/compiler_rust/driver/src/cli/basic.rs`) reporting `outcome=OK` and
+/// `dropped=0`.
+///
+/// Mirror of `verdict_clean` in `src/app/test_runner_new/test_runner_single.spl`
+/// — kept in sync deliberately, not shared code, because the two runners
+/// parse independently. `outcome=OK` means the module ran to completion with
+/// no error AFTER its BDD table was tallied; `dropped=0` means every declared
+/// example actually ran. Only both together are positive evidence that a
+/// non-zero exit code is unrelated to the spec's own correctness (the known
+/// case: `describe(...)` as the tail expression of `fn main()` makes its
+/// return value — an example count, not a status — the process exit code).
+fn verdict_reports_clean_ok(output: &str) -> bool {
+    for line in output.lines() {
+        let clean_line = strip_ansi_codes(line);
+        if clean_line.contains("SPEC FILE VERDICT:") {
+            return clean_line.contains("outcome=OK") && clean_line.contains(" dropped=0");
+        }
     }
+    false
+}
+
+/// Reconcile a spec-file child process's exit status with its parsed
+/// assertion tally, returning the (possibly bumped) failed count and an
+/// optional diagnostic message.
+///
+/// A `simple run <spec>` child exiting non-zero is ALWAYS a real failure
+/// signal — a segfault, an abort, or an explicit `exit(N)` for `N != 0`
+/// after the spec's assertions already ran — UNLESS the child's own
+/// `SPEC FILE VERDICT:` line reports `outcome=OK dropped=0`, which is the
+/// one documented legitimate non-zero-exit shape (see
+/// `verdict_reports_clean_ok`). The predecessor of this function
+/// (`child_exit_error`, removed) only covers the *vacuous* case (no
+/// assertions observed at all, left as an error with the count untouched so
+/// a lone offending file still reads as `executed_nothing()` -> ERROR rather
+/// than a false PASS or a miscounted FAIL). It silently dropped the exit
+/// code whenever ANY assertion tally was parsed — including "N passed, 0
+/// failed" — because `TestRunResult::success()` and every downstream
+/// summary/artifact consult only `.failed`/`.passed`, never `.error`. A spec
+/// that passes its assertions and then dies (crash, abort, stray `exit(N)`,
+/// or a runtime error caught after the BDD table was tallied — proven to
+/// still emit a verdict line, with `outcome=ERROR`) was therefore reported as
+/// a clean PASS with rc=0.
+/// See doc/08_tracking/bug/test_runner_trusts_verdict_over_nonzero_exit_ignoring_outcome_2026-09-01.md.
+///
+/// Legitimate zero-exit cases are unaffected (`exit_code == 0` is a no-op
+/// here).
+fn reconcile_child_exit_status(
+    exit_code: i32,
+    passed: usize,
+    mut failed: usize,
+    output: &str,
+) -> (usize, Option<String>) {
+    if exit_code == 0 {
+        return (failed, None);
+    }
+    if failed == 0 && passed == 0 {
+        // Vacuous: no assertions observed at all. Leave counts untouched so
+        // the caller's executed_nothing() gate can classify this as ERROR
+        // rather than a silently-invented pass or fail count.
+        return (failed, Some(format!("Process exited with code {}", exit_code)));
+    }
+    if failed == 0 {
+        if verdict_reports_clean_ok(output) {
+            // The child's own driver epilogue confirms the module ran to
+            // completion with no error after the BDD table was tallied, and
+            // dropped nothing. The non-zero exit is the known
+            // describe-as-tail-expression artifact, not a real failure.
+            return (failed, None);
+        }
+        // The parsed tally says every assertion passed, yet the process
+        // still exited non-zero with no clean-OK verdict backing it up. The
+        // assertion tally is not the whole verdict: force this file to
+        // FAILED instead of laundering the crash/abort/explicit-exit/runtime
+        // error into a green result.
+        failed = 1;
+        return (
+            failed,
+            Some(format!(
+                "Process exited with code {} after all {} assertion(s) reported passing — \
+                 a non-zero exit after assertions ran (crash, abort, explicit exit(N), or a \
+                 runtime error) is a failure regardless of the assertion tally",
+                exit_code, passed
+            )),
+        );
+    }
+    // Already carries at least one parsed failure; the exit code adds no
+    // new information the caller doesn't already have from `failed > 0`.
+    (failed, None)
 }
 
 fn fallback_counts_from_output(
@@ -843,6 +926,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 fallback_counts_from_output(&combined_output, exit_code, options)
             };
 
+            let (failed, exit_error) = reconcile_child_exit_status(exit_code, passed, failed, &combined_output);
             let result = TestFileResult {
                 path: path.to_path_buf(),
                 passed,
@@ -850,7 +934,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: child_exit_error(exit_code, passed, failed),
+                error: exit_error,
                 individual_results,
             };
             let result = enforce_assert_ran(result, options, 0);
@@ -1268,6 +1352,39 @@ fn preprocess_matchers_only(path: &Path) -> Result<PathBuf, String> {
     Ok(tmp_path)
 }
 
+/// Net count of unclosed `[`/`(`/`{` on one line, skipping string literals
+/// and `#` comments. Used so a multi-line top-level declaration such as
+/// `val XS: [text] = [` ... `]` is kept whole at module scope: the closing
+/// `]` sits at column 0 and is not itself a declaration keyword, so
+/// indentation alone ended the declaration and swept the `]` into the
+/// generated `fn main()`, leaving the module-scope list literal unterminated
+/// ("parse: expected RBracket, found Val").
+fn spipe_open_bracket_delta(line: &str) -> i64 {
+    let mut delta = 0i64;
+    let mut in_str: Option<char> = None;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if let Some(q) = in_str {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                in_str = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => in_str = Some(ch),
+            '#' => break,
+            '[' | '(' | '{' => delta += 1,
+            ']' | ')' | '}' => delta -= 1,
+            _ => {}
+        }
+    }
+    delta
+}
+
 fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let path_str = path.to_string_lossy();
     if !path_str.ends_with("_spec.spl") {
@@ -1284,6 +1401,8 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let mut top_fn_indent = 0usize;
     let mut in_import_block = false;
     let mut import_brace_depth = 0usize;
+    // Unclosed bracket depth of the top-level declaration being collected.
+    let mut top_decl_depth = 0i64;
 
     // Hoisting state: when we encounter a nested `class`/`impl`/`enum`/`type`
     // at indent > 0 inside what would otherwise be body content, we lift the
@@ -1421,6 +1540,13 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
                 || trimmed.starts_with("mod "));
 
         if in_top_fn {
+            // A declaration whose first line left brackets open continues at
+            // column 0 (the closing `]`), so indentation alone cannot end it.
+            if top_decl_depth > 0 {
+                top_decl_depth = (top_decl_depth + spipe_open_bracket_delta(line)).max(0);
+                top_level_parts.push(line.to_string());
+                continue;
+            }
             if trimmed.is_empty() {
                 top_level_parts.push(String::new());
                 continue;
@@ -1456,6 +1582,7 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
         if starts_top_level {
             in_top_fn = true;
             top_fn_indent = 0;
+            top_decl_depth = spipe_open_bracket_delta(line).max(0);
             top_level_parts.push(line.to_string());
             continue;
         }
@@ -1907,6 +2034,7 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
                 options,
             );
 
+            let (failed, exit_error) = reconcile_child_exit_status(exit_code, passed, failed, &combined_output);
             let result = TestFileResult {
                 path: path.to_path_buf(),
                 passed,
@@ -1914,7 +2042,7 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: child_exit_error(exit_code, passed, failed),
+                error: exit_error,
                 individual_results,
             };
             let result = enforce_assert_ran(result, options, bdd_snapshot.len());
@@ -2034,6 +2162,7 @@ pub fn run_test_file_native_mode(
                 fallback_counts_from_output(&combined_output, exit_code, options)
             };
 
+            let (failed, exit_error) = reconcile_child_exit_status(exit_code, passed, failed, &combined_output);
             let result = TestFileResult {
                 path: path.to_path_buf(),
                 passed,
@@ -2041,7 +2170,7 @@ pub fn run_test_file_native_mode(
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: child_exit_error(exit_code, passed, failed),
+                error: exit_error,
                 individual_results,
             };
             let result = enforce_assert_ran(result, options, 0);
@@ -2090,6 +2219,76 @@ fn create_test_runner(options: &super::types::TestOptions) -> Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a multi-line top-level `val XS: [text] = [ ... ]` used to
+    /// have its closing `]` (column 0, not a declaration keyword) swept into
+    /// the generated `fn main()`, leaving the module-scope list literal
+    /// unterminated and producing
+    /// `parse: Unexpected token: expected RBracket, found Val`.
+    /// Shape taken from test/perf/graphics_2d/no_duplication_spec.spl.
+    #[test]
+    fn spipe_wrapper_keeps_multiline_top_level_list_at_module_scope() {
+        let dir = std::env::temp_dir().join(format!(
+            "spipe_rbracket_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("multiline_list_spec.spl");
+        std::fs::write(
+            &src,
+            concat!(
+                "val CANONICAL_OUTPUT_DIRS: [text] = [\n",
+                "    \"test/perf/graphics_2d/\",\n",
+                "    \"test/perf/local_gpu_check/\"\n",
+                "]\n",
+                "\n",
+                "val CANONICAL_BACKENDS: [text] = [\n",
+                "    \"cpu\",\n",
+                "    \"vulkan\"\n",
+                "]\n",
+                "\n",
+                "describe \"multiline lists\":\n",
+                "    it \"has two dirs\":\n",
+                "        expect(CANONICAL_OUTPUT_DIRS.len()).to_equal(2)\n",
+            ),
+        )
+        .unwrap();
+
+        let out = preprocess_spipe_for_smf(&src).expect("preprocess must succeed");
+        let wrapped = std::fs::read_to_string(&out).unwrap();
+        let (top, body) = wrapped.split_once("fn main():").expect("wrapper must emit fn main()");
+
+        // Both list literals must be closed *above* fn main().
+        let opens = top.matches('[').count();
+        let closes = top.matches(']').count();
+        assert_eq!(opens, closes, "unbalanced brackets at module scope:\n{}", top);
+        assert!(
+            top.contains("val CANONICAL_BACKENDS"),
+            "second declaration missing from module scope:\n{}",
+            top
+        );
+        // The stray closing bracket must not have been indented into main().
+        assert!(
+            !body.lines().any(|l| l.trim() == "]"),
+            "closing bracket leaked into fn main() body:\n{}",
+            body
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spipe_open_bracket_delta_ignores_strings_and_comments() {
+        assert_eq!(spipe_open_bracket_delta("val xs = ["), 1);
+        assert_eq!(spipe_open_bracket_delta("]"), -1);
+        assert_eq!(spipe_open_bracket_delta("it \"matrix[0] is zero\":"), 0);
+        assert_eq!(spipe_open_bracket_delta("val a = 1  # note [unclosed"), 0);
+        assert_eq!(spipe_open_bracket_delta("fn f(a: i64) -> i64:"), 0);
+    }
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
@@ -2177,20 +2376,73 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_failure_bdd_summary_does_not_create_exit_error() {
+    fn test_pass_then_nonzero_exit_is_reconciled_to_failure() {
+        // Regression for doc/08_tracking/bug/test_runner_trusts_verdict_over_nonzero_exit_ignoring_outcome_2026-09-01.md:
+        // a spec whose assertions all reported passing must NOT be reported
+        // green if the child process then exited non-zero (crash/abort/exit(N)).
         let output = "[INFO] JIT compilation failed, falling back to interpreter: nope\n1 example, 0 failures";
         let (passed, failed) = parse_test_output(output);
-        assert_eq!(child_exit_error(1, passed, failed), None);
+        let (failed, error) = reconcile_child_exit_status(1, passed, failed, output);
+        assert_eq!(failed, 1);
+        assert!(error.is_some());
+    }
+
+    #[test]
+    fn test_zero_exit_with_clean_summary_is_untouched() {
+        // Negative control: a normal zero-exit pass must not be reclassified.
+        let output = "1 example, 0 failures";
+        let (passed, failed) = parse_test_output(output);
+        let (failed, error) = reconcile_child_exit_status(0, passed, failed, output);
+        assert_eq!(failed, 0);
+        assert_eq!(error, None);
     }
 
     #[test]
     fn test_nonzero_exit_without_bdd_summary_still_errors() {
         let output = "random text";
         let (passed, failed) = parse_test_output(output);
-        assert_eq!(
-            child_exit_error(1, passed, failed),
-            Some("Process exited with code 1".to_string())
-        );
+        let (failed, error) = reconcile_child_exit_status(1, passed, failed, output);
+        assert_eq!(failed, 0);
+        assert_eq!(error, Some("Process exited with code 1".to_string()));
+    }
+
+    #[test]
+    fn test_already_failed_nonzero_exit_keeps_failed_count_and_no_extra_error() {
+        // A file that already parsed a real failure doesn't need the exit
+        // code to add a second, redundant diagnostic.
+        let output = "2 examples, 1 failure";
+        let (passed, failed) = parse_test_output(output);
+        let (new_failed, error) = reconcile_child_exit_status(1, passed, failed, output);
+        assert_eq!(new_failed, failed);
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn test_nonzero_exit_with_clean_ok_verdict_is_forgiven() {
+        // The one documented legitimate non-zero-exit shape: `describe(...)`
+        // as the tail expression of `fn main()` makes its return value (an
+        // example count, not a status) the process exit code. The driver's
+        // own SPEC FILE VERDICT line, with outcome=OK and dropped=0, is
+        // positive evidence the module ran cleanly and nothing failed.
+        let output = "z\n  \u{2713} passes\n\n1 example, 0 failures\n\
+                       SPEC FILE VERDICT: /tmp/tail_expr_spec.spl outcome=OK declared>=0 executed=1 passed=1 failed=0 skipped=0 dropped=0";
+        let (passed, failed) = parse_test_output(output);
+        let (failed, error) = reconcile_child_exit_status(1, passed, failed, output);
+        assert_eq!(failed, 0);
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn test_nonzero_exit_with_error_outcome_verdict_still_fails() {
+        // Regression for the outcome-blind version of this gate: a verdict
+        // line with a clean count but outcome=ERROR (a runtime error in
+        // fn main() AFTER the BDD table was tallied) must NOT be forgiven.
+        let output = "x\n  \u{2713} passes\n\n1 example, 0 failures\n\
+                       SPEC FILE VERDICT: /tmp/pass_then_die_spec.spl outcome=ERROR declared>=1 executed=1 passed=1 failed=0 skipped=0 dropped=0";
+        let (passed, failed) = parse_test_output(output);
+        let (failed, error) = reconcile_child_exit_status(1, passed, failed, output);
+        assert_eq!(failed, 1);
+        assert!(error.is_some());
     }
 
     #[test]

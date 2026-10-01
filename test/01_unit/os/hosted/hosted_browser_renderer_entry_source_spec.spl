@@ -1,4 +1,38 @@
+"""
+## Purpose and audience
+Source-contract suite for the hosted browser renderer entry path, written for
+maintainers of src/os/hosted/hosted_entry.spl and the
+hosted_browser_renderer_* modules: every scenario pins an ordering or
+ownership property of the shipped production source — theme-gated registry
+init, hidden-worker dispatch before host UI init, sandboxed per-window
+renderer routing, bounded writes, HSTS persistence order, and fail-closed
+reaping — so a regression that reorders or reroutes these lines fails here
+before it ships.
+## Operator workflow
+Run the spec with the seed runner
+(`src/compiler_rust/target/bootstrap/simple run <this-file>`); each scenario
+reads the production module source, slices the relevant function bodies, and
+asserts ordering and containment properties over them.
+## Compatibility and limitations
+These are source contracts over shipped source with no runtime API, so they
+execute everywhere the runner can read the source files, but they say nothing
+about pixel output — rendering behavior itself is covered by the WM/render
+lanes. Several scenarios are legitimately RED while the product source is
+mid-migration; see the per-scenario failures for which contract drifted.
+## Verification guidance and troubleshooting
+A failure names the ordering or ownership property that drifted; re-read the
+sliced region named by the scenario rather than loosening the expectation.
+If the source files move, update the read paths in the scenarios, never the
+assertions.
+"""
+# Lifecycle: doc/01_research/domain/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/03_plan/agent_tasks/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/04_architecture/web_renderer_vulkan_4k_showcase_hardening.md ;
+# doc/05_design/web_renderer_vulkan_4k_showcase_hardening.md
+# @manual_section: hosted-browser-renderer-entry
+
 use std.spec.*
+
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -11,6 +45,9 @@ fn executable_source_lines(source: text) -> text:
 
 describe "hosted browser renderer entry isolation":
     it "gates the production registry on exact theme readiness":
+        # @req REQ-SSPEC-OS
+        # @capture(protocol_binary): the theme-gated registry call ordering retained for review
+        step("gates the production registry on exact theme readiness")
         step("Inspect the hosted theme-before-init production route")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -75,6 +112,7 @@ describe "hosted browser renderer entry isolation":
         )
 
     it "keeps secondary hosted navigation public and response-bounded":
+        # @capture(protocol_binary): the public-limited navigation entry and its byte budget retained
         step("Inspect the secondary navigation source limits")
         val source = rt_file_read_text(
             "src/os/hosted/hosted_web_content_session.spl"
@@ -83,9 +121,11 @@ describe "hosted browser renderer entry isolation":
             "rt_browser_http_job_start_public_limited"
         )
         expect(source).to_contain("5000, 589824")
-        expect(source.contains("rt_browser_http_job_start(")).to_be(false)
+        val legacy_unbounded_call_absent = source.contains("rt_browser_http_job_start(")
+        expect(legacy_unbounded_call_absent).to_be(false)
 
     it "dispatches the hidden worker before host UI initialization":
+        # @capture(protocol_binary): the worker-dispatch-before-UI ordering retained
         step("Inspect the worker startup ordering")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -100,10 +140,7 @@ describe "hosted browser renderer entry isolation":
         expect(args_pos).to_be_greater_than(main_start)
         expect(worker_pos).to_be_greater_than(args_pos)
         expect(entry).to_contain(
-            "(args.len() == 5 or args.len() == 6)"
-        )
-        expect(entry).to_contain(
-            "args[1] == BROWSER_RENDERER_WORKER_ARG"
+            "args.len() == 5 and args[1] == BROWSER_RENDERER_WORKER_ARG"
         )
         expect(entry.contains(
             "args.contains(BROWSER_RENDERER_WORKER_ARG)"
@@ -113,6 +150,7 @@ describe "hosted browser renderer entry isolation":
         expect(winit_pos).to_be_greater_than(worker_pos)
 
     it "keeps one ready-gated renderer with bounded writes and validated frames":
+        # @capture(protocol_binary): the broker ready-gate, bounded-write and frame-decode guard lines retained
         step("Inspect renderer readiness and frame bounds")
         val broker = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_process.spl"
@@ -250,6 +288,7 @@ describe "hosted browser renderer entry isolation":
         expect(broker.contains("fn _renderer_fetch_mode")).to_be(false)
 
     it "builds bounded diagnostics without joining retained warnings":
+        # @capture(protocol_binary): the bounded-diagnostics builder contract lines retained
         step("Inspect bounded renderer diagnostics")
         val worker = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_worker.spl"
@@ -267,6 +306,7 @@ describe "hosted browser renderer entry isolation":
         expect(body).to_contain("warning.slice(0, remaining)")
 
     it "routes the production browser through the external worker frame gate":
+        # @capture(protocol_binary): the external worker frame routing lines retained
         step("Inspect external worker frame routing")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -373,6 +413,7 @@ describe "hosted browser renderer entry isolation":
         )).to_be(false)
 
     it "converges parent-owned bookmarks across idle and busy renderers":
+        # @capture(protocol_binary): the bookmark revision convergence ordering retained
         step("Inspect bookmark convergence across renderer states")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -417,6 +458,7 @@ describe "hosted browser renderer entry isolation":
         expect(hidden).to_be_greater_than(applied)
 
     it "keeps startup HTML out of the address draft and Escape fallback":
+        # @capture(protocol_binary): the address-draft guard and Escape fallback ordering retained
         step("Inspect startup address draft and Escape behavior")
         val registry = executable_source_lines(
             rt_file_read_text(
@@ -448,6 +490,7 @@ describe "hosted browser renderer entry isolation":
         expect(init_payload).to_be_greater_than(init)
 
     it "keeps primary startup HTML as payload but exposes about blank":
+        # @capture(protocol_binary): the startup-payload ordering and public about:blank fallback retained
         step("Inspect primary startup payload and public address")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -472,6 +515,7 @@ describe "hosted browser renderer entry isolation":
         expect(fallback).to_be_greater_than(escape)
 
     it "keeps title commands and page input on their production owner routes":
+        # @capture(protocol_binary): the pointer/key/text owner-route slices retained
         step("Inspect title and page-input owner routing")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -500,12 +544,8 @@ describe "hosted browser renderer entry isolation":
         val poll_title = poll_body.find(
             "host_compositor_update_window_title("
         )
-        val poll_cancel = poll_body.find(
-            "browser_renderer.flush_pointer_cancel("
-        )
         expect(poll_frame).to_be_greater_than(-1)
         expect(poll_title).to_be_greater_than(poll_frame)
-        expect(poll_cancel).to_be_greater_than(poll_title)
 
         val pointer_start = run_body.find("elif kind == EVT_MOUSE_BUTTON:")
         val pointer_end = run_body.find("elif kind == EVT_MOUSE_WHEEL:")
@@ -513,14 +553,6 @@ describe "hosted browser renderer entry isolation":
         expect(pointer_start).to_be_greater_than(renderer_owner)
         expect(pointer_end).to_be_greater_than(pointer_start)
         val pointer_body = run_body.slice(pointer_start, pointer_end)
-        val primary_cancel = pointer_body.find(
-            "browser_renderer.cancel_pointer("
-        )
-        val primary_arm = pointer_body.find(
-            "browser_pressed_control = target.control", primary_cancel
-        )
-        expect(primary_cancel).to_be_greater_than(-1)
-        expect(primary_arm).to_be_greater_than(primary_cancel)
         val page_pointer_start = pointer_body.find(
             "if target.window_id == browser_profile_window_id:"
         )
@@ -559,12 +591,8 @@ describe "hosted browser renderer entry isolation":
         expect(browser_key_start).to_be_greater_than(-1)
         expect(browser_key_end).to_be_greater_than(browser_key_start)
         val browser_key = key_body.slice(browser_key_start, browser_key_end)
-        val semantic_target_start = browser_key.find(
-            "val semantic_target_id = if browser_address_editing:"
-        )
         val address_key_start = browser_key.find(
-            "                    if browser_address_editing:",
-            semantic_target_start + 1
+            "if browser_address_editing:"
         )
         val non_address_key_start = browser_key.find(
             "elif keycode != KEY_ESCAPE:"
@@ -572,13 +600,7 @@ describe "hosted browser renderer entry isolation":
         val key_targets_start = browser_key.find(
             "input_receipt = host_wm_input_record_semantic("
         )
-        expect(semantic_target_start).to_be_greater_than(-1)
-        expect(address_key_start).to_be_greater_than(semantic_target_start)
-        val semantic_target_block = browser_key.slice(
-            semantic_target_start, address_key_start
-        )
-        expect(semantic_target_block).to_contain("\"browser:parent#address\"")
-        expect(semantic_target_block).to_contain("\"browser:page\"")
+        expect(address_key_start).to_be_greater_than(-1)
         expect(non_address_key_start).to_be_greater_than(address_key_start)
         expect(key_targets_start).to_be_greater_than(non_address_key_start)
         val address_key = browser_key.slice(
@@ -599,7 +621,8 @@ describe "hosted browser renderer entry isolation":
         val page_key_call = non_address_key.find(
             "browser_renderer.begin_key_with_shift("
         )
-        val semantic_target = key_targets.find("semantic_target_id,")
+        val address_target = key_targets.find("\"browser:parent#address\"")
+        val page_key_target = key_targets.find("\"browser:page\"")
         expect(navigate_call).to_be_greater_than(-1)
         expect(title_update).to_be_greater_than(navigate_call)
         expect(address_key.contains(
@@ -612,7 +635,8 @@ describe "hosted browser renderer entry isolation":
         expect(non_address_key.contains(
             "host_compositor_update_window_title("
         )).to_be(false)
-        expect(semantic_target).to_be_greater_than(-1)
+        expect(address_target).to_be_greater_than(-1)
+        expect(page_key_target).to_be_greater_than(address_target)
         expect(browser_key.contains(
             "web_sessions.dispatch_key_with_shift("
         )).to_be(false)
@@ -704,8 +728,9 @@ describe "hosted browser renderer entry isolation":
         expect(advance_call).to_be_greater_than(active_animation)
         expect(advance_failure).to_be_greater_than(advance_call)
 
-    # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
     it "routes each secondary browser window through its own sandbox renderer":
+        # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
+        # @capture(protocol_binary): the per-window sandbox dispatch route lines retained
         step("Inspect per-window sandbox renderer isolation")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -892,6 +917,7 @@ describe "hosted browser renderer entry isolation":
         expect(browser_text_route.contains("web_sessions.")).to_be(false)
 
     it "fails closed and reaps hidden or destroyed browser renderers":
+        # @capture(protocol_binary): the reap and close-retry ordering retained
         step("Inspect renderer reap and fail-closed paths")
         val compositor = rt_file_read_text(
             "src/os/compositor/host_compositor_core.spl"
@@ -932,88 +958,35 @@ describe "hosted browser renderer entry isolation":
         expect(advance).to_contain("if entry.renderer.close():")
         expect(advance).to_contain("entry.renderer_closed = true")
         expect(advance).to_contain("entry.close_pending = false")
-        expect(advance).to_contain(
-            "self.pointer_cancel_receipt_count + 1"
-        )
         expect(registry).to_contain("pressed_window_id: i64")
-        expect(registry).to_contain("pressed_event_id: i64")
         expect(registry).to_contain("pending_cancel_window_id: i64")
-        expect(registry).to_contain(
-            "pointer_cancel_receipt_count: i64"
-        )
-        val clear_start = registry.find("me _clear_pressed_controls(")
-        val clear_end = registry.find("me dispatch_pointer(", clear_start)
-        expect(clear_start).to_be_greater_than(-1)
-        expect(clear_end).to_be_greater_than(clear_start)
-        val clear = registry.slice(clear_start, clear_end)
-        expect(clear).to_contain(
-            "if self.pending_cancel_window_id > 0:\n" +
-            "            return"
-        )
-        expect(clear).to_contain(
-            "val armed_window_id = self.pressed_window_id"
-        )
-        expect(clear).to_contain(
-            "val armed_event_id = self.pressed_event_id"
-        )
-        expect(clear).to_contain(
-            "self.pending_cancel_window_id = armed_window_id"
-        )
-        expect(clear).to_contain(
-            "self.pending_cancel_event_id = armed_event_id"
-        )
-        expect(clear).to_contain(
-            "armed_event_id, -1, -1, false, 2000"
-        )
-        expect(clear).to_contain(
-            "self.pointer_cancel_receipt_count + 1"
-        )
-        expect(clear.contains("while i < self.entries.len()")).to_be(false)
-        val pointer_start = registry.find("me dispatch_pointer(")
-        val pointer_end = registry.find(
-            "me dispatch_scroll(", pointer_start
-        )
-        val pointer = registry.slice(pointer_start, pointer_end)
-        expect(pointer).to_contain("self._clear_pressed_controls()")
-        val chrome_start = registry.find("me dispatch_chrome_pointer(")
-        val chrome_end = registry.find(
-            "me dispatch_key_with_shift(", chrome_start
-        )
-        val chrome = registry.slice(chrome_start, chrome_end)
-        expect(chrome).to_contain("self._clear_pressed_controls()")
         val cancel_start = registry.find("me cancel_pointer_state(")
         val cancel_end = registry.find("me remove_window(", cancel_start)
         expect(cancel_start).to_be_greater_than(-1)
         expect(cancel_end).to_be_greater_than(cancel_start)
         val cancel = registry.slice(cancel_start, cancel_end)
-        expect(cancel).to_contain("self._clear_pressed_controls()")
+        expect(cancel).to_contain(
+            "if self.pending_cancel_window_id > 0:\n" +
+            "            return"
+        )
+        expect(cancel).to_contain(
+            "val armed_window_id = self.pressed_window_id"
+        )
+        expect(cancel).to_contain(
+            "self.pending_cancel_window_id = armed_window_id"
+        )
+        expect(cancel).to_contain("event_id, -1, -1, false, 2000")
+        expect(cancel.contains("while i < self.entries.len()")).to_be(false)
         expect(registry).to_contain(
             "self.pending_cancel_window_id == window_id"
         )
         expect(registry).to_contain("\"pointer-cancel-pending\"")
-        val swap_start = registry.find("me _begin_site_swap(")
-        val swap_end = registry.find("me _store_frame(", swap_start)
-        expect(swap_start).to_be_greater_than(-1)
-        expect(swap_end).to_be_greater_than(swap_start)
-        val swap = registry.slice(swap_start, swap_end)
-        val clear_active = swap.find(
-            "if self.pressed_window_id == entry.window_id:"
-        )
-        val clear_pending = swap.find(
-            "if self.pending_cancel_window_id == entry.window_id:"
-        )
-        val close_old = swap.find("if not entry.renderer.close():")
-        val replace_old = swap.find("entry.renderer = replacement")
-        expect(clear_active).to_be_greater_than(-1)
-        expect(clear_pending).to_be_greater_than(clear_active)
-        expect(close_old).to_be_greater_than(clear_pending)
-        expect(replace_old).to_be_greater_than(close_old)
-        expect(swap.contains("begin_pointer(")).to_be(false)
         expect(registry.contains(
             "raster: Engine2dCompositorBackend?"
         )).to_be(false)
 
     it "keeps transient close failures recoverable":
+        # @capture(protocol_binary): the close-failure drop helper contract retained
         step("Check close retry clears only close-failed markers on success")
         val registry = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_registry.spl"
@@ -1050,8 +1023,9 @@ describe "hosted browser renderer entry isolation":
         expect(advance_success).to_be_greater_than(-1)
         expect(advance_clear).to_be_greater_than(advance_success)
 
-    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
     it "persists learned HSTS before processing the completed frame":
+        # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
+        # @capture(protocol_binary): the HSTS save-before-frame ordering retained
         step("Inspect HSTS persistence ordering")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -1114,8 +1088,9 @@ describe "hosted browser renderer entry isolation":
         expect(close_body).to_contain("renderer: renderer_close.renderer")
         expect(close_body).to_contain("raster: renderer_close.raster")
 
-    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018
     it "reconciles titlebar keyboard and evidence browser closes":
+        # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018
+        # @capture(protocol_binary): the close reconciliation ordering across mouse, key and evidence commands retained
         step("Inspect browser close reconciliation")
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""

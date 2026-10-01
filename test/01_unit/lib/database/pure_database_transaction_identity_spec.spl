@@ -1,0 +1,114 @@
+# PureDatabase transaction identity and rollback regression coverage.
+# @req REQ-LIB-DATABASE-TRANSACTION-IDENTITY-001
+
+use std.spec.*
+use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbValue}
+use std.io_runtime.{file_delete, file_read}
+
+val STALE_PATH = "/tmp/pure_database_transaction_identity_stale.db"
+val ROLLBACK_PATH = "/tmp/pure_database_transaction_identity_rollback.db"
+
+fn remove_store(path: text):
+    file_delete(path)
+    file_delete(path + ".commit.lock")
+
+fn seed(path: text):
+    remove_store(path)
+    val db = PureDatabase.open(path).unwrap()
+    expect(db.exec_sql("CREATE TABLE items (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok()).to_equal(true)
+    expect(db.exec_sql("INSERT INTO items (id,value) VALUES ('seed','base')").is_ok()).to_equal(true)
+
+fn row_count(db: PureDatabase, id: text) -> i64:
+    db.query("SELECT value FROM items WHERE id = ?", [DbValue.Text(value: id)]).unwrap().len()
+
+fn main() -> ():
+    describe("PureDatabase durable-image transaction identity", fn() -> ():
+        it("rejects stale BEGIN without replacing the handle's deferred edits", fn() -> ():
+            seed(STALE_PATH)
+            val stale = PureDatabase.open_deferred(STALE_PATH).unwrap()
+            val winner = PureDatabase.open(STALE_PATH).unwrap()
+
+            expect(stale.exec_sql("INSERT INTO items (id,value) VALUES ('local','deferred')").is_ok()).to_equal(true)
+            expect(winner.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(winner.exec_sql("INSERT INTO items (id,value) VALUES ('winner','committed')").is_ok()).to_equal(true)
+            expect(winner.exec_sql("COMMIT").is_ok()).to_equal(true)
+
+            expect(stale.exec_sql("BEGIN").is_err()).to_equal(true)
+            expect(row_count(stale, "local")).to_equal(1)
+            expect(row_count(stale, "winner")).to_equal(0)
+
+            val durable = PureDatabase.open(STALE_PATH).unwrap()
+            expect(row_count(durable, "winner")).to_equal(1)
+            expect(row_count(durable, "local")).to_equal(0)
+            remove_store(STALE_PATH)
+        )
+
+        it("ROLLBACK after a commit conflict never checkpoints the stale snapshot", fn() -> ():
+            seed(ROLLBACK_PATH)
+            val winner = PureDatabase.open(ROLLBACK_PATH).unwrap()
+            val loser = PureDatabase.open(ROLLBACK_PATH).unwrap()
+
+            expect(winner.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(loser.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(winner.exec_sql("INSERT INTO items (id,value) VALUES ('winner','committed')").is_ok()).to_equal(true)
+            expect(loser.exec_sql("INSERT INTO items (id,value) VALUES ('loser','rejected')").is_ok()).to_equal(true)
+            expect(winner.exec_sql("COMMIT").is_ok()).to_equal(true)
+            val winner_image = file_read(ROLLBACK_PATH)
+
+            expect(loser.exec_sql("COMMIT").is_err()).to_equal(true)
+            expect(loser.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+            expect(file_read(ROLLBACK_PATH)).to_equal(winner_image)
+
+            expect(row_count(loser, "winner")).to_equal(0)
+            expect(row_count(loser, "loser")).to_equal(0)
+            val durable = PureDatabase.open(ROLLBACK_PATH).unwrap()
+            expect(row_count(durable, "winner")).to_equal(1)
+            expect(row_count(durable, "loser")).to_equal(0)
+            remove_store(ROLLBACK_PATH)
+        )
+
+        it("refuses a later checkpoint of dirty state restored after a conflict", fn() -> ():
+            seed(ROLLBACK_PATH)
+            val loser = PureDatabase.open_deferred(ROLLBACK_PATH).unwrap()
+            val winner = PureDatabase.open(ROLLBACK_PATH).unwrap()
+            expect(loser.exec_sql("INSERT INTO items (id,value) VALUES ('local','preserve-in-memory')").is_ok()).to_equal(true)
+            loser.set_auto_checkpoint(true)
+
+            expect(loser.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(winner.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(loser.exec_sql("INSERT INTO items (id,value) VALUES ('loser','discard')").is_ok()).to_equal(true)
+            expect(winner.exec_sql("INSERT INTO items (id,value) VALUES ('winner','committed')").is_ok()).to_equal(true)
+            expect(winner.exec_sql("COMMIT").is_ok()).to_equal(true)
+            val winner_image = file_read(ROLLBACK_PATH)
+
+            expect(loser.exec_sql("COMMIT").is_err()).to_equal(true)
+            expect(loser.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+            expect(row_count(loser, "local")).to_equal(1)
+            expect(row_count(loser, "loser")).to_equal(0)
+            expect(loser.checkpoint().is_err()).to_equal(true)
+            expect(file_read(ROLLBACK_PATH)).to_equal(winner_image)
+
+            val durable = PureDatabase.open(ROLLBACK_PATH).unwrap()
+            expect(row_count(durable, "winner")).to_equal(1)
+            expect(row_count(durable, "local")).to_equal(0)
+            remove_store(ROLLBACK_PATH)
+        )
+
+        it("refuses checkpoint and close while a transaction owns uncommitted rows", fn() -> ():
+            seed(ROLLBACK_PATH)
+            val db = PureDatabase.open(ROLLBACK_PATH).unwrap()
+            val before = file_read(ROLLBACK_PATH)
+            expect(db.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(db.exec_sql("INSERT INTO items (id,value) VALUES ('uncommitted','private')").is_ok()).to_equal(true)
+
+            expect(db.checkpoint().is_err()).to_equal(true)
+            expect(db.close().is_err()).to_equal(true)
+            expect(file_read(ROLLBACK_PATH)).to_equal(before)
+            expect(db.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+            expect(row_count(db, "uncommitted")).to_equal(0)
+            expect(db.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(db.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+            remove_store(ROLLBACK_PATH)
+        )
+    )

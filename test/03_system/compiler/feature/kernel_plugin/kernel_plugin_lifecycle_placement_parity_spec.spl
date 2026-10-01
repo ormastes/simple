@@ -1,0 +1,50 @@
+# codex-system-test
+# @req REQ-KPF-007
+use std.spec.*
+use std.nogc_async_mut.kernel_plugin.testing.placement_lifecycle_evidence.*
+use std.nogc_async_mut.kernel_plugin.lifecycle_supervisor.*
+
+describe "KPF generation-scoped lifecycle supervision":
+    it "should preserve the lifecycle across static native worker and Wasm placements":
+        step("Run each placement through prepare start publish drain retire and unload")
+        val static_evidence = kpf_static_lifecycle_evidence_v1()
+        val native_evidence = kpf_native_lifecycle_evidence_v1()
+        val worker_evidence = kpf_worker_lifecycle_evidence_v1()
+        val wasm_evidence = kpf_wasm_lifecycle_evidence_v1()
+        expect(static_evidence.accepted_transitions).to_equal(6)
+        expect(native_evidence.accepted_transitions).to_equal(static_evidence.accepted_transitions)
+        expect(worker_evidence.accepted_transitions).to_equal(static_evidence.accepted_transitions)
+        expect(wasm_evidence.accepted_transitions).to_equal(static_evidence.accepted_transitions)
+        expect(static_evidence.final_phase).to_equal(KpfLifecyclePhaseV1.Unloaded)
+        expect(native_evidence.final_phase).to_equal(static_evidence.final_phase)
+        expect(worker_evidence.final_phase).to_equal(static_evidence.final_phase)
+        expect(wasm_evidence.final_phase).to_equal(static_evidence.final_phase)
+        expect(wasm_evidence.final_sequence).to_equal(static_evidence.final_sequence)
+        expect(static_evidence.host_failed).to_equal(false)
+
+    it "should bound restarts then quarantine only the failed generation":
+        step("Consume a two-restart budget inside one deterministic window")
+        val evidence = kpf_crash_loop_evidence_v1()
+        expect(evidence.first.outcome).to_equal(KpfLifecycleOutcomeV1.RestartAllowed)
+        expect(evidence.first.restart_count).to_equal(1)
+        expect(evidence.second.outcome).to_equal(KpfLifecycleOutcomeV1.RestartAllowed)
+        expect(evidence.second.restart_count).to_equal(2)
+        expect(evidence.exhausted.outcome).to_equal(KpfLifecycleOutcomeV1.RestartBudgetExhausted)
+        expect(evidence.exhausted.quarantined).to_equal(true)
+        expect(evidence.exhausted.disabled).to_equal(true)
+        expect(evidence.exhausted.host_failed).to_equal(false)
+        expect(evidence.sibling_phase).to_equal(KpfLifecyclePhaseV1.Published)
+
+    it "should reject stale faults and reset fault state for a replacement generation":
+        step("Submit a stale-generation fault after quarantine then prepare a replacement")
+        val evidence = kpf_crash_loop_evidence_v1()
+        expect(evidence.stale.outcome).to_equal(KpfLifecycleOutcomeV1.StaleGeneration)
+        expect(evidence.replacement.generation).to_equal(13)
+        expect(evidence.replacement.outcome).to_equal(KpfLifecycleOutcomeV1.Accepted)
+        expect(evidence.replacement.disabled).to_equal(false)
+        expect(evidence.replacement.quarantined).to_equal(false)
+
+    it "should expose restart-budget bypass and stale-generation mutations":
+        step("Require both lifecycle safety mutations to be observable")
+        expect(kpf_restart_budget_bypass_mutant_exposed_v1()).to_equal(true)
+        expect(kpf_stale_generation_fault_mutant_exposed_v1()).to_equal(true)

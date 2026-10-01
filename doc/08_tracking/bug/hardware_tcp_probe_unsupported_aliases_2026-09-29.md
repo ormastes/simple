@@ -107,3 +107,19 @@ specs remain pending on a verified self-hosted runtime. No dynamic PASS or
 release readiness is claimed. This evidence-only followup changes the source
 commit identity; the original preparation receipt covers only its recorded
 original result, not this followup.
+## 2026-09-29 integration diagnostics
+
+Conflict resolution retains the shared TcpStream/TcpListener facade introduced
+in PR #2046. Its scalar connection and close methods delegate to the same
+network owner used by the previously landed calls. The integration spec was
+invoked through `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`.
+The executable identified itself as a Rust-built bootstrap seed, so the result
+is diagnostic only and is not admitted self-hosted app verification. Further
+app testing through that executable was stopped.
+
+The diagnostic executed seven examples: five passed, while localhost and
+`.invalid` hostname cases failed with `semantic: invalid socket address`
+before the expected native `-101` fallback. This demonstrates an interpreter
+versus native-provider error-contract mismatch; it does not prove a native
+probe failure or a successful native test. Log: `/tmp/pr2046-hardware-test.log`.
+A supported self-hosted/native provider harness remains required for this gate.

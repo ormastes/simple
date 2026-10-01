@@ -1,4 +1,9 @@
 # `rt_file_read_bytes` halts the kernel instead of degrading when no VFS is present
+## Closed 2026-09-16 — ... trigger its fallback, not a halt. ## Fix `c9b5e0beabb` fix(os/runtime): `rt_file_read_byt
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Status:** fixed / landed (`c9b5e0beabb`)
@@ -37,3 +42,4 @@ the caller degrades to its fallback path.
 - `desktop_kernel_ovmf_render_pagefault_vs_kernel_clean_2026-07-18.md` — the
   in-guest font read chain (NVMe 64-bit BAR high-half map) that, once working,
   supplies real bytes on this path.
+

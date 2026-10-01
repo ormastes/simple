@@ -1,4 +1,9 @@
 # Seed native cranelift miscompiles a function that RETURNS a `Dict` by value
+## Closed 2026-09-16 — ALREADY-FIXED re-verified 2026-08-10; repro output matches interpreter
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Lane:** S57 (found while disproving the `{}` land-war; filed, not fixed here)
@@ -115,3 +120,4 @@ A codegen lane should root-cause in `src/compiler_rust/compiler/src/codegen/`
 
 - `seed_stage4_empty_dict_literal_2026-07-17.md` — the `{}` land-war
   resolution this was found alongside.
+

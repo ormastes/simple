@@ -1,7 +1,8 @@
 # Bug: `src/lib/blink/paint/paint_tree_walker.spl` and `src/lib/blink/layout/block_flow.spl` do not exist — spec targets an unimplemented module
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-20
 
@@ -77,11 +78,3 @@ for a test-shard fix.
 
 - `test/01_unit/lib_standalone/blink/.spipe_matchers_image_paint_spec.spl` (whole file, 0 examples executed)
 
-## Re-verification 2026-08-17 (stdlib slice G, content-classified)
-
-**STILL-OPEN, confirmed by CONTENT.** `src/lib/blink/paint/` contains only
-`border_paint.spl`, `effect_paint.spl`, `effects.spl`, `invalidation.spl`,
-`style_paint.spl`, `text_paint.spl` — no `paint_tree_walker.spl`. The only
-in-tree mention is a stale forward reference in a comment,
-`src/lib/blink/layout/block_flow.spl:82` ("Consumers: blink/paint/paint_tree_walker.spl,
-blink/input/hit_test.spl"), both of which are absent. Module genuinely missing.

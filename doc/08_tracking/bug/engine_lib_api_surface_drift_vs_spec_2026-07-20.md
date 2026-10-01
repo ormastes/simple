@@ -1,7 +1,8 @@
 # Engine lib API surface drift vs. spec expectations
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (missing/mismatched implementation, not a test-naming issue)
@@ -120,3 +121,4 @@ is highest-leverage since 3 specs depend on it), decide whether to update the
 source to the generational-handle design the specs assume or prune the specs
 down to the current design, and implement/port method-by-method with the
 specs as the acceptance criteria.
+

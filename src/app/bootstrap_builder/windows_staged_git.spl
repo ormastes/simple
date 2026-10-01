@@ -1,0 +1,138 @@
+# Opt-in compiler workspace setup. This creates real local Git objects, never
+# an SCV inventory, journal, or compiler-admission receipt.
+use app.io.env_ops.{env_get, env_vars}
+use app.io.file_ops.{file_exists, file_atomic_write, file_read_regular_no_follow_bounded}
+use app.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.bootstrap_builder.contracts.{BuildTaskV1, builder_task_identity_v1, builder_identifier_valid_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_file_digest_v1, windows_process_path_valid_v1}
+
+pub struct BuilderStagedGitErrorV1:
+    message: text
+    tree_cleanup_confirmed: bool
+
+pub fn builder_windows_control_v1(root: text, identity: text, host: text) -> bool:
+    val request = match file_read_regular_no_follow_bounded(root + "/control.request", 4096):
+        Ok(value): value
+        Err(_message): return false
+    val fields = request.split("\n")
+    if fields.len() != 4 or fields[0] != identity or fields[1] != host: return false
+    if not builder_identifier_valid_v1(fields[2]) or (fields[3] != "probe" and fields[3] != "cancel"): return false
+    if not file_atomic_write(root + "/control.response", request): return false
+    fields[3] == "cancel"
+
+pub fn builder_staged_git_command_v1(task: BuildTaskV1, root: text, program: text, digest: text, environment: [text], args: [text], ordinal: i64, host: text = "") -> Result<text, BuilderStagedGitErrorV1>:
+    if file_exists(root + "/cancel.request") or (host != "" and builder_windows_control_v1(root, builder_task_identity_v1(task), host)): return Err(BuilderStagedGitErrorV1("staged Git cancelled before launch", true))
+    var inputs: [WindowsProcessInputV1] = []
+    for input in task.inputs:
+        inputs.push(WindowsProcessInputV1(root + "/work/" + input.path, input.digest))
+    val stdout_path = root + "/git-" + str(ordinal) + ".stdout"
+    val request = WindowsProcessRequestV1(program, digest, args, environment,
+        root + "/work", inputs, stdout_path, root + "/git-" + str(ordinal) + ".stderr", 300000)
+    val lease = match windows_process_admit_v1(request, 0):
+        WindowsProcessAdmissionV1.Started(value): value
+        WindowsProcessAdmissionV1.RejectedBeforeStart(reason): return Err(BuilderStagedGitErrorV1(reason, true))
+        WindowsProcessAdmissionV1.FailedAfterCleanup(reason): return Err(BuilderStagedGitErrorV1(reason, true))
+        WindowsProcessAdmissionV1.Unknown(reason): return Err(BuilderStagedGitErrorV1(reason, false))
+    var cancelled = false
+    while true:
+        if (file_exists(root + "/cancel.request") or (host != "" and builder_windows_control_v1(root, builder_task_identity_v1(task), host))) and not cancelled:
+            val _accepted = match windows_process_cancel_v1(lease):
+                Ok(value): value
+                Err(reason): return Err(BuilderStagedGitErrorV1(reason, false))
+            cancelled = true
+        val observation = match windows_process_poll_v1(lease):
+            Ok(value): value
+            Err(reason):
+                val _cancel = windows_process_cancel_v1(lease)
+                val cleaned = match windows_process_collect_v1(lease):
+                    Ok(receipt): receipt.leader_reaped and receipt.tree_empty
+                    Err(_message): false
+                return Err(BuilderStagedGitErrorV1(reason, cleaned))
+        if observation.terminal:
+            val receipt = match windows_process_collect_v1(lease):
+                Ok(value): value
+                Err(reason): return Err(BuilderStagedGitErrorV1(reason, false))
+            if cancelled:
+                if not receipt.leader_reaped or not receipt.tree_empty:
+                    return Err(BuilderStagedGitErrorV1("staged Git cancellation cleanup unproven", false))
+                return Err(BuilderStagedGitErrorV1("staged Git cancelled; owned tree reaped", true))
+            if not receipt.leader_reaped or not receipt.tree_empty or receipt.timed_out or receipt.exit_code != 0:
+                return Err(BuilderStagedGitErrorV1("staged Git command failed; see retained git logs", receipt.leader_reaped and receipt.tree_empty))
+            return match file_read_regular_no_follow_bounded(stdout_path, 16 * 1024 * 1024):
+                Ok(value): Ok(value)
+                Err(reason): Err(BuilderStagedGitErrorV1(reason, true))
+        sleep_ms(10)
+    Err(BuilderStagedGitErrorV1("unreachable staged Git state", false))
+
+pub fn builder_windows_staged_git_v1(task: BuildTaskV1, root: text, host: text = "") -> Result<text, BuilderStagedGitErrorV1>:
+    if (env_get("SIMPLE_BUILD_STAGED_GIT") ?? "") != "1": return Ok("")
+    if (env_get("SIMPLE_BUILD_STAGED_GIT_POLICY") ?? "") != "raw-v1-20000101":
+        return Err(BuilderStagedGitErrorV1("staged Git deterministic policy missing", true))
+    if task.args.len() == 0 or task.args[0] != "native-build":
+        return Err(BuilderStagedGitErrorV1("staged Git policy requires a compiler native-build task", true))
+    val program = env_get("SIMPLE_BUILD_GIT_PROGRAM") ?? ""
+    val digest = env_get("SIMPLE_BUILD_GIT_SHA256") ?? ""
+    if not windows_process_path_valid_v1(program) or digest.len() != 64 or windows_process_file_digest_v1(program) != digest:
+        return Err(BuilderStagedGitErrorV1("staged Git executable pin differs", true))
+    if file_exists(root + "/work/.git"):
+        return Err(BuilderStagedGitErrorV1("staged Git metadata already exists", true))
+    var paths: [text] = []
+    for input in task.inputs:
+        if input.path.to_lower().starts_with(".git/") or input.path.to_lower() == ".git" or input.path.contains("\n") or input.path.contains("\r") or input.path.contains("\t"):
+            return Err(BuilderStagedGitErrorV1("invalid staged Git input path", true))
+        if input.path.to_lower() == ".gitattributes" or input.path.to_lower().ends_with("/.gitattributes"):
+            return Err(BuilderStagedGitErrorV1("raw staged Git policy does not support declared attributes files", true))
+        if windows_process_file_digest_v1(root + "/work/" + input.path) != input.digest:
+            return Err(BuilderStagedGitErrorV1("staged Git source digest differs", true))
+        paths.push(input.path)
+    if not dir_create_all(root + "/git-empty-hooks") or not file_atomic_write(root + "/git-inputs.txt", paths.join("\0") + "\0"):
+        return Err(BuilderStagedGitErrorV1("staged Git setup files unavailable", true))
+    val inherited = env_vars()
+    if inherited == nil: return Err(BuilderStagedGitErrorV1("staged Git environment unavailable", true))
+    var environment: [text] = []
+    for pair in inherited ?? []:
+        if pair.0 != "" and not pair.0.contains("=") and not pair.0.to_upper().starts_with("GIT_"):
+            environment.push(pair.0 + "=" + pair.1)
+    environment.push("GIT_CONFIG_NOSYSTEM=1")
+    environment.push("GIT_CONFIG_GLOBAL=NUL")
+    environment.push("GIT_CONFIG_SYSTEM=NUL")
+    environment.push("GIT_ATTR_NOSYSTEM=1")
+    environment.push("GIT_AUTHOR_NAME=Simple staged build")
+    environment.push("GIT_AUTHOR_EMAIL=staged-build@localhost")
+    environment.push("GIT_COMMITTER_NAME=Simple staged build")
+    environment.push("GIT_COMMITTER_EMAIL=staged-build@localhost")
+    environment.push("GIT_AUTHOR_DATE=946684800 +0000")
+    environment.push("GIT_COMMITTER_DATE=946684800 +0000")
+    val config = ["-c", "user.name=Simple staged build", "-c", "user.email=staged-build@localhost",
+        "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "core.autocrlf=false",
+        "-c", "core.attributesFile=NUL", "-c", "core.hooksPath=" + root + "/git-empty-hooks"]
+    val _init = builder_staged_git_command_v1(task, root, program, digest, environment,
+        config + ["init", "--template=" + root + "/git-empty-hooks", "."], 0, host)?
+    val _add = builder_staged_git_command_v1(task, root, program, digest, environment,
+        config + ["--literal-pathspecs", "add", "--force", "--pathspec-file-nul", "--pathspec-from-file=" + root + "/git-inputs.txt"], 1, host)?
+    val _commit = builder_staged_git_command_v1(task, root, program, digest, environment,
+        config + ["commit", "--no-verify", "--no-gpg-sign", "-m", "Declared isolated build snapshot"], 2, host)?
+    val listed = builder_staged_git_command_v1(task, root, program, digest, environment,
+        config + ["-c", "core.quotePath=false", "ls-files"], 4, host)?
+    var expected: Dict<text, bool> = {}
+    for path in paths: expected[path] = true
+    var actual: Dict<text, bool> = {}
+    for path in listed.split("\n"):
+        val normalized = if path.ends_with("\r"): path[:path.len() - 1] else: path
+        if normalized == "": continue
+        if not expected.has(normalized) or actual.has(normalized):
+            return Err(BuilderStagedGitErrorV1("committed staged Git file set differs", true))
+        actual[normalized] = true
+    if actual.len() != expected.len(): return Err(BuilderStagedGitErrorV1("committed staged Git file count differs", true))
+    # With every attributes source disabled/rejected and autocrlf=false, Git's
+    # object bytes equal the declared raw bytes. Check the committed worktree.
+    val _diff = builder_staged_git_command_v1(task, root, program, digest, environment,
+        config + ["diff", "--no-ext-diff", "--no-textconv", "--exit-code", "HEAD", "--"], 5, host)?
+    val head = builder_staged_git_command_v1(task, root, program, digest, environment,
+        config + ["rev-parse", "HEAD"], 3, host)?
+    val commit = head.trim()
+    if commit.len() != 40 and commit.len() != 64: return Err(BuilderStagedGitErrorV1("staged Git commit identity invalid", true))
+    if not file_atomic_write(root + "/staged-git.txt", "task=" + builder_task_identity_v1(task) + "\nsource=" + task.source_digest + "\ngit=" + digest + "\ncommit=" + commit + "\n"):
+        return Err(BuilderStagedGitErrorV1("staged Git actual commit record unavailable", true))
+    Ok(commit)

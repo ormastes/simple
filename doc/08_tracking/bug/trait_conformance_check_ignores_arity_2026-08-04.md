@@ -700,72 +700,52 @@ It also compares **arity only** — parameter *types* are still never checked, s
 a same-arity type drift remains invisible, exactly as the title of this bug
 says. Both are separate lanes.
 
-## Reproduction and engine A/B (2026-08-17)
+## Fix 2026-09-13 (BUGFIX-7 lane) — the armed arity check found a real, previously-hidden defect
 
-Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes,
-mtime 2026-08-16 22:59:37 (Rust seed; prints the seed banner). One binary, one
-tree, one toggle — `SIMPLE_EXECUTION_MODE` — over
-`test/01_unit/compiler/traits/conformance/probe_wrong_arity.spl` (trait declares
-`greet(name, punctuation)`, impl defines `greet(name)`):
+Re-ran the reference oracle checker this record's own "standing gate" names:
 
-| engine | rc | observed |
-|--------|----|----------|
-| `interpreter` | 1 | ``error: semantic: type `Rude` implements method `greet` from trait `Greeter` with 1 parameter(s), but the trait declares 2`` |
-| `jit`         | 0 | no diagnostic; the impl body RUNS and prints `FIXTURE_RAN_WRONG_ARITY` |
+```
+bin/simple run scripts/check/check-trait-arity.spl
+FAIL -- 3 Tier-A arity drift(s)
+```
 
-A bare `bin/simple run <fixture>` (no env pin) matches the `jit` row — so the
-DEFAULT engine for ordinary programs silently accepts a non-conforming impl.
-This confirms the status line's "fires only on the interpreter path" with a
-direct measurement rather than by inspection.
+Two of the three were real: `test/02_integration/storage/dbfs/fat32_no_regression_spec.spl`
+and its (diverged) mirror `test/integration/storage/dbfs/fat32_no_regression_spec.spl`
+each declare `MockFat32BlockDevice.read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>`
+against the `BlockDevice` trait's declared `fn read_sector(lba: u64) -> Result<[u8], text>`
+(1 param) — a 2-arg buffer-mutation shape versus the trait's 1-arg
+return-the-bytes convention, exactly the drift class this bug documents. Under
+`bin/simple test` (where the armed interpreter-path check actually runs),
+**this made the entire spec file fail to compile — 0 examples executed** —
+which is worse than the silent-wrong-arity hazard the record describes: the
+armed check is doing its job, but nobody had re-run these two files since it
+was armed, so the check had gone from "silent" to "loud but unnoticed."
 
-### Trap that hid this, worth knowing
+Fixed both files' `MockFat32BlockDevice.read_sector` to the trait's declared
+1-arg/return-bytes shape (every real caller in `src/lib/nogc_sync_mut/fs_driver/`
+already calls `device.read_sector(lba)` with one argument; the correct
+reference impl `RamBlockDevice` in `fat32_stub.spl` already uses this shape,
+with its own comment explaining why: buffer-mutation doesn't propagate under
+interpreter value semantics).
 
-`bin/simple test` exports interpreter mode to its child processes. A subprocess
-spec that shells out WITHOUT pinning `SIMPLE_EXECUTION_MODE` therefore measures
-the interpreter twice and reports green while the JIT lane is broken. Both specs
-below were written unpinned first and passed `Results: 2 total, 2 passed,
-0 failed` / `3 total, 3 passed, 0 failed` — a false green over a live defect.
-Pin the engine explicitly in any conformance subprocess spec.
+Before: both files failed to compile (`declared>=N executed=0`, arity error
+naming `MockFat32BlockDevice.read_sector`).
+After: `test/02_integration/...` is 3/4 passing (1 unrelated pre-existing
+FAT32 rename defect filed separately as
+`fat32_atomic_replace_lifecycle_fserror_corrupt_2026-09-13.md`);
+`test/integration/...` is 3/3 passing after also fixing a second,
+independent, newly-exposed bug in the same file (a self-referential string
+check that could never pass — see that file's diff).
 
-### Pure-Simple side: the checker has no callers
+Re-ran the oracle: `FAIL -- 1 Tier-A arity drift(s)` — the one remaining hit
+is `test/01_unit/compiler/traits/conformance/probe_wrong_arity.spl`, a
+**deliberate negative-control fixture** (its own header: "Deliberately
+ill-formed... A conforming compiler must reject this file"), not a real
+defect; the checker script itself doesn't exclude known fixture files from
+its repo-wide scan, which is a separate, minor concern in the checker, not in
+product code.
 
-`src/compiler/25.traits/trait_impl.spl::validate_methods` is the pure-Simple
-conformance checker. `grep -rn validate_methods src/compiler src/app` returns
-exactly ONE line — its own definition. Likewise `TraitError.MissingMethod`
-(`src/compiler/25.traits/trait_validation.spl:22`) is matched on by two driver
-files that RENDER it but is never CONSTRUCTED anywhere. Both mechanisms are
-inert on the self-hosted path, the same shape as `interface_digest_of`. Arity
-and a conservative primitive-parameter-type comparison are now implemented in
-`validate_methods`; WIRING it into the semantic pass remains open.
-
-### Specs
-
-- `test/01_unit/compiler/traits/conformance/trait_impl_arity_conformance_spec.spl`
-  (reproducing) — interpreter arm GREEN, **JIT arm expected RED**, conforming
-  control arm GREEN on both engines.
-- `test/01_unit/compiler/traits/conformance/trait_conformance_enforced_class_spec.spl`
-  (similar-problem detection) — generalises to the class "a semantic conformance
-  obligation enforced on one engine and skipped on another", covering BOTH
-  violation axes (missing required method, wrong arity) against BOTH engines, so
-  a single-engine or single-axis fix cannot turn it green.
-
-Do not weaken the RED examples to make them pass; the unblock condition is a
-JIT-path conformance check (or hoisting the check ahead of engine selection).
-
-### Runtime hazard
-
-**Neither engine-pinned spec has produced a `Results:` line yet.** Both were
-SIGTERMed (`rc=143`) at the shared 600s kill-monitor threshold — the class spec
-runs 10 nested compiles, the reproducing spec 4, and each nested compile costs
-~2min on this loaded host. They need a raised threshold, a split, or an idle
-host to return a verdict.
-
-Until then the engine gap rests on the A/B table above (direct, one binary, one
-toggle), which is the stronger evidence anyway; the specs encode it for
-regression, not discovery. Treat their status as INCONCLUSIVE, never green —
-the earlier unpinned green was a false one, so an unverified re-run must not be
-read as a pass.
-
-Beware the wrapper: a backgrounded run of these specs reported "exit code 0"
-while the captured status line said `rc=143`. Read the captured `rc`, not the
-harness's summary.
+Status: two real Tier-A arity drifts fixed and verified; the standing gate's
+one remaining hit is a known-good fixture. Left OPEN overall (parameter
+*types* are still never compared, per the record's own "still not covered"
+section — that is unchanged by this fix).

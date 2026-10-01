@@ -1,0 +1,164 @@
+"""
+HIR expression type-presence regression.
+
+`HirExpr.has_type_` is the presence bit for the desugared `type_` field.  A
+lowering constructor that leaves a zero/placeholder `HirType` beside a false
+presence bit is indistinguishable from a real inferred type after a native
+aggregate boundary.  Exercise the pure-Simple lowering path for the three
+high-risk shapes (Call, NamedVar, StringLit), then cross the generated HIR
+codec and assert that typed and untyped shapes retain their contract.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg, HirFunction}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+
+val SOURCE = "fn id(value: i64) -> i64:\n    value\n\nfn call_site(value: i64) -> i64:\n    id(value)\n\nfn string_site():\n    \"hello\"\n"
+
+fn span() -> Span:
+    Span.empty()
+
+fn scalar() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: span())
+
+fn string_type() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: span())
+
+fn lower_fixture() -> HirModule:
+    val parsed = parse_full_frontend(SOURCE, "hir_expr_type_presence.spl",
+                                     "hir_expr_type_presence", Logger(level: 0))
+    var lowering = HirLowering.with_filename("hir_expr_type_presence.spl")
+    lowering.lower_module(parsed)
+
+fn assert_presence(expr: HirExpr, expected: bool):
+    expect(expr.has_type_).to_equal(expected)
+    expect((expr.type_ != nil)).to_equal(expected)
+
+fn function_type() -> HirType:
+    HirType(kind: HirTypeKind.Function([scalar()], scalar(), []), span: span())
+
+fn typed_call_expr() -> HirExpr:
+    val callee = HirExpr(
+        kind: HirExprKind.NamedVar(SymbolId(id: 1), "id"),
+        has_type_: true,
+        type_: function_type(),
+        span: span())
+    val argument = HirExpr(
+        kind: HirExprKind.NamedVar(SymbolId(id: 2), "value"),
+        has_type_: true,
+        type_: scalar(),
+        span: span())
+    HirExpr(
+        kind: HirExprKind.Call(callee, [HirCallArg(
+            has_name: false, name: "", value: argument, span: span())], []),
+        has_type_: true,
+        type_: scalar(),
+        span: span())
+
+fn install_typed_shapes(module: HirModule) -> HirModule:
+    for symbol in module.functions.keys():
+        var function_: HirFunction = module.functions[symbol]
+        if function_.name == "call_site":
+            function_.body.value = typed_call_expr()
+            module.functions[symbol] = function_
+        elif function_.name == "string_site":
+            function_.body.value = HirExpr(
+                kind: HirExprKind.StringLit("typed", nil),
+                has_type_: true,
+                type_: string_type(),
+                span: span())
+            module.functions[symbol] = function_
+    module
+
+fn decoded_module(module: HirModule) -> HirModule:
+    val blob = hir_module_encode(module)
+    expect(blob != "").to_equal(true)
+    val decoded = hir_module_decode(blob)
+    expect(decoded != nil).to_equal(true)
+    decoded.unwrap()
+
+describe "HIR expression has_type_ presence boundary [importance=critical; importance_weight=3]":
+    it "constructs untyped Call, NamedVar, and StringLit with nil type payloads":
+        val module = lower_fixture()
+        var call_seen = false
+        var named_seen = false
+        var string_seen = false
+        for symbol in module.functions.keys():
+            val function_ = module.functions[symbol]
+            if function_.name == "call_site":
+                match function_.body.value.kind:
+                    case HirExprKind.Call(callee, args, _):
+                        call_seen = true
+                        assert_presence(function_.body.value, false)
+                        match callee.kind:
+                            case HirExprKind.NamedVar(_, _):
+                                named_seen = true
+                                assert_presence(callee, false)
+                            case _:
+                                fail("call callee was not a NamedVar")
+                        expect(args.len()).to_equal(1)
+                        match args[0].value.kind:
+                            case HirExprKind.NamedVar(_, _):
+                                named_seen = true
+                                assert_presence(args[0].value, false)
+                            case _:
+                                fail("call argument was not a NamedVar")
+                    case _:
+                        fail("call_site body was not a Call")
+            elif function_.name == "string_site":
+                match function_.body.value.kind:
+                    case HirExprKind.StringLit(_, _):
+                        string_seen = true
+                        assert_presence(function_.body.value, false)
+                    case _:
+                        fail("string_site body was not a StringLit")
+        expect(call_seen).to_equal(true)
+        expect(named_seen).to_equal(true)
+        expect(string_seen).to_equal(true)
+
+    it "does not turn untyped payloads into zero types across HIR transport":
+        val module = decoded_module(lower_fixture())
+        var checked = 0
+        for symbol in module.functions.keys():
+            val function_ = module.functions[symbol]
+            if function_.name == "call_site":
+                match function_.body.value.kind:
+                    case HirExprKind.Call(callee, args, _):
+                        assert_presence(function_.body.value, false)
+                        assert_presence(callee, false)
+                        assert_presence(args[0].value, false)
+                        checked = checked + 1
+                    case _:
+                        fail("transport changed call shape")
+            elif function_.name == "string_site":
+                assert_presence(function_.body.value, false)
+                checked = checked + 1
+        expect(checked).to_equal(2)
+
+    it "preserves typed Call, NamedVar, and StringLit payloads across HIR transport":
+        val module = decoded_module(install_typed_shapes(lower_fixture()))
+        var call_seen = false
+        var string_seen = false
+        for symbol in module.functions.keys():
+            val function_ = module.functions[symbol]
+            if function_.name == "call_site":
+                match function_.body.value.kind:
+                    case HirExprKind.Call(callee, args, _):
+                        call_seen = true
+                        assert_presence(function_.body.value, true)
+                        assert_presence(callee, true)
+                        assert_presence(args[0].value, true)
+                    case _:
+                        fail("typed call shape was not preserved")
+            elif function_.name == "string_site":
+                string_seen = true
+                assert_presence(function_.body.value, true)
+        expect(call_seen).to_equal(true)
+        expect(string_seen).to_equal(true)

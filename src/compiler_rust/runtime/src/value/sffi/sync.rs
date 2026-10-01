@@ -115,6 +115,8 @@ pub extern "C" fn rt_rwlock_unlock_write(_handle: i64) {
 
 thread_local! {
     static THREAD_LOCAL_STORAGE: RefCell<HashMap<i64, RuntimeValue>> = RefCell::new(HashMap::new());
+    // Scalar TLS has a distinct ABI: an unset slot is raw zero, not tagged NIL.
+    static THREAD_LOCAL_STORAGE_I64: RefCell<HashMap<i64, i64>> = RefCell::new(HashMap::new());
 }
 
 lazy_static::lazy_static! {
@@ -156,10 +158,33 @@ pub extern "C" fn rt_thread_local_set(handle: i64, value: RuntimeValue) {
     });
 }
 
+/// Read a raw scalar TLS slot. Zero denotes an unset or invalid handle.
+/// Keep this separate from the RuntimeValue ABI used by ThreadLocal<T>.
+#[no_mangle]
+pub extern "C" fn rt_thread_local_get_i64(handle: i64) -> i64 {
+    if !THREAD_LOCAL_HANDLES.lock().contains(&handle) {
+        return 0;
+    }
+    THREAD_LOCAL_STORAGE_I64.with(|storage| storage.borrow().get(&handle).copied().unwrap_or(0))
+}
+
+/// Store an untagged scalar without truncating it to RuntimeValue's integer range.
+#[no_mangle]
+pub extern "C" fn rt_thread_local_set_i64(handle: i64, value: i64) {
+    if !THREAD_LOCAL_HANDLES.lock().contains(&handle) {
+        return;
+    }
+    THREAD_LOCAL_STORAGE_I64.with(|storage| {
+        storage.borrow_mut().insert(handle, value);
+    });
+}
+
 /// Free thread-local storage slot
 #[no_mangle]
 pub extern "C" fn rt_thread_local_free(handle: i64) {
     THREAD_LOCAL_HANDLES.lock().remove(&handle);
+    THREAD_LOCAL_STORAGE.with(|storage| { storage.borrow_mut().remove(&handle); });
+    THREAD_LOCAL_STORAGE_I64.with(|storage| { storage.borrow_mut().remove(&handle); });
     // Note: Each thread's local copy will be cleaned up when thread exits
 }
 
@@ -176,6 +201,9 @@ pub fn clear_condvar_registry() {
 pub fn clear_thread_local_registry() {
     THREAD_LOCAL_HANDLES.lock().clear();
     THREAD_LOCAL_STORAGE.with(|storage| {
+        storage.borrow_mut().clear();
+    });
+    THREAD_LOCAL_STORAGE_I64.with(|storage| {
         storage.borrow_mut().clear();
     });
 }
@@ -365,5 +393,34 @@ mod tests {
         assert_eq!(value.as_int(), 100);
 
         rt_thread_local_free(handle);
+    }
+
+    #[test]
+    fn test_thread_local_raw_i64_abi_is_distinct_and_isolated() {
+        let handle = rt_thread_local_new();
+        assert_eq!(rt_thread_local_get_i64(handle), 0);
+        assert!(rt_thread_local_get(handle).is_nil());
+
+        rt_thread_local_set_i64(handle, i64::MAX);
+        assert_eq!(rt_thread_local_get_i64(handle), i64::MAX);
+        assert!(rt_thread_local_get(handle).is_nil());
+
+        rt_thread_local_set(handle, RuntimeValue::from_int(17));
+        assert_eq!(rt_thread_local_get(handle).as_int(), 17);
+        assert_eq!(rt_thread_local_get_i64(handle), i64::MAX);
+
+        std::thread::spawn(move || {
+            assert_eq!(rt_thread_local_get_i64(handle), 0);
+            assert!(rt_thread_local_get(handle).is_nil());
+            rt_thread_local_set_i64(handle, 23);
+            assert_eq!(rt_thread_local_get_i64(handle), 23);
+        }).join().unwrap();
+        assert_eq!(rt_thread_local_get_i64(handle), i64::MAX);
+
+        rt_thread_local_free(handle);
+        assert_eq!(rt_thread_local_get_i64(handle), 0);
+        assert!(rt_thread_local_get(handle).is_nil());
+        rt_thread_local_set_i64(handle, 9);
+        assert_eq!(rt_thread_local_get_i64(handle), 0);
     }
 }

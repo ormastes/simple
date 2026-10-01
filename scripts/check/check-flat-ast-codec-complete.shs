@@ -66,7 +66,11 @@ CODEC_GLOB_DEFAULT="$CODEC_GLOB_DEFAULT $POOL_FILES_DEFAULT"
 #     process-lifetime state, not per-parse state, and restoring it would
 #     REWIND the counter -- i.e. restoring it is wrong, not merely unnecessary.
 #     That is the bar for an entry here.
-EXCLUDE_RE='^(ast_reset_seq)$'
+#   par_prof_enabled_cached (parser.spl) -- a request-policy cache, reset to -1
+#     by parser_init_with_path so each same-process request resamples
+#     SIMPLE_PARSE_PROFILE. Restoring a captured 0/1 would freeze policy from
+#     the cached parse and make later environment changes ineffective.
+EXCLUDE_RE='^(ast_reset_seq|par_prof_enabled_cached)$'
 
 # Per-parse state is NOT "every array-typed var in four files" -- that framing
 # produced a FALSE GREEN (151/151) while silently omitting the `extend`/enum
@@ -80,7 +84,7 @@ EXCLUDE_RE='^(ast_reset_seq)$'
 # plus the three names parse_module_body clears inline at its own top.
 # Names are matched case-INSENSITIVELY: EXTEND_TARGETS is uppercase, and the
 # original lowercase-only regex is exactly why it was missed.
-RESET_FNS='reset_all_pools|ast_reset|stmt_reset|expr_reset|parser_init_with_path|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi'
+RESET_FNS='reset_all_pools|ast_reset|decl_metadata_pools_reset|stmt_reset|expr_reset|parser_init_with_path|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi'
 
 # Cleared inline at the top of parse_module_body rather than in a named reset
 # function, so the body scan below cannot find them generically.
@@ -112,10 +116,116 @@ extract_pools() {
     } | sort -u
 }
 
+# Pools a reset function clears IN PLACE (`decl_tag.clear()`). Such a pool has
+# one process-lifetime owner, so its restore must refill that owner
+# (`decl_tag = flat_pool_dec_i64_into(decl_tag, r)`) instead of replacing it:
+# a replacement is born inside the driver's per-file transient scope, is freed
+# at scope end, and the next ast_reset() then clears freed memory. That is the
+# warm-cache access violation in HIR of compiler.backend.backend_types.
+extract_inplace_pools() {
+    for f in $1; do
+        [ -f "$f" ] || continue
+        awk -v fns="$RESET_FNS" '
+            /^(pub )?fn [a-zA-Z_0-9]+\(/ {
+                inbody = 0
+                name = $0
+                sub(/^(pub )?fn /, "", name)
+                sub(/\(.*/, "", name)
+                if (name ~ ("^(" fns ")$")) inbody = 1
+                next
+            }
+            /^[^ \t]/ { inbody = 0 }
+            inbody && /^[ \t]+[A-Za-z_0-9]+\.clear\(\)/ {
+                line = $0
+                sub(/^[ \t]+/, "", line)
+                sub(/\.clear.*/, "", line)
+                print line
+            }
+        ' "$f" 2>/dev/null
+    done | sort -u
+}
+
+# Every assignment to a pool inside a codec body (flat_*_dump / flat_*_restore).
+# The dump must never replace an owner either: a capture-armed cache MISS runs
+# it inside the transient scope, and `arm_body = arm_body_rebuilt` there is what
+# actually crashed the cold-cache run.
+extract_codec_assignments() {
+    for f in $1; do
+        [ -f "$f" ] || continue
+        awk '
+            /^(pub )?fn [a-zA-Z_0-9]+\(/ {
+                inbody = 0
+                name = $0
+                sub(/^(pub )?fn /, "", name)
+                sub(/\(.*/, "", name)
+                if (name ~ /^flat_[a-z_0-9]*_(dump|restore)$/) inbody = 1
+                next
+            }
+            /^[^ \t]/ { inbody = 0 }
+            inbody && /^[ \t]+[A-Za-z_0-9]+ *=[^=]/ {
+                line = $0
+                sub(/^[ \t]+/, "", line)
+                print line
+            }
+        ' "$f" 2>/dev/null
+    done
+}
+
+# Some nested i64 pools have an authoritative text mirror named <pool>_flat.
+# The dumper reconstructs a local [[i64]] from that mirror instead of mutating
+# the live owner. Recognize the complete data-flow sequence, not a pool-name
+# exemption or the mere presence of an encoded temporary. Every step must be
+# in the same dump function; missing/wrong payload or a different iterator
+# fails closed. Both mirrors remain independently subject to the normal scan.
+extract_encoded_pool_aliases() {
+    for f in $1; do
+        [ -f "$f" ] || continue
+        awk '
+            /^(pub )?fn [a-zA-Z_0-9]+\(/ {
+                in_dump = ($0 ~ /fn flat_[a-z_0-9]*_dump\(/)
+                stage = 0
+                next
+            }
+            !in_dump { next }
+            {
+                line = $0
+                sub(/^[ \t]+/, "", line)
+                sub(/[ \t]+$/, "", line)
+                if (line == "" || line ~ /^#/) next
+                if (stage == 3) {
+                    encoded = "flat_pool_enc_i64_list(" temporary ")"
+                    if (line == "out = " encoded ||
+                        line == "parts = parts.push(" encoded ")") print pool
+                    stage = 0
+                } else if (stage == 2) {
+                    stage = (line == temporary ".push(ast_i64_list_split(" item "))") ? 3 : 0
+                } else if (stage == 1) {
+                    if (line ~ /^for [A-Za-z_0-9]+ in [A-Za-z_0-9]+_flat:$/) {
+                        split(line, words, /[ :]+/)
+                        item = words[2]
+                        pool = words[4]
+                        sub(/_flat$/, "", pool)
+                        stage = 2
+                    } else stage = 0
+                }
+                if (stage == 0 && line ~ /^var [A-Za-z_0-9]+: *\[\[i64\]\] *= *\[\]$/) {
+                    temporary = line
+                    sub(/^var /, "", temporary)
+                    sub(/:.*/, "", temporary)
+                    stage = 1
+                }
+            }
+        ' "$f" 2>/dev/null
+    done | sort -u
+}
+
 run_scan() {
     _pool_files="$1"
     _codec_files="$2"
     _pools=$(extract_pools "$_pool_files" "${3:-}")
+    _inplace=$(extract_inplace_pools "$_pool_files")
+    _codec_assigns=$(extract_codec_assignments "$_codec_files")
+    _encoded_aliases=$(extract_encoded_pool_aliases "$_codec_files")
     _checked=0
     _missing=""
     _stale=""
@@ -143,11 +253,19 @@ $(cat "$f")"
         # Scalar state rides the blob inline ("{name}\n" / name = r.next_i64())
         # rather than through an enc_/dec_ helper, so both forms count.
         _enc=$(printf '%s\n' "$_codec_text" | grep -cE "flat_pool_enc_[a-z_0-9]+\($p\)|out \+ \"\{$p\}")
+        if [ "$_enc" -eq 0 ] && printf '%s\n' "$_encoded_aliases" | grep -qx "$p"; then
+            _enc=1
+        fi
         _dec=$(printf '%s\n' "$_codec_text" | grep -cE "^ *$p *= *(flat_pool_dec_|r\.next_)")
-        if [ "$_enc" -eq 0 ] || [ "$_dec" -eq 0 ]; then
+        _repl=0
+        if printf '%s\n' "$_inplace" | grep -qx "$p"; then
+            _repl=$(printf '%s\n' "$_codec_assigns" | grep -E "^$p *=" | grep -cvE "^$p *= *flat_pool_dec_[a-z_0-9]+_into\($p, r\)$")
+        fi
+        if [ "$_enc" -eq 0 ] || [ "$_dec" -eq 0 ] || [ "$_repl" -ne 0 ]; then
             _why=""
             [ "$_enc" -eq 0 ] && _why="not-encoded"
             [ "$_dec" -eq 0 ] && _why="${_why:+$_why,}not-decoded"
+            [ "$_repl" -ne 0 ] && _why="${_why:+$_why,}owner-replaced"
             _missing="$_missing $p($_why)"
         fi
     done
@@ -215,6 +333,72 @@ selftest() {
         _fail=1
     fi
 
+    # Fixture F: a pool the reset clears in place but the restore REPLACES ->
+    # must FAIL as owner-replaced; the `_into` form of the same pool is clean.
+    mkdir -p "$_tmp/f"
+    printf 'fn ast_reset():\n    live_pool.clear()\n    live_pool = live_pool\n' > "$_tmp/f/pools.spl"
+    printf 'fn flat_f_pools_restore(r):\n    live_pool = flat_pool_dec_i64(r)\nfn flat_f_pools_dump():\n    out = flat_pool_enc_i64(live_pool)\n' > "$_tmp/f/codec.spl"
+    run_scan "$_tmp/f/pools.spl" "$_tmp/f/codec.spl" "live_pool"
+    case "$SCAN_MISSING" in
+        *live_pool*owner-replaced*) : ;;
+        *) echo "selftest: in-place pool restored by replacement must FAIL (missing=$SCAN_MISSING)"; _fail=1 ;;
+    esac
+    # The dump replacing the owner is the same defect (the cold-cache crash).
+    printf 'fn flat_f_pools_restore(r):\n    live_pool = flat_pool_dec_i64_into(live_pool, r)\nfn flat_f_pools_dump():\n    live_pool = rebuilt\n    out = flat_pool_enc_i64(live_pool)\n' > "$_tmp/f/codec.spl"
+    run_scan "$_tmp/f/pools.spl" "$_tmp/f/codec.spl" "live_pool"
+    case "$SCAN_MISSING" in
+        *live_pool*owner-replaced*) : ;;
+        *) echo "selftest: in-place pool replaced by the dump must FAIL (missing=$SCAN_MISSING)"; _fail=1 ;;
+    esac
+    printf 'fn flat_f_pools_restore(r):\n    live_pool = flat_pool_dec_i64_into(live_pool, r)\nfn flat_f_pools_dump():\n    out = flat_pool_enc_i64(live_pool)\n' > "$_tmp/f/codec.spl"
+    run_scan "$_tmp/f/pools.spl" "$_tmp/f/codec.spl" "live_pool"
+    if [ "$SCAN_CHECKED" -ne 1 ] || [ -n "$SCAN_MISSING" ]; then
+        echo "selftest: in-place pool restored with _into should pass (checked=$SCAN_CHECKED missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+
+    # Fixture G: a local reconstruction really carries the mirror payload.
+    # Arbitrary pool/temporary names prevent a hardcoded exemption from passing.
+    mkdir -p "$_tmp/g"
+    printf 'fn ast_reset():\n    payload = []\n    payload_flat = []\n' > "$_tmp/g/pools.spl"
+    cat > "$_tmp/g/codec.spl" <<'ALIAS_FIXTURE'
+fn flat_g_pools_dump():
+    var local_copy: [[i64]] = []
+    for entry in payload_flat:
+        local_copy.push(ast_i64_list_split(entry))
+    parts = parts.push(flat_pool_enc_i64_list(local_copy))
+    parts = parts.push(flat_pool_enc_text(payload_flat))
+fn flat_g_pools_restore(r):
+    payload = flat_pool_dec_i64_list(r)
+    payload_flat = flat_pool_dec_text(r)
+ALIAS_FIXTURE
+    run_scan "$_tmp/g/pools.spl" "$_tmp/g/codec.spl"
+    if [ "$SCAN_CHECKED" -ne 2 ] || [ -n "$SCAN_MISSING" ]; then
+        echo "selftest: reconstructed local payload should pass (checked=$SCAN_CHECKED missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+    # Removing the actual copy, encoding a different local, or splitting the
+    # wrong item must not make an empty/wrong payload look complete.
+    for mutation in missing_copy wrong_local wrong_item; do
+        case "$mutation" in
+            missing_copy) sed '/local_copy.push/d' "$_tmp/g/codec.spl" > "$_tmp/g/bad.spl" ;;
+            wrong_local) sed 's/flat_pool_enc_i64_list(local_copy)/flat_pool_enc_i64_list(other)/' "$_tmp/g/codec.spl" > "$_tmp/g/bad.spl" ;;
+            wrong_item) sed 's/ast_i64_list_split(entry)/ast_i64_list_split(other)/' "$_tmp/g/codec.spl" > "$_tmp/g/bad.spl" ;;
+        esac
+        run_scan "$_tmp/g/pools.spl" "$_tmp/g/bad.spl"
+        case "$SCAN_MISSING" in
+            *payload\(not-encoded\)*) : ;;
+            *) echo "selftest: $mutation must fail payload encoding (missing=$SCAN_MISSING)"; _fail=1 ;;
+        esac
+    done
+    # No association may cross a function boundary with a reused local name.
+    sed '/parts = parts.push(flat_pool_enc_i64_list(local_copy))/i\fn flat_other_pools_dump():' "$_tmp/g/codec.spl" > "$_tmp/g/bad.spl"
+    run_scan "$_tmp/g/pools.spl" "$_tmp/g/bad.spl"
+    case "$SCAN_MISSING" in
+        *payload\(not-encoded\)*) : ;;
+        *) echo "selftest: cross-function local must fail payload encoding (missing=$SCAN_MISSING)"; _fail=1 ;;
+    esac
+
     rm -rf "$_tmp"
     if [ "$_fail" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest failed)"
@@ -225,7 +409,7 @@ selftest() {
 case "${1:-}" in
     --selftest)
         selftest
-        echo "PASS — 5 selftest fixture(s) checked, all behaved as specified"
+        echo "PASS — 7 selftest fixture(s) checked, all behaved as specified"
         exit 0
         ;;
 esac

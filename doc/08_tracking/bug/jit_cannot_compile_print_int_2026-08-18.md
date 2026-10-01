@@ -1,4 +1,9 @@
 # JIT cannot compile `print(<int>)` — whole module silently de-JITs
+## Closed 2026-09-16 — Status FIXED 2026-08-18; all 12 strict-JIT probes green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-18 (same session) — real scope was ALL bare-assignment
 locals, not print: `stmt_lowering.rs` now mints `n = 5` as a function-scoped
@@ -58,3 +63,4 @@ formatting gap; a scoping/lowering defect in the builtin-call path.
 
 SIMPLE-CAPABILITY (JIT lowering gap). Fix in Cranelift lowering for the print
 builtin's non-text argument path.
+

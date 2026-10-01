@@ -1,4 +1,8 @@
 # wine_proton_runtime_spec.spl: `common.wine_proton_gate` / `common.wine_proton_runtime` modules do not exist
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Category:** GENUINE-BUG (missing implementation, not a stale rename)
@@ -81,3 +85,4 @@ explicit user approval per project rules; not done here).
 ## Affected specs
 
 - `test/01_unit/lib/common/wine_proton_runtime_spec.spl` (sole affected spec in this shard)
+

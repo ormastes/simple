@@ -131,9 +131,23 @@ pub(crate) fn exec_lambda(
                                 callee_val,
                                 Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                             ) {
-                                if let Some(Value::Object { class, mut fields }) = call_env.get(obj_name).cloned() {
-                                    Arc::make_mut(&mut fields).insert(field.clone(), callee_val);
-                                    call_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                // Same dead-alias copy-on-write the named-fn
+                                // write-back had (function_exec.rs): with
+                                // `get().cloned()` the frame still holds the
+                                // other handle, so `Arc::make_mut` copies the
+                                // object's whole field map on every lambda
+                                // `obj.field` write-back.
+                                let taken = call_env.take_frame_owned(obj_name);
+                                let took = taken.is_some();
+                                match taken.or_else(|| call_env.get(obj_name).cloned()) {
+                                    Some(Value::Object { class, mut fields }) => {
+                                        Arc::make_mut(&mut fields).insert(field.clone(), callee_val);
+                                        call_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                    }
+                                    Some(other) if took => {
+                                        call_env.restore_frame_owned(obj_name.clone(), other);
+                                    }
+                                    _ => {}
                                 }
                             }
                         }

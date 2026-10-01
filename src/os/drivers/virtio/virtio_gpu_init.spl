@@ -26,7 +26,7 @@ fn virtio_gpu_init_from_grant(drv_in: VirtioGpuDriver, grant: DeviceGrant) -> Vi
     """Initialize VirtIO-GPU device from a kernel DeviceGrant.
 
     Steps:
-      1. Map BAR0 via syscall 83
+      1. Map BAR0 via BDF/BAR-authorized syscall 88
       2. Reset device, negotiate features
       3. Set up controlq (queue 0) with DMA-allocated rings
       4. Allocate command/response DMA buffers
@@ -38,8 +38,6 @@ fn virtio_gpu_init_from_grant(drv_in: VirtioGpuDriver, grant: DeviceGrant) -> Vi
     """
     var drv = drv_in
     drv.notif_id = grant.irq_notification_id
-    drv.device_bdf = (grant.pci_bus as u64) << 16 | (grant.pci_dev as u64) << 8 | (grant.pci_func as u64)
-    drv.kernel_dma_available = true
     log_info("[virtio] " + "[virtio-gpu] grant bar0=0x{grant.bar0_phys} bar0_cap={grant.bar0_cap}")
 
     if grant.bar0_cap != 1 and (grant.bar0_phys & 1) == 0 and drv.try_map_modern_pci_caps(grant):
@@ -93,66 +91,59 @@ fn virtio_gpu_init_from_grant(drv_in: VirtioGpuDriver, grant: DeviceGrant) -> Vi
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Command buffer DMA alloc failed")
         drv.cmd_buf_virt = cmd_dma.unwrap_virt()
         drv.cmd_buf_phys = cmd_dma.unwrap_device()
-        drv.cmd_buf_allocation_id = cmd_dma.unwrap_allocation_id()
 
         val resp_dma = drv.alloc_dma(4096)
         if resp_dma.is_err():
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Response buffer DMA alloc failed")
         drv.resp_buf_virt = resp_dma.unwrap_virt()
         drv.resp_buf_phys = resp_dma.unwrap_device()
-        drv.resp_buf_allocation_id = resp_dma.unwrap_allocation_id()
         log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{drv.cmd_buf_virt} resp=0x{drv.resp_buf_virt}")
 
         val display_result = drv.cmd_get_display_info()
         if display_result.is_err():
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "GET_DISPLAY_INFO failed")
-        log_info("[virtio] " + "[virtio-gpu] Display: {drv.width}x{drv.height}")
+        log_info("[virtio] " + "[virtio-gpu] Display: {drv.get_width()}x{drv.get_height()}")
 
-        drv.resource_id = 1
-        drv.next_resource_id = 2
-        val create_result = drv.cmd_resource_create_2d_raw(drv.resource_id.to_u64(), drv.width.to_u64(), drv.height.to_u64())
+        drv.set_resource_ids(1, 2)
+        val create_result = drv.cmd_resource_create_2d_raw(drv.get_resource_id().to_u64(), drv.get_width().to_u64(), drv.get_height().to_u64())
         if create_result.is_err():
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "RESOURCE_CREATE_2D failed")
-        log_info("[virtio] " + "[virtio-gpu] Resource {drv.resource_id} created")
+        log_info("[virtio] " + "[virtio-gpu] Resource {drv.get_resource_id()} created")
 
-        drv.fb_size = drv.width.to_u64() * drv.height.to_u64() * 4
-        val fb_dma = drv.alloc_dma(drv.fb_size)
+        val fb_size = drv.get_width().to_u64() * drv.get_height().to_u64() * 4
+        val fb_dma = drv.alloc_dma(fb_size)
         if fb_dma.is_err():
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Framebuffer DMA alloc failed")
         drv.fb_virt = fb_dma.unwrap_virt()
         drv.fb_phys = fb_dma.unwrap_device()
-        drv.fb_allocation_id = fb_dma.unwrap_allocation_id()
         log_info("[virtio] " + "[virtio-gpu] FB virt=0x{drv.fb_virt} phys=0x{drv.fb_phys} size={drv.fb_size}")
 
         drv.clear(0x00000000)
 
-        val attach_result = drv.cmd_resource_attach_backing_raw(drv.resource_id.to_u64(), drv.fb_phys, drv.fb_size)
+        val attach_result = drv.cmd_resource_attach_backing_raw(drv.get_resource_id().to_u64(), drv.get_fb_phys(), drv.get_fb_size())
         if attach_result.is_err():
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "RESOURCE_ATTACH_BACKING failed")
         log_info("[virtio] " + "[virtio-gpu] Backing attached")
 
-        val scanout_result = drv.cmd_set_scanout_raw(0, drv.resource_id.to_u64(), drv.width.to_u64(), drv.height.to_u64())
+        val scanout_result = drv.cmd_set_scanout_raw(0, drv.get_resource_id().to_u64(), drv.get_width().to_u64(), drv.get_height().to_u64())
         if scanout_result.is_err():
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "SET_SCANOUT failed")
-        log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {drv.resource_id}")
+        log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {drv.get_resource_id()}")
 
-        drv.initialized = true
-        log_info("[virtio] " + "[virtio-gpu] Device initialized: {drv.width}x{drv.height} BGRA (modern)")
+        drv.set_initialized(true)
+        log_info("[virtio] " + "[virtio-gpu] Device initialized: {drv.get_width()}x{drv.get_height()} BGRA (modern)")
         return VirtioGpuInitResult(driver: drv, ok: true, err_msg: "")
 
     if (grant.bar0_phys & 1) != 0:
-        drv.is_io_bar = true
-        drv.bar0_port = (grant.bar0_phys & 0xFFFC).to_u16()
-        drv.bar0_virt = 0
-        log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{drv.bar0_port}")
+        drv.set_io_transport(true, grant.bar0_phys, 0)
+        log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{drv.get_bar0_port()}")
     else:
-        drv.is_io_bar = false
+        drv.set_io_transport(false, grant.bar0_phys, 0)
         val bar_result = syscall(83, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
         if bar_result < 0:
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "MapBar failed: error {bar_result}")
-        drv.bar0_virt = bar_result as u64
-        drv.bar0_port = 0
-        log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{drv.bar0_virt}")
+        drv.set_io_transport(false, grant.bar0_phys, bar_result as u64)
+        log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{drv.get_bar0_virt()}")
 
     drv.write_status(0)
     drv.write_status(STATUS_ACKNOWLEDGE)
@@ -183,82 +174,75 @@ fn virtio_gpu_init_from_grant(drv_in: VirtioGpuDriver, grant: DeviceGrant) -> Vi
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Command buffer DMA alloc failed")
     drv.cmd_buf_virt = cmd_dma.unwrap_virt()
     drv.cmd_buf_phys = cmd_dma.unwrap_device()
-    drv.cmd_buf_allocation_id = cmd_dma.unwrap_allocation_id()
 
     val resp_dma = drv.alloc_dma(4096)
     if resp_dma.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Response buffer DMA alloc failed")
     drv.resp_buf_virt = resp_dma.unwrap_virt()
     drv.resp_buf_phys = resp_dma.unwrap_device()
-    drv.resp_buf_allocation_id = resp_dma.unwrap_allocation_id()
     log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{drv.cmd_buf_virt} resp=0x{drv.resp_buf_virt}")
 
     val display_result = drv.cmd_get_display_info()
     if display_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "GET_DISPLAY_INFO failed")
-    log_info("[virtio] " + "[virtio-gpu] Display: {drv.width}x{drv.height}")
+    log_info("[virtio] " + "[virtio-gpu] Display: {drv.get_width()}x{drv.get_height()}")
 
-    drv.resource_id = 1
-    drv.next_resource_id = 2
-    val create_result = drv.cmd_resource_create_2d_raw(drv.resource_id.to_u64(), drv.width.to_u64(), drv.height.to_u64())
+    drv.set_resource_ids(1, 2)
+    val create_result = drv.cmd_resource_create_2d_raw(drv.get_resource_id().to_u64(), drv.get_width().to_u64(), drv.get_height().to_u64())
     if create_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "RESOURCE_CREATE_2D failed")
-    log_info("[virtio] " + "[virtio-gpu] Resource {drv.resource_id} created")
+    log_info("[virtio] " + "[virtio-gpu] Resource {drv.get_resource_id()} created")
 
-    drv.fb_size = drv.width.to_u64() * drv.height.to_u64() * 4
-    val fb_dma = drv.alloc_dma(drv.fb_size)
+    val fb_size = drv.get_width().to_u64() * drv.get_height().to_u64() * 4
+    val fb_dma = drv.alloc_dma(fb_size)
     if fb_dma.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Framebuffer DMA alloc failed")
     drv.fb_virt = fb_dma.unwrap_virt()
     drv.fb_phys = fb_dma.unwrap_device()
-    drv.fb_allocation_id = fb_dma.unwrap_allocation_id()
     log_info("[virtio] " + "[virtio-gpu] FB virt=0x{drv.fb_virt} phys=0x{drv.fb_phys} size={drv.fb_size}")
 
     drv.clear(0x00000000)
 
-    val attach_result = drv.cmd_resource_attach_backing_raw(drv.resource_id.to_u64(), drv.fb_phys, drv.fb_size)
+    val attach_result = drv.cmd_resource_attach_backing_raw(drv.get_resource_id().to_u64(), drv.get_fb_phys(), drv.get_fb_size())
     if attach_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "RESOURCE_ATTACH_BACKING failed")
     log_info("[virtio] " + "[virtio-gpu] Backing attached")
 
-    val scanout_result = drv.cmd_set_scanout_raw(0, drv.resource_id.to_u64(), drv.width.to_u64(), drv.height.to_u64())
+    val scanout_result = drv.cmd_set_scanout_raw(0, drv.get_resource_id().to_u64(), drv.get_width().to_u64(), drv.get_height().to_u64())
     if scanout_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "SET_SCANOUT failed")
-    log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {drv.resource_id}")
+    log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {drv.get_resource_id()}")
 
-    drv.initialized = true
-    log_info("[virtio] " + "[virtio-gpu] Device initialized: {drv.width_raw}x{drv.height_raw} BGRA")
+    drv.set_initialized(true)
+    log_info("[virtio] " + "[virtio-gpu] Device initialized: {drv.get_width()}x{drv.get_height()} BGRA")
     VirtioGpuInitResult(driver: drv, ok: true, err_msg: "")
 
 # ============================================================================
 # Legacy BAR0 Initialization
 # ============================================================================
 
-fn virtio_gpu_init_legacy(drv_in: VirtioGpuDriver, bar0_phys: u64, bar0_size: u64, notif_id: u64) -> VirtioGpuInitResult:
+fn virtio_gpu_init_legacy(drv_in: VirtioGpuDriver, device_bdf: u64,
+        bar0_phys: u64, bar0_size: u64,
+        notif_id: u64) -> VirtioGpuInitResult:
     """Initialize the legacy transport from scalar grant fields.
 
     Baremetal wrapper entries use this to avoid the current large-struct
     DeviceGrant ABI issue where fields after pci_subclass arrive as zero.
     """
     var drv = drv_in
-    drv.kernel_dma_available = false
-    drv.device_bdf = 0
     drv.notif_id = notif_id
     log_info("[virtio] " + "[virtio-gpu] scalar legacy bar0=0x{bar0_phys}")
 
     if (bar0_phys & 1) != 0:
-        drv.is_io_bar = true
-        drv.bar0_port = (bar0_phys & 0xFFFC).to_u16()
-        drv.bar0_virt = 0
-        log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{drv.bar0_port}")
+        drv.set_io_transport(true, bar0_phys, 0)
+        log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{drv.get_bar0_port()}")
     else:
-        drv.is_io_bar = false
+        drv.set_io_transport(false, bar0_phys, 0)
         val bar_result = syscall(83, bar0_phys, bar0_size, 0, 0, 0)
         if bar_result < 0:
             return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "MapBar failed: error {bar_result}")
-        drv.bar0_virt = bar_result as u64
-        drv.bar0_port = 0
-        log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{drv.bar0_virt}")
+        drv.set_io_transport(false, bar0_phys, bar_result as u64)
+        log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{drv.get_bar0_virt()}")
 
     drv.write_status(0)
     drv.write_status(STATUS_ACKNOWLEDGE)
@@ -288,49 +272,45 @@ fn virtio_gpu_init_legacy(drv_in: VirtioGpuDriver, bar0_phys: u64, bar0_size: u6
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Command buffer DMA alloc failed")
     drv.cmd_buf_virt = cmd_dma.unwrap_virt()
     drv.cmd_buf_phys = cmd_dma.unwrap_device()
-    drv.cmd_buf_allocation_id = cmd_dma.unwrap_allocation_id()
 
     val resp_dma = drv.alloc_dma(4096)
     if resp_dma.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Response buffer DMA alloc failed")
     drv.resp_buf_virt = resp_dma.unwrap_virt()
     drv.resp_buf_phys = resp_dma.unwrap_device()
-    drv.resp_buf_allocation_id = resp_dma.unwrap_allocation_id()
     log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{drv.cmd_buf_virt} resp=0x{drv.resp_buf_virt}")
 
     val display_result = drv.cmd_get_display_info()
     if display_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "GET_DISPLAY_INFO failed")
-    log_info("[virtio] " + "[virtio-gpu] Display: {drv.width}x{drv.height}")
+    log_info("[virtio] " + "[virtio-gpu] Display: {drv.get_width()}x{drv.get_height()}")
 
-    drv.resource_id = 1
-    drv.next_resource_id = 2
-    val create_result = drv.cmd_resource_create_2d_raw(drv.resource_id.to_u64(), drv.width.to_u64(), drv.height.to_u64())
+    drv.set_resource_ids(1, 2)
+    val create_result = drv.cmd_resource_create_2d_raw(drv.get_resource_id().to_u64(), drv.get_width().to_u64(), drv.get_height().to_u64())
     if create_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "RESOURCE_CREATE_2D failed")
-    log_info("[virtio] " + "[virtio-gpu] Resource {drv.resource_id} created")
+    log_info("[virtio] " + "[virtio-gpu] Resource {drv.get_resource_id()} created")
 
-    drv.fb_size = drv.width.to_u64() * drv.height.to_u64() * 4
-    val fb_dma = drv.alloc_dma(drv.fb_size)
+    val fb_size = drv.get_width().to_u64() * drv.get_height().to_u64() * 4
+    val fb_dma = drv.alloc_dma(fb_size)
     if fb_dma.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "Framebuffer DMA alloc failed")
     drv.fb_virt = fb_dma.unwrap_virt()
     drv.fb_phys = fb_dma.unwrap_device()
-    drv.fb_allocation_id = fb_dma.unwrap_allocation_id()
     log_info("[virtio] " + "[virtio-gpu] FB virt=0x{drv.fb_virt} phys=0x{drv.fb_phys} size={drv.fb_size}")
 
     drv.clear(0x00000000)
 
-    val attach_result = drv.cmd_resource_attach_backing_raw(drv.resource_id.to_u64(), drv.fb_phys, drv.fb_size)
+    val attach_result = drv.cmd_resource_attach_backing_raw(drv.get_resource_id().to_u64(), drv.get_fb_phys(), drv.get_fb_size())
     if attach_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "RESOURCE_ATTACH_BACKING failed")
     log_info("[virtio] " + "[virtio-gpu] Backing attached")
 
-    val scanout_result = drv.cmd_set_scanout_raw(0, drv.resource_id.to_u64(), drv.width.to_u64(), drv.height.to_u64())
+    val scanout_result = drv.cmd_set_scanout_raw(0, drv.get_resource_id().to_u64(), drv.get_width().to_u64(), drv.get_height().to_u64())
     if scanout_result.is_err():
         return VirtioGpuInitResult(driver: drv, ok: false, err_msg: "SET_SCANOUT failed")
-    log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {drv.resource_id}")
+    log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {drv.get_resource_id()}")
 
-    drv.initialized = true
-    log_info("[virtio] " + "[virtio-gpu] Device initialized: {drv.width_raw}x{drv.height_raw} BGRA")
+    drv.set_initialized(true)
+    log_info("[virtio] " + "[virtio-gpu] Device initialized: {drv.get_width()}x{drv.get_height()} BGRA")
     VirtioGpuInitResult(driver: drv, ok: true, err_msg: "")

@@ -1,7 +1,8 @@
 # Cranelift emits garbage data pointer for [u8] array literals under freestanding native-build
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -28,3 +29,4 @@ Any freestanding entry code using `[u8]` array literals for embedded machine cod
 
 ## Next Step
 Investigate cranelift lowering of array-literal data placement. Check `.rodata` section generation and relocation handling for freestanding targets. Data pointer may be misaligned or pointing to wrong section.
+

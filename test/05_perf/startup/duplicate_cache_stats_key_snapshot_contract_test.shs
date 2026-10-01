@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+owner="$repo_root/src/compiler/90.tools/duplicate_check/cache.spl"
+
+stats_body=$(sed -n '/    fn stats() -> text:/,/^fn new_token_cache_manager/p' "$owner")
+
+printf '%s\n' "$stats_body" | grep -Fq 'val cache_keys = self.cache.keys()' || {
+    echo "duplicate-cache stats lacks its single reusable key snapshot" >&2
+    exit 1
+}
+printf '%s\n' "$stats_body" | grep -Fq 'for key in cache_keys:' || {
+    echo "duplicate-cache stats traversal bypasses the reusable snapshot" >&2
+    exit 1
+}
+printf '%s\n' "$stats_body" | grep -Fq 'Cache: {cache_keys.len()} files, {total_tokens} tokens' || {
+    echo "duplicate-cache stats count bypasses the reusable snapshot" >&2
+    exit 1
+}
+
+snapshot_count=$(printf '%s\n' "$stats_body" | grep -Fc 'self.cache.keys()')
+if [ "$snapshot_count" -ne 1 ]; then
+    echo "duplicate-cache stats materializes $snapshot_count key snapshots, expected 1" >&2
+    exit 1
+fi
+
+echo "PASS: duplicate-cache stats reuses one key snapshot"

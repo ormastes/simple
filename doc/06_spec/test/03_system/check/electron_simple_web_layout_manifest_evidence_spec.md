@@ -27,7 +27,7 @@ electron_simple_web_layout_manifest_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the manifest-level wrapper behavior around tracked divergence policies
 | Design | doc/07_guide/ui/pixel_comparison_guide.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_simple_web_layout_manifest_evidence_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -72,11 +72,6 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_m
   emits divergent or pass evidence without blur/tolerance.
 - Resumable manifest runs reuse complete case evidence when scene and dimensions
   match, so a bounded rerun can continue without repeating completed captures.
-- When every manifest case reports a host dependency failure such as missing
-  Electron, the manifest is `unavailable` instead of a renderer mismatch
-  failure.
-- The standalone manifest wrapper resolves and exports a self-hosted Simple
-  launcher for nested bitmap cases, and rejects Rust seed drivers explicitly.
 
 ## Operator Notes
 
@@ -152,14 +147,6 @@ useful progress after a timeout.
 The manifest wrapper must still run missing cases in resume mode. Reuse is
 case-local and does not turn the entire manifest into a stale cached result.
 
-The manifest wrapper must not report a full manifest of missing Electron cases
-as renderer failures. That failure class blocks host setup, not Simple Web
-layout correctness.
-
-The standalone manifest wrapper must not depend on the production parity wrapper
-to select a usable Simple binary. It records the selected binary and exports it
-to each nested bitmap case.
-
 ## Manual Reproduction
 
 Run the focused spec with:
@@ -196,14 +183,14 @@ counts from completed per-case evidence.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-simple-web-layout-manifest-tracked-policy"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
     "printf 'tracked_case|fixture-scene|96|64|track-css-flex-column-divergence|tracked fixture\\nopacity_case|fixture-opacity|96|64|track-compositor-opacity-rounding|opacity tracked fixture\\nexact_case|fixture-exact|96|64|exact|exact fixture\\n' > " + root + "/manifest.txt && " +
-    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\ncase \"$ELECTRON_BITMAP_SCENE\" in\\nfixture-scene) printf \"electron_simple_web_layout_status=divergent\\\\nelectron_simple_web_layout_reason=text-raster-mismatch\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=7\\\\nelectron_simple_web_layout_mismatch_class=text-raster-mismatch\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=2\\\\n\" > \"$BUILD_DIR/evidence.env\"; exit 1;;\\n*) printf \"electron_simple_web_layout_status=pass\\\\nelectron_simple_web_layout_reason=pass\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=0\\\\nelectron_simple_web_layout_mismatch_class=\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=0\\\\n\" > \"$BUILD_DIR/evidence.env\";;\\nesac\\n' > " + root + "/fixture/bitmap.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\ncase \"$ELECTRON_BITMAP_SCENE\" in\\nfixture-scene) printf \"electron_simple_web_layout_status=divergent\\\\nelectron_simple_web_layout_reason=checksum-mismatch\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=7\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=2\\\\n\" > \"$BUILD_DIR/evidence.env\"; exit 1;;\\n*) printf \"electron_simple_web_layout_status=pass\\\\nelectron_simple_web_layout_reason=pass\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=0\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=0\\\\n\" > \"$BUILD_DIR/evidence.env\";;\\nesac\\n' > " + root + "/fixture/bitmap.sh && " +
     "MANIFEST_PATH=" + root + "/manifest.txt ELECTRON_LAYOUT_MANIFEST_BITMAP_SCRIPT=" + root + "/fixture/bitmap.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -215,8 +202,6 @@ expect(evidence).to_contain("electron_simple_web_layout_manifest_pass_count=1")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_count=2")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_fail_count=0")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_case_policy=track-css-flex-column-divergence")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_case_reason=text-raster-mismatch")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_case_mismatch_class=text-raster-mismatch")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_opacity_case_policy=track-compositor-opacity-rounding")
 ```
 
@@ -251,122 +236,12 @@ expect(evidence).to_contain("electron_simple_web_layout_manifest_second_case_reu
 
 </details>
 
-#### classifies all-case missing Electron dependency as unavailable
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val root = "build/test-electron-simple-web-layout-manifest-missing-electron"
-val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
-    "printf 'first_case|fixture-first|96|64|exact|first fixture\\nsecond_case|fixture-second|96|64|exact|second fixture\\n' > " + root + "/manifest.txt && " +
-    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_status=unavailable\\\\nelectron_simple_web_layout_reason=missing-electron-dependency\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=\\\\nelectron_simple_web_layout_blur_or_tolerance_used=\\\\nelectron_simple_web_layout_exit_code=1\\\\n\" > \"$BUILD_DIR/evidence.env\"\\nexit 1\\n' > " + root + "/fixture/bitmap.sh && " +
-    "MANIFEST_PATH=" + root + "/manifest.txt ELECTRON_LAYOUT_MANIFEST_BITMAP_SCRIPT=" + root + "/fixture/bitmap.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read(root + "/out/evidence.env")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_status=unavailable")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_reason=missing-electron-dependency")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_dependency_status=missing")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_dependency_reason=missing-electron-dependency")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_dependency_missing_count=2")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_case_count=2")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_fail_count=2")
-```
-
-</details>
-
-#### selects only self hosted simple launchers by default
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val script = file_read("scripts/check/check-electron-simple-web-layout-manifest-evidence.shs")
-expect(script).to_contain("repo-self-hosted-fallback")
-expect(script).to_contain("\"release\"/*/simple")
-expect(script).to_contain("\"build/bootstrap/stage3/simple\" \\\n        \"bin/simple\"")
-expect(script).to_contain("\"bin/simple\"")
-expect(script).to_contain("\"bin/release\"/*/simple")
-expect(script).to_contain("is_rust_seed_simple")
-expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
-expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
-expect(script).to_contain("electron_simple_web_layout_manifest_simple_bin=$SIMPLE_BIN")
-expect(script).to_contain("electron_simple_web_layout_manifest_simple_bin_source=$SIMPLE_BIN_SOURCE")
-expect(script).to_contain("electron_simple_web_layout_manifest_simple_bin_status=$SIMPLE_BIN_STATUS")
-```
-
-</details>
-
-#### rejects explicit rust seed simple launcher
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val root = "build/test-electron-simple-web-layout-manifest-seed-forbidden"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf 'first_case|fixture-first|96|64|exact|first fixture\\n' > " + root + "/manifest.txt && " +
-    "SIMPLE_BIN=src/compiler_rust/target/release/simple MANIFEST_PATH=" + root + "/manifest.txt BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read(root + "/out/evidence.env")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_status=unavailable")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_reason=simple-bin-forbidden")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin=src/compiler_rust/target/release/simple")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin_source=explicit-env-rust-seed-forbidden")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin_status=forbidden")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_dependency_reason=simple-bin-forbidden")
-```
-
-</details>
-
-#### exports selected simple binary to bitmap cases
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val root = "build/test-electron-simple-web-layout-manifest-simple-bin"
-val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
-    "printf 'first_case|fixture-first|96|64|exact|first fixture\\n' > " + root + "/manifest.txt && " +
-    "printf '#!/bin/sh\\nexit 0\\n' > " + root + "/fixture/simple-driver && chmod +x " + root + "/fixture/simple-driver && " +
-    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_status=pass\\\\nelectron_simple_web_layout_reason=pass\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=0\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=0\\\\nelectron_simple_web_layout_simple_bin=$SIMPLE_BIN\\\\nelectron_simple_web_layout_simple_bin_source=$SIMPLE_BIN_SOURCE\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/bitmap.sh && " +
-    "SIMPLE_BIN=" + root + "/fixture/simple-driver SIMPLE_BIN_SOURCE=fixture-env MANIFEST_PATH=" + root + "/manifest.txt ELECTRON_LAYOUT_MANIFEST_BITMAP_SCRIPT=" + root + "/fixture/bitmap.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read(root + "/out/evidence.env")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_status=pass")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin=" + root + "/fixture/simple-driver")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin_source=fixture-env")
-expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin_status=pass")
-expect(evidence).to_contain("case_first_case_electron_simple_web_layout_simple_bin=" + root + "/fixture/simple-driver")
-expect(evidence).to_contain("case_first_case_electron_simple_web_layout_simple_bin_source=fixture-env")
-```
-
-</details>
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

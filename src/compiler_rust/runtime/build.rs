@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[path = "src/runtime_export_scan.rs"]
 mod runtime_export_scan;
@@ -9,13 +10,17 @@ mod runtime_export_scan;
 mod runtime_signature_scan;
 
 fn main() {
+    emit_cdylib_soname();
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src/runtime_export_scan.rs");
     println!("cargo:rerun-if-changed=src/runtime_signature_scan.rs");
     println!("cargo:rerun-if-changed=../compiler/src/codegen/runtime_sffi.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -32,6 +37,10 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_collection_capture.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_collection_capture_impl.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_sdl2.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_sdl2_rust_provider.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_simd_dispatch.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
@@ -96,7 +105,8 @@ fn main() {
     }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, runtime_tls, &target_os);
+    let defined_symbols =
+        collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, runtime_tls, &target_os);
 
     generated.push_str("#[allow(clashing_extern_declarations)]\n");
     generated.push_str("mod exported_symbols {\n");
@@ -137,6 +147,45 @@ fn main() {
     fs::write(out_dir.join("runtime_symbol_entries.rs"), generated).expect("write runtime symbol entries");
 }
 
+/// Give the `cdylib` a real shared-library identity instead of leaving it a
+/// build by-product.
+///
+/// Without a SONAME an ELF consumer records the *path it was linked against*
+/// in `DT_NEEDED`, so the library cannot be installed, versioned, or resolved
+/// by `ld.so` from a system directory. `rustc-cdylib-link-arg` is the right
+/// lever because it applies ONLY to the cdylib link step: the `rlib` and
+/// `staticlib` outputs of this same crate are unaffected, which is what keeps
+/// the freestanding/static lane (`libsimple_runtime.a`, and the
+/// `simple-native-all` archive that Stage 4 actually links) byte-for-byte
+/// unchanged. Putting `-soname` in `.cargo/config.toml` rustflags would
+/// instead stamp it onto every crate in the workspace, including binaries.
+///
+/// The version is taken from `CARGO_PKG_VERSION_MAJOR` so the SONAME tracks a
+/// deliberate ABI break rather than every patch release.
+fn emit_cdylib_soname() {
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_else(|_| "0".to_string());
+    match target_os.as_str() {
+        // ELF platforms: DT_SONAME.
+        "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "dragonfly" => {
+            println!(
+                "cargo:rustc-cdylib-link-arg=-Wl,-soname,libsimple_runtime.so.{major}"
+            );
+        }
+        // Mach-O: the install name is the SONAME equivalent. `@rpath` keeps the
+        // dylib relocatable so a consumer picks it up via its own LC_RPATH.
+        "macos" | "ios" => {
+            println!(
+                "cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libsimple_runtime.{major}.dylib"
+            );
+        }
+        // PE/COFF has no SONAME concept: the DLL name is embedded in the import
+        // library that rustc emits alongside the DLL. Nothing to do.
+        _ => {}
+    }
+}
+
 /// Emit the canonical callable ABI for symbols that are also declared by the
 /// Rust runtime. A mismatched declaration is undefined behavior if it is ever
 /// called and triggers `clashing_extern_declarations` even when used only as a
@@ -168,6 +217,11 @@ fn runtime_symbol_declaration(
         "rt_atomic_bool_fetch_and" => "(handle: i64, value: bool) -> bool",
         "rt_atomic_bool_fetch_or" => "(handle: i64, value: bool) -> bool",
         "rt_atomic_bool_fetch_not" => "(handle: i64) -> bool",
+        // The callable SFFI tier models booleans as I8, but this linker-anchor
+        // declaration shares a scope with the Rust wrapper's C `bool` ABI.
+        // Keep the declaration identical to the wrapper to avoid two
+        // incompatible Rust declarations for one link name.
+        "rt_progress_tls_is_initialized" => "() -> bool",
         "rt_atomic_int_compare_exchange" => "(handle: i64, current: i64, new_value: i64) -> bool",
         "rt_atomic_flag_test_and_set" => "(handle: i64) -> bool",
         "rt_atomic_flag_load" => "(handle: i64) -> bool",
@@ -226,6 +280,7 @@ fn compile_c_runtime_sources() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
     let mut c_sources = vec![
+        "runtime_backend_plugin.c",
         "runtime_memory.c",
         "runtime_time.c",
         "runtime_timestamp.c",
@@ -236,8 +291,12 @@ fn compile_c_runtime_sources() {
         "runtime_rocm.c",
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
+        "runtime_file_view.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        // Shared capture state uses this runtime owner's text and builder ABI.
+        "runtime_collection_capture.c",
+        "runtime_sdl2_rust_provider.c",
         "runtime_simd_dispatch.c",
         // rt_opengl_* / rt_oneapi_* (interpreter_extern_registration_lanes.md,
         // lane R2): both families were entirely absent from this list, so the
@@ -318,13 +377,54 @@ fn compile_c_runtime_sources() {
         // exact-equivalent since every value it deep-frees is a string.
         // Re-added after the tree-wipe restore ae55a746719 dropped it again.
         "runtime_process_owned.c",
+        // Env-gated SIGPROF PC sampler (diagnostic tooling; see the TU header).
+        // This list is NOT interpreter-only: the cc archive below is bundled
+        // WHOLESALE into this crate's staticlib/cdylib outputs, and the
+        // bootstrap stage2/stage3 link selects libsimple_native_all.a -- which
+        // embeds those objects -- as its runtime. Without this row the sampler
+        // silently vanishes from every bootstrap-produced compiler binary even
+        // though the seed-lane (tools.rs) and pure-Simple (runtime_compiler.spl)
+        // lists both carry it (measured 2026-09-19: stage2 at 12:47 had zero
+        // prof symbols and no SIMPLE_PROF_SAMPLE_FILE string; the archive
+        // member only survives the link because native_project/linker.rs
+        // forces prof_sample_force_link as a retention root). Zero-cost
+        // unless SIMPLE_PROF_SAMPLE_FILE is set; empty TU off Linux
+        // x86_64/aarch64; no symbol overlap with this crate's Rust rt_* owners.
+        "runtime_prof_sample.c",
+        // Narrow Stage2 provider: runtime.c/runtime_native.c cannot be linked
+        // into this Rust archive without colliding with Rust-owned rt_* APIs.
+        "runtime_secure_staging.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
     }
 
+    // Linux SOSIX owns a real io_uring provider in the runtime C layer.  Keep
+    // the dependency hermetic: the small liburing subset is vendored in this
+    // repository, so discovery must never consult system pkg-config or link
+    // a host liburing that can disagree with the headers.  The Rust facade
+    // below remains the owner of the rt_driver_* ABI; the C layer contributes
+    // only the spl_driver vtable and backend implementation.
+    let linux_uring = target_os == "linux";
+    if linux_uring {
+        c_sources.push("platform/async_driver.c");
+        c_sources.push("platform/async_linux_uring.c");
+        c_sources.push("vendor/liburing/src/queue.c");
+        c_sources.push("vendor/liburing/src/register.c");
+        c_sources.push("vendor/liburing/src/setup.c");
+        c_sources.push("vendor/liburing/src/syscall.c");
+    }
+
     let mut build = cc::Build::new();
+    build.define("SIMPLE_RUNTIME_RUST_COLLECTION_CAPTURE_PROVIDER", None);
     build.opt_level(2).warnings(false).cargo_metadata(false);
+    if linux_uring {
+        build.include(runtime_c_dir.join("platform"));
+        build.include(runtime_c_dir.join("vendor/liburing/include"));
+        build.define("SPL_HAS_IO_URING", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_EPOLL", None);
+    }
     build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
     // See the runtime_audio.c comment above: this crate doesn't compile
     // runtime.c, so spl_array_get/spl_as_float are unavailable here.
@@ -335,17 +435,49 @@ fn compile_c_runtime_sources() {
     // Bootstrap-only compatibility: the seed cannot link the canonical Pure
     // Simple timestamp module. Stage4 never enables this provider.
     build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
-    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    if target_env == "msvc" {
+    // See the runtime_process.c comment above: the Rust runtime crate already
+    // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
+    build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
+    build.define("SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER", None);
+    let target_os_for_heap_counters = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os_for_heap_counters == "windows" {
         // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks
         // are __attribute__((weak)) so the Rust accounting wins whenever both
         // are linked. MSVC has no weak attribute, so on this lane the C
         // fallbacks are STRONG and collide with the Rust definitions in
         // value::heap -- LNK2005, measured on x86_64-pc-windows-msvc. The Rust
         // runtime always provides them here (mem_snapshot.rs imports both), so
-        // suppress the C fallbacks rather than duplicate them. Gated to msvc:
-        // the GNU/Darwin lanes keep the weak fallbacks byte-unchanged.
+        // suppress the C fallbacks rather than duplicate them.
+        //
+        // Keyed on target_os, NOT target_env == "msvc" (2026-09-07). The
+        // earlier msvc-only gate reasoned that "the GNU/Darwin lanes keep the
+        // weak fallbacks byte-unchanged", but that holds only for the *Unix*
+        // GNU lanes. runtime_memtrack.c selects its weak branch with
+        // `#elif (__GNUC__ || __clang__) && !defined(_WIN32)`, so
+        // x86_64-pc-windows-gnu skips that branch and lands on the same STRONG
+        // definitions MSVC gets -- deliberately, because a GNU-style weak
+        // symbol on MinGW becomes a `.weak.NAME.ref` COFF alias that ld drops
+        // under --gc-sections (documented at that file's `#else`). With the
+        // suppression gated to msvc, MinGW therefore got the strong C
+        // definitions AND the Rust ones, failing the seed link with:
+        //   multiple definition of `rt_heap_peak_bytes';
+        //   simple_runtime...rcgu.o: first defined here
+        // measured on x86_64-pc-windows-gnu / GCC 16.2 running
+        // `cargo build --profile bootstrap -p simple-driver`.
+        //
+        // Both Windows ABIs need the same suppression for the same reason, so
+        // the condition is the OS. Unix GNU and Darwin still take the weak
+        // branch and are unaffected.
         build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
+        // Same reasoning, same precedent, for rt_simd_aes_round_u8x16 /
+        // rt_simd_aes_round_last_u8x16: runtime_simd_dispatch.c's GNU/Clang
+        // weak definitions already yield to
+        // value/simd_aes_ops.rs's `#[no_mangle]` ones on Unix/Darwin. MSVC
+        // has no weak attribute and Windows-GNU drops a weak COFF alias under
+        // --gc-sections (see runtime_memtrack.c's identical note), so both
+        // Windows ABIs need the C definitions suppressed outright rather than
+        // relying on weak-symbol precedence.
+        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16", None);
     }
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
@@ -372,41 +504,51 @@ fn compile_c_runtime_sources() {
             build.file(src_path);
         }
     }
+    build.define("SIMPLE_RUNTIME_RUST_SDL_PROVIDER", None);
     build.compile("runtime_sffi_c");
 
-    // Cocoa has one process-wide owner: the dynamic runtime. A normal
-    // rustc-link-lib would also bundle this provider into native-all through
-    // the runtime rlib. Link and export it only when producing the cdylib.
+    // hosted_cocoa.c is Objective-C behind a .c extension. Keep its symbols
+    // private to this Rust crate: cocoa_dynload_owner.rs supplies the public
+    // rt_cocoa_* exports from the cdylib. A native-all archive must not carry
+    // a second public Cocoa provider.
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
         let cocoa = runtime_c_dir.join("hosted_cocoa.c");
         if cocoa.exists() {
+            // LLVM 23 emits objc_msgSendClass$... references for this file;
+            // those class dispatch stubs are unresolved when rustc links its
+            // macOS 11 cdylib. Xcode Clang emits the supported dispatch ABI.
+            let apple_clang = Command::new("xcrun")
+                .args(["--find", "clang"])
+                .output()
+                .expect("xcrun is required to compile the macOS Cocoa provider");
+            assert!(apple_clang.status.success(), "xcrun could not find Xcode Clang");
+            let apple_clang = String::from_utf8(apple_clang.stdout)
+                .expect("xcrun returned a non-UTF-8 compiler path");
+            let apple_clang = apple_clang.trim();
+            assert!(!apple_clang.is_empty(), "xcrun returned an empty compiler path");
             let mut objc = cc::Build::new();
             objc.opt_level(2).warnings(false).cargo_metadata(false);
+            objc.compiler(apple_clang);
+            objc.flag("-mmacosx-version-min=11.0");
             // New upstream Clang can emit objc_msgSendClass selector stubs
             // that the installed Apple linker cannot synthesize. Use ordinary
             // libobjc calls so the bootstrap's Clang and SDK can differ.
             objc.flag_if_supported("-fno-objc-msgsend-class-selector-stubs");
             objc.flag("-xobjective-c").file(cocoa);
-            objc.compile("runtime_sffi_objc");
-            let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
-            println!("cargo:rustc-cdylib-link-arg=-Wl,-force_load,{out_dir}/libruntime_sffi_objc.a");
-            println!("cargo:rustc-cdylib-link-arg=-Wl,-framework,Cocoa");
             for name in [
-                "window_new",
-                "window_resize",
-                "window_close",
-                "layer_create",
-                "layer_fill_rect",
-                "layer_present",
-                "layer_free",
-                "layer_read_pixel",
-                "layer_blend_rect",
-                "layer_blur",
-                "layer_gradient_v",
-                "event_pump",
+                "window_new", "window_resize", "window_close", "layer_create",
+                "layer_fill_rect", "layer_present", "layer_free",
+                "layer_read_pixel", "layer_blend_rect", "layer_blur",
+                "layer_gradient_v", "event_pump",
             ] {
-                println!("cargo:rustc-cdylib-link-arg=-Wl,-exported_symbol,_rt_cocoa_{name}");
+                objc.define(
+                    &format!("rt_cocoa_{name}"),
+                    Some(format!("simple_cocoa_impl_{name}").as_str()),
+                );
             }
+            objc.compile("runtime_sffi_objc");
+            println!("cargo:rustc-link-lib=static=runtime_sffi_objc");
+            println!("cargo:rustc-link-lib=framework=Cocoa");
         }
     }
 
@@ -464,8 +606,10 @@ fn collect_defined_runtime_symbols(
             if !runtime_regex && entry_path.file_name().and_then(|name| name.to_str()) == Some("regex.rs") {
                 continue;
             }
-            // net_tls.rs is compiled only with runtime-tls. Do not register
-            // its exports when the module is absent from the runtime archive.
+            // `net_tls.rs` is compiled only with `runtime-tls`. A textual
+            // export scan used to register its no_mangle names even when the
+            // module was cfg-disabled, creating table relocations to symbols
+            // that could not exist in the archive.
             if !runtime_tls && entry_path.file_name().and_then(|name| name.to_str()) == Some("net_tls.rs") {
                 continue;
             }
@@ -494,6 +638,9 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        // The narrow provider includes these definitions; export scanning does
+        // not preprocess includes, so name its shared implementation directly.
+        "runtime_collection_capture_impl.h",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
     ];

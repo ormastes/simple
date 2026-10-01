@@ -1,0 +1,264 @@
+# Independent before/after caret+pixel oracle for the pinned GUI input scene.
+#
+# The images below are built from LITERAL rectangles only — background, glyph
+# ink cells whose geometry comes from the native glyph contract's resolved
+# subset (NEVER from widget DrawIR, the 5x7 charset metrics, or any backend
+# output), and the caret rectangle. This is the visual half of
+# gui_input_qualification.spl: that module proves source state (click, keys,
+# ACB value, caret index 2); this module pins what the two states must look
+# like once a physical capture exists.
+
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_hash_sha256}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use std.common.encoding.font_registry.{
+    simpleos_default_font_asset_candidate}
+use common.renderdoc.final_output_pixels.{
+    FinalOutputCapture, final_output_canonical_rgba}
+use common.renderdoc.gui_input_scene.{
+    GUI_INPUT_SCENE_ID, GUI_INPUT_PLACEHOLDER, GUI_INPUT_EXPECTED_VALUE,
+    GUI_INPUT_WIDTH, GUI_INPUT_HEIGHT}
+use common.renderdoc.gui_input_qualification.{GUI_INPUT_PINNED_SOURCE_SHA256}
+use common.renderdoc.native_glyph_contract.{
+    NativeGlyphContractSubset, native_glyph_contract_resolve,
+    native_glyph_contract_preflight}
+
+pub val GUI_INPUT_PIXEL_FIXTURE_ID: text = GUI_INPUT_SCENE_ID
+# Receipt-domain binding for this oracle: the pinned scene input state.
+pub val GUI_INPUT_PIXEL_FIXTURE_DIGEST: text = GUI_INPUT_PINNED_SOURCE_SHA256
+pub val GUI_INPUT_PIXEL_STATE_INPUT_SHA256: text =
+    "9fa48b0776fbc9b456a6721624ba256c2574305c0f22185638e710cf3785fd15"
+pub val GUI_INPUT_PIXEL_WIDTH: i32 = GUI_INPUT_WIDTH
+pub val GUI_INPUT_PIXEL_HEIGHT: i32 = GUI_INPUT_HEIGHT
+pub val GUI_INPUT_PIXEL_TEXT_COLOR: i64 = 0x172033
+pub val GUI_INPUT_PIXEL_CARET_COLOR: i64 = 0x111111
+pub val GUI_INPUT_PIXEL_TEXT_ORIGIN_X: i64 = 5
+pub val GUI_INPUT_PIXEL_TEXT_TOP: i64 = 10
+pub val GUI_INPUT_PIXEL_TEXT_SIZE_PX: i64 = 12
+pub val GUI_INPUT_PIXEL_CARET_Y: i64 = 3
+pub val GUI_INPUT_PIXEL_CARET_WIDTH: i64 = 2
+pub val GUI_INPUT_PIXEL_CARET_HEIGHT: i64 = 34
+# Pinned expectation for the after-state caret origin x:
+# 5 + snap(pen of glyph index 2) at 12px in the pinned face.
+pub val GUI_INPUT_PIXEL_CARET_X: i64 = 19
+pub val GUI_INPUT_PIXEL_BEFORE_RGBA_SHA256: text =
+    "d50aef32301c33f5e08e70d35bd5e4d89d046a09080f33aa38190a51a390fbdd"
+pub val GUI_INPUT_PIXEL_AFTER_RGBA_SHA256: text =
+    "6ad95967d1a6410212ea9e26a6c669d09a2bcd26ce9f9018470dd39022eb5591"
+
+# NFR-2D-003: font-edge tolerances declared BEFORE any device capture. They
+# are fixture-specific policy and must never be widened from observed
+# mismatches; a failing capture fails, the tolerance does not move.
+pub val GUI_INPUT_FONT_EDGE_MAX_CHANNEL_DELTA: i64 = 16
+pub val GUI_INPUT_FONT_EDGE_MEAN_CHANNEL_DELTA: i64 = 4
+
+struct GuiInputPixelOracleImage:
+    rgba: [i64]
+    edge_mask: [bool]
+    caret_x: i64
+
+pub struct GuiInputPixelVerdict:
+    passed: bool
+    exact_mismatch_pixels: i64
+    edge_excess_pixels: i64
+    edge_channel_abs_sum: i64
+    edge_channel_count: i64
+    edge_max_channel_delta: i64
+
+fn _gui_input_pixel_abs(value: i64) -> i64:
+    if value < 0: 0 - value else: value
+
+# Milli-pixel to pixel snap, positive half-up — the same rounding the run
+# measurement lane uses when it snaps the exact cumulative pen.
+fn _gui_input_pixel_snap(milli: i64) -> i64:
+    ((milli as f64 / 1000.0) + 0.5) as i64
+
+fn _gui_input_pixel_channel(color: i64, shift: i64) -> i64:
+    (color >> shift) & 255
+
+fn _gui_input_pixel_subset(text: text) -> Result<NativeGlyphContractSubset, text>:
+    val resolved = native_glyph_contract_resolve(
+        text, simpleos_default_font_asset_candidate(),
+        GUI_INPUT_PIXEL_TEXT_SIZE_PX, 0)?
+    native_glyph_contract_preflight(resolved)
+
+fn _gui_input_pixel_fill_rect(rgba: [i64], edge_mask: [bool],
+    x0: i64, y0: i64, x1: i64, y1: i64, color: i64, masked: bool) -> i64:
+    var filled: i64 = 0
+    var y = y0
+    while y < y1 and y < GUI_INPUT_PIXEL_HEIGHT.to_i64():
+        var x = x0
+        while x < x1 and x < GUI_INPUT_PIXEL_WIDTH.to_i64():
+            if x >= 0 and y >= 0:
+                val offset = (y * GUI_INPUT_PIXEL_WIDTH.to_i64() + x) * 4
+                rgba[offset] = _gui_input_pixel_channel(color, 16)
+                rgba[offset + 1] = _gui_input_pixel_channel(color, 8)
+                rgba[offset + 2] = _gui_input_pixel_channel(color, 0)
+                rgba[offset + 3] = 255
+                if masked:
+                    edge_mask[y * GUI_INPUT_PIXEL_WIDTH.to_i64() + x] = true
+                filled = filled + 1
+            x = x + 1
+        y = y + 1
+    filled
+
+fn _gui_input_pixel_image(text: text, caret_index: i64,
+    pinned_sha: text) -> Result<GuiInputPixelOracleImage, text>:
+    if text.len() == 0 or caret_index < 0 or caret_index > text.len():
+        return Err("gui-input-pixel-state-invalid")
+    val subset = _gui_input_pixel_subset(text)?
+    var rgba: [i64] = []
+    var edge_mask: [bool] = []
+    var pixel: i64 = 0
+    while pixel < GUI_INPUT_PIXEL_WIDTH.to_i64() * GUI_INPUT_PIXEL_HEIGHT.to_i64():
+        rgba.push(255)
+        rgba.push(255)
+        rgba.push(255)
+        rgba.push(255)
+        edge_mask.push(false)
+        pixel = pixel + 1
+    # Glyph ink cells: one literal rectangle per resolved glyph, covering the
+    # snapped pen span of its advance at the pinned text line. These pixels
+    # are font-edge pixels and carry only the declared tolerance.
+    var index: i64 = 0
+    while index < subset.glyphs.len():
+        val glyph = subset.glyphs[index]
+        val pen: i64 = glyph.pen_milli_px
+        val advance: i64 = glyph.advance_milli_px
+        val x0 = GUI_INPUT_PIXEL_TEXT_ORIGIN_X + _gui_input_pixel_snap(pen)
+        val x1 = GUI_INPUT_PIXEL_TEXT_ORIGIN_X +
+            _gui_input_pixel_snap(pen + advance)
+        _gui_input_pixel_fill_rect(rgba, edge_mask, x0,
+            GUI_INPUT_PIXEL_TEXT_TOP, x1,
+            GUI_INPUT_PIXEL_TEXT_TOP + GUI_INPUT_PIXEL_TEXT_SIZE_PX,
+            GUI_INPUT_PIXEL_TEXT_COLOR, true)
+        index = index + 1
+    # Caret rectangle: exact pixels, never font-edge. caret index 2 means the
+    # caret sits at the pen of glyph index 2 (after "AC" of "ACB").
+    var caret_x: i64 = GUI_INPUT_PIXEL_TEXT_ORIGIN_X
+    if caret_index < subset.glyphs.len():
+        val at_caret = subset.glyphs[caret_index]
+        val caret_pen: i64 = at_caret.pen_milli_px
+        caret_x = GUI_INPUT_PIXEL_TEXT_ORIGIN_X +
+            _gui_input_pixel_snap(caret_pen)
+    elif subset.glyphs.len() > 0:
+        val last = subset.glyphs[subset.glyphs.len() - 1]
+        val last_pen: i64 = last.pen_milli_px
+        val last_advance: i64 = last.advance_milli_px
+        caret_x = GUI_INPUT_PIXEL_TEXT_ORIGIN_X +
+            _gui_input_pixel_snap(last_pen + last_advance)
+    _gui_input_pixel_fill_rect(rgba, edge_mask, caret_x,
+        GUI_INPUT_PIXEL_CARET_Y, caret_x + GUI_INPUT_PIXEL_CARET_WIDTH,
+        GUI_INPUT_PIXEL_CARET_Y + GUI_INPUT_PIXEL_CARET_HEIGHT,
+        GUI_INPUT_PIXEL_CARET_COLOR, false)
+    if caret_x != GUI_INPUT_PIXEL_CARET_X:
+        return Err("gui-input-pixel-caret-position-diverged")
+    if bytes_to_hex(sha256_bytes(rgba)) != pinned_sha:
+        return Err("gui-input-pixel-oracle-image-digest-mismatch")
+    Ok(GuiInputPixelOracleImage(rgba: rgba, edge_mask: edge_mask,
+        caret_x: caret_x))
+
+fn gui_input_pixel_before_oracle() -> Result<GuiInputPixelOracleImage, text>:
+    """Placeholder state: the pinned "Type" placeholder, no caret."""
+    _gui_input_pixel_image(GUI_INPUT_PLACEHOLDER, 0,
+        GUI_INPUT_PIXEL_BEFORE_RGBA_SHA256)
+
+fn gui_input_pixel_after_oracle() -> Result<GuiInputPixelOracleImage, text>:
+    """Typed state: the pinned "ACB" value with caret index 2."""
+    _gui_input_pixel_image(GUI_INPUT_EXPECTED_VALUE, 2,
+        GUI_INPUT_PIXEL_AFTER_RGBA_SHA256)
+
+fn _gui_input_pixel_compare(actual: [i64],
+    oracle: GuiInputPixelOracleImage) -> Result<GuiInputPixelVerdict, text>:
+    val expected_length =
+        GUI_INPUT_PIXEL_WIDTH.to_i64() * GUI_INPUT_PIXEL_HEIGHT.to_i64() * 4
+    if actual.len() != expected_length or oracle.rgba.len() != expected_length:
+        return Err("gui-input-pixel-length-mismatch")
+    var exact_mismatch: i64 = 0
+    var edge_excess: i64 = 0
+    var edge_sum: i64 = 0
+    var edge_count: i64 = 0
+    var edge_max: i64 = 0
+    var pixel: i64 = 0
+    while pixel < oracle.edge_mask.len():
+        val offset = pixel * 4
+        var channel = 0
+        while channel < 4:
+            val value = actual[offset + channel]
+            if value < 0 or value > 255:
+                return Err("gui-input-pixel-canonical-byte-out-of-range")
+            channel = channel + 1
+        if oracle.edge_mask[pixel]:
+            var pixel_excess = actual[offset + 3] != 255
+            channel = 0
+            while channel < 3:
+                val delta = _gui_input_pixel_abs(
+                    actual[offset + channel] - oracle.rgba[offset + channel])
+                edge_sum = edge_sum + delta
+                edge_count = edge_count + 1
+                if delta > edge_max: edge_max = delta
+                if delta > GUI_INPUT_FONT_EDGE_MAX_CHANNEL_DELTA:
+                    pixel_excess = true
+                channel = channel + 1
+            if pixel_excess: edge_excess = edge_excess + 1
+        elif (actual[offset] != oracle.rgba[offset] or
+                actual[offset + 1] != oracle.rgba[offset + 1] or
+                actual[offset + 2] != oracle.rgba[offset + 2] or
+                actual[offset + 3] != 255):
+            exact_mismatch = exact_mismatch + 1
+        pixel = pixel + 1
+    Ok(GuiInputPixelVerdict(
+        passed: exact_mismatch == 0 and edge_excess == 0 and
+            edge_sum <= edge_count * GUI_INPUT_FONT_EDGE_MEAN_CHANNEL_DELTA,
+        exact_mismatch_pixels: exact_mismatch,
+        edge_excess_pixels: edge_excess,
+        edge_channel_abs_sum: edge_sum,
+        edge_channel_count: edge_count,
+        edge_max_channel_delta: edge_max))
+
+fn _gui_input_pixel_capture_domain(capture: FinalOutputCapture
+) -> Result<FinalOutputCapture, text>:
+    val metadata = capture.metadata
+    if metadata.fixture_id != GUI_INPUT_PIXEL_FIXTURE_ID or
+        metadata.fixture_digest != GUI_INPUT_PIXEL_FIXTURE_DIGEST or
+        metadata.width != GUI_INPUT_PIXEL_WIDTH.to_i64() or
+        metadata.height != GUI_INPUT_PIXEL_HEIGHT.to_i64() or
+        metadata.crop_x != 0 or metadata.crop_y != 0 or
+        metadata.crop_width != GUI_INPUT_PIXEL_WIDTH.to_i64() or
+        metadata.crop_height != GUI_INPUT_PIXEL_HEIGHT.to_i64():
+        return Err("gui-input-pixel-capture-domain-mismatch")
+    Ok(capture)
+
+fn gui_input_pixel_before_compare(
+    capture: FinalOutputCapture) -> Result<GuiInputPixelVerdict, text>:
+    """Compare a physical BEFORE-state capture against the placeholder oracle."""
+    val checked = _gui_input_pixel_capture_domain(capture)?
+    val oracle = gui_input_pixel_before_oracle()?
+    val actual = match final_output_canonical_rgba(checked):
+        case Ok(value): value
+        case Err(error): return Err("gui-input-pixel-capture-" + error.code)
+    _gui_input_pixel_compare(actual, oracle)
+
+fn gui_input_pixel_after_compare(
+    capture: FinalOutputCapture) -> Result<GuiInputPixelVerdict, text>:
+    """Compare a physical AFTER-state capture against the ACB+caret oracle."""
+    val checked = _gui_input_pixel_capture_domain(capture)?
+    val oracle = gui_input_pixel_after_oracle()?
+    val actual = match final_output_canonical_rgba(checked):
+        case Ok(value): value
+        case Err(error): return Err("gui-input-pixel-capture-" + error.code)
+    _gui_input_pixel_compare(actual, oracle)
+
+export GUI_INPUT_PIXEL_FIXTURE_ID, GUI_INPUT_PIXEL_FIXTURE_DIGEST,
+    GUI_INPUT_PIXEL_STATE_INPUT_SHA256, GUI_INPUT_PIXEL_WIDTH,
+    GUI_INPUT_PIXEL_HEIGHT, GUI_INPUT_PIXEL_TEXT_COLOR,
+    GUI_INPUT_PIXEL_CARET_COLOR, GUI_INPUT_PIXEL_TEXT_ORIGIN_X,
+    GUI_INPUT_PIXEL_TEXT_TOP, GUI_INPUT_PIXEL_TEXT_SIZE_PX,
+    GUI_INPUT_PIXEL_CARET_Y, GUI_INPUT_PIXEL_CARET_WIDTH,
+    GUI_INPUT_PIXEL_CARET_HEIGHT, GUI_INPUT_PIXEL_CARET_X,
+    GUI_INPUT_PIXEL_BEFORE_RGBA_SHA256, GUI_INPUT_PIXEL_AFTER_RGBA_SHA256,
+    GUI_INPUT_FONT_EDGE_MAX_CHANNEL_DELTA,
+    GUI_INPUT_FONT_EDGE_MEAN_CHANNEL_DELTA, GuiInputPixelOracleImage,
+    GuiInputPixelVerdict,
+    gui_input_pixel_before_oracle, gui_input_pixel_after_oracle,
+    gui_input_pixel_before_compare, gui_input_pixel_after_compare

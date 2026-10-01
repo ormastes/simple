@@ -1,0 +1,118 @@
+"""
+# Option presence-method dispatch Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md
+
+## Overview
+
+`jit_is_some_is_none_method_dispatch_gap_2026-08-17` reported two distinct JIT
+failures for `.is_some()` / `.is_none()`, both with the tree-walk interpreter
+correct:
+
+- **Shape A** — a plain local receiver died with
+  `Runtime error: Function 'is_some' not found` (exit 70).
+- **Shape B** — a function-call receiver returned a raw untagged value instead
+  of a bool: `zero_i64().is_some()` -> `nil`, `.is_none()` -> `0`,
+  `absent_i64().is_some()` -> `0`, `.is_none()` -> `nil`.
+
+The record stresses that these were **wrong for PRESENT and ABSENT receivers
+alike**, which is what distinguishes them from the separate `rt_is_none`
+zero/nil bit-pattern collision. The payload is deliberately `0` throughout:
+a falsy payload is the case where a presence test and a truthiness test
+disagree, so a spec using a non-zero payload would not discriminate.
+
+Re-checked 2026-09-12: all four rows correct on both lanes, both receiver
+shapes.
+
+## Syntax
+
+```simple
+val o: i64? = 0
+o.is_some()            # true — a present but falsy payload
+zero_i64().is_some()   # true — call-result receiver
+```
+
+"""
+
+use std.spec
+
+
+fn zero_i64() -> i64?:
+    return 0
+
+
+fn absent_i64() -> i64?:
+    return nil
+
+
+# ============================================================================
+# Test Group 1: Shape A — plain local receiver
+# ============================================================================
+
+describe "presence methods on a plain local receiver":
+    """
+    ## Shape A
+
+    This shape failed CLOSED (unresolved symbol, exit 70), so it could not
+    produce a wrong answer — only a dead run.
+    """
+
+    it "reports a present falsy payload as some":
+        val o: i64? = 0
+        expect(o.is_some()).to_equal(true)
+
+    it "reports a present falsy payload as not none":
+        val o: i64? = 0
+        expect(o.is_none()).to_equal(false)
+
+    it "reports an absent local as none":
+        val o: i64? = nil
+        expect(o.is_none()).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: Shape B — call-result receiver
+# ============================================================================
+
+describe "presence methods on a call-result receiver":
+    """
+    ## Shape B
+
+    The four rows of the record's own table, in order. Each returned a raw
+    untagged `nil`/`0` under the JIT instead of a bool.
+    """
+
+    it "zero_i64().is_some() is true":
+        expect(zero_i64().is_some()).to_equal(true)
+
+    it "zero_i64().is_none() is false":
+        expect(zero_i64().is_none()).to_equal(false)
+
+    it "absent_i64().is_some() is false":
+        expect(absent_i64().is_some()).to_equal(false)
+
+    it "absent_i64().is_none() is true":
+        expect(absent_i64().is_none()).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: the record's own control
+# ============================================================================
+
+describe "general bool boxing control":
+    """
+    ## Control
+
+    The record used this to show bool boxing works generally, so a failure
+    above is dispatch-specific rather than a broken bool path.
+    """
+
+    it "returns a real bool from an unrelated method":
+        expect("ab".contains("a")).to_equal(true)

@@ -1,0 +1,112 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_fence_provider.{
+    strict_riscv_scalar_runtime_fence_provider}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+describe "plan-bound runtime scalar FENCE provider":
+    it "consumes tag four and validates exact dynamic decoder-plan rows":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val provider = strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_rows", CoreConfig.rv32(), plan).unwrap()
+        expect(provider.diagnostic()).to_equal("")
+        expect(provider.plan.named_width(provider.ports, "request_provider_tag")).to_equal(3)
+        expect(provider.plan.port_direction(provider.ports, "request_ready")).to_equal("out")
+        expect(provider.plan.port_direction(provider.ports, "request_accept")).to_equal("out")
+        expect(provider.datapath_width("class_ok")).to_equal(1)
+        expect(provider.datapath_width("effect_ok")).to_equal(1)
+        expect(provider.datapath_width("width_ok")).to_equal(1)
+        expect(provider.datapath_width("raw_fields_ok")).to_equal(1)
+        expect(provider.datapath_width("events_ok")).to_equal(1)
+        expect(provider.origins[1].source_name).to_equal("rv.i.fence")
+
+    it "requires encoded FENCE rd rs1 and fm to be zero and rejects illegal-marked requests":
+        val provider = strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_encoding", CoreConfig.rv32(),
+            riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+        var rd_zero = false; var rs1_zero = false; var fm_zero = false
+        var encoding_gate = false; var illegal_gate = false
+        for op in provider.datapath_comb_ops:
+            if op.result == "rd_zero" and op.lhs == "canonical_rd" and op.rhs == "zero5":
+                rd_zero = true
+            if op.result == "rs1_zero" and op.lhs == "canonical_rs1" and op.rhs == "zero5":
+                rs1_zero = true
+            if op.result == "fm_zero" and op.lhs == "decoded_fm" and op.rhs == "zero4":
+                fm_zero = true
+            if op.result == "fence_encoding_ok" and op.lhs == "fence_zero01" and op.rhs == "fm_zero":
+                encoding_gate = true
+            if op.result == "legal_flag_ok" and op.lhs == "illegal_valid" and op.rhs == "zero1":
+                illegal_gate = true
+        expect(rd_zero).to_be(true)
+        expect(rs1_zero).to_be(true)
+        expect(fm_zero).to_be(true)
+        expect(encoding_gate).to_be(true)
+        expect(illegal_gate).to_be(true)
+        expect(provider.datapath_width("accepted_legal_0")).to_equal(1)
+        expect(provider.plan.rules[0].guards[0].lhs).to_equal("fault_any")
+        expect(provider.plan.rules[3].guards[2].lhs).to_equal("selected_any")
+
+    it "holds the external ordering effect until acceptance":
+        val provider = strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_effect", CoreConfig.rv64(),
+            riscv_scalar_decoder_plan("rv64i").unwrap()).unwrap()
+        expect(provider.plan.rules[2].name).to_equal("effect_accept")
+        expect(provider.plan.rules[2].guards[0].lhs).to_equal("fence_effect_ready")
+        expect(provider.plan.rules[3].name).to_equal("request_capture")
+        expect(provider.plan.outputs[2].result).to_equal("fence_effect_valid")
+        expect(provider.plan.outputs[2].guards[0].lhs).to_equal("pending_reg")
+        expect(provider.plan.named_width(provider.ports, "fence_effect_kind")).to_equal(2)
+        expect(provider.plan.named_width(provider.ports, "fence_effect_fm")).to_equal(4)
+        expect(provider.plan.named_width(provider.ports, "fence_effect_pred")).to_equal(4)
+        expect(provider.plan.named_width(provider.ports, "fence_effect_succ")).to_equal(4)
+
+    it "holds tag four ids and the complete completion payload until ready":
+        val provider = strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_completion", CoreConfig.rv32(),
+            riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+        expect(provider.plan.rules[1].name).to_equal("completion_consume")
+        expect(provider.plan.rules[1].guards[0].lhs).to_equal("completion_ready")
+        expect(provider.plan.outputs.len()).to_equal(35)
+        expect(provider.plan.outputs[7].result).to_equal("completion_valid")
+        expect(provider.plan.outputs[8].result).to_equal("completion_provider_tag")
+        expect(provider.plan.named_width(provider.ports, "completion_provider_event_id")).to_equal(64)
+        expect(provider.plan.named_width(provider.ports, "completion_decode_event_id")).to_equal(64)
+        expect(provider.plan.named_width(provider.ports, "completion_illegal_valid")).to_equal(1)
+
+    it "makes provider fault sticky and leaves requests for other tags idle":
+        val provider = strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_fault", CoreConfig.rv32(),
+            riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+        expect(provider.plan.rules[0].name).to_equal("protocol_fault")
+        expect(provider.plan.rules[0].assignments[0].destination).to_equal("fault_reg")
+        expect(provider.plan.outputs[0].guards[3].lhs).to_equal("tag_ok")
+        expect(provider.plan.outputs[1].guards[1].lhs).to_equal("tag_ok")
+        expect(provider.plan.outputs[9].result).to_equal("provider_protocol_fault")
+        expect(provider.plan.outputs[9].source).to_equal("fault_reg")
+
+    it "admits FENCE.I only when the exact decoder plan contains its row":
+        val base = strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_base", CoreConfig.rv32(),
+            riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+        var base_has_fence_i = false
+        for origin in base.origins:
+            if origin.source_name == "rv.i.fence_i": base_has_fence_i = true
+        expect(base_has_fence_i).to_be(false)
+        val zifencei = strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_zifencei", CoreConfig.rv32_zicsr_zifencei(),
+            riscv_scalar_decoder_plan("rv32i_zicsr_zifencei").unwrap()).unwrap()
+        var extended_has_fence_i = false
+        for origin in zifencei.origins:
+            if origin.source_name == "rv.i.fence_i": extended_has_fence_i = true
+        expect(extended_has_fence_i).to_be(true)
+        expect(zifencei.datapath_constants.any(
+            _.name == "mask_1" and _.bit_width == 32 and _.value == 0xFFFFFFFF)).to_be(true)
+
+    it "rejects missing identity mismatched plans and compressed v1":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        expect(strict_riscv_scalar_runtime_fence_provider("", CoreConfig.rv32(), plan).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_wrong", CoreConfig.rv64(), plan).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_fence_provider(
+            "runtime_fence_compressed", CoreConfig.rv32_zca_integer(),
+            riscv_scalar_decoder_plan("rv32i_zca").unwrap()).is_err()).to_be(true)

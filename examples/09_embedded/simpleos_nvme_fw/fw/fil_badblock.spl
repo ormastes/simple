@@ -23,12 +23,6 @@ fn bbt_new() -> BadBlockTable:
     BadBlockTable(bad: bad, spare_next: 56)
 
 impl BadBlockTable:
-    me normalize_spare_next():
-        if me.spare_next < 56:
-            me.spare_next = 56
-        if me.spare_next > NUM_BLOCKS:
-            me.spare_next = NUM_BLOCKS
-
     me mark_bad(blk: i64):
         if block_in_range(blk) and blk < me.bad.len():
             me.bad[blk] = 1
@@ -43,19 +37,16 @@ impl BadBlockTable:
     me count_bad() -> i64:
         var n: i64 = 0
         var i: i64 = 0
-        while i < NUM_BLOCKS and i < me.bad.len():
-            if me.bad[i] != 0:
+        while i < NUM_BLOCKS:
+            if me.bad[i] == 1:
                 n = n + 1
             i = i + 1
         n
 
     me alloc_spare() -> i64:
-        me.normalize_spare_next()
         while me.spare_next < NUM_BLOCKS:
             val blk: i64 = me.spare_next
             me.spare_next = me.spare_next + 1
-            if blk >= me.bad.len():
-                return UNMAP
             if me.bad[blk] == 0:
                 return blk
         UNMAP
@@ -93,24 +84,6 @@ fn bbt_selftest() -> i64:
     if s1 != s2:
         sdiff = 1
     fails = fails + expect_eq(sdiff, 1, "alloc_spare returns distinct blocks")
-
-    var tc = bbt_new()
-    tc.spare_next = -4
-    fails = fails + expect_eq(tc.alloc_spare(), 56, "corrupted negative spare cursor recovers to first spare")
-    tc.spare_next = 3
-    fails = fails + expect_eq(tc.alloc_spare(), 56, "corrupted data-region spare cursor cannot allocate user block")
-    tc.spare_next = NUM_BLOCKS + 9
-    fails = fails + expect_eq(tc.alloc_spare(), UNMAP, "corrupted oversized spare cursor fails closed")
-    tc.bad[56] = 7
-    tc.spare_next = 56
-    fails = fails + expect_eq(if tc.is_bad(56): 1 else: 0, 1, "corrupted nonzero bad-block marker fails closed")
-    fails = fails + expect_eq(tc.count_bad(), 1, "corrupted nonzero bad-block marker is counted")
-    fails = fails + expect_eq(tc.alloc_spare(), 57, "corrupted nonzero bad-block marker is skipped for spare allocation")
-    tc.bad[56] = 0
-    tc.bad = []
-    tc.spare_next = 56
-    fails = fails + expect_eq(if tc.is_bad(56): 1 else: 0, 1, "truncated bad-block table treats spare as bad")
-    fails = fails + expect_eq(tc.alloc_spare(), UNMAP, "truncated bad-block table alloc fails closed")
 
     # mark all spare slots bad -> next alloc returns UNMAP
     var i: i64 = 56

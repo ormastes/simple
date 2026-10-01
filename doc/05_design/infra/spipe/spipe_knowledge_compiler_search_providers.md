@@ -790,7 +790,8 @@ One checked-in corpus and expected canonical result file drives:
 - DBFS facade;
 - PureDatabase adapter;
 - textual BM25 adapter;
-- `JsFixedPointSearchProvider`;
+- `JsFixedPointSearchProvider` plus the explicitly limited read-only
+  `ReadOnlyJsFallbackSearchProvider`;
 - Simple provider wire adapter;
 - database server adapter.
 
@@ -961,8 +962,11 @@ migration, and prevents mixed-version cache reuse.
 
 - One documented `bm25-fixed-v1` implementation contract governs all adapters.
 - Exact lengths and deterministic public-ID tie-breaking are used everywhere.
-- `JsFixedPointSearchProvider` and the Simple `SearchProvider` implementation
-  pass the same conformance corpus.
+- The JavaScript fallback executes only its admitted read-only conformance
+  cells (01, 02, 03, 04, 11, 15, 16, and 22); its fixed
+  `(scope_digest,logical_root)` binding is checked before every read and it
+  has no open/apply/publish/lifecycle/authority mutation surface. The Simple
+  provider remains responsible for the full process/lifecycle matrix.
 - Provider startup, hot request, cache, invalidation, bounds, and fallback paths
   have executable evidence.
 - PureDatabase cache identity includes columns, algorithm, and generation.
@@ -972,6 +976,181 @@ migration, and prevents mixed-version cache reuse.
 - Simple symbol export is compiler-authoritative and revisioned.
 - Every optimized path matches the exhaustive oracle.
 - Performance and security gates pass without embeddings or a remote service.
+
+## 13.1 W4A provider-conformance closure plan
+
+This is the implementation plan that closes the gap between the frozen Wave 4
+contract and an admitted provider.  **W4A is not a second score contract and
+does not reopen `bm25-fixed-v1`.**  It is a staged adapter-conformance program.
+No target is called conformant merely because it can compile a probe or returns
+the golden three-document result.  A target is admitted only after the
+conformance record in Section 13.1.5 has all required cells and its exact
+logical-root/scope bindings verify.
+
+### 13.1.1 Starting evidence and ownership
+
+The current source supplies useful but deliberately narrow starting points:
+
+| Existing path | What it proves | What it does not prove |
+|---|---|---|
+| `src/lib/common/search/{analyzer,document,corpus_stats,ranking,query,snapshot,top_k,provider,explain}.spl` | common records, checked fixed-point scoring, immutable snapshot records and port vocabulary | a process transport or a database transaction boundary |
+| `src/lib/nogc_sync_mut/db/dbfs_engine/fts/wave4_compatibility.spl` | an exhaustive, public-single-scope five-field DBFS compatibility projection | arbitrary visibility scopes, cursors, provider framing, or DBFS as a `SearchProvider` |
+| `src/app/spipe_knowledge_provider/{lexical,service,protocol,wire_*,byte_stream,frame_*,request_control,work_control}.spl` | the intended native executable and framed-service ownership split | native provider admission, successful Stage 4 executable provenance, or qualified performance |
+| `examples/05_stdlib/spipe/src/provider/{protocol,adapter,js_fixed_point}.js` | normative dependency-free provider/adapter validation shape | a process adapter, native binary authenticity, or fallback evidence |
+| `examples/05_stdlib/spipe/test/support/{simple_provider_wave4_parity_probe,dbfs_wave4_parity_probe}.spl` | locked micro-corpus oracle observations | all W4 cells, hostile-wire behavior, multi-scope isolation, or a functional receipt |
+
+Lane C owns only `src/lib/common/search/**`; lane D owns the SPipe JavaScript
+adapter/process boundary and fixture checker; lane E owns DBFS compatibility;
+each database owner owns its own transactional adapter.  `src/app/
+spipe_knowledge_provider/**` is a Simple-provider lane with a published wire
+contract, not a substitute for either DBFS or database-server ownership.  A
+single merge owner updates the corpus digest, contract manifest, and evidence
+checker only after independent review.
+
+### 13.1.2 Required conformance record and common fixture
+
+Track one immutable fixture directory:
+
+```text
+examples/05_stdlib/spipe/test/fixture/wave4_search/
+  fixture_manifest.json
+  golden_corpus.json
+  bm25_intermediates.json
+  golden_results.json
+  provider_protocol_vectors.json
+  conformance_applicability.json
+  conformance_evidence_schema.json
+```
+
+`fixture_manifest.json` must hash every listed file, name the five contract
+identities, and record the exact public document-ID byte ordering.  A target
+first transforms its native rows/documents into canonical `SearchDocumentV1`
+bytes and proves the resulting `spipe-lexical-snapshot-v1` root; it then runs
+the same query/delta vectors.  The checker recomputes roots, statistics,
+scores, explanation digests, rank/tie ordering, and page hashes from the
+checked-in oracle rather than accepting target-reported `pass` booleans.
+
+Every emitted `ProviderConformanceRecordV1` is closed canonical JSON:
+
+```text
+{schema, fixture_manifest_sha256, target_id, target_build_identity,
+ provider_contract, analyzer_contract, score_contract, explanation_contract,
+ logical_index_contract, capability_set, scope_digest, logical_root,
+ query_result_digests, delta_result_digests, explanation_digests,
+ executed_cells, unsupported_cells, process_evidence, security_evidence,
+ generated_at_utc, checker_version, record_sha256}
+```
+
+`target_build_identity` is an executable digest plus Stage 4 provenance for
+the native process target, and a canonical source/module digest for in-process
+targets. `unsupported_cells` is allowed only when the applicability manifest
+marks the exact target/capability combination as out of scope; it never turns a
+required lexical, scope, delta, or explanation cell into a pass.  `record_sha256`
+hashes the same closed object with that field zeroed.  Receipt storage is
+derived evidence under `build/test-artifacts/spipe-wave4/`; checked-in fixtures
+contain only reproducible inputs and expected oracle values.
+
+### 13.1.3 W4A sequence: JS, Simple native, and process adapter
+
+| W4A stage | Exact implementation scope | Required proof before the next stage |
+|---|---|---|
+| W4A-1 contract oracle | C: `src/lib/common/search/**`; D: golden fixture/checker only | checked arithmetic/intermediate vectors, Unicode analyzer parity, add/replace/delete clean-rebuild equality, explanation recomputation |
+| W4A-2 JS baseline | D: `examples/05_stdlib/spipe/src/provider/{protocol,adapter,js_fixed_point}.js` and `src/index/**` only | initialized `InProcessSearchProviderAdapter` passes every applicable lexical/source-page vector and rejects bad bindings without cache publication |
+| W4A-3 native lexical core | Simple provider lane: `src/app/spipe_knowledge_provider/{lexical,service,protocol,wire_query,wire_dispatch,wire_core}.spl` | the native core consumes the canonical logical snapshot and returns byte-equivalent source-local pages/explanations; no adapter/RRF code is copied into Simple |
+| W4A-4 framed process adapter | D: new `examples/05_stdlib/spipe/src/provider/process_adapter.js` plus private launch helper; Simple: only `main.spl`/byte-stream framing hooks | one long-lived, shell-free child generation initializes once, carries one request/snapshot/scope binding per frame, and has no per-query spawn or cursor cross-generation reuse |
+| W4A-5 degradation | D composition only | crash/timeout/malformed native reply quarantines that generation, opens or rebuilds the same logical root in JS, retries once, and emits a bounded diagnostic; root mismatch returns no result and does not fall back |
+| W4A-6 admission | integration/checker/guide only | exact record plus independent review; no performance or production-readiness claim without the qualified receipt |
+
+The process adapter receives the *already authorization-filtered* logical
+snapshot and an opaque request binding, never raw workspace paths, filesystem
+handles, registry credentials, or graph/trace material.  It launches a
+configured canonical executable with fixed `argv`, fixed nonsymlink working
+directory, explicit minimal environment allowlist, closed inherited file
+descriptors, resource/deadline/output limits, and process-group cleanup.  It
+checks executable ownership/mode and an approved binary/provenance digest
+before launch.  It sends only canonical framed bytes; it validates native
+responses before cache insertion against the request ID, operation, provider
+generation, implementation digest, logical root, scope digest, query digest,
+cursor digest, visible document membership, score/order/explanation rules, and
+page limits.  An invalid frame/response is a generation quarantine, not a
+candidate-level warning.
+
+The adapter may invoke exactly one JS retry only for a transport crash,
+deadline, or quarantine *after* proving the JS snapshot root and all five
+lexical identities equal the request binding.  It must not retry semantic
+`ProviderErrorV1`, switch providers within a paged collection, merge native and
+JS hits, re-use a native cursor, or turn a failed native request into a cache
+hit.  `phrase`, `regex`, `wildcard`, semantic, duplicate, and symbols remain
+separately negotiated capabilities; no unavailable capability is emulated as a
+lexical success.
+
+### 13.1.4 Database adaptation order
+
+Database implementations consume the same fixture but do **not** become
+SPipe's process provider merely by adopting the scorer.
+
+| Target | Owner and changes | Snapshot/scope rule | Required compatibility and recovery proof |
+|---|---|---|---|
+| DBFS (Wave 4) | E changes `src/lib/nogc_sync_mut/db/dbfs_engine/fts/{bm25,inverted_index,search,wave4_compatibility}.spl`; C changes common scorer only | `DbfsWave4Index` must bind exactly one scope and root; production DBFS must reject a foreign scope before postings/statistics | public `FtsEngine`/`fts_bm25_*` behaviors stay distinct from trigram/fuzzy modes; upsert/delete update exact N/df/length; facade and common oracle match; compaction preserves live root |
+| PureDatabase (Wave 10) | pure-SQL owner changes `src/lib/nogc_sync_mut/database/pure_sql/{database,__init__}.spl` and its `_PureDatabase/**` internals only | row transaction commits an FTS generation atomically with the visible MVCC version; query cursor contains DB instance/table/columns/algorithm/MVCC/FTS generation/scope | insert/update/delete/rollback/checkpoint/reopen clean-rebuild parity; `Contains`, term-frequency, BM25, and `fts5_search` retain separately tested behavior; old metadata rebuilds instead of being reinterpreted |
+| Textual DB (Wave 10) | textual owner changes `src/lib/nogc_sync_mut/database/{fts,wal,core}.spl` plus tier-approved counterparts | rows/WAL are authority; BM25 side-index is derived and cannot become visible before its committed row generation | retain trigram `fts_search` as `contains_fuzzy`; add explicit `search_lexical`; fault/restart replay validates or rebuilds side index; no unlogged row/index split |
+| Database server (Wave 10) | server owner changes `src/lib/nogc_sync_mut/database/server/{capability,session,txn,durability,protocol,transport,server}.spl`, adding a private SearchCapsule | authorize table/fields before postings/stats/cache, bind every request/cursor to session MVCC snapshot and effective-capability digest | deny-wins leakage tests for hit/count/facet/explanation/cache; commit/restart reconstruction; cancellation, bounded pages, private cache partitions; exhaustive parity before WAND/Block-Max WAND/shard merge |
+
+The DBFS compatibility probe is a valuable W4A input but not evidence that its
+single-public scope is sufficient for PureDatabase, textual, or server search.
+No database implementation may expose a `SearchProvider` wire capability until
+it independently meets the process-provider scope/binding and transport gates.
+WAND, Block-Max WAND, ANN, or shard merging are separate opt-in implementations:
+each has generated-corpus exhaustive equivalence, delete/tie/cursor parity,
+and a measured benefit before selection.
+
+### 13.1.5 Mandatory gate matrix
+
+| Gate | JS | Simple native/process | DBFS | PureDB/textual/server |
+|---|---:|---:|---:|---:|
+| canonical document/root/statistics and BM25 intermediate parity | required | required | required | required before adapter admission |
+| Unicode 17 analyzer and five-field ordering | required | required | required | required |
+| add/replace/delete/no-op/replay clean-root parity | required | required | required | required with native transaction/recovery cases |
+| exact source-local ranks, scores, ties, explanations and cursors | required | required | required where cursor supported | required |
+| foreign scope/snapshot/query/cursor/document rejection | required | required | scope-only W4 facade; full native scope before exposure | required |
+| hostile framed wire, launch, child-limit and timeout controls | N/A in-process | required | N/A facade | required only if remotely/process exposed |
+| no per-query spawn/full-tree scan/repeated unchanged source read | required by qualified collector | required by qualified collector | measured if selected for SPipe | measured per exposed service |
+| transaction/MVCC/WAL/restart/durability proof | N/A derived in-process | provider lifecycle only | DBFS supported persistence boundary | required |
+| exact exhaustive versus optimization parity | oracle | oracle | before WAND | before each optimization |
+
+For the Simple process target, `executed_cells` is exactly W4-SRCH-01 through
+W4-SRCH-08 and W4-SRCH-10 through W4-SRCH-39, once each in numeric order;
+W4-SRCH-27 is mandatory and must not be omitted. Streaming/control cells 28
+through 39 include the Stage-4/import/production-controlled closures 38 and
+39 and are functional prerequisites, not optional performance observations.
+JS and DBFS records may use the frozen applicability manifest only for genuinely
+nonapplicable process cells; `unsupported_cells` cannot omit a required target
+cell or silently downgrade it. W4-SRCH-09 is qualified-performance evidence
+and cannot be self-certified by the provider. A build that cannot execute an
+applicable cell records `NOT EVIDENCE`, not a partial PASS.
+
+### 13.1.6 Security, performance, and closure conditions
+
+Before W4A-6, run one process-adapter adversarial suite covering path and
+symlink substitution, digest/provenance mismatch, hostile environment and
+preload variables, shell metacharacters, inherited descriptors, oversize and
+fragmented frames, invalid UTF-8/JSON, duplicate keys, replayed/mismatched
+request IDs, cross-scope/snapshot cursors, extra or unauthorized document IDs,
+score/tie/explanation forgery, provider hang/crash, process-tree escape, and
+output/RSS/CPU/FD limits.  Every failure must produce either a payload-free
+transport diagnostic before envelope binding or the closed operation error
+after binding; neither may disclose private query/content values.
+
+Qualified performance follows Section 14.6 exactly: a Stage 4 admitted native
+binary, one persistent provider, approved containment counter journal, one
+warmup plus at least 20 alternating samples, and the functional receipt as a
+verified prerequisite.  The W4A closure packet contains the conformance record,
+qualified receipt (or explicit `NOT EVIDENCE`), raw counter journal digest,
+native binary/provenance digest, fixture manifest digest, commands/exit codes,
+applicability matrix, and independent-review verdict.  Until all required
+functional cells pass, W4 remains open.  Until the qualified receipt passes,
+the implementation may be functionally admitted but must not claim NFR
+performance completion or production availability.
 
 ## 14. Wave 4 normative contract freeze
 

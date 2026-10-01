@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+For the Engine2D maintainer of
+`doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`.
+
+The absolute oracle for that bug: a paragraph containing an em dash, painted
+through the Draw IR resolved-advances route, must put INK on the surface. It
+did not -- `ResolvedFontMetrics.advances` is per codepoint, the staging loop
+paired it with a byte-offset table, the batch was marked invalid and the entire
+composition was dropped, so the page came back all background.
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ SIMPLE_2D_BACKEND=cpu_simd <simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_em_dash_text_ink_spec.spl`
+
+CPU backend and a repo-tracked TTF: no GPU, no device identity, nothing to
+skip on a host without hardware.
+
+## Compatibility and limitations
+The oracle is "at least one pixel differs from the cleared background", which
+is absolute rather than a tolerance -- it cannot drift with hinting, kerning or
+atlas policy. It deliberately does NOT assert glyph shape or position; the
+advance arithmetic itself is pinned by
+`test/01_unit/lib/nogc_sync_mut/text_layout/font_advance_codepoint_arity_spec.spl`.
+If the font asset is missing the example fails rather than skipping: a missing
+oracle is not a pass.
+
+## Verification guidance and troubleshooting
+Sabotage: index the advance table by byte again in `font_advance_layout.spl`.
+The em-dash example goes to zero ink while the ASCII control stays green.
+"""
+# Lifecycle: doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md
+# @manual_section: draw_ir_em_dash_text_ink
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 1%
+# @tag: unit, gpu, engine2d, font, text
+
+use std.spec.*
+use std.common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch, draw_ir_embedding_config,
+    draw_ir_rect, draw_ir_text_resolved_font}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch_with_images}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.text_layout.font_renderer.{resolve_font_metrics}
+
+val FONT_PATH = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+
+fn ink_pixels(pixels: [u32], background: u32) -> i64:
+    var ink: i64 = 0
+    for pixel in pixels:
+        if pixel != background:
+            ink = ink + 1
+    ink
+
+fn render_ink(content: text) -> i64:
+    val width: i32 = 220
+    val height: i32 = 48
+    val background = 0xFF000000u32
+    var engine = Engine2D.create_with_backend(width, height, "cpu")
+    expect(engine.load_font(FONT_PATH)).to_be(true)
+    val metrics = resolve_font_metrics(FONT_PATH, content, 18)
+    expect(metrics.valid).to_be(true)
+    val command = draw_ir_text_resolved_font(
+        "paragraph", 4, 4, content, 0xFFFFFFFFu32,
+        metrics.family, metrics.identity, metrics.advances,
+        metrics.width, metrics.line_height, 18)
+    # The resolved-advances route is the one under test; a command that fell
+    # back to plain text inside the constructor would prove nothing.
+    expect(command.advance_widths.len()).to_be_greater_than(0)
+    engine.clear(background)
+    val result = engine2d_draw_ir_adv_batch_with_images(
+        engine, draw_ir_batch("em-dash", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surface", "root", 0, 0, width, height, 0, 1000, false),
+            [command]), false, [])
+    expect(result.skipped_command_count).to_equal(0)
+    val ink = ink_pixels(result.pixels, background)
+    engine.shutdown()
+    ink
+
+describe "A paragraph with an em dash paints through Draw IR":
+
+    it "renders at least one glyph pixel for ASCII text":
+        # CONTROL. Bytes and codepoints coincide here, so this was green
+        # throughout the defect; it fences the fix against regressing the
+        # overwhelmingly common case.
+        expect(render_ink("plain ascii paragraph")).to_be_greater_than(0)
+
+    it "renders at least one glyph pixel when the paragraph contains an em dash":
+        # THE ORACLE. U+2014 is 3 bytes and 1 codepoint; that difference of 2
+        # is what emptied the page.
+        expect(render_ink("an em dash \u{2014} renderable")).to_be_greater_than(0)

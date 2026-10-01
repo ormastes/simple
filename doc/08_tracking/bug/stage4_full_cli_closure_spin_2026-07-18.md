@@ -1,4 +1,8 @@
 # Stage-4 full-CLI compile "spins forever" — not a hang, a legitimate but
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 # unbudgeted 662→1278+ file re-compile triggered by the CLI importing the
 # compiler's own driver
 
@@ -260,3 +264,4 @@ harness, which discovers only 2 files and completes in ~5s.
 - `doc/08_tracking/bug/bootstrap_stage1_entry_closure_spin_oom_2026-07-17.md`
   (superseded/different bug — Rust seed stage1, not Stage-4)
 - `doc/08_tracking/bug/cpu_simd_direct_fill_full_bootstrap_stage4_spin_2026-07-08.md`
+

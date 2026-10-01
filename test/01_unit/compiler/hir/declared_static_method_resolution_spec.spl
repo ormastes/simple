@@ -1,0 +1,77 @@
+use std.spec.{describe, it, expect}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId, SymbolKind, MethodResolution, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.expression_core.*
+
+fn static_resolution_receiver(symbol: SymbolId, name: text) -> HirExpr:
+    HirExpr(kind: HirExprKind.NamedVar(symbol, name), has_type_: false,
+        type_: nil, span: Span.empty())
+
+fn assert_declared_static(resolution: MethodResolution, owner: SymbolId, method: SymbolId):
+    match resolution:
+        case MethodResolution.StaticMethod(actual_owner, actual_method):
+            expect(actual_owner.id).to_equal(owner.id)
+            expect(actual_method.id).to_equal(method.id)
+        case _: assert(false)
+
+fn assert_static_unresolved(resolution: MethodResolution):
+    match resolution:
+        case MethodResolution.Unresolved: ()
+        case _: assert(false)
+
+describe "declared static method resolution retains the authoritative owner":
+    it "selects each exact owner when two classes share a method name":
+        var lowering = HirLowering.with_filename("static_owners")
+        val span = Span.empty()
+        val first = lowering.symbols.define("First", SymbolKind.Class, nil, span, Visibility.Public, false, Some("static_owners"))
+        val second = lowering.symbols.define("Second", SymbolKind.Class, nil, span, Visibility.Public, false, Some("static_owners"))
+        val first_name = lowering.symbols.method_symbol_name(first, "answer")
+        val second_name = lowering.symbols.method_symbol_name(second, "answer")
+        val first_method = lowering.symbols.define(first_name, SymbolKind.Function, nil, span, Visibility.Public, false, Some("static_owners"))
+        val second_method = lowering.symbols.define(second_name, SymbolKind.Function, nil, span, Visibility.Public, false, Some("static_owners"))
+        expect(first_method.id == second_method.id).to_equal(false)
+        assert_declared_static(lowering.declared_static_method_resolution(
+            static_resolution_receiver(first, "First"), "answer"), first, first_method)
+        assert_declared_static(lowering.declared_static_method_resolution(
+            static_resolution_receiver(second, "Second"), "answer"), second, second_method)
+
+    it "preserves instance dispatch and rejects a nonstatic method on a type receiver":
+        var lowering = HirLowering.with_filename("instance_owner")
+        val span = Span.empty()
+        val owner = lowering.symbols.define("Holder", SymbolKind.Class, nil, span, Visibility.Public, false, Some("instance_owner"))
+        val static_name = lowering.symbols.method_symbol_name(owner, "answer")
+        lowering.symbols.define(static_name, SymbolKind.Function, nil, span, Visibility.Public, false, Some("instance_owner"))
+        val instance_name = lowering.symbols.method_symbol_name(owner, "read")
+        lowering.symbols.define(instance_name, SymbolKind.Method, nil, span, Visibility.Public, false, Some("instance_owner"))
+        val instance = lowering.symbols.define("value", SymbolKind.Variable,
+            Some(HirType(kind: HirTypeKind.Named(owner, []), span: span)), span, Visibility.Private, false, nil)
+        assert_static_unresolved(lowering.declared_static_method_resolution(
+            static_resolution_receiver(instance, "value"), "answer"))
+        assert_static_unresolved(lowering.declared_static_method_resolution(
+            static_resolution_receiver(owner, "Holder"), "read"))
+
+    it "retains imported class and enum symbol identities":
+        var lowering = HirLowering.with_filename("consumer")
+        val span = Span.empty()
+        val imported = lowering.symbols.define("Imported", SymbolKind.Class, nil, span, Visibility.Public, false, Some("provider"))
+        val enum_owner = lowering.symbols.define("Choice", SymbolKind.Enum, nil, span, Visibility.Public, false, Some("provider"))
+        val imported_name = lowering.symbols.method_symbol_name(imported, "answer")
+        val enum_name = lowering.symbols.method_symbol_name(enum_owner, "answer")
+        val imported_method = lowering.symbols.define(imported_name, SymbolKind.Function, nil, span, Visibility.Public, false, Some("provider"))
+        val enum_method = lowering.symbols.define(enum_name, SymbolKind.Function, nil, span, Visibility.Public, false, Some("provider"))
+        assert_declared_static(lowering.declared_static_method_resolution(
+            static_resolution_receiver(imported, "Imported"), "answer"), imported, imported_method)
+        assert_declared_static(lowering.declared_static_method_resolution(
+            static_resolution_receiver(enum_owner, "Choice"), "answer"), enum_owner, enum_method)
+
+    it "does not resolve an unknown owner or missing method by leaf name":
+        var lowering = HirLowering.with_filename("missing_owner")
+        val span = Span.empty()
+        val owner = lowering.symbols.define("Known", SymbolKind.Struct, nil, span, Visibility.Public, false, Some("missing_owner"))
+        assert_static_unresolved(lowering.declared_static_method_resolution(
+            static_resolution_receiver(SymbolId(id: -1), "Unknown"), "answer"))
+        assert_static_unresolved(lowering.declared_static_method_resolution(
+            static_resolution_receiver(owner, "Known"), "missing"))

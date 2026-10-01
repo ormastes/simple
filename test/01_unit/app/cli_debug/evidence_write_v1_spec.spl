@@ -1,0 +1,157 @@
+"""
+## Purpose and audience
+Pins the WRITE path of `simple debug write`: `write_debug_evidence_bundle_v1`
+emits a bundle that the existing reader
+(`inspect_debug_evidence_bundle_v1`) accepts end to end, and the capability
+capsule it ships alongside claims nothing. Audience: engineers changing
+`src/app/cli_debug/evidence_write_v1.spl`,
+`src/app/cli_debug/evidence_inspect_v1.spl`, or
+`src/lib/common/debug/state/capability_receipt_v1.spl`.
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/app/cli_debug/evidence_write_v1_spec.spl
+## Compatibility and limitations
+The writer copies artifacts that already exist on disk. It performs no core,
+minidump, or trace CAPTURE, so a bundle written here proves manifest/receipt
+conformance only -- never that the captured state can be analyzed or replayed.
+Scratch bundles are written under `build/test-artifacts/`, removed before each
+scenario so a rerun cannot pass on a stale tree.
+## Verification guidance and troubleshooting
+A RED on the round trip means writer and reader disagree about `manifest.sdn`;
+diff the emitted file against
+`doc/07_guide/app/debug/debug_evidence_bundle_contract.md`. A RED on the
+capsule scenario means a capability was promoted above `Unverified` without a
+proof receipt, which the Wave 0 design forbids.
+"""
+# Lifecycle: doc/02_requirements/feature/simple_unified_debugging_evidence.md ;
+# doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md ;
+# doc/03_plan/app/debug/dump_replay_wave_plan.md ;
+# doc/04_architecture/simple_unified_debugging_evidence.md ;
+# doc/05_design/app/debug/debug_capability_truth_wave0_design.md ;
+# doc/07_guide/app/debug/debug_evidence_bundle_contract.md
+# @manual_section: primary
+
+use std.spec.*
+use app.cli_debug.evidence_write_v1.{
+    write_debug_evidence_bundle_v1, debug_evidence_state_capsule_sdn_v1,
+    DEBUG_EVIDENCE_WRITE_CLAIM_SOURCE_V1,
+}
+use app.cli_debug.evidence_inspect_v1.{inspect_debug_evidence_bundle_v1}
+use std.common.debug.state.capability_receipt_v1.{
+    CapabilityStatus, state_capability_receipt_unverified_v1,
+    state_capability_receipt_validate_v1,
+}
+use std.io_runtime.{file_read, file_write, dir_remove_all, mkdir_p}
+
+val BUILD_ID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val SCRATCH = "build/test-artifacts/debug_evidence_write_v1"
+val BUNDLE = "build/test-artifacts/debug_evidence_write_v1/bundle"
+
+fn fresh_sources() -> [text]:
+    """Clears the scratch tree and lays down two small artifacts to bundle."""
+    dir_remove_all(SCRATCH)
+    mkdir_p(SCRATCH + "/sources")
+    file_write(SCRATCH + "/sources/events.sdn", "events: []\n")
+    file_write(SCRATCH + "/sources/notes.txt", "captured by the writer spec\n")
+    [SCRATCH + "/sources/events.sdn", SCRATCH + "/sources/notes.txt"]
+
+fn unverified_count(artifact_id: text) -> i64:
+    """How many of the six capability fields are `Unverified` on the capsule the
+    writer emits for `artifact_id`."""
+    val receipt = state_capability_receipt_unverified_v1(artifact_id, DEBUG_EVIDENCE_WRITE_CLAIM_SOURCE_V1)
+    var n = 0
+    match receipt.analyze:
+        case CapabilityStatus.Unverified(_): n = n + 1
+        case _: n = n
+    match receipt.resume_forward:
+        case CapabilityStatus.Unverified(_): n = n + 1
+        case _: n = n
+    match receipt.exact_replay:
+        case CapabilityStatus.Unverified(_): n = n + 1
+        case _: n = n
+    match receipt.reverse_execution:
+        case CapabilityStatus.Unverified(_): n = n + 1
+        case _: n = n
+    match receipt.counterfactual_fork:
+        case CapabilityStatus.Unverified(_): n = n + 1
+        case _: n = n
+    match receipt.profile_correlation:
+        case CapabilityStatus.Unverified(_): n = n + 1
+        case _: n = n
+    n
+
+describe "debug evidence bundle writing":
+    it "writes a bundle the existing reader accepts end to end":
+        # @req REQ-014
+        # @capture(evidence_manifest): the scratch bundle root and the two source artifact paths
+        step("Write a bundle from two freshly created artifacts")
+        val sources = fresh_sources()
+        match write_debug_evidence_bundle_v1(BUNDLE, BUILD_ID, sources):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(written):
+                # @capture(evidence_manifest): the inspection's artifact count, build id and captured session id
+                step("Inspect the written bundle with the reader that verifies every digest")
+                match inspect_debug_evidence_bundle_v1(written.bundle_root):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(inspection):
+                        expect(inspection.artifact_count).to_equal(2)  # oracle: fresh_sources() lays down exactly two artifact files
+                        expect(inspection.build_id).to_equal(BUILD_ID)
+                        expect(written.receipt_id.contains(inspection.captured_session_id)).to_equal(true)
+                        expect(inspection.captured_at_ns > 0).to_equal(true)  # oracle: receipts carry the same real clock the manifest does, never the -1 "no time" sentinel
+
+    it "ships a capability capsule that claims nothing":
+        # @req REQ-014
+        # Generalization of the Wave 0 rule: bytes in a bundle never imply
+        # capability, so every capsule the writer emits is fully Unverified.
+        # @capture(evidence_manifest): the bundle root whose normalized/state_capsule.sdn is read back
+        step("Write a bundle and read back the capsule it placed under normalized/")
+        val sources = fresh_sources()
+        match write_debug_evidence_bundle_v1(BUNDLE, BUILD_ID, sources):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(written):
+                # @capture(evidence_manifest): the capsule file bytes and the validator verdict for the same receipt
+                step("Verify the capsule bytes are the validated all-Unverified receipt for this manifest")
+                val on_disk = file_read(written.bundle_root + "/normalized/state_capsule.sdn") ?? ""
+                match debug_evidence_state_capsule_sdn_v1(written.manifest_digest):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(expected): expect(on_disk).to_equal(expected)
+                match state_capability_receipt_validate_v1(
+                        state_capability_receipt_unverified_v1(written.manifest_digest, DEBUG_EVIDENCE_WRITE_CLAIM_SOURCE_V1)):
+                    case Err(reason): expect(reason).to_equal("")
+                    case Ok(_): expect(on_disk.contains("proof_receipts: []")).to_equal(true)
+                expect(unverified_count(written.manifest_digest)).to_equal(6)  # oracle: StateCapabilityReceiptV1 declares exactly six capability fields
+
+    it "rejects a build id that is not an exact digest":
+        # @req REQ-014
+        # @capture(evidence_manifest): the moving "latest" build label handed to the writer
+        step("Ask the writer to bundle under a moving build label")
+        val sources = fresh_sources()
+        # @capture(evidence_manifest): the writer's Err(reason) naming the required build id shape
+        step("Verify the rejection names the required sha256 build id shape")
+        match write_debug_evidence_bundle_v1(BUNDLE, "latest", sources):
+            case Ok(_): expect("accepted").to_equal("rejected")
+            case Err(reason): expect(reason).to_contain("build id")
+
+    it "rejects an artifact path that is not a readable file":
+        # @req REQ-014
+        # @capture(evidence_manifest): the absent artifact path handed to the writer
+        step("Ask the writer to bundle a path that was never created")
+        val sources = fresh_sources()
+        # @capture(evidence_manifest): the writer's Err(reason) naming the unreadable artifact
+        step("Verify the rejection names the unreadable artifact rather than writing a partial bundle")
+        match write_debug_evidence_bundle_v1(BUNDLE, BUILD_ID, [sources[0], SCRATCH + "/sources/absent.bin"]):
+            case Ok(_): expect("accepted").to_equal("rejected")
+            case Err(reason): expect(reason).to_contain("absent.bin")
+
+    it "rejects overwriting a root that already holds a bundle":
+        # @req REQ-014
+        # @capture(evidence_manifest): the bundle root written by the first call
+        step("Write a bundle, then write again into the same root")
+        val sources = fresh_sources()
+        match write_debug_evidence_bundle_v1(BUNDLE, BUILD_ID, sources):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(_): ()
+        # @capture(evidence_manifest): the second call's Err(reason) naming the existing bundle
+        step("Verify the second write refuses instead of clobbering the first bundle")
+        match write_debug_evidence_bundle_v1(BUNDLE, BUILD_ID, sources):
+            case Ok(_): expect("overwritten").to_equal("refused")
+            case Err(reason): expect(reason).to_contain("already exists")

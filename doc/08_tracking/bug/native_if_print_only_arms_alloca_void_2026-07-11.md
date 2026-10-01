@@ -1,4 +1,9 @@
 # BUG: native path — statement-form `if` with print-only arms emits `%lN = alloca void` (invalid IR)
+## Closed 2026-09-16 — ...recorded in `3f6dbe1b4abd`. ## Resolution Statement-form Unit results no longer require an
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status (2026-07-15):** source implemented; historical native/oracle
 regression evidence is recorded in `3f6dbe1b4abd`.
@@ -42,3 +47,4 @@ fixtures; re-derive with the shape above on the normal native path.)
 ## Triage note (2026-07-17)
 
 Confirmed fixed by commit `3f6dbe1b4abd` ("#169 materialize void spill slots as i64 (llc reject)", 2026-07-13). The commit directly addresses the `alloca void` symptom; commit message includes verified native==oracle regression evidence confirming the fix closes the gap.
+

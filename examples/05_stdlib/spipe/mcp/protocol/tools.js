@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { join, sep } from "node:path";
 import { releaseCapabilities, releaseContractHash, releaseOperations, releaseSchemas } from "../../src/release/contract.js";
 import { createReleasePlan } from "../../src/release/planner.js";
+import { CompiledInventoryReverseReferenceService } from "./reverse_references.js";
 
 const booleanFields = new Set(["read_only_snapshot", "main_is_independent_trunk", "forward_port_required", "release_first_exception_approved", "reviewed", "main_tests_renewed", "protected_ref_direct_update", "signed_tag", "annotated_tag", "exact_tag_push", "rebuild", "fallback_artifact", "release_authority_approved"]);
 const integerFields = new Set(["attempt", "candidate_attempt", "interval_seconds", "last_scan_epoch", "now_epoch"]);
@@ -22,7 +23,7 @@ export const tools = Object.freeze([
   { name: "spipe_experts", description: "List project, domain, and tool experts packaged with SPipe.", inputSchema: { type: "object", properties: {} } },
   {
     name: "spipe_read_doc",
-    description: "Read a whitelisted SPipe document by relative path.",
+    description: "Read a whitelisted SPipe document by relative path (max 256 KiB; symlinks must resolve inside the module).",
     inputSchema: {
       type: "object",
       properties: { path: { type: "string", description: "Relative path under the SPipe module." } },
@@ -39,24 +40,48 @@ export const tools = Object.freeze([
   { name: "spipe_release_candidate_plan", description: "Validate an immutable build-once candidate plan. Performs no candidate creation or build.", inputSchema: releasePlanSchema("candidate") },
   { name: "spipe_release_promotion_plan", description: "Validate exact admitted promotion inputs. Performs no tag, push, delete, rebuild, or publication.", inputSchema: releasePlanSchema("promotion") },
   { name: "spipe_release_main_fix_discovery_plan", description: "Check supplied immutable snapshots for reviewed bug-fix candidates. Never selects or cherry-picks a fix.", inputSchema: releasePlanSchema("main-fix-discovery") },
-  { name: "spipe_release_forward_port_plan", description: "Validate an isolated main forward-port for an approved release-first fix. Never pushes a protected ref.", inputSchema: releasePlanSchema("forward-port") }
+  { name: "spipe_release_forward_port_plan", description: "Validate an isolated main forward-port for an approved release-first fix. Never pushes a protected ref.", inputSchema: releasePlanSchema("forward-port") },
+  {
+    name: "spipe_folder_reverse_references",
+    description: "Query deterministic, bounded reverse references to one target from source artifacts inside a project-relative folder.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        inventory_path: { type: "string", minLength: 1, description: "Server-local path to an immutable compiled inventory JSON file." },
+        target_uid: { type: "string", minLength: 1, description: "Opaque target UID referenced by returned edges." },
+        folder_path: { type: "string", default: "", description: "Canonical project-relative source folder; empty selects the project root." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 },
+        max_work_units: { type: "integer", minimum: 1, maximum: 500000, default: 50000 },
+        cursor: { type: ["string", "null"], default: null, description: "Authenticated cursor returned by the preceding page." }
+      },
+      required: ["inventory_path", "target_uid"],
+      additionalProperties: false
+    }
+  }
 ]);
 
 function text(content) {
   return { content: [{ type: "text", text: content }] };
 }
 
+const MAX_DOC_BYTES = 256 * 1024;
+const MAX_LISTED_EXPERTS = 64;
+
 function listDirs(moduleRoot, root) {
   const abs = join(moduleRoot, root);
   if (!existsSync(abs)) return [];
-  return readdirSync(abs, { withFileTypes: true })
+  const names = readdirSync(abs, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
+  if (names.length > MAX_LISTED_EXPERTS) {
+    return [...names.slice(0, MAX_LISTED_EXPERTS), `…(+${names.length - MAX_LISTED_EXPERTS} more)`];
+  }
+  return names;
 }
 
 export function readDoc(moduleRoot, path) {
-  if (!path || path.includes("..") || path.startsWith("/") || path.startsWith("\\")) {
+  if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/") || path.startsWith("\\")) {
     throw new Error("path must be a relative path inside the SPipe module");
   }
   const allowed = [
@@ -65,17 +90,36 @@ export function readDoc(moduleRoot, path) {
     "doc/00_llm_process/project_expert/",
     "doc/00_llm_process/domain_expert/",
     "doc/00_llm_process/tool_expert/",
-    "doc/00_llm_process/template/"
+    "doc/00_llm_process/template/",
+    "doc/00_llm_process/skill_command/"
   ];
   if (!allowed.some((prefix) => path === prefix || path.startsWith(prefix))) {
     throw new Error("path is outside the SPipe documentation allowlist");
   }
   const abs = join(moduleRoot, path);
   if (!existsSync(abs)) throw new Error(`document not found: ${path}`);
+  // Lexical allowlisting does not resolve symlinks: pin the read to the real
+  // module root so a whitelisted directory cannot link outside the tree.
+  const rootReal = realpathSync(moduleRoot);
+  const docReal = realpathSync(abs);
+  if (docReal !== rootReal && !docReal.startsWith(rootReal.endsWith(sep) ? rootReal : `${rootReal}${sep}`)) {
+    throw new Error("path resolves outside the SPipe module");
+  }
+  const stat = statSync(abs);
+  if (!stat.isFile()) throw new Error(`path is not a regular file: ${path}`);
+  if (stat.size > MAX_DOC_BYTES) {
+    throw new Error(`document exceeds the ${MAX_DOC_BYTES}-byte SPipe documentation cap`);
+  }
   return readFileSync(abs, "utf8");
 }
 
-export function callTool(moduleRoot, name, args = {}) {
+export function createToolCaller(moduleRoot, { reverseReferenceService = new CompiledInventoryReverseReferenceService() } = {}) {
+  return function call(name, args = {}) {
+    return callTool(moduleRoot, name, args, reverseReferenceService);
+  };
+}
+
+export function callTool(moduleRoot, name, args = {}, reverseReferenceService = new CompiledInventoryReverseReferenceService()) {
   if (name === "spipe_info") {
     return text([
       `module=${moduleRoot}`,
@@ -113,5 +157,8 @@ export function callTool(moduleRoot, name, args = {}) {
     spipe_release_forward_port_plan: "forward-port"
   };
   if (releaseTools[name]) return text(JSON.stringify(createReleasePlan(releaseTools[name], args), null, 2));
+  if (name === "spipe_folder_reverse_references") {
+    return text(JSON.stringify(reverseReferenceService.query(args), null, 2));
+  }
   throw new Error(`unknown tool: ${name}`);
 }

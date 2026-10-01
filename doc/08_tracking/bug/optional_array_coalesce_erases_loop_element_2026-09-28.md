@@ -1,10 +1,10 @@
 # Optional array coalescing erases the loop element type
 
-Status: release focused HIR/native verification PASS; canonical bootstrap pending.
+Status: main focused HIR/native verification PASS; canonical bootstrap pending.
 
-Windows canonical frozen6b2 Stage2 compiled all 1062 compiler files and passed
+Windows canonical frozen6b2 Stage2 compiled all1062 compiler files and passed
 independent sanity/receiver checks, but the required full CLI matrix failed
-with 2487 compiled files and one failure in `src/app/play/wm_tray.spl`:
+with2487 compiled files and one failure in `src/app/play/wm_tray.spl`:
 
 ```
 hir: Unsupported feature: cannot infer field type while lowering wm_tray_dispatch: struct 'ANY' field 'window_id'
@@ -55,14 +55,21 @@ Canonical bootstrap matrix/Stage3/Stage4 must be verified after landing the fix.
 Previously published early Stage2 admission receipts do not make the failed
 matrix a PASS.
 
-Release cycle1 at `0f0a2092585c6f9a373b83421e2063d3cb5d0eca` on Linux GNU
-with pinned nightly2026-09-27 and LLVM23 passed both tests once
-(`--offline --locked --profile bootstrap --features llvm --jobs 9`).
-Precise HIR: 1 passed, 0 failed, 0 ignored. Native integration: 1 passed,
-0 failed, 0 ignored, with real build/run taking 13.04 seconds. Input manifest
-unchanged. Evidence:
-`/mnt/simple-bootstrap-6b2/coalesce-release-tests-20260928/release-cycle1`.
+Main cycle1 on Linux GNU with pinned nightly2026-09-27 and LLVM23 passed both
+tests once (`--offline --locked --profile bootstrap --features llvm --jobs9`).
+Precise HIR:1 passed,0 failed,0 ignored. Native integration:1 passed,0 failed,
+0 ignored, with real build/run taking6.99 seconds. Input manifest unchanged.
+Evidence: `/mnt/simple-bootstrap-6b2/coalesce-fix-tests-20260928/main-cycle1`.
 
-The surgical release backport inserts Array-only narrowing before the existing
-runtime unwrap. It preserves the older scalar behavior and does not backport
-the separate optional BoxInt scalar correction from main.
+The release backport inserts the same Array-only narrowing before the existing
+runtime unwrap. It preserves the older maintenance scalar behavior and does
+not backport the separate optional BoxInt scalar correction from main.
+
+## Release verification
+
+The surgical release backport retained the older maintenance scalar behavior;
+the separate optional BoxInt scalar correction remains on main. Release cycle 1
+at `0f0a2092585c6f9a373b83421e2063d3cb5d0eca` passed the focused HIR and
+native integration tests (1 passed, 0 failed in each) with pinned nightly
+2026-09-27 and LLVM 23. The native build/run took 13.04 seconds. Evidence is
+retained at `/mnt/simple-bootstrap-6b2/coalesce-release-tests-20260928/release-cycle1`.

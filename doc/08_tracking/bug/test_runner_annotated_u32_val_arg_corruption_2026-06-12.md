@@ -1,7 +1,14 @@
 # Annotated u32 `val` locals corrupt as call args in it blocks under `bin/simple test`
 
+## Closed 2026-09-13 — Already fixed; the regression spec is green
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows, `bin/simple run <spec>`): `test/01_unit/compiler/interpreter/closure_nested_typed_binding_spec.spl` → `7 examples, 0 failures`, including the exact case "binds annotated u32 inside if and passes it as call arg".
+- **measured**: the fix is present in the seed source — `bind_pattern_value` is now used by the nested-block walker in `src/compiler_rust/compiler/src/interpreter_call/block_execution.rs` (lines 409, 764, 1433, the last with the comment "so typed (val x: T = ...), tuple, and ...").
+- **inferred**: the residual "run-mode in the deployed stage4 binary still carries the old behavior" caveat is a redeploy question, not an unfixed defect; no stage4 binary is deployed on this host.
+- Note: `bin/simple test` cannot verify anything on this Windows host — the runner's `process_run_bounded` kills every child immediately (`code -1 ... outer bound 930000ms`); `bin/simple run <spec>` was used instead.
+
 Date: 2026-06-12
-Status: fixed (seed interpreter, 2026-06-12); run-mode in the deployed stage4
+Status: CLOSED 2026-09-13 (verified fixed). Originally: fixed (seed interpreter, 2026-06-12); run-mode in the deployed stage4
 binary still carries the old behavior until the next stage4 redeploy
 Owner: gpu-backend-dx-harden lane
 

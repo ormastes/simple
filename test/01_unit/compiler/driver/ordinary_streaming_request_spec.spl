@@ -1,0 +1,42 @@
+use std.spec.{describe, it, expect}
+use std.io.{file_read}
+use compiler.driver.driver_streaming_surface_policy.{driver_streaming_surface_requested_values, driver_streaming_surface_route_values, driver_streaming_surface_rejection, driver_streaming_entry_ready_values}
+
+describe "Ordinary AOT explicit streaming ownership":
+    it "accepts a published CLI entry before closure discovery completes":
+        expect(driver_streaming_entry_ready_values("src/app/cli/bootstrap_main.spl", false)).to_equal(true)
+        expect(driver_streaming_entry_ready_values("entry.spl", true)).to_equal(true)
+        expect(driver_streaming_entry_ready_values("", true)).to_equal(true)
+        expect(driver_streaming_entry_ready_values("", false)).to_equal(false)
+        val gate = file_read("src/compiler/80.driver/driver_phase_gates.spl")
+        expect(gate).to_contain("driver_streaming_entry_ready_values(driver_source_entry_request(ctx),")
+        val focused = file_read("src/app/cli/bootstrap_focused_native_build.spl")
+        expect(focused).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_ENTRY\", entry)")
+        expect(focused).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"0\")")
+
+    it "selects streaming without requiring bootstrap mode":
+        val request = driver_streaming_surface_requested_values("1", "", "")
+        expect(driver_streaming_surface_route_values(request, true, true, false, true, false)).to_equal(1)
+        val gate = file_read("src/compiler/80.driver/driver_phase_gates.spl")
+        expect(gate).to_contain("driver_streaming_surface_route_values(requested,")
+        expect(gate).to_contain("driver_streaming_surface_route(ctx) == 1")
+
+    it "preserves default and off routes and rejects unsupported explicit routes":
+        expect(driver_streaming_surface_requested_values("", "", "")).to_equal(false)
+        expect(driver_streaming_surface_requested_values("0", "", "")).to_equal(false)
+        expect(driver_streaming_surface_route_values(false, false, false, true, false, true)).to_equal(0)
+        expect(driver_streaming_surface_route_values(true, false, true, false, true, false)).to_equal(-1)
+        expect(driver_streaming_surface_route_values(true, true, false, false, true, false)).to_equal(-2)
+        expect(driver_streaming_surface_route_values(true, true, true, true, true, false)).to_equal(-3)
+        expect(driver_streaming_surface_route_values(true, true, true, false, false, false)).to_equal(-4)
+        expect(driver_streaming_surface_route_values(true, true, true, false, true, true)).to_equal(-5)
+        expect(driver_streaming_surface_requested_values("", "1", "1")).to_equal(true)
+
+    it "rejects a blocked explicit request before source loading":
+        val source = file_read("src/compiler/80.driver/driver_orchestration.spl")
+        val rejection = source.index_of("if streaming_route < 0:")
+        expect(rejection).to_be_greater_than(0)
+        expect(source.index_of("val (loaded_ctx, load_ok) = self.load_sources_impl()")).to_be_greater_than(rejection)
+        expect(source).to_contain("return CompileResult.CodegenError(streaming_error)")
+        expect(source).to_contain("val sources_streaming_in_place = streaming_route == 1")
+        expect(driver_streaming_surface_rejection(-2)).to_start_with("E-DRV-STREAM-ENTRY:")

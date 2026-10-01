@@ -18,8 +18,7 @@ use std.hardware.riscv_common.isa.isa_database.{
     riscv_zca_critical_subset_has_entry, riscv_zca_integer_entries_for_xlen,
     riscv_zca_target_rtl_has_entry, riscv_zca_target_rtl_has_contract
 }
-use std.hardware.rv32i_rtl.c_extension.{rv32c_expand_mission_critical}
-use std.hardware.rv64gc_rtl.decode.{rvc_expand_mission_critical}
+use std.hardware.rv64gc_rtl.decode.{rvc_expand}
 use compiler.common.mission_critical.riscv_zca_contracts.{riscv_zca_strict_contracts, riscv_zca_strict_isa_id, riscv_zca_strict_row_label}
 
 use std.spec.step
@@ -75,7 +74,7 @@ describe "mission-critical compressed subset boundary":
         expect(riscv_zca_target_rtl_has_contract("__simple_riscv_zca_cj_predecode_v1")).to_be(true)
         expect(riscv_zca_target_rtl_has_contract("__simple_riscv_zca_cbeqz_predecode_v1")).to_be(true)
         expect(riscv_zca_target_rtl_has_contract("__simple_riscv_zca_cbnez_predecode_v1")).to_be(true)
-        expect(riscv_zca_target_rtl_has_contract("__simple_riscv_zca_addi16sp_row_v1")).to_be(true)
+        expect(riscv_zca_target_rtl_has_contract("__simple_riscv_zca_caddi16sp_row_v1")).to_be(true)
 
     it "uses the same canonical strict contract for lowering and capability evidence":
         step("Verify: uses the same canonical strict contract for lowering and capability evidence")
@@ -85,25 +84,23 @@ describe "mission-critical compressed subset boundary":
         expect(riscv_zca_strict_isa_id("__simple_riscv_zca_cadd_row_v1")).to_equal("zca.c.add")
         expect(riscv_zca_strict_row_label("__simple_riscv_zca_cbeqz_predecode_v1")).to_equal("C.BEQZ")
         expect(riscv_zca_strict_isa_id("__simple_riscv_zca_cbnez_predecode_v1")).to_equal("zca.c.bnez")
-        expect(riscv_zca_strict_row_label("__simple_riscv_zca_addi16sp_row_v1")).to_equal("C.ADDI16SP")
+        expect(riscv_zca_strict_row_label("__simple_riscv_zca_caddi16sp_row_v1")).to_equal("C.ADDI16SP")
         for contract in contracts:
             expect(contract.isa_id.starts_with("zca.c.")).to_be(true)
             expect(contract.row_label != "").to_be(true)
 
     it "accepts only verified common rows and never invokes a legacy fallback":
         step("Verify: accepts only verified common rows and never invokes a legacy fallback")
-        val ebreak32 = rv32c_expand_mission_critical(0x9002)
-        val addi64 = rvc_expand_mission_critical(0x0505)
-        val unsupported32 = rv32c_expand_mission_critical(0x2085)
-        val unsupported64 = rvc_expand_mission_critical(0x2085)
-        expect(ebreak32.illegal).to_be(false)
-        expect(ebreak32.instruction).to_equal(0x00100073)
-        expect(addi64.legal).to_be(true)
-        expect(addi64.insn).to_equal(0x00150513)
+        val ebreak = riscv_zca_mission_critical_expand_hardware(0x9002)
+        val addi = riscv_zca_mission_critical_expand_hardware(0x0505)
+        val width_divergent = riscv_zca_mission_critical_expand_hardware(0x2085)
+        expect(ebreak.legal).to_be(true)
+        expect(ebreak.canonical_instruction).to_equal(0x00100073)
+        expect(addi.legal).to_be(true)
+        expect(addi.canonical_instruction).to_equal(0x00150513)
         # Q1/funct3=001 is RV32 C.JAL but RV64 C.ADDIW: the critical common
-        # subset must reject it rather than use either legacy decoder.
-        expect(unsupported32.illegal).to_be(true)
-        expect(unsupported64.legal).to_be(false)
+        # subset must reject it rather than fall back to either legacy decoder.
+        expect(width_divergent.legal).to_be(false)
 
     it "preserves distinct hardware failure reasons with no illegal payload":
         step("Verify: preserves distinct hardware failure reasons with no illegal payload")
@@ -157,7 +154,7 @@ describe "mission-critical compressed subset boundary":
 
     it "passes through an uncompressed RV64 word without pretending it is Zca":
         step("Verify: passes through an uncompressed RV64 word without pretending it is Zca")
-        val normal = rvc_expand_mission_critical(0x00100013)
+        val normal = rvc_expand(0x00100013)
         expect(normal.compressed).to_be(false)
         expect(normal.legal).to_be(true)
         expect(normal.insn).to_equal(0x00100013)

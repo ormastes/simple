@@ -1,0 +1,94 @@
+# codex-impl
+# Pure preparation coordinator. It performs no CLI access, loading, mapping,
+# publication commit, hidden compilation, or GPU initialization.
+
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.*
+use compiler.driver.environment_variant_composite_publication_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.EnvironmentDependencyResolutionV1
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.PublicationArtifactEvidenceV1
+
+pub enum EnvironmentVariantPreparationErrorV1:
+    InvalidPolicy
+    InvalidPolicyAuthority
+    PublicationAdmissionFailed
+
+pub struct EnvironmentVariantPreparationInputV1:
+    policy_inputs: EnvironmentVariantPolicyInputsV1
+    policy_authority: EnvironmentVariantCatalogPolicyAuthorityV1
+    snapshot: EnvironmentSnapshotV1
+    arena_bytes: [u8]
+    feature_words: [u64]
+    gpu_devices: [EnvironmentGpuDeviceV1]
+    root: VariantDescriptorV1
+    descriptors: [VariantDescriptorV1]
+    dependencies: [VariantDependencyV1]
+    resolution: EnvironmentDependencyResolutionV1
+    evidence: [PublicationArtifactEvidenceV1]
+    catalog_generation: u64
+    publication_generation: u64
+    bindings: [VariantFacetBindingV1]
+
+pub struct EnvironmentVariantPreparationV1:
+    decision: EnvironmentVariantPolicyDecisionInputV1
+    projection: EnvironmentVariantCatalogPolicyProjectionV1
+    publication: EnvironmentCompositePublicationV1
+    bindings: [VariantFacetBindingV1]
+    selected_variant_identities: [EnvironmentDigest256V1]
+    rejections: [VariantRejectionV1]
+    dependency_closure_digest: EnvironmentDigest256V1
+    catalog_digest: EnvironmentDigest256V1
+    dependency_lock_digest: EnvironmentDigest256V1
+    canonical_base_plan_digest: EnvironmentDigest256V1
+    plan_digest: EnvironmentDigest256V1
+    catalog_generation: u64
+    publication_generation: u64
+    policy_text_digest: text
+    policy_digest: EnvironmentDigest256V1
+
+fn _copy_bindings(rows: [VariantFacetBindingV1]) -> [VariantFacetBindingV1]:
+    var out: [VariantFacetBindingV1] = []
+    for row in rows: out.append(row)
+    out
+fn _copy_digests(rows: [EnvironmentDigest256V1]) -> [EnvironmentDigest256V1]:
+    var out: [EnvironmentDigest256V1] = []
+    for row in rows: out.append(row)
+    out
+fn _copy_rejections(rows: [VariantRejectionV1]) -> [VariantRejectionV1]:
+    var out: [VariantRejectionV1] = []
+    for row in rows: out.append(row)
+    out
+
+pub fn environment_variant_prepare_v1(
+    input: EnvironmentVariantPreparationInputV1
+) -> Result<EnvironmentVariantPreparationV1, EnvironmentVariantPreparationErrorV1>:
+    val decision = match environment_variant_policy_resolve_v1(input.policy_inputs):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPreparationErrorV1.InvalidPolicy)
+    val projection = match environment_variant_catalog_policy_project_v1(
+        decision, input.policy_authority):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPreparationErrorV1.InvalidPolicyAuthority)
+    val publication = match environment_composite_publication_admit_v1(
+        input.snapshot, input.arena_bytes, input.feature_words, input.gpu_devices,
+        input.root, input.descriptors, input.dependencies, input.resolution,
+        input.evidence, input.catalog_generation, input.publication_generation,
+        input.bindings, projection):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantPreparationErrorV1.PublicationAdmissionFailed)
+    # Projection feature ranges and descriptor feature ranges address the same
+    # caller-provided feature_words arena; the canonical catalog digest binds it.
+    Ok(EnvironmentVariantPreparationV1(decision: decision, projection: projection,
+        publication: publication, bindings: _copy_bindings(publication.facet_bindings),
+        selected_variant_identities: _copy_digests(publication.selected_variant_identities),
+        rejections: _copy_rejections(publication.rejections),
+        dependency_closure_digest: publication.admission.dependency_closure_digest,
+        catalog_digest: publication.admission.plan.catalog_digest,
+        dependency_lock_digest: publication.admission.plan.dependency_lock_digest,
+        canonical_base_plan_digest: publication.canonical_base_plan_digest,
+        plan_digest: publication.admission.plan.plan_digest,
+        catalog_generation: publication.admission.plan.catalog_generation,
+        publication_generation: publication.admission.plan.publication_generation,
+        policy_text_digest: projection.explain_policy_digest,
+        policy_digest: projection.binding_policy_digest))

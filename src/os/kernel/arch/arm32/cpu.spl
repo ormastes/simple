@@ -1,8 +1,8 @@
 # ARM32 CPU Primitives — ARMv7-A Coprocessor Register Access
 #
-# Implements ARMv7-A coprocessor register operations as capability-confined
-# inline assembly. ARM32 uses MRC/MCR cp15 coprocessor instructions instead of
-# AArch64 MSR/MRS system registers.
+# Wraps ARMv7-A coprocessor register operations via extern functions
+# (implemented in assembly or C runtime). ARM32 uses MRC/MCR cp15
+# coprocessor instructions instead of AArch64 MSR/MRS system registers.
 #
 # Key cp15 registers:
 #   MIDR      (c0,c0,0) — Main ID Register (CPU identification)
@@ -32,12 +32,34 @@
 #   MCR p15,0,r0,c8,c7,0 — TLBIALL (Invalidate entire TLB)
 #   MCR p15,0,r0,c8,c7,1 — TLBIMVA (Invalidate TLB by MVA)
 
-use os.kernel.smp.cpu_topology_identity_owner_v1.{
-    CpuHardwareIdentityKindV1,
-}
-use os.kernel.smp.cpu_identity_runtime_surface_v1.{
-    cpu_identity_runtime_resolve_or_unresolved_v1,
-}
+# ============================================================================
+# ARMv7-A Coprocessor Register Access (extern — implemented in asm/C runtime)
+# ============================================================================
+
+extern fn rt_arm32_mrc_midr() -> u32
+extern fn rt_arm32_mrc_mpidr() -> u32
+extern fn rt_arm32_mrc_sctlr() -> u32
+extern fn rt_arm32_mcr_sctlr(value: u32)
+extern fn rt_arm32_mrc_ttbr0() -> u32
+extern fn rt_arm32_mcr_ttbr0(value: u32)
+extern fn rt_arm32_mrc_ttbr1() -> u32
+extern fn rt_arm32_mcr_ttbr1(value: u32)
+extern fn rt_arm32_mcr_ttbcr(value: u32)
+extern fn rt_arm32_mcr_dacr(value: u32)
+extern fn rt_arm32_mcr_vbar(value: u32)
+extern fn rt_arm32_mcr_tlbiall()
+extern fn rt_arm32_mcr_tlbimva(mva: u32)
+extern fn rt_arm32_isb()
+extern fn rt_arm32_dsb()
+extern fn rt_arm32_dmb()
+extern fn rt_arm32_wfi()
+extern fn rt_arm32_wfe()
+extern fn rt_arm32_cpsid_i()
+extern fn rt_arm32_cpsie_i()
+extern fn rt_arm32_cpsid_f()
+extern fn rt_arm32_cpsie_f()
+extern fn rt_arm32_cpsid_if()
+extern fn rt_arm32_cpsie_if()
 
 # ============================================================================
 # Coprocessor Register Wrapper Functions
@@ -45,87 +67,38 @@ use os.kernel.smp.cpu_identity_runtime_surface_v1.{
 
 fn mrc_midr() -> u32:
     """Read MIDR — Main ID Register (CPU identification)."""
-    var value: u32 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrc p15, 0, {result}, c0, c0, 0",
-            result = out(reg) value
-        )
-    value
+    rt_arm32_mrc_midr()
 
 fn mrc_mpidr() -> u32:
     """Read MPIDR — Multiprocessor Affinity Register.
 
     Bits [7:0] = Aff0 (core ID within cluster).
     """
-    var value: u32 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrc p15, 0, {result}, c0, c0, 5",
-            result = out(reg) value
-        )
-    value
-
-pub fn arm32_current_mpidr_v1() -> u64:
-    """Return the full raw ARMv7 MPIDR without truncating affinity fields."""
-    mrc_mpidr() as u64
+    rt_arm32_mrc_mpidr()
 
 fn mrc_sctlr() -> u32:
     """Read SCTLR — System Control Register."""
-    var value: u32 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrc p15, 0, {result}, c1, c0, 0",
-            result = out(reg) value
-        )
-    value
+    rt_arm32_mrc_sctlr()
 
 fn mcr_sctlr(value: u32):
     """Write SCTLR — System Control Register (MMU, caches, alignment)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c1, c0, 0",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm32_mcr_sctlr(value)
 
 fn mrc_ttbr0() -> u32:
     """Read TTBR0 — Translation Table Base Register 0."""
-    var value: u32 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrc p15, 0, {result}, c2, c0, 0",
-            result = out(reg) value
-        )
-    value
+    rt_arm32_mrc_ttbr0()
 
 fn mcr_ttbr0(value: u32):
     """Write TTBR0 — Translation Table Base Register 0."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c2, c0, 0",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm32_mcr_ttbr0(value)
 
 fn mrc_ttbr1() -> u32:
     """Read TTBR1 — Translation Table Base Register 1."""
-    var value: u32 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrc p15, 0, {result}, c2, c0, 1",
-            result = out(reg) value
-        )
-    value
+    rt_arm32_mrc_ttbr1()
 
 fn mcr_ttbr1(value: u32):
     """Write TTBR1 — Translation Table Base Register 1."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c2, c0, 1",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm32_mcr_ttbr1(value)
 
 fn mcr_ttbcr(value: u32):
     """Write TTBCR — Translation Table Base Control Register.
@@ -134,12 +107,7 @@ fn mcr_ttbcr(value: u32):
     N=0: TTBR0 maps entire 4GB space.
     N>0: TTBR0 maps lower 2^(32-N) bytes, TTBR1 maps rest.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c2, c0, 2",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm32_mcr_ttbcr(value)
 
 fn mcr_dacr(value: u32):
     """Write DACR — Domain Access Control Register.
@@ -148,37 +116,21 @@ fn mcr_dacr(value: u32):
     0b00 = No access (fault), 0b01 = Client (check AP),
     0b10 = Reserved, 0b11 = Manager (no AP check).
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c3, c0, 0",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm32_mcr_dacr(value)
 
 fn mcr_vbar(value: u32):
     """Write VBAR — Vector Base Address Register (exception vectors).
 
     Must be 32-byte aligned.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c12, c0, 0",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm32_mcr_vbar(value)
 
 fn tlbiall():
     """Invalidate entire TLB (TLBIALL).
 
     Must be followed by DSB + ISB to ensure completion.
     """
-    val zero: u32 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c8, c7, 0",
-            operand = in(reg) zero,
-            clobber("memory")
-        )
+    rt_arm32_mcr_tlbiall()
 
 fn tlbimva(mva: u32):
     """Invalidate TLB entry for a single Modified Virtual Address.
@@ -186,12 +138,7 @@ fn tlbimva(mva: u32):
     The address should include the ASID in bits [7:0].
     Must be followed by DSB + ISB to ensure completion.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mcr p15, 0, {operand}, c8, c7, 1",
-            operand = in(reg) mva,
-            clobber("memory")
-        )
+    rt_arm32_mcr_tlbimva(mva)
 
 fn isb():
     """Instruction Synchronization Barrier.
@@ -200,11 +147,7 @@ fn isb():
     before subsequent instructions execute. Required after writing
     cp15 registers that affect instruction execution.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "isb",
-            clobber("memory")
-        )
+    rt_arm32_isb()
 
 fn dsb():
     """Data Synchronization Barrier (full system).
@@ -213,11 +156,7 @@ fn dsb():
     subsequent memory accesses. Required before TLB invalidation
     and after page table modifications.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "dsb",
-            clobber("memory")
-        )
+    rt_arm32_dsb()
 
 fn dmb():
     """Data Memory Barrier (full system).
@@ -225,59 +164,31 @@ fn dmb():
     Ensures ordering of memory accesses but doesn't wait for
     completion. Lighter weight than DSB.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "dmb",
-            clobber("memory")
-        )
+    rt_arm32_dmb()
 
 fn wfi():
     """Wait For Interrupt — halt CPU until interrupt fires."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "wfi",
-            clobber("memory")
-        )
+    rt_arm32_wfi()
 
 fn wfe():
     """Wait For Event — halt CPU until event fires."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "wfe",
-            clobber("memory")
-        )
+    rt_arm32_wfe()
 
 fn cpsid_i():
     """Disable IRQ interrupts (CPSID i — set I bit in CPSR)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "cpsid i",
-            clobber("memory")
-        )
+    rt_arm32_cpsid_i()
 
 fn cpsie_i():
     """Enable IRQ interrupts (CPSIE i — clear I bit in CPSR)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "cpsie i",
-            clobber("memory")
-        )
+    rt_arm32_cpsie_i()
 
 fn cpsid_if():
     """Disable both IRQ and FIQ interrupts (CPSID if)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "cpsid if",
-            clobber("memory")
-        )
+    rt_arm32_cpsid_if()
 
 fn cpsie_if():
     """Enable both IRQ and FIQ interrupts (CPSIE if)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "cpsie if",
-            clobber("memory")
-        )
+    rt_arm32_cpsie_if()
 
 # ============================================================================
 # Arm32Cpu — HAL-Compatible CPU Interface
@@ -294,9 +205,8 @@ struct Arm32Cpu:
 
 impl Arm32Cpu:
     fn cpu_id() -> u64:
-        """Resolve the full current MPIDR through the boot-sealed census."""
-        cpu_identity_runtime_resolve_or_unresolved_v1(
-            CpuHardwareIdentityKindV1.ArmMpidr, arm32_current_mpidr_v1())
+        """Return current CPU core ID from MPIDR Aff0 field."""
+        (mrc_mpidr() & 0xFF) as u64
 
     fn cpu_address_width() -> u64:
         """Return virtual address width in bits (32 for ARMv7-A)."""

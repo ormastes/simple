@@ -6,8 +6,9 @@ use simple_common::target::TargetOS;
 
 use super::{effective_target, ModuleImports};
 use super::tools::{
-    find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command,
-    target_c_compiler,
+    archive_create_command, find_archive_tool, find_c_compiler, find_runtime_library,
+    external_tool_path, is_compiler_rt_builtin_symbol, is_system_symbol, is_system_symbol_for_target,
+    nm_command, target_c_compiler, windows_gnu_target_flag,
 };
 
 pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
@@ -369,8 +370,48 @@ fn check_fabricated_stub_ratchet(project_root: &Path, output: &Path, fabricated:
     Ok(())
 }
 
-fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+/// Platform C symbols that must never be satisfied by a same-named Simple
+/// function.
+///
+/// `resolve_defined_suffix_alias`'s last fallback matches a BARE symbol (one
+/// with no `__`, i.e. a plain C identifier) against any defined Simple symbol
+/// ending in `__<name>`. That is right for an undecorated Simple symbol and
+/// catastrophic for a libc/winsock one, because the names collide by
+/// coincidence and the suffix match cannot tell them apart.
+///
+/// Measured 2026-09-27 on the Windows Stage 2 link: an undefined reference to
+/// winsock's `select` resolved to
+/// `lib__nogc_async_mut__async__combinators__select`, and the generated alias
+///
+/// ```asm
+/// .globl select
+/// select:
+///   jmp lib__nogc_async_mut__async__combinators__select
+/// ```
+///
+/// crashed ld.lld 23.1.0 in `checkAndSetWeakAlias` against ws2_32's own
+/// `select`. The crash was the lucky outcome: had it linked, every socket
+/// `select()` call would have jumped into an async combinator.
+///
+/// These names must come from the platform's import library. Returning `None`
+/// here leaves the reference unresolved for the real provider to satisfy,
+/// which is the correct outcome, not a regression.
+const PLATFORM_C_SYMBOLS: &[&str] = &[
+    // winsock / POSIX sockets -- the family that produced the measured bug
+    "select", "accept", "bind", "connect", "listen", "send", "recv", "sendto",
+    "recvfrom", "shutdown", "socket", "getsockopt", "setsockopt", "poll",
+    // libc names a Simple module could plausibly also define
+    "read", "write", "open", "close", "seek", "flush", "abort", "exit",
+    "malloc", "free", "realloc", "calloc", "signal", "raise", "time", "clock",
+    "remove", "rename", "system", "getenv", "sleep", "wait", "kill", "pipe",
+    "fork", "exec", "stat", "link", "unlink", "chmod", "chown", "access",
+];
+
+pub(crate) fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
     if is_runtime_owned_symbol(sym) {
+        return None;
+    }
+    if PLATFORM_C_SYMBOLS.contains(&sym) {
         return None;
     }
 
@@ -403,6 +444,16 @@ fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<S
         tail.strip_prefix('_')
             .and_then(|decorated| unique_suffix(&format!("__{}", decorated)))
     })
+}
+
+/// A bare undefined name has no provenance: it may be a C import even when a
+/// Simple function with the same tail exists. Windows linking must fail closed
+/// instead of manufacturing an alias for that ambiguous name.
+pub(crate) fn resolve_windows_compat_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+    if !sym.contains("__") {
+        return None;
+    }
+    resolve_defined_suffix_alias(sym, defined)
 }
 
 /// The bare Simple function name of a mangled pure-Simple module symbol.
@@ -480,6 +531,34 @@ dangling and the source must be repaired.",
     ))
 }
 
+/// Refuse a freestanding weak stub for every unresolved pure-Simple module
+/// symbol. A missing `lib__*` or `os__*` provider is a closure failure, not a
+/// runtime compatibility symbol: fabricating a nil-returning body would turn a
+/// deterministic link error into silent kernel behavior.
+fn unresolved_simple_module_closure_report(
+    needs_stub: &[String],
+    defined: &std::collections::HashSet<String>,
+) -> Option<String> {
+    if let Some(report) = stale_module_move_report(needs_stub, defined) {
+        return Some(report);
+    }
+    let mut missing: Vec<&str> = needs_stub
+        .iter()
+        .filter_map(|symbol| simple_module_symbol_tail(symbol).map(|_| symbol.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    missing.sort_unstable();
+    Some(format!(
+        "freestanding link refused: {} pure-Simple module closure symbol(s) are undefined:\n  {}\n\
+A `lib__*` or `os__*` symbol must be supplied by the kernel closure; refusing to \
+fabricate a weak nil-returning stub.",
+        missing.len(),
+        missing.join("\n  ")
+    ))
+}
+
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
@@ -503,7 +582,7 @@ pub(crate) fn generate_stub_object_freestanding(
     use std::collections::{BTreeSet, HashSet};
 
     fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
-        let output = nm_command().arg("-g").arg("-p").arg(path).output().ok()?;
+        let output = nm_command().ok()?.arg("-g").arg("-p").arg(external_tool_path(path)).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -582,7 +661,7 @@ pub(crate) fn generate_stub_object_freestanding(
         .filter(|s| s != "main" && s != "_main")
         .collect();
 
-    // Stale-object-cache consistency check (runs BEFORE the unresolved-mode
+    // Pure-Simple closure consistency check (runs BEFORE the unresolved-mode
     // match, so `DeferToLinker` / `EmitStubs` cannot swallow it).
     //
     // An undefined `lib__*` / `os__*` symbol whose bare function name IS defined
@@ -597,7 +676,7 @@ pub(crate) fn generate_stub_object_freestanding(
     // (`cross_module_layout_fingerprint` in `native_project::mod`): it catches
     // the class even if a future key change regresses. It deliberately does NOT
     // touch the `rt_*` channels.
-    if let Some(report) = stale_module_move_report(&needs_stub, &defined) {
+    if let Some(report) = unresolved_simple_module_closure_report(&needs_stub, &defined) {
         return Err(report);
     }
 
@@ -902,10 +981,10 @@ pub(crate) fn generate_stub_object(
     };
 
     for path in &scan_paths {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
-            .arg(path)
+            .arg(external_tool_path(path))
             .output()
             .map_err(|e| format!("nm: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -934,10 +1013,10 @@ pub(crate) fn generate_stub_object(
         selected_runtime_libs.to_vec()
     };
     for rt_path in runtime_libs {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
-            .arg(rt_path)
+            .arg(external_tool_path(rt_path))
             .output()
             .map_err(|e| format!("nm runtime: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -955,14 +1034,15 @@ pub(crate) fn generate_stub_object(
         }
     }
 
-    let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+    let target = effective_target();
+    let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_target(&target);
     for lib_path in &plat_config.system_scan_libs {
         if std::path::Path::new(lib_path).exists() {
-            let mut nm_cmd = nm_command();
+            let mut nm_cmd = nm_command()?;
             for flag in &plat_config.nm_flags {
                 nm_cmd.arg(flag);
             }
-            nm_cmd.arg(lib_path);
+            nm_cmd.arg(external_tool_path(lib_path));
             if let Ok(output) = nm_cmd.output() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
@@ -1017,7 +1097,7 @@ pub(crate) fn generate_stub_object(
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
         .filter(|s| !is_linker_provided_symbol(s, &defined))
-        .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_system_symbol_for_target(s, target))
         .filter(|s| !is_runtime_optional_symbol(s))
         .cloned()
         .collect();
@@ -1064,6 +1144,13 @@ or set {}=1 to bypass at your own risk.",
         })
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
+        // libgcc/compiler-rt owned names (arithmetic builtins, and GCC's
+        // __cpu_model/__cpu_indicator_init/__cpu_features2 CPU-dispatch
+        // support symbols) are resolved by the compiler runtime the final
+        // link already pulls in, never by our own fabricated stubs -- see
+        // is_compiler_rt_builtin_symbol's doc comment for the incident this
+        // filter fixes (Windows/MinGW "multiple definition of `__cpu_model`").
+        .filter(|s| !is_compiler_rt_builtin_symbol(s))
         // Inline-asm blocks are concrete compiler output, never optional
         // application functions. Weak-stubbing a block after target-specific
         // asm compilation failed turns a missing instruction path into a
@@ -1071,7 +1158,7 @@ or set {}=1 to bypass at your own risk.",
         // final linker to diagnose.
         .filter(|s| !is_inline_asm_symbol(s))
         .filter(|s| stub_missing_runtime || !is_runtime_owned_symbol(s))
-        .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_system_symbol_for_target(s, target))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
 
@@ -1133,7 +1220,11 @@ the old fabricating behaviour.",
     // present; those aliases resolve real code rather than hiding a missing
     // implementation. Leave every genuinely unresolved symbol to the linker.
     if strict_no_stub_fallback {
-        needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
+        if effective_target().os == TargetOS::Windows {
+            needs_stub.retain(|sym| resolve_windows_compat_alias(sym, &defined).is_some());
+        } else {
+            needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
+        }
     }
 
     if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {
@@ -1152,14 +1243,19 @@ the old fabricating behaviour.",
         let stub_c = temp_dir.join("_stubs.c");
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
         let stub_o = temp_dir.join("_stubs.o");
-        let empty_cc = target_c_compiler(effective_target());
-        let status = std::process::Command::new(&empty_cc)
-            .arg("-c")
+        let target = effective_target();
+        let empty_cc = target_c_compiler(target);
+        let mut command = std::process::Command::new(&empty_cc);
+        command.arg("-c")
             .arg("-ffunction-sections")
             .arg("-fdata-sections")
             .arg("-o")
             .arg(&stub_o)
-            .arg(&stub_c)
+            .arg(&stub_c);
+        if let Some(flag) = windows_gnu_target_flag(target, &empty_cc) {
+            command.arg(flag);
+        }
+        let status = command
             .status()
             .map_err(|e| format!("compile stubs: {e}"))?;
         if !status.success() {
@@ -1210,6 +1306,7 @@ the old fabricating behaviour.",
                 *s,
                 "rt_enum_new"
                     | "rt_enum_check_discriminant"
+                    | "rt_enum_check_variant"
                     | "rt_enum_id"
                     | "rt_enum_discriminant"
                     | "rt_enum_payload"
@@ -1229,8 +1326,133 @@ the old fabricating behaviour.",
         }
     }
 
-    #[cfg(target_os = "windows")]
     {
+        let target = effective_target();
+        if target.os == TargetOS::Windows {
+        // COFF archive extraction is object-granular.  Putting every strict
+        // compatibility trampoline in `_stubs.o` means that selecting one
+        // live alias also selects siblings whose targets may be unreachable.
+        // `/OPT:REF` then sees their relocations before it can discard them.
+        // Emit one real trampoline per archive member so the archive index is
+        // the liveness boundary.  This is deliberately strict-only: ordinary
+        // unresolved fallback keeps its historical C return-3 bodies.
+        if strict_no_stub_fallback {
+            let asm_cc = target_c_compiler(target);
+            let asm_cc_name = std::path::Path::new(&asm_cc)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&asm_cc)
+                .to_ascii_lowercase();
+            if asm_cc_name == "cl" {
+                return Err("strict Windows compatibility aliases require clang or clang-cl; cl.exe cannot assemble GAS trampoline sources".to_string());
+            }
+            let clang_driver = asm_cc_name.contains("clang");
+            let msvc_driver = asm_cc_name.contains("clang-cl");
+            let jmp = simple_common::platform::asm_helpers::asm_jmp_instruction(&target);
+            let mut members = Vec::with_capacity(needs_stub.len());
+
+            for (index, sym) in needs_stub.iter().enumerate() {
+                if !plat_config.is_valid_asm_label(sym) {
+                    continue;
+                }
+                let real_fn = resolve_windows_compat_alias(sym, &defined).ok_or_else(|| {
+                    format!("strict Windows compatibility alias '{sym}' has no resolved target")
+                })?;
+                if !plat_config.is_valid_asm_label(&real_fn) {
+                    return Err(format!(
+                        "strict Windows compatibility alias target '{real_fn}' is not a valid assembly label"
+                    ));
+                }
+
+                let source = temp_dir.join(format!("_compat_alias_{index}.s"));
+                let object = temp_dir.join(format!("_compat_alias_{index}.obj"));
+                let section = format!(".text$compat_alias_{index}");
+                // The one-member-per-alias archive is the COFF liveness
+                // boundary.  Do not use the GAS `one_only` COMDAT spelling:
+                // clang-cl's COFF integrated assembler rejects it.
+                let asm = format!(
+                    ".section {section},\"xr\"\n.globl {sym}\n{sym}:\n  {jmp} {real_fn}\n"
+                );
+                std::fs::write(&source, asm)
+                    .map_err(|e| format!("write Windows compatibility alias assembly: {e}"))?;
+
+                let mut command = std::process::Command::new(&asm_cc);
+                command.arg("-c");
+                // clang/clang-cl need the requested target to prevent an x64
+                // host from silently emitting x64 COFF for an ARM64 target.
+                // A GNU cross compiler carries its target in its executable
+                // name and rejects clang's --target spelling.
+                if clang_driver {
+                    command.arg(format!("--target={}", target.triple_str()));
+                }
+                command.arg(&source);
+                if msvc_driver {
+                    command.arg(format!("-Fo{}", object.display()));
+                } else {
+                    command.arg("-o").arg(&object);
+                }
+                let output = command.output()
+                    .map_err(|e| format!("assemble Windows compatibility alias ({asm_cc}): {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "assemble Windows compatibility alias '{sym}' ({asm_cc}): {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                members.push(object);
+            }
+            if members.is_empty() {
+                return Err("strict Windows compatibility aliases produced no COFF members".to_string());
+            }
+            let archive = temp_dir.join("_compat_aliases.lib");
+            let archive_tool = find_archive_tool()?;
+            // `lib.exe`/`llvm-lib` receive object paths directly.  Bound each
+            // invocation by its encoded Windows command-line length, not a
+            // member count: 128 generated paths can exceed CreateProcess'
+            // 32,767 UTF-16 code-unit limit in a deep build directory.  Keep
+            // a conservative reserve for tool, archive, and quoting overhead.
+            const ARCHIVE_COMMAND_LIMIT: usize = 24_000;
+            let archive_path_len = archive.as_os_str().to_string_lossy().encode_utf16().count() + 3;
+            let mut start = 0;
+            while start < members.len() {
+                // Append commands carry the archive both as `/OUT:` and as
+                // an input member, so account for two encoded path copies.
+                let mut batch_len = 512 + archive_path_len * if start == 0 { 1 } else { 2 };
+                let mut end = start;
+                while end < members.len() {
+                    let member_len = members[end].as_os_str().to_string_lossy().encode_utf16().count() + 3;
+                    if batch_len + member_len > ARCHIVE_COMMAND_LIMIT {
+                        if end == start {
+                            return Err(format!(
+                                "Windows compatibility alias object path exceeds archive command budget: {}",
+                                members[end].display()
+                            ));
+                        }
+                        break;
+                    }
+                    batch_len += member_len;
+                    end += 1;
+                }
+                let output = archive_create_command(
+                    &archive_tool,
+                    &archive,
+                    &members[start..end],
+                    start != 0,
+                    true,
+                )
+                    .output()
+                    .map_err(|e| format!("archive Windows compatibility aliases ({archive_tool}): {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "archive Windows compatibility aliases ({archive_tool}): {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                start = end;
+            }
+            return Ok(archive);
+        }
+
         let mut c_code = String::with_capacity(needs_stub.len() * 120);
         c_code.push_str("/* Auto-generated stubs for bootstrap linking (Windows) */\n");
         c_code.push_str("#include <stdint.h>\n\n");
@@ -1250,14 +1472,21 @@ the old fabricating behaviour.",
         std::fs::write(&stub_c, &c_code).map_err(|e| format!("write stubs: {e}"))?;
 
         let stub_o = temp_dir.join("_stubs.o");
-        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "gcc".to_string());
-        let output = std::process::Command::new(&stub_cc)
-            .arg("-c")
+        // GNU-style driver flags and `__asm__` labels below: clang's GNU
+        // driver, never gcc (clang-only toolchain). Fail fast if it is absent.
+        let stub_cc = target_c_compiler(target);
+        simple_common::platform::cc_detect::require_compiler(&stub_cc)?;
+        let mut command = std::process::Command::new(&stub_cc);
+        command.arg("-c")
             .arg("-ffunction-sections")
             .arg("-fdata-sections")
             .arg("-o")
             .arg(&stub_o)
-            .arg(&stub_c)
+            .arg(&stub_c);
+        if let Some(flag) = windows_gnu_target_flag(target, &stub_cc) {
+            command.arg(flag);
+        }
+        let output = command
             .output()
             .map_err(|e| format!("compile stubs ({stub_cc}): {e}"))?;
 
@@ -1268,8 +1497,8 @@ the old fabricating behaviour.",
 
         return Ok(stub_o);
     }
+    }
 
-    #[cfg(not(target_os = "windows"))]
     {
         let mut asm_code = String::with_capacity(needs_stub.len() * 100);
         asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
@@ -1291,7 +1520,12 @@ the old fabricating behaviour.",
                 continue;
             }
 
-            if let Some(real_fn) = resolve_defined_suffix_alias(sym, &defined) {
+            let resolved_alias = if target.os == TargetOS::Windows {
+                resolve_windows_compat_alias(sym, &defined)
+            } else {
+                resolve_defined_suffix_alias(sym, &defined)
+            };
+            if let Some(real_fn) = resolved_alias {
                 // Use the platform-aware trampoline emitter so macOS gets
                 // `.weak_definition` (its assembler rejects GNU `.weak`).
                 asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
@@ -1358,6 +1592,150 @@ the old fabricating behaviour.",
         }
 
         Ok(stub_o)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows undefined-symbol stub parity (MSVC ABI, lld-link)
+//
+// ELF links resolve undefined symbols AFTER `--gc-sections` (the LLVM backend
+// gives every body its own ELF section), so a reference made only by
+// unreachable code is dropped with that code and never reported. lld-link
+// reports every undefined symbol BEFORE `/OPT:REF`, and Simple's COFF bodies
+// are not COMDAT (most are `weak`, and a weak COMDAT would stop a strong
+// definition from overriding them), so the same object set fails on Windows.
+// Owner decision 2026-09-25 ("parity now, fix later"): after a strict link
+// fails on undefined symbols, relink once with trap stubs for exactly those
+// names. Differences from ELF, tracked in
+// doc/08_tracking/bug/windows_stage2_cli_stubbed_symbols_2026-09-25.md: ELF
+// still rejects an unresolved reference from REACHABLE code at link time;
+// here it links and the stub prints its name and aborts when called.
+// Rust std/alloc internals are never stubbed.
+// ---------------------------------------------------------------------------
+
+/// Undefined symbol names reported by an lld-link run (`undefined symbol: X`).
+pub(crate) fn lld_link_undefined_symbols(diagnostics: &str) -> Vec<String> {
+    let mut names: Vec<String> = diagnostics
+        .lines()
+        .filter_map(|line| line.split("undefined symbol: ").nth(1))
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// True when `name` is a (demangled) Rust standard-library / allocator
+/// internal. Those must be resolved by linking the matching std, never stubbed.
+pub(crate) fn is_rust_internal_symbol(name: &str) -> bool {
+    const RUST_CRATES: [&str; 6] = ["std::", "core::", "alloc::", "hashbrown::", "__rustc::", "compiler_builtins::"];
+    name.contains('<')
+        || name.contains(' ')
+        || name.starts_with("_ZN")
+        || name.starts_with("_R")
+        || name.starts_with("__rust_")
+        || RUST_CRATES.iter().any(|krate| name.starts_with(krate))
+}
+
+/// True when `name` can be the asm label of a C stub definition.
+fn is_coff_stub_label(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$' | ':'))
+}
+
+/// C source for trap stubs: each named symbol, if ever called, prints its name
+/// and aborts. `/Gy` gives each stub its own COMDAT so the linker can drop
+/// stubs nothing references.
+pub(crate) fn coff_gc_parity_stub_source(names: &[String]) -> Result<String, String> {
+    let mut source = String::from(
+        "/* Generated: Windows undefined-symbol trap stubs. See stubs.rs. */\n\
+         #include <stdio.h>\n\
+         #include <stdlib.h>\n\
+         static __declspec(noinline) void spl_unresolved_symbol_trap(const char* name) {\n\
+         \x20   fprintf(stderr, \"fatal: called unresolved symbol `%s` (stubbed for link only)\\n\", name);\n\
+         \x20   fflush(stderr);\n\
+         \x20   abort();\n\
+         }\n",
+    );
+    for (index, name) in names.iter().enumerate() {
+        if !is_coff_stub_label(name) {
+            return Err(format!("cannot stub unresolved symbol with non-label name `{name}`"));
+        }
+        source.push_str(&format!(
+            "long long spl_gc_parity_stub_{index}(void) __asm__(\"{name}\");\n\
+             long long spl_gc_parity_stub_{index}(void) {{ spl_unresolved_symbol_trap(\"{name}\"); return 0; }}\n"
+        ));
+    }
+    Ok(source)
+}
+
+/// Compile the trap stubs with clang-cl (MSVC ABI). Fails fast if clang-cl is
+/// not installed.
+pub(crate) fn compile_coff_gc_parity_stubs(temp_dir: &Path, names: &[String]) -> Result<PathBuf, String> {
+    let source = coff_gc_parity_stub_source(names)?;
+    let stub_c = temp_dir.join("_gc_parity_stubs.c");
+    let stub_o = temp_dir.join("_gc_parity_stubs.obj");
+    std::fs::write(&stub_c, source).map_err(|e| format!("write {}: {e}", stub_c.display()))?;
+    let cc = "clang-cl";
+    simple_common::platform::cc_detect::require_compiler(cc)?;
+    let output = std::process::Command::new(cc)
+        .arg("/nologo")
+        .arg("/c")
+        .arg("/O1")
+        .arg("/Gy")
+        .arg(format!("/Fo{}", stub_o.display()))
+        .arg(&stub_c)
+        .output()
+        .map_err(|e| format!("compile GC-parity stubs ({cc}): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to compile GC-parity stubs ({cc}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(stub_o)
+}
+
+#[cfg(test)]
+mod coff_gc_parity_tests {
+    use super::*;
+
+    #[test]
+    fn parses_lld_link_undefined_symbols() {
+        let log = "lld-link: error: undefined symbol: rt_cuda_malloc\n>>> referenced by x.o\n\
+                   lld-link: error: undefined symbol: DocBlock::Heading\n\
+                   lld-link: error: undefined symbol: rt_cuda_malloc\n";
+        assert_eq!(
+            lld_link_undefined_symbols(log),
+            vec!["DocBlock::Heading".to_string(), "rt_cuda_malloc".to_string()]
+        );
+    }
+
+    #[test]
+    fn rust_internals_are_never_stub_candidates() {
+        for name in [
+            "std::env::_var_os",
+            "core::option::unwrap_failed",
+            "__rustc::__rust_alloc",
+            "<core::fmt::Formatter>::debug_struct",
+            "_RNvNtCs6DFWowmz9po_4core6option13unwrap_failed",
+        ] {
+            assert!(is_rust_internal_symbol(name), "{name}");
+        }
+        for name in ["rt_cuda_malloc", "DocBlock::Heading", "EditSession._find_doc_index"] {
+            assert!(!is_rust_internal_symbol(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn stub_source_traps_loudly_and_rejects_non_labels() {
+        let source = coff_gc_parity_stub_source(&["rt_x".to_string(), "T.m".to_string()]).unwrap();
+        assert!(source.contains("__asm__(\"rt_x\")") && source.contains("__asm__(\"T.m\")"));
+        assert!(source.contains("abort();") && source.contains("fatal: called unresolved symbol"));
+        assert!(coff_gc_parity_stub_source(&["a b".to_string()]).is_err());
     }
 }
 
@@ -1494,6 +1872,52 @@ mod tests {
         // Tail extraction takes everything after the LAST separator.
         assert_eq!(simple_module_symbol_tail(live), Some("skip_wrap_spaces"));
         assert_eq!(simple_module_symbol_tail("os__kernel__mm__map_page"), Some("map_page"));
+    }
+
+    #[test]
+    fn unresolved_bytespan_method_is_refused_before_weak_stub_fallback() {
+        use std::process::Command;
+
+        let missing = "lib__common__bytes__span__ByteSpan_dot_starts_with";
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("bytespan_missing_method.c");
+        let object = dir.path().join("bytespan_missing_method.o");
+        std::fs::write(
+            &source,
+            "extern long lib__common__bytes__span__ByteSpan_dot_starts_with(void);\n\
+             long lib__common__bytes__span__ByteSpan_dot_len(void) { return 1; }\n\
+             long bytespan_probe(void) {\n\
+                 return lib__common__bytes__span__ByteSpan_dot_starts_with();\n\
+             }\n",
+        )
+        .unwrap();
+        let compile = Command::new("cc")
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+
+        let report = with_freestanding_stub_env(None, Some("1"), None, || {
+            generate_stub_object_freestanding(
+                dir.path(),
+                std::slice::from_ref(&object),
+                &[],
+                "x86_64-unknown-none",
+                "x86-64",
+                "",
+                dir.path(),
+                Path::new("bytespan-kernel.elf"),
+            )
+        })
+        .expect_err("a missing ByteSpan method must fail before a weak stub is emitted");
+        assert!(report.contains(missing));
+        assert!(report.contains("freestanding link refused"));
+        assert!(report.contains("weak nil-returning stub"));
+        assert!(!dir.path().join("_stubs_freestanding.c").exists());
+        assert!(!dir.path().join("_stubs_freestanding.o").exists());
     }
 
     #[test]

@@ -1,14 +1,16 @@
-use llvm_sys::core::{LLVMConstReal, LLVMConstRealOfStringAndSize};
+use llvm_sys::core::{LLVMConstReal, LLVMConstRealOfStringAndSize, LLVMGetTypeKind};
 use llvm_sys::execution_engine::LLVMCreateGenericValueOfFloat;
 use llvm_sys::prelude::LLVMTypeRef;
 
+use crate::AddressSpace;
 use crate::context::ContextRef;
 use crate::support::LLVMString;
+#[llvm_versions(12..)]
+use crate::types::ScalableVectorType;
 use crate::types::enums::BasicMetadataTypeEnum;
 use crate::types::traits::AsTypeRef;
 use crate::types::{ArrayType, FunctionType, PointerType, Type, VectorType};
 use crate::values::{ArrayValue, FloatValue, GenericValue, IntValue};
-use crate::AddressSpace;
 
 use std::fmt::{self, Display};
 
@@ -24,10 +26,12 @@ impl<'ctx> FloatType<'ctx> {
     /// # Safety
     /// Undefined behavior, if referenced type isn't float type
     pub unsafe fn new(float_type: LLVMTypeRef) -> Self {
-        assert!(!float_type.is_null());
+        unsafe {
+            assert!(!float_type.is_null());
 
-        FloatType {
-            float_type: Type::new(float_type),
+            FloatType {
+                float_type: Type::new(float_type),
+            }
         }
     }
 
@@ -73,13 +77,32 @@ impl<'ctx> FloatType<'ctx> {
     ///
     /// let context = Context::create();
     /// let f32_type = context.f32_type();
-    /// let f32_vector_type = f32_type.vec_type(3);
+    /// let f32_scalable_vector_type = f32_type.vec_type(3);
+    ///
+    /// assert_eq!(f32_scalable_vector_type.get_size(), 3);
+    /// assert_eq!(f32_scalable_vector_type.get_element_type().into_float_type(), f32_type);
+    /// ```
+    pub fn vec_type(self, size: u32) -> VectorType<'ctx> {
+        self.float_type.vec_type(size)
+    }
+
+    /// Creates a scalable `VectorType` with this `FloatType` for its element type.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use inkwell::context::Context;
+    ///
+    /// let context = Context::create();
+    /// let f32_type = context.f32_type();
+    /// let f32_vector_type = f32_type.scalable_vec_type(3);
     ///
     /// assert_eq!(f32_vector_type.get_size(), 3);
     /// assert_eq!(f32_vector_type.get_element_type().into_float_type(), f32_type);
     /// ```
-    pub fn vec_type(self, size: u32) -> VectorType<'ctx> {
-        self.float_type.vec_type(size)
+    #[llvm_versions(12..)]
+    pub fn scalable_vec_type(self, size: u32) -> ScalableVectorType<'ctx> {
+        self.float_type.scalable_vec_type(size)
     }
 
     /// Creates a `FloatValue` representing a constant value of this `FloatType`.
@@ -128,9 +151,9 @@ impl<'ctx> FloatType<'ctx> {
     /// assert_eq!(f64_val.print_to_string().to_string(), "double 0x7FF0000000000000");
     /// ```
     pub unsafe fn const_float_from_string(self, slice: &str) -> FloatValue<'ctx> {
-    	assert!(!slice.is_empty());
+        assert!(!slice.is_empty());
 
-    	unsafe {
+        unsafe {
             FloatValue::new(LLVMConstRealOfStringAndSize(
                 self.as_type_ref(),
                 slice.as_ptr() as *const ::libc::c_char,
@@ -172,21 +195,6 @@ impl<'ctx> FloatType<'ctx> {
         self.float_type.size_of().unwrap()
     }
 
-    /// Gets the alignment of this `FloatType`. Value may vary depending on the target architecture.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use inkwell::context::Context;
-    ///
-    /// let context = Context::create();
-    /// let f32_type = context.f32_type();
-    /// let f32_type_alignment = f32_type.get_alignment();
-    /// ```
-    pub fn get_alignment(self) -> IntValue<'ctx> {
-        self.float_type.get_alignment()
-    }
-
     /// Gets a reference to the `Context` this `FloatType` was created in.
     ///
     /// # Example
@@ -215,27 +223,20 @@ impl<'ctx> FloatType<'ctx> {
     /// let f32_type = context.f32_type();
     /// let f32_ptr_type = f32_type.ptr_type(AddressSpace::default());
     ///
-    /// #[cfg(any(
-    ///     feature = "llvm4-0",
-    ///     feature = "llvm5-0",
-    ///     feature = "llvm6-0",
-    ///     feature = "llvm7-0",
-    ///     feature = "llvm8-0",
-    ///     feature = "llvm9-0",
-    ///     feature = "llvm10-0",
-    ///     feature = "llvm11-0",
-    ///     feature = "llvm12-0",
-    ///     feature = "llvm13-0",
-    ///     feature = "llvm14-0"
-    /// ))]
+    /// #[cfg(feature = "typed-pointers")]
     /// assert_eq!(f32_ptr_type.get_element_type().into_float_type(), f32_type);
     /// ```
     #[cfg_attr(
         any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
+            all(feature = "llvm15-0", not(feature = "typed-pointers")),
+            all(feature = "llvm16-0", not(feature = "typed-pointers")),
             feature = "llvm17-0",
-            feature = "llvm18-0"
+            feature = "llvm18-1",
+            feature = "llvm19-1",
+            feature = "llvm20-1",
+            feature = "llvm21-1",
+            feature = "llvm22-1",
+            feature = "llvm23-1",
         ),
         deprecated(
             note = "Starting from version 15.0, LLVM doesn't differentiate between pointer types. Use Context::ptr_type instead."
@@ -243,6 +244,46 @@ impl<'ctx> FloatType<'ctx> {
     )]
     pub fn ptr_type(self, address_space: AddressSpace) -> PointerType<'ctx> {
         self.float_type.ptr_type(address_space)
+    }
+
+    /// Gets the bit width of a `FloatType`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use inkwell::context::Context;
+    ///
+    /// let context = Context::create();
+    /// let f128_type = context.f128_type();
+    ///
+    /// assert_eq!(f128_type.get_bit_width(), 128);
+    /// ```
+    pub fn get_bit_width(self) -> u32 {
+        let type_kind = unsafe { LLVMGetTypeKind(self.as_type_ref()) };
+
+        match type_kind {
+            llvm_sys::LLVMTypeKind::LLVMHalfTypeKind => 16,
+            #[cfg(any(
+                feature = "llvm11-0",
+                feature = "llvm12-0",
+                feature = "llvm13-0",
+                feature = "llvm14-0",
+                feature = "llvm15-0",
+                feature = "llvm16-0",
+                feature = "llvm17-0",
+                feature = "llvm18-1",
+                feature = "llvm19-1",
+                feature = "llvm20-1",
+                feature = "llvm21-1",
+                feature = "llvm22-1",
+                feature = "llvm23-1",
+            ))]
+            llvm_sys::LLVMTypeKind::LLVMBFloatTypeKind => 16,
+            llvm_sys::LLVMTypeKind::LLVMFloatTypeKind => 32,
+            llvm_sys::LLVMTypeKind::LLVMDoubleTypeKind => 64,
+            llvm_sys::LLVMTypeKind::LLVMX86_FP80TypeKind => 80,
+            llvm_sys::LLVMTypeKind::LLVMFP128TypeKind | llvm_sys::LLVMTypeKind::LLVMPPC_FP128TypeKind => 128,
+            _ => unreachable!(),
+        }
     }
 
     /// Print the definition of a `FloatType` to `LLVMString`.

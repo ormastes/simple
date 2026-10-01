@@ -17,6 +17,8 @@ mod resolution;
 mod types;
 pub(crate) mod var_overlay;
 
+pub(crate) use resolution::clear_numbered_dir_cache;
+
 // Re-export public types
 pub use types::{
     ChildModule, DirectoryManifest, ModuleLifecycle, ModuleResolver, ModuleState, ResolveResult, ResolvedModule,
@@ -40,6 +42,24 @@ mod tests {
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"));
         assert_eq!(resolver.project_root(), dir.path());
         assert_eq!(resolver.source_root(), dir.path().join("src"));
+    }
+
+    #[test]
+    fn inventory_scratch_import_resolves_from_app_context() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let source_root = root.join("src");
+        let importer = source_root.join("app/compiler_entrypoint/inventory_scratch.spl");
+        let source = fs::read_to_string(&importer).expect("inventory scratch source");
+        let module_name = "compiler.mir._MirLowering.transient_owner_sffi";
+        assert!(source.contains(&format!("use {module_name}.{{")));
+
+        let path = ModulePath::new(module_name.split('.').map(str::to_string).collect());
+        let resolver = ModuleResolver::new(root, source_root.clone());
+        let resolved = resolver.resolve(&path, &importer).expect("SFFI owner import");
+        assert_eq!(
+            resolved.path,
+            source_root.join("compiler/50.mir/_MirLowering/transient_owner_sffi.spl")
+        );
     }
 
     #[test]

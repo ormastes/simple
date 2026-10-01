@@ -52,8 +52,13 @@ for something not actually done — a defect, tracked below).
 | Async I/O (non-blocking, IPC-backed) | A/B | implemented (legacy; migrating to SOSIX) | `src/os/posix/async_io.spl`, `src/os/posix/async_io_rw.spl` |
 | pipe() | B | implemented (ring buffer + notification pair) | `src/os/kernel/pipe_compat.spl` (facade: `src/os/posix/pipe_compat.spl`) |
 | fork/execve/spawn/waitpid | B | implemented (sync wrapper); host-Linux passthrough + SimpleOS syscall path both wired | `src/os/kernel/process_compat.spl` (facade: `src/os/posix/process_compat.spl`), `src/os/libc/simpleos_fork.c`, `src/os/libc/simpleos_process.c`, `src/os/libc/simpleos_process_wait.c` |
+| getuid/getgid/geteuid/getegid credentials | C | stub — returns the all-bits-one sentinel and `ENOSYS`; no kernel credential authority exists | `src/os/libc/simpleos_process.c` |
+| setsid/getsid/setpgid | C | stub — honestly returns `ENOSYS`; no kernel session/process-group owner exists | `src/os/libc/simpleos_process.c` |
+| setrlimit/getrusage/wait4 usage receipt | C | stub — honestly returns `ENOSYS`; no kernel resource-limit or usage-accounting owner exists | `src/os/libc/simpleos_process_wait.c` |
 | Async process control | A/B | implemented | `src/os/kernel/process_async.spl` (facade: `src/os/posix/process_async.spl`) |
-| signal()/kill()/sigprocmask()/raise() | B | implemented | `src/os/posix/signal_compat.spl`, `src/os/posix/signal_dispatch.spl`, `src/os/libc/simpleos_signal.c` |
+| getenv/setenv/unsetenv | B | implemented — validates names/nulls and uses checked owned entry allocation | `src/os/libc/simpleos_process.c` |
+| kill()/raise() kernel delivery | B | partial — kernel delivery only; user disposition/trampoline semantics are not available | `src/os/posix/signal_compat.spl`, `src/os/posix/signal_dispatch.spl`, `src/os/libc/simpleos_signal.c` |
+| signal()/sigaction registration, sigprocmask mask installation | C | stub — rejects with `ENOSYS` until kernel-owned disposition, trampoline, mask, and pending-delivery state exists | `src/os/libc/simpleos_signal.c` |
 | sockets (AF_INET) | B | implemented over netstack IPC (port 2) | `src/os/kernel/socket_compat.spl` (facade: `src/os/posix/socket_compat.spl`), `src/os/libc/simpleos_socket.c` |
 | socket connect state machine | B | implemented | `src/os/posix/socket_connect_semantics.spl` |
 | AF_UNIX | C | absent | — (no `sys/un.h` implementation found beyond header; not wired) |
@@ -61,6 +66,9 @@ for something not actually done — a defect, tracked below).
 | dlopen/dlsym/dlclose — ELF | C | implemented | `src/os/libc/simpleos_libc_ext.c`, `src/os/posix/dylib_async.spl` |
 | dlopen/dlsym/dlclose — SMF | C | partial (stub entry point) | `src/os/posix/dynlib.spl` |
 | dlopen/dlsym/dlclose — PE/COFF | C | stub — honestly returns `Invalid` (WS3 not landed) | `src/os/posix/dynlib.spl` |
+| realpath canonical resolution | C | stub — honestly returns `ENOSYS`; a copied spelling is not canonical/containment-safe | `src/os/libc/simpleos_libc_ext.c` |
+| madvise VM advice | C | stub — honestly returns `ENOSYS`; no VM-owned advice/residency contract exists | `src/os/libc/simpleos_libc_ext.c` |
+| scanf/fscanf/sscanf formatted input | C | stub — returns `EOF` with `ENOSYS`; no bounded assignment/conversion parser exists | `src/os/libc/simpleos_libc_ext.c` |
 | mmap() anonymous private | A-equivalent/B | implemented (real syscall 10 path) | `src/os/libc/simpleos_libc.c` |
 | mmap() writable MAP_SHARED — libc surface | C | **absent** — fails closed with `EOPNOTSUPP` (was DISHONEST, fixed earlier lane; still unreachable, see kernel row) | `src/os/libc/simpleos_libc.c`; documented in `src/os/posix/mod.spl` |
 | mmap() file-backed (any fd) — libc surface | C | **absent** — fails closed with `EOPNOTSUPP` | `src/os/libc/simpleos_libc.c` |
@@ -68,18 +76,20 @@ for something not actually done — a defect, tracked below).
 | msync() | C | **absent at the libc surface**; kernel-side `vmm_shared_msync` flushes the shared page cache into the backing file image only | `src/os/kernel/memory/vmm_shared.spl` |
 | munmap()/mprotect() | B | implemented | `src/os/libc/simpleos_libc.c` |
 | pthread_create/join/detach | C | stub — honestly returns `ENOSYS` | `src/os/libc/simpleos_pthread.c` |
-| pthread mutex/attr | C | implemented as single-threaded no-ops (correct: no concurrent thread exists to race) | `src/os/libc/simpleos_pthread.c` |
+| pthread mutex/rwlock/attr | C | stub — returns `ENOSYS` until a kernel-owned atomic lock/futex handoff exists; no-op success would authorize unsynchronized shared access | `src/os/libc/simpleos_pthread.c`, `src/os/libc/simpleos_pthread_rwlock.c` |
 | pthread_once/TLS (key_create et al.) | C | implemented (single-threaded semantics) | `src/os/libc/simpleos_pthread.c` |
-| pthread_cond_* | C | partial (see file — no real kernel wait, single-thread-safe subset) | `src/os/libc/simpleos_pthread_cond.c` |
-| pthread_rwlock_* | C | partial (single-threaded semantics) | `src/os/libc/simpleos_pthread_rwlock.c` |
-| flock() (BSD file locks) | C | **DISHONEST — always returns 0 for every operation including `LOCK_EX`, with zero lock tracking.** Filed, not fixed this increment (mmap was fixed as the bounded first increment's honest-failure target). Next lane increment should fail closed (`ENOSYS`) or implement real single-node advisory locking. | `src/os/libc/simpleos_filelock.c` |
+| pthread_cond_* | C | stub — honestly returns `ENOSYS` until an atomic mutex-release/kernel-wait owner exists | `src/os/libc/simpleos_pthread_cond.c` |
+| pthread_rwlock_* | C | stub — returns `ENOSYS` until a kernel-owned atomic lock/futex handoff exists; it never reports a no-op lock as acquired | `src/os/libc/simpleos_pthread_rwlock.c` |
+| flock() (BSD file locks) | C | stub — honestly returns `ENOSYS`; kernel-visible per-file advisory-lock ownership is not implemented | `src/os/libc/simpleos_filelock.c` |
 | termios (tcgetattr/tcsetattr/tcflush/tcdrain/tcsendbreak/tcflow) | C | stub — honestly returns `ENOSYS`, documented reasoning (no `Tty*` syscall id exists yet) | `src/os/libc/simpleos_termios.c` |
 | termios struct transforms (cfmakeraw, speed accessors) | C | implemented (pure struct ops, no kernel dependency) | `src/os/libc/simpleos_termios.c` |
+| nanosleep/clock_gettime/gettimeofday | B | implemented — validates requests and propagates kernel errno; nanosleep has no partial-remainder receipt yet | `src/os/libc/simpleos_time.c` |
+| alarm(SIGALRM timer) | C | stub — positive requests return their unchanged duration and set `errno=ENOSYS`; no kernel timer-to-signal owner exists | `src/os/libc/simpleos_process.c` |
 | locale (setlocale/localeconv) | C | partial (returns fixed "C" locale state, no real locale DB) | `src/os/libc/simpleos_libc_ext.c` |
-| sched_yield | C | implemented (correct no-op: no other runnable thread exists) | `src/os/libc/simpleos_sched.c` |
+| sched_yield | C | implemented — invokes kernel scheduler-yield ABI and propagates kernel errno | `src/os/libc/simpleos_sched.c` |
 | shm_open/shmget/shmat (POSIX/SysV shared memory) | C | absent | — (no symbols found) |
 | AIO (aio_read/aio_write) | C | absent | — (no symbols found) |
-| epoll | D | implemented | `src/os/libc/simpleos_epoll.c` |
+| epoll | D | partial — poll-backed readiness; `epoll_pwait` rejects non-null signal masks until kernel-owned atomic mask/wait exists | `src/os/libc/simpleos_epoll.c` |
 | eventfd | D | stub — honestly returns `ENOSYS` | `src/os/libc/simpleos_eventfd.c` |
 | signalfd | D | stub — honestly returns `ENOSYS` | `src/os/libc/simpleos_signalfd.c` |
 | timerfd | D | stub — honestly returns `ENOSYS` | `src/os/libc/simpleos_timerfd.c` |
@@ -87,16 +97,17 @@ for something not actually done — a defect, tracked below).
 | /proc compat, ioctl translation, namespace/cgroup translation | D | absent | — |
 | statvfs/fstatvfs | B | implemented | `src/os/libc/simpleos_statvfs.c` |
 | utsname (uname) | B | implemented | `src/os/libc/simpleos_utsname.c` |
-| dynamic memory (malloc/free family) | A/B | implemented (dlmalloc) | `src/os/libc/simpleos_dlmalloc.c` |
+| dynamic memory (malloc/free family) | A/B | partial — dlmalloc owns ordinary allocations and proven 16-byte alignment; over-aligned/page-aligned allocation requests fail with `ENOMEM` until the allocator owns an aligned-block representation | `src/os/libc/simpleos_dlmalloc.c`, `src/os/libc/simpleos_alloc.c` |
+| C++ aligned operator new | C | partial — only the allocator's 16-byte alignment is accepted; unsupported alignment aborts rather than returning under-aligned storage | `src/os/libc/simpleos_cxxabi.c` |
 
 ## Row counts by status (as of this audit)
 
-- implemented: 20
-- partial: 6 (writable shared file mapping added as **model-only**)
-- stub (honest ENOSYS/error): 9
+- implemented: 18
+- partial: 8 (writable shared file mapping added as **model-only**)
+- stub (honest ENOSYS/error): 14
 - absent: 7
-- DISHONEST (open defect): 1 — `flock()`, filed above; `mmap()` writable-shared/
-  file-backed was the second instance and is now fixed (see below)
+- DISHONEST (open defect): 0 — `flock()` and mmap writable-shared/file-backed
+  requests now fail closed (see below)
 
 Counts are facility-line counts in the table above (some rows group closely
 related symbols under one status where they share an owning file and
@@ -183,14 +194,8 @@ not this model landing.
 Design record, remaining wiring, and the exact gate:
 `.spipe/writable_shared_mmap/state.md`.
 
-## Follow-up (not fixed this increment)
+## Advisory-lock follow-up
 
-`flock()` (`src/os/libc/simpleos_filelock.c`) unconditionally returns `0`
-(success) for every `operation` argument, including `LOCK_EX`/`LOCK_SH`, with
-no lock-state tracking whatsoever — a program relying on it for mutual
-exclusion (package managers, embedded databases, build-lock files) gets zero
-protection while believing it holds an exclusive lock. This is a second
-instance of the same silent-fake-success anti-pattern this lane targets.
-Recommended next-increment fix: fail closed with `ENOSYS` until real
-single-node advisory locking is implemented, mirroring the `termios` file's
-documented-reasoning pattern.
+`flock()` now fails closed with `ENOSYS`. A future implementation must provide
+kernel-visible per-file ownership and release semantics before promotion beyond
+the honest-stub profile.

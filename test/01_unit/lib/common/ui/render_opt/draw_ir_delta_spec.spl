@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/lib/common/ui/render_opt/draw_ir_delta.spl 80%
 # @tag: unit, ui, render_perf, render_opt, o5
 #
@@ -17,12 +21,21 @@
 #     observably smaller than a full M-component re-emission, via an in-band
 #     command count (`built_count`), not a timing side-channel.
 
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use common.ui.render_opt.revisions.{RenderRevisions, REV_PAINT}
 use common.ui.render_opt.property_trees.PaintChunks
 use common.ui.render_opt.paint_chunk_rasterizer.PaintChunkRects
-use common.ui.render_opt.draw_ir_delta.{DrawIrDeltaResult, draw_ir_delta_build, draw_ir_delta_replay}
+use common.ui.render_opt.draw_ir_delta.{
+    DrawIrDeltaResult,
+    draw_ir_delta_build, draw_ir_delta_replay,
+    draw_ir_stable_upsert, draw_ir_stable_remove,
+    draw_ir_stable_transaction, draw_ir_stable_apply
+}
 use common.ui.draw_ir.{DrawIrCommand, draw_ir_rect}
+
 
 # 4 components laid out left-to-right, one PaintChunks/PaintChunkRects entry
 # each, owner == node index in `revs` (0..3).
@@ -82,7 +95,10 @@ fn lists_equal(a: [DrawIrCommand], b: [DrawIrCommand]) -> bool:
     true
 
 describe "O5 DrawIR delta: only affected components rebuilt, replay matches full rebuild":
+    # @manual scenario evidence
     it "1 of 4 components dirty: delta has exactly 1 command, replay == full rebuild":
+        # @req REQ-SSPEC-UNIT
+        step("1 of 4 components dirty: delta has exactly 1 command, replay == full rebuild")
         val chunks = make_chunks()
         val rects = make_rects()
         val ids = make_ids()
@@ -127,6 +143,8 @@ describe "O5 DrawIR delta: only affected components rebuilt, replay matches full
         assert_true(commands_equal(replayed[3], prev[3]))
 
     it "identical frames (fresh revs, nothing ever marked) produce an empty delta with no bootstrap step":
+        # @req REQ-SSPEC-UNIT
+        step("identical frames (fresh revs, nothing ever marked) produce an empty delta with no bootstrap step")
         val chunks = make_chunks()
         val rects = make_rects()
         val ids = make_ids()
@@ -142,6 +160,8 @@ describe "O5 DrawIR delta: only affected components rebuilt, replay matches full
         assert_true(delta.total_count == 4)
 
     it "0 of 4 components dirty after clear_dirty: delta is empty, replay == prev unchanged":
+        # @req REQ-SSPEC-UNIT
+        step("0 of 4 components dirty after clear_dirty: delta is empty, replay == prev unchanged")
         val chunks = make_chunks()
         val rects = make_rects()
         val ids = make_ids()
@@ -164,6 +184,8 @@ describe "O5 DrawIR delta: only affected components rebuilt, replay matches full
         assert_true(lists_equal(replayed, full_rebuild(rects, ids)))
 
     it "prev is not mutated by replay (Simple arrays are value types)":
+        # @req REQ-SSPEC-UNIT
+        step("prev is not mutated by replay (Simple arrays are value types)")
         val chunks = make_chunks()
         val rects = make_rects()
         val ids = make_ids()
@@ -185,6 +207,8 @@ describe "O5 DrawIR delta: only affected components rebuilt, replay matches full
         assert_true(prev[0].component_id == prev_before)
 
     it "SABOTAGE (proportionality): an unconditional full rebuild every frame breaks the exact-count invariant the real path guarantees":
+        # @req REQ-SSPEC-UNIT
+        step("SABOTAGE (proportionality): an unconditional full rebuild every frame breaks the exact-count invariant the real path guarantees")
         val chunks = make_chunks()
         val rects = make_rects()
         val ids = make_ids()
@@ -213,6 +237,8 @@ describe "O5 DrawIR delta: only affected components rebuilt, replay matches full
         assert_true(real_delta.built_count == 1)
 
     it "SABOTAGE (correctness): building the delta from stale geometry produces a replay that diverges from a full rebuild":
+        # @req REQ-SSPEC-UNIT
+        step("SABOTAGE (correctness): building the delta from stale geometry produces a replay that diverges from a full rebuild")
         val chunks = make_chunks()
         val rects = make_rects()
         val ids = make_ids()
@@ -252,3 +278,43 @@ describe "O5 DrawIR delta: only affected components rebuilt, replay matches full
         val real_delta = draw_ir_delta_build(chunks, grown_rects, revs, ids)
         val real_replay = draw_ir_delta_replay(prev, real_delta)
         assert_true(lists_equal(real_replay, correct_fresh))
+
+    it "stable transaction atomically removes, reorders, and inserts without a stale hidden command":
+        val a = draw_ir_rect("A", 0, 0, 1, 1, 0xFF000001u32)
+        val b = draw_ir_rect("B", 1, 0, 1, 1, 0xFF000002u32)
+        val c = draw_ir_rect("C", 2, 0, 1, 1, 0xFF000003u32)
+        val d = draw_ir_rect("D", 3, 0, 1, 1, 0xFF000004u32)
+        val transaction = draw_ir_stable_transaction(
+            "rev-1", "rev-2", ["C", "A", "D"], [
+                draw_ir_stable_remove("B"),
+                draw_ir_stable_upsert("D", d)
+            ])
+        val applied = draw_ir_stable_apply([a, b, c], "rev-1", transaction)
+        assert_true(applied.valid)
+        assert_true(applied.revision == "rev-2")
+        assert_true(applied.commands.len() == 3)
+        assert_true(applied.commands[0].component_id == "C")
+        assert_true(applied.commands[1].component_id == "A")
+        assert_true(applied.commands[2].component_id == "D")
+
+    it "stable transaction rejects incomplete or malformed changes without mutating prior commands":
+        val a = draw_ir_rect("A", 0, 0, 1, 1, 0xFF000001u32)
+        val b = draw_ir_rect("B", 1, 0, 1, 1, 0xFF000002u32)
+        val previous = [a, b]
+        val missing_tombstone = draw_ir_stable_transaction(
+            "rev-1", "rev-2", ["A"], [])
+        val missing = draw_ir_stable_apply(previous, "rev-1", missing_tombstone)
+        assert_true(not missing.valid)
+        assert_true(lists_equal(missing.commands, previous))
+
+        val duplicate_target = draw_ir_stable_transaction(
+            "rev-1", "rev-2", ["A", "A"], [])
+        val duplicate = draw_ir_stable_apply(previous, "rev-1", duplicate_target)
+        assert_true(not duplicate.valid)
+        assert_true(lists_equal(duplicate.commands, previous))
+
+        val wrong_revision = draw_ir_stable_transaction(
+            "rev-0", "rev-2", ["A", "B"], [])
+        val stale = draw_ir_stable_apply(previous, "rev-1", wrong_revision)
+        assert_true(not stale.valid)
+        assert_true(lists_equal(stale.commands, previous))

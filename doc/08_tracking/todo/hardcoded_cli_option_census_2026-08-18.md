@@ -39,6 +39,17 @@ and stay hardcoded by design — they are excluded from migration scope.
 
 ## Route-driven today
 
-Zero product options are yet registered through
-`SimpleCliOptionRouteTableV1`; the generator and route layer exist, the
-migration itself is the remaining Phase C work.
+**Batch 1 migrated (2026-08-18, lane-aspect-dynload):** the six `doc-coverage`
+options in `src/app/cli/doc_coverage_command.spl` — `--check-public-api`,
+`--sdoctest-report`, `--missing`, `--tag-file=`, `--format=`, `--tag=` — now
+parse via `SimpleCliOptionRouteRecordV1` records (`doc_coverage_route_records`,
+registered fail-closed by `doc_coverage_route_table`), and the generated help
+index + shell completions derive from the same records
+(`doc_coverage_help_routes`). Behaviour parity and positive-control specs:
+`test/01_unit/app/cli/doc_coverage_option_route_migration_spec.spl`,
+`test/01_unit/app/cli/doc_coverage_option_route_defect_class_spec.spl`.
+
+Remaining: at most **80** distinct long-option spellings (upper bound: 86
+census minus these 6; census hits were never individually adjudicated, so
+re-verify any spelling before migrating it) across the other 35 files. All
+short flags remain unmigrated except the reserved `-h`/`-V`.

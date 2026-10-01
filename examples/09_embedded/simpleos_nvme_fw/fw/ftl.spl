@@ -13,6 +13,7 @@ Composes the FIL (fil), the DFTL map cache (ftl_map), the log-structured allocat
 use nvme_types.*
 use nd_types.*
 use fil.*
+use nvme_payload.*   # PageData and the page-wide primitives
 use ftl_map.*
 use ftl_band.*
 use ftl_journal.*
@@ -142,6 +143,17 @@ impl Ftl:
     # Write one logical block (log-structured): program a fresh physical page with OOB
     # {lba, seq}, journal the remap, update L2P, invalidate the previous version.
     me write(lba: i64, data: i64) -> i64:
+        # Residual word-0 derivation at the legacy scalar entry point (D11).
+        var p: PageData = page_zero()
+        p.words[0] = data
+        me.write_page(lba, p)
+
+    # Page-wide host write — the widened seam. `write` above derives the word-0
+    # page inline for not-yet-migrated callers (D11 deleted the shared shim).
+    # RAIN parity is still computed over word 0 only (plan D6 widens it); that
+    # narrowing is explicit,
+    # not accidental.
+    me write_page(lba: i64, data: PageData) -> i64:
         if not ftl_host_lba_valid(lba):
             return SC_LBA_RANGE
         # Host writes never consume the GC scratch reserve (over-provisioning headroom),
@@ -151,7 +163,7 @@ impl Ftl:
             return SC_NS_NOT_READY
         val s: i64 = me.next_seq()
         val old_ppn: i64 = me.map.lookup(lba)
-        val pc: i64 = me.fil.program(ppn, lba, s, data)
+        val pc: i64 = me.fil.program_page(ppn, lba, s, data)
         if pc != NAND_OK:
             me.band.set_bad(ppn_block(ppn))
             me.rel_retire(ppn_block(ppn))    # program-fail retire -> event-driven spare substitution
@@ -160,7 +172,7 @@ impl Ftl:
         val before_wal: i64 = me.journal.wal_len()
         if me.journal.append(0, lba, old_ppn, ppn, s) <= before_wal:
             return SC_NS_NOT_READY
-        me.rain_update_page(ppn, 0, data)
+        me.rain_update_page(ppn, 0, page_word(data, 0))   # RAIN is word-wide until D6
         me.map.update(lba, ppn)
         me.band.mark_valid(ppn)
         # Fresh data on this block: reset the FCR age-proxy clock and clear any stale
@@ -187,17 +199,23 @@ impl Ftl:
     # payload as the pre-L8 plain read (no recovery actuator), so this is behaviour-
     # preserving there.
     me read(lba: i64) -> i64:
+        page_word(me.read_page(lba), 0)
+
+    # Page-wide host read — the widened seam, and the SINGLE side-effecting read
+    # body (`read` above is a pure word view of it, so calling either bumps the
+    # disturb/health observability exactly once, as before).
+    me read_page(lba: i64) -> PageData:
         if not ftl_host_lba_valid(lba):
-            return 0
+            return page_zero()
         val ppn: i64 = me.map.lookup(lba)
         if ppn == UNMAP:
-            return 0
+            return page_zero()
         val blk: i64 = ppn_block(ppn)
         me.bump_read_disturb(blk)
         me.rel_disturb = rel_disturb_observe(me.rel_disturb, nd_block(blk), nd_page(ppn_page(ppn)))
         val res: RelReadResult = me.fil.read_with_ladder(ppn, nd_block(blk))
         me.rel_note_read(blk, res)
-        res.data
+        res.page
 
     # Read status: SC_MEDIA_ERR if the recovery ladder could not recover the page, else
     # SC_SUCCESS. Consistent with read(): a drifted page the ladder recovers reports
@@ -636,7 +654,7 @@ impl Ftl:
                 if newp == NO_PPN:
                     return UNMAP    # cannot relocate -> do NOT erase; block stays intact
                 val s: i64 = me.next_seq()
-                val pc: i64 = me.fil.program(newp, res.lba, s, res.data)
+                val pc: i64 = me.fil.program_page(newp, res.lba, s, res.page)
                 if pc != NAND_OK:
                     me.band.set_bad(ppn_block(newp))
                     me.rel_retire(ppn_block(newp))  # relocation-target retire -> spare substitution

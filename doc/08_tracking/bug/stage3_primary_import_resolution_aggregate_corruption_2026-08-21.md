@@ -1,4 +1,8 @@
 # Stage-3 primary import resolution aggregate corruption (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -58,6 +62,25 @@ pending.
 
 Fresh verification proved scalar primary routes were necessary but not sufficient: Stage 3 reached HIR and reproduced the early Span/OptimizationLevel/ProcessResult cascade. The remaining cross-stage consumers indexed retained callable dictionaries and impl/trait method aggregates. Module surfaces now freeze aligned scalar signature, dependency, and impl-to-trait projections. Free functions, concrete impl methods, and trait methods consume only those projections; unsupported complex shapes deliberately register without an eager HIR function type. Bootstrap re-verification is pending.
 
+## Integration correction (2026-08-22)
+
+History integration retained only the scalar-signature consumer method and one
+import, but omitted the `ModuleSurface` fields, producer, registry helpers, and
+actual registration consumers from that experimental representation. Stage 2
+therefore failed while lowering `surface.signature_names`; the same source also
+emitted unresolved-helper warnings. The incomplete, unreachable consumer is
+removed and its contract now rejects future references to the undeclared
+projection. The existing reference-semantic callable owner remains authoritative
+until a complete scalar replacement is designed and landed atomically.
+
+The final bounded Stage-2 verification cycle cleared the undeclared-field HIR
+failure and reached the linker. It then exposed the adjacent incomplete
+composite projection: `module_surface_declarations` calls global
+`module_surface_projected_type_shape` and
+`module_surface_projected_type_name`, but neither owner exists. Strict bootstrap
+refused fallback. This session's three-cycle cap is exhausted, so that new
+linker blocker remains the next scoped repair and no Stage-2 PASS is claimed.
+
 ## Flat AST parameter transport follow-up (2026-08-21)
 
 The next bounded run died in Phase 2 while converting the first typed extern-heavy module. Kernel symbolization mapped the fault to `flat_ast_to_module` and a 48-byte aggregate copy selected through an invalid pointer. Both ordinary and extern parameter conversion constructed `Param.type_` with an inline conditional returning rich `Type` values; the ordinary path did the same for `Expr` defaults. Conversion now materializes stable typed locals before constructing `Param`, with exact extern and adjacent ordinary/default regressions.
@@ -82,3 +105,4 @@ cycle still failed convergence: HIR recorded 15 unresolved `Span` errors in
 `driver_pipeline_passes.spl` and 19 in `driver_pipeline_aop.spl`. The scan was
 terminated once failure was certain; no Stage 4, deployment, hook PASS, or push
 is claimed.
+

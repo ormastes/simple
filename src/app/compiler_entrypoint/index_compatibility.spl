@@ -1,0 +1,41 @@
+# Publish only compatibility markers from the admitted package-index generation.
+# A binding-only generation has no graph and must leave the driver on its cold
+# path, even when an earlier request in the same process admitted a graph.
+
+use app.io.env_ops.{env_set}
+use compiler.driver.cache.package_module_index.{
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, PACKAGE_MODULE_INDEX_SCHEMA_V3,
+    PackageModuleIndexGenerationV1}
+
+fn compiler_entrypoint_clear_index_compatibility_v1() -> bool:
+    # Attempt every clear even if one environment write fails. No individual
+    # marker from an earlier graph may survive merely due to short circuiting.
+    val producer = env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", "")
+    val root = env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", "")
+    val variant = env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", "")
+    producer and root and variant
+
+fn compiler_entrypoint_publish_index_compatibility_v1(
+    generation: PackageModuleIndexGenerationV1
+) -> bool:
+    var producer = ""
+    var root_generation = ""
+    var variant = ""
+    if generation.entries.len() > 0:
+        if (generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 and
+                generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V3) or
+                generation.variant_digest == "":
+            compiler_entrypoint_clear_index_compatibility_v1()
+            return false
+        producer = generation.producer_digest
+        root_generation = generation.root_generation
+        variant = generation.variant_digest
+    val producer_set = env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", producer)
+    val root_set = env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", root_generation)
+    val variant_set = env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", variant)
+    if not producer_set or not root_set or not variant_set:
+        compiler_entrypoint_clear_index_compatibility_v1()
+        return false
+    true
+
+export compiler_entrypoint_publish_index_compatibility_v1

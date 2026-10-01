@@ -1,0 +1,387 @@
+# Curated evidence-showcase inventory and generated-region writer.
+
+use std.sdn.{SdnValue, parse}
+use std.spec.scenario_evidence_manifest.{
+    ScenarioEvidenceManifest,
+    scenario_evidence_manifest_from_sdn
+}
+use app.spipe_docgen.evidence_manifest.{
+    validate_evidence_artifact_files
+}
+use app.spipe_docgen.common.{
+    native_fs_exists,
+    native_fs_read_string,
+    native_fs_write_string
+}
+
+pub struct EvidenceShowcaseHub:
+    id: text
+    path: text
+    order: i64
+
+pub struct EvidenceShowcaseRow:
+    id: text
+    category: text
+    claim: text
+    requirement: text
+    hub: text
+    spec: text
+    manual: text
+    manifest: text
+    order: i64
+    critical: bool
+
+pub struct EvidenceShowcaseInventory:
+    version: i64
+    hubs: [EvidenceShowcaseHub]
+    rows: [EvidenceShowcaseRow]
+
+pub struct EvidenceShowcaseResolvedRow:
+    row: EvidenceShowcaseRow
+    status: text
+    boundary: text
+    target: text
+    artifact_path: text
+    resume_command: text
+
+fn _showcase_safe_path(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\"):
+        return false
+    if path.contains("://") or path.contains("?") or path.contains("#") or
+       path.contains("(") or path.contains(")") or path.contains("[") or
+       path.contains("]") or path.contains("<") or path.contains(">") or
+       path.contains("&") or path.contains(" ") or path.contains("\t") or
+       path.contains("\r") or path.contains("\n"):
+        return false
+    val normalized = path.replace("\\", "/")
+    for part in normalized.split("/"):
+        if part == "" or part == "." or part == "..":
+            return false
+    true
+
+fn _showcase_text(value: SdnValue, field: text) -> Result<text, text>:
+    if val Some(item) = value.get(field):
+        if val Some(result) = item.as_str():
+            if result != "":
+                return Ok(result)
+        return Err("inventory field must be nonempty text: " + field)
+    Err("missing inventory field: " + field)
+
+fn _showcase_i64(value: SdnValue, field: text) -> Result<i64, text>:
+    if val Some(item) = value.get(field):
+        if val Some(result) = item.as_i64():
+            return Ok(result)
+        return Err("inventory field must be integer: " + field)
+    Err("missing inventory field: " + field)
+
+fn _showcase_bool(value: SdnValue, field: text) -> Result<bool, text>:
+    if val Some(item) = value.get(field):
+        if val Some(result) = item.as_bool():
+            return Ok(result)
+        return Err("inventory field must be bool: " + field)
+    Err("missing inventory field: " + field)
+
+fn _showcase_array(value: SdnValue, field: text) -> Result<[SdnValue], text>:
+    if val Some(item) = value.get(field):
+        match item:
+            case SdnValue.Array(result):
+                return Ok(result)
+            case SdnValue.Table(headers, rows):
+                var result: [SdnValue] = []
+                for row in rows:
+                    var record: Dict<text, SdnValue> = {}
+                    var i = 0
+                    while i < headers.len() and i < row.len():
+                        record[headers[i]] = row[i]
+                        i = i + 1
+                    result.push(SdnValue.Dict(record))
+                return Ok(result)
+            case _:
+                return Err("inventory field must be array or table: " + field)
+    Err("missing inventory field: " + field)
+
+fn _showcase_duplicate_hub(hubs: [EvidenceShowcaseHub], id: text) -> bool:
+    for hub in hubs:
+        if hub.id == id:
+            return true
+    false
+
+fn _showcase_duplicate_row(rows: [EvidenceShowcaseRow], id: text) -> bool:
+    for row in rows:
+        if row.id == id:
+            return true
+    false
+
+fn _showcase_known_hub(hubs: [EvidenceShowcaseHub], id: text) -> bool:
+    if id == "root":
+        return true
+    for hub in hubs:
+        if hub.id == id:
+            return true
+    false
+
+fn _parse_showcase_hub(value: SdnValue) -> Result<EvidenceShowcaseHub, text>:
+    val hub = EvidenceShowcaseHub(
+        id: _showcase_text(value, "id")?,
+        path: _showcase_text(value, "path")?,
+        order: _showcase_i64(value, "order")?
+    )
+    if not _showcase_safe_path(hub.path):
+        return Err("unsafe showcase hub path: " + hub.path)
+    Ok(hub)
+
+fn _parse_showcase_row(value: SdnValue) -> Result<EvidenceShowcaseRow, text>:
+    for forbidden in ["status", "freshness", "result", "artifacts"]:
+        if val Some(_) = value.get(forbidden):
+            return Err("inventory must not contain evidence truth field: " + forbidden)
+    val row = EvidenceShowcaseRow(
+        id: _showcase_text(value, "id")?,
+        category: _showcase_text(value, "category")?,
+        claim: _showcase_text(value, "claim")?,
+        requirement: _showcase_text(value, "requirement")?,
+        hub: _showcase_text(value, "hub")?,
+        spec: _showcase_text(value, "spec")?,
+        manual: _showcase_text(value, "manual")?,
+        manifest: _showcase_text(value, "manifest")?,
+        order: _showcase_i64(value, "order")?,
+        critical: _showcase_bool(value, "critical")?
+    )
+    if not _showcase_safe_path(row.spec):
+        return Err("unsafe showcase spec path: " + row.spec)
+    if not _showcase_safe_path(row.manual):
+        return Err("unsafe showcase manual path: " + row.manual)
+    if not _showcase_safe_path(row.manifest):
+        return Err("unsafe showcase manifest path: " + row.manifest)
+    Ok(row)
+
+pub fn parse_evidence_showcase_inventory(
+    source: text
+) -> Result<EvidenceShowcaseInventory, text>:
+    val root = parse(source)?
+    var section = SdnValue.null()
+    if val Some(value) = root.get("evidence_showcase"):
+        section = value
+    else:
+        return Err("missing inventory section: evidence_showcase")
+    val version = _showcase_i64(section, "inventory_version")?
+    if version != 1:
+        return Err("unsupported evidence showcase inventory version: " + version.to_text())
+    var hubs: [EvidenceShowcaseHub] = []
+    var previous_hub_order = -1
+    for value in _showcase_array(section, "hubs")?:
+        val hub = _parse_showcase_hub(value)?
+        if _showcase_duplicate_hub(hubs, hub.id):
+            return Err("duplicate showcase hub id: " + hub.id)
+        if hub.order <= previous_hub_order:
+            return Err("showcase hub order must be strictly increasing")
+        hubs.push(hub)
+        previous_hub_order = hub.order
+    var rows: [EvidenceShowcaseRow] = []
+    var previous_row_order = -1
+    for value in _showcase_array(section, "rows")?:
+        val row = _parse_showcase_row(value)?
+        if _showcase_duplicate_row(rows, row.id):
+            return Err("duplicate showcase row id: " + row.id)
+        if row.order <= previous_row_order:
+            return Err("showcase row order must be strictly increasing")
+        if not row.critical:
+            return Err("showcase row must be critical: " + row.id)
+        rows.push(row)
+        previous_row_order = row.order
+    for row in rows:
+        if not _showcase_known_hub(hubs, row.hub):
+            return Err("unknown showcase hub for row " + row.id + ": " + row.hub)
+    Ok(EvidenceShowcaseInventory(version: version, hubs: hubs, rows: rows))
+
+fn _showcase_manifest_matches_row(
+    manifest: ScenarioEvidenceManifest,
+    row: EvidenceShowcaseRow
+) -> text:
+    if manifest.feature_id != row.id:
+        return "manifest feature_id mismatch for " + row.id
+    if manifest.spec_path != row.spec:
+        return "manifest spec_path mismatch for " + row.id
+    if manifest.generated_manual_path != row.manual:
+        return "manifest generated_manual_path mismatch for " + row.id
+    if not manifest.requirement_ids.contains(row.requirement):
+        return "manifest requirement mismatch for " + row.id
+    ""
+
+fn _resolve_showcase_row(
+    row: EvidenceShowcaseRow
+) -> Result<EvidenceShowcaseResolvedRow, text>:
+    if row.critical and not native_fs_exists(row.manual):
+        return Err("critical showcase manual not found for " + row.id + ": " + row.manual)
+    if not native_fs_exists(row.manifest):
+        val status = if native_fs_exists(row.spec): "contract-only" else: "planned"
+        val boundary = if status == "contract-only":
+            "Executable contract exists; no validated evidence manifest"
+        else:
+            "Selected work has no executable contract or validated evidence manifest"
+        return Ok(EvidenceShowcaseResolvedRow(
+            row: row,
+            status: status,
+            boundary: boundary,
+            target: "",
+            artifact_path: "",
+            resume_command: ""
+        ))
+    val parsed = validate_evidence_artifact_files(
+        scenario_evidence_manifest_from_sdn(
+        native_fs_read_string(row.manifest)
+        )?
+    )?
+    val mismatch = _showcase_manifest_matches_row(parsed, row)
+    if mismatch != "":
+        return Err(mismatch)
+    var artifact_path = ""
+    if parsed.artifacts.len() > 0:
+        artifact_path = parsed.artifacts[0].path
+    var boundary = parsed.reason
+    if boundary == "":
+        boundary = row.claim
+    Ok(EvidenceShowcaseResolvedRow(
+        row: row,
+        status: parsed.showcase_status,
+        boundary: boundary,
+        target: parsed.target,
+        artifact_path: artifact_path,
+        resume_command: parsed.resume_command
+    ))
+
+pub fn resolve_evidence_showcase_inventory(
+    inventory: EvidenceShowcaseInventory
+) -> Result<[EvidenceShowcaseResolvedRow], text>:
+    var rows: [EvidenceShowcaseResolvedRow] = []
+    for row in inventory.rows:
+        rows.push(_resolve_showcase_row(row)?)
+    Ok(rows)
+
+fn _showcase_escape_cell(value: text) -> text:
+    var escaped = value.replace("&", "&amp;")
+    escaped = escaped.replace("<", "&lt;")
+    escaped = escaped.replace(">", "&gt;")
+    escaped = escaped.replace("\\", "&#92;")
+    escaped = escaped.replace("|", "&#124;")
+    escaped = escaped.replace("[", "&#91;")
+    escaped = escaped.replace("]", "&#93;")
+    escaped = escaped.replace("`", "&#96;")
+    escaped = escaped.replace("*", "&#42;")
+    escaped = escaped.replace("_", "&#95;")
+    escaped = escaped.replace("\r", " ")
+    escaped.replace("\n", " ")
+
+fn _showcase_link_prefix(hub_id: text) -> text:
+    if hub_id == "simpleos":
+        return "../../"
+    if hub_id == "ide" or hub_id == "llm_caret":
+        return "../../../"
+    if hub_id == "gpu":
+        return "../../../../"
+    ""
+
+fn _showcase_link(label: text, path: text, hub_id: text) -> text:
+    "[" + _showcase_escape_cell(label) + "](" +
+        _showcase_link_prefix(hub_id) + path + ")"
+
+fn _showcase_proof(row: EvidenceShowcaseResolvedRow, hub_id: text) -> text:
+    var links: [text] = []
+    if native_fs_exists(row.row.manual):
+        links.push(_showcase_link("manual", row.row.manual, hub_id))
+    if native_fs_exists(row.row.spec):
+        links.push(_showcase_link("spec", row.row.spec, hub_id))
+    if row.artifact_path != "":
+        links.push(_showcase_link("artifact", row.artifact_path, hub_id))
+    if links.len() == 0:
+        return "`planned`"
+    links.join(" · ")
+
+fn _showcase_status_count(rows: [EvidenceShowcaseResolvedRow], status: text) -> i64:
+    var count = 0
+    for row in rows:
+        if row.status == status:
+            count = count + 1
+    count
+
+pub fn render_evidence_showcase_generated(
+    rows: [EvidenceShowcaseResolvedRow],
+    hub_id: text
+) -> text:
+    var selected: [EvidenceShowcaseResolvedRow] = []
+    for row in rows:
+        if hub_id == "root" or row.row.hub == hub_id:
+            selected.push(row)
+    var out: [text] = []
+    out.push("## Generated evidence status\n\n")
+    out.push("Status is derived from validated manifests. Missing manifests resolve only to `contract-only` or `planned`.\n\n")
+    out.push("| Status | Count |\n|---|---:|\n")
+    for status in ["live-pass", "historical-pass", "contract-only", "blocked", "unsupported", "planned"]:
+        out.push("| `{status}` | {_showcase_status_count(selected, status)} |\n")
+    out.push("\n## Critical capabilities\n\n")
+    out.push("| Capability | Status | Claim boundary | Target | Proof | Resume |\n")
+    out.push("|---|---|---|---|---|---|\n")
+    for resolved in selected:
+        val target = if resolved.target == "": "—" else: _showcase_escape_cell(resolved.target)
+        var resume = "—"
+        if resolved.resume_command != "":
+            val escaped_resume = _showcase_escape_cell(resolved.resume_command)
+            resume = "`" + escaped_resume.replace("`", "'") + "`"
+        out.push(
+            "| " + _showcase_escape_cell(resolved.row.claim) +
+            " | `" + resolved.status + "` | " +
+            _showcase_escape_cell(resolved.boundary) + " | " + target + " | " +
+            _showcase_proof(resolved, hub_id) + " | " + resume + " |\n"
+        )
+    out.join("")
+
+pub fn replace_evidence_showcase_generated(
+    content: text,
+    generated: text
+) -> Result<text, text>:
+    val start_marker = "<!-- evidence-showcase:generated:start -->"
+    val end_marker = "<!-- evidence-showcase:generated:end -->"
+    val start_parts = content.split(start_marker)
+    if start_parts.len() == 1:
+        return Err("missing evidence showcase start marker")
+    if start_parts.len() != 2:
+        return Err("duplicate evidence showcase start marker")
+    val end_parts = start_parts[1].split(end_marker)
+    if end_parts.len() == 1:
+        return Err("missing evidence showcase end marker")
+    if end_parts.len() != 2:
+        return Err("duplicate evidence showcase end marker")
+    Ok(
+        start_parts[0] + start_marker + "\n" + generated.trim() + "\n" +
+        end_marker + end_parts[1]
+    )
+
+fn _write_evidence_showcase(
+    path: text,
+    hub_id: text,
+    rows: [EvidenceShowcaseResolvedRow]
+) -> Result<bool, text>:
+    if not native_fs_exists(path):
+        return Err("showcase file not found: " + path)
+    val merged = replace_evidence_showcase_generated(
+        native_fs_read_string(path),
+        render_evidence_showcase_generated(rows, hub_id)
+    )?
+    if not native_fs_write_string(path, merged):
+        return Err("failed to atomically write showcase: " + path)
+    Ok(true)
+
+pub fn generate_evidence_showcases(
+    inventory_path: text = "config/evidence_showcase.sdn"
+) -> Result<i64, text>:
+    if not native_fs_exists(inventory_path):
+        return Err("evidence showcase inventory not found: " + inventory_path)
+    val inventory = parse_evidence_showcase_inventory(
+        native_fs_read_string(inventory_path)
+    )?
+    val rows = resolve_evidence_showcase_inventory(inventory)?
+    _write_evidence_showcase("EVIDENCE_SHOWCASE.md", "root", rows)?
+    var written = 1
+    for hub in inventory.hubs:
+        _write_evidence_showcase(hub.path, hub.id, rows)?
+        written = written + 1
+    Ok(written)

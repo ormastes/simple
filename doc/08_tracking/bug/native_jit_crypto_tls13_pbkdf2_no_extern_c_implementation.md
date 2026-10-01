@@ -1,4 +1,8 @@
 # BUG: TLS 1.3 / PBKDF2 / Ed25519 / SIMD-row runtime symbols are registered in the master ABI list but only implemented as interpreter-only Rust builtins — no `extern "C"` or C definition for native/JIT lowering
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (not urgent — existing stub-guard fails loudly by default, see "Blast radius" below)
 **Severity:** low-medium — feature gap, not silent corruption (see caveats)
@@ -92,3 +96,4 @@ linker error in normal native builds, loud stderr warning only under
 `SIMPLE_BOOTSTRAP=1`/`SIMPLE_STUB_MISSING_RT=1`) — there is no silent
 corruption to urgently contain. No source change made this pass; status and
 severity unchanged.
+

@@ -1,0 +1,62 @@
+use std.spec
+use compiler.common.assurance.proof_performance_evidence.{ProofPerformanceThresholdsV1, ProofPerformanceObservationV1, seal_proof_performance_evidence_v1, measure_proof_performance_v1}
+
+fn _measured_work() -> i64:
+    0
+
+fn _measured_cache_hit() -> bool:
+    true
+
+fn _measured_clock() -> i64:
+    4000
+
+fn _measured_rss() -> i64:
+    42000
+
+describe "FV2 proof performance evidence":
+    it "owns workload timing cache classification and RSS sampling":
+        val receipt = measure_proof_performance_v1(
+            ProofPerformanceThresholdsV1(3, 10, 10, 65536, 3),
+            "fv2-owned-measurement", 3, _measured_work, _measured_cache_hit,
+            _measured_clock, _measured_rss
+        )
+        expect(receipt.diagnostic).to_equal("")
+        expect(receipt.warm_runs).to_equal(3)
+        expect(receipt.warm_latency_max_ms).to_equal(0)
+        expect(receipt.cached_latency_max_ms).to_equal(0)
+        expect(receipt.cache_hits).to_equal(3)
+        expect(receipt.max_rss_kib).to_equal(42000)
+
+    it "seals measured warm cache latency and max RSS evidence within thresholds":
+        val receipt = seal_proof_performance_evidence_v1(
+            ProofPerformanceThresholdsV1(3, 50, 10, 65536, 2),
+            ProofPerformanceObservationV1("fv2-medium-dag", [41, 35, 37], [8, 6], 2, 1, 42000)
+        )
+        expect(receipt.diagnostic).to_equal("")
+        expect(receipt.warm_runs).to_equal(3)
+        expect(receipt.warm_latency_max_ms).to_equal(41)
+        expect(receipt.cached_latency_max_ms).to_equal(8)
+        expect(receipt.max_rss_kib).to_equal(42000)
+        expect(receipt.evidence_hash == "").to_be(false)
+
+    it "fails closed when warm or cache measurements are absent":
+        val thresholds = ProofPerformanceThresholdsV1(3, 50, 10, 65536, 2)
+        val cold = seal_proof_performance_evidence_v1(
+            thresholds, ProofPerformanceObservationV1("fv2-medium-dag", [40], [8, 6], 2, 1, 42000)
+        )
+        expect(cold.diagnostic).to_contain("WARM-RUNS")
+        val uncached = seal_proof_performance_evidence_v1(
+            thresholds, ProofPerformanceObservationV1("fv2-medium-dag", [40, 39, 38], [], 0, 3, 42000)
+        )
+        expect(uncached.diagnostic).to_contain("CACHE")
+
+    it "rejects latency and RSS regressions against explicit limits":
+        val thresholds = ProofPerformanceThresholdsV1(3, 50, 10, 65536, 2)
+        val slow = seal_proof_performance_evidence_v1(
+            thresholds, ProofPerformanceObservationV1("fv2-medium-dag", [40, 51, 38], [8, 6], 2, 1, 42000)
+        )
+        expect(slow.diagnostic).to_contain("WARM-LATENCY")
+        val large = seal_proof_performance_evidence_v1(
+            thresholds, ProofPerformanceObservationV1("fv2-medium-dag", [40, 39, 38], [8, 6], 2, 1, 65537)
+        )
+        expect(large.diagnostic).to_contain("RSS")

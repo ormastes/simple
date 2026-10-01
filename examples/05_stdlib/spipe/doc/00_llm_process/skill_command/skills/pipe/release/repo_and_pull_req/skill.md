@@ -1,11 +1,14 @@
-<!-- generated-from: doc/00_llm_process/skill_command/command/release.md -->
-# Protected Software Release
+<!-- llm-process-gen: managed source=pipe_release_repo_and_pull_req_skill source_sha256=b0d8ff77e62a1f146b0cb5f61c09a80186698ae2321053ec11daaaa8f3ce8c45 content_sha256=b0d8ff77e62a1f146b0cb5f61c09a80186698ae2321053ec11daaaa8f3ce8c45 -->
+---
+name: repo_and_pull_req
+description: GitHub and Jira/Confluence integration — setup, push, wiki, and autonomous PR review. Routes to sub-skills in git/ and jira/ directories.
+---
 
-Use the canonical semantic source at `doc/00_llm_process/skill_command/command/release.md`.
+# Repo & Pull Request Skill — Dispatcher
 
-Start one isolated release branch/worktree, read `release/version.sdn`, and require verified evidence. Beta maintenance accepts only explicit reviewed bug-fix backports with exact provenance and renewed post-application evidence. Create an immutable candidate, build once, and promote exact admitted artifacts through one signed annotated exact tag after approval.
+Unified skill for GitHub and Jira/Confluence operations: setup, push, wiki, and PR review.
 
-Never update protected refs directly, rebuild during promotion, select fixes automatically, push all tags, delete/move/reuse a published tag, or use fallback artifacts. Rollback redeploys a prior admitted release; corrections get a new version.
+## Usage
 
 ## Normalized contract clauses
 
@@ -21,7 +24,7 @@ Never update protected refs directly, rebuild during promotion, select fixes aut
 - Promotion reuses admitted artifacts without rebuilding and pushes exactly one signed annotated tag.
 - Release admission requires focused failures to reach zero followed by one clean whole-suite confirmation.
 - Withdrawal preserves published tags assets and history and corrections use a new version.
-- Protected PR self review uses a required status check because GitHub forbids an author APPROVED review and never claims provider approval.
+- Protected PR self review uses a required status check because GitHub forbids a PR author from submitting an `APPROVED` review and never claims provider approval.
 - Ordinary code and text are eligible by default absent an operator deny or constrain record with code, text, file, directory_files, and directory_recursive scopes.
 - Push, retarget, base, diff, ruleset, policy, or expiry invalidation requires a fresh exact-head review and a new self-review admission dispatch.
 - Rejection remediation follows the exact reason without broadening protected integration, candidate, release, signing, or publication authority.

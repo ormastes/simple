@@ -1,0 +1,178 @@
+"""Acceptance evidence for the unified SOSIX runtime library: one operation lifecycle, one frozen service-ID table, one hosted capsule, and one set of performance budgets. Every criterion that this host can execute is exercised against the real capsule rather than asserted from documentation; every criterion that needs another host, hardware, or lane stays visible here as a blocked row with its owner and resume command, never skipped."""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_exists, read_file_text}
+use std.env.platform.{get_temp_dir}
+use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
+use std.common.contracts.sosix.operation_v1.{SOSIX_OPERATION_COMPLETED}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.service_ids_v1.{sosix_service_ids_all, sosix_service_ids_are_unique, sosix_service_id_is_known, SOSIX_ID_FS_READ_AT}
+use std.common.contracts.sosix.error_v1.{SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE}
+use std.common.contracts.sosix.wait_v1.{SOSIX_SYNC_WAIT_COMPLETED}
+use std.nogc_async_mut.io.{file_remove}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs}
+use std.nogc_async_mut.sosix.sync.{sosix_sync_fs_read_at, sosix_sync_fs_write_at}
+use std.nogc_async_mut.sosix.file_driver.{SosixHostedFileDriver, SOSIX_FILE_DRIVER_STATUS_IO}
+
+val BLOCKED_ROWS_DOC = "doc/08_tracking/todo/sosix_unification_blocked_rows_2026-09-05.md"
+val PERF_REPORT = "doc/10_metrics/runtime/sosix_unification_perf_report_2026-09-05.md"
+
+fn hosted_fs(capacity: i64) -> SosixHostedFs:
+    match SosixHostedFs.create(77u64, 7u64, capacity):
+        case Ok(fs): fs
+        case Err(_):
+            fail("unresolved sosix oracle: the hosted capsule could not create a ring")
+            SosixHostedFs.create(77u64, 7u64, capacity).unwrap()
+
+fn file_cap() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 3, generation: 1)
+
+fn buffer_ref() -> SosixBufferRef:
+    SosixBufferRef(slot: 5, generation: 1)
+
+# Rows that cannot be proved on this host. Each is carried here so a reader of the
+# generated manual sees the whole matrix, not just the part that happens to run.
+# The seven contract files the lift produced; named by hand so a file quietly
+# dropped from the capsule is a failure rather than a shorter loop.
+fn contract_files() -> [text]:
+    ["operation_v1.spl", "capability_ref_v1.spl", "completion_v1.spl", "wait_v1.spl",
+     "file_operation_v1.spl", "service_ids_v1.spl", "error_v1.spl"]
+
+fn blocked_rows() -> [text]:
+    ["C3 zero-wrapper disassembly gate",
+     "C4 Linux io_uring provider",
+     "C5 macOS / Windows providers",
+     "F1 GPU G1 proxy storage slice",
+     "G2 QEMU level (AC-3b) serial bytes observed",
+     "G3 retire io_rw.spl onto the v1 positioned stack",
+     "G4 SimpleOS device-initiated queues",
+     "A5 export use ... as compiler fix"]
+
+describe "SOSIX runtime unification acceptance":
+
+    it "admits, completes and releases a positioned read through one ring lifecycle":
+        # @req REQ-SOSIX-AC-2
+        step("Submit a positioned read on a two-slot ring")
+        val fs = hosted_fs(2)
+        val submit = fs.read_at(file_cap(), buffer_ref(), 0u64, 0u64, 16u64, 0u64)
+        expect(submit.accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(1u64)
+        step("The software provider services it and the pump publishes exactly one completion")
+        expect(fs.service_one(0, 16u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        step("The consumer polls a ready result carrying the transferred count")
+        match fs.poll(submit.operation):
+            case TaskPollResult.Ready(result):
+                match result:
+                    case Ok(completion):
+                        expect(completion.transferred).to_equal(16u64)
+                        expect(completion.terminal_state).to_equal(SOSIX_OPERATION_COMPLETED)
+                    case Err(_): fail("a successful read reported an error")
+            case TaskPollResult.Pending(_): fail("a completed read was still pending")
+        step("Releasing the lease returns the slot to the ring")
+        expect(fs.release(submit.operation).accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(0u64)
+
+    it "rejects an invalid descriptor as a value without ever touching the ring":
+        # @req REQ-SOSIX-AC-5
+        step("Submit with a zero-generation capability, which no lease can name")
+        val fs = hosted_fs(1)
+        val bad = fs.read_at(SosixCapabilityRef(slot: 0, generation: 0), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        step("The rejection is a typed value: no reservation, no commit, no occupancy")
+        expect(bad.accepted).to_be(false)
+        expect(bad.error.kind).to_equal(SOSIX_ERROR_INVALID_CAPABILITY)
+        expect(fs.occupancy()).to_equal(0u64)
+        expect(fs.telemetry().reservations).to_equal(0u64)
+        expect(fs.telemetry().commits).to_equal(0u64)
+
+    it "waits exactly once for a synchronous read and returns the slot on completion":
+        # @req REQ-SOSIX-AC-3A
+        step("Two consecutive synchronous reads share a capacity-one ring")
+        val fs = hosted_fs(1)
+        val driver = SosixHostedFileDriver.create()
+        val path = get_temp_dir() + "/sosix_acceptance_sync.txt"
+        file_remove(path)
+        val file = driver.open_path(path)
+        val source = driver.buffer_from("acceptance")
+        expect(sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 10u64, 0u64).outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        val sink = driver.buffer_from("")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 0u64, 10u64, 0u64)
+        step("Each call waits once, and the second is admitted because the first released its lease")
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(read.waits).to_equal(1u64)
+        expect(driver.buffer_bytes(sink)).to_equal("acceptance")
+        expect(fs.occupancy()).to_equal(0u64)
+
+    it "carries real host bytes through the ring and reports a missing file as a typed error":
+        # @req REQ-SOSIX-AC-2
+        step("Write through the ring, then read the same bytes back through the ring")
+        val fs = hosted_fs(2)
+        val driver = SosixHostedFileDriver.create()
+        val path = get_temp_dir() + "/sosix_acceptance_roundtrip.txt"
+        file_remove(path)
+        val file = driver.open_path(path)
+        val source = driver.buffer_from("unified sosix bytes")
+        expect(sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 19u64, 0u64).completion.transferred).to_equal(19u64)
+        val sink = driver.buffer_from("")
+        expect(sosix_sync_fs_read_at(fs, driver, file, sink, 8u64, 0u64, 5u64, 0u64).completion.transferred).to_equal(5u64)
+        expect(driver.buffer_bytes(sink)).to_equal("sosix")
+        step("A path that does not exist surfaces as a native error, not a crash or a silent zero")
+        val missing = driver.open_path(get_temp_dir() + "/sosix_acceptance_absent.txt")
+        file_remove(get_temp_dir() + "/sosix_acceptance_absent.txt")
+        val err = sosix_sync_fs_read_at(fs, driver, missing, driver.buffer_from(""), 0u64, 0u64, 4u64, 0u64)
+        expect(err.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(err.error.native_code).to_equal(SOSIX_FILE_DRIVER_STATUS_IO)
+
+    it "refuses a full queue as a typed value rather than blocking or overwriting":
+        # @req REQ-SOSIX-AC-5
+        step("Fill the only slot, then submit again")
+        val fs = hosted_fs(1)
+        expect(fs.read_at(file_cap(), buffer_ref(), 0u64, 0u64, 8u64, 0u64).accepted).to_be(true)
+        val second = fs.read_at(file_cap(), buffer_ref(), 8u64, 0u64, 8u64, 0u64)
+        expect(second.accepted).to_be(false)
+        expect(second.error.kind).to_equal(SOSIX_ERROR_QUEUE_FULL)
+        expect(fs.occupancy()).to_equal(1u64)
+
+    it "freezes the host service IDs as one unique table the contracts own alone":
+        # @req REQ-SOSIX-AC-1
+        step("Every frozen ID is known and no two collide")
+        expect(sosix_service_ids_are_unique()).to_be(true)
+        expect(sosix_service_ids_all().len()).to_be_greater_than(11)
+        expect(sosix_service_id_is_known(SOSIX_ID_FS_READ_AT)).to_be(true)
+        expect(sosix_service_id_is_known(0xDEADu32)).to_be(false)
+        step("The contract capsule stays pure: no OS import and no raw runtime extern in any contract file")
+        for name in contract_files():
+            val path = "src/lib/common/contracts/sosix/" + name
+            expect(file_exists(path)).to_be(true)
+            val body = read_file_text(path)
+            expect(body).to_not_contain("\nuse os.")
+            expect(body).to_not_contain("\nextern fn rt_")
+
+    it "leaves no second copy of the lifecycle: the dead Future chain and the unreachable io route are gone":
+        # @req REQ-SOSIX-AC-4
+        step("The four self-referential future modules were deleted, not migrated")
+        expect(file_exists("src/lib/nogc_sync_mut/src/future.spl")).to_be(false)
+        expect(file_exists("src/lib/nogc_async_mut/src/future.spl")).to_be(false)
+        expect(file_exists("src/lib/gc_async_mut/src/future.spl")).to_be(false)
+        expect(file_exists("src/lib/gc_sync_mut/src/future.spl")).to_be(false)
+        step("The unreachable SimpleOS io route is gone; its live replacement remains")
+        expect(file_exists("src/os/sosix/io.spl")).to_be(false)
+        expect(file_exists("src/os/sosix/io_rw.spl")).to_be(true)
+
+    it "keeps every row this host cannot prove visible with an owner and a resume command":
+        # @req REQ-SOSIX-AC-5
+        step("The blocked-row record exists and names each row that needs another host, hardware or lane")
+        expect(file_exists(BLOCKED_ROWS_DOC)).to_be(true)
+        val doc = read_file_text(BLOCKED_ROWS_DOC)
+        for row in blocked_rows():
+            val key = row.split(" ")[0]
+            expect(doc).to_contain(key)
+        step("Each row carries a resume path, so a later session can pick it up without re-deriving it")
+        expect(doc).to_contain("Resume command")
+        expect(doc).to_contain("Missing prerequisite")
+        step("The performance budgets are reported with binary identity rather than left implicit")
+        expect(file_exists(PERF_REPORT)).to_be(true)
+        val perf = read_file_text(PERF_REPORT)
+        expect(perf).to_contain("Binary identity")
+        expect(perf).to_contain("ring cycle")

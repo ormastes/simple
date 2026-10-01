@@ -1,0 +1,805 @@
+# Provider Wire Dispatch Specification
+
+> Tests covering SPipe provider closed framed dispatch.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 14 | 14 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Provider Wire Dispatch Specification
+
+## Scenarios
+
+### SPipe provider closed framed dispatch
+
+#### rejects C0 DEL and C1 controls from IdText
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- rejects C0 DEL and C1 controls from IdText
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("rejects C0 DEL and C1 controls from IdText")
+expect(wire_valid_id("visible-id")).to_be(true)
+expect(wire_valid_id("bad\nid")).to_be(false)
+expect(wire_valid_id("bad" + bytes_to_text([127u8]))).to_be(false)
+expect(wire_valid_id("bad" + bytes_to_text([194u8, 133u8]))).to_be(false)
+```
+
+</details>
+
+#### uses checked relative deadline boundaries
+
+- uses checked relative deadline boundaries
+   - Expected: wire_deadline_exceeded_at(100, 10, 109) is false
+   - Expected: wire_deadline_exceeded_at(100, 10, 110) is true
+   - Expected: wire_deadline_exceeded_at(100, 10, 99) is true
+   - Expected: wire_explanation_exceeds_limit("x" * 65536) is false
+   - Expected: wire_explanation_exceeds_limit("x" * 65537) is true
+   - Expected: wire_page_exceeds_limit("x" * 524288) is false
+   - Expected: wire_page_exceeds_limit("x" * 524289) is true
+   - Expected: query_deadline_exceeded(before, 100, 10) is false
+   - Expected: query_deadline_exceeded(boundary, 100, 10) is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("uses checked relative deadline boundaries")
+expect(wire_deadline_exceeded_at(100, 10, 109)).to_equal(false)
+expect(wire_deadline_exceeded_at(100, 10, 110)).to_equal(true)
+expect(wire_deadline_exceeded_at(100, 10, 99)).to_equal(true)
+expect(wire_explanation_exceeds_limit("x" * 65536)).to_equal(false)
+expect(wire_explanation_exceeds_limit("x" * 65537)).to_equal(true)
+expect(wire_page_exceeds_limit("x" * 524288)).to_equal(false)
+expect(wire_page_exceeds_limit("x" * 524289)).to_equal(true)
+val before = FixedQueryClockV1.at(109)
+val boundary = FixedQueryClockV1.at(110)
+expect(query_deadline_exceeded(before, 100, 10)).to_equal(false)
+expect(query_deadline_exceeded(boundary, 100, 10)).to_equal(true)
+```
+
+</details>
+
+#### locks canonical candidate identity and ProviderGeneration wire text
+
+- locks canonical candidate identity and ProviderGeneration wire text
+   - Expected: uid equals `cand-4adcb8c9713f37d79044d0130b7117f7a4c8d1b3e57a255a9a34be40ffbdb191`
+   - Expected: rejected.outcome.close_transport is true
+   - Expected: rejected.outcome.write_response is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("locks canonical candidate identity and ProviderGeneration wire text")
+val uid = provider_candidate_uid("WS-TEST", "spks1-test",
+    "sha256:" + "3" * 64, "sha256:" + "0" * 64,
+    "sha256:" + "1" * 64,
+    "sha256:53eac50845e9d3c9014580d3136062cb03e36c7863f947124e63bb674e38308f")
+expect(uid).to_equal("cand-4adcb8c9713f37d79044d0130b7117f7a4c8d1b3e57a255a9a34be40ffbdb191")
+
+var service = SpipeProviderServiceV1.empty()
+service = dispatch_bound(service, init_frame("init-generation-vector")).service
+val numeric = bound_frame("stats-generation-vector", "stats",
+    "{\"logical_root\":\"sha256:" + "0" * 64 + "\"}").replace(
+        "\"provider_generation\":\"pg-00000000000000000000000000000001\"",
+        "\"provider_generation\":1")
+val rejected = dispatch_bound(service, numeric)
+expect(rejected.outcome.close_transport).to_equal(true)
+expect(rejected.outcome.write_response).to_equal(false)
+```
+
+</details>
+
+#### accepts only a closed authoritative host binding
+
+- accepts only a closed authoritative host binding
+   - Expected: dispatched.service.state.workspace equals `WS-PROVIDER`
+   - Expected: dispatched.service.state.snapshot_id equals `"spks1-" + "0" * 64`
+   - Expected: dispatched.service.state.scope_digest equals `"sha256:" + "1" * 64`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("accepts only a closed authoritative host binding")
+expect(ProviderHostBindingV1.create("", "spks1-" + "0" * 64,
+    "sha256:" + "1" * 64).is_err()).to_equal(true)
+val dispatched = provider_dispatch_frame_bound_owned(
+    SpipeProviderServiceV1.empty(), host_binding(), init_frame("init-stages"))
+expect(dispatched.service.state.workspace).to_equal("WS-PROVIDER")
+expect(dispatched.service.state.snapshot_id).to_equal("spks1-" + "0" * 64)
+expect(dispatched.service.state.scope_digest).to_equal("sha256:" + "1" * 64)
+expect(provider_parse_frame(dispatched.outcome.frame).payload).to_contain("\"request_id\":\"init-stages\"")
+```
+
+</details>
+
+#### preserves initialized state at payload and frame ownership boundaries
+
+- preserves initialized state at payload and frame ownership boundaries
+   - Expected: payload_dispatch.service.state.initialized is true
+   - Expected: payload_dispatch.service.state.provider_generation equals `1`
+   - Expected: payload_dispatch.service.state.workspace equals `WS-PROVIDER`
+   - Expected: frame_dispatch.service.state.initialized is true
+   - Expected: frame_dispatch.service.state.provider_generation equals `1`
+   - Expected: frame_dispatch.service.state.workspace equals `WS-PROVIDER`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("preserves initialized state at payload and frame ownership boundaries")
+val original = SpipeProviderServiceV1.empty()
+val payload_dispatch = provider_dispatch_payload_bound_owned(original, host_binding(),
+    provider_parse_frame(init_frame("init-payload-boundary")).payload)
+expect(payload_dispatch.service.state.initialized).to_equal(true)
+expect(payload_dispatch.service.state.provider_generation).to_equal(1)
+expect(payload_dispatch.service.state.workspace).to_equal("WS-PROVIDER")
+
+val frame_dispatch = provider_dispatch_frame_bound_owned(SpipeProviderServiceV1.empty(), host_binding(),
+    init_frame("init-frame-boundary"))
+expect(frame_dispatch.service.state.initialized).to_equal(true)
+expect(frame_dispatch.service.state.provider_generation).to_equal(1)
+expect(frame_dispatch.service.state.workspace).to_equal("WS-PROVIDER")
+```
+
+</details>
+
+#### fails malformed and unknown operations closed with zero response bytes
+
+- fails malformed and unknown operations closed with zero response bytes
+   - Expected: malformed.close_transport is true
+   - Expected: malformed.write_response is false
+   - Expected: unknown.close_transport is true
+   - Expected: unknown.frame equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("fails malformed and unknown operations closed with zero response bytes")
+var service = SpipeProviderServiceV1.empty()
+val malformed_dispatch = dispatch_bound(service, "00000003{}")
+service = malformed_dispatch.service
+val malformed = malformed_dispatch.outcome
+expect(malformed.close_transport).to_equal(true)
+expect(malformed.write_response).to_equal(false)
+val unknown_dispatch = dispatch_bound(service, provider_encode_frame("{\"operation\":\"invented\",\"protocol\":{\"major\":1,\"minor\":0},\"request_id\":\"r1\"}").unwrap())
+service = unknown_dispatch.service
+val unknown = unknown_dispatch.outcome
+expect(unknown.close_transport).to_equal(true)
+expect(unknown.frame).to_equal("")
+```
+
+</details>
+
+#### returns handshake_required before initialize
+
+- returns handshake_required before initialize
+   - Expected: outcome.write_response is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("returns handshake_required before initialize")
+var service = SpipeProviderServiceV1.empty()
+val dispatched = dispatch_bound(service, bound_frame("req-pre", "stats", "{\"logical_root\":\"sha256:" + "0" * 64 + "\"}"))
+service = dispatched.service
+val outcome = dispatched.outcome
+expect(outcome.write_response).to_equal(true)
+expect(provider_parse_frame(outcome.frame).payload).to_contain("\"code\":\"handshake_required\"")
+```
+
+</details>
+
+#### persists one initialized generation and rejects unnegotiated cancellation
+
+- persists one initialized generation and rejects unnegotiated cancellation
+   - Expected: initialized.write_response is true
+   - Expected: service.state.initialized is true
+   - Expected: service.state.initialized is true
+   - Expected: service.state.initialized is true
+   - Expected: shutdown.stop_after_write is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("persists one initialized generation and rejects unnegotiated cancellation")
+var service = SpipeProviderServiceV1.empty()
+val initialize_dispatch = dispatch_bound(service, init_frame("init-1"))
+service = initialize_dispatch.service
+val initialized = initialize_dispatch.outcome
+expect(initialized.write_response).to_equal(true)
+expect(provider_parse_frame(initialized.frame).payload).to_contain("\"ok\":true")
+expect(provider_parse_frame(initialized.frame).payload).to_contain(
+    "\"cancel\":false")
+expect(service.state.initialized).to_equal(true)
+
+val stats_dispatch = dispatch_bound(service, bound_frame("stats-1", "stats", "{\"logical_root\":\"sha256:" + "0" * 64 + "\"}"))
+service = stats_dispatch.service
+val stats = stats_dispatch.outcome
+expect(provider_parse_frame(stats.frame).payload).to_contain("\"document_count\":0")
+expect(provider_parse_frame(stats.frame).payload).to_contain("\"provider_generation\":\"pg-00000000000000000000000000000001\"")
+expect(service.state.initialized).to_equal(true)
+
+val cancel_dispatch = dispatch_bound(service, bound_frame("cancel-1", "cancel", "{\"target_request_id\":\"stats-1\"}"))
+service = cancel_dispatch.service
+val cancel = cancel_dispatch.outcome
+expect(provider_parse_frame(cancel.frame).payload).to_contain(
+    "\"code\":\"unsupported_capability\"")
+expect(service.state.initialized).to_equal(true)
+
+val unknown_cancel = dispatch_bound(service, bound_frame("cancel-2", "cancel", "{\"target_request_id\":\"work-never-admitted\"}"))
+service = unknown_cancel.service
+expect(provider_parse_frame(unknown_cancel.outcome.frame).payload).to_contain(
+    "\"code\":\"unsupported_capability\"")
+
+val shutdown_dispatch = dispatch_bound(service, bound_frame("stop-1", "shutdown", "{\"reason\":\"normal\"}"))
+service = shutdown_dispatch.service
+val shutdown = shutdown_dispatch.outcome
+expect(shutdown.stop_after_write).to_equal(true)
+expect(provider_parse_frame(shutdown.frame).payload).to_contain("\"status\":\"closing\"")
+```
+
+</details>
+
+#### maps invalid index_open shapes separately from missing roots
+
+- maps invalid index_open shapes separately from missing roots
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("maps invalid index_open shapes separately from missing roots")
+var service = dispatch_bound(SpipeProviderServiceV1.empty(),
+    init_frame("init-open-errors")).service
+val invalid_create = dispatch_bound(service, bound_frame("open-invalid-create",
+    "index_open", "{\"logical_root\":\"sha256:" + "0" * 64 +
+    "\",\"mode\":\"create\"}"))
+expect(provider_parse_frame(invalid_create.outcome.frame).payload).to_contain(
+    "\"code\":\"invalid_request\"")
+val invalid_open = dispatch_bound(invalid_create.service,
+    bound_frame("open-invalid-null", "index_open",
+        "{\"logical_root\":null,\"mode\":\"open\"}"))
+expect(provider_parse_frame(invalid_open.outcome.frame).payload).to_contain(
+    "\"code\":\"invalid_request\"")
+val missing = dispatch_bound(invalid_open.service,
+    bound_frame("open-missing", "index_open",
+        "{\"logical_root\":\"sha256:" + "9" * 64 +
+        "\",\"mode\":\"open\"}"))
+expect(provider_parse_frame(missing.outcome.frame).payload).to_contain(
+    "\"code\":\"snapshot_not_found\"")
+```
+
+</details>
+
+#### rejects unsupported semantic surfaces with a bound error
+
+- rejects unsupported semantic surfaces with a bound error
+   - Expected: initialized.write_response is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("rejects unsupported semantic surfaces with a bound error")
+var service = SpipeProviderServiceV1.empty()
+val initialize_dispatch = dispatch_bound(service, init_frame("init-1"))
+service = initialize_dispatch.service
+val initialized = initialize_dispatch.outcome
+expect(initialized.write_response).to_equal(true)
+val result_dispatch = dispatch_bound(service, bound_frame("symbols-1", "symbols_snapshot", "{\"cursor\":null,\"limit\":10,\"project_uid\":\"P-1\",\"revision\":\"r1\"}"))
+service = result_dispatch.service
+val result = result_dispatch.outcome
+expect(provider_parse_frame(result.frame).payload).to_contain("\"code\":\"unsupported_capability\"")
+```
+
+</details>
+
+#### supports OR filters authenticated cursor pages and root-bound field stats
+
+- supports OR filters authenticated cursor pages and root-bound field stats
+   - Expected: wire_jint(stats_result, "cache_bytes", -1) equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 95 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("supports OR filters authenticated cursor pages and root-bound field stats")
+var seed: [u8] = []
+var seed_index = 0
+while seed_index < 32:
+    seed.push(11u8)
+    seed_index = seed_index + 1
+val authority = PureEd25519ReceiptAuthorityV1.test_only(seed,
+    "AUTH-QUERY", 1).unwrap()
+val storage = FileDurableLifecycleV1.configured_absolute(
+    "/tmp/simple-spipe-provider-query-test").unwrap()
+storage.commit("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").unwrap()
+var service = SpipeProviderServiceV1.configured_with_transition(authority,
+    storage, DeterministicCandidateTransitionAuthorityV1.test_only(0).unwrap()).unwrap()
+service = dispatch_bound(service, init_frame("init-query")).service
+val documents = [
+    query_document("A-1", "compiler"),
+    query_document("A-2", "storage"),
+    query_document("A-3", "unrelated"),
+]
+service.state = SpipeProviderStateV1.initialized_bound(
+    service.state.workspace, service.state.snapshot_id,
+    service.state.scope_digest, service.state.provider_generation,
+    service.state.logical_root, SearchSnapshot.of(service.state.snapshot_id,
+        "r1", AnalyzerIdentity.spipe_v1(), documents),
+    service.state.capabilities_value, service.state.cancelled_request_ids,
+    service.state.generation_quarantined)
+
+val first_payload = "{\"cursor\":null,\"explain\":false,\"filters\":[{\"name\":\"component\",\"values\":[\"compiler\",\"storage\"]}],\"limit\":1,\"query_text\":\"alpha\"}"
+val first_receipt = provider_sign_query_receipt(service, "search-page-1",
+    "search", first_payload).unwrap()
+val first_dispatch = dispatch_bound(service, query_frame("search-page-1",
+    "search", first_payload, first_receipt))
+service = first_dispatch.service
+val first_response = provider_parse_frame(first_dispatch.outcome.frame).payload
+expect(first_response).to_contain("\"document_id\":\"A-1\"")
+expect(first_response).to_contain("\"matched_fields\":[\"title\",\"heading\",\"body\"]")
+expect(first_response).to_contain("\"exhausted\":false")
+val first_json = json_parse_with_error(first_response).0
+val first_result = json_object_get(first_json, "result").unwrap()
+val cursor = json_to_string(json_object_get(first_result, "next_cursor")) ?? ""
+expect(cursor.len()).to_be_greater_than(0)
+val first_receipt_json = json_parse_with_error(first_receipt).0
+val first_receipt_id = json_to_string(json_object_get(first_receipt_json,
+    "receipt_id")) ?? ""
+expect(base64url_decode_strict(cursor).unwrap()).to_contain(
+    "\"query_receipt_id\":\"" + first_receipt_id + "\"")
+
+val second_payload = "{\"cursor\":\"" + cursor + "\",\"explain\":false,\"filters\":[{\"name\":\"component\",\"values\":[\"compiler\",\"storage\"]}],\"limit\":1,\"query_text\":\"alpha\"}"
+val second_receipt = provider_sign_query_receipt(service, "search-page-2",
+    "search", second_payload).unwrap()
+val second_dispatch = dispatch_bound(service, query_frame("search-page-2",
+    "search", second_payload, second_receipt))
+service = second_dispatch.service
+val second_response = provider_parse_frame(second_dispatch.outcome.frame).payload
+expect(second_response).to_contain("\"document_id\":\"A-2\"")
+expect(second_response).to_contain("\"exhausted\":true")
+
+val rebound_payload = "{\"cursor\":\"" + cursor + "\",\"explain\":false,\"filters\":[{\"name\":\"component\",\"values\":[\"compiler\",\"storage\"]}],\"limit\":1,\"query_text\":\"beta\"}"
+val rebound_receipt = provider_sign_query_receipt(service, "search-rebound",
+    "search", rebound_payload).unwrap()
+val rebound_dispatch = dispatch_bound(service, query_frame("search-rebound",
+    "search", rebound_payload, rebound_receipt))
+service = rebound_dispatch.service
+expect(provider_parse_frame(rebound_dispatch.outcome.frame).payload).to_contain(
+    "\"code\":\"stale_cursor\"")
+
+val replacement = if cursor.ends_with("A"): "B" else: "A"
+val tampered = cursor.slice(0, cursor.len() - 1) + replacement
+val stale_payload = "{\"cursor\":\"" + tampered + "\",\"explain\":false,\"filters\":[{\"name\":\"component\",\"values\":[\"compiler\",\"storage\"]}],\"limit\":1,\"query_text\":\"alpha\"}"
+val stale_receipt = provider_sign_query_receipt(service, "search-stale",
+    "search", stale_payload).unwrap()
+val stale_dispatch = dispatch_bound(service, query_frame("search-stale",
+    "search", stale_payload, stale_receipt))
+service = stale_dispatch.service
+expect(provider_parse_frame(stale_dispatch.outcome.frame).payload).to_contain(
+    "\"code\":\"stale_cursor\"")
+
+val stats_dispatch = dispatch_bound(service, bound_frame("stats-fields", "stats",
+    "{\"logical_root\":\"sha256:" + "0" * 64 + "\"}"))
+service = stats_dispatch.service
+val stats = provider_parse_frame(stats_dispatch.outcome.frame).payload
+expect(stats).to_contain("\"document_count\":3")
+expect(stats).to_contain("\"field_stats\":[{\"N\":3")
+expect(stats).to_contain("\"field\":\"body\"")
+val stats_result = json_object_get(json_parse_with_error(stats).0,
+    "result").unwrap()
+expect(wire_jint(stats_result, "index_bytes", -1)).to_be_greater_than(0)
+expect(wire_jint(stats_result, "peak_rss_bytes", -1)).to_be_greater_than(0)
+expect(wire_jint(stats_result, "cache_bytes", -1)).to_equal(0)
+
+val wrong_root = dispatch_bound(service, bound_frame("stats-wrong", "stats",
+    "{\"logical_root\":\"sha256:" + "9" * 64 + "\"}"))
+expect(provider_parse_frame(wrong_root.outcome.frame).payload).to_contain(
+    "\"code\":\"snapshot_not_found\"")
+```
+
+</details>
+
+#### paginates every ranked match beyond the public thousand-hit page cap
+
+- paginates every ranked match beyond the public thousand-hit page cap
+   - Expected: json_array_length(json_object_get(first_result, "hits")) equals `1000`
+   - Expected: json_array_length(json_object_get(second_result, "hits")) equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 57 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("paginates every ranked match beyond the public thousand-hit page cap")
+var seed: [u8] = []
+var seed_index = 0
+while seed_index < 32:
+    seed.push(17u8)
+    seed_index = seed_index + 1
+val authority = PureEd25519ReceiptAuthorityV1.test_only(seed,
+    "AUTH-QUERY-PAGINATION", 1).unwrap()
+val storage = FileDurableLifecycleV1.configured_absolute(
+    "/tmp/simple-spipe-provider-query-pagination-test").unwrap()
+storage.commit("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").unwrap()
+var service = SpipeProviderServiceV1.configured_with_transition(authority,
+    storage, DeterministicCandidateTransitionAuthorityV1.test_only(0).unwrap()).unwrap()
+service = dispatch_bound(service, init_frame("init-query-pagination")).service
+var documents: [SearchDocument] = []
+var document_index = 0
+while document_index < 1001:
+    documents.push(query_document("PAGE-" + document_index.to_text(),
+                                  "compiler"))
+    document_index = document_index + 1
+service.state = SpipeProviderStateV1.initialized_bound(
+    service.state.workspace, service.state.snapshot_id,
+    service.state.scope_digest, service.state.provider_generation,
+    service.state.logical_root, SearchSnapshot.of(service.state.snapshot_id,
+        "r1", AnalyzerIdentity.spipe_v1(), documents),
+    service.state.capabilities_value, service.state.cancelled_request_ids,
+    service.state.generation_quarantined)
+
+val first_payload = "{\"cursor\":null,\"explain\":false,\"filters\":[{\"name\":\"component\",\"values\":[\"compiler\"]}],\"limit\":1000,\"query_text\":\"\"}"
+val first_receipt = provider_sign_query_receipt(service,
+    "search-all-page-1", "search", first_payload).unwrap()
+val first_dispatch = dispatch_bound(service, query_frame(
+    "search-all-page-1", "search", first_payload, first_receipt))
+service = first_dispatch.service
+val first_response = provider_parse_frame(first_dispatch.outcome.frame).payload
+val first_result = json_object_get(
+    json_parse_with_error(first_response).0, "result").unwrap()
+expect(json_array_length(json_object_get(first_result, "hits"))).to_equal(1000)
+expect(wire_jbool(first_result, "exhausted", true)).to_be(false)
+val cursor = json_to_string(json_object_get(first_result,
+    "next_cursor")) ?? ""
+expect(cursor.len()).to_be_greater_than(0)
+
+val second_payload = "{\"cursor\":\"" + cursor + "\",\"explain\":false,\"filters\":[{\"name\":\"component\",\"values\":[\"compiler\"]}],\"limit\":1000,\"query_text\":\"\"}"
+val second_receipt = provider_sign_query_receipt(service,
+    "search-all-page-2", "search", second_payload).unwrap()
+val second_dispatch = dispatch_bound(service, query_frame(
+    "search-all-page-2", "search", second_payload, second_receipt))
+val second_response = provider_parse_frame(
+    second_dispatch.outcome.frame).payload
+val second_result = json_object_get(
+    json_parse_with_error(second_response).0, "result").unwrap()
+expect(json_array_length(json_object_get(second_result, "hits"))).to_equal(1)
+expect(wire_jbool(second_result, "exhausted", false)).to_be(true)
+expect(json_to_string(json_object_get(second_result,
+    "next_cursor"))).to_be_nil()
+```
+
+</details>
+
+#### rejects stale policy receipts invalid query shapes and declared token bounds
+
+- rejects stale policy receipts invalid query shapes and declared token bounds
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 82 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("rejects stale policy receipts invalid query shapes and declared token bounds")
+var seed: [u8] = []
+var seed_index = 0
+while seed_index < 32:
+    seed.push(13u8)
+    seed_index = seed_index + 1
+val authority = PureEd25519ReceiptAuthorityV1.test_only(seed,
+    "AUTH-QUERY-BOUNDS", 1).unwrap()
+val storage = FileDurableLifecycleV1.configured_absolute(
+    "/tmp/simple-spipe-provider-query-bounds-test").unwrap()
+storage.commit("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").unwrap()
+var service = SpipeProviderServiceV1.configured_with_transition(authority,
+    storage, DeterministicCandidateTransitionAuthorityV1.test_only(0).unwrap()).unwrap()
+service = dispatch_bound(service, init_frame("init-query-bounds")).service
+service.state = SpipeProviderStateV1.initialized_bound(
+    service.state.workspace, service.state.snapshot_id,
+    service.state.scope_digest, service.state.provider_generation,
+    service.state.logical_root, SearchSnapshot.of(service.state.snapshot_id,
+        "r1", AnalyzerIdentity.spipe_v1(), [query_document("A-1", "compiler")]),
+    service.state.capabilities_value, service.state.cancelled_request_ids,
+    service.state.generation_quarantined)
+
+val valid_payload = "{\"cursor\":null,\"explain\":false,\"filters\":[],\"limit\":1,\"query_text\":\"alpha\"}"
+val policy_receipt = provider_sign_query_receipt(service, "query-policy",
+    "search", valid_payload).unwrap().replace("\"policy_version\":1",
+                                               "\"policy_version\":2")
+val policy_result = dispatch_bound(service, query_frame("query-policy",
+    "search", valid_payload, policy_receipt))
+expect(provider_parse_frame(policy_result.outcome.frame).payload).to_contain(
+    "\"code\":\"unauthorized\"")
+
+val revocation_receipt = provider_sign_query_receipt(service, "query-revoked",
+    "search", valid_payload).unwrap().replace("\"revocation_generation\":0",
+                                               "\"revocation_generation\":1")
+val revocation_result = dispatch_bound(service, query_frame("query-revoked",
+    "search", valid_payload, revocation_receipt))
+expect(provider_parse_frame(revocation_result.outcome.frame).payload).to_contain(
+    "\"code\":\"unauthorized\"")
+
+val ordered_receipt = provider_sign_query_receipt(service, "query-order",
+    "search", valid_payload).unwrap()
+val ordered_json = json_parse_with_error(ordered_receipt).0
+val issued = wire_jint(ordered_json, "issued_at_ms", -1)
+val expires = wire_jint(ordered_json, "expires_at_ms", -1)
+val bad_order = ordered_receipt.replace("\"expires_at_ms\":" + expires.to_text(),
+                                        "\"expires_at_ms\":" + (issued - 1).to_text())
+val order_result = dispatch_bound(service, query_frame("query-order",
+    "search", valid_payload, bad_order))
+expect(provider_parse_frame(order_result.outcome.frame).payload).to_contain(
+    "\"code\":\"unauthorized\"")
+
+var oversized_query = ""
+var token = 0
+while token < 129:
+    if token > 0: oversized_query = oversized_query + " "
+    oversized_query = oversized_query + "token" + token.to_text()
+    token = token + 1
+val oversized_payload = "{\"cursor\":null,\"explain\":false,\"filters\":[],\"limit\":1,\"query_text\":\"" + oversized_query + "\"}"
+val oversized_receipt = provider_sign_query_receipt(service, "query-oversized",
+    "search", oversized_payload).unwrap()
+val oversized_result = dispatch_bound(service, query_frame("query-oversized",
+    "search", oversized_payload, oversized_receipt))
+expect(provider_parse_frame(oversized_result.outcome.frame).payload).to_contain(
+    "\"code\":\"limit_exceeded\"")
+
+val empty_payload = "{\"cursor\":null,\"explain\":false,\"filters\":[],\"limit\":1,\"query_text\":\"\"}"
+val empty_receipt = provider_sign_query_receipt(service, "query-empty",
+    "search", empty_payload).unwrap()
+val empty_result = dispatch_bound(service, query_frame("query-empty",
+    "search", empty_payload, empty_receipt))
+expect(provider_parse_frame(empty_result.outcome.frame).payload).to_contain(
+    "\"code\":\"invalid_request\"")
+
+val typed_explain_payload = "{\"document_id\":\"A-1\",\"filters\":[],\"query_text\":7}"
+val typed_explain_receipt = provider_sign_query_receipt(service,
+    "explain-type", "explain", typed_explain_payload).unwrap()
+val typed_explain_result = dispatch_bound(service, query_frame(
+    "explain-type", "explain", typed_explain_payload,
+    typed_explain_receipt))
+expect(provider_parse_frame(typed_explain_result.outcome.frame).payload).to_contain(
+    "\"code\":\"invalid_request\"")
+```
+
+</details>
+
+#### durably signs applies and publishes through injected lifecycle ports
+
+- durably signs applies and publishes through injected lifecycle ports
+   - Expected: initialized.write_response is true
+   - Expected: signed_query.split("\"authority_id\":").len() equals `2`
+   - Expected: opened.write_response is true
+   - Expected: service.candidates.len() equals `1`
+   - Expected: applied_payload equals `index_apply must return a bound success result`
+   - Expected: service.state.logical_root equals `candidate_root`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 59 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("durably signs applies and publishes through injected lifecycle ports")
+var seed: [u8] = []
+var seed_index = 0
+while seed_index < 32:
+    seed.push(7u8)
+    seed_index = seed_index + 1
+val authority = PureEd25519ReceiptAuthorityV1.test_only(seed, "AUTH-TEST", 1).unwrap()
+val storage = FileDurableLifecycleV1.configured_absolute("/tmp/simple-spipe-provider-wire-test").unwrap()
+storage.commit("{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}").unwrap()
+var service = SpipeProviderServiceV1.configured_with_transition(authority,
+    storage,
+    DeterministicCandidateTransitionAuthorityV1.test_only(0).unwrap()).unwrap()
+val initialize_dispatch = dispatch_bound(service, init_frame("init-secure"))
+service = initialize_dispatch.service
+val initialized = initialize_dispatch.outcome
+expect(initialized.write_response).to_equal(true)
+val signed_query = provider_sign_query_receipt(service, "query-secure",
+    "search", "{\"filters\":[],\"query_text\":\"alpha\"}").unwrap()
+expect(signed_query.split("\"authority_id\":").len()).to_equal(2)
+val open_dispatch = dispatch_bound(service, bound_frame("open-secure", "index_open", "{\"logical_root\":null,\"mode\":\"create\"}"))
+service = open_dispatch.service
+val opened = open_dispatch.outcome
+expect(opened.write_response).to_equal(true)
+
+val apply_without_hash = "{\"base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"apply-secure\",\"operations\":[]}"
+val apply_hash = provider_operation_payload_hash(apply_without_hash, "index_apply").unwrap()
+val apply_payload = "{\"base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"apply-secure\",\"operations\":[],\"payload_hash\":\"" + apply_hash + "\"}"
+val apply_dispatch = dispatch_bound(service, bound_frame("apply-request", "index_apply", apply_payload))
+service = apply_dispatch.service
+val applied = apply_dispatch.outcome
+val applied_payload = provider_parse_frame(applied.frame).payload
+expect(applied_payload).to_contain("\"operation_receipt\":{")
+expect(applied_payload).to_contain("\"status\":\"no_op\"")
+expect(service.candidates.len()).to_equal(1)
+
+val response_json = json_parse_with_error(applied_payload).0
+val maybe_result_json = json_object_get(response_json, "result")
+# Keep a provider error inspectable instead of masking it with a test
+# harness nil unwrap. A success response is the only response allowed
+# to continue into publish binding extraction.
+if maybe_result_json == nil:
+    expect(applied_payload).to_equal("index_apply must return a bound success result")
+    return
+val result_json = maybe_result_json.unwrap()
+val candidate_uid = json_to_string(json_object_get(result_json, "candidate_uid")) ?? ""
+val candidate_root = json_to_string(json_object_get(result_json, "candidate_logical_root")) ?? ""
+val publish_without_hash = "{\"action\":\"publish\",\"candidate_logical_root\":\"" + candidate_root + "\",\"candidate_uid\":\"" + candidate_uid + "\",\"expected_base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"publish-secure\"}"
+val publish_hash = provider_operation_payload_hash(publish_without_hash, "index_publish").unwrap()
+val publish_payload = "{\"action\":\"publish\",\"candidate_logical_root\":\"" + candidate_root + "\",\"candidate_uid\":\"" + candidate_uid + "\",\"expected_base_logical_root\":\"sha256:" + "0" * 64 + "\",\"operation_id\":\"publish-secure\",\"payload_hash\":\"" + publish_hash + "\"}"
+val publish_dispatch = dispatch_bound(service, bound_frame("publish-request", "index_publish", publish_payload))
+service = publish_dispatch.service
+val published = publish_dispatch.outcome
+val published_payload = provider_parse_frame(published.frame).payload
+expect(published_payload).to_contain("\"status\":\"published\"")
+expect(published_payload).to_contain("\"operation_receipt\":{")
+expect(service.state.logical_root).to_equal(candidate_root)
+expect(service.candidates[0].terminal_at_ms).to_be_greater_than(
+    service.candidates[0].created_at_ms)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering SPipe provider closed framed dispatch.
+- SPipe provider closed framed dispatch
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 14 |
+| Active scenarios | 14 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c3f845637b32f34ea4a7f3d358ac3136823e7be40fb9c6b239ab56e2875b404f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c3f845637b32f34ea4a7f3d358ac3136823e7be40fb9c6b239ab56e2875b404f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c3f845637b32f34ea4a7f3d358ac3136823e7be40fb9c6b239ab56e2875b404f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.spl
+mirror: doc/06_spec/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects C0 DEL and C1 controls from IdText' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses checked relative deadline boundaries' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/spipe_knowledge_provider/provider_wire_dispatch_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'locks canonical candidate identity and ProviderGeneration wire text' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -14,18 +14,9 @@ Tool-set names (env `SIMPLE_MCP_TOOL_SET` / flag `--tool-set=`):
 
 | Set | Default? | First tools/list | list_changed emitted? | Later tools/list |
 |-----|----------|------------------|----------------------|------------------|
-| `auto` | YES (new default) | core (20 tools) | yes, once, after the response | full (163, cached) |
-| `all`  | choosable | full (163, cached) | no | full (cached) |
+| `auto` | YES (new default) | core (20 tools) | yes, once, after the response | full (151, cached) |
+| `all`  | choosable | full (151, cached) | no | full (cached) |
 | `core` | choosable | core | no | core (strict small surface) |
-
-> **Full-list count, updated 2026-08-27: 151 -> 163.** This plan was written
-> against a 151-tool full list. The full surface has since grown by 12 tools
-> with the addition of the `caret_*` group at `e80dc8c34c4`; the specs are
-> pinned to 163 accordingly. The **core count stays 20** — that is the
-> deliberately-specified small surface and is unaffected by growth in the full
-> list. Treat 163 as a snapshot of a moving number: the binding contract is
-> "core is exactly 20" and "full is cached and served whole", not the full
-> list's literal cardinality.
 
 Rules:
 - Invalid set values fall back to `auto` (the default).
@@ -48,8 +39,8 @@ State in `main.spl`: `_MCP_TOOL_SET` (default "auto") + `_MCP_LIST_UPGRADED`
 | ID | Task | Files (exclusive scope) | Model |
 |----|------|------------------------|-------|
 | A | Server state machine: default `auto`, listChanged capability, core-first serve, one-shot list_changed emit, upgraded→cached full | `src/app/mcp/main.spl` | sonnet |
-| B | Full-list cache: module-level cache var + `_mcp_static_tools_result_cached()`; extend perf spec with cache oracle (same string object/equal + exact 163 count both calls) | `src/app/mcp/main_static_tools.spl`, `test/01_unit/app/mcp/mcp_static_tools_perf_spec.spl` | sonnet |
-| C | Specs: update tool_set spec for new default `auto` + invalid→auto; new upgrade-flow spec (auto: first=20 core, upgraded flag flips, second=163; all: first=163; core: never upgrades) | `test/01_unit/app/mcp/mcp_tool_set_spec.spl`, `test/01_unit/app/mcp/mcp_dynload_upgrade_spec.spl` (new) | sonnet |
+| B | Full-list cache: module-level cache var + `_mcp_static_tools_result_cached()`; extend perf spec with cache oracle (same string object/equal + exact 151 count both calls) | `src/app/mcp/main_static_tools.spl`, `test/01_unit/app/mcp/mcp_static_tools_perf_spec.spl` | sonnet |
+| C | Specs: update tool_set spec for new default `auto` + invalid→auto; new upgrade-flow spec (auto: first=20 core, upgraded flag flips, second=151; all: first=151; core: never upgrades) | `test/01_unit/app/mcp/mcp_tool_set_spec.spl`, `test/01_unit/app/mcp/mcp_dynload_upgrade_spec.spl` (new) | sonnet |
 | D | Docs: guide section "core-default + dynload" in startup guide; append plan/spipe state | `doc/07_guide/app/mcp/startup_performance.md` | haiku |
 | E | Rebuild mcp-package native binary, re-measure all three sets, wrapper probe check | build + measure | orchestrator |
 | R | Review all diffs vs this contract; false-green audit on specs | — | opus |

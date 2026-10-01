@@ -1,0 +1,160 @@
+"""
+ecc_codeword_check — D4 per-codeword ECC: capability, independence, non-vacuity.
+
+Run from the REPO ROOT (fw/nvme_transport_config.spl uses a cwd-relative SDN path):
+  bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/ecc_codeword_check.spl
+"""
+
+use nvme_types.*
+use nvme_payload.*
+use fil_ecc.*
+
+# A deterministic, non-trivial page: every word distinct, high bits exercised.
+fn cw_page() -> PageData:
+    var p = page_zero()
+    var i: i64 = 0
+    while i < PAGE_WORDS:
+        p.words[i] = (i * 0x9E3779B97F4A7C15) ^ (i << 17) ^ 0x5A5A5A5A5A5A5A5A
+        i = i + 1
+    p
+
+# Deep-copy-then-flip. `var q: PageData = p` is NOT a copy on the current Rust
+# seed (the nested `words` array aliases), so a naive flip would corrupt `base`
+# and quietly make every later assertion compare a corrupted page against
+# itself. Rebuilding the array is the only safe form here.
+fn flip(p: PageData, widx: i64, bidx: i64) -> PageData:
+    var q: PageData = ecc_page_clone(p)
+    q.words[widx] = q.words[widx] ^ (1 << bidx)
+    q
+
+fn main() -> ():
+    var fail: i64 = 0
+    val lba: i64 = 4242
+    val seq: i64 = 9
+    val base: PageData = cw_page()
+    val par: [i64] = ecc_page_compute(base, lba, seq)
+
+    fail = fail + expect_eq(par.len(), CODEWORDS_PER_PAGE, "one parity word per codeword")
+
+    # --- clean round trip ---
+    val clean: EccPageDecode = ecc_page_decode(base, lba, seq, par, 0)
+    fail = fail + expect_eq(clean.code, NAND_OK, "clean page decodes NAND_OK")
+    fail = fail + expect_eq(clean.corrected, 0, "clean page corrects nothing")
+    fail = fail + expect_eq(bool_to_int(page_eq(clean.page, base)), 1, "clean page unchanged")
+
+    # --- NON-VACUITY WITNESS: codeword 3 (page words 384..511) ---
+    # A word-0-only ECC cannot pass any of these three.
+    var t: i64 = 0
+    while t < 3:
+        val wi: i64 = 384 + (t * 61)          # 384, 445, 506 — all inside cw3
+        val bi: i64 = (t * 21) + 3
+        val d3: EccPageDecode = ecc_page_decode(flip(base, wi, bi), lba, seq, par, 0)
+        fail = fail + expect_eq(d3.code, NAND_ECC_FIXED, "cw3 word {wi} bit {bi} -> ECC_FIXED")
+        fail = fail + expect_eq(d3.corrected, 1, "cw3 word {wi} exactly one codeword repaired")
+        fail = fail + expect_eq(bool_to_int(page_eq(d3.page, base)), 1, "cw3 word {wi} bit {bi} page restored")
+        t = t + 1
+
+    # --- correctable single bit in EVERY codeword, incl. seam + edge bits ---
+    var cw: i64 = 0
+    while cw < CODEWORDS_PER_PAGE:
+        val off: i64 = cw * CODEWORD_WORDS
+        # first word / bit 0 (the reason positions are 1-based)
+        val a: EccPageDecode = ecc_page_decode(flip(base, off, 0), lba, seq, par, 0)
+        fail = fail + expect_eq(a.code, NAND_ECC_FIXED, "cw{cw} first word bit 0 -> FIXED")
+        fail = fail + expect_eq(bool_to_int(page_eq(a.page, base)), 1, "cw{cw} first word bit 0 restored")
+        # last word / bit 63 (the (w+1)<<6 carry path)
+        val b: EccPageDecode = ecc_page_decode(flip(base, off + CODEWORD_WORDS - 1, 63), lba, seq, par, 0)
+        fail = fail + expect_eq(b.code, NAND_ECC_FIXED, "cw{cw} last word bit 63 -> FIXED")
+        fail = fail + expect_eq(bool_to_int(page_eq(b.page, base)), 1, "cw{cw} last word bit 63 restored")
+        # mid word / bit 63
+        val c: EccPageDecode = ecc_page_decode(flip(base, off + 63, 63), lba, seq, par, 0)
+        fail = fail + expect_eq(c.code, NAND_ECC_FIXED, "cw{cw} mid word bit 63 -> FIXED")
+        fail = fail + expect_eq(bool_to_int(page_eq(c.page, base)), 1, "cw{cw} mid word bit 63 restored")
+        cw = cw + 1
+
+    # --- exhaustive-ish single-bit walk inside codeword 1 ---
+    var miss: i64 = 0
+    var wi2: i64 = 128
+    while wi2 < 256:
+        var bi2: i64 = 0
+        while bi2 < 64:
+            val d: EccPageDecode = ecc_page_decode(flip(base, wi2, bi2), lba, seq, par, 0)
+            if d.code != NAND_ECC_FIXED:
+                miss = miss + 1
+            else:
+                if not page_eq(d.page, base):
+                    miss = miss + 1
+            bi2 = bi2 + 8
+        wi2 = wi2 + 13
+    fail = fail + expect_eq(miss, 0, "single-bit walk over codeword 1 all corrected")
+
+    # --- UNCORRECTABLE: 2-bit burst must be DETECTED, never mis-corrected ---
+    var bad: i64 = 0
+    var bcw: i64 = 0
+    while bcw < CODEWORDS_PER_PAGE:
+        val off2: i64 = bcw * CODEWORD_WORDS
+        # adjacent bits in one word (a classic NAND burst)
+        val p2: PageData = flip(flip(base, off2 + 7, 11), off2 + 7, 12)
+        val d2: EccPageDecode = ecc_page_decode(p2, lba, seq, par, 0)
+        fail = fail + expect_eq(d2.code, NAND_ECC_FAIL, "cw{bcw} adjacent 2-bit burst -> ECC_FAIL")
+        fail = fail + expect_eq(d2.failed_cw, bcw, "cw{bcw} 2-bit burst names its own codeword")
+        # SILENT MIS-CORRECTION GUARD: the decoder must not have "repaired" it.
+        if page_eq(d2.page, base):
+            bad = bad + 1
+        # two bits in different words of the same codeword
+        val p3: PageData = flip(flip(base, off2 + 3, 5), off2 + 90, 40)
+        val d3b: EccPageDecode = ecc_page_decode(p3, lba, seq, par, 0)
+        fail = fail + expect_eq(d3b.code, NAND_ECC_FAIL, "cw{bcw} split 2-bit error -> ECC_FAIL")
+        if page_eq(d3b.page, base):
+            bad = bad + 1
+        # a 4-bit (even-weight) burst
+        val p4: PageData = flip(flip(flip(flip(base, off2 + 20, 0), off2 + 20, 1), off2 + 20, 2), off2 + 20, 3)
+        val d4: EccPageDecode = ecc_page_decode(p4, lba, seq, par, 0)
+        fail = fail + expect_eq(d4.code, NAND_ECC_FAIL, "cw{bcw} 4-bit even burst -> ECC_FAIL")
+        bcw = bcw + 1
+    fail = fail + expect_eq(bad, 0, "no uncorrectable error was silently mis-corrected")
+
+    # --- PER-CODEWORD INDEPENDENCE ---
+    # Corrupt codeword 2 uncorrectably; codewords 0/1/3 must be untouched, and a
+    # correctable flip in codeword 0 must STILL be corrected in the same sense.
+    val mixed: PageData = flip(flip(flip(base, 256 + 4, 9), 256 + 4, 10), 5, 33)
+    val dm: EccPageDecode = ecc_page_decode(mixed, lba, seq, par, 0)
+    fail = fail + expect_eq(dm.code, NAND_ECC_FAIL, "page with one dead codeword -> ECC_FAIL")
+    fail = fail + expect_eq(dm.failed_cw, 2, "the dead codeword is identified as cw2")
+    fail = fail + expect_eq(dm.corrected, 1, "cw0 still repaired despite cw2 being dead")
+    fail = fail + expect_eq(dm.page.words[5], base.words[5], "cw0 repaired independently of cw2")
+    var indep: i64 = 0
+    var k: i64 = 0
+    while k < PAGE_WORDS:
+        if k < 256 or k >= 384:
+            if dm.page.words[k] != base.words[k]:
+                indep = indep + 1
+        k = k + 1
+    fail = fail + expect_eq(indep, 0, "cw2 corruption did not touch cw0/cw1/cw3")
+
+    # --- metadata guard: wrong OOB {lba,seq} fails closed ---
+    val dmeta: EccPageDecode = ecc_page_decode(base, lba + 1, seq, par, 0)
+    fail = fail + expect_eq(dmeta.code, NAND_ECC_FAIL, "wrong OOB lba -> ECC_FAIL")
+
+    # --- injected NAND flip counter still folds in ---
+    fail = fail + expect_eq(ecc_page_decode(base, lba, seq, par, 1).code, NAND_ECC_FIXED, "1 injected flip -> FIXED")
+    fail = fail + expect_eq(ecc_page_decode(base, lba, seq, par, 2).code, NAND_ECC_FAIL, "2 injected flips -> FAIL")
+
+    # --- erased page (all zeros, lba UNMAP) reads clean against erased parity ---
+    var zpar: [i64] = []
+    var z: i64 = 0
+    while z < CODEWORDS_PER_PAGE:
+        zpar.push(0)
+        z = z + 1
+    fail = fail + expect_eq(ecc_page_decode(page_zero(), UNMAP, 0, zpar, 0).code, NAND_OK, "erased page decodes clean")
+
+    # --- missing widened parity fails closed, never silently OK ---
+    var short_par: [i64] = []
+    short_par.push(par[0])
+    fail = fail + expect_eq(ecc_page_decode(base, lba, seq, short_par, 0).code, NAND_ECC_FAIL, "missing per-codeword parity fails closed")
+
+    if fail == 0:
+        print "ECC CODEWORD OK"
+    else:
+        print "ECC CODEWORD FAIL ({fail})"
+    return ()

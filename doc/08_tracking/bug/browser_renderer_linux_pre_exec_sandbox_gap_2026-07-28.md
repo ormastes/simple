@@ -1,7 +1,6 @@
 # Browser renderer Linux pre-exec sandbox gap
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: implemented and admission-guarded; installed production evidence
 pending, release-blocking
 
 `rt_browser_renderer_spawn_sandboxed` scrubs descriptors/environment and then
@@ -58,33 +57,26 @@ address. The focused host C containment gate passes. Installed pure-Simple
 READY/frame evidence remains compiler-blocked and no bootstrap/seed substitute
 is accepted.
 
-## 2026-08-17 verification — runtime lane
+## 2026-09-21 admission-gate repair
 
-**Verdict: STILL OPEN as an EVIDENCE gap, not a code defect.**
+The namespace self-check had remained behind the retired
+`SPL_HAS_BROWSER_RENDERER_NAMESPACES` switch. Its translation unit therefore
+had no `main`, so `check-browser-renderer-sandbox-seccomp.shs` could not link
+the mandatory namespace phase. The check now calls the actual
+`browser_renderer_preinit` path with the broker's fixed argv and empty
+environment, then proves that `rt_browser_renderer_namespaces_active()` agrees
+with the observed `/proc/self/ns/net` identity and that a failed namespace
+attempt cannot strand the worker under different effective credentials. An
+injected partial-setup failure must terminate with exit 126. A denied
+namespace request is reported as `unavailable`; a claimed active namespace
+must change identity.
+On the verification host it reported `namespaces=unavailable`, with
+`uid=1000`, `gid=1000`, and `net:[4026531833] -> net:[4026531833]`. This
+direct preinit probe proves fallback credential stability and fail-closed
+partial setup, but does not prove root-drop; the current preinit implementation
+does not claim root-drop, and installed renderer evidence must cover the
+remaining runtime contract.
 
-The doc's own remaining item is un-landed *installed-production evidence*, not a
-missing implementation — stage one is implemented and admission-guarded. No
-source defect in `src/runtime/runtime_process.c` was identified or fixed by this
-lane, and none is claimed.
-
-**What was NOT proven.** The named reproducer
-`test/01_unit/runtime/run_process_piped_write_test.shs` was not executed this
-session (host reserved for a stage-3 bootstrap), so there is no `Results:` line
-either way. Closing this row requires the installed-production transcript the
-doc asks for; a source read cannot supply it.
-
-## 2026-08-17 verification — runtime slice (classified by CONTENT)
-
-**Verdict: STILL OPEN, but the open item is EVIDENCE, not code.** The pre-exec
-sandbox stage is present in current source: `src/runtime/runtime_process.c`
-declares `rt_browser_renderer_spawn_sandboxed` (:889, :1408) and
-`rt_browser_renderer_sandbox_enter` (:896), includes `<linux/seccomp.h>` (:966),
-and `proc_spawn(..., bool sandboxed_renderer)` (:1239) admission-guards the slot
-(`proc_alloc`, :1003-1016), forces an absolute `cmd` (:1244), and redirects
-stdout/stderr to `/dev/null` in the child (:1328-1330). Whole-tree syntax gate is
-green: `PASS — 104 file(s) compiled, 0 errors` (`check-c-runtime-compiles-push.shs`).
-
-**What was NOT proven.** The doc's actual gap — installed-production evidence from
-a deployed renderer — was not collected. Nothing in `src/runtime/*.c` is reachable
-from `bin/simple` (Rust seed, Rust runtime), so no interpreted probe here can be
-anything but vacuous. Needs a native build + an installed-production run transcript.
+This restores source-level admission evidence for the pre-exec stage. The
+installed pure-Simple ready/frame artifact remains the outstanding release
+evidence described above.

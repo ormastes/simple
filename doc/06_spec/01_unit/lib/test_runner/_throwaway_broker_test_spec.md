@@ -1,4 +1,4 @@
-# Throwaway Broker Test Specification
+# _throwaway_broker_test_spec
 
 > <details>
 
@@ -33,7 +33,24 @@ _throwaway_broker_test_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Throwaway Broker Test Specification
+# _throwaway_broker_test_spec
+
+Purpose: Import-check probe that also exercises the imported module behaviorally
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/test_runner/_throwaway_broker_test_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Import-check probe that also exercises the imported module behaviorally
+so a broken export fails here, not silently at load time.
+Audience: test-runner engineers who own the imported module.
 
 ## Scenarios
 

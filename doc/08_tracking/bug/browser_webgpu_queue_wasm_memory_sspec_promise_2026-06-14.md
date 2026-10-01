@@ -1,8 +1,7 @@
 # Browser WebGPU Queue WASM Memory SSpec Promise Harness Gap
 
 Date: 2026-06-14
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: open (re-triaged 2026-09-13 — see the note at the end of this file)
 Priority: P2
 
 ## Summary
@@ -39,27 +38,8 @@ Stabilize SSpec nested Promise handling or add a harness helper for settled
 BrowserSession Promise drains, then add the queue-upload SSpec without weakening
 the assertion or leaving the broad browser WebGPU spec red.
 
-## Re-verification 2026-08-17 (UI/JS slice) — STILL OPEN, but MISCLASSIFIED
+## Triage 2026-09-13 — LEFT OPEN (cannot be exercised on this host)
 
-Classified by CONTENT. Runtime support is confirmed present in
-`src/lib/nogc_sync_mut/js/engine/interpreter_native.spl` (the WebGPU/queue and
-Uint8Array/`Symbol.iterator` machinery this scenario needs is live at
-interpreter_native.spl:3901, 3942, 3972, 4388 and the Node-stream/async-iterator
-definitions around 1791/2532).
-
-**This is not a silent-wrong-result defect and does not belong in that triage
-class.** This doc's own evidence says the runtime produced the CORRECT values
-(`39:1:4:65536:39:12,13,14`) under a direct BrowserSession probe. The only thing
-that fails is expressing that nested-Promise drain as an SSpec scenario. The
-defect is in the *test harness's* Promise-settling support, not in any product
-code path — no user-visible computation returns a wrong answer.
-
-Nothing to fix in this slice's files; the fix is a `std.spec` harness helper for
-settled BrowserSession Promise drains, per this doc's own Follow-Up.
-
-Not proven: the SSpec-side failure was not re-reproduced (a system-level browser
-spec is unaffordable while the priority bootstrap holds the box; 195 concurrent
-`simple test` processes were measured during this session).
-
-Status: OPEN (harness gap, P3). Recommend re-tagging out of the
-silently-wrong-results class.
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the broad spec this entry leans on as its green baseline, `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`, no longer runs here at all — `executed=0`, outcome=ERROR, `cannot resolve import 'plugins.backend_wasm.wasm_codegen_adapter'` (E1034). With the baseline down there is nothing to compare a new SSpec scenario against.
+- **inferred**: the gap as filed is an SSpec harness limitation around nested Promise chains, needing a settled-Promise drain helper. That is unchanged work — no fix has landed that would close it, and the runtime support it cites (`src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`) still exists.
+- Verdict: OPEN — genuinely unresolved, and additionally blocked here by the baseline spec's import failure.

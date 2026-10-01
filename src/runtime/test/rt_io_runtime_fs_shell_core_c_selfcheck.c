@@ -17,7 +17,21 @@
  *      src/runtime/test/rt_io_runtime_fs_shell_core_c_selfcheck.c rn.o lc.o \
  *      -lpthread -lm -ldl -o fs_shell && ./fs_shell
  */
+/* Darwin: defining _XOPEN_SOURCE lowers __DARWIN_C_LEVEL to the pure POSIX
+ * namespace, which HIDES mkdtemp (used below) from <unistd.h>. glibc needs
+ * the define for the same declarations, so scope it to non-Darwin hosts. */
+#ifndef __APPLE__
 #define _XOPEN_SOURCE 700
+#endif
+#if defined(__APPLE__)
+/* Darwin gates <unistd.h> declarations on __DARWIN_C_LEVEL. Defining
+ * _XOPEN_SOURCE alone lowers that level to __DARWIN_C_ANSI and HIDES mkdtemp()
+ * (a POSIX.1-2008 / BSD interface), so the call below became an implicit
+ * declaration -- a hard error under ISO C99 and later. _DARWIN_C_SOURCE
+ * restores the full Darwin visibility level. Inert on glibc/musl, which expose
+ * mkdtemp() under _XOPEN_SOURCE 700 already, so the Linux build is unchanged. */
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "runtime.h"
 
 #include <stdio.h>

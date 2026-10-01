@@ -1,0 +1,113 @@
+# Purpose: `@must(simd)` / `@prefer(avx512)` were parsed, carried through HIR,
+# and then checked by nothing — a function tagged `@must(simd)` that the
+# vectorizer silently failed to vectorize compiled clean. `check_simd_requirement`
+# is the decision half that fixes it, and it was itself untested: the tag could
+# have been wired to a function that always answers Satisfied and nothing would
+# have noticed.
+#
+# The distinctions these examples pin are the ones that make the tag worth
+# having. `@must(avx512)` on an AVX-512 host that emitted 256-bit lanes is NOT
+# satisfied — reporting it as satisfied is exactly the silent failure the tag
+# exists to prevent. And "a pattern was recognised but this wave emits no
+# rewrite for it" is not the same failure as "nothing matched": they have
+# different fixes, and the wrong reason sends the reader hunting a
+# pattern-matcher bug that does not exist.
+# @req REQ-CMP-COMPILER_ANALYSIS-001
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use compiler.mir_opt.mir_opt.auto_vectorize_receipt.{
+    SimdReqVerdict, SimdReqOutcome, SimdReqEvidence,
+    simd_req_evidence_none, check_simd_requirement, simd_req_outcome_is_fatal
+}
+
+fn ev(vectorized: bool, lanes: i64, avx512: bool, recognised: bool) -> SimdReqEvidence:
+    SimdReqEvidence(
+        vectorized: vectorized, lane_width_bits: lanes,
+        avx512_admitted: avx512, recognised_only: recognised)
+
+fn verdict_of(level: text, backend: text, e: SimdReqEvidence) -> SimdReqVerdict:
+    check_simd_requirement(level, backend, e).verdict
+
+describe "an untagged function is never adjudicated":
+    it "reports NotRequested for an empty or none level":
+        step("the vast majority of functions carry no tag; they must not be")
+        step("reported as failing a requirement they never made")
+        expect(verdict_of("", "simd", ev(false, 0, false, false))).to_equal(SimdReqVerdict.NotRequested)
+        expect(verdict_of("none", "simd", ev(false, 0, false, false))).to_equal(SimdReqVerdict.NotRequested)
+
+    it "reports NotRequested for a backend this pass has no authority over":
+        step("a GPU request is not this pass's to adjudicate, and answering")
+        step("Error for it would be a false failure")
+        for b in ["cuda", "metal", "opencl", "gpu"]:
+            expect(verdict_of("must", b, ev(false, 0, false, false))).to_equal(SimdReqVerdict.NotRequested)
+
+    it "reports NotRequested rather than Error for an unknown backend":
+        expect(verdict_of("must", "", ev(false, 0, false, false))).to_equal(SimdReqVerdict.NotRequested)
+        expect(verdict_of("must", "unknown", ev(false, 0, false, false))).to_equal(SimdReqVerdict.NotRequested)
+
+describe "@must fails the build's intent when the loop did not vectorize":
+    it "is an Error, not a warning":
+        step("this is the whole point of the tag: a must that is not met is")
+        step("a failure, not a note")
+        expect(verdict_of("must", "simd", simd_req_evidence_none())).to_equal(SimdReqVerdict.Error)
+        expect(verdict_of("error_not", "simd", simd_req_evidence_none())).to_equal(SimdReqVerdict.Error)
+
+    it "is fatal by the predicate the pipeline is meant to consult":
+        val outcome = check_simd_requirement("must", "simd", simd_req_evidence_none())
+        expect(simd_req_outcome_is_fatal(outcome)).to_equal(true)
+        expect(simd_req_outcome_is_fatal(
+            check_simd_requirement("prefer", "simd", simd_req_evidence_none()))).to_equal(false)
+
+    it "names loop-not-vectorized as the reason":
+        step("the reason text is what the developer acts on")
+        val outcome = check_simd_requirement("must", "simd", simd_req_evidence_none())
+        expect(outcome.reason.contains("loop-not-vectorized")).to_equal(true)
+        expect(outcome.reason.contains("@must(simd)")).to_equal(true)
+
+describe "@prefer degrades to a warning, never an error":
+    it "warns where must would error":
+        step("prefer is advice; it must not fail a build")
+        expect(verdict_of("prefer", "simd", simd_req_evidence_none())).to_equal(SimdReqVerdict.Warn)
+        expect(verdict_of("warn_not", "avx512", simd_req_evidence_none())).to_equal(SimdReqVerdict.Warn)
+
+describe "a satisfied requirement reports the width it actually achieved":
+    it "accepts any real vectorization for plain simd":
+        expect(verdict_of("must", "simd", ev(true, 128, false, false))).to_equal(SimdReqVerdict.Satisfied)
+
+    it "accepts avx512 only at 512-bit lanes on an admitting target":
+        step("an AVX-512-capable host that emitted 256-bit lanes has NOT")
+        step("satisfied @must(avx512) — calling that satisfied is precisely")
+        step("the silent failure this tag exists to prevent")
+        expect(verdict_of("must", "avx512", ev(true, 512, true, false))).to_equal(SimdReqVerdict.Satisfied)
+        expect(verdict_of("must", "avx512", ev(true, 256, true, false))).to_equal(SimdReqVerdict.Error)
+        expect(verdict_of("must", "avx512", ev(true, 512, false, false))).to_equal(SimdReqVerdict.Error)
+
+    it "distinguishes the two ways avx512 can fail":
+        step("a width shortfall and a target that never admitted AVX-512 need")
+        step("different fixes, so they must not share a reason string")
+        val narrow = check_simd_requirement("must", "avx512", ev(true, 256, true, false))
+        expect(narrow.reason.contains("below-avx512-width")).to_equal(true)
+        val unadmitted = check_simd_requirement("must", "avx512", ev(true, 512, false, false))
+        expect(unadmitted.reason.contains("avx512-not-admitted-by-target-receipt")).to_equal(true)
+
+    it "holds the width ladder for avx2 and sse":
+        expect(verdict_of("must", "avx2", ev(true, 256, false, false))).to_equal(SimdReqVerdict.Satisfied)
+        expect(verdict_of("must", "avx2", ev(true, 128, false, false))).to_equal(SimdReqVerdict.Error)
+        expect(verdict_of("must", "sse", ev(true, 128, false, false))).to_equal(SimdReqVerdict.Satisfied)
+        expect(verdict_of("must", "sse", ev(true, 64, false, false))).to_equal(SimdReqVerdict.Error)
+
+    it "reports the achieved width in the satisfied reason":
+        val outcome = check_simd_requirement("must", "avx512", ev(true, 512, true, false))
+        expect(outcome.reason.contains("512")).to_equal(true)
+
+describe "a recognised-but-unimplemented pattern reports its own reason":
+    it "does not say loop-not-vectorized":
+        step("a reduction the matcher saw but this wave cannot emit is a")
+        step("different failure from nothing matching at all; the wrong reason")
+        step("sends the reader hunting a pattern-matcher bug that is not there")
+        val outcome = check_simd_requirement("must", "simd", ev(false, 0, false, true))
+        expect(outcome.verdict).to_equal(SimdReqVerdict.Error)
+        expect(outcome.reason.contains("pattern-recognised-but-this-wave-emits-no-rewrite-for-it")).to_equal(true)
+        expect(outcome.reason.contains("loop-not-vectorized")).to_equal(false)

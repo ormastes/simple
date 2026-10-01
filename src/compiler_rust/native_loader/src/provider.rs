@@ -62,7 +62,10 @@ impl RuntimeLoadMode {
     pub fn default_for_profile() -> Self {
         if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
             let trimmed = path.trim();
-            if !trimmed.is_empty() {
+            // Native builds also use this variable for a directory of link
+            // archives. A directory is not a dlopen target; leave provider
+            // selection to SIMPLE_RUNTIME_LOAD (static by default).
+            if !trimmed.is_empty() && !Path::new(trimmed).is_dir() {
                 return Self::DynamicPath(trimmed.to_string());
             }
         }
@@ -244,6 +247,24 @@ mod tests {
             other => panic!("expected DynamicPath, got {:?}", other),
         }
         std::env::remove_var("SIMPLE_RUNTIME_PATH");
+    }
+
+    #[test]
+    fn test_default_for_profile_treats_runtime_archive_directory_as_static() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("SIMPLE_RUNTIME_PATH", std::env::temp_dir());
+        std::env::remove_var("SIMPLE_RUNTIME_LOAD");
+        assert!(matches!(
+            RuntimeLoadMode::default_for_profile(),
+            RuntimeLoadMode::Static
+        ));
+        std::env::set_var("SIMPLE_RUNTIME_LOAD", "dynamic");
+        assert!(matches!(
+            RuntimeLoadMode::default_for_profile(),
+            RuntimeLoadMode::Dynamic
+        ));
+        std::env::remove_var("SIMPLE_RUNTIME_PATH");
+        std::env::remove_var("SIMPLE_RUNTIME_LOAD");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 <!-- codex-design -->
 # Simple Formal Verification 2.0 Detail Design
 
-**Status:** FV2 implementation restored and reconciled; executable admission blocked
-**Date:** 2026-08-14
+**Status:** Under implementation
+**Date:** 2026-08-12
 **Architecture:** `doc/04_architecture/simple_formal_verification_2_0.md`
 
 ## Frozen implementation and manual vocabulary
@@ -20,7 +20,7 @@ not rename or supersede it.
 | Frozen display name | Simple symbol/owner | Working tree |
 |---|---|---|
 | `VerificationIR v1` | `VerificationIrV1` in `src/compiler/50.mir/verification_ir.spl` | Implemented |
-| `SemanticCoverage v1` | `SemanticCoverageV1` owned by the VIR builder | Implemented |
+| `SemanticCoverage v1` | `SemanticCoverageV1` plus resolved VIR/Wave 6 V2 and the exact-core V2 collector | Exhaustive instruction/terminator inventory implemented; Exact promotion is blocked until a typed transition manifest exists |
 | `ProofObligation v1` | `ProofObligationV1` in common assurance | Implemented |
 | `ProofReceipt v1` | `ProofReceiptV1` in common assurance | Implemented |
 | `TrustManifest v1` | `TrustManifestV1` in common assurance | Implemented |
@@ -60,11 +60,10 @@ mechanics and secondary matrices; raw test code is not the primary manual.
 
 ## Current-tree artifact and status inventory
 
-This table is authoritative for implementation claims in this document. Every
-statement after it is normative proposed behavior, even when written in the
-present tense for specification clarity, unless a row here explicitly says
-`Present`. No named collector, V1 record, replay/release adapter, cache owner,
-or product-proof flow below is a current-tree implementation claim.
+This table is authoritative for implementation claims in this document.
+Frozen records, collectors, replay/release adapters, and product runner
+scaffolds are present in source; their executable or external evidence remains
+blocked unless a row explicitly says otherwise.
 
 | Artifact | Current status | Admissible evidence |
 |---|---|---|
@@ -76,10 +75,12 @@ or product-proof flow below is a current-tree implementation claim.
 | Native x86_64/AArch64/RV32/RV64 probe rejection | Present in commit `27fa51e3ae0`; not executable evidence | Blocked on Stage 4 CLI and backend closure gate |
 | `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl` | Present | Not rerun: authoritative runtime unavailable |
 | Frozen V1 interface implementation files | Present in working tree | Static shape evidence; runtime blocked |
-| Gate 0–7 collectors and finalizer | Present in working tree | Runtime verification blocked |
+| Gate 0–7 collectors and finalizer | Structural validators present; non-Phase-4 public finalization is authority-blocked | Runtime/producer authority blocked |
 | Fresh/independent FV2 replay scripts and pinned adapter | Present in working tree | External tool execution blocked |
-| FV2 release CLI, signature adapter, signer policy | Present in working tree | Signed-bundle execution blocked |
+| FV2 release CLI and signature adapter | Present; tracked V1 signer policy is empty deny-all | Terminal signer authority blocked |
 | RV32 ADD end-to-end/equivalence/Sail machinery | Present in working tree | External tool/product evidence blocked |
+| RV64 seven-row runner | Present and fail-closed to frozen repository authorities | Canonical proof wrappers/material are absent; Gate 6 cannot pass |
+| Proof DAG scheduler | Present; local and recursive dependency identities plus external schedule validity are bound | Scalar task facade cannot emit measured evidence; direct typed envelopes required |
 
 ## Requirement-to-design traceability
 
@@ -90,26 +91,26 @@ requirement or be re-admitted without the Stage 4 runtime.
 
 | ID | Design section | Proposed module/owner | Executable test/evidence target | Current status |
 |---|---|---|---|---|
-| REQ-FV2-001 | Core records | `compiler.common.assurance.formal_status` | status-lattice and false-promotion negatives | Planned; blocked |
-| REQ-FV2-002 | Policy versioning | assurance policy V2 resolver | profile resolution plus V1/V2 confusion negatives | Planned; blocked |
+| REQ-FV2-001 | Core records | `compiler.common.assurance.formal_status` | status-lattice and false-promotion negatives | Source implemented; execution blocked |
+| REQ-FV2-002 | Policy versioning | assurance policy V2 resolver | profile resolution plus V1/V2 confusion negatives | Source implemented; execution blocked |
 | REQ-FV2-003 | Canonical lowering algorithm | frontend weave owner + VIR builder | same canonical-program hash through proof/build | Planned; blocked |
 | REQ-FV2-004 | Contract VC shape | MIR contract bridge | normal/error execution-linked VC scenarios | Planned; blocked |
-| REQ-FV2-005 | Core records | `verification_ir.spl` | canonical VIR round-trip and mutation negatives | Planned; blocked |
+| REQ-FV2-005 | Core records | `verification_ir.spl` | canonical VIR round-trip and mutation negatives | Function/module closure hardened; canonical producer execution blocked |
 | REQ-FV2-006 | Type/effect design | MIR probe bridge + VIR semantics | `mir_coverage_opcode_admission_spec.spl` and width edges | Partial; blocked |
 | REQ-FV2-007 | Lean and solver design | typed Lean IR owner | typed emission plus guessed/fallback rejection | Planned; blocked |
-| REQ-FV2-008 | Contract VC shape | obligation DAG builder | thirteen-kind ordering/dependency/closure tests | Planned; blocked |
-| REQ-FV2-009 | Lean and solver design | replay and axiom-audit adapters | fresh + independent exact-root replay negatives | Planned; blocked |
-| REQ-FV2-010 | Core records | receipt/trust/cache owners | canonical hash, drift, duplicate, stale mutations | Planned; blocked |
-| REQ-FV2-011 | Canonical lowering algorithm | weave-manifest owner | join-point/order/post-VIR transform negatives | Planned; blocked |
+| REQ-FV2-008 | Contract VC shape | obligation DAG builder | thirteen-kind ordering/dependency/closure tests | Source implemented; measured executor envelope blocked |
+| REQ-FV2-009 | Lean and solver design | replay and axiom-audit adapters | fresh + independent exact-root replay negatives | Source implemented; external execution blocked |
+| REQ-FV2-010 | Core records | receipt/trust/cache owners | canonical hash, drift, duplicate, stale mutations | Source implemented; end-to-end execution blocked |
+| REQ-FV2-011 | Canonical lowering algorithm | weave-manifest owner | join-point/order/post-VIR transform negatives | Interface present; canonical producer blocked |
 | REQ-FV2-012 | Type and effect design | MIR region/effect closure | transitive direct-call and unknown-call negatives | Planned; blocked |
-| REQ-FV2-013 | Canonical lowering algorithm | compiler certificate validators | gap-free pass/target certificate chain | Planned; blocked |
+| REQ-FV2-013 | Canonical lowering algorithm | compiler certificate validators | gap-free pass/target certificate chain | Source validators present; complete chain blocked |
 | REQ-FV2-014 | Product flows / SimpleOS | SimpleOS gate adapter | implementation-linked seven-subsystem receipts | Planned; blocked |
-| REQ-FV2-015 | Product flows / RISC-V | HWIR/RVFI/Sail/SBY/equivalence adapters | RV32 ADD then RV64 product chain | Planned; blocked |
+| REQ-FV2-015 | Product flows / RISC-V | HWIR/RVFI/Sail/SBY/equivalence adapters | RV32 ADD then RV64 product chain | Source runners present; external artifacts/tools blocked |
 | REQ-FV2-016 | Security/failure rules | mutation and non-vacuity owners | property/implementation/cache/evidence mutants | Planned; blocked |
 | REQ-FV2-017 | Core records | dynamic composition/trust adapter | signed receipt compatibility and TCB negatives | Planned; blocked |
 | REQ-FV2-018 | Canonical lowering algorithm | existing verification syntax owners | grammar census and no-new-syntax guard | Planned; blocked |
 | REQ-FV2-019 | Current executable blockers | every producer/consumer boundary | probe admission/backend rejection plus timeout/tool negatives | Partial; blocked |
-| REQ-FV2-020 | Gate design | planned Gate 0–7 collectors/finalizer | ordered predecessor and premature-pass negatives | Planned; blocked |
+| REQ-FV2-020 | Gate design | Gate 0–7 collectors/finalizer | ordered predecessor and premature-pass negatives | Source implemented; executed closure blocked |
 | NFR-FV2-001 | Caching and scheduling | canonical serializers/tool pinning | clean rebuild identity comparison | Planned; blocked |
 | NFR-FV2-002 | Diagnostics | all reducers/adapters | unsupported/stale/timeout/unknown fail-closed matrix | Partial; blocked |
 | NFR-FV2-003 | Core records | trust-manifest owner | complete attributable trust closure | Planned; blocked |
@@ -123,16 +124,23 @@ requirement or be re-admitted without the Stage 4 runtime.
 
 ## Core records
 
-Planned executed-evidence collectors follow product ownership boundaries:
+Implemented executed-evidence collectors follow product ownership boundaries:
 `formal_gate_collectors` owns core Gates 0–3,
 `formal_os_hardware_gate_collectors` owns SimpleOS/RV32 Gates 4–5, and
 `formal_product_gate_collectors` owns RV64/release Gates 6–7. Product adapters
-would consume these interfaces; none may redefine the frozen status, receipt,
-or gate schemas. These collector modules are absent on current main.
+consume these interfaces; none may redefine the frozen status, receipt, or
+gate schemas. Their source presence is not executed release evidence.
 
-The proposed implementation would use immutable versioned records with canonical serialization. IDs are content-derived except `SymbolId`, which remains stable across formatting and unrelated edits. Receipts refer to hashes, never mutable filesystem paths as identity.
+The implementation uses immutable versioned records with canonical serialization. IDs are content-derived except `SymbolId`, which remains stable across formatting and unrelated edits. Receipts refer to hashes, never mutable filesystem paths as identity.
 
-Planned replay orchestration is split by checker authority. The proposed
+Planned replay orchestration is split by checker authority. The source-level
+wrappers below are not yet checker authority: the fresh lane discovers tools
+from the caller environment, while the independent lane's mutable build
+manifest pins only its adapter and does not pin the adapter's `lean4export`
+and nanoda dependencies or their versions. Consequently the public V1 replay
+runners fail closed with `FV2-E-REPLAY-AUTHORITY` until a repository-owned or
+provisioned trust anchor resolves all executable paths, SHA-256 identities,
+and versions before execution. The proposed
 seven-root fresh lane is
 `scripts/check/run-fv2-simpleos-fresh-replay.shs`; it runs exact Lake modules
 through `leanchecker --fresh` and may synthesize a hash-bound attestation only
@@ -149,12 +157,13 @@ verification keeps nanoda Nat/String extensions disabled;
 an exported `#ELN`/`#ELS` dependency is therefore a typed capability rejection,
 not permission to widen the TCB silently.
 The adapter itself enforces a lowercase 64-character SHA-256 artifact identity
-and repeats the exact declaration root in its accepted attestation; caller-side
-validation is defense in depth, not the trusted identity boundary.
+and repeats the exact declaration root in its accepted attestation. Those are
+necessary structural checks, but the adapter and its adjacent mutable manifest
+cannot authorize themselves; caller-side validation is not a substitute for
+the missing trusted identity boundary.
 Retained exporter inputs are keyed by module, declaration root, and artifact so
 two roots from one `.olean` cannot overwrite each other's replay material.
-When implemented, fresh replay resolves the exact checker and Lake launcher
-once, invokes those
+Fresh replay resolves the exact checker and Lake launcher once, invokes those
 resolved paths, and hashes both; version evidence cannot accidentally describe
 a different PATH-resolved binary from the one that performed replay.
 
@@ -197,21 +206,20 @@ implies Ensures(pre_state, args, outcome)
 
 `Ensures` dispatches on `Ok(ret, post_state)`, `Err(err, post_state)`, trap, cancellation, or divergence policy. Frame VCs prove non-modified regions unchanged. Preconditions additionally receive satisfiability witnesses; invariants receive reachable witnesses.
 
-The proposed pure-function Lean slice would emit two roots when `in:` is present:
+The current pure-function Lean slice emits two roots when `in:` is present:
 `<function>_preconditions_satisfiable` and `<function>_spec`. With
 `proof uses: X`, generated proofs reference `X_preconditions_satisfiable` and
 `X`, respectively; both enter transitive trust audit. Predicate roots retain
-exact source spans and internally derived semantic hashes. The proposed
-stateful design assigns typed `ExecutionContractObligation v2` ownership (the
-frozen v1 shape remains the compatibility boundary): invariant initialization
-requires a reachable-state
+exact source spans and internally derived semantic hashes. Stateful clauses now
+have typed `ExecutionContractObligation v2` ownership (the frozen v1 shape is
+preserved): invariant initialization requires a reachable-state
 semantic identity, preservation requires a transition identity, frame VCs
 require transition plus region-model identities, and decreases VCs require
 recursive-call plus well-founded-order identities. Preconditions likewise need
 an exact input-domain identity before their satisfiability VC exists. Each VC
 records the authorities and a derived relation-semantic hash; missing authority
 fails closed. V1 refuses clauses that need authorities it cannot represent.
-The proposed canonical MIR bridge would reject a caller-selected execution hash and derive
+The canonical MIR bridge rejects a caller-selected execution hash and derives
 the precondition input-domain identity from the exact SymbolId, parameter-type
 serialization, arity, and variadic policy.
 
@@ -237,12 +245,12 @@ recursion, the bridge derives the exact serialized self-call set and canonical
 unsigned-order identity; forged call/order identities fail. Product invariant
 and frame generation for effectful code remains rejected until canonical heap,
 region, and external-transition owners exist. For the exactly classified pure
-subset, the proposed canonical MIR bridge would derive reachable input states, a `Unit` identity
+subset, canonical MIR now derives reachable input states, a `Unit` identity
 transition, and an empty frame. Only local computation, pure control flow,
 self-recursion, and the exact Result constructor/discriminator/payload
 primitives enter this class; load/store/global mutation, allocation, indirect
 or unknown calls, traps, unwind, synchronization, and external boundaries fail.
-The proposed canonical Lean backend would render typed direct-call operands as validated Lean
+The canonical Lean backend renders typed direct-call operands as validated Lean
 identifiers rather than string literals. A retained unsigned `decreases`
 expression emits `termination_by measure.toNat`; it requires `proof uses: X`
 and discharges decreasing goals only through the audited derived root
@@ -255,7 +263,7 @@ Issuance additionally requires one materialized verified cache key whose VIR
 hash equals the obligation's MIR execution identity and whose contract hash
 equals the exact obligation hash. A same-named proof from another MIR body or
 obligation therefore cannot be reused. Lean state-transition theorem
-emission is planned to cover pure invariant initialization/preservation and an
+emission now covers pure invariant initialization/preservation and an
 axiom-free empty-frame theorem over the actual function call for every
 classified pure exported definition, including functions without source
 contracts; effectful
@@ -277,9 +285,8 @@ payload extraction, arm copies, merge, and impossible fallthrough edge.
 - extern/SFFI/MMIO lower to explicit contracted transitions, never generated axioms.
 - Typed effects include pure, region read/write, allocate/free, IO, time, random, spawn/suspend, atomic order, FFI capability, MMIO region, and unsafe capability.
 
-The planned `MirRegionEffectManifest v1` is the canonical direct-effect owner
-for the first admitted stateful subset. When implemented,
-`LoadGlobal`/`StoreGlobal` produce exact
+`MirRegionEffectManifest v1` is now the canonical direct-effect owner for the
+first admitted stateful subset. `LoadGlobal`/`StoreGlobal` produce exact
 `global:<SymbolId>` read/write effects with serialized MIR value types and
 instruction hashes plus exact source spans; missing provenance or inconsistent
 types fail. Pointer/heap operations without a
@@ -312,8 +319,8 @@ retained well-founded decreases evidence; indirect calls, module calls, and
 cyclic CFGs without a retained measure fail closed.
 Proof discharge remains required before REQ-FV2-008 can be considered complete.
 
-The planned `verification_obligation_module.spl` adds the first canonical
-inter-function composition. Its migration-only V1 path remains model evidence only. The
+`verification_obligation_module.spl` adds the first canonical inter-function
+composition. Its migration-only V1 path remains model evidence only. The
 verified candidate is `ResolvedCanonicalModuleClosureV2`: it consumes a
 `ResolvedDirectCallManifestV1` made from resolver-captured direct-call
 `SymbolId`s and materialized only after the final MIR module exists, when exact
@@ -349,14 +356,15 @@ or overlapping rows; an accepted external row supplies the existing typed
 required before a real lowered module with generated/runtime calls can enter
 the resolved V2 closure.
 
-`VerificationObligationEvidenceClosureV1` validates discharge evidence without
-promoting it beyond `model_proven`. It requires one exact discharge per
+`VerificationObligationEvidenceClosureV1` validates discharge structure but
+does not promote hash-only V1 values to `model_proven`. It requires one exact discharge per
 obligation, exact closure/proposition/root bindings, theorem artifacts, trust
 and independent-replay identities, and every direct DAG dependency in the
 consumer theorem's dependency set. Missing, duplicate, drifted, unreplayed, or
 dependency-incomplete receipts fail the whole evidence closure. This protocol
-does not fabricate proofs; executed Lean generation and replay must supply the
-thirteen discharges. One theorem may discharge multiple propositions only when
+does not fabricate proofs; it returns `FV2-E-VC-EVIDENCE-EXECUTION-AUTHORITY`
+after otherwise-valid structural checks until a runner-owned path supplies the
+thirteen executed discharges. One theorem may discharge multiple propositions only when
 its receipt binds every corresponding obligation/proposition identity.
 
 `ProofUsesClosureManifestV1` reuses the existing `proof uses` channel without
@@ -367,7 +375,7 @@ base theorem when its checked statement covers both branches. Evidence closure
 requires the generated theorem receipt to list the exact expanded external
 dependency. Invalid names, missing dependencies, or closure drift fail closed.
 
-The planned `evaluate_verified_release_v1` is a deterministic final fail-closed reducer.
+`evaluate_verified_release_v1` is a deterministic final fail-closed reducer.
 It requires the `verified` profile, `artifact_verified` final status, exact
 artifact/evidence identity, nonempty unique proof and compiler-certificate
 sets, trust, independent replay, mutation, and non-vacuity receipts, and a
@@ -375,7 +383,7 @@ closed reachable-symbol status set. `unknown`, timeout, missing tool, tool or
 environment failure, stale evidence, unsupported lowering, warning-phase
 controls, and artifact drift each produce a stable rejection code. Trusted
 boundaries and approved external TCB outcomes require an explicit bounded-TCB
-manifest. The proposed release command has a strict SDN ingestion boundary. Its
+manifest. The release command now has a strict SDN ingestion boundary. Its
 bundle schema contains complete typed evidence, the declared payload hash,
 signer identity, public key, and signature; a separate policy schema contains
 approved signer-to-public-key-hash bindings. Unknown or duplicate fields,
@@ -389,16 +397,15 @@ All release-security identities use SHA-256 with length-prefixed canonical
 fields. The general assurance polynomial checksum is not accepted as a
 cryptographic evidence identity. Every passed-gate receipt hash must also have
 exactly one file at `build/verification/release-receipts/<sha256>.receipt`; the
-planned CLI recomputes its SHA-256 before admission, and rejects absent, extra,
+CLI recomputes its SHA-256 before admission, and rejects absent, extra,
 duplicate, or changed receipt material.
 V2 materialized receipts additionally begin with the `FormalDeliveryReceipt-v2`
 envelope and name their exact formal gate; opaque or cross-gate content is
-rejected. The final gate `evidence_hash` would remain in the signed gate row rather
+rejected. The final gate `evidence_hash` remains in the signed gate row rather
 than inside each receipt, because that hash is derived from the receipt hashes
 and embedding it in the receipts would create a circular identity. Each
-planned collector's typed receipt schema binds its semantic evidence before
-producing the signed gate row. The planned
-`finalize_formal_gate_collection_v2` is the only
+collector's typed receipt schema binds its semantic evidence before producing
+the signed gate row. `finalize_formal_gate_collection_v2` is the only
 collector-to-release finalizer: it validates raw receipt bytes, puts their
 payload hash and collector-local semantic evidence hash in the envelope, and
 then derives the release-facing receipt and gate identities from those bytes.
@@ -408,7 +415,7 @@ receipts, and independent replay closures emit SHA-256 identities over
 length-framed canonical records. Release code does not legitimize a weak
 upstream checksum by wrapping it in another hash.
 
-Planned Gate 0 (`verification_truthfulness`) has a typed collector design. For each exported
+Gate 0 (`verification_truthfulness`) has a typed collector. For each exported
 proof root it requires a unique `ProofReceiptV1`, exactly one closed transitive
 axiom audit, and an accepted fresh-plus-independent replay closure bound to the
 same artifact. The retained axiom report is re-audited against the exact proof
@@ -420,7 +427,7 @@ materialized receipt content; rejected axioms, weak identities, replay drift,
 unproven statuses, or duplicate roots produce a failed gate with no passing
 receipt hashes.
 
-The planned V2 release loader independently parses each `FormalDeliveryReceipt-v2`
+The V2 release loader independently parses each `FormalDeliveryReceipt-v2`
 envelope rather than accepting a prefix or substring. Its four canonical header
 lines bind exactly one formal gate, one collector semantic-evidence SHA-256,
 and the SHA-256 of the retained raw payload. All envelopes for a passed gate
@@ -430,7 +437,7 @@ hashes. Payload, semantic, duplicate-field, cross-gate, and gate-evidence
 substitution fail admission even if a signed outer bundle retains hash-shaped
 strings.
 
-Planned Gate 1 (`exact_core_semantics`) consumes a self-validating canonical VIR module:
+Gate 1 (`exact_core_semantics`) consumes a self-validating canonical VIR module:
 every reachable function, type, provenance edge, effect closure, and module
 identity is recomputed with framed SHA-256. Only `SemanticClass.Exact` types
 are accepted in this gate. Five executed check receipts are mandatory in a
@@ -441,7 +448,7 @@ outcome, and diagnostic. Missing, reordered, stale, output-free, timed-out, or
 failed checks produce a failed gate; no caller-authored aggregate pass boolean
 exists.
 
-Planned Gate 2 (`vir_compiler_relation`) starts with an executed construction receipt
+Gate 2 (`vir_compiler_relation`) starts with an executed construction receipt
 that binds the exact canonical woven-program hash to the self-validating VIR
 hash, generator identity, command policy, and retained output. It then requires
 one executed validator receipt per `CompilerCertificateV1`. Certificate edges
@@ -451,7 +458,7 @@ materialized separately. A stale construction, woven drift, missing validator,
 certificate reorder/gap, timeout, missing output, or final-artifact mismatch
 fails without passing evidence.
 
-Planned Gate 3 (`aop_macro_closure`) checks the exact `WeaveManifestV1` against the
+Gate 3 (`aop_macro_closure`) checks the exact `WeaveManifestV1` against the
 same self-validating VIR: base source, macro expansion, woven identity, resolved
 join-point SymbolIds, and introduced symbols must all occur in canonical
 provenance/closure. Every resolved advice ID has exactly one ghost or bounded
@@ -461,11 +468,14 @@ Gate 0 truthfulness receipt. An executed weaver receipt binds tool/policy,
 retained output, introduced-symbol closure, and a derived lock preventing
 post-proof dynamic transformation. Pointcut drift, missing introduced symbols,
 unmatched/duplicate advice, absent proof material, or an invalid lock fails.
+Even an otherwise-consistent caller-built pair now fails with
+`FV2-E-AOP-MANIFEST-AUTHORITY`; no passing receipt is emitted until the
+compiler-owned HIR/MIR weave path retains and supplies the manifest.
 
-Planned Gate 4 (`simpleos_vertical_slice`) consumes seven frozen subsystem classes in
+Gate 4 (`simpleos_vertical_slice`) consumes seven frozen subsystem classes in
 order: capability authority, scheduler lifecycle, bounded IPC, shared memory,
 process wait, process queue, and crash-safe storage. The product adapter accepts
-only implementation-linked receipts at `source_refined`; each would be
+only the existing implementation-linked receipts at `source_refined`; each is
 bound to its exact SHA-256 source/model semantics, canonical source receipt,
 proof receipt, verified cache key, closed trust manifest, transitive axiom
 report, and same-artifact fresh/independent replay. Missing, reordered,
@@ -473,8 +483,8 @@ duplicated, model-only, stale, weak-hash, artifact-drifted, or open-trust input
 fails without receipt material. The collector emits two receipts per subsystem
 plus one aggregate receipt; it cannot promote a model proof itself.
 
-Planned Gate 5 (`generated_rv32i_end_to_end`) composes the proposed generated
-RV32 ADD product protocol. It requires executed SBY proof, reachability cover, and
+Gate 5 (`generated_rv32i_end_to_end`) composes the existing generated RV32 ADD
+product protocol. It requires executed SBY proof, reachability cover, and
 killed-mutant evidence at `model_proven`; an independently checked HWIR-to-RTL
 compiler certificate; RTL-to-netlist equivalence at `backend_refined`; and the
 pinned independent Sail ADD witness at `model_proven`. All lanes must bind the
@@ -483,8 +493,12 @@ the equivalence lane must name a synthesized netlist. Every referenced tool
 output, version, trace, receipt, and certificate is materialized by exact hash;
 specified-only jobs, scope gaps, missing outputs, identity drift, weak hashes,
 or unrelated compiler edges fail without passing evidence.
+The current public receipt reducers and collector accept caller-constructible
+text/records only for structural review and therefore return failed evidence;
+Gate 5 reports `FV2-E-RV32I-EXECUTION-AUTHORITY` until a runner-owned boundary
+directly observes and retains the SBY, equivalence, and Sail processes.
 
-Planned Gate 6 (`rv64_privilege_mmu_linux`) freezes seven ordered checks over one exact
+Gate 6 (`rv64_privilege_mmu_linux`) freezes seven ordered checks over one exact
 RV64 product identity: shared-XLEN refinement, privilege/CSR proof, MMU/page-walk
 proof, precise trap/interrupt proof, post-synthesis equivalence, Linux boot, and
 architectural compatibility validation. The first four require materialized
@@ -494,10 +508,11 @@ executed validations—not theorem proofs. Every check binds the same HWIR, RTL,
 netlist, OS image, platform profile, and assumption manifest; tool/policy and
 distinct retained output are materialized. Missing/reordered checks, product
 drift, timeout, proof substitution, or a validation that impersonates a proof
-fails closed. This protocol does not claim that the presently missing RV64
-product evidence exists.
+fails closed. The current runner additionally rejects caller-selected tools and
+requires seven frozen repository authority paths/policies. Several canonical
+authority wrappers and all product evidence are absent, so Gate 6 cannot pass.
 
-Planned Gate 7 (`verified_release`) is collected before the eight-gate manifest is
+Gate 7 (`verified_release`) is collected before the eight-gate manifest is
 sealed. It requires an `artifact_verified` reachable closure, accepted tool
 outcomes, zero unsupported/stale/warning/environment counts, and unique
 materialized proof, compiler-certificate, trust, replay, mutation, non-vacuity,
@@ -505,8 +520,13 @@ and optional bounded-TCB receipts. It emits a pre-manifest closure receipt;
 required material already owned by predecessor gates is resolved exactly once
 but not republished, while only genuinely new material becomes Gate 7 receipt
 ownership. This preserves the release loader's global no-duplicate invariant.
-The caller would then insert all eight gate rows, recompute the canonical
-manifest, and sign the complete release evidence. The planned release CLI
+The runner-owned orchestrator inserts all eight collector rows, recomputes the
+canonical manifest, and verifies the supplied Ed25519 signature. It does not
+admit the bundle: the signer and `approved_signers` values currently share the
+same caller, so the terminal path returns
+`FV2-E-WAVE6-SIGNER-AUTHORITY` until the fixed repository policy is available.
+There is no accepting value-only finalizer. Caller-built gate or
+signature-verification values remain diagnostic-only. The planned release CLI
 additionally hashes
 the actual artifact at
 `build/verification/release-artifacts/<signed-sha256>.artifact` through the
@@ -514,24 +534,32 @@ canonical file facade and requires that observed hash to equal both signed
 artifact identities. Matching hash strings without matching deployed bytes can
 no longer admit a release.
 
-The planned `validate_signed_verified_release_bundle_v1` additionally binds the exact
+`validate_signed_verified_release_bundle_v1` additionally binds the exact
 evidence payload hash, signer, approved-signer policy, signature-verifier
 identity/evidence, and passed release decision. Its typed signature receipt is
-a protocol boundary for callers. The proposed `app.verify.release_signature`
-adapter invokes the
+a protocol boundary for callers. `app.verify.release_signature` invokes the
 pure-Simple RFC 8032 Ed25519 owner over the canonical evidence-hash bytes and
 constructs the receipt from the actual verification result. `simple verify
 release BUNDLE.sdn` reconstructs the evidence and loads approved keys only from
 the fixed repository policy `config/formal/verified_release_signers.sdn`. It
+requires that policy path to be a regular file without following symlinks,
 then calls the cryptographic adapter and compiler-owned signed-bundle reducer.
 The caller cannot substitute a policy path, and the bundle schema has no
 admission boolean; an injected `verified: true` is rejected as unknown.
-The signer policy file is absent on current main. Release therefore remains
-blocked; when introduced it starts deny-all until an authorized change adds a
-reviewed public-key hash. Private keys never belong in the repository.
+The tracked signer policy is V1 with an empty signer set, so release remains
+deny-all until an authorized change adds a reviewed public-key hash. Private
+keys never belong in the repository.
 `ApprovedReleaseSignerV1` binds the signer name to the exact public-key hash;
 reusing an approved name with another key is rejected even when that other key
 produces a cryptographically valid signature.
+
+V2 release parsing now requires the additive V3 signer-policy schema. It binds
+lowercase SHA-256 over the fully framed resolved policy, flight rules, and
+sorted signer allow list; legacy `APOLV2-<decimal>` and V1 CLI downgrade paths
+cannot grant authority. Public V3 value reducers also fail closed because a
+caller-built allow list cannot prove filesystem provenance. The tracked policy
+is empty V1, and positive admission remains blocked until a trusted install-root
+resolver, atomic no-follow snapshot/read, and reviewed V3 provisioning exist.
 
 The planned `evaluate_formal_delivery_gates_v1` consumes exactly eight ordered gate
 records. A passed record requires nonempty unique receipt identities, an exact
@@ -549,7 +577,7 @@ A caller therefore inherits effects derived from the callee's actual MIR, not
 from name prefixes. Duplicate internal names, unknown direct targets, indirect
 calls, and absent callees fail closed.
 
-The proposed canonical Lean backend includes a first effectful subset for one
+The canonical Lean backend now has a first effectful executable subset for one
 straight-line block of homogeneous exact global state. It emits the source
 function as an explicit state transformer
 `(Nat → α) → args → result × (Nat → α)`, lowers ordered global loads and stores
@@ -571,38 +599,23 @@ not assert that an unproved runtime implements
 
 Typed `LeanTypeIR`, `LeanTermIR`, `LeanPatternIR`, `LeanBinderIR`, `LeanDefinitionIR`, `LeanTheoremIR`, and `LeanProofReferenceIR` are validated before printing. A deterministic VC classifier routes definitional, linear, polynomial, bit-vector, finite, inductive, state-machine, heap, concurrency, floating-point, temporal, and boundary goals. Every external result is `proved_with_replayable_certificate`, `proved_by_approved_external_tcb`, `counterexample`, `unknown`, `timeout`, or `tool_failure`.
 
-The proposed release audit would run normal Lean checking, transitive axiom
-inspection, fresh checking, and configured independent replay.
-Tool/import/tactic/simplifier identities would be cache inputs.
+Release audit runs normal Lean checking, transitive axiom inspection, fresh checking, and configured independent replay. Tool/import/tactic/simplifier identities are cache inputs.
 
 ## Caching and scheduling
 
-The proposed scheduler would operate on SymbolId SCCs. A semantic cache hit
-would require exact `VerificationCacheKey v1` equality. Changed pointcut
-matches, layout, dependency theorem, solver policy, compiler pass, target, or
-trust policy would invalidate dependents. Planned observability reports
-classification time, engine time, cache hits/misses, invalidation cause, proof
-DAG critical path, and max RSS.
+The scheduler operates on SymbolId SCCs. A semantic cache hit requires exact `VerificationCacheKey v1` equality. Changed pointcut matches, layout, dependency theorem, solver policy, compiler pass, target, or trust policy invalidates dependents. Observability reports classification time, engine time, cache hits/misses, invalidation cause, proof DAG critical path, and max RSS.
 
 ## Product flows
 
 ### SimpleOS
 
-The proposed initial slice would expose typed kernel events for capability
-lookup/revoke, task state changes, IPC enqueue/dequeue/close/cancel, map/unmap,
-and storage prepare/commit/recover. A planned bounded explorer would emit
-source-mapped counterexample traces. General invariants and abstract-to-VIR
-refinement would remain Lean proof roots. Environmental predicates could
-generate bounded fail-stop monitor aspects before VIR.
+The initial slice exposes typed kernel events for capability lookup/revoke, task state changes, IPC enqueue/dequeue/close/cancel, map/unmap, and storage prepare/commit/recover. A bounded explorer emits source-mapped counterexample traces. General invariants and abstract-to-VIR refinement remain Lean proof roots. Environmental predicates can generate bounded fail-stop monitor aspects before VIR.
 
 ### RISC-V
 
-The planned HWIR defines `RiscvRetireRecord`; generated RVFI would be a checked
-projection. Receipts bind CoreConfig/XLEN/extensions, Sail version, RTL,
-property set, cover witnesses, SBY engine, and netlist. Delivery is planned to
-begin with one RV32I instruction family, then expand by the staged gates.
+HWIR defines `RiscvRetireRecord`; generated RVFI is a proved projection. Receipts bind CoreConfig/XLEN/extensions, Sail version, RTL, property set, cover witnesses, SBY engine, and netlist. Delivery begins with one RV32I instruction family, then expands by the staged gates in the plan.
 
-For the planned first ADD slice, `run-fv2-rv32-add-equivalence.shs` would consume only the
+For the first ADD slice, `run-fv2-rv32-add-equivalence.shs` consumes only the
 already executed formal bundle. It rejects a stale RTL hash, duplicate or
 preexisting equivalence fields, missing tools, failed equivalence, and missing
 netlist. Its policy identity is the hash of
@@ -611,7 +624,7 @@ netlist. Its policy identity is the hash of
 and every equivalence identity before returning `backend_refined`; malformed,
 cross-module, stale, or failed inputs return `failed`.
 
-The planned `run-fv2-rv32-add-sail.shs` owns the independent concrete oracle witness. It
+`run-fv2-rv32-add-sail.shs` owns the independent concrete oracle witness. It
 requires `SAIL_RISCV_SIM`, `SAIL_RISCV_RV32_CONFIG`, and `SAIL_RISCV_LOCK`.
 The lock must bind the approved repository/revision to the exact simulator and
 configuration hashes; the runner rehashes both before use. It then compiles the

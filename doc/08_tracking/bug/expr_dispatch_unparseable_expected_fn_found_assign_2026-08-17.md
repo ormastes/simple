@@ -123,3 +123,61 @@ If the binary is older than the source, a RED tells you nothing about the source
 until you rebuild into an isolated `CARGO_TARGET_DIR` and re-test.
 Also: a silent exit is not a verdict, and a wrapper's exit 0 is not the guard's
 exit 0 — read the verdict line, which is always last on stdout.
+
+## 2026-08-17 — RESOLVED IN SOURCE-OF-TRUTH: this is a STALE-BINARY artifact, not a live parser defect
+
+Two arms, same file, same bytes, measured — not inferred:
+
+| parser under test | result |
+|---|---|
+| built from the **current `origin/main`** tree (`cargo test -p simple-parser`) | `PROBE real_expr_dispatch: PARSED (267543 bytes)` |
+| **deployed** `bin/release/x86_64-unknown-linux-gnu/simple` (size 59536728, mtime 2026-08-16 22:59:37) | `rc=1` — `parse: in ".../expr_dispatch.spl": Unexpected token: expected Fn, found Assign` |
+
+The construct is the module-level `var` initialiser at lines 49-55
+(`var mir_lower_parent_expr_file: text = ""` and siblings). Probed in isolation
+against the `origin/main` parser, all of these PARSE:
+
+```
+PROBE module_var_init_text: PARSED     var a: text = ""
+PROBE module_var_init_i64: PARSED      var b: i64 = -1
+PROBE module_var_init_bool: PARSED     var c: bool = false
+PROBE module_var_no_init: PARSED       var d: i64
+PROBE fn_after_module_var: PARSED      var e: i64 = 0 / fn f() -> i64: e
+```
+
+So `origin/main` is **correct** here and the deployed binary is **behind**. This
+row describes a defect that no longer exists in the tree; it survives only in a
+binary that is a week stale. It also confirms the parse-sweep census's
+"1 file goes the other way" note
+(`unparseable_spl_files_on_origin_main_sweep_2026-08-17.md`) and refutes any
+reading of this row as a live regression. Closing it requires **redeploying
+`bin/simple`**, not a parser change.
+
+### Why this matters far beyond one file: it blocks the pre-push chain
+
+Discovered while pushing an unrelated 2-file test-only change. At least **seven**
+pre-push guards native-build compiler source with `bin/simple`, so the stale
+binary's failure on this one file takes all of them down at once. Verbatim:
+
+```
+FAIL — native-build of src/compiler/00.common failed
+  BLOCKED by check-predicate-parser-native-build.shs (status 1)
+FAIL — native-build failed to compile the fixture (exit 1)
+  BLOCKED by check-native-trailing-default-param.shs (status 1)
+FAIL — cold native-build of the 3-module fixture did not succeed
+  BLOCKED by check-native-object-cache-granularity.shs (status 1)
+FAIL — in-process native-build exited non-zero
+  BLOCKED by check-native-inprocess-positional-nonvacuous.shs (status 1)
+ERROR — no Results line from .../render_perf_receipt_v2_spec.spl (runner rc=1); nothing was measured
+  BLOCKED by check-render-perf-milestone-gate.shs (status 2)
+```
+
+each with the *same* underlying line:
+`error: compile failed: parse: in ".../expr_dispatch.spl": Unexpected token: expected Fn, found Assign`.
+
+**Consequence: the pre-push guard chain is currently unsatisfiable for every lane
+using the deployed `bin/simple`, for a reason unrelated to what that lane
+changed.** This is a plausible contributor to bootstrap stages "failing in varied
+ways" — the varied surfaces share one stale-binary root. The correct repair is a
+redeploy; stepping over the chain with `--no-verify` would spread unreviewed
+pushes instead.

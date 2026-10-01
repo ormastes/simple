@@ -1,0 +1,60 @@
+# Pure HIR declaration-owner identity shared by symbol binding and lookup.
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+
+fn hir_owner_name_is_canonical(path: text) -> bool:
+    # Accept only names whose full path normalization is an identity. Keep
+    # aliases and suffix-looking names on the existing normalization path.
+    # starts_with/ends_with box both receiver and argument on the retained
+    # native producer: three calls allocated six objects per canonical probe.
+    # Scalar byte guards preserve these exclusions without text boxing.
+    val length = path.len()
+    if length == 0:
+        return false
+    if length >= 3:
+        if path.byte_at(0) == 115 and path.byte_at(1) == 116 and path.byte_at(2) == 100:
+            if length == 3 or path.byte_at(3) == 46:
+                return false
+    if length >= 4:
+        if path.byte_at(length - 4) == 46 and path.byte_at(length - 3) == 115:
+            val suffix_middle = path.byte_at(length - 2)
+            val suffix_last = path.byte_at(length - 1)
+            if (suffix_middle == 112 and suffix_last == 108) or (suffix_middle == 100 and suffix_last == 110):
+                return false
+    var segment_start = true
+    var index = 0
+    while index < length:
+        val code = path.byte_at(index)
+        val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+        if letter:
+            segment_start = false
+        elif code >= 48 and code <= 57:
+            if segment_start: return false
+        elif code == 46:
+            if segment_start: return false
+            segment_start = true
+        else:
+            return false
+        index = index + 1
+    not segment_start
+
+pub fn hir_symbol_owner_module(path: text) -> text:
+    # Canonical import owners recur for every qualified type probe. Returning
+    # the existing text avoids path scans, split/join and intermediate strings.
+    # No memo retains a pointer across a transient parser/lowering scope.
+    if hir_owner_name_is_canonical(path):
+        return path
+    val relative = module_logical_name_from_path(path)
+    var canonical: [text] = []
+    for segment in relative.split("."):
+        var is_tier = segment != ""
+        var segment_index = 0
+        while segment_index < segment.len():
+            val code = segment.char_code_at(segment_index)
+            if code < 48 or code > 57: is_tier = false
+            segment_index = segment_index + 1
+        if not is_tier:
+            canonical = canonical.push(segment)
+    val owner = canonical.join(".")
+    if owner == "std": return "lib"
+    if owner.starts_with("std."): return "lib." + owner.substring(4)
+    owner

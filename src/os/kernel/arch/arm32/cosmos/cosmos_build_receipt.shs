@@ -32,6 +32,38 @@ cosmos_tool_sha256() {
     cosmos_sha256_file "$_cr_tool_path"
 }
 
+# Admit one immutable self-host compiler/provenance pair for build or package
+# receipt verification. Callers retain the resulting SIMPLE* variables.
+cosmos_admit_simple_toolchain() {
+    _cr_root="$1"
+    _cr_requested_simple="$2"
+    _cr_requested_provenance="${3:-}"
+    [ -x "$_cr_requested_simple" ] || return 1
+    BOOTSTRAP_STAGE3_FACADE_PATH="$_cr_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    STAGE4_PROVENANCE_HELPER_PATH="$_cr_root/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    [ -f "$BOOTSTRAP_STAGE3_FACADE_PATH" ] &&
+        [ -f "$STAGE4_PROVENANCE_HELPER_PATH" ] || return 1
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH" || return 1
+    . "$STAGE4_PROVENANCE_HELPER_PATH" || return 1
+    SIMPLE="$(bootstrap_stage3_canonical_file "$_cr_requested_simple")" || return 1
+    if [ -n "$_cr_requested_provenance" ]; then
+        SIMPLE_PROVENANCE="$_cr_requested_provenance"
+    else
+        SIMPLE_PROVENANCE="${SIMPLE}.provenance.env"
+    fi
+    stage4_verify_candidate_provenance \
+        "$SIMPLE_PROVENANCE" "$SIMPLE" "$_cr_root" || return 1
+    SIMPLE_SHA256_ADMITTED="$(cosmos_sha256_file "$SIMPLE")" || return 1
+    SIMPLE_PROVENANCE_SHA256_ADMITTED="$(
+        cosmos_sha256_file "$SIMPLE_PROVENANCE"
+    )" || return 1
+    _cr_simple_identity="$($SIMPLE --version 2>&1 || true)"
+    case "$_cr_simple_identity" in
+        *"Rust-built Simple binary is a bootstrap seed"*) return 1 ;;
+    esac
+}
+
 cosmos_profile_define() {
     _cr_header="$1"
     _cr_key="$2"
@@ -82,28 +114,57 @@ cosmos_write_source_manifest() (
         cosmos_linker.ld \
         cosmos_start.S \
         cosmos_uart.c \
+        cosmos_fsbl.spl \
+        cosmos_fsbl_decision.spl \
         cosmos_runtime.c \
+        cosmos_runtime_core.h \
+        cosmos_runtime_core.spl \
+        cosmos_runtime_residual.h \
+        cosmos_runtime_residual.spl \
         cosmos_mmu_cache.c \
+        cosmos_mmu_cache_policy.h \
+        cosmos_mmu_cache_policy.spl \
         cosmos_smp_gic.c \
-        cosmos_fsbl.c \
         cosmos_nfc.c \
+        cosmos_nfc_policy.h \
+        cosmos_nfc_policy.spl \
+        cosmos_nfc_ecc_bridge.c \
+        cosmos_nfc_ecc_policy.h \
+        cosmos_nfc_ecc.spl \
         cosmos_pcie.c \
+        cosmos_nvme_pcie_policy.spl \
+        cosmos_nvme_pcie_policy.h \
+        cosmos_nvme_pcie_policy_bridge.c \
         cosmos_nvme_firmware.c \
         cosmos_nvme_firmware.h \
         cosmos_nvme_pcie_adapter.c \
         cosmos_nvme_pcie_adapter.h \
+        cosmos_nvme_pcie_adapter_policy.h \
+        cosmos_nvme_pcie_adapter_policy.spl \
         cosmos_nvme_admin.c \
         cosmos_nvme_admin.h \
+        cosmos_nvme_admin_policy.h \
+        cosmos_nvme_admin_policy.spl \
         cosmos_nvme_dispatch.c \
         cosmos_nvme_dispatch.h \
         cosmos_ftl.c \
         cosmos_ftl.h \
+        cosmos_ftl_policy.h \
+        cosmos_ftl_policy.spl \
         cosmos_ftl_nfc_backend.c \
         cosmos_ftl_nfc_backend.h \
+        cosmos_ftl_nfc_backend_policy.h \
+        cosmos_ftl_nfc_backend_policy.spl \
         cosmos_nvme_ftl_media.c \
         cosmos_nvme_ftl_media.h \
+        cosmos_nvme_media_policy.h \
+        cosmos_nvme_media_policy.spl \
+        cosmos_pcie_residual_policy.h \
+        cosmos_pcie_residual_policy.spl \
         cosmos_storage.c \
         cosmos_storage.h \
+        cosmos_storage_policy.h \
+        cosmos_storage_policy.spl \
         cosmos_hal.h \
         cosmos_zynq_regs.h \
         cosmos_nfc_regs.h \
@@ -277,15 +338,35 @@ cosmos_write_receipt() (
     _cr_loads="$6"
     _cr_target="$7"
     _cr_supplied_sources="${8:-}"
+    _cr_object_manifest="${9:-}"
     _cr_sources="$_cr_target.sources.$$"
     _cr_payload="$_cr_target.payload.$$"
     _cr_clang="${CLANG:-clang}"
     _cr_lld="${LLD:-ld.lld}"
+    _cr_simple="${SIMPLE:-}"
+    _cr_simple_provenance="${SIMPLE_PROVENANCE:-}"
+    _cr_simple_sha_admitted="${SIMPLE_SHA256_ADMITTED:-}"
+    _cr_simple_provenance_sha_admitted="${SIMPLE_PROVENANCE_SHA256_ADMITTED:-}"
     command -v "$_cr_clang" >/dev/null 2>&1 || return 1
     command -v "$_cr_lld" >/dev/null 2>&1 || return 1
     _cr_clang_version="$(cosmos_tool_version "$_cr_clang")" || return 1
     _cr_lld_version="$(cosmos_tool_version "$_cr_lld")" || return 1
-    [ -n "$_cr_clang_version" ] && [ -n "$_cr_lld_version" ] || return 1
+    [ -x "$_cr_simple" ] && [ -f "$_cr_simple_provenance" ] || return 1
+    [ -f "$_cr_object_manifest" ] && [ -s "$_cr_object_manifest" ] || return 1
+    awk '
+        $0 !~ /^[0-9a-f]{64}  [A-Za-z0-9_.+-]+$/ { bad = 1 }
+        { name = $2; if (seen[name]++) bad = 1 }
+        END { exit bad || NR == 0 }
+    ' "$_cr_object_manifest" || return 1
+    [ -n "$_cr_simple_sha_admitted" ] &&
+        [ -n "$_cr_simple_provenance_sha_admitted" ] || return 1
+    [ "$(cosmos_sha256_file "$_cr_simple")" = \
+        "$_cr_simple_sha_admitted" ] || return 1
+    [ "$(cosmos_sha256_file "$_cr_simple_provenance")" = \
+        "$_cr_simple_provenance_sha_admitted" ] || return 1
+    _cr_simple_version="$(cosmos_tool_version "$_cr_simple")" || return 1
+    [ -n "$_cr_clang_version" ] && [ -n "$_cr_lld_version" ] && \
+        [ -n "$_cr_simple_version" ] || return 1
     if [ -n "$_cr_supplied_sources" ]; then
         cp "$_cr_supplied_sources" "$_cr_sources" || {
             rm -f "$_cr_sources" "$_cr_payload"
@@ -300,6 +381,8 @@ cosmos_write_receipt() (
     _cr_source_count="$(wc -l < "$_cr_sources" | tr -d ' ')"
     _cr_source_sha="$(cosmos_sha256_file "$_cr_sources")"
     _cr_load_sha="$(cosmos_sha256_file "$_cr_loads")"
+    _cr_object_count="$(wc -l < "$_cr_object_manifest" | tr -d ' ')"
+    _cr_object_sha="$(cosmos_sha256_file "$_cr_object_manifest")"
     {
         printf 'format=%s\n' "$COSMOS_RECEIPT_FORMAT"
         printf 'build.clean=1\n'
@@ -319,6 +402,10 @@ cosmos_write_receipt() (
         fi
         printf 'source.file.count=%s\n' "$_cr_source_count"
         printf 'source.sha256=%s\n' "$_cr_source_sha"
+        printf 'object.file.count=%s\n' "$_cr_object_count"
+        printf 'object.manifest.sha256=%s\n' "$_cr_object_sha"
+        awk '{ printf "object.%s.sha256=%s\n", $2, $1 }' \
+            "$_cr_object_manifest"
         printf 'linker.sha256=%s\n' \
             "$(cosmos_sha256_file "$_cr_dir/cosmos_linker.ld")"
         printf 'elf.sha256=%s\n' "$(cosmos_sha256_file "$_cr_elf")"
@@ -336,6 +423,16 @@ cosmos_write_receipt() (
         printf 'tool.lld.version=%s\n' "$_cr_lld_version"
         printf 'tool.lld.sha256=%s\n' \
             "$(cosmos_tool_sha256 "$_cr_lld")"
+        printf 'tool.simple.path=%s\n' "$COSMOS_SIMPLE_COMPILER"
+        printf 'tool.simple.version=%s\n' "$COSMOS_SIMPLE_COMPILER_VERSION"
+        printf 'tool.simple.sha256=%s\n' "$COSMOS_SIMPLE_COMPILER_SHA256"
+        printf 'tool.simple.provenance.path=%s\n' \
+            "$COSMOS_SIMPLE_COMPILER_PROVENANCE"
+        printf 'tool.simple.provenance.sha256=%s\n' \
+            "$COSMOS_SIMPLE_COMPILER_PROVENANCE_SHA256"
+        printf 'object.fsbl.sha256=%s\n' \
+            "$COSMOS_SIMPLE_FSBL_OBJECT_SHA256"
+        printf 'object.fsbl.target=armv7-unknown-none-eabihf\n'
     } > "$_cr_payload" || {
         rm -f "$_cr_sources" "$_cr_payload"
         return 1

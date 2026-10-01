@@ -1,6 +1,6 @@
 # HostFuture - Full-Featured Future
 #
-# Heap-allocated future with waker support, chaining, timeout, and cancellation.
+# Hosted future with waker support and terminal publication.
 
 use std.async_core.{AsyncError, Poll}
 use std.async_host.waker.{Waker, Context}
@@ -9,11 +9,8 @@ use std.sffi.system.{time_now_unix_millis}
 class HostFuture<T>:
     """Heap-allocated future with waker support.
 
-    More powerful than EmbeddedFuture:
-    - Waker-based notification
-    - Chaining with map/then
-    - Timeout support
-    - Cancellation
+    Pending map/then currently return detached snapshots. They cannot be used
+    as a live task-chain bridge until a source subscription owner is added.
     """
     state: FutureState<T>
     wakers: [Waker]
@@ -71,19 +68,35 @@ impl HostFuture<T>:
             case FutureState.Ready(_): true
             case _: false
 
-    me complete(value: T):
-        """Complete future and wake all waiters."""
+    fn is_terminal() -> bool:
+        """True after publication, failure, or an expired delay deadline."""
+        if self.deadline > 0 and time_now_unix_millis() >= self.deadline:
+            return true
+        match self.state:
+            case FutureState.Pending: false
+            case _: true
+
+    me complete(value: T) -> bool:
+        """Publish one value and wake waiters once; false if already terminal."""
+        if self.is_terminal():
+            return false
+        self.deadline = 0
         self.state = FutureState.Ready(value)
         for waker in self.wakers:
             waker.wake()
         self.wakers = []
+        true
 
-    me fail(err: AsyncError):
-        """Fail future."""
+    me fail(err: AsyncError) -> bool:
+        """Publish one failure and wake waiters once; false if terminal."""
+        if self.is_terminal():
+            return false
+        self.deadline = 0
         self.state = FutureState.Failed(err)
         for waker in self.wakers:
             waker.wake()
         self.wakers = []
+        true
 
     fn map<U>(f: fn(T) -> U) -> HostFuture<U>:
         """Transform future value."""
@@ -114,5 +127,3 @@ impl HostFuture<T>:
                 failed
 
 # Note: HostFuture implements FutureCore<T> via duck typing
-
-

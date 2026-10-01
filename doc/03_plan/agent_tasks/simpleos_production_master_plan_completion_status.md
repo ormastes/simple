@@ -388,6 +388,22 @@ the physical Debian/aarch64 identity, an absent canonical CPU runner, and a GPU
 exit at `pure-simple-runtime-missing` before provider or board mutation. These
 are blocker receipts only: ARM AC-1..3 and UNO AC-4..8 remain unchecked.
 
+### Plan refresh 2026-09-05 (no row credited)
+
+All 28 open rows above re-checked against the tree: the matrix lane's own
+ledger `.spipe/simpleos_server_execution_matrix/state.md:31-51` still shows
+AC-1..AC-10 unchecked; the matrix artifacts exist as documents/specs only
+(`doc/02_requirements/feature/simpleos_server_execution_matrix.md`,
+`doc/04_architecture/simpleos_server_execution_matrix.md`,
+`doc/05_design/simpleos_server_execution_matrix.md`,
+`doc/03_plan/{agent_tasks,sys_test}/simpleos_server_execution_matrix.md`,
+`test/03_system/os/server/simpleos_server_execution_matrix_spec.spl`) with no
+guide under `doc/07_guide/os/` and no `SimpleOsServerExecutionReceiptV1`
+definition under `src/os/`, so MATRIX-DOC is not closed. No Linux nginx/
+PostgreSQL/SQLite comparison report exists under `doc/09_report/` or
+`doc/10_metrics/` (only `http_server_bench_2026-05-28.md`). The Restart12
+WEB/DB/GATE rows remain uncredited by the lane's own three-cycle rule.
+
 ## Wave 3 (2026-07-27) — board bring-up + convergence, all lanes landed
 
 ### BOARD: SimpleOS boots on Arduino UNO Q — **PASS** (first board boot of this stack)
@@ -454,3 +470,9 @@ Host board: Qualcomm QRB2210, quad Cortex-A53, aarch64 Debian 13, adb `365530871
 `test/01_unit/compiler/two_hop_field_method_mutation_spec.spl` lands RED (5 examples,
 4 failures — one-hop green, every two-hop red). It is a correct test of a real open defect and
 goes green when the interpreter place model is fixed; not skipped, per the no-cover-up rule.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/simpleos_production_master_plan_completion_status_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

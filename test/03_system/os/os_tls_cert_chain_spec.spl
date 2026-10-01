@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """
 # TLS Certificate Chain Verification Specification
 
@@ -10,6 +14,8 @@ certificate fixtures:
 tag: slow, system, tls, crypto
 """
 
+use std.spec.step
+
 use std.spipe.*
 use os.tls13.cert_verify.{
     verify_cert_chain, CertChainResult,
@@ -18,29 +24,25 @@ use os.tls13.cert_verify.{
     extract_certificate_signature_bytes,
     extract_certificate_signature_scheme
 }
-use std.nogc_sync_mut.io.signature_sffi.{rsa_pss_sha256_verify_native}
-
-val _HEX_DIGITS_LOWER: text = "0123456789abcdef"
-val _HEX_DIGITS_UPPER: text = "0123456789ABCDEF"
+use std.nogc_sync_mut.io.signature_sffi.{rsa_pss_sha256_verify}
 
 fn _hex_digit(c: text) -> i64:
-    """Hex nibble via table lookup.
-
-    This was previously a 22-arm `if c == "0": return 0 ... if c == "f": return 15`
-    chain. On bin/simple as of 2026-07-28 the LAST arm of such a chain yields the
-    PREVIOUS arm's value, so `_hex_digit("f")` returned 14 and every 'f' nibble in
-    the DER fixtures below decoded as 'e'. That corrupted the RSA-PSS algorithm
-    OID (2a 86 48 86 f7 0d ...) and made three of this file's four examples fail
-    with "unsupported certificate signature algorithm". See
-    .spipe/tls_assessment/state.md.
-    """
-    var i: i64 = 0
-    while i < 16:
-        if _HEX_DIGITS_LOWER[i:i + 1] == c:
-            return i
-        if _HEX_DIGITS_UPPER[i:i + 1] == c:
-            return i
-        i = i + 1
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
     -1
 
 fn hex_to_bytes(s: text) -> [u8]:
@@ -74,7 +76,7 @@ fn observe_cert_chain(result: CertChainResult) -> CertChainObservation:
             CertChainObservation(is_ok: false, err_msg: msg)
 
 describe "verify_cert_chain":
-    it "parses leaf certificate pieces compatible with rsa_pss_sha256_verify_native":
+    it "parses leaf certificate pieces compatible with rsa_pss_sha256_verify":
         val intermediate = hex_to_bytes(INT_DER_HEX)
         val leaf = hex_to_bytes(LEAF_DER_HEX)
         val scheme = extract_certificate_signature_scheme(leaf)
@@ -85,9 +87,11 @@ describe "verify_cert_chain":
         expect(spki.len() > 0).to_equal(true)
         expect(tbs.len() > 0).to_equal(true)
         expect(sig.len() > 0).to_equal(true)
-        expect(rsa_pss_sha256_verify_native(spki, tbs, sig)).to_equal(true)
+        expect(rsa_pss_sha256_verify(spki, tbs, sig)).to_equal(true)
 
     it "accepts a valid leaf -> intermediate chain anchored in the root store":
+        # @req REQ-SSPEC-SYSTEM
+        step("accepts a valid leaf -> intermediate chain anchored in the root store")
         val root = hex_to_bytes(ROOT_DER_HEX)
         val intermediate = hex_to_bytes(INT_DER_HEX)
         val leaf = hex_to_bytes(LEAF_DER_HEX)
@@ -97,6 +101,8 @@ describe "verify_cert_chain":
         expect(observed.is_ok).to_equal(true)
 
     it "rejects the chain when the trust anchor is absent":
+        # @req REQ-SSPEC-SYSTEM
+        step("rejects the chain when the trust anchor is absent")
         val intermediate = hex_to_bytes(INT_DER_HEX)
         val leaf = hex_to_bytes(LEAF_DER_HEX)
         val observed = observe_cert_chain(verify_cert_chain([leaf, intermediate], []))
@@ -104,6 +110,8 @@ describe "verify_cert_chain":
         expect(observed.err_msg.contains("trust anchor") or observed.err_msg.contains("issuer")).to_equal(true)
 
     it "rejects an intermediate certificate that is not marked as a CA":
+        # @req REQ-SSPEC-SYSTEM
+        step("rejects an intermediate certificate that is not marked as a CA")
         val root = hex_to_bytes(ROOT_DER_HEX)
         val bad_intermediate = hex_to_bytes(BAD_INT_DER_HEX)
         val leaf = hex_to_bytes(LEAF_DER_HEX)

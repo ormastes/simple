@@ -1,4 +1,8 @@
 # Theme package source-capture design hard stop — TLDR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Canonical `theme-package-install-wire-v1` text landed at `b1d0b3e27f`.
 - No source-matched self-hosted runtime admits its aggregate ABI probe:
@@ -13,3 +17,4 @@
 - Legacy aggregate loading remains independent.
 - Native aggregate encoder/decoder use still needs the admitted incremental ABI
   probe.
+

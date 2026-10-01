@@ -1,7 +1,7 @@
 # SIMD Platform Detection & Intrinsics - Extracted from simd.spl
 #
-# SimdPlatform enum, SimdCapabilities class, SimdIntrinsics class,
-# CPU feature detection via /proc/cpuinfo parsing.
+# Legacy coarse SIMD platform facade and pure-Simple reference operations.
+# Fine-grained hardware discovery lives in simd_capabilities.spl.
 
 use std.io_runtime.{file_read_result}
 
@@ -91,19 +91,10 @@ impl SimdCapabilities:
             # /proc/cpuinfo not available; x86_64 guarantees SSE2
             return SimdPlatform.SSE2
 
-        # Check from highest to lowest capability
-        var has_avx512 = _flags_contain(flags, "avx512f")
-        if has_avx512:
-            return SimdPlatform.AVX512
-
-        var has_avx2 = _flags_contain(flags, "avx2")
-        if has_avx2:
-            return SimdPlatform.AVX2
-
-        var has_avx = _flags_contain(flags, "avx")
-        if has_avx:
-            return SimdPlatform.AVX
-
+        # /proc/cpuinfo flags do not prove the OS has enabled XMM/YMM/ZMM
+        # state. This legacy coarse facade therefore admits only architectural
+        # baseline tiers. AVX-family admission belongs to the fine-grained
+        # CPUID + OS-state authority in simd_capabilities.spl.
         var has_sse2 = _flags_contain(flags, "sse2")
         if has_sse2:
             return SimdPlatform.SSE2
@@ -112,8 +103,7 @@ impl SimdCapabilities:
         if has_sse:
             return SimdPlatform.SSE
 
-        # x86_64 always has SSE2
-        SimdPlatform.SSE2
+        SimdPlatform.None_Platform
 
     static fn detect_arm() -> SimdPlatform:
         """
@@ -224,17 +214,17 @@ impl SimdCapabilities:
         "SimdCapabilities(platform: {self.platform.to_string()}, width: {self.register_width()}-bit)"
 
 # ============================================================================
-# SIMD Intrinsics (Placeholder)
+# Pure-Simple SIMD reference operations
 # ============================================================================
 
 class SimdIntrinsics:
     """
-    SIMD intrinsics for low-level operations
+    Scalar-defined SIMD reference operations.
 
-    In a real implementation, these would be extern functions
-    that map to LLVM intrinsics or inline assembly.
-
-    For now, they're placeholders showing the API.
+    These functions deliberately perform lane-wise Simple arithmetic. They
+    define portable semantics and provide interpreter/scalar fallbacks; native
+    acceleration is introduced later through MIR lowering and capability-
+    admitted backend selection, never by pretending these calls are intrinsics.
     """
 
 impl SimdIntrinsics:
@@ -244,27 +234,22 @@ impl SimdIntrinsics:
 
     static fn sse_add_ps(a: Vec4f, b: Vec4f) -> Vec4f:
         """SSE: Add 4x f32 (addps)"""
-        # In real impl: __builtin_ia32_addps(a, b)
         a.add(b)
 
     static fn sse_sub_ps(a: Vec4f, b: Vec4f) -> Vec4f:
         """SSE: Subtract 4x f32 (subps)"""
-        # In real impl: __builtin_ia32_subps(a, b)
         a.sub(b)
 
     static fn sse_mul_ps(a: Vec4f, b: Vec4f) -> Vec4f:
         """SSE: Multiply 4x f32 (mulps)"""
-        # In real impl: __builtin_ia32_mulps(a, b)
         a.mul(b)
 
     static fn sse_div_ps(a: Vec4f, b: Vec4f) -> Vec4f:
         """SSE: Divide 4x f32 (divps)"""
-        # In real impl: __builtin_ia32_divps(a, b)
         a.div(b)
 
     static fn sse_sqrt_ps(a: Vec4f) -> Vec4f:
         """SSE: Square root 4x f32 (sqrtps)"""
-        # In real impl: __builtin_ia32_sqrtps(a)
         Vec4f(
             x: a.x.sqrt(),
             y: a.y.sqrt(),
@@ -274,12 +259,10 @@ impl SimdIntrinsics:
 
     static fn sse_min_ps(a: Vec4f, b: Vec4f) -> Vec4f:
         """SSE: Minimum 4x f32 (minps)"""
-        # In real impl: __builtin_ia32_minps(a, b)
         a.min(b)
 
     static fn sse_max_ps(a: Vec4f, b: Vec4f) -> Vec4f:
         """SSE: Maximum 4x f32 (maxps)"""
-        # In real impl: __builtin_ia32_maxps(a, b)
         a.max(b)
 
     # ========================================================================
@@ -288,7 +271,6 @@ impl SimdIntrinsics:
 
     static fn avx_add_ps(a: Vec8f, b: Vec8f) -> Vec8f:
         """AVX: Add 8x f32 (vaddps)"""
-        # In real impl: __builtin_ia32_addps256(a, b)
         Vec8f(
             e0: a.e0 + b.e0, e1: a.e1 + b.e1,
             e2: a.e2 + b.e2, e3: a.e3 + b.e3,
@@ -383,6 +365,5 @@ fn _detect_from_cpuinfo() -> SimdPlatform:
         if has_sve:
             return SimdPlatform.SVE
 
-    # Fallback: use compile-time architecture knowledge
-    # On modern x86_64 Linux, SSE2 is guaranteed
-    SimdPlatform.SSE2
+    # Unknown host or unavailable provider: fail closed to scalar semantics.
+    SimdPlatform.None_Platform

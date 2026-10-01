@@ -1,4 +1,8 @@
 # P1 `compiler` rows, first half by id — session triage 2026-08-18
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Scope: the 29 lowest-id `compiler`/P1 rows in `doc/08_tracking/todo/todo_db.sdn`
 (ids 536..605). Worktree `/mnt/data/worktrees/p1-compiler-a`, `bin/simple` = the
@@ -108,4 +112,5 @@ failures, so the row's description should not be trusted as a starting point.
 Row 597 stays open; the next session should attack the hang (isolate one
 provider/consumer fixture, as the row already suggests) rather than chase
 assertion failures that were never observed.
+
 

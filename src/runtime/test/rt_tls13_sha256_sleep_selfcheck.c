@@ -5,6 +5,12 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 static int failures = 0;
 
 static void check_digest(const uint8_t* input, size_t input_len,
@@ -48,6 +54,18 @@ int main(void) {
     check_digest(NULL, 0, empty_digest);
     check_digest(abc, sizeof(abc), abc_digest);
 
+#if defined(_WIN32)
+    /* Windows has no clock_gettime/CLOCK_MONOTONIC; QueryPerformanceCounter is
+     * the platform monotonic clock.  Same oracle: elapsed must be positive. */
+    LARGE_INTEGER freq, before, after;
+    if (!QueryPerformanceFrequency(&freq)) failures++;
+    if (!QueryPerformanceCounter(&before)) failures++;
+    rt_sleep_nanos(1000000);
+    if (!QueryPerformanceCounter(&after)) failures++;
+    int64_t elapsed_ns = freq.QuadPart > 0
+        ? (int64_t)(((after.QuadPart - before.QuadPart) * 1000000000LL) / freq.QuadPart)
+        : 0;
+#else
     struct timespec before;
     struct timespec after;
     if (clock_gettime(CLOCK_MONOTONIC, &before) != 0) failures++;
@@ -56,6 +74,7 @@ int main(void) {
     int64_t elapsed_ns =
         (int64_t)(after.tv_sec - before.tv_sec) * 1000000000LL +
         (int64_t)(after.tv_nsec - before.tv_nsec);
+#endif
     if (elapsed_ns <= 0) failures++;
 
     printf("SELFCHECK %s (%d failures)\n",

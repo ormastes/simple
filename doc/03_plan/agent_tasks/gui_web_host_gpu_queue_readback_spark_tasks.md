@@ -2,34 +2,11 @@
 
 Owner: normal-LLM/Spark lane
 Date: 2026-06-14
-Status: superseded/merged into
-`doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md`
-for broad GUI/Web/2D rendering delegation. Keep this file as the queue/readback
-technical task packet only; do not use it as the current top-level platform
-plan or completion evidence.
-
-Current routing update, 2026-06-27:
-
-- Use `doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md`
-  WO-9 for stale-doc cleanup and the active Spark/normal-review split.
-- Use `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
-  for Linux Vulkan, macOS Metal, and Windows D3D12 RenderDoc/render-log
-  platform execution.
-- This file remains useful for BrowserBackend queue/readback metadata and
-  fail-closed device-readback semantics.
-- Spark output from this packet is advisory until a normal/high-capability
-  reviewer accepts no raw `rt_*` additions, no direct backend-poke pass states,
-  and no promotion of provenance-only rows to production proof.
-- Retained 4K/8K showcase performance is now tracked as a dedicated lane in the
-  2026-06-27 parallel plan, not in this queue/readback packet.
-
-Historical status: current local focused specs passed when this packet was
-written, and the production wrapper reported the platform matrix explicitly as
-partial unless Metal/ROCm/DirectX/WebGPU same-frame device-readback proof was
-present. Treat the rows below as last-known historical routing notes, not as a
-prediction that a fresh run will pass. WebGPU `surface_upload` is
-provenance-only and WebGPU real device readback was unavailable in that slice.
-The Linux joined GUI/web frame proof was Vulkan-backed; CUDA/OpenCL were child
+Status: current local focused specs pass, and the production wrapper now reports
+the platform matrix explicitly as partial unless Metal/ROCm/DirectX/WebGPU
+same-frame device-readback proof is present. WebGPU `surface_upload` is
+provenance-only and WebGPU real device readback is currently unavailable. The
+Linux joined GUI/web frame proof is Vulkan-backed; CUDA/OpenCL are child
 backend readback fixtures. Synthetic handles remain isolated probe evidence.
 
 ## Context
@@ -37,10 +14,7 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 - This lane owns the final chain from 2D draw scheduling -> host/GPU queue emit/drain ->
   BrowserBackend frame evidence -> same-frame GPU readback receipt.
 - Canonical source of truth: `sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`.
-- Latest report at the time of this packet
-  (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`)
-  was the last-known evidence source. Regenerate the wrapper before reuse; do
-  not treat these historical rows as an expected current pass:
+- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`) is expected to pass on this Linux host when regenerated:
   `browser_frame_queue_status=pass`, `same_frame_gpu_backend_readback_status=pass`,
   `readback_vulkan_verdict=pass`, `readback_cuda_verdict=pass`,
   `readback_opencl_verdict=pass`,

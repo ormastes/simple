@@ -32,6 +32,7 @@ use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 use compiler.semantics.lint.option_me_call.{check_option_me_call_source}
 use compiler.semantics.lint.required_comment.{check_required_comment, required_comment_source_may_match}
+use compiler.common.assurance.mc_exceptions.{mc_exception_report_line}
 
 # File I/O wrapper
 
@@ -545,6 +546,10 @@ fn run_lint_source_with_linter_policy(
 fn _run_lint_with_linter_source(
     linter: Linter, file_path: String, policy: LintCliPolicy, content: String?
 ) -> Int:
+    linter.last_diagnostic_count = 0
+    linter.last_error_count = 0
+    linter.last_warning_count = 0
+    linter.last_not_analyzed = false
     val deny_all = policy.deny_all
     val warn_all = policy.warn_all
     val json_output = policy.json_output
@@ -591,12 +596,35 @@ fn _run_lint_with_linter_source(
         case Some(profile): linter.config.set_profile(profile)
         case nil: pass_do_nothing
 
+    # Mission-critical EXCEPTION: a file the project lists under
+    # `lints: mc_exceptions:` is not held to the critical tier yet. It is
+    # linted at the regression-safe `strict` baseline instead — never muted —
+    # and the skip is REPORTED with its reason so the user can decide.
+    # Applied only when the resolved tier is actually critical, so an
+    # exception can never RAISE a weaker profile.
+    val mc_reason = linter.config.mc_exception_reason(file_path)
+    if mc_reason != "":
+        val at_critical = match linter.config.profile:
+            case Some(p): p == LintProfile.Critical
+            case nil: false
+        if at_critical:
+            if json_output:
+                print("{\"type\":\"lint-mc-exception\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"{escape_json(mc_reason)}\"}")
+            else:
+                info("lint", mc_exception_report_line(file_path, mc_reason))
+            linter.config.set_profile(LintProfile.Strict)
+
     # --wm-lane turns ON the default-off WM/GUI/web/2D portable-lane boundary
     # rule and nothing else, so the portability contract can be checked without
     # the ~900 lines of noise --warn-all produces. See
     # _LintMain/wm_lane_boundary_lints.spl.
     if policy.wm_lane:
         linter.config.set_level("wm_lane_boundary", LintLevel.Deny)
+
+    # --gpu-2d-perf turns ON the default-off Simple 2D/GPU per-frame cost rule
+    # and nothing else. See _LintMain/gpu_2d_perf_lints.spl.
+    if policy.gpu_2d_perf:
+        linter.config.set_level("gpu_2d_perf", LintLevel.Deny)
 
     if warn_all:
         for lint_name in all_lint_names():
@@ -665,6 +693,10 @@ fn _run_lint_with_linter_source(
                 # would emit invalid JSON. See
                 # .claude/memory reference_to_to_text_on_erased_any_bool_corrupt.
                 val not_linted_json = if not_linted: "true" else: "false"
+                linter.last_diagnostic_count = error_count + warning_count
+                linter.last_error_count = error_count
+                linter.last_warning_count = warning_count
+                linter.last_not_analyzed = not_linted
                 if json_output:
                     if not_linted:
                         print("{\"type\":\"lint-not-linted\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"parse failure\"}")

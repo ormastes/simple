@@ -2,7 +2,8 @@
 # SemVer Parser and Constraint Matching
 # Implements Semantic Versioning 2.0.0 specification
 
-use package.types
+use std.nogc_async_mut.package.types.{Version, VersionConstraint}
+use std.common.convert.{try_parse_int}
 
 # ============================================================================
 # Version Parsing
@@ -67,15 +68,14 @@ fn parse_int_component(s: text) -> Result<i64, text>:
     val size = s.len()
     var i = 0
     while i < size:
-        val ch = s[i:i + 1]
-        if ch < "0" or ch > "9":
+        val ch = s.char_code_at(i)
+        if ch < 48 or ch > 57:
             return Err("Version component must be numeric")
         i = i + 1
 
-    # Try to parse as integer
-    val num = s.to_int()
-    if num == nil:
-        return Err("Version component must be numeric")
+    # The legacy text.to_int intrinsic cannot represent parse failure reliably.
+    # Digits were checked above; reject overflow through the fail-closed parser.
+    val num = try_parse_int(s) ?? -1
     if num < 0:
         return Err("Version component must be non-negative")
 
@@ -107,16 +107,21 @@ fn version_greater(a: Version, b: Version) -> bool:
         return a.patch > b.patch
 
     # Compare prerelease (no prerelease > with prerelease)
-    match (a.prerelease, b.prerelease):
-        case (nil, Some(_)):
-            true        # 1.0.0 > 1.0.0-alpha
-        case (Some(_), nil):
-            false       # 1.0.0-alpha < 1.0.0
-        case (Some(pre_a), Some(pre_b)):
-            # Lexicographic comparison of prerelease
-            pre_a > pre_b
-        case (nil, nil):
-            false          # Equal versions
+    # Keep optional tests explicit: nested Some tuple patterns are not yet
+    # reliable in the native bootstrap lowering (tracked 2026-09-23).
+    match a.prerelease:
+        Some(pre_a):
+            match b.prerelease:
+                Some(pre_b):
+                    return pre_a > pre_b
+                nil:
+                    return false
+        nil:
+            match b.prerelease:
+                Some(_):
+                    return true
+                nil:
+                    return false
 
 fn version_greater_or_equal(a: Version, b: Version) -> bool:
     """Check if version a >= version b"""
@@ -154,7 +159,7 @@ fn parse_constraint(s: text) -> Result<VersionConstraint, text>:
         val version = match parse_version(version_str):
             case Ok(v): v
             case Err(e): return Err(e)
-        return Ok(VersionConstraint.Caret(base: version))
+        return Ok(VersionConstraint.Caret(version: version))
 
     # Tilde constraint (~1.2.3)
     if trimmed.starts_with("~"):
@@ -162,7 +167,7 @@ fn parse_constraint(s: text) -> Result<VersionConstraint, text>:
         val version = match parse_version(version_str):
             case Ok(v): v
             case Err(e): return Err(e)
-        return Ok(VersionConstraint.Tilde(base: version))
+        return Ok(VersionConstraint.Tilde(version: version))
 
     # Range constraint (>=1.0.0, <2.0.0)
     if trimmed.contains(","):
@@ -174,7 +179,7 @@ fn parse_constraint(s: text) -> Result<VersionConstraint, text>:
         val version = match parse_version(version_str):
             case Ok(v): v
             case Err(e): return Err(e)
-        return Ok(VersionConstraint.GreaterEq(version: version))
+        return Ok(VersionConstraint.GreaterEqual(version: version))
 
     # Less than (<2.0.0)
     if trimmed.starts_with("<"):
@@ -182,7 +187,7 @@ fn parse_constraint(s: text) -> Result<VersionConstraint, text>:
         val version = match parse_version(version_str):
             case Ok(v): v
             case Err(e): return Err(e)
-        return Ok(VersionConstraint.LessThan(version: version))
+        return Ok(VersionConstraint.Less(version: version))
 
     # Exact version (1.2.3)
     val version = match parse_version(trimmed):
@@ -241,10 +246,16 @@ fn satisfies(version: Version, constraint: VersionConstraint) -> bool:
         case VersionConstraint.Range(min, max):
             version_greater_or_equal(version, min) and version_less(version, max)
 
-        case VersionConstraint.GreaterEq(min_version):
+        case VersionConstraint.GreaterEqual(min_version):
             version_greater_or_equal(version, min_version)
 
-        case VersionConstraint.LessThan(max_version):
+        case VersionConstraint.Greater(min_version):
+            version_greater(version, min_version)
+
+        case VersionConstraint.LessEqual(max_version):
+            version_less(version, max_version) or version_equal(version, max_version)
+
+        case VersionConstraint.Less(max_version):
             version_less(version, max_version)
 
 fn satisfies_caret(version: Version, base: Version) -> bool:
@@ -305,10 +316,16 @@ fn constraint_to_string(constraint: VersionConstraint) -> text:
         case VersionConstraint.Range(min, max):
             ">={min.to_string()}, <{max.to_string()}"
 
-        case VersionConstraint.GreaterEq(v):
+        case VersionConstraint.GreaterEqual(v):
             ">=" + v.to_string()
 
-        case VersionConstraint.LessThan(v):
+        case VersionConstraint.Greater(v):
+            ">" + v.to_string()
+
+        case VersionConstraint.LessEqual(v):
+            "<=" + v.to_string()
+
+        case VersionConstraint.Less(v):
             "<" + v.to_string()
 
 fn find_max_satisfying(versions: [Version], constraint: VersionConstraint) -> Version?:

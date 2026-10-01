@@ -22,6 +22,8 @@ use compiler.common.assurance.policy_names.{normalize_profile_name, deprecated_p
 use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
     warning_phase_env_var_name, downgrade_severity_rank,
     severity_rank_warn, severity_rank_deny}
+use compiler.common.assurance.mc_exceptions.{McException, parse_mc_exceptions,
+    mc_exception_reason_for}
 use compiler.semantics.lint.option_me_call.{OptionMeCallWarning}
 
 extern fn rt_env_get(key: text) -> text
@@ -127,91 +129,49 @@ fn parse_lint_profile(profile_str: String) -> Option<LintProfile>:
 
 # All configurable lint names.
 fn all_lint_names() -> [text]:
-    ["primitive_api", "bare_bool", "simple_script_required", "print_in_test_spec", "todo_format",
-     "spipe_no_print_based_tests", "spipe_missing_docstrings",
-     "spipe_minimal_docstrings", "spipe_manual_assertions",
-     "spipe_placeholder_tests", "spipe_empty_examples",
-     "spipe_boolean_wrapper_assertions", "spipe_false_boolean_wrapper_assertions",
-     "unnamed_duplicate_typed_args", "resource_leak",
-     "wildcard_match", "non_exhaustive_match",
-     "export_outside_init", "init_boundary_violation",
-     "bypass_with_code_files", "unknown_annotation", "unknown_decorator", "stub_impl",
-     "unknown_attribute", "too_many_arguments", "dummy_accessor",
-     "parser_contextual_keyword", "deprecated_if_let",
-     "struct_construction_parens", "short_grammar_refactor",
-     "raw_unit_postfix", "simd_opportunity",
-     "similar_parent_method_name", "nonexistent_type",
-     "required_comment",
-     "ui_no_raw_widget_kind", "ui_no_raw_variant", "ui_no_raw_theme_name",
-     "stale_md_diagrams", "hash_bracket_attribute", "llvm_backend_type_safety",
-     # Newly-configurable families (previously unmapped — see
-     # map_lint_code_to_config_name). Default warn (regression-safe).
-     "unused_code", "style_convention", "unsafe_pattern", "concurrency_misuse",
-     "closure_capture", "ignored_return", "multiline_bool", "memory_safety",
-     "collection_performance",
-     "visibility_boundary", "database_integrity", "tracking_traceability",
-     # Freestanding/kernel-risk entry-closure codegen defect avoidance
-     # (C1/C4/C5/C7) — scoped to src/os/** and examples/09_embedded/**.
-     "freestanding_enum_eq", "freestanding_anon_tuple_return",
-     "freestanding_bare_conversion", "freestanding_global_call_init",
-     "module_init_literal", "raw_rt_access",
-     # Const-by-default references (W-MC-REF-001) — warn in ALL tiers
-     # including robust; deny escalation is a later profile-v2 change.
-     "const_ref_default",
-     # Bare-primitive internal bindings (W-MC-VAL-001, REQ-MC-011) — allow by
-     # default (would flood non-MC code); warn under the critical tier.
-     "bare_primitive_internal",
-     # Unwrapped foreign resource escape (W-MC-RES-001, REQ-MC-023) — allow
-     # by default (would flood non-MC FFI glue); warn under the critical
-     # tier. Deny at profile v2 (deliberately not implemented here).
-     "unwrapped_foreign_resource",
-     "raw_sffi_call",
-     # Silent-default / fail-open (W-MC-DEF-001/002/003) — WARN by default so
-     # existing code keeps compiling. PROMOTION TO A HARD ERROR IS THE ONE-LINE
-     # CHANGE `levels["silent_default"] = "deny"` below, and nothing else.
-     "silent_default",
-     # WM/GUI/web/2D portable-lane dependency boundary (WML001/WML002) — allow
-     # by default because it walks every import line; --wm-lane or --warn-all
-     # turns it on. See wm_lane_boundary_lints.spl.
-     "wm_lane_boundary"]
+    # The default-level catalog is the single authoritative list. This
+    # projection replaces the formerly independent hand-maintained name array.
+    build_default_levels().keys()
 
-# Allocation-free membership for config and attribute parsing. Keep enumeration
-# in `all_lint_names`; hot membership must not rebuild and scan that array for
-# every authored lint name.
+pub struct CanonicalLintRuleDescriptor:
+    name: text
+    default_level: text
+
+pub struct CanonicalLintRuleProfileDescriptor:
+    name: text
+    moderate_level: text
+    strict_level: text
+    robust_level: text
+    critical_level: text
+
+pub fn canonical_lint_rule_descriptors() -> [CanonicalLintRuleDescriptor]:
+    val levels = build_default_levels()
+    var descriptors: [CanonicalLintRuleDescriptor] = []
+    for name in levels.keys():
+        descriptors.push(CanonicalLintRuleDescriptor(
+            name: name, default_level: levels[name]))
+    descriptors
+
+pub fn canonical_lint_rule_profile_descriptors() -> [CanonicalLintRuleProfileDescriptor]:
+    val moderate = profile_default_levels(LintProfile.Moderate)
+    val strict = profile_default_levels(LintProfile.Strict)
+    val robust = profile_default_levels(LintProfile.Robust)
+    val critical = profile_default_levels(LintProfile.Critical)
+    var descriptors: [CanonicalLintRuleProfileDescriptor] = []
+    for rule in canonical_lint_rule_descriptors():
+        descriptors.push(CanonicalLintRuleProfileDescriptor(
+            name: rule.name,
+            moderate_level: moderate[rule.name],
+            strict_level: strict[rule.name],
+            robust_level: robust[rule.name],
+            critical_level: critical[rule.name]))
+    descriptors
+
+# Membership is projected from the same generated default catalog used by
+# enumeration and profile descriptors. This removes the former second manual
+# match table, which had already drifted by omitting `nonexistent_type`.
 fn lint_name_is_known(name: text) -> bool:
-    match name:
-        case "primitive_api" | "bare_bool" | "simple_script_required" |
-             "print_in_test_spec" | "todo_format" |
-             "spipe_no_print_based_tests" | "spipe_missing_docstrings" |
-             "spipe_minimal_docstrings" | "spipe_manual_assertions" |
-             "spipe_placeholder_tests" | "spipe_empty_examples" |
-             "spipe_boolean_wrapper_assertions" |
-             "spipe_false_boolean_wrapper_assertions" |
-             "unnamed_duplicate_typed_args" | "resource_leak" |
-             "wildcard_match" | "non_exhaustive_match" |
-             "export_outside_init" | "init_boundary_violation" |
-             "bypass_with_code_files" | "unknown_annotation" |
-             "unknown_decorator" | "stub_impl" |
-             "unknown_attribute" | "too_many_arguments" | "dummy_accessor" |
-             "parser_contextual_keyword" | "deprecated_if_let" |
-             "struct_construction_parens" | "short_grammar_refactor" |
-             "raw_unit_postfix" | "simd_opportunity" |
-             "similar_parent_method_name" | "required_comment" |
-             "ui_no_raw_widget_kind" | "ui_no_raw_variant" |
-             "ui_no_raw_theme_name" | "stale_md_diagrams" |
-             "hash_bracket_attribute" | "llvm_backend_type_safety" |
-             "unused_code" | "style_convention" | "unsafe_pattern" |
-             "concurrency_misuse" | "closure_capture" | "ignored_return" |
-             "multiline_bool" | "memory_safety" | "collection_performance" |
-             "visibility_boundary" | "database_integrity" |
-             "tracking_traceability" | "freestanding_enum_eq" |
-             "freestanding_anon_tuple_return" |
-             "freestanding_bare_conversion" |
-             "freestanding_global_call_init" | "module_init_literal" |
-             "raw_rt_access" | "const_ref_default" |
-             "bare_primitive_internal" | "unwrapped_foreign_resource" |
-             "raw_sffi_call" | "silent_default" | "wm_lane_boundary": true
-        case _: false
+    build_default_levels().contains_key(name)
 
 # Build the default levels dict for all configurable lint names.
 # Most are Warn; exceptions: spipe_no_print_based_tests=Deny,
@@ -302,6 +262,9 @@ fn build_default_levels() -> Dict<String, String>:
     # [lints] entry. It must never run in a normal build — and cannot, since
     # compiler/90.tools/lint is not on the compile/build driver's import path.
     levels["wm_lane_boundary"] = "allow"
+    # DEFAULT OFF, same reasoning: gpu_2d_perf is opt-in via --gpu-2d-perf,
+    # --warn-all, or an explicit simple.sdn [lints] entry.
+    levels["gpu_2d_perf"] = "allow"
     levels
 
 # Per-tier default levels, layered on top of build_default_levels().
@@ -461,6 +424,7 @@ class LintCliPolicy:
     fix_all: bool
     fix_dry_run: bool
     wm_lane: bool
+    gpu_2d_perf: bool
     profile: Option<LintProfile>
     error: String
 
@@ -469,7 +433,7 @@ impl LintCliPolicy:
         var policy = LintCliPolicy(
             deny_all: false, warn_all: false, json_output: false,
             fix_mode: false, fix_all: false, fix_dry_run: false,
-            wm_lane: false, profile: nil, error: "")
+            wm_lane: false, gpu_2d_perf: false, profile: nil, error: "")
         var expect_profile = false
         for arg in args:
             if expect_profile:
@@ -485,6 +449,7 @@ impl LintCliPolicy:
             elif arg == "--fix-all": policy.fix_all = true
             elif arg == "--fix-dry-run": policy.fix_dry_run = true
             elif arg == "--wm-lane": policy.wm_lane = true
+            elif arg == "--gpu-2d-perf": policy.gpu_2d_perf = true
             elif arg == "--profile": expect_profile = true
             elif arg.starts_with("--profile="):
                 val profile_text = arg.slice(10, arg.len())
@@ -515,6 +480,12 @@ class LintConfig:
     # switch. Default false, so a config that never sets it behaves byte-identically
     # to before. See compiler.common.assurance.warning_phase.
     warning_phase: bool
+    # MISSION-CRITICAL EXCEPTIONS (2026-08-28): repo-relative path scopes that
+    # are NOT held to the critical tier yet, each with a reason. A file inside
+    # one is linted at `strict` and the skip is REPORTED. Parsed from the
+    # `mc_exceptions:` key under `lints:`; see
+    # compiler.common.assurance.mc_exceptions for the grammar.
+    mc_exceptions: [McException]
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
@@ -527,7 +498,8 @@ impl LintConfig:
         LintConfig(levels: {}, effective_defaults: build_default_levels(),
                    source_path: "", profile: nil, error: "",
                    warning_phase: warning_phase_enabled_for_value(
-                       rt_env_get(warning_phase_env_var_name()) ?? ""))
+                       rt_env_get(warning_phase_env_var_name()) ?? ""),
+                   mc_exceptions: [])
 
     # Load config from an SDN file.  Parses the canonical `lints:` section.
     static fn from_sdn_file(path: String) -> LintConfig:
@@ -599,6 +571,11 @@ impl LintConfig:
                     # separate key fails CLOSED where a name suffix fails OPEN.
                     if lint_name == "warning_phase":
                         config.set_warning_phase_from_value(level_str)
+                    elif lint_name == "mc_exceptions":
+                        # Flat scalar on purpose: the typed ProjectContext loader
+                        # reads the same key and must never see a shape it
+                        # rejects (a parse error there drops the whole manifest).
+                        config.mc_exceptions = parse_mc_exceptions(level_str)
                     elif lint_name == "profile":
                         if parse_lint_profile(level_str).?:
                             config.set_profile_from_string(level_str)
@@ -653,6 +630,11 @@ impl LintConfig:
     # the environment; this stays a pure function of its argument.
     me set_warning_phase_from_value(raw: String):
         self.warning_phase = warning_phase_enabled_for_value(raw)
+
+    # The mission-critical exception reason covering `path`, or "" when the
+    # file is held to the configured profile. Pure lookup; the caller reports.
+    fn mc_exception_reason(path: String) -> String:
+        mc_exception_reason_for(self.mc_exceptions, path)
 
     me set_error_once(message: String):
         if self.error == "":
@@ -769,7 +751,8 @@ impl LintConfig:
                    effective_defaults: self.effective_defaults,
                    source_path: self.source_path,
                    profile: self.profile, error: self.error,
-                   warning_phase: self.warning_phase)
+                   warning_phase: self.warning_phase,
+                   mc_exceptions: self.mc_exceptions)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     resolve_lint_config_with_lines(base, path, content.split("\n"))
@@ -847,6 +830,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "too_many_arguments"
     if code == "WML001" or code == "WML002":
         return "wm_lane_boundary"
+    if code == "G2DP001" or code == "G2DP002" or code == "G2DP003":
+        return "gpu_2d_perf"
     if code == "ACC001":
         return "dummy_accessor"
     if code == "TYPE001" or code == "TYPE002":
@@ -1224,6 +1209,10 @@ class Linter:
     manifest_dir_cache: Dict<String, String>
     manifest_dir_cache_count: i64
     prepared_config_path: String
+    last_diagnostic_count: i64
+    last_error_count: i64
+    last_warning_count: i64
+    last_not_analyzed: bool
 
 fn linter_find_project_sdn(linter: Linter, file_path: String) -> String:
     """Resolve one source's project manifest with a bounded command cache."""

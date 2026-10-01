@@ -1,0 +1,161 @@
+"""Allocation-free semantic-array preflight for native-build payload collections."""
+
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.composition.native_build_payload_types_v1.{NativeBuildReferenceV1}
+
+pub struct NativeBuildCollectionPreflightV1:
+    ok: bool
+    item_count: i64
+    text_bytes: i64
+
+fn _failure_v1() -> NativeBuildCollectionPreflightV1:
+    NativeBuildCollectionPreflightV1(ok: false, item_count: 0, text_bytes: 0)
+
+fn _success_v1(item_count: i64, text_bytes: i64) -> NativeBuildCollectionPreflightV1:
+    NativeBuildCollectionPreflightV1(ok: true, item_count: item_count,
+        text_bytes: text_bytes)
+
+fn _read_u32_v1(bytes: [u8], offset: i64) -> u32:
+    var value: u32 = 0u32
+    var index: i64 = 0
+    while index < 4:
+        value = value | ((bytes[offset + index] as u32) << ((index * 8) as u32))
+        index = index + 1
+    value
+
+fn _contains_zero_v1(bytes: [u8]) -> bool:
+    for value in bytes:
+        if value == 0u8: return true
+    false
+
+pub fn native_build_text_bytes_less_v1(left_value: text, right_value: text) -> bool:
+    val left = left_value.bytes()
+    val right = right_value.bytes()
+    val count = if left.len() < right.len(): left.len() else: right.len()
+    var index: i64 = 0
+    while index < count:
+        if left[index] != right[index]: return left[index] < right[index]
+        index = index + 1
+    left.len() < right.len()
+
+pub fn native_build_reference_less_v1(left: NativeBuildReferenceV1,
+        right: NativeBuildReferenceV1) -> bool:
+    native_build_text_bytes_less_v1(left.role, right.role) or
+        (left.role == right.role and native_build_text_bytes_less_v1(left.name, right.name))
+
+fn _byte_ranges_compare_v1(bytes: [u8], left_start: i64, left_length: i64,
+        right_start: i64, right_length: i64) -> i64:
+    val count = if left_length < right_length: left_length else: right_length
+    var index: i64 = 0
+    while index < count:
+        val left = bytes[left_start + index]
+        val right = bytes[right_start + index]
+        if left < right: return -1
+        if left > right: return 1
+        index = index + 1
+    if left_length < right_length: return -1
+    if left_length > right_length: return 1
+    0
+
+fn _text_range_v1(bytes: [u8], position: i64, allow_empty: bool,
+        remaining_text: i64) -> (i64, i64, i64, bool):
+    if position < 0 or position > bytes.len() - 4: return (position, 0, 0, false)
+    val length = _read_u32_v1(bytes, position) as i64
+    val start = position + 4
+    if (length == 0 and not allow_empty) or length > remaining_text or
+            start > bytes.len() or length > bytes.len() - start:
+        return (position, 0, 0, false)
+    val raw = bytes[start..(start + length)]
+    if _contains_zero_v1(raw): return (position, 0, 0, false)
+    match validated_utf8_bytes_to_text_linear(raw):
+        case Ok(_): (start + length, start, length, true)
+        case Err(_): (position, 0, 0, false)
+
+pub fn native_build_text_vector_preflight_v1(bytes: [u8], max_items: i64,
+        max_text_bytes: i64) -> NativeBuildCollectionPreflightV1:
+    if bytes.len() < 4: return _failure_v1()
+    val count = _read_u32_v1(bytes, 0) as i64
+    if count > max_items or count > (bytes.len() - 4) / 4: return _failure_v1()
+    var position: i64 = 4
+    var retained_text: i64 = 0
+    var index: i64 = 0
+    while index < count:
+        val (next, _, length, ok) = _text_range_v1(
+            bytes, position, false, max_text_bytes - retained_text)
+        if not ok: return _failure_v1()
+        retained_text = retained_text + length
+        position = next
+        index = index + 1
+    if position != bytes.len(): return _failure_v1()
+    _success_v1(count, retained_text)
+
+pub fn native_build_references_preflight_v1(bytes: [u8], max_items: i64,
+        max_text_bytes: i64) -> NativeBuildCollectionPreflightV1:
+    if bytes.len() < 4: return _failure_v1()
+    val count = _read_u32_v1(bytes, 0) as i64
+    if count > max_items or count > (bytes.len() - 4) / 51: return _failure_v1()
+    var position: i64 = 4
+    var retained_text: i64 = 0
+    var previous_role_start: i64 = -1
+    var previous_role_length: i64 = 0
+    var previous_name_start: i64 = -1
+    var previous_name_length: i64 = 0
+    var index: i64 = 0
+    while index < count:
+        val (after_role, role_start, role_length, role_ok) = _text_range_v1(
+            bytes, position, false, max_text_bytes - retained_text)
+        if not role_ok: return _failure_v1()
+        retained_text = retained_text + role_length
+        val (after_name, name_start, name_length, name_ok) = _text_range_v1(
+            bytes, after_role, false, max_text_bytes - retained_text)
+        if not name_ok: return _failure_v1()
+        retained_text = retained_text + name_length
+        val (after_kind, _, kind_length, kind_ok) = _text_range_v1(
+            bytes, after_name, false, max_text_bytes - retained_text)
+        if not kind_ok: return _failure_v1()
+        retained_text = retained_text + kind_length
+        if after_kind > bytes.len() - 36: return _failure_v1()
+        if index > 0:
+            val role_order = _byte_ranges_compare_v1(bytes, previous_role_start,
+                previous_role_length, role_start, role_length)
+            if role_order > 0: return _failure_v1()
+            if role_order == 0 and _byte_ranges_compare_v1(bytes, previous_name_start,
+                    previous_name_length, name_start, name_length) >= 0:
+                return _failure_v1()
+        previous_role_start = role_start
+        previous_role_length = role_length
+        previous_name_start = name_start
+        previous_name_length = name_length
+        position = after_kind + 36
+        index = index + 1
+    if position != bytes.len(): return _failure_v1()
+    _success_v1(count, retained_text)
+
+pub fn native_build_map_preflight_v1(bytes: [u8], max_items: i64,
+        max_text_bytes: i64) -> NativeBuildCollectionPreflightV1:
+    if bytes.len() < 4: return _failure_v1()
+    val count = _read_u32_v1(bytes, 0) as i64
+    if count > max_items or count > (bytes.len() - 4) / 9: return _failure_v1()
+    var position: i64 = 4
+    var retained_text: i64 = 0
+    var previous_key_start: i64 = -1
+    var previous_key_length: i64 = 0
+    var index: i64 = 0
+    while index < count:
+        val (after_key, key_start, key_length, key_ok) = _text_range_v1(
+            bytes, position, false, max_text_bytes - retained_text)
+        if not key_ok: return _failure_v1()
+        retained_text = retained_text + key_length
+        val (after_value, _, value_length, value_ok) = _text_range_v1(
+            bytes, after_key, true, max_text_bytes - retained_text)
+        if not value_ok: return _failure_v1()
+        retained_text = retained_text + value_length
+        if index > 0 and _byte_ranges_compare_v1(bytes, previous_key_start,
+                previous_key_length, key_start, key_length) >= 0:
+            return _failure_v1()
+        previous_key_start = key_start
+        previous_key_length = key_length
+        position = after_value
+        index = index + 1
+    if position != bytes.len(): return _failure_v1()
+    _success_v1(count, retained_text)

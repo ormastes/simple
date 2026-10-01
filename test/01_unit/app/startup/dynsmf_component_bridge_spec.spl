@@ -1,10 +1,37 @@
 """
-Checked dynSMF to canonical component-planner bridge specification.
+## Purpose and audience
 
-The bridge must preserve real manifest IDs, choose cached dynamic artifacts
-when the authoritative embedded table is empty, reject impossible static pins,
-and remain free of host I/O and compiler/process fallbacks.
+Executable specification for the checked dynSMF to canonical
+component-planner bridge, for the startup and packaging owners who change
+how dynamic artifacts are admitted at process start. The bridge must
+preserve real manifest IDs, reject impossible static pins, and stay free
+of host I/O and compiler/process fallbacks.
+
+## Operator workflow
+
+Run this spec with the repo test runner; a failure names the manifest-ID,
+static-pin, or no-IO contract that regressed.
+
+## Compatibility and limitations
+
+The bridge is exercised in-process with in-memory manifest and setting
+tables, so artifact download/verify IO and loader hand-off are out of
+scope here; the structural scenarios read the bridge source at runtime to
+pin that no scan/shell/env escape hatch is introduced.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to dynsmf_component_bridge.spl or
+dynsmf_autoload.spl. A static_required_missing failure means a pinned
+component lacks a generated-table row; an evidence-status failure means
+the production startup no longer routes through the bridge before
+artifact IO.
 """
+# Lifecycle: doc/01_research/domain/low_dependency_ui_dynsmf.md ;
+# doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_loader_handoff.md ;
+# doc/04_architecture/ui/low_dependency_ui_dynsmf.md ;
+# doc/05_design/low_dependency_ui_dynsmf.md
+# @manual_section: dynsmf component startup bridge
 # @req: REQ-APP-STARTUP-001
 # @cover src/app/startup/dynsmf_component_bridge.spl 90%
 # @cover src/app/startup/startup_planner.spl 80%
@@ -46,47 +73,56 @@ fn bridge_setting(id: text, placement: text,
 
 describe "dynSMF component startup bridge":
     it "selects the exact startup manifest ID and leaves first-use work cold":
+        # @req REQ-APP-STARTUP-001
         step("Plan from cached-manifest metadata without artifact or source IO")
+        # @capture(statistics): planned startup step count and selected manifest ID retained
         val plan = dynsmf_component_startup_plan(
             "compile", [], bridge_manifest(), [
                 bridge_setting("compiler.frontend", "auto", "startup"),
                 bridge_setting("aspect.log.debug", "dynamic", "first_use")])
         expect(plan.ok).to_equal(true)
-        expect(plan.steps.len()).to_equal(1)
+        expect(plan.steps.len()).to_equal(1)  # oracle: exactly one setting is startup-activated
         expect(plan.steps[0].id).to_equal("compiler.frontend")
         expect(plan.steps[0].mode).to_equal("dynamic")
         expect(plan.steps[0].activation).to_equal("startup")
 
     it "fails closed when config pins a component absent from the static table":
+        # @req REQ-APP-STARTUP-001
         step("Require an actual generated-table row for static placement")
+        # @capture(statistics): rejected-plan reason and step count retained
         val plan = dynsmf_component_startup_plan(
             "compile", [], bridge_manifest(), [
                 bridge_setting("compiler.frontend", "static", "startup")])
         expect(plan.ok).to_equal(false)
         expect(plan.reason).to_equal(
             "static_required_missing:compiler.frontend")
-        expect(plan.steps.len()).to_equal(0)
+        expect(plan.steps.len()).to_equal(0)  # oracle: a rejected pin plans no startup step
 
     it "is reached by the production settings startup before artifact IO":
+        # @req REQ-APP-STARTUP-001
         step("Route a static pin through the real startup session owner")
+        # @capture(statistics): session evidence action, status, and reason retained
         val session = dynsmf_startup_session_with_dynload_settings(
             [], "", "", "spec-component-caller", bridge_manifest(), [
                 bridge_setting("compiler.frontend", "static", "startup")])
-        expect(session.loaded.len()).to_equal(0)
-        expect(session.evidence.len()).to_equal(1)
+        expect(session.loaded.len()).to_equal(0)  # oracle: the session must stop before any artifact load
+        expect(session.evidence.len()).to_equal(1)  # oracle: exactly one component_resolve evidence entry
         expect(session.evidence[0].action).to_equal("component_resolve")
         expect(session.evidence[0].status).to_equal("failed")
         expect(session.evidence[0].reason).to_equal(
             "static_required_missing:compiler.frontend")
 
     it "accepts matching real static identity and rejects a stale row":
+        # @req REQ-APP-STARTUP-001
+        step("Plan a static pin against matching and stale implementation rows")
+        # @capture(bit_table): admit/reject verdict per implementation-row comparison retained
         val ids = ["compiler.frontend"]
         val matching = dynsmf_component_startup_plan_with_static_table(
             "compile", [], bridge_manifest(), [
                 bridge_setting("compiler.frontend", "static", "startup")],
             ids, ids, ["impl-B"], ["impl-B"])
         expect(matching.ok).to_equal(true)
-        expect(matching.steps.len()).to_equal(1)
+        expect(matching.steps.len()).to_equal(1)  # oracle: the admitted static pin plans exactly one step
         expect(matching.steps[0].mode).to_equal("static")
 
         val stale = dynsmf_component_startup_plan_with_static_table(
@@ -98,19 +134,31 @@ describe "dynSMF component startup bridge":
             "static_required_stale:compiler.frontend")
 
     it "contains no scan shell compile environment or file IO surface":
+        # @req REQ-APP-STARTUP-001
+        step("Read the bridge module and assert its escape-hatch surface stays empty")
+        # @capture(statistics): per-keyword absence verdicts for IO, env, and process markers retained
         val source = read_file(
             "src/app/startup/dynsmf_component_bridge.spl")
         expect(source).to_contain("plan_startup(request")
         expect(source).to_contain("static_table_known = true")
-        expect(source.contains("file_" + "read")).to_equal(false)
-        expect(source.contains("dir_" + "walk")).to_equal(false)
-        expect(source.contains("env_" + "get")).to_equal(false)
-        expect(source.contains("process_" + "run")).to_equal(false)
-        expect(source.contains("process_" + "spawn")).to_equal(false)
-        expect(source.contains("bin/simple compile")).to_equal(false)
+        val reads_files = source.contains("file_" + "read")
+        val walks_dirs = source.contains("dir_" + "walk")
+        val reads_env = source.contains("env_" + "get")
+        val runs_processes = source.contains("process_" + "run") or
+            source.contains("process_" + "spawn")
+        val shells_out = source.contains("bin/simple compile")
+        expect(reads_files).to_equal(false)  # oracle: the bridge plans from caller-owned metadata only
+        expect(walks_dirs).to_equal(false)
+        expect(reads_env).to_equal(false)
+        expect(runs_processes).to_equal(false)
+        expect(shells_out).to_equal(false)
 
     it "is the production settings caller and rolls back on load failure":
+        # @req REQ-APP-STARTUP-001
+        step("Read the production autoload owner and pin the bridge call and rollback")
+        # @capture(statistics): bridge-call and rollback marker presence retained
         val source = read_file("src/app/startup/dynsmf_autoload.spl")
         expect(source).to_contain("dynsmf_component_startup_plan(")
         expect(source).to_contain("return dynsmf_session_close(out)")
-        expect(source.contains("dynsmf_dynload_" + "load_plan(")).to_equal(false)
+        val bypasses_bridge = source.contains("dynsmf_dynload_" + "load_plan(")
+        expect(bypasses_bridge).to_equal(false)  # oracle: startup must plan through the component bridge

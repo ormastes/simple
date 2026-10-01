@@ -1,0 +1,279 @@
+# codex-impl
+# Restricted worker IO boundary.  Prepared bytes are the only data visible to
+# this module.  The root-bound physical broker consumes its descriptors before
+# entering here; no filesystem path, descriptor, CAS, network, DB, or reverse-
+# reference handle is represented in this execution domain.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.operation_v1.{SosixOperationId}
+use std.common.contracts.sosix.wait_v1.{SOSIX_NATIVE_WAIT_SIGNALED}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsTaken}
+use std.nogc_async_mut.sosix.sync.{SosixSyncWaitDriver, sosix_sync_fs_read_at}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ThreePayloadClosureSealV2, ThreePayloadFallbackV1,
+    three_payload_closure_seal_valid_v2, three_payload_closure_seal_digest_v2
+}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    ThreePayloadInputIdentityV1, ThreePayloadWorkerPolicyV1
+}
+use compiler.common.cache_contract.physical_tld_v1.{
+    physical_tld_object_decode_bounded_v1, three_payload_contract_digest_valid_v1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    PreparedThreePayloadV2, verify_prepared_three_payload_v2
+}
+
+pub struct ThreePayloadObjectReadEvidenceV1:
+    logical_receipt: ThreePayloadInMemoryReadReceiptV1
+    source_digest: text
+    prior_tld_digest: text?
+    init_tld_digest: text
+
+pub struct ThreePayloadInMemoryReadReceiptV1:
+    input_identity: ThreePayloadInputIdentityV1
+    executor_digest: text
+    distinct_source: i64
+    distinct_prior: i64
+    distinct_init: i64
+    external_input_count: i64
+    rr_input_count: i64
+    logical_read_calls: i64
+    logical_read_bytes: i64
+    decoded_sections: i64
+    largest_declared_decode_bytes: i64
+
+class _ThreePayloadObjectProviderV1:
+    objects: [[u8]]
+    buffers: [[u8]]
+    services: i64
+
+    static fn create(source: [u8], prior: [u8]?, init: [u8]) -> _ThreePayloadObjectProviderV1:
+        # Slots are stable by role.  Slot zero is never a capability; a cold
+        # task retains an inactive slot two rather than renumbering init.
+        _ThreePayloadObjectProviderV1(objects: [[], source,
+            (match prior:
+                case Some(value): value
+                case nil: []), init], buffers: [[]], services: 0)
+
+    me fn allocate_buffer() -> SosixBufferRef:
+        self.buffers.push([])
+        SosixBufferRef(slot: (self.buffers.len() - 1).to_u32(), generation: 1u32)
+
+    fn bytes_of(buffer: SosixBufferRef) -> [u8]:
+        val slot = buffer.slot.to_i64()
+        if buffer.generation != 1u32 or slot <= 0 or slot >= self.buffers.len(): return []
+        self.buffers[slot]
+
+    me fn service(fs: SosixHostedFs) -> bool:
+        val taken = fs.take_next()
+        if not taken.taken: return taken.canceled
+        self.services = self.services + 1
+        val request = taken.request
+        val file_slot = request.file.slot.to_i64()
+        val buffer_slot = request.buffer.slot.to_i64()
+        if request.file.generation != 1u32 or request.buffer.generation != 1u32 or
+                file_slot <= 0 or file_slot >= self.objects.len() or
+                buffer_slot <= 0 or buffer_slot >= self.buffers.len():
+            return fs.complete_taken(taken, -5, 0u64)
+        val object = self.objects[file_slot]
+        val start = request.file_offset
+        val length = request.length
+        if request.buffer_offset != 0u64 or start > object.len().to_u64() or
+                length > object.len().to_u64() - start:
+            return fs.complete_taken(taken, -5, 0u64)
+        val stop = start + length
+        var owned: [u8] = []
+        var index = start.to_i64()
+        while index < stop.to_i64():
+            owned.push(object[index])
+            index = index + 1
+        self.buffers[buffer_slot] = owned
+        fs.complete_taken(taken, 0, length)
+
+impl SosixSyncWaitDriver for _ThreePayloadObjectProviderV1:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId,
+                 deadline_ns: u64, attempt: u64) -> u8:
+        self.service(fs)
+        SOSIX_NATIVE_WAIT_SIGNALED
+
+class _ThreePayloadObjectBrokerV1:
+    fs: SosixHostedFs
+    provider: _ThreePayloadObjectProviderV1
+    source: SosixCapabilityRef
+    prior: SosixCapabilityRef?
+    init: SosixCapabilityRef
+    reads: i64
+    bytes: i64
+
+fn _object_capability_v1(slot: u32) -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: slot, generation: 1u32)
+
+fn _object_broker_create_v1(prepared: PreparedThreePayloadV2) -> Result<_ThreePayloadObjectBrokerV1, ThreePayloadFallbackV1>:
+    val fs = match SosixHostedFs.create(7301u64, 7302u64, 1):
+        case Ok(value): value
+        case Err(_): return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    var prior_capability: SosixCapabilityRef? = nil
+    if prepared.prior_tld_bytes.is_some():
+        prior_capability = Some(_object_capability_v1(2u32))
+    Ok(_ThreePayloadObjectBrokerV1(fs: fs,
+        provider: _ThreePayloadObjectProviderV1.create(prepared.source_bytes,
+            prepared.prior_tld_bytes, prepared.init_tld_bytes),
+        source: _object_capability_v1(1u32), prior: prior_capability,
+        init: _object_capability_v1(3u32), reads: 0, bytes: 0))
+
+fn _object_broker_read_v1(broker: _ThreePayloadObjectBrokerV1,
+                          capability: SosixCapabilityRef,
+                          length: i64) -> Result<[u8], ThreePayloadFallbackV1>:
+    if length <= 0: return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val buffer = broker.provider.allocate_buffer()
+    val result = sosix_sync_fs_read_at(broker.fs, broker.provider, capability,
+        buffer, 0u64, 0u64, length.to_u64(), 0u64)
+    if result.completion.status != 0 or result.completion.transferred != length.to_u64():
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val bytes = broker.provider.bytes_of(buffer)
+    if bytes.len() != length: return Err(ThreePayloadFallbackV1.CorruptPayload)
+    broker.reads = broker.reads + 1
+    broker.bytes = broker.bytes + bytes.len()
+    Ok(bytes)
+
+fn _seal_same_v1(left: ThreePayloadClosureSealV2, right: ThreePayloadClosureSealV2) -> bool:
+    three_payload_closure_seal_valid_v2(left) and three_payload_closure_seal_valid_v2(right) and
+        three_payload_closure_seal_digest_v2(left) == three_payload_closure_seal_digest_v2(right)
+
+fn _receipt_valid_v1(receipt: ThreePayloadInMemoryReadReceiptV1,
+                     prepared: PreparedThreePayloadV2,
+                     policy: ThreePayloadWorkerPolicyV1) -> bool:
+    val expected_prior = if prepared.prior_tld_bytes.is_some(): 1 else: 0
+    receipt.distinct_source == 1 and receipt.distinct_prior == expected_prior and
+        receipt.distinct_init == 1 and receipt.external_input_count == 0 and
+        receipt.rr_input_count == 0 and receipt.logical_read_calls == 2 + expected_prior and
+        receipt.logical_read_bytes == prepared.seal.payload_bytes and
+        receipt.logical_read_bytes <= policy.max_read_bytes and
+        receipt.decoded_sections == prepared.seal.section_count and
+        receipt.decoded_sections <= policy.max_decoded_sections and
+        receipt.largest_declared_decode_bytes <= policy.max_decode_bytes and
+        receipt.largest_declared_decode_bytes <= prepared.seal.max_decode_bytes
+
+fn _prepared_within_worker_policy_v1(prepared: PreparedThreePayloadV2,
+                                     policy: ThreePayloadWorkerPolicyV1) -> bool:
+    # Only scalar/length checks are allowed here.  This gate runs before seal
+    # hashing, prepared verification, physical-TLD decoding, provider creation,
+    # buffer allocation, or broker copying.
+    if prepared.seal.payload_bytes < 0 or
+            prepared.seal.payload_bytes > policy.max_read_bytes or
+            prepared.seal.section_count < 0 or
+            prepared.seal.section_count > policy.max_decoded_sections or
+            prepared.seal.max_decode_bytes < 0 or
+            prepared.seal.max_decode_bytes > policy.max_decode_bytes:
+        return false
+    val source_bytes = prepared.source_bytes.len()
+    if source_bytes > policy.max_read_bytes: return false
+    var remaining = policy.max_read_bytes - source_bytes
+    match prepared.prior_tld_bytes:
+        case Some(bytes):
+            if bytes.len() > remaining: return false
+            remaining = remaining - bytes.len()
+        case nil: pass
+    prepared.init_tld_bytes.len() <= remaining
+
+fn _worker_policy_valid_v1(policy: ThreePayloadWorkerPolicyV1) -> bool:
+    three_payload_contract_digest_valid_v1(policy.executor_digest) and
+        policy.max_read_bytes > 0 and policy.max_decode_bytes > 0 and
+        policy.max_decoded_sections > 0
+
+fn _decoded_tld_shape_v1(bytes: [u8], policy: ThreePayloadWorkerPolicyV1) -> Result<(i64, i64), ThreePayloadFallbackV1>:
+    val decoded = physical_tld_object_decode_bounded_v1(bytes,
+        policy.max_decoded_sections, policy.max_decode_bytes)
+    if not decoded.ok: return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val object = match decoded.value:
+        case Some(value): value
+        case nil: return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok((object.header.sections.len(), object.header.payload_bytes))
+
+pub fn read_three_payload_confined_objects_v1(
+    prepared_handles: PreparedThreePayloadV2,
+    verified_seal: ThreePayloadClosureSealV2,
+    policy: ThreePayloadWorkerPolicyV1,
+) -> Result<ThreePayloadObjectReadEvidenceV1, ThreePayloadFallbackV1>:
+    # This is the real byte-object broker route.  It proves generation-tagged,
+    # bounded, path-free SimpleRing/SOSIX reads; it deliberately is not named
+    # as physical-file or production-worker admission.
+    if not _worker_policy_valid_v1(policy):
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    if policy.request_reverse_reference or policy.request_external_input:
+        return Err(ThreePayloadFallbackV1.ExternalFacetRequired)
+    if not _prepared_within_worker_policy_v1(prepared_handles, policy):
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    if not _seal_same_v1(prepared_handles.seal, verified_seal) or
+            not verify_prepared_three_payload_v2(prepared_handles):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+
+    val broker = _object_broker_create_v1(prepared_handles)?
+    val source = _object_broker_read_v1(broker, broker.source,
+        prepared_handles.source_bytes.len())?
+    var prior: [u8]? = nil
+    match prepared_handles.prior_tld_bytes:
+        case Some(expected):
+            val capability = match broker.prior:
+                case Some(value): value
+                case nil: return Err(ThreePayloadFallbackV1.CorruptPayload)
+            prior = Some(_object_broker_read_v1(broker, capability, expected.len())?)
+        case nil:
+            if broker.prior.is_some(): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val init = _object_broker_read_v1(broker, broker.init,
+        prepared_handles.init_tld_bytes.len())?
+
+    if sha256_u8_hex(source) != prepared_handles.seal.source_digest or
+            sha256_u8_hex(init) != prepared_handles.seal.init_tld_digest:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    match prior:
+        case Some(bytes):
+            val expected = match prepared_handles.seal.prior_tld_digest:
+                case Some(value): value
+                case nil: return Err(ThreePayloadFallbackV1.CorruptPayload)
+            if sha256_u8_hex(bytes) != expected:
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+        case nil:
+            if prepared_handles.seal.prior_tld_digest.is_some():
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+
+    val (init_sections, init_decode_bytes) = _decoded_tld_shape_v1(init, policy)?
+    var prior_sections: i64 = 0
+    var prior_decode_bytes: i64 = 0
+    match prior:
+        case Some(bytes):
+            val (section_count, decode_bytes) = _decoded_tld_shape_v1(bytes, policy)?
+            prior_sections = section_count
+            prior_decode_bytes = decode_bytes
+        case nil: pass
+    val decoded_sections = init_sections + prior_sections
+    var largest_declared_decode_bytes = prior_decode_bytes
+    if init_decode_bytes > largest_declared_decode_bytes:
+        largest_declared_decode_bytes = init_decode_bytes
+    val prior_count = if prior.is_some(): 1 else: 0
+    val receipt = ThreePayloadInMemoryReadReceiptV1(input_identity: ThreePayloadInputIdentityV1(
+            source_digest: prepared_handles.seal.source_digest,
+            prior_tld_digest: prepared_handles.seal.prior_tld_digest,
+            init_tld_digest: prepared_handles.seal.init_tld_digest,
+            seal_digest: prepared_handles.seal_digest),
+        executor_digest: policy.executor_digest,
+        distinct_source: 1, distinct_prior: prior_count, distinct_init: 1,
+        external_input_count: 0, rr_input_count: 0,
+        logical_read_calls: broker.reads, logical_read_bytes: broker.bytes,
+        decoded_sections: decoded_sections,
+        largest_declared_decode_bytes: largest_declared_decode_bytes)
+    if not _receipt_valid_v1(receipt, prepared_handles, policy):
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    Ok(ThreePayloadObjectReadEvidenceV1(logical_receipt: receipt,
+        source_digest: sha256_u8_hex(source),
+        prior_tld_digest: match prior:
+            case Some(bytes): Some(sha256_u8_hex(bytes))
+            case nil: nil,
+        init_tld_digest: sha256_u8_hex(init)))
+
+# The confined object broker creates the only capability references used by the
+# V1 executor.  It never exposes a path, a host descriptor, a network/cache
+# handle, or a fourth object; all three reads are bounded by the prepared seal.
+pub fn three_payload_worker_confinement_available_v1() -> bool:
+    true

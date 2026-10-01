@@ -1,0 +1,63 @@
+# @req REQ-SSPEC-COMPILER
+# A sibling dependency may allocate a class before its lexical declaration.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind, ScopeKind}
+use compiler.hir.hir_symbol_table_methods.*
+
+describe "canonical class reuse honors lexical binding requests":
+    it "publishes both lexical and exact lookup without allocating another owner":
+        var symbols = SymbolTable.new()
+        val owner = symbols.define_with_binding("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.value"), false)
+        expect(symbols.lookup_or_invalid("SpanProbe").is_valid()).to_equal(false)
+        expect(symbols.lookup_exact_type("SpanProbe")).to_be_nil()
+        val count = symbols.next_symbol_id
+        val declared = symbols.define("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.value"))
+        expect(declared.id).to_equal(owner.id)
+        expect(symbols.next_symbol_id).to_equal(count)
+        expect(symbols.lookup_or_invalid("SpanProbe").id).to_equal(owner.id)
+        expect(symbols.lookup_exact_type("SpanProbe").unwrap().id).to_equal(owner.id)
+        expect(symbols.lookup_qualified_type_raw("graph.value", "SpanProbe")).to_equal(owner.id)
+
+    it "keeps repeated nonlexical registration private to qualified lookup":
+        var symbols = SymbolTable.new()
+        val owner = symbols.define_with_binding("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.value"), false)
+        val repeated = symbols.define_with_binding("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.value"), false)
+        expect(repeated.id).to_equal(owner.id)
+        expect(symbols.lookup_or_invalid("SpanProbe").is_valid()).to_equal(false)
+        expect(symbols.lookup_exact_type("SpanProbe")).to_be_nil()
+        expect(symbols.lookup_qualified_type_raw("graph.value", "SpanProbe")).to_equal(owner.id)
+
+    it "preserves a competing short name and its exact lookup in the same scope":
+        var symbols = SymbolTable.new()
+        val first = symbols.define("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.first"))
+        val second = symbols.define_with_binding("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.second"), false)
+        val declared = symbols.define("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.second"))
+        expect(first.id == second.id).to_equal(false)
+        expect(declared.id).to_equal(second.id)
+        expect(symbols.lookup_or_invalid("SpanProbe").id).to_equal(first.id)
+        expect(symbols.lookup_exact_type("SpanProbe").unwrap().id).to_equal(first.id)
+        expect(symbols.lookup_qualified_type_raw("graph.second", "SpanProbe")).to_equal(second.id)
+
+    it "binds the reused owner in a child scope while preserving the outer binding":
+        var symbols = SymbolTable.new()
+        val outer = symbols.define("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.outer"))
+        val inner = symbols.define_with_binding("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.inner"), false)
+        symbols.push_scope(ScopeKind.Class)
+        val declared = symbols.define("SpanProbe", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("graph.inner"))
+        expect(declared.id).to_equal(inner.id)
+        expect(symbols.lookup_or_invalid("SpanProbe").id).to_equal(inner.id)
+        expect(symbols.lookup_exact_type("SpanProbe").unwrap().id).to_equal(outer.id)
+        symbols.pop_scope()
+        expect(symbols.lookup_or_invalid("SpanProbe").id).to_equal(outer.id)

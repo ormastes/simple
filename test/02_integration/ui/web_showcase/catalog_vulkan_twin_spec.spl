@@ -1,0 +1,137 @@
+"""
+# The showcase catalog renders on Vulkan without quietly falling back to the CPU
+## Purpose and audience
+For the engineers who own the Vulkan lane of the web renderer showcase
+(`std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast` and
+`simple_web_renderer`). The showcase's whole claim is that pages are drawn on
+the GPU; the failure this scenario is built to catch is the silent one, where
+the Vulkan request is served by the CPU path and every downstream lane still
+reports green because the pixels look fine.
+## Operator workflow
+Run: SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \\
+     bin/simple test test/02_integration/ui/web_showcase/catalog_vulkan_twin_spec.spl
+Each tab is rendered through the Vulkan backend; the per-frame lane census is
+read back and the CPU twin is compared against it with the showcase's own
+pixel comparator.
+## Compatibility and limitations
+Needs a working Vulkan device. Without one the renderer falls back to the CPU
+and reports the reason; the row is then recorded as blocked in its step text
+rather than asserting GPU behaviour that cannot happen here. The CPU-to-Vulkan
+pixel budget IS pinned as of 2026-09-13 (<= 0.5% of pixels differing at the
+comparator's per-channel TOLERANCE=8, worst channel delta <= 8); measured 0.00%
+on all 8 catalog pages after the shadow-formula fix. See
+doc/10_metrics/ui/engine2d_twin_parity_2026-09-13.md and
+doc/08_tracking/bug/web_cpu_vulkan_twin_pixel_divergence_unbudgeted_2026-09-13.md.
+## Verification guidance and troubleshooting
+`cpu_fallback=true` in the captured census is the headline failure: read
+`cpu_fallback_reason` beside it, which names the missing device or feature. A
+digest instability failure means the GPU lane is not bit-reproducible across
+two identical submissions.
+"""
+# Lifecycle: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ;
+# doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: web-showcase-vulkan-twin
+# @tag: ui, web, showcase, vulkan, gpu, integration, slow
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_vulkan_lane_census_line, web_vulkan_lane_census_drain}
+use app.ui.chrome_showcase.catalog.{
+    chrome_catalog_tabs, chrome_catalog_page, CHROME_CATALOG_SOURCE}
+use app.ui.chrome_showcase.gpu_boundary_audit.{audit_frame_digest, audit_field}
+use app.ui.chrome_showcase.frame.{chrome_frame_nonblank}
+use app.ui.chrome_showcase.pixel_diff.{diff_argb}
+
+val TWIN_W: i32 = 320
+val TWIN_H: i32 = 180
+
+fn vulkan_census_for(html: text, w: i32, h: i32) -> text:
+    # @step: drain the lane counters, render one frame, read the counters back
+    web_vulkan_lane_census_drain()
+    simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, "vulkan")
+    web_vulkan_lane_census_line()
+
+describe "web renderer showcase catalog on the Vulkan backend":
+
+    it "draws every showcase page on the GPU instead of silently using the CPU":
+        # @req REQ-UI-WEBSHOWCASE-010
+        # @capture(statistics): per-tab Vulkan lane census (fallback flag and dispatch count)
+        step("Render each catalog tab through Vulkan and read the lane census for that frame")
+        val tabs = chrome_catalog_tabs()
+        val source = read_file(CHROME_CATALOG_SOURCE)
+        var fell_back: [text] = []
+        var no_dispatch: [text] = []
+        var inspected = 0
+        var census_report = ""
+        for tab in tabs:
+            val census = vulkan_census_for(chrome_catalog_page(source, tab), TWIN_W, TWIN_H)
+            val fallback = audit_field(census, "cpu_fallback")
+            val dispatches = audit_field(census, "dispatches_frame")
+            census_report = census_report + "{tab} cpu_fallback={fallback} dispatches_frame={dispatches} reason={audit_field(census, \"cpu_fallback_reason\")}\n"
+            if fallback != "false":
+                fell_back = fell_back + [tab]
+            if dispatches == "0" or dispatches == "":
+                no_dispatch = no_dispatch + [tab]
+            inspected = inspected + 1
+        print(census_report)
+
+        if fell_back.len() > 0:
+            step("blocked: this host has no usable Vulkan device, the lane fell back to the CPU for {fell_back.len()} tab(s) -- see cpu_fallback_reason in the capture above")
+        else:
+            step("No tab fell back to the CPU, and each one issued GPU dispatch work")
+            # oracle: census fields emitted by web_vulkan_lane_census_line()
+            #         (simple_web_layout_engine2d_fast.spl:1541 and neighbours)
+            expect(inspected).to_equal(8)
+            expect(no_dispatch).to_equal([])
+
+    it "returns a bit-identical frame when the same page is submitted to the GPU twice":
+        # @req REQ-UI-WEBSHOWCASE-011
+        # @capture(statistics): the two Vulkan frame digests for the overview page
+        step("Submit the overview page to the Vulkan backend twice and compare the frame digests")
+        val tabs = chrome_catalog_tabs()
+        val html = chrome_catalog_page(read_file(CHROME_CATALOG_SOURCE), tabs[0])
+        val census = vulkan_census_for(html, TWIN_W, TWIN_H)
+        val first = audit_frame_digest(
+            simple_web_render_html_to_pixels_with_engine2d_backend(html, TWIN_W, TWIN_H, "vulkan"))
+        val second = audit_frame_digest(
+            simple_web_render_html_to_pixels_with_engine2d_backend(html, TWIN_W, TWIN_H, "vulkan"))
+        print("vulkan digests first={first} second={second} cpu_fallback={audit_field(census, \"cpu_fallback\")}")
+
+        if audit_field(census, "cpu_fallback") != "false":
+            step("blocked: no usable Vulkan device on this host, GPU reproducibility cannot be measured")
+        else:
+            step("The GPU produced the same frame both times")
+            expect(first).to_equal(second)
+
+    it "keeps the CPU and Vulkan twins drawing the same page at the same size":
+        # @req REQ-UI-WEBSHOWCASE-012
+        # @capture(statistics): diff_argb mismatch percentage and worst channel delta
+        step("Render the overview page on both backends and compare them with the showcase comparator")
+        val tabs = chrome_catalog_tabs()
+        val html = chrome_catalog_page(read_file(CHROME_CATALOG_SOURCE), tabs[0])
+        val cpu = simple_web_render_html_to_pixels_with_engine2d_backend(
+            html, TWIN_W, TWIN_H, "cpu_simd")
+        val gpu = simple_web_render_html_to_pixels_with_engine2d_backend(
+            html, TWIN_W, TWIN_H, "vulkan")
+        val diff = diff_argb(cpu, TWIN_W, TWIN_H, gpu, TWIN_W, TWIN_H)
+        print("twin diff {diff}")
+
+        step("Both twins drew the same frame: the CPU-to-Vulkan pixel budget is now pinned, and measured 0 differing pixels on all 8 catalog pages at this size on 2026-09-13")
+        # oracle: diff_argb (src/app/ui/chrome_showcase/pixel_diff.spl:45) with
+        #         its per-channel TOLERANCE=8; the budget below is the one this
+        #         repo never had -- see
+        #         doc/10_metrics/ui/engine2d_twin_parity_2026-09-13.md. The
+        #         ceiling is 0.5% rather than the measured 0.0% so an
+        #         unrelated sub-pixel lane change is not a false red, while the
+        #         29.33% shadow-formula divergence it replaced cannot return.
+        expect(diff.mismatch_pct_x100 <= 50).to_equal(true)
+        expect(diff.max_delta <= 8).to_equal(true)
+        # oracle: diff_argb (pixel_diff.spl:45) reports ok=false only for a
+        #         dimension mismatch or an empty image, i.e. an unusable pair
+        expect(diff.ok).to_equal(true)
+        expect(diff.pixels).to_equal(57600)
+        expect(chrome_frame_nonblank(cpu)).to_equal(true)
+        expect(chrome_frame_nonblank(gpu)).to_equal(true)

@@ -1,4 +1,8 @@
 # Private module helper `_has` silently resolves to the wrong function across modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-17
 - Severity: high (silent wrong answers, not a crash)
@@ -307,3 +311,4 @@ after a std.spec export (`pending`, `fail`, ...) is affected. Worked around in
 that spec by renaming the binding to `pending_request`; the rename is a
 workaround, not a fix — the resolution order (local binding > parameter > global
 function) is what needs correcting, at the same seed sites listed above.
+

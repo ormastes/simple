@@ -1,0 +1,160 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Round 13 (2026-09-13) equivalence gate for `sfnt_blob_glyph_advances_into`,
+# the batched replacement for the per-glyph `sfnt_glyph_advance_into` on the
+# font-renderer advance-miss path. Round 12 §3a measured the per-glyph function
+# at 1.09 ms x 228 calls = 248 ms on the eight-page web catalog, essentially all
+# of it the `parse_offset_table` + three `find_table` setup re-run per glyph.
+#
+# The ORACLE is the per-glyph function itself, kept unchanged: for every glyph
+# id and size the batch must return exactly what the per-glyph call returns, or
+# 0 exactly where the per-glyph call fails. This is an exactness property, not a
+# tolerance -- a differing advance moves glyphs and the web catalog's Draw IR
+# digests would stop being byte-identical.
+#
+# BOTH lanes are checked, and that is not decoration. The per-glyph function
+# reports the advance twice: `meta[2]`, rounded to whole pixels, and `meta[18]`,
+# the same advance in MILLI-pixels, and the renderer takes the milli lane. They
+# are rounded INDEPENDENTLY from the unrounded scale, so `milli / 1000` is a
+# different number from `meta[2]`. A first cut of this batch carried only the
+# pixel lane; it passed a pixel-only spec and moved all eight catalog digests.
+# Checking one lane is checking nothing.
+#
+# Metrics: doc/10_metrics/ui/web_perf_round13_2026-09-13.md
+
+use std.spec
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_INDEX, SFNT_GLYPH_SELECTOR_CODEPOINT,
+    sfnt_glyph_advance_into, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val PINNED_FONT: text = "assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf"
+
+# The per-glyph oracle, reduced to the one number the batch produces: the
+# advance, or 0 where the per-glyph path fails (which is exactly where the
+# caller falls through to its untouched slow path).
+fn _oracle_advance(blob: [u8], gid: i64, size: i64) -> i64:
+    var meta: [i64] = [0; 20]
+    sfnt_glyph_advance_into(blob, SFNT_GLYPH_SELECTOR_INDEX, gid, size, meta)
+    if meta[7] != 310031:
+        return 0
+    meta[18]
+
+# The rounded pixel lane of the same call (`meta[2]`).
+fn _oracle_advance_px(blob: [u8], gid: i64, size: i64) -> i64:
+    var meta: [i64] = [0; 20]
+    sfnt_glyph_advance_into(blob, SFNT_GLYPH_SELECTOR_INDEX, gid, size, meta)
+    if meta[7] != 310031:
+        return 0
+    meta[2]
+
+describe "batched sfnt glyph advances":
+    it "matches the per-glyph oracle over the whole ASCII catalog at 5 sizes":
+        # @req REQ-SSPEC-LIB
+        val blob = file_read_bytes(PINNED_FONT)
+        expect(blob.len()).to_be_greater_than(0)
+        var codepoints: [i64] = [0; 95]
+        var i: i64 = 0
+        while i < 95:
+            codepoints[i] = 32 + i
+            i = i + 1
+        var ids: [i64] = [0; 95]
+        sfnt_blob_glyph_ids_into(blob, codepoints, ids)
+        val sizes: [i64] = [1, 8, 16, 24, 512]
+        var compared: i64 = 0
+        var nonzero: i64 = 0
+        for size in sizes:
+            var batch: [i64] = [0; 95]
+            var batch_px: [i64] = [0; 95]
+            sfnt_blob_glyph_advances_into(blob, ids, size, batch, batch_px)
+            var j: i64 = 0
+            while j < 95:
+                expect(batch[j]).to_equal(_oracle_advance(blob, ids[j], size))
+                expect(batch_px[j]).to_equal(_oracle_advance_px(blob, ids[j], size))
+                if batch[j] > 0:
+                    nonzero = nonzero + 1
+                compared = compared + 1
+                j = j + 1
+        # Non-vacuity: a run that compared nothing, or compared only zeros,
+        # is not evidence that the arithmetic agrees.
+        expect(compared).to_equal(475)
+        expect(nonzero).to_be_greater_than(300)
+
+    it "matches the oracle on adversarial glyph ids including ids past numberOfHMetrics":
+        # @req REQ-SSPEC-LIB
+        # Scanning glyph INDEX space directly reaches both `hmtx` branches: ids
+        # below `numberOfHMetrics` (4-byte long metric) and ids at or above it
+        # (2-byte left-side-bearing tail reusing the last advance), plus ids
+        # past `numGlyphs` where the oracle fails and the batch must answer 0.
+        val blob = file_read_bytes(PINNED_FONT)
+        expect(blob.len()).to_be_greater_than(0)
+        var ids: [i64] = [0; 260]
+        var i: i64 = 0
+        while i < 256:
+            ids[i] = i
+            i = i + 1
+        ids[256] = 60000          # far past numGlyphs
+        ids[257] = 4294967295     # the selector's upper bound
+        ids[258] = 4294967296     # one past it: out of range for both paths
+        ids[259] = -7             # negative: out of range for both paths
+        val sizes: [i64] = [1, 16, 512]
+        var compared: i64 = 0
+        var zeros: i64 = 0
+        for size in sizes:
+            var batch: [i64] = [0; 260]
+            var batch_px: [i64] = [0; 260]
+            sfnt_blob_glyph_advances_into(blob, ids, size, batch, batch_px)
+            var j: i64 = 0
+            while j < 260:
+                expect(batch[j]).to_equal(_oracle_advance(blob, ids[j], size))
+                expect(batch_px[j]).to_equal(_oracle_advance_px(blob, ids[j], size))
+                if batch[j] == 0:
+                    zeros = zeros + 1
+                compared = compared + 1
+                j = j + 1
+        expect(compared).to_equal(780)
+        # The out-of-range ids (0, negative, past numGlyphs) must have produced
+        # real zeros, so the zero-agreement above is not vacuous either.
+        expect(zeros).to_be_greater_than(9)
+
+    it "answers all zeros for an empty blob and for out-of-range sizes":
+        # @req REQ-SSPEC-LIB
+        val blob = file_read_bytes(PINNED_FONT)
+        val ids: [i64] = [36, 37, 38, 39]
+        var empty_blob: [u8] = []
+        var out_empty: [i64] = [9, 9, 9, 9]
+        var out_empty_px: [i64] = [9, 9, 9, 9]
+        sfnt_blob_glyph_advances_into(empty_blob, ids, 16, out_empty, out_empty_px)
+        expect(out_empty[0]).to_equal(0)
+        expect(out_empty[3]).to_equal(0)
+        expect(out_empty_px[0]).to_equal(0)
+        expect(out_empty_px[3]).to_equal(0)
+        val bad_sizes: [i64] = [0, -4, 513, 100000]
+        for size in bad_sizes:
+            var out_bad: [i64] = [9, 9, 9, 9]
+            var out_bad_px: [i64] = [9, 9, 9, 9]
+            sfnt_blob_glyph_advances_into(blob, ids, size, out_bad, out_bad_px)
+            var j: i64 = 0
+            while j < 4:
+                expect(out_bad[j]).to_equal(0)
+                expect(out_bad_px[j]).to_equal(0)
+                expect(out_bad[j]).to_equal(_oracle_advance(blob, ids[j], size))
+                expect(out_bad_px[j]).to_equal(_oracle_advance_px(blob, ids[j], size))
+                j = j + 1
+
+    it "is insensitive to the output array being longer than the id array":
+        # @req REQ-SSPEC-LIB
+        # The renderer passes a fixed 95-slot buffer; a short id array must
+        # leave the tail zeroed rather than read past its end.
+        val blob = file_read_bytes(PINNED_FONT)
+        val ids: [i64] = [36, 37]
+        var out: [i64] = [9, 9, 9, 9, 9]
+        var out_px: [i64] = [9, 9, 9, 9, 9]
+        sfnt_blob_glyph_advances_into(blob, ids, 16, out, out_px)
+        expect(out[0]).to_equal(_oracle_advance(blob, 36, 16))
+        expect(out[1]).to_equal(_oracle_advance(blob, 37, 16))
+        expect(out[2]).to_equal(0)
+        expect(out[4]).to_equal(0)
+        expect(out_px[0]).to_equal(_oracle_advance_px(blob, 36, 16))
+        expect(out_px[2]).to_equal(0)

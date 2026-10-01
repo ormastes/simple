@@ -1,4 +1,8 @@
 # `MirToLlvm` no longer satisfies `MirTextCodegen.translate_call` — main is red for every spec
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (2026-08-04)
 **Date:** 2026-08-04
@@ -197,3 +201,4 @@ looks like a single-method break. It is also **name-based only**:
 that arity mismatch passes the check silently today and is deliberately left
 untouched here as out of scope for the compile break. It is worth a separate
 look.
+

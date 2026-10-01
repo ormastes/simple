@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# The interpreter's argument binder used to reject an arity mismatch with
+# `semantic: function expects 7 argument(s), but 8 were provided` and NOTHING
+# else: no callee, no line, no caller. Inside a native-build of the
+# self-hosted compiler (the seed interprets the pure-Simple frontend) that
+# single line was the whole diagnostic, and placing it took a full lane.
+# Every binder call site holds the callee's `FunctionDef`, so the name and
+# declaration line are free; `name_callee` (interpreter_call/core/arg_binding.rs)
+# now prefixes them, and appends the interpreted call stack when
+# `SIMPLE_DEBUG_FIELD_ACCESS=1` populates it.
+
+use std.spec.step
+
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val FIXTURE = """class Adder:
+    base: i64
+
+    fn two(a: i64, b: i64) -> i64:
+        self.base + a + b
+
+fn caller() -> i64:
+    val ad = Adder(base: 10)
+    ad.two(1, 2, 3)
+
+fn main():
+    print(caller())
+"""
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-arity-error-names-callee"
+    dir_create_all(dir)
+    dir
+
+# The compiler under test: `SIMPLE_SPEC_COMPILER` (a rebuilt seed or a stage
+# candidate), else `SIMPLE_BINARY`, else the deployed `bin/simple` — which may
+# be a stale seed that predates the fix and then fails this spec for the
+# wrong reason.
+fn compiler_binary() -> text:
+    val spec_compiler = env_get("SIMPLE_SPEC_COMPILER")
+    if spec_compiler != "":
+        return spec_compiler
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
+
+describe "an interpreter arity error names the callee":
+
+    """`two(1, 2, 3)` against `fn two(a, b)` must fail, and the failure must
+    say WHICH function was called and where it is declared. Under
+    `SIMPLE_DEBUG_FIELD_ACCESS=1` it must also name the calling frame."""
+
+    it "prefixes the callee name and declaration line, and the caller frame when the debug stack is live":
+        step("write the fixture")
+        val dir = work_dir()
+        val src = dir + "/main.spl"
+        assert_true(file_write(src, FIXTURE))
+
+        step("interpret it through the compiler binary with the debug call stack live")
+        # The interpreter lane is the one the native-build worker runs the
+        # self-hosted frontend on; the JIT lane SEGVs on this fixture
+        # (pre-existing, both the 09-19 and 09-26 seeds) and is not under test.
+        env_set("SIMPLE_EXECUTION_MODE", "interpreter")
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_RUST_SEED_WARNING", "0")
+        env_set("SIMPLE_DEBUG_FIELD_ACCESS", "1")
+        val ran = process_run(compiler_binary(), ["run", src])
+        assert_equal(ran[2], 1)
+
+        step("the diagnostic names the callee, its declaration line, the arity, and the caller chain")
+        val err = ran[1]
+        assert_true(err.contains("in call to `two` (declared at line 4): function expects 2 argument(s), but 3 were provided"))
+        assert_true(err.contains("(call stack: main -> caller)"))

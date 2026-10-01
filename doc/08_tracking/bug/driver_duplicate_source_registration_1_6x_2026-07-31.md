@@ -1,8 +1,12 @@
 # Driver registers ~6,359 duplicate/alias SourceFiles (1.6x the source list)
+## Closed 2026-09-16 — FIXED 2026-08-01; O(N^2) scan replaced by Dict, spec assertions verified green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-31
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** RECLASSIFIED 2026-08-01 — the duplicate registrations are DELIBERATE
 and load-bearing; "1.6x cost" is NOT supported by the source. One real O(N²) was
 found nearby and is the actual actionable item. See "Static re-analysis" below.
 **FIXED 2026-08-01** — the O(N²) linear scan is replaced by a `Dict<text, i64>`,
@@ -362,3 +366,4 @@ This is not the 1.6x lever it was filed as, and it should not be prioritised as
 one. The defensible work here is the `O(aliases x files)` linear scan in (e)(2)
 and the unresolved memory question in (e)(3) — both local, both cheap, neither
 requiring the alias set to shrink.
+

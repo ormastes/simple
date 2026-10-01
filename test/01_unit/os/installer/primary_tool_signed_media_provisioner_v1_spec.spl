@@ -1,0 +1,257 @@
+use std.spec
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestResourceLimits, ManifestTarget, SimpleArtifactManifest}
+use std.common.crypto.ed25519.{
+    pure_ed25519_keypair_from_seed, pure_ed25519_sign_from_seed_v1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    encode_simple_artifact_manifest_v1_signing_bytes}
+use os.installer.primary_tool_signed_media_provisioner_v1.{
+    PrimaryToolSignedMediaRowV1, PrimaryToolSignedMediaRequestV1,
+    PrimaryToolSignedMediaErrorV1,
+    primary_tool_signed_media_request_shape_v1,
+    primary_tool_signed_media_record_authenticated_v1,
+    primary_tool_signed_media_simplebox_matches_v1,
+    primary_tool_signed_media_rollback_receipt_error_v1,
+    primary_tool_signed_media_publication_receipt_valid_v1}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HostedSafeArtifactBundleNFinishReceiptV1}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSafeArtifactBindingReceiptV1,
+    SimpleboxSignedCatalogProvisionErrorV1,
+    SimpleboxSignedCatalogProvisionResultV1}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1}
+use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
+    simplebox_primary_tool_catalog_bundle_plan_v1}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootRecordV1}
+use os.kernel.loader.primary_linux_tool_catalog_bundle_v1.{
+    primary_linux_tool_catalog_required_paths_v1}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    simplebox_canonical_aliases_v1}
+
+fn signing_seed_v1() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60]
+
+fn hex_v1(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for byte in bytes:
+        val value = byte.to_i64()
+        out = out + digits.substring(value / 16, value / 16 + 1)
+        out = out + digits.substring(value % 16, value % 16 + 1)
+    out
+
+fn target_v1(arch: text) -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: arch, abi: "simpleos")
+
+fn manifest_v1(path: text, target: ManifestTarget) -> SimpleArtifactManifest:
+    SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "native-executable", target: target,
+        entrypoint: path, required_abi_features: [], required_services: [],
+        required_capabilities: 0u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 1048576, max_open_handles: 16,
+            max_threads: 1, cpu_budget_us: 0),
+        namespace_template: "primary-tools", native_libraries: [],
+        smf_libraries: [], interpreter: "", argument_schema: [],
+        startup_preloads: [], content_hashes: ["11" * 32],
+        signature: "ed25519:primary-root:" + "22" * 64,
+        debug_identity: path)
+
+fn authenticated_record_v1(
+    path: text, target: ManifestTarget, aliases: [text]
+) -> InstalledArtifactBootRecordV1:
+    val content_sha256 = "11" * 32
+    var manifest = manifest_v1(path, target)
+    manifest.signature = ""
+    val signing = encode_simple_artifact_manifest_v1_signing_bytes(
+        manifest, content_sha256)
+    val signed = pure_ed25519_sign_from_seed_v1(signing_seed_v1(), signing.bytes)
+    val envelope = "ed25519:primary-root:" + hex_v1(signed.signature)
+    manifest.signature = envelope
+    InstalledArtifactBootRecordV1(
+        canonical_path: path, aliases: aliases,
+        content_sha256: content_sha256, detached_signature: envelope,
+        expected_trust_root_sha256: sha256_u8_hex(signed.public_key),
+        manifest: manifest)
+
+fn empty_simplebox_v1(target: ManifestTarget) -> SimpleboxSignedCatalogProvisionResultV1:
+    SimpleboxSignedCatalogProvisionResultV1(
+        ok: false, error: SimpleboxSignedCatalogProvisionErrorV1.InvalidInput,
+        receipt: SimpleboxSafeArtifactBindingReceiptV1(
+            artifact_relative_path: "", artifact_sha256: "",
+            artifact_byte_count: 0, signed_record_relative_path: "",
+            signed_record_sha256: "", sam1_identity_sha256: ""),
+        plan: simplebox_primary_tool_catalog_bundle_plan_v1(target, [], []))
+
+fn request_v1(arch: text) -> PrimaryToolSignedMediaRequestV1:
+    val target = target_v1(arch)
+    val paths = primary_linux_tool_catalog_required_paths_v1()
+    var rows: [PrimaryToolSignedMediaRowV1] = []
+    var index: i64 = 0
+    while index < paths.len():
+        rows.push(PrimaryToolSignedMediaRowV1(
+            canonical_path: paths[index],
+            source_relative_path: "incoming/tool-" + index.to_text(),
+            payload_leaf: "tool-" + index.to_text(),
+            scr1_leaf: "tool-" + index.to_text() + ".scr1",
+            manifest_projection: manifest_v1(paths[index], target),
+            scr1_bytes: [0x53u8, 0x43u8, 0x52u8, index.to_u8()]))
+        index = index + 1
+    PrimaryToolSignedMediaRequestV1(
+        trusted_absolute_root: "/trusted", bundle_relative_path: "primary-v1",
+        descriptor_leaf: "release.ptrd", target: target,
+        expected_release_id: "release-1",
+        expected_signer_key_id: "primary-root",
+        trust_roots: [ExecutableManifestTrustedSignerV1(
+            key_id: "primary-root", public_key: [7u8] * 32)],
+        trust_config_bytes: (
+            "key_id=primary-root\npublic_key_ed25519_hex=" + "07" * 32 + "\n"
+        ).to_bytes(), rows: rows, descriptor_bytes: [1u8],
+        simplebox_input: empty_simplebox_v1(target))
+
+describe "primary-tool signed-media request boundary":
+    it "accepts the exact structural contract for all three 64-bit targets":
+        for arch in ["x86_64", "aarch64", "riscv64"]:
+            expect(primary_tool_signed_media_request_shape_v1(
+                request_v1(arch)).is_ok()).to_be(true)
+
+    it "rejects 32-bit and non-SimpleOS targets before safe I/O":
+        expect(primary_tool_signed_media_request_shape_v1(
+            request_v1("riscv32")).unwrap_err()).to_equal(
+                PrimaryToolSignedMediaErrorV1.UnsupportedTarget)
+        var mixed = request_v1("x86_64")
+        mixed.target.os = "linux"
+        expect(primary_tool_signed_media_request_shape_v1(mixed).unwrap_err()).to_equal(
+            PrimaryToolSignedMediaErrorV1.UnsupportedTarget)
+
+    it "rejects mixed-target manifest rows":
+        var request = request_v1("x86_64")
+        request.rows[3].manifest_projection.target = target_v1("riscv64")
+        expect(primary_tool_signed_media_request_shape_v1(request).unwrap_err()).to_equal(
+            PrimaryToolSignedMediaErrorV1.InvalidRequest)
+
+    it "rejects reordered canonical rows":
+        var request = request_v1("aarch64")
+        val first = request.rows[0]
+        request.rows[0] = request.rows[1]
+        request.rows[1] = first
+        expect(primary_tool_signed_media_request_shape_v1(request).unwrap_err()).to_equal(
+            PrimaryToolSignedMediaErrorV1.InvalidRequest)
+
+    it "rejects duplicate source and output authority":
+        var source = request_v1("riscv64")
+        source.rows[4].source_relative_path = source.rows[0].source_relative_path
+        expect(primary_tool_signed_media_request_shape_v1(source).is_err()).to_be(true)
+        var leaf = request_v1("riscv64")
+        leaf.rows[4].payload_leaf = leaf.rows[0].scr1_leaf
+        expect(primary_tool_signed_media_request_shape_v1(leaf).is_err()).to_be(true)
+
+    it "rejects duplicate or malformed externally pinned roots":
+        var request = request_v1("x86_64")
+        request.trust_roots.push(request.trust_roots[0])
+        expect(primary_tool_signed_media_request_shape_v1(request).unwrap_err()).to_equal(
+            PrimaryToolSignedMediaErrorV1.TrustRejected)
+        var short = request_v1("x86_64")
+        short.trust_roots[0].public_key = [1u8]
+        expect(primary_tool_signed_media_request_shape_v1(short).unwrap_err()).to_equal(
+            PrimaryToolSignedMediaErrorV1.TrustRejected)
+        var mismatched = request_v1("x86_64")
+        mismatched.trust_config_bytes = (
+            "key_id=primary-root\npublic_key_ed25519_hex=" + "08" * 32 + "\n"
+        ).to_bytes()
+        expect(primary_tool_signed_media_request_shape_v1(
+            mismatched).unwrap_err()).to_equal(
+                PrimaryToolSignedMediaErrorV1.TrustRejected)
+
+    it "rejects missing and oversized signed metadata before allocation or I/O":
+        var empty = request_v1("x86_64")
+        empty.rows[2].scr1_bytes = []
+        expect(primary_tool_signed_media_request_shape_v1(empty).is_err()).to_be(true)
+        var descriptor = request_v1("x86_64")
+        descriptor.descriptor_bytes = []
+        expect(primary_tool_signed_media_request_shape_v1(descriptor).is_err()).to_be(true)
+
+    it "accepts a known Ed25519/SAM1 record and rejects one-field tamper":
+        val target = target_v1("x86_64")
+        val path = primary_linux_tool_catalog_required_paths_v1()[1]
+        var record = authenticated_record_v1(path, target, [])
+        val public_key = pure_ed25519_keypair_from_seed(signing_seed_v1()).1
+        val roots = [ExecutableManifestTrustedSignerV1(
+            key_id: "primary-root", public_key: public_key)]
+        expect(primary_tool_signed_media_record_authenticated_v1(
+            record, path, target, roots)).to_be(true)
+        record.content_sha256 = "12" * 32
+        expect(primary_tool_signed_media_record_authenticated_v1(
+            record, path, target, roots)).to_be(false)
+
+    it "accepts exact Simplebox binding and rejects a row-zero path mutation":
+        val target = target_v1("aarch64")
+        val path = primary_linux_tool_catalog_required_paths_v1()[0]
+        val record = authenticated_record_v1(
+            path, target, simplebox_canonical_aliases_v1())
+        val public_key = pure_ed25519_keypair_from_seed(signing_seed_v1()).1
+        val root = ExecutableManifestTrustedSignerV1(
+            key_id: "primary-root", public_key: public_key)
+        val plan = simplebox_primary_tool_catalog_bundle_plan_v1(
+            target, [root], [record])
+        val signing = encode_simple_artifact_manifest_v1_signing_bytes(
+            record.manifest, record.content_sha256)
+        val scr1_sha256 = "33" * 32
+        val row = PrimaryToolSignedMediaRowV1(
+            canonical_path: path, source_relative_path: "incoming/simplebox",
+            payload_leaf: "simplebox", scr1_leaf: "simplebox.scr1",
+            manifest_projection: record.manifest, scr1_bytes: [1u8])
+        val simplebox = SimpleboxSignedCatalogProvisionResultV1(
+            ok: true, error: SimpleboxSignedCatalogProvisionErrorV1.None,
+            receipt: SimpleboxSafeArtifactBindingReceiptV1(
+                artifact_relative_path: row.source_relative_path,
+                artifact_sha256: record.content_sha256,
+                artifact_byte_count: 4096,
+                signed_record_relative_path: "incoming/simplebox.scr1",
+                signed_record_sha256: scr1_sha256,
+                sam1_identity_sha256: sha256_u8_hex(signing.bytes)),
+            plan: plan)
+        expect(primary_tool_signed_media_simplebox_matches_v1(
+            simplebox, row, record, scr1_sha256)).to_be(true)
+        var moved = row
+        moved.source_relative_path = "incoming/other-simplebox"
+        expect(primary_tool_signed_media_simplebox_matches_v1(
+            simplebox, moved, record, scr1_sha256)).to_be(false)
+
+    it "distinguishes consumed rollback from cleanup-indeterminate receipts":
+        val consumed = HostedSafeArtifactBundleNFinishReceiptV1(
+            committed: false, rolled_back: true, durable: true,
+            quarantined: false, artifact_count: 0,
+            detail: "hosted-safe-bundle-n-add-rejected")
+        expect(primary_tool_signed_media_rollback_receipt_error_v1(
+            consumed, PrimaryToolSignedMediaErrorV1.BundleOperationRejected)).to_equal(
+                PrimaryToolSignedMediaErrorV1.BundleOperationRejected)
+        var indeterminate = consumed
+        indeterminate.rolled_back = false
+        indeterminate.durable = false
+        expect(primary_tool_signed_media_rollback_receipt_error_v1(
+            indeterminate, PrimaryToolSignedMediaErrorV1.PayloadRejected)).to_equal(
+                PrimaryToolSignedMediaErrorV1.CleanupIndeterminate)
+
+    it "accepts only the exact durable five-row publication receipt":
+        val published = HostedSafeArtifactBundleNFinishReceiptV1(
+            committed: true, rolled_back: false, durable: true,
+            quarantined: false, artifact_count: 5,
+            detail: "hosted-safe-bundle-n-committed")
+        expect(primary_tool_signed_media_publication_receipt_valid_v1(
+            published)).to_be(true)
+        var partial = published
+        partial.artifact_count = 4
+        expect(primary_tool_signed_media_publication_receipt_valid_v1(
+            partial)).to_be(false)
+        var quarantined = published
+        quarantined.quarantined = true
+        expect(primary_tool_signed_media_publication_receipt_valid_v1(
+            quarantined)).to_be(false)

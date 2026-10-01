@@ -1,4 +1,9 @@
 # JS engine (nogc_sync_mut copy): a nested function cannot read its enclosing function's locals or parameters
+## Closed 2026-09-16 — RESOLVED 2026-08-21; fix landed bdc18a13495; 8/8 closure-scope spec rows pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-21
 - Status: RESOLVED 2026-08-21
@@ -87,3 +92,4 @@ Neighbours, all on the fixed engine:
 
 The "also observed" lexer note (an apostrophe inside a `//` comment breaking the
 script) is NOT covered here and is not resolved by this change.
+

@@ -1,0 +1,141 @@
+# codex-impl
+# Canonical bridge from environment-variant build/publication evidence to the
+# existing native cache provider-receipt namespace.  This receipt is provider
+# provenance only; it is never substituted for BinaryObjectActionV1.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.environment_variant_build_planner_v1.{
+    ENV_VARIANT_BUILD_PLAN_SCHEMA_V1, EnvironmentVariantBuildPlanV1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1
+}
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.{
+    ENV_PUBLICATION_ADMISSION_SCHEMA_V1, EnvironmentPublicationAdmissionV1,
+    PublicationArtifactEvidenceV1
+}
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.{
+    ENV_ARTIFACT_TRUST_AUTHENTICATED_V1, artifact_trust_receipt_valid_v1,
+    artifact_exact_bytes_match_v1
+}
+
+pub const ENV_VARIANT_PROVIDER_RECEIPT_SCHEMA_V1: u16 = 1u16
+
+pub enum EnvironmentVariantProviderReceiptErrorV1:
+    InvalidBuildPlan
+    InvalidPublication
+    ArtifactIndexInvalid
+    ArtifactNotAdmitted
+    DuplicateArtifactEvidence
+    TargetFeatureRangeInvalid
+    ArtifactIdentityMismatch
+    ArtifactNotAuthenticated
+
+pub struct EnvironmentVariantProviderReceiptV1:
+    schema_version: u16
+    provider_receipt_hash: text
+    plan_identity: EnvironmentDigest256V1
+    selected_artifact_identity: EnvironmentDigest256V1
+    selected_cache_key: EnvironmentDigest256V1
+    publication_plan_digest: EnvironmentDigest256V1
+    dependency_lock_digest: EnvironmentDigest256V1
+    dependency_closure_digest: EnvironmentDigest256V1
+    provider_generation: u64
+
+fn _declared(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _same(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _digest_text(value: EnvironmentDigest256V1) -> text:
+    "{value.w0}:{value.w1}:{value.w2}:{value.w3}"
+
+fn _matching_evidence(
+    variant: EnvironmentDigest256V1,
+    evidence: [PublicationArtifactEvidenceV1]
+) -> Result<PublicationArtifactEvidenceV1, EnvironmentVariantProviderReceiptErrorV1>:
+    var found = -1
+    var i = 0
+    while i < evidence.len():
+        if _same(evidence[i].variant_identity, variant):
+            if found >= 0:
+                return Err(EnvironmentVariantProviderReceiptErrorV1.DuplicateArtifactEvidence)
+            found = i
+        i = i + 1
+    if found < 0:
+        return Err(EnvironmentVariantProviderReceiptErrorV1.ArtifactNotAdmitted)
+    Ok(evidence[found])
+
+pub fn environment_variant_provider_receipt_v1(
+    build_plan: EnvironmentVariantBuildPlanV1,
+    publication: EnvironmentPublicationAdmissionV1,
+    selected_artifact_index: i64,
+    target_feature_words: [u64]
+) -> Result<EnvironmentVariantProviderReceiptV1, EnvironmentVariantProviderReceiptErrorV1>:
+    if build_plan.schema_version != ENV_VARIANT_BUILD_PLAN_SCHEMA_V1 or
+       not _declared(build_plan.plan_identity) or build_plan.artifacts.len() == 0:
+        return Err(EnvironmentVariantProviderReceiptErrorV1.InvalidBuildPlan)
+    if publication.schema_version != ENV_PUBLICATION_ADMISSION_SCHEMA_V1 or
+       publication.plan.descriptor_size < 224u32 or
+       not _declared(publication.plan.plan_digest) or
+       not _declared(publication.plan.dependency_lock_digest) or
+       not _declared(publication.dependency_closure_digest):
+        return Err(EnvironmentVariantProviderReceiptErrorV1.InvalidPublication)
+    if selected_artifact_index < 0 or selected_artifact_index >= build_plan.artifacts.len():
+        return Err(EnvironmentVariantProviderReceiptErrorV1.ArtifactIndexInvalid)
+    val artifact = build_plan.artifacts[selected_artifact_index]
+    val feature_range = artifact.target_profile.requested_features.words
+    if feature_range.offset > target_feature_words.len() as u32 or
+       feature_range.count > target_feature_words.len() as u32 - feature_range.offset:
+        return Err(EnvironmentVariantProviderReceiptErrorV1.TargetFeatureRangeInvalid)
+    val evidence = match _matching_evidence(
+        artifact.variant_identity, publication.admitted_artifacts):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    if not artifact_exact_bytes_match_v1(
+        evidence.artifact_digest, evidence.observed_artifact_digest) or
+       not _same(evidence.artifact_digest, evidence.trust_receipt.artifact_digest) or
+       not _same(evidence.required_trust_policy_digest,
+           evidence.trust_receipt.trust_policy_digest) or
+       not _same(evidence.required_verifier_identity,
+           evidence.trust_receipt.verifier_identity) or
+       evidence.trust_receipt.verifier_generation < evidence.minimum_verifier_generation:
+        return Err(EnvironmentVariantProviderReceiptErrorV1.ArtifactIdentityMismatch)
+    if not artifact_trust_receipt_valid_v1(evidence.trust_receipt) or
+       evidence.trust_receipt.authentication_status != ENV_ARTIFACT_TRUST_AUTHENTICATED_V1:
+        return Err(EnvironmentVariantProviderReceiptErrorV1.ArtifactNotAuthenticated)
+
+    var material = "simple/environment-variant-provider-receipt/v1"
+    material = material + "|plan=" + _digest_text(build_plan.plan_identity)
+    material = material + "|artifact=" + _digest_text(artifact.artifact_identity)
+    material = material + "|cache=" + _digest_text(artifact.cache_key)
+    material = material + "|publication=" + _digest_text(publication.plan.plan_digest)
+    material = material + "|lock=" + _digest_text(publication.plan.dependency_lock_digest)
+    material = material + "|closure=" + _digest_text(publication.dependency_closure_digest)
+    material = material + "|provider=" + _digest_text(evidence.provider_identity)
+    material = material + "|variant=" + _digest_text(evidence.variant_identity)
+    material = material + "|bytes=" + _digest_text(evidence.artifact_digest)
+    material = material + "|generation={evidence.provider_generation}"
+    material = material + "|trust=" + _digest_text(evidence.trust_receipt.receipt_identity)
+    material = material + "|trustEvidence=" + _digest_text(evidence.trust_receipt.verification_evidence_digest)
+    material = material + "|target=" + _digest_text(artifact.target_profile.target_identity)
+    material = material + "|backend=" + _digest_text(artifact.target_profile.backend_identity)
+    material = material + "|arch={artifact.target_profile.target_architecture}"
+    material = material + "|abi={artifact.target_profile.target_abi_id}"
+    material = material + "|format={artifact.target_profile.target_object_format_id}"
+    var i: u32 = 0u32
+    while i < feature_range.count:
+        material = material + "|feature={target_feature_words[(feature_range.offset + i) as i64]}"
+        i = i + 1u32
+    Ok(EnvironmentVariantProviderReceiptV1(
+        schema_version: ENV_VARIANT_PROVIDER_RECEIPT_SCHEMA_V1,
+        provider_receipt_hash: sha256_text(material),
+        plan_identity: build_plan.plan_identity,
+        selected_artifact_identity: artifact.artifact_identity,
+        selected_cache_key: artifact.cache_key,
+        publication_plan_digest: publication.plan.plan_digest,
+        dependency_lock_digest: publication.plan.dependency_lock_digest,
+        dependency_closure_digest: publication.dependency_closure_digest,
+        provider_generation: evidence.provider_generation))

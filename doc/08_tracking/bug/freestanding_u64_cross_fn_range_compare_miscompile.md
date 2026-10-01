@@ -1,7 +1,10 @@
 # BUG: freestanding native-build miscompiles a u64 range comparison across a function boundary
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** open
 **Severity:** high (silently wrong arithmetic in freestanding/baremetal code)
 **Component:** compiler / freestanding native-build (`clang --target=x86_64-unknown-elf` path)
 **Found:** 2026-07-08, SimpleOS x86_64 ring-3 FS-exec loader (M2 argv-frame work)
@@ -76,3 +79,4 @@ ring-3 argv frame (M2) but does not fix the underlying codegen bug.
 Any freestanding/baremetal Simple code that factors u64 range math into a helper
 can get silently-wrong results. This is a correctness landmine for the OS,
 drivers, and firmware layers that run under freestanding native-build.
+

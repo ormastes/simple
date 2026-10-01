@@ -12,7 +12,7 @@
 
 use compiler.core.ast_expr.{
     expr_get_tag, expr_get_str, expr_get_left, expr_get_right,
-    expr_get_extra, expr_get_args, expr_get_stmts
+    expr_get_extra, expr_get_int, expr_get_args, expr_get_stmts
 }
 use compiler.frontend.core.ast_stmt.{
     stmt_get_tag, stmt_get_expr, stmt_get_body
@@ -45,6 +45,9 @@ fn req_comment_expr_get_right(idx: i64) -> i64:
 
 fn req_comment_expr_get_extra(idx: i64) -> i64:
     expr_get_extra(idx)
+
+fn req_comment_expr_get_int(idx: i64) -> i64:
+    expr_get_int(idx)
 
 fn req_comment_expr_get_args(idx: i64) -> [i64]:
     expr_get_args(idx)
@@ -226,6 +229,35 @@ fn _check_expr(expr_idx: i64, site_name: text) -> [RequiredCommentWarning]:
 
     if is_any_pass:
         val msg = req_comment_expr_get_str(expr_idx)
+        # A real `todo(...)` call (parser marks it via the node's `int`
+        # field == 1, see expr_pass_todo_call) desugars to the same node tag
+        # as the `pass_todo` keyword, but gets the todo-specific two-string
+        # (what-remains + hint) REQC003 check instead of REQC001's
+        # single-string check. Deliberately NOT using the `extra` field:
+        # several generic AST walkers in this compiler (unused_vars.spl,
+        # closure_analysis.spl, call_edge_utils.spl, alloc_inference.spl,
+        # and this file's own `_check_expr` at the `extra_warnings` call
+        # below) treat `expr_get_extra` as an optional child-expression
+        # index and recurse into it unconditionally whenever it is >= 0;
+        # repurposing it as a boolean flag would make every one of them
+        # walk into whatever unrelated node happens to sit at arena index 1.
+        # `int` carries no such generic-recursion contract (precedent:
+        # expr_mark_string_processed already reuses it as a per-tag marker).
+        # See doc/08_tracking/bug/todo_call_collapses_to_pass_todo_node_reqc003_unreachable_2026-08-07.md
+        if is_pass_todo and req_comment_expr_get_int(expr_idx) == 1:
+            val parts = msg.split(" | ")
+            val has_what = parts.len() > 0 and not _is_weak_rationale(parts[0])
+            val has_hint = parts.len() > 1 and not _is_weak_rationale(parts[1])
+            if not has_what or not has_hint:
+                warnings.push(RequiredCommentWarning(
+                    code: "REQC003",
+                    severity: "warn",
+                    message: "todo used without what-remains and next-step strings",
+                    hint: "Use todo(\"what remains\", \"hint or issue\")",
+                    site_name: site_name,
+                    line: 0
+                ))
+            return warnings
         if _is_weak_rationale(msg):
             val w = RequiredCommentWarning(
                 code: "REQC001",

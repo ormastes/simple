@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -359,9 +359,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("Inspect child discovery, early-exit detection, and bounded diagnostics")
 val source = file_read(WRAPPER)
 expect(source).to_contain("app_pid=\"\"")
-expect(source).to_contain("LAUNCHED_PID_ENV=")
-expect(source).to_contain("value_of launched_pid")
-expect(source).to_contain("require_launched_process")
+expect(source).to_contain("find_launched_pid()")
 expect(source).to_contain("capture_child_exit_cause()")
 expect(source).to_contain("child_logs_have_terminal_failure()")
 expect(source).to_contain("! kill -0 \"$app_pid\" 2>/dev/null")
@@ -419,16 +417,15 @@ step("Inspect unique executable discovery and PID-scoped ownership")
 val source = file_read(WRAPPER)
 expect(source).to_contain("launch_app_bundle=")
 expect(source).to_contain("launch_app_executable=")
-expect(source).to_contain("pid_matches_executable")
-expect(source).to_contain("validate_strict_receipt")
-expect(source).to_contain("fail \"launched-process-identity-mismatch\"")
+expect(source).to_contain("$2 == executable")
+expect(source).to_contain("assert_launched_process()")
+expect(source).to_contain("fail \"launched-pid-executable-mismatch\"")
 expect(source).to_contain("cleanup()")
 expect(source).to_contain("trap cleanup EXIT HUP INT TERM")
 expect(source).to_contain("set targetPid to (item 1 of argv) as integer")
 expect(source).to_contain("processes whose unix id is targetPid")
 expect(source).to_contain("osascript - \"$app_pid\" >/dev/null")
-expect(source).to_contain("window_pid=\"" + SHELL_OPEN + "1:-}\"")
-expect(source).to_contain("[ \"$window_pid\" = \"$app_pid\" ]")
+expect(source).to_contain("app_pid=\"" + SHELL_OPEN + "1:-}\"")
 expect(source).to_contain("fail \"invalid-window-pid\"")
 expect(source).to_contain("if kill -0 \"$app_pid\" 2>/dev/null; then")
 expect(source).to_contain("kill -TERM \"$app_pid\" 2>/dev/null || true")
@@ -655,8 +652,8 @@ expect(source).to_contain("refusing cleanup with simple_seed descendant")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

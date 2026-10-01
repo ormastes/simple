@@ -24,9 +24,9 @@ Extend `/spipe` (formerly `/spipe`) into a daily-operating dev pipe with bug-rep
 | `src/lib/nogc_sync_mut/aws_sigv4.spl` | SigV4 helper (driven by MinIO test vector `aeeed9bb…`) |
 | `src/lib/nogc_sync_mut/oauth2.spl` | OAuth2 client-credentials + token cache (driven by Graph) |
 | `.claude/skills/company_bug_report.md` | Dispatcher: mail → jira → minio → triage |
-| `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_setup.md` | Install + Repo Access Token |
-| `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_push.md` | Push + PR create |
-| `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_pull_req_review.md` | PR review pass |
+| `tools/claude-plugin/repo-and-pull-req/skills/bb_setup/SKILL.md` | Install + Repo Access Token |
+| `tools/claude-plugin/repo-and-pull-req/skills/bb_push/SKILL.md` | Push + PR create |
+| `tools/claude-plugin/repo-and-pull-req/skills/bb_pull_req_review/SKILL.md` | PR review pass |
 
 Touched (extended, not rewritten):
 - `tools/claude-plugin/repo-and-pull-req/agents/review_loop.md` — add `--level=1|2|3`
@@ -58,7 +58,7 @@ base_url = https://graph.microsoft.com/v1.0
 ```
 
 Token cache (auto-managed, mode 0600):
-- `~/.config/itf/outlook_token_cache.sdn` — Graph access token (1h TTL, re-request before expiry)
+- `~/.config/devhub/outlook_token_cache.sdn` — Graph access token (1h TTL, re-request before expiry)
 
 ## Adapter pattern (mirror existing ITF)
 
@@ -123,7 +123,7 @@ Per-cycle procedure (per `--level`):
 
 Pipeline (one cycle, idempotent on re-run):
 
-1. **Watermark load** — read `~/.config/itf/spipe_daily.sdn` for `last_run`.
+1. **Watermark load** — read `~/.config/devhub/spipe_daily.sdn` for `last_run`.
 2. **Pull bug mail** — `outlook.list_messages(folder=Inbox, $filter=receivedDateTime ge last_run)` (or Gmail/IMAP backend if configured).
 3. **Per message**:
    - Extract Jira key from subject/body via regex `[A-Z][A-Z0-9]+-\d+`.

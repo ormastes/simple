@@ -1,0 +1,210 @@
+"""Scheduler/IPC bridge for the already-admitted x86_64 server pair.
+
+Admission and filesystem resolution happen before this module is called.  The
+bridge creates empty pledged tasks, asks the authoritative IPC manager to mint
+real task-owned capabilities, and installs that exact set into both owners.
+"""
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.x86_64_server_admission.{
+    X86_64_SERVER_WEB_PATH, X86_64_SERVER_DB_PATH,
+    X86_64ServerAdmissionInput, x86_64_server_admit
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.capability_types.{CapabilitySet, CapabilityKind, CAP_RIGHT_READ, CAP_RIGHT_WRITE}
+use os.kernel.types.task_types.{TaskId, TaskPriority}
+
+pub struct X86_64ServerSchedulerBridgeInput:
+    """The immutable payload handed over by the admission owner."""
+    web_bytes: [u8]
+    db_bytes: [u8]
+    web_profile: text
+    db_profile: text
+
+pub struct X86_64ServerSchedulerBridgeResult:
+    """Both mutable kernel owners must always be adopted from this result."""
+    scheduler: Scheduler
+    ipc: IpcManager
+    web_pid: u64
+    db_pid: u64
+    reason: text
+    accepted: bool
+    rolled_back_web_pid: u64
+
+fn _web_capability_kinds() -> [CapabilityKind]:
+    [
+        CapabilityKind.FileRead(path_prefix: "/SYS/APPS"),
+        CapabilityKind.NetListen(port: 8080u16),
+        CapabilityKind.IpcConnect(port_name: "db")
+    ]
+
+fn _db_capability_kinds() -> [CapabilityKind]:
+    [
+        CapabilityKind.FileRead(path_prefix: "/SYS/APPS"),
+        CapabilityKind.NetListen(port: 5432u16),
+        CapabilityKind.IpcListen(port_name: "db"),
+        CapabilityKind.BlockDevice(
+            path: "/DATA/SIMPLEOS", rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE
+        )
+    ]
+
+fn _x86_64_server_launch_argv_valid(argv: [text]) -> bool:
+    """Constrain opaque admitted launch fields before they reach a user stack."""
+    val MAX_ARGUMENTS: i64 = 16
+    val MAX_ARGUMENT_BYTES: i64 = 256
+    val MAX_TOTAL_BYTES: i64 = 2048
+    if argv.len() == 0 or argv.len() > MAX_ARGUMENTS:
+        return false
+    if argv[0] == "" or argv[0].contains("\0"):
+        return false
+    var total_bytes: i64 = 0
+    var index: i64 = 0
+    while index < argv.len():
+        val argument = argv[index]
+        if argument.contains("\0"):
+            return false
+        val argument_bytes = argument.bytes()
+        val argument_size = argument_bytes.len()
+        if argument_size > MAX_ARGUMENT_BYTES:
+            return false
+        if argument_size > MAX_TOTAL_BYTES - total_bytes:
+            return false
+        total_bytes = total_bytes + argument_size
+        index = index + 1
+    true
+
+fn _bridge_result(
+    scheduler: Scheduler,
+    ipc: IpcManager,
+    web_pid: u64,
+    db_pid: u64,
+    reason: text,
+    accepted: bool,
+    rolled_back_web_pid: u64
+) -> X86_64ServerSchedulerBridgeResult:
+    X86_64ServerSchedulerBridgeResult(
+        scheduler: scheduler,
+        ipc: ipc,
+        web_pid: web_pid,
+        db_pid: db_pid,
+        reason: reason,
+        accepted: accepted,
+        rolled_back_web_pid: rolled_back_web_pid
+    )
+
+fn _x86_64_server_schedule_admitted(
+    input: X86_64ServerSchedulerBridgeInput,
+    scheduler: Scheduler,
+    ipc: IpcManager
+) -> X86_64ServerSchedulerBridgeResult:
+    var live_scheduler = scheduler
+    var live_ipc = ipc
+    val web_argv: [text] = [
+        X86_64_SERVER_WEB_PATH, "--simpleos", "--launch-id", input.web_profile
+    ]
+    val web_envp: [text] = []
+    if not _x86_64_server_launch_argv_valid(web_argv):
+        return _bridge_result(
+            live_scheduler, live_ipc, 0u64, 0u64,
+            "invalid-web-launch-argv", false, 0u64
+        )
+    val web_pid = live_scheduler.create_user_task_from_bytes_with_args_pid(
+        X86_64_SERVER_WEB_PATH, input.web_bytes, Architecture.X86_64,
+        web_argv, web_envp, TaskPriority.High, CapabilitySet.empty())
+    if web_pid == 0u64:
+        return _bridge_result(
+            live_scheduler, live_ipc, 0u64, 0u64,
+            "web-create-failed", false, 0u64
+        )
+
+    val web_caps = live_ipc.mint_task_capability_set(
+        TaskId(id: web_pid), _web_capability_kinds())
+    if web_caps == nil or not live_scheduler.install_task_capability_set(
+            TaskId(id: web_pid), web_caps.unwrap()):
+        live_ipc.cap_revoke_all_for_task(TaskId(id: web_pid))
+        val web_child = TaskId(id: web_pid)
+        live_scheduler.exit_task_by_id(web_child, -12)
+        # A failed provisional launch must be collected before returning the
+        # scheduler owner.  Leaving a Zombie resident leaks its task slot and
+        # user address-space handle into the next launch.
+        val _web_collected = live_scheduler.wait_for_collect(
+            TaskId(id: 0u64), web_child, false)
+        return _bridge_result(
+            live_scheduler, live_ipc, 0u64, 0u64,
+            "web-capability-install-failed", false, web_pid
+        )
+
+    val db_argv: [text] = [
+        X86_64_SERVER_DB_PATH, "--simpleos", "--launch-id", input.db_profile
+    ]
+    val db_envp: [text] = []
+    if not _x86_64_server_launch_argv_valid(db_argv):
+        live_ipc.cap_revoke_all_for_task(TaskId(id: web_pid))
+        val web_child = TaskId(id: web_pid)
+        live_scheduler.exit_task_by_id(web_child, -12)
+        val _web_collected = live_scheduler.wait_for_collect(
+            TaskId(id: 0u64), web_child, false)
+        return _bridge_result(
+            live_scheduler, live_ipc, 0u64, 0u64,
+            "invalid-db-launch-argv-web-rolled-back", false, web_pid
+        )
+    val db_pid = live_scheduler.create_user_task_from_bytes_with_args_pid(
+        X86_64_SERVER_DB_PATH, input.db_bytes, Architecture.X86_64,
+        db_argv, db_envp, TaskPriority.Normal, CapabilitySet.empty())
+    if db_pid == 0u64:
+        live_ipc.cap_revoke_all_for_task(TaskId(id: web_pid))
+        val web_child = TaskId(id: web_pid)
+        live_scheduler.exit_task_by_id(web_child, -12)
+        val _web_collected = live_scheduler.wait_for_collect(
+            TaskId(id: 0u64), web_child, false)
+        return _bridge_result(
+            live_scheduler, live_ipc, 0u64, 0u64,
+            "db-create-failed-web-rolled-back", false, web_pid
+        )
+
+    val db_caps = live_ipc.mint_task_capability_set(
+        TaskId(id: db_pid), _db_capability_kinds())
+    if db_caps == nil or not live_scheduler.install_task_capability_set(
+            TaskId(id: db_pid), db_caps.unwrap()):
+        live_ipc.cap_revoke_all_for_task(TaskId(id: db_pid))
+        live_ipc.cap_revoke_all_for_task(TaskId(id: web_pid))
+        val db_child = TaskId(id: db_pid)
+        val web_child = TaskId(id: web_pid)
+        live_scheduler.exit_task_by_id(db_child, -12)
+        live_scheduler.exit_task_by_id(web_child, -12)
+        val _db_collected = live_scheduler.wait_for_collect(
+            TaskId(id: 0u64), db_child, false)
+        val _web_collected = live_scheduler.wait_for_collect(
+            TaskId(id: 0u64), web_child, false)
+        return _bridge_result(
+            live_scheduler, live_ipc, 0u64, 0u64,
+            "db-capability-install-failed-both-rolled-back", false, web_pid
+        )
+
+    _bridge_result(live_scheduler, live_ipc, web_pid, db_pid, "ok", true, 0u64)
+
+pub fn x86_64_server_schedule_admitted_input(
+    input: X86_64ServerAdmissionInput,
+    scheduler: Scheduler,
+    ipc: IpcManager
+) -> X86_64ServerSchedulerBridgeResult:
+    """Revalidate admission, then atomically install scheduler/IPC authority."""
+    val admission = x86_64_server_admit(input)
+    if not admission.accepted:
+        return _bridge_result(
+            scheduler, ipc, 0u64, 0u64,
+            "admission-rejected:" + admission.reason, false, 0u64
+        )
+    _x86_64_server_schedule_admitted(
+        X86_64ServerSchedulerBridgeInput(
+            web_bytes: input.web_bytes,
+            db_bytes: input.db_bytes,
+            web_profile: input.web_profile,
+            db_profile: input.db_profile
+        ),
+        scheduler, ipc
+    )
+
+export X86_64ServerSchedulerBridgeResult
+export x86_64_server_schedule_admitted_input

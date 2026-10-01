@@ -1,0 +1,63 @@
+"""Build-owner producer for canonical SAM2/SCR2 artifact receipts."""
+
+use std.common.crypto.ed25519.{
+    pure_ed25519_keypair_from_seed, pure_ed25519_sign, pure_ed25519_verify
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_receipt_v2_codec.{
+    SimpleArtifactReceiptSubjectV2,
+    simple_artifact_receipt_sam2_encode_v2,
+    simple_artifact_receipt_scr2_encode_v2
+}
+
+pub struct SignedArtifactReceiptProducedV2:
+    bytes: [u8]
+    public_key: [u8]
+    scr2_sha256: text
+
+fn _receipt_hex_v2(value: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for byte in value:
+        val number = byte as i64
+        out = out + digits.substring(number / 16, number / 16 + 1)
+        out = out + digits.substring(number % 16, number % 16 + 1)
+    out
+
+fn _receipt_key_id_valid_v2(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 33 or code > 126 or code == 58: return false
+        index = index + 1
+    true
+
+pub fn signed_artifact_receipt_produce_v2(
+    subject: SimpleArtifactReceiptSubjectV2,
+    key_id: text,
+    signing_seed: [u8],
+) -> SignedArtifactReceiptProducedV2?:
+    """Sign exactly SAM2 and self-verify before returning canonical SCR2."""
+    if not _receipt_key_id_valid_v2(key_id) or signing_seed.len() != 32:
+        return nil
+    val public_key = pure_ed25519_keypair_from_seed(signing_seed).1
+    if public_key.len() != 32: return nil
+    var signed_subject = subject
+    signed_subject.signature_algorithm = "ed25519"
+    signed_subject.signer_key_id = key_id
+    signed_subject.signer_public_key_sha256 = sha256_u8_hex(public_key)
+    val signed_sam2 = simple_artifact_receipt_sam2_encode_v2(signed_subject)
+    if not signed_sam2.?: return nil
+    val signature = pure_ed25519_sign(
+        signing_seed, public_key, signed_sam2.unwrap())
+    if signature.len() != 64 or
+        not pure_ed25519_verify(public_key, signed_sam2.unwrap(), signature):
+        return nil
+    val envelope = "ed25519:" + key_id + ":" + _receipt_hex_v2(signature)
+    val encoded = simple_artifact_receipt_scr2_encode_v2(
+        signed_subject, envelope, sha256_u8_hex(public_key))
+    if not encoded.?: return nil
+    Some(SignedArtifactReceiptProducedV2(
+        bytes: encoded.unwrap(), public_key: public_key,
+        scr2_sha256: sha256_u8_hex(encoded.unwrap())))

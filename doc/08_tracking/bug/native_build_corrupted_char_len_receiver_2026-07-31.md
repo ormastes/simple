@@ -1,7 +1,10 @@
 # `native-build` phase2:parse: `.len()` on identifier `c` receives a corrupted `str` (renders as U+FFFD) — localized, not fixed
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** file-6 (`io_runtime.spl`) blocker CLEARED by `6d9c78d9902` (see
 "Update 2026-07-31: file-6 blocker cleared" below) — measured on a fresh
 worktree with a `bootstrap`+`llvm` seed rebuild. Root byte-provenance of the
 original `StrBytes` corruption was still never independently re-derived past
@@ -278,3 +281,4 @@ the time across two independent runs. Whether it clears the *entire*
 phase2:parse run and lets `native-build` reach a later phase or emit a
 binary is a separate, larger question this doc's original reproduction
 never reached (it hard-stopped at file 6) — see the follow-up report.
+

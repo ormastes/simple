@@ -1,0 +1,93 @@
+use std.spec.{describe, expect, it}
+use compiler.backend.linker.coff.coff_directives.{
+    coff_parse_directives, coff_alternate_name_map, coff_resolve_alternate_name,
+    coff_effective_default_libraries}
+
+describe "COFF .drectve parser":
+    it "collects resolution directives and preserves quoted values":
+        val parsed = coff_parse_directives(
+            " /DEFAULTLIB:\"runtime support.lib\" /INCLUDE:forced " +
+            "/ALTERNATENAME:weak=strong /defaultlib:kernel32.lib")
+        expect(parsed.is_ok()).to_equal(true)
+        val directives = parsed.unwrap()
+        expect(directives.default_libraries).to_equal(
+            ["runtime support.lib", "kernel32.lib"])
+        expect(directives.includes).to_equal(["forced"])
+        expect(directives.alternate_names.len()).to_equal(1)
+        expect(directives.alternate_names[0].weak_name).to_equal("weak")
+        expect(directives.alternate_names[0].default_name).to_equal("strong")
+
+    it "deduplicates identical rows and rejects malformed owned directives":
+        val deduplicated = coff_parse_directives(
+            "/INCLUDE:root /include:root /ALTERNATENAME:a=b /alternatename:a=b")
+        expect(deduplicated.unwrap().includes.len()).to_equal(1)
+        expect(deduplicated.unwrap().alternate_names.len()).to_equal(1)
+        expect(coff_parse_directives("/DEFAULTLIB:").is_err()).to_equal(true)
+        expect(coff_parse_directives("/DEFAULTLIB").is_err()).to_equal(true)
+        expect(coff_parse_directives("/INCLUDE").is_err()).to_equal(true)
+        expect(coff_parse_directives("/ALTERNATENAME:a").is_err()).to_equal(true)
+        expect(coff_parse_directives(
+            "/ALTERNATENAME:a=b /ALTERNATENAME:a=c").is_err()).to_equal(true)
+        expect(coff_parse_directives("/DEFAULTLIB:\"unterminated").is_err()).to_equal(true)
+
+    it "ignores unrelated directives without accepting malformed owned prefixes":
+        val parsed = coff_parse_directives("/DEBUG /OPT:REF /SUBSYSTEM:CONSOLE")
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().default_libraries.len()).to_equal(0)
+
+    it "resolves alias chains and rejects cycles":
+        val chained = coff_parse_directives(
+            "/ALTERNATENAME:a=b /ALTERNATENAME:b=c").unwrap()
+        val aliases = coff_alternate_name_map(chained).unwrap()
+        expect(coff_resolve_alternate_name("a", aliases).unwrap()).to_equal("c")
+        expect(coff_resolve_alternate_name("plain", aliases).unwrap()).to_equal("plain")
+        val cyclic = coff_parse_directives(
+            "/ALTERNATENAME:a=b /ALTERNATENAME:b=a").unwrap()
+        expect(coff_alternate_name_map(cyclic).is_err()).to_equal(true)
+
+    it "applies NODEFAULTLIB globally and by canonical library name":
+        val selective = coff_parse_directives(
+            "/DEFAULTLIB:libcmt.lib /DEFAULTLIB:kernel32.lib " +
+            "/NODEFAULTLIB:LIBCMT").unwrap()
+        expect(coff_effective_default_libraries(selective)).to_equal(["kernel32.lib"])
+        expect(selective.excluded_default_libraries).to_equal(["LIBCMT"])
+        val all = coff_parse_directives(
+            "/DEFAULTLIB:kernel32.lib /NODEFAULTLIB").unwrap()
+        expect(all.exclude_all_default_libraries).to_equal(true)
+        expect(coff_effective_default_libraries(all).len()).to_equal(0)
+        expect(coff_parse_directives("/NODEFAULTLIB:").is_err()).to_equal(true)
+
+    it "accepts identical FAILIFMISMATCH values and rejects conflicts":
+        val compatible = coff_parse_directives(
+            "/FAILIFMISMATCH:\"RuntimeLibrary=MT_StaticRelease\" " +
+            "/FAILIFMISMATCH:RuntimeLibrary=MT_StaticRelease").unwrap()
+        expect(compatible.fail_if_mismatch["RuntimeLibrary"]).to_equal(
+            "MT_StaticRelease")
+        expect(coff_parse_directives(
+            "/FAILIFMISMATCH:RuntimeLibrary=MD_DynamicRelease " +
+            "/FAILIFMISMATCH:RuntimeLibrary=MT_StaticRelease").is_err()).to_equal(true)
+        expect(coff_parse_directives("/FAILIFMISMATCH:").is_err()).to_equal(true)
+        expect(coff_parse_directives(
+            "/FAILIFMISMATCH:RuntimeLibrary").is_err()).to_equal(true)
+
+    it "parses complete EXPORT contracts and rejects ambiguous rows":
+        val parsed = coff_parse_directives(
+            "/EXPORT:api=implementation,@7,NONAME,DATA,PRIVATE " +
+            "/EXPORT:plain /EXPORT:plain").unwrap()
+        expect(parsed.exports.len()).to_equal(2)
+        expect(parsed.exports[0].public_name).to_equal("api")
+        expect(parsed.exports[0].internal_name).to_equal("implementation")
+        expect(parsed.exports[0].ordinal).to_equal(7)
+        expect(parsed.exports[0].noname).to_equal(true)
+        expect(parsed.exports[0].data).to_equal(true)
+        expect(parsed.exports[0].private_export).to_equal(true)
+        expect(parsed.exports[1].internal_name).to_equal("plain")
+        expect(parsed.exports[1].ordinal).to_equal(-1)
+        expect(coff_parse_directives("/EXPORT:").is_err()).to_equal(true)
+        expect(coff_parse_directives("/EXPORT:a=,DATA").is_err()).to_equal(true)
+        expect(coff_parse_directives("/EXPORT:a,NONAME").is_err()).to_equal(true)
+        expect(coff_parse_directives("/EXPORT:a,@0").is_err()).to_equal(true)
+        expect(coff_parse_directives("/EXPORT:a,@65536").is_err()).to_equal(true)
+        expect(coff_parse_directives("/EXPORT:a,UNKNOWN").is_err()).to_equal(true)
+        expect(coff_parse_directives(
+            "/EXPORT:a=one /EXPORT:a=two").is_err()).to_equal(true)

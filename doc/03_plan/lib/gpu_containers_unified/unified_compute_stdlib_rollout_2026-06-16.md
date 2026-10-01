@@ -163,8 +163,22 @@ Per the user's "haiku in parallel, opus verifies" model:
 - [x] 1-dev — refined goal + ACs (`.spipe/gpu_containers_unified/state.md`)
 - [x] 2-research — `doc/01_research/lib/gpu_containers_unified/…cuda_parity_2026-06-16.md`
 - [ ] 3-arch — resolve Q1/Q3/Q4; module list + interfaces + ≥1 SDN component diagram
+      (2026-09-05: no `doc/04_architecture/lib/gpu_containers_unified/` or
+      `doc/05_design/lib/gpu_containers_unified/` exists; the module list that
+      shipped is `src/lib/nogc_async_mut/compute/{exec_target,backend_dispatch,
+      compute_ops,compute_algo_ext,containers,bitset}.spl`, 739 lines)
 - [ ] 4-spec — failing SSpec `.spl` per AC (discriminating GPU-offload + parity oracles)
+      (2026-09-05: one spec per module exists under
+      `test/01_unit/lib/nogc_async_mut/compute/` — `.spipe/gpu_containers_unified/state.md:24-43`
+      records AC-1/4/6/7 DONE, 52/52 green — but no differential-vs-CUDA parity
+      oracle exists; only `exec_target_spec.spl`/`backend_dispatch_spec.spl`
+      mention cuda, as target names)
 - [ ] 5-implement — pre-work P1–P5, then cell-grid waves W1→W4
+      (2026-09-05: foundation + surface + dispatch landed per state.md
+      "Phase: dev-done → impl landed"; GPU-kernel execution, `std.compute`
+      `__init__` export wiring — 0 `compute` hits in
+      `src/lib/nogc_async_mut/__init__.spl` — Complex<f64> parity and
+      reduce/scan cooperative kernels still open)
 - [ ] 6-refactor — dedup, ≤800-line files, naming, doc/wiki pass
 - [ ] 7-verify — differential vs CUDA oracle, full suite, docgen scenario manuals
 - [ ] 8-ship — jj commit per cell (≤5 files), tracking docs
@@ -173,3 +187,9 @@ Per the user's "haiku in parallel, opus verifies" model:
 
 `/arch` to design the concrete surface (namespace, policy-as-value-vs-type, FFI vs kernel),
 then `/impl` per wave. Open questions Q1–Q5 carried from research §6.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/unified_compute_stdlib_rollout_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

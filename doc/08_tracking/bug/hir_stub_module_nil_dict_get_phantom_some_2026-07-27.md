@@ -1,8 +1,11 @@
 # Bug: nil Dict receiver — `.get()` returns phantom Some while `.len()` returns -1 (stub Module, stage-4 segfault lineage)
+## Obsolete 2026-09-16 — superseded per in-body CORRECTION; primary docs native_dict_get_struct_value_corrupt_option + len_minus_one verified present
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-27
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** superseded — see CORRECTION
 **Area:** native codegen (Dict nil-receiver methods) + Rust seed (HirLowering field-type inference)
 
 ## CORRECTION (2026-07-27, supersedes the analysis above)
@@ -198,3 +201,4 @@ registry (`module_registry.spl`, accessor-fn pattern) mirrored by the driver
 at parse time via plain arg-pass + dict-insert (both preserve nested dicts);
 seven lookup sites refetch through it. Guards from rounds 1-4 remain as the
 safety net for genuinely-absent entries.
+

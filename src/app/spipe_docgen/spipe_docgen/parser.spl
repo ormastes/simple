@@ -6,8 +6,14 @@
 # - Validation: validate_spec
 # - Test Structure: extract_quoted_name, extract_inline_docstring, extract_test_structure
 
-use app.spipe_docgen.spipe_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, spipe_dbg, native_fs_read_string, native_fs_exists, spec_kw_line}
+use app.spipe_docgen.spipe_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, spipe_dbg, native_fs_read_string, native_fs_exists}
 use std.math_repr.{to_text, render_latex_raw}
+# Which lines sit inside a string opened earlier is CoreLexer's fact, not this
+# file's. Two walkers here decided it from one line at a time and both misread
+# a fixture's bare closing `"""` as a docstring OPENER — 38 spec files in this
+# tree carry exactly that shape (measured 2026-09-05). See
+# doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 
 # ============================================================================
 # PARSER MODULE
@@ -21,7 +27,7 @@ fn parse_id_attr(line: text) -> text:
 
     # Extract content between quotes
     val after_prefix = trimmed[5:]  # Remove "#[id("
-    val without_suffix = if after_prefix.ends_with(")]"): after_prefix[:-2] else: after_prefix
+    val without_suffix = after_prefix.trim_end_matches(")]")
     val inner = without_suffix.trim()
 
     if inner.starts_with("\"") and inner.ends_with("\"") and inner.len() >= 2:
@@ -36,6 +42,10 @@ fn parse_spipe_file(path: text) -> Result<SspecDoc, text>:
     val lines = content.split("\n")
     val lines_len = lines.len()
     spipe_dbg("got {lines_len} lines")
+    # Element i pairs with lines[i]: true when the line continues a string
+    # opened earlier. A bare `"""` that CLOSES a fixture string is such a line
+    # and must not be taken for the opener of a doc block.
+    val string_continuation = simple_string_continuation_lines(content)
     var doc_blocks = []
     var feature_title = ""
     var feature_ids = []
@@ -89,23 +99,29 @@ fn parse_spipe_file(path: text) -> Result<SspecDoc, text>:
             if id != "":
                 feature_ids.push(id)
 
-        # Check for top-level doc block start, including modern """# Title form.
-        if trimmed == "\"\"\"" or line.starts_with("\"\"\""):
+        # Check for doc block start: a standalone `"""` on its own line, or a
+        # column-0 `"""` that already carries its first content line (the
+        # `"""# Title` form most feature specs open with). The inline form is
+        # accepted only at column 0 so that indented function docstrings are
+        # not mistaken for the file's documentation block.
+        val doc_open_inline = line.starts_with("\"\"\"") and trimmed.len() > 3
+        if not string_continuation[i] and (trimmed == "\"\"\"" or doc_open_inline):
             val start_line = i
 
             var block_lines: [text] = []
             var found_end = false
-            if trimmed != "\"\"\"":
-                val opening_content = line[3:]
-                if opening_content.ends_with("\"\"\""):
-                    block_lines.push(opening_content[:-3])
-                    found_end = true
-                else:
-                    block_lines.push(opening_content)
 
-            # Collect lines until closing """
-            if not found_end:
+            val opener_rest = trimmed[3:]
+            if opener_rest.len() >= 3 and opener_rest.ends_with("\"\"\""):
+                # Single-line documentation block: `"""text"""`
+                block_lines.push(opener_rest[0:opener_rest.len() - 3])
+                found_end = true
+            else:
+                if opener_rest != "":
+                    block_lines.push(opener_rest)
                 i = i + 1
+
+                # Collect lines until closing """
                 while i < lines.len():
                     val block_line = lines[i]
 
@@ -369,23 +385,13 @@ fn validate_spec(doc: SspecDoc) -> ValidationResult:
     var scenario_count = 0
     for line in doc.raw_content.split("\n"):
         val trimmed = line.trim()
-        # Single source of truth for what a scenario line looks like — the
-        # legacy bare form `it "name":` AND the modern call form `it("name"):`.
-        # Counting only the legacy one made every modern SSpec render as
-        # having zero scenarios.
-        if is_scenario_line(trimmed):
+        if trimmed.starts_with("it \""):
             scenario_count = scenario_count + 1
     val docs_present = doc.doc_blocks.len() > 0 or scenario_count > 0
 
     var doc_lines = 0
     for block in doc.doc_blocks:
-        # Preserve split semantics (even empty content is one line) without
-        # allocating a temporary line array for every documentation block.
-        var block_line_count = 1
-        for ch in block.content:
-            if ch == "\n":
-                block_line_count = block_line_count + 1
-        doc_lines = doc_lines + block_line_count
+        doc_lines = doc_lines + block.content.split("\n").len()
     if doc_lines == 0 and scenario_count > 0:
         # Auto manuals include scenario summaries plus folded executable SSpec.
         doc_lines = scenario_count * 10
@@ -845,6 +851,47 @@ fn scenario_capture_policy(lines: [text], scenario_index: i64) -> text:
         break
     ""
 
+fn requirement_id_from_metadata_line(trimmed: text) -> text:
+    """The requirement id declared by an already-trimmed `@req <ID>` metadata
+    line, or "" when the line declares none."""
+    if trimmed.starts_with("# @req "):
+        return trimmed["# @req ".len():].trim()
+    if trimmed.starts_with("@req "):
+        return trimmed["@req ".len():].trim()
+    ""
+
+fn scenario_requirement_ids(lines: [text], scenario_index: i64) -> [text]:
+    """Requirement ids declared by the `@req` metadata block directly above a
+    scenario, in source order and without duplicates."""
+    var reversed: [text] = []
+    var j = scenario_index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if trimmed == "":
+            j = j - 1
+            continue
+        val req = requirement_id_from_metadata_line(trimmed)
+        if req != "" and not reversed.contains(req):
+            reversed.push(req)
+        if trimmed.starts_with("#") or trimmed.starts_with("@"):
+            j = j - 1
+            continue
+        break
+    var ids: [text] = []
+    var k = reversed.len() - 1
+    while k >= 0:
+        ids.push(reversed[k])
+        k = k - 1
+    ids
+
+fn render_scenario_requirements(ids: [text]) -> text:
+    if ids.len() == 0:
+        return ""
+    var quoted: [text] = []
+    for id in ids:
+        quoted.push("`" + id + "`")
+    "\n_Requirements: " + quoted.join(", ") + "_\n"
+
 fn artifact_path_from_metadata_line(trimmed: text) -> text:
     if not (trimmed.starts_with("# @artifact") or trimmed.starts_with("@artifact")):
         return ""
@@ -995,12 +1042,9 @@ fn scenario_prev_title(lines: [text], scenario_index: i64) -> text:
 fn is_scenario_line(trimmed: text) -> bool:
     if not trimmed.contains("\""):
         return false
-    # Both spellings are live: the legacy bare form (`it "name":`) and the
-    # modern call form (`it("name"):`). Recognising only the bare form made
-    # every modern SSpec look like it declared zero scenarios.
-    spec_kw_line(trimmed, "it") or spec_kw_line(trimmed, "slow_it") or
-        spec_kw_line(trimmed, "pending") or spec_kw_line(trimmed, "skip_it") or
-        spec_kw_line(trimmed, "skip it")
+    trimmed.starts_with("it ") or trimmed.starts_with("slow_it ") or
+        trimmed.starts_with("pending ") or trimmed.starts_with("skip_it ") or
+        trimmed.starts_with("skip it ")
 
 fn scenario_title_at(lines: [text], scenario_index: i64) -> text:
     if scenario_index < 0 or scenario_index >= lines.len():
@@ -1009,6 +1053,79 @@ fn scenario_title_at(lines: [text], scenario_index: i64) -> text:
     if not is_scenario_line(trimmed):
         return ""
     extract_quoted_name(trimmed)
+
+fn _spipe_pending_marker_line(trimmed: text) -> bool:
+    """True when an already-trimmed source line IS a pending/skip placeholder
+    statement, rather than merely mentioning one.
+
+    Statement position is required for the same reason
+    `src/app/sspec_maintain/source_facts.spl:148 _is_pending` requires it: a
+    comment, a reason string ("migration pending"), or a spec that TESTS this
+    detector must not be counted as a scaffold.
+    """
+    val lower = trimmed.lower()
+    if lower.starts_with("#"):
+        return false
+    if lower == "pass_todo" or lower == "pass_do_nothing" or lower == "pass_dn":
+        return true
+    if lower.starts_with("pass_todo(") or lower.starts_with("pass_do_nothing(") or
+            lower.starts_with("pass_dn("):
+        return true
+    if lower == "pending" or lower.starts_with("pending("):
+        return true
+    lower.starts_with("skip(") or lower.starts_with("fail(\"todo:")
+
+fn scenario_at_is_unconditional_pending(lines: [text], scenario_index: i64) -> bool:
+    """True when the scenario opened at `scenario_index` pends unconditionally.
+
+    "Unconditional" is decided by INDENTATION, not by searching the body for
+    the keyword: a placeholder that sits at the scenario body's own level always
+    executes, whereas one nested deeper sits under an `if`/`match`/loop and is a
+    conditional gate, which is a real oracle rather than a scaffold. Counting
+    the latter as pending is what made the manual's pending column lie.
+
+    Docstring bodies are skipped so a manual that documents the placeholder
+    syntax cannot be misread as using it. A non-scenario index, or an index off
+    the end, is `false` rather than an error — callers scan every line.
+    """
+    if scenario_index < 0 or scenario_index >= lines.len():
+        return false
+    val scenario_line = lines[scenario_index]
+    if not is_scenario_line(scenario_line.trim()):
+        return false
+    val scenario_indent = count_leading_indent(scenario_line)
+    # `find_scenario_body_end` gained a `continuation` parameter in #373 (so a
+    # fixture's column-0 string body no longer ends the scenario early); this
+    # call site was missed and passed three arguments to a four-parameter
+    # function, which is a STATIC semantic error — it broke `spipe-docgen` for
+    # every spec on every backend. The public 2-argument shape of this function
+    # is kept (three call sites in generator.spl plus a unit spec depend on it),
+    # so the lexical facts are derived here from the lines we were handed.
+    # Bug: doc/08_tracking/bug/spipe_docgen_missing_scenario_indent_argument_2026-09-13.md
+    val continuation = simple_string_continuation_lines(lines.join("\n"))
+    val end_index = find_scenario_body_end(lines, continuation, scenario_index + 1, scenario_indent)
+    var body_indent = -1
+    var in_docstring = false
+    var index = scenario_index + 1
+    while index < end_index:
+        val line = lines[index]
+        val trimmed = line.trim()
+        if trimmed.starts_with("\"\"\""):
+            # A one-line `"""..."""` opens and closes on the same line.
+            if not (trimmed.len() > 5 and trimmed.ends_with("\"\"\"")):
+                in_docstring = not in_docstring
+            index = index + 1
+            continue
+        if in_docstring or trimmed == "" or trimmed.starts_with("#"):
+            index = index + 1
+            continue
+        val indent = count_leading_indent(line)
+        if body_indent < 0:
+            body_indent = indent
+        if indent == body_indent and _spipe_pending_marker_line(trimmed):
+            return true
+        index = index + 1
+    false
 
 fn previous_scenario_title(lines: [text], scenario_index: i64) -> text:
     var j = scenario_index - 1
@@ -1030,14 +1147,14 @@ fn scenario_index_by_title(lines: [text], title: text, excluded_index: i64) -> i
         j = j + 1
     -1
 
-fn scenario_body_by_index(lines: [text], scenario_index: i64) -> [text]:
+fn scenario_body_by_index(lines: [text], continuation: [bool], scenario_index: i64) -> [text]:
     if scenario_index < 0 or scenario_index >= lines.len():
         return []
     val scenario_line = lines[scenario_index]
-    val end_index = find_scenario_body_end(lines, scenario_index + 1, count_leading_indent(scenario_line))
+    val end_index = find_scenario_body_end(lines, continuation, scenario_index + 1, count_leading_indent(scenario_line))
     collect_scenario_body(lines, scenario_index + 1, end_index)
 
-fn scenario_references_title(lines: [text], scenario_index: i64, title: text) -> bool:
+fn scenario_references_title(lines: [text], continuation: [bool], scenario_index: i64, title: text) -> bool:
     if title == "":
         return false
     val prev_title = scenario_prev_title(lines, scenario_index)
@@ -1045,7 +1162,7 @@ fn scenario_references_title(lines: [text], scenario_index: i64, title: text) ->
         return true
     if prev_title == "__previous__" and previous_scenario_title(lines, scenario_index) == title:
         return true
-    val body = scenario_body_by_index(lines, scenario_index)
+    val body = scenario_body_by_index(lines, continuation, scenario_index)
     var i = 0
     while i < body.len():
         val line = body[i]
@@ -1058,38 +1175,38 @@ fn scenario_references_title(lines: [text], scenario_index: i64, title: text) ->
 fn scenario_cycle_warning(kind: text, from_title: text, to_title: text) -> text:
     "# @manual-warning: cycle detected in " + kind + " expansion: " + from_title + " -> " + to_title
 
-fn find_previous_scenario_body(lines: [text], scenario_index: i64) -> [text]:
+fn find_previous_scenario_body(lines: [text], continuation: [bool], scenario_index: i64) -> [text]:
     var j = scenario_index - 1
     while j >= 0:
         val trimmed = lines[j].trim()
         if is_scenario_line(trimmed):
-            val end_index = find_scenario_body_end(lines, j + 1, count_leading_indent(lines[j]))
+            val end_index = find_scenario_body_end(lines, continuation, j + 1, count_leading_indent(lines[j]))
             return collect_scenario_body(lines, j + 1, end_index)
         j = j - 1
     []
 
-fn find_scenario_body_by_title(lines: [text], title: text, scenario_index: i64) -> [text]:
+fn find_scenario_body_by_title(lines: [text], continuation: [bool], title: text, scenario_index: i64) -> [text]:
     if title == "__previous__":
-        return find_previous_scenario_body(lines, scenario_index)
+        return find_previous_scenario_body(lines, continuation, scenario_index)
     var j = 0
     while j < lines.len():
         val trimmed = lines[j].trim()
         if j != scenario_index and is_scenario_line(trimmed):
             val name = extract_quoted_name(trimmed)
             if name == title:
-                val end_index = find_scenario_body_end(lines, j + 1, count_leading_indent(lines[j]))
+                val end_index = find_scenario_body_end(lines, continuation, j + 1, count_leading_indent(lines[j]))
                 return collect_scenario_body(lines, j + 1, end_index)
         j = j + 1
     []
 
-fn expand_prev_scenario_body(lines: [text], scenario_index: i64, body: [text]) -> [text]:
+fn expand_prev_scenario_body(lines: [text], continuation: [bool], scenario_index: i64, body: [text]) -> [text]:
     val prev_title = scenario_prev_title(lines, scenario_index)
     if prev_title == "":
         return body
     val current_title = scenario_title_at(lines, scenario_index)
     val target_title = if prev_title == "__previous__": previous_scenario_title(lines, scenario_index) else: prev_title
     val target_index = scenario_index_by_title(lines, target_title, scenario_index)
-    if target_title == current_title or scenario_references_title(lines, target_index, current_title):
+    if target_title == current_title or scenario_references_title(lines, continuation, target_index, current_title):
         var cycle_body: [text] = []
         cycle_body.push(scenario_cycle_warning("prev", current_title, target_title))
         var i = 0
@@ -1097,7 +1214,7 @@ fn expand_prev_scenario_body(lines: [text], scenario_index: i64, body: [text]) -
             cycle_body.push(body[i])
             i = i + 1
         return cycle_body
-    val prev_body = find_scenario_body_by_title(lines, prev_title, scenario_index)
+    val prev_body = find_scenario_body_by_title(lines, continuation, prev_title, scenario_index)
     if prev_body.len() == 0:
         var missing_prev: [text] = []
         val label = if prev_title == "__previous__": "previous scenario" else: prev_title
@@ -1118,7 +1235,7 @@ fn expand_prev_scenario_body(lines: [text], scenario_index: i64, body: [text]) -
         i = i + 1
     expanded
 
-fn expand_include_scenario_body(lines: [text], scenario_index: i64, body: [text]) -> [text]:
+fn expand_include_scenario_body(lines: [text], continuation: [bool], scenario_index: i64, body: [text]) -> [text]:
     var expanded: [text] = []
     var i = 0
     while i < body.len():
@@ -1128,10 +1245,10 @@ fn expand_include_scenario_body(lines: [text], scenario_index: i64, body: [text]
         if include_title != "":
             val current_title = scenario_title_at(lines, scenario_index)
             val include_index = scenario_index_by_title(lines, include_title, scenario_index)
-            if include_title == current_title or scenario_references_title(lines, include_index, current_title):
+            if include_title == current_title or scenario_references_title(lines, continuation, include_index, current_title):
                 expanded.push(scenario_cycle_warning("include", current_title, include_title))
             else:
-                val include_body = find_scenario_body_by_title(lines, include_title, scenario_index)
+                val include_body = find_scenario_body_by_title(lines, continuation, include_title, scenario_index)
                 if include_body.len() > 0:
                     var j = 0
                     while j < include_body.len():
@@ -1305,14 +1422,6 @@ fn step_helper_label_from_source(trimmed: text) -> text:
     if not trimmed.starts_with("step("):
         return ""
     if trimmed.contains("\""):
-        # Span the FIRST to the LAST quote rather than taking the first quoted
-        # segment: a label carrying an escaped quote (step("session \"main\""))
-        # splits into several segments, and a first-segment reader truncated it
-        # at the backslash — manuals showed `- Create session \`.
-        val open_at = trimmed.find("\"")
-        val close_at = trimmed.rfind("\"")
-        if close_at > open_at:
-            return trimmed[open_at + 1:close_at].replace("\\\"", "\"")
         return extract_quoted_name(trimmed)
     ""
 
@@ -1469,11 +1578,7 @@ fn manual_expected_value_label(value: text) -> text:
         label = label[0:77] + "... (full value in folded executable source)"
     label
 
-fn assertion_expected_summary(raw_trimmed: text) -> text:
-    # Strip the same-line oracle marker first: without this the rendered
-    # expected value swallowed the comment, e.g.
-    #   Expected: s.session_index equals `0)  # oracle: index 0 is the first ...`
-    val trimmed = without_trailing_oracle_comment(raw_trimmed)
+fn assertion_expected_summary(trimmed: text) -> text:
     if not trimmed.starts_with("expect("):
         return ""
     var expected_true = false
@@ -1626,10 +1731,10 @@ fn render_scenario_body_with_capture(lines: [text], scenario_capture: text) -> t
     val evidence = if steps != "": "" else: render_capture_evidence_summary(scenario_capture, lines)
     warnings + steps + evidence + render_executable_spipe(without_metadata)
 
-fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text, capture_policy: text) -> text:
+fn render_manual_scenario(name: text, suffix: text, body: [text], visibility: text, capture_policy: text, requirement_ids: [text]) -> text:
     if visibility == "skip":
         return ""
-    val heading = "#### " + name + suffix + "\n"
+    val heading = "#### " + name + suffix + "\n" + render_scenario_requirements(requirement_ids)
     val rendered_body = render_scenario_body_with_capture(body, capture_policy)
     if visibility == "folded" or visibility == "detail":
         val label = if visibility == "detail": "Details: " else: "Advanced: "
@@ -1646,23 +1751,12 @@ fn render_rendered_scenario_toggle(lines: [text]) -> text:
         i = i + 1
     "<details>\n<summary>Rendered scenario source</summary>\n\n" + quoted.join("\n") + "\n\n</details>\n\n"
 
-fn custom_block_opener_at(line: text, index: i32, opener: text) -> bool:
-    if index + opener.len() > line.len():
-        return false
-    if line[index:index + opener.len()] != opener:
-        return false
-    if index == 0:
-        return true
-    not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(
-        line[index - 1:index]
-    )
-
 fn extract_custom_block_exprs(line: text, block_name: text) -> [text]:
     var exprs: [text] = []
     var i = 0
     val opener = block_name + "{"
     while i + 1 < line.len():
-        if custom_block_opener_at(line, i, opener):
+        if i + opener.len() <= line.len() and line[i:i + opener.len()] == opener:
             var depth = 1
             var j = i + opener.len()
             var expr_parts: [text] = []
@@ -1709,7 +1803,7 @@ fn render_line_with_custom_blocks(line: text) -> text:
     var i = 0
     val opener = "m{"
     while i < line.len():
-        if custom_block_opener_at(line, i, opener):
+        if i + opener.len() <= line.len() and line[i:i + opener.len()] == opener:
             var depth = 1
             var j = i + opener.len()
             var expr_parts: [text] = []
@@ -1749,11 +1843,16 @@ fn render_custom_block_examples(lines: [text]) -> text:
     else:
         ""
 
-fn find_scenario_body_end(lines: [text], start: i64, scenario_indent: i64) -> i64:
+fn find_scenario_body_end(lines: [text], continuation: [bool], start: i64, scenario_indent: i64) -> i64:
+    # `continuation[k]` is CoreLexer's answer to "is line k inside a string
+    # opened earlier?". A fixture such as `val src = """ ... """` routinely
+    # holds column-0 text; before this, that text's indent ended the scenario
+    # body early and every line after the fixture fell out of the manual
+    # (11 spec files in this tree, measured 2026-09-05).
     var k = start
     while k < lines.len():
         val cur = lines[k]
-        if cur.trim() == "":
+        if cur.trim() == "" or continuation[k]:
             k = k + 1
             continue
         if count_leading_indent(cur) <= scenario_indent:
@@ -1769,130 +1868,40 @@ fn collect_scenario_body(lines: [text], start: i64, end_index: i64) -> [text]:
         k = k + 1
     body
 
-fn pending_call_parenthesis_delta(line: text) -> i32:
-    var delta = 0
-    var in_string = false
-    var escaped = false
-    var index = 0
-    while index < line.len():
-        val ch = line[index:index + 1]
-        if in_string:
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                in_string = false
-        elif ch == "\"":
-            in_string = true
-        elif ch == "(":
-            delta = delta + 1
-        elif ch == ")":
-            delta = delta - 1
-        index = index + 1
-    delta
-
-fn literal_pending_call(call: text) -> bool:
-    if not call.starts_with("pending(\""):
-        return false
-    if not call.ends_with("\")"):
-        return false
-    val reason = call.slice(9, call.len() - 2)
-    reason != "" and not reason.contains("\"")
-
-fn scenario_body_is_unconditional_pending(body: [text]) -> bool:
-    val source = strip_leading_docstring(body)
-    var statement_indent = -1
-    for raw_line in source:
-        val line = raw_line.trim()
-        if line == "" or line.starts_with("#"):
-            continue
-        val indent = count_leading_indent(raw_line)
-        if statement_indent < 0 or indent < statement_indent:
-            statement_indent = indent
-    if statement_indent < 0:
-        return false
-
-    var index = 0
-    while index < source.len():
-        val line = source[index].trim()
-        if (
-            line.starts_with("pending(") and
-            count_leading_indent(source[index]) == statement_indent
-        ):
-            var call = ""
-            var depth = 0
-            var call_end = index
-            while call_end < source.len():
-                val part = source[call_end].trim()
-                call = call + part
-                depth = depth + pending_call_parenthesis_delta(part)
-                if depth == 0:
-                    break
-                if depth < 0:
-                    return false
-                call_end = call_end + 1
-            if depth != 0 or not literal_pending_call(call):
-                index = index + 1
-                continue
-            var next = call_end + 1
-            while next < source.len():
-                val next_line = source[next].trim()
-                if next_line == "" or next_line.starts_with("#"):
-                    next = next + 1
-                    continue
-                if (
-                    count_leading_indent(source[next]) == statement_indent and
-                    next_line == "return"
-                ):
-                    return true
-                break
-        index = index + 1
-    false
-
-fn scenario_at_is_unconditional_pending(
-    lines: [text], scenario_index: i64
-) -> bool:
-    val end_index = find_scenario_body_end(
-        lines, scenario_index + 1, count_leading_indent(lines[scenario_index])
-    )
-    scenario_body_is_unconditional_pending(
-        collect_scenario_body(lines, scenario_index + 1, end_index)
-    )
-
 fn extract_test_structure_with_default(content: text, default_visibility: text) -> text:
     val lines = content.split("\n")
     val file_visibility = file_manual_visibility(lines)
     val resolved_file_visibility = manual_default(file_visibility, default_visibility)
     var result_parts: [text] = []
     var i = 0
-    var in_docstring = false
+    # Both facts index beside lines[i]. They replace a per-line docstring flag
+    # that could not tell a docstring's bare closing `"""` from a fixture
+    # string's — so `val src = """ ... """` put the walker into docstring mode
+    # on the way OUT and it discarded every scenario until the next triple quote.
+    val string_continuation = simple_string_continuation_lines(content)
+    val code_lines = simple_code_lines(content)
 
     while i < lines.len():
         val line = lines[i]
         val trimmed = line.trim()
 
-        # Handle multi-line docstring content — skip until closing """
-        if in_docstring:
-            if trimmed == "\"\"\"" or trimmed.ends_with("\"\"\""):
-                in_docstring = false
+        # Inside a string opened earlier: content, not structure. Covers a
+        # docstring's interior and closing line, and a fixture's too.
+        if string_continuation[i]:
             i = i + 1
             continue
 
-        # Detect standalone """ opening (multi-line block)
-        if trimmed == "\"\"\"":
-            in_docstring = true
-            i = i + 1
-            continue
-
-        # Detect inline multi-line start: """text (no closing """ on same line)
-        if trimmed.starts_with("\"\"\"") and not (trimmed.ends_with("\"\"\"") and trimmed.len() > 6):
-            in_docstring = true
+        # The OPENING line of a multi-line docstring carries no structure
+        # either: its code view is exactly an empty quote pair and the next
+        # line continues it. A fixture opener (`val src = """`) keeps its code
+        # and is deliberately NOT skipped; a one-line `"""doc"""` has no
+        # continuation and falls through, as before.
+        if code_lines[i].trim() == "\"\"" and i + 1 < lines.len() and string_continuation[i + 1]:
             i = i + 1
             continue
 
         # describe block -> H3
-        if spec_kw_line(trimmed, "describe"):
+        if trimmed.starts_with("describe ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             result_parts.push("### {name}\n")
 
@@ -1927,68 +1936,62 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             result_parts.push("\n")
 
         # skip it / skip_it -> skipped scenario
-        elif (spec_kw_line(trimmed, "skip it") or spec_kw_line(trimmed, "skip_it")):
+        elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
+            val next_index = find_scenario_body_end(lines, string_continuation, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val expanded_body = expand_prev_scenario_body(lines, i, body)
-            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val expanded_body = expand_prev_scenario_body(lines, string_continuation, i, body)
+            val included_body = expand_include_scenario_body(lines, string_continuation, i, expanded_body)
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(skipped)_", final_body, visibility, capture))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(skipped)_", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         # pending -> pending bullet
-        elif spec_kw_line(trimmed, "pending"):
+        elif trimmed.starts_with("pending ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
+            val next_index = find_scenario_body_end(lines, string_continuation, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val expanded_body = expand_prev_scenario_body(lines, i, body)
-            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val expanded_body = expand_prev_scenario_body(lines, string_continuation, i, body)
+            val included_body = expand_include_scenario_body(lines, string_continuation, i, expanded_body)
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(pending)_", final_body, visibility, capture))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(pending)_", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         # slow it -> slow bullet
-        elif spec_kw_line(trimmed, "slow_it"):
+        elif trimmed.starts_with("slow_it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
+            val next_index = find_scenario_body_end(lines, string_continuation, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val expanded_body = expand_prev_scenario_body(lines, i, body)
-            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val expanded_body = expand_prev_scenario_body(lines, string_continuation, i, body)
+            val included_body = expand_include_scenario_body(lines, string_continuation, i, expanded_body)
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "folded"))
             val capture = scenario_capture_policy(lines, i)
-            val suffix = if scenario_body_is_unconditional_pending(body):
-                " _(slow, pending)_"
-            else:
-                " _(slow)_"
-            result_parts.push(render_manual_scenario(name, suffix, final_body, visibility, capture))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, " _(slow)_", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         # regular it -> check bullet
-        elif spec_kw_line(trimmed, "it"):
+        elif trimmed.starts_with("it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
+            val next_index = find_scenario_body_end(lines, string_continuation, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
-            val expanded_body = expand_prev_scenario_body(lines, i, body)
-            val included_body = expand_include_scenario_body(lines, i, expanded_body)
+            val expanded_body = expand_prev_scenario_body(lines, string_continuation, i, body)
+            val included_body = expand_include_scenario_body(lines, string_continuation, i, expanded_body)
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            val suffix = if scenario_body_is_unconditional_pending(body):
-                " _(pending)_"
-            else:
-                ""
-            result_parts.push(render_manual_scenario(
-                name, suffix, final_body, visibility, capture
-            ))
+            val requirement_ids = scenario_requirement_ids(lines, i)
+            result_parts.push(render_manual_scenario(name, "", final_body, visibility, capture, requirement_ids))
             i = next_index - 1
 
         i = i + 1

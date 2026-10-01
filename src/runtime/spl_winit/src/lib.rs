@@ -24,10 +24,11 @@
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CStr;
 use std::num::NonZeroU32;
 use std::os::raw::c_char;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -164,7 +165,6 @@ struct Inner {
     id_map: HashMap<WindowId, i64>,
     pending_events: VecDeque<i64>,
     stored_events: HashMap<i64, StoredEvent>,
-    next_window_id: i64,
     next_event_id: i64,
     create_requests: Vec<CreateReq>,
     create_results: HashMap<i64, i64>,
@@ -178,8 +178,21 @@ struct Inner {
 }
 
 struct PumpState {
+    loop_id: i64,
     event_loop: EventLoop<()>,
     inner: Inner,
+}
+
+static NEXT_NATIVE_ID: AtomicI64 = AtomicI64::new(1);
+
+fn next_native_id() -> i64 {
+    NEXT_NATIVE_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .unwrap_or(0)
+}
+
+fn loop_matches(el: i64) -> bool {
+    el > 0 && PUMP.with(|cell| cell.borrow().as_ref().is_some_and(|ps| ps.loop_id == el))
 }
 
 thread_local! {
@@ -188,8 +201,10 @@ thread_local! {
 
 impl Inner {
     fn store_event(&mut self, ev: StoredEvent) {
-        let id = self.next_event_id + 1;
-        self.next_event_id = id;
+        let id = next_native_id();
+        if id == 0 {
+            return;
+        }
         self.stored_events.insert(id, ev);
         self.pending_events.push_back(id);
     }
@@ -236,8 +251,11 @@ impl Inner {
             let nh = NonZeroU32::new(req.height.max(1)).unwrap();
             let _ = surface.resize(nw, nh);
 
-            let wid = self.next_window_id + 1;
-            self.next_window_id = wid;
+            let wid = next_native_id();
+            if wid == 0 {
+                self.create_results.insert(req.req_id, 0);
+                continue;
+            }
             self.id_map.insert(window.id(), wid);
             self.windows.insert(
                 wid,
@@ -562,12 +580,16 @@ mod sided_modifier_tests {
 /// this router is called from whatever thread the interpreter runs
 /// extern calls on, not necessarily "main") and any other unexpected panic
 /// are caught here rather than allowed to escape.
-/// (One event loop per process — winit only allows one.)
+/// One event loop per provider thread. Its opaque handle is never reused.
 #[no_mangle]
 pub extern "C" fn rt_winit_event_loop_new() -> i64 {
-    let already = PUMP.with(|cell| cell.borrow().is_some());
-    if already {
-        return 1;
+    let already = PUMP.with(|cell| cell.borrow().as_ref().map(|ps| ps.loop_id));
+    if let Some(loop_id) = already {
+        return loop_id;
+    }
+    let loop_id = next_native_id();
+    if loop_id == 0 {
+        return 0;
     }
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut builder = EventLoop::builder();
@@ -602,15 +624,15 @@ pub extern "C" fn rt_winit_event_loop_new() -> i64 {
         Ok(Ok(event_loop)) => {
             PUMP.with(|cell| {
                 *cell.borrow_mut() = Some(PumpState {
+                    loop_id,
                     event_loop,
                     inner: Inner {
-                        next_window_id: 0,
                         next_event_id: 0,
                         ..Default::default()
                     },
                 });
             });
-            1
+            loop_id
         }
         Ok(Err(_)) => 0,
         Err(_) => 0,
@@ -619,7 +641,41 @@ pub extern "C" fn rt_winit_event_loop_new() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64 {
-    if el != 1 || max <= 0 || !pump_once(1) {
+    if !loop_matches(el) || max <= 0 || !pump_once(1) {
+        return -1;
+    }
+    PUMP.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(ps) = borrow.as_mut() {
+            ps.inner.pending_events.pop_front().unwrap_or(0)
+        } else {
+            -1
+        }
+    })
+}
+
+/// Poll this window only. Events for sibling windows stay queued for their owners.
+#[no_mangle]
+pub extern "C" fn rt_winit_window_poll_event(win: i64, max: i64) -> i64 {
+    if win <= 0 || max <= 0 || !PUMP.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|ps| ps.inner.windows.contains_key(&win))
+    }) || !pump_once(1) {
+        return -1;
+    }
+    PUMP.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(ps) = borrow.as_mut() else { return -1; };
+        let index = ps.inner.pending_events.iter().position(|event_id| {
+            ps.inner.stored_events.get(event_id)
+                .is_some_and(|event| event.window_id() == win)
+        });
+        index.and_then(|position| ps.inner.pending_events.remove(position)).unwrap_or(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64 {
+    if !loop_matches(el) || timeout_ms < 0 || !pump_once(timeout_ms as u64) {
         return -1;
     }
     PUMP.with(|cell| {
@@ -633,16 +689,12 @@ pub extern "C" fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64 {
-    if el != 1 || timeout_ms < 0 || !pump_once(timeout_ms as u64) {
-        return -1;
-    }
+pub extern "C" fn rt_winit_event_loop_window_count(el: i64) -> i64 {
     PUMP.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        if let Some(ps) = borrow.as_mut() {
-            ps.inner.pending_events.pop_front().unwrap_or(0)
-        } else {
-            -1
+        let borrow = cell.borrow();
+        match borrow.as_ref() {
+            Some(ps) if ps.loop_id == el => ps.inner.windows.len() as i64,
+            _ => -1,
         }
     })
 }
@@ -651,7 +703,9 @@ pub extern "C" fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i
 pub extern "C" fn rt_winit_event_loop_free(el: i64) -> bool {
     PUMP.with(|cell| {
         let mut state = cell.borrow_mut();
-        if el != 1 || state.is_none() {
+        if el <= 0 || state.as_ref().is_none_or(|ps|
+            ps.loop_id != el || !ps.inner.windows.is_empty() ||
+            !ps.inner.create_requests.is_empty()) {
             return false;
         }
         *state = None;
@@ -662,7 +716,10 @@ pub extern "C" fn rt_winit_event_loop_free(el: i64) -> bool {
 /// Create a window. `title_ptr` is a C-string pointer (from spl_str_ptr).
 /// Returns a window handle (>0) or 0 on failure.
 #[no_mangle]
-pub extern "C" fn rt_winit_window_new(_el: i64, w: i64, h: i64, title_ptr: i64) -> i64 {
+pub extern "C" fn rt_winit_window_new(el: i64, w: i64, h: i64, title_ptr: i64) -> i64 {
+    if !loop_matches(el) {
+        return 0;
+    }
     let title = if title_ptr == 0 {
         String::from("Simple")
     } else {
@@ -872,6 +929,13 @@ pub extern "C" fn rt_winit_window_free(win: i64) -> bool {
         if let Some(ps) = borrow.as_mut() {
             if let Some(slot) = ps.inner.windows.remove(&win) {
                 ps.inner.id_map.remove(&slot.window.id());
+                let stale: HashSet<i64> = ps.inner.stored_events.iter()
+                    .filter_map(|(id, event)| (event.window_id() == win).then_some(*id))
+                    .collect();
+                ps.inner.pending_events.retain(|id| !stale.contains(id));
+                for id in stale {
+                    ps.inner.stored_events.remove(&id);
+                }
                 return true;
             }
         }

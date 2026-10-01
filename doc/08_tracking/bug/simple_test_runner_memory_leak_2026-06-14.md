@@ -1,4 +1,8 @@
 # Bug: `bin/simple test` runner grows unbounded RSS → OOM-killed (45–118 GB)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-06-14
 - **Severity:** P1 (kills CI containers via kernel global_oom)
@@ -129,3 +133,11 @@ still climbs from output parsing. (Use a deliberately verbose/large-output spec 
 - `src/lib/nogc_sync_mut/test_runner/test_runner_fork.spl` — fork model (child reclaimed, parent not)
 - `src/runtime/runtime_fork.c:74-78,150` — parent capture buffers reset per spec (NOT the leak)
 - `src/runtime/runtime.c:1014`, `src/runtime/runtime_memtrack.h:94` — no-GC allocator
+
+## Triage 2026-09-13 — LEFT OPEN (unverifiable here; the runner does not work at all on this host)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple test` cannot run a single spec here, let alone ~22.5k. Every invocation dies immediately with `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and reports a false `outer-bound-timeout`, so no RSS growth curve can be produced.
+- **inferred**: the leak is also structurally unreachable on Windows. The root-cause analysis rests on the fork path (`_is_fork_available()` true on Linux, `rt_fork_child_exit` → `_exit()`); there is no fork on Windows, so the parent-process accumulation pattern would differ even if the runner worked.
+- **measured**: all eight repo paths the entry cites still exist — this is stale by host, not by removed code.
+- Verdict: OPEN. The static analysis is unrefuted and the OOM evidence came from Linux CI containers; re-measure there.
+

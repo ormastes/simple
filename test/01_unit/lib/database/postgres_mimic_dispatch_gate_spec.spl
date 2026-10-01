@@ -1,0 +1,55 @@
+"""Atomic frontend/owner handoff for parallel pgwire workers."""
+
+use std.spec
+use std.database.postgres_mimic.{
+    PgResponse, PgResponseKind, PgDispatchGate, PgDispatchOperation,
+    PgDispatchSubmitResult, PgDispatchClaimResult, PgDispatchTakeResult,
+    PgDispatchCompletion
+}
+
+fn gate_completion(session_id: i64) -> PgDispatchCompletion:
+    PgDispatchCompletion(session_id: session_id,
+        responses: [PgResponse(kind: PgResponseKind.CommandComplete,
+            tag: "SELECT 1", columns: [], rows: [], sqlstate: "", message: "",
+            transaction_status: "I")], close_connection: false)
+
+describe "Postgres mimic thread-safe dispatch gate":
+    it "hands a job from a frontend to the single owner exactly once":
+        var gate = PgDispatchGate.create(2)
+        val submitted = gate.submit(10, 3, PgDispatchOperation.Query,
+            "SELECT 1", 0, 100)
+        val job_id = match submitted:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected: 0
+        val claimed_id = match gate.claim_next(1):
+            PgDispatchClaimResult.Claimed(job): job.job_id
+            PgDispatchClaimResult.Empty: 0
+        expect(claimed_id).to_equal(job_id)
+        expect(gate.complete(job_id, gate_completion(3))).to_equal(true)
+        val session_id = match gate.take(job_id):
+            PgDispatchTakeResult.Ready(completion): completion.session_id
+            _: 0
+        expect(session_id).to_equal(3)
+        expect(gate.take(job_id)).to_equal(PgDispatchTakeResult.Gone)
+
+    it "applies overload, disconnect, timeout, and drain at the atomic gate":
+        var gate = PgDispatchGate.create(2)
+        val first = gate.submit(20, 4, PgDispatchOperation.Query,
+            "SELECT 1", 0, 100)
+        val second = gate.submit(21, 5, PgDispatchOperation.Query,
+            "SELECT 2", 0, 5)
+        expect(gate.submit(22, 6, PgDispatchOperation.Query,
+            "SELECT 3", 0, 100)).to_equal(PgDispatchSubmitResult.Rejected)
+        val first_id = match first:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected: 0
+        val second_id = match second:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected: 0
+        expect(gate.cancel_connection(20)).to_equal(1)
+        expect(gate.take(first_id)).to_equal(PgDispatchTakeResult.Gone)
+        expect(gate.expire_queued(5)).to_equal(1)
+        expect(gate.take(second_id)).to_equal(PgDispatchTakeResult.Gone)
+        expect(gate.begin_drain()).to_equal(0)
+        expect(gate.submit(23, 7, PgDispatchOperation.Query,
+            "SELECT 4", 5, 100)).to_equal(PgDispatchSubmitResult.Rejected)

@@ -84,14 +84,14 @@ fn exact_line_present(body: text, statement: text) -> bool:
 
 fn source_has_ordered_post_parse_reclaim(driver: text) -> bool:
     val body = exact_indented_body(driver, "me compile() -> CompileResult:")
-    val parse_pos = exact_line_position(body, "val (parsed_ctx, parse_ok) = self.parse_all_impl()")
-    val gate_pos = exact_line_position(body, "if self.ctx.source_contents_reclaimable():")
+    val parse_pos = exact_line_position(body, "val (parsed_ctx, returned_parse_ok) = self.parse_all_impl()")
+    val gate_pos = exact_line_position(body, "if self.ctx.source_contents_reclaimable() and not streaming_pipeline:")
     val trace_start_pos = exact_line_position(body, "log_phase(\"phase2:source_reclaim:start low_memory=true\")")
     val reset_pos = exact_line_position(body, "lexer_release_parse_source_globals()")
     val reclaim_pos = exact_line_position(body, "val reclaimed_sources = self.ctx.reclaim_source_contents()")
     val evict_pos = exact_line_position(body, "self.ctx.evict_sources()")
     val trace_done_pos = exact_line_position(body, "log_phase(\"phase2:source_reclaim:done reclaimed={{reclaimed_sources}}\")")
-    val hir_pos = exact_line_position(body, "val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()")
+    val hir_pos = exact_line_position(body, "val (analyzed_ctx, returned_analyze_ok) = self.lower_and_check_impl()")
     (parse_pos >= 0 and gate_pos > parse_pos and trace_start_pos > gate_pos and
         reset_pos > trace_start_pos and reclaim_pos > reset_pos and
         evict_pos > reclaim_pos and trace_done_pos > evict_pos and
@@ -112,11 +112,11 @@ fn source_has_complete_lexer_release(lexer: text) -> bool:
         lexer,
         "pub fn lexer_release_parse_source_globals():"
     )
-    (exact_line_present(body, "current_core_lexer_slot = []") and
-        exact_line_present(body, "lex_inline_source_slot = [\"\"]") and
-        exact_line_present(body, "lex_source_codes = []") and
-        exact_line_present(body, "lex_source_char_count_slot = [0]") and
-        exact_line_present(body, "lex_source_code_base_slot = [0]") and
+    (exact_line_present(body, "current_core_lexer_slot[0] = detached_core_lexer_slot[0]") and
+        exact_line_present(body, "lex_inline_source_slot[0] = \"\"") and
+        exact_line_present(body, "lex_source_codes.clear()") and
+        exact_line_present(body, "lex_source_char_count_slot[0] = 0") and
+        exact_line_present(body, "lex_source_code_base_slot[0] = 0") and
         exact_line_present(body, "rt_env_set(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", \"\")") and
         exact_line_present(body, "rt_env_set(\"SIMPLE_BOOTSTRAP_LEX_PATH\", \"\")"))
 
@@ -125,11 +125,11 @@ fn source_contract_negative_control() -> bool:
     val false_lexer = (
         "pub fn lexer_release_parse_source_globals():\n" +
         "    \"\"\"\n" +
-        "    current_core_lexer_slot = []\n" +
-        "    lex_inline_source_slot = [\"\"]\n" +
-        "    lex_source_codes = []\n" +
-        "    lex_source_char_count_slot = [0]\n" +
-        "    lex_source_code_base_slot = [0]\n" +
+        "    current_core_lexer_slot[0] = detached_core_lexer_slot[0]\n" +
+        "    lex_inline_source_slot[0] = \"\"\n" +
+        "    lex_source_codes.clear()\n" +
+        "    lex_source_char_count_slot[0] = 0\n" +
+        "    lex_source_code_base_slot[0] = 0\n" +
         "    rt_env_set(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", \"\")\n" +
         "    rt_env_set(\"SIMPLE_BOOTSTRAP_LEX_PATH\", \"\")\n" +
         "    \"\"\"\n" +
@@ -139,7 +139,7 @@ fn source_contract_negative_control() -> bool:
     val false_driver_scope = (
         "class FalseDriverScope:\n" +
         "    me compile() -> CompileResult:\n" +
-        "        val (parsed_ctx, parse_ok) = self.parse_all_impl()\n" +
+        "        val parse_ok = self.parse_all_impl()\n" +
         "    me unrelated() -> CompileResult:\n" +
         "        if self.ctx.source_contents_reclaimable():\n" +
         "            log_phase(\"phase2:source_reclaim:start low_memory=true\")\n" +
@@ -147,21 +147,21 @@ fn source_contract_negative_control() -> bool:
         "            val reclaimed_sources = self.ctx.reclaim_source_contents()\n" +
         "            self.ctx.evict_sources()\n" +
         "            log_phase(\"phase2:source_reclaim:done reclaimed={{reclaimed_sources}}\")\n" +
-        "        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()\n"
+        "        val analyze_ok = self.lower_and_check_impl()\n"
     )
     # Every ordered token is in compile(), but only inside a docstring.
     val false_driver_string = (
         "class FalseDriver:\n" +
         "    me compile() -> CompileResult:\n" +
         "        \"\"\"\n" +
-        "        val (parsed_ctx, parse_ok) = self.parse_all_impl()\n" +
+        "        val parse_ok = self.parse_all_impl()\n" +
         "        if self.ctx.source_contents_reclaimable():\n" +
         "        log_phase(\"phase2:source_reclaim:start low_memory=true\")\n" +
         "        lexer_release_parse_source_globals()\n" +
         "        val reclaimed_sources = self.ctx.reclaim_source_contents()\n" +
         "        self.ctx.evict_sources()\n" +
         "        log_phase(\"phase2:source_reclaim:done reclaimed={{reclaimed_sources}}\")\n" +
-        "        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()\n" +
+        "        val analyze_ok = self.lower_and_check_impl()\n" +
         "        \"\"\"\n" +
         "        pass\n"
     )

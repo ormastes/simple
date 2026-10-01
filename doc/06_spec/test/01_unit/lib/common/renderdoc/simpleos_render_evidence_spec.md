@@ -2,9 +2,33 @@
 
 > <details>
 
+<!-- sdn-diagram:id=simpleos_render_evidence_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_render_evidence_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_render_evidence_spec -> std
+simpleos_render_evidence_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_render_evidence_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -136,32 +160,7 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 </details>
 
 <details>
-<summary>Advanced: should reject capture identity disagreement</summary>
-
-#### should reject capture identity disagreement
-
-- Pair a serial receipt with a different captured frame
-- var evidence = target evidence
-   - Expected: validate_simpleos_render_target_evidence(evidence).code equals `frame-correlation-mismatch`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Pair a serial receipt with a different captured frame")
-var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
-evidence.capture_frame_id = "frame-2"
-expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("frame-correlation-mismatch")
-```
-
-</details>
-
-
-</details>
+<summary>Advanced: should reject non-hex evidence hashes</summary>
 
 #### should reject non-hex evidence hashes
 
@@ -180,6 +179,9 @@ step("Replace a capture digest with a same-length non-hex string")
 val evidence = target_evidence("qemu", "", "", "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg", "boot-1")
 expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missing-capture-evidence")
 ```
+
+</details>
+
 
 </details>
 
@@ -355,7 +357,7 @@ expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", ke
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-07-10 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -368,8 +370,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

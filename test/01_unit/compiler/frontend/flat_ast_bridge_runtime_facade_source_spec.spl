@@ -1,8 +1,40 @@
+"""
+## Purpose and audience
+Pins the flat AST bridge's environment-facade ownership: the bridge owns the
+nullable transport import and total lookup wrapper, the io_runtime facade owns
+the optional-result ABI, and no raw extern leaks into the bridge. Audience:
+engineers changing std.nogc_sync_mut.io_runtime env facades or the flat AST
+bridge's convert_nodes pass.
+
+## Operator workflow
+Run the spec and read the verdict line:
+./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/frontend/flat_ast_bridge_runtime_facade_source_spec.spl
+
+## Compatibility and limitations
+The facade shape is asserted as a source contract because these internals have
+no runtime API; an intentional wrapper reshape fails the scenario until this
+contract is updated to match the reviewed new shape.
+
+## Verification guidance and troubleshooting
+A failing expectation names the exact token or cardinality to re-check in
+convert_nodes.spl or io_runtime.spl; a cardinality drift means a call site was
+added or removed and the contract counts must be re-derived before landing.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_import_alias_resolution.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/sspec_capture_extension.md
+# @manual_section: flat AST bridge facade ownership
+
 use std.spec.*
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
 describe "flat AST bridge environment facade ownership":
     it "preserves nullable transport and total bridge lookup semantics":
+        # @req REQ-FRONTEND-BRIDGE-FACADE-001
+        # @capture(statistics): facade call-site cardinalities and wrapper body text
+        step("Read the bridge and facade sources")
         val source = file_read(
             "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
         val facade_source = file_read(
@@ -13,7 +45,7 @@ describe "flat AST bridge environment facade ownership":
 
         # Positive cardinalities keep the contract meaningful if either the
         # bridge lookup or the reset trace control is accidentally removed.
-        expect(source.split("env_get_nullable(").len() - 1).to_equal(2)
+        expect(source.split("env_get_nullable(").len() - 1).to_equal(2)  # oracle: exactly two call sites -- the total wrapper and the trace reset
         expect(source.split("flat_bridge_env_get(").len() - 1).to_be_greater_than(8)
 
         # The wrapper deliberately keeps its old empty-for-unset contract;
@@ -23,9 +55,12 @@ describe "flat AST bridge environment facade ownership":
         expect(source).to_contain(
             "val trace_reset = (env_get_nullable(\"SIMPLE_TRACE_AST_RESET\") ?? \"\") == \"1\"")
 
-        expect(source.contains("extern fn rt_env_get")).to_equal(false)
-        expect(source.contains("rt_env_get(")).to_equal(false)
-        expect(source.contains("env_get_opt(")).to_equal(false)
+        val declares_no_raw_env_extern = source.contains("extern fn rt_env_get")
+        expect(declares_no_raw_env_extern).to_equal(false)
+        val calls_no_raw_env_transport = source.contains("rt_env_get(")
+        expect(calls_no_raw_env_transport).to_equal(false)
+        val calls_no_legacy_env_opt = source.contains("env_get_opt(")
+        expect(calls_no_legacy_env_opt).to_equal(false)
 
         # The facade must not merely advertise an optional result over a
         # non-optional raw declaration: both runtime providers return nil for
@@ -34,9 +69,9 @@ describe "flat AST bridge environment facade ownership":
             "extern fn rt_env_get(key: text) -> text?")
         val nullable_prefix = facade_source.split(
             "pub fn env_get_nullable(key: text) -> text?:")
-        expect(nullable_prefix.len()).to_equal(2)
+        expect(nullable_prefix.len()).to_equal(2)  # oracle: exactly one definition of env_get_nullable exists in the facade
         val nullable_body = nullable_prefix[1].split("\n\n")[0]
-        expect(nullable_body.split("rt_env_get(key)").len() - 1).to_equal(1)
+        expect(nullable_body.split("rt_env_get(key)").len() - 1).to_equal(1)  # oracle: the body forwards to rt_env_get exactly once
         expect(nullable_body).to_equal(
             "\n    unsafe(capabilities: [ffi]):\n        rt_env_get(key)")
         expect(nullable_prefix[0]).to_end_with("@always_inline\n")

@@ -31,6 +31,17 @@ for script in \
   scripts/setup/setup.shs; do
   sh -n "${script}" || fail "shell syntax: ${script}"
 done
+bash -n scripts/setup/materialize-symlinks-windows.shs ||
+  fail "shell syntax: scripts/setup/materialize-symlinks-windows.shs"
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) : ;;
+  *)
+    materializer_noop=$(bash scripts/setup/materialize-symlinks-windows.shs 2>&1) ||
+      fail "Windows symlink materializer is not a portable non-Windows no-op"
+    printf '%s\n' "${materializer_noop}" | grep -Fq 'this script is Windows-only' ||
+      fail "Windows symlink materializer did not report its non-Windows no-op"
+    ;;
+esac
 perl -c scripts/check/lib/portable-hardlink-lock.pl >/dev/null ||
   fail "Perl syntax: portable-hardlink-lock.pl"
 perl -c scripts/check/lib/portable-session-exec.pl >/dev/null ||
@@ -72,6 +83,10 @@ sh test/01_unit/scripts/portable_process_lock_test.shs ||
 sh test/01_unit/scripts/bootstrap_from_scratch_rust_authority_contract_test.shs ||
   fail "immutable bootstrap authority publication"
 sh -n scripts/bootstrap/bootstrap-from-scratch.sh || fail "shell syntax: bootstrap-from-scratch.sh (windows-entry folded)"
+sh test/01_unit/scripts/bootstrap_from_scratch_jobs_space_form_test.shs ||
+  fail "bootstrap argument errors: --jobs space form / unknown argument"
+sh test/01_unit/scripts/bootstrap_from_scratch_arg_contract_test.shs ||
+  fail "bootstrap argument parser contract"
 sh test/02_integration/bootstrap_stage3_source_snapshot_test.shs ||
   fail "Stage 3 source snapshot symlinks"
 if command -v jj >/dev/null 2>&1; then
@@ -86,7 +101,7 @@ printf '%s\n' "${help}" | grep -q -- '--incremental-unlimited' || fail "missing 
 printf '%s\n' "${help}" | grep -q -- '--clean-release' || fail "missing clean release profile help"
 printf '%s\n' "${help}" | grep -q -- '--diagnostics' || fail "missing diagnostics mode help"
 printf '%s\n' "${help}" | grep -q -- '--diagnostic-child-compiler' || fail "missing diagnostic child compiler help"
-printf '%s\n' "${help}" | grep -q -- 'default: llvm; cranelift also supported' || fail "LLVM default/backend support missing from help"
+printf '%s\n' "${help}" | grep -q -- 'selected default: llvm' || fail "selected backend help missing"
 
 grep -q 'command -v shasum' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS SHA-256 fallback"
 grep -q 'command -v gtimeout' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS timeout fallback"
@@ -94,7 +109,9 @@ grep -Fq 'brew install coreutils freetype' .github/workflows/rust-bootstrap-mult
 grep -Fq 'brew install coreutils freetype zstd' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS zstd linker dependency missing"
 grep -Fq 'LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS Homebrew library path missing"
 grep -Fq 'clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev' .github/workflows/rust-bootstrap-multiplatform.yml || fail "Linux bootstrap linker dependency missing"
-grep -q '^backend="llvm"$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap default backend is not LLVM"
+grep -q '^backend=""$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap still hides a backend selection"
+grep -Fq 'backend=llvm' scripts/bootstrap/bootstrap-from-scratch.sh || fail "LLVM+Cranelift authority does not derive its default backend"
+grep -Fq 'selected_k1_policy=$(kernel_policy_value k1_policy)' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap does not consume canonical K1 authority"
 grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table or browser TLS is disabled"
 grep -Fq 'runtime-tls = ["dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pemfile"]' src/compiler_rust/runtime/Cargo.toml || fail "browser TLS does not use platform trust"
 grep -Fq '.with_platform_verifier()' src/compiler_rust/runtime/src/value/net_tls.rs || fail "browser TLS platform verifier wiring missing"
@@ -310,7 +327,7 @@ if grep -Eq 'choco install llvm|Get-ChildItem .*llvm-config' "${multiplatform}";
 fi
 grep -Fq 'run: sh scripts/check/check-bootstrap-portability.shs' "${multiplatform}" || fail "bootstrap portability contracts are not executed in CI"
 grep -Fq "group: \${{ github.workflow }}-\${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}" "${multiplatform}" || fail "manual bootstrap concurrency is not run-isolated"
-grep -Fq "cancel-in-progress: \${{ github.event_name != 'workflow_dispatch' }}" "${multiplatform}" || fail "manual bootstrap runs remain cancellable"
+grep -Fq "cancel-in-progress: \${{ github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/main' }}" "${multiplatform}" || fail "manual or main bootstrap runs remain cancellable"
 grep -Fq "if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'" "${multiplatform}" || fail "bootstrap failure logs are not retained"
 grep -Fq 'name: bootstrap-failure-logs-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}' "${multiplatform}" || fail "bootstrap failure artifact names collide across platforms"
 dynload_archive_body=$(awk '
@@ -521,7 +538,7 @@ fi
 grep -Fq '#cloud-config' "${freebsd_qemu}" || fail "FreeBSD firstboot seed is not cloud-config"
 grep -Fq '/etc/rc.conf.d/firstboot_freebsd_update' "${freebsd_qemu}" || fail "FreeBSD update is not disabled before LOGIN"
 grep -Fq '/etc/rc.conf.d/firstboot_pkgs' "${freebsd_qemu}" || fail "FreeBSD package bootstrap is not disabled before LOGIN"
-grep -Fq 'pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
+grep -Fq 'pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5 coreutils' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
 grep -Fq 'command -v perl' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not verify the provenance helper runtime"
 write_files_line=$(grep -n '^write_files:' "${freebsd_qemu}" | cut -d: -f1)
 runcmd_line=$(grep -n '^runcmd:' "${freebsd_qemu}" | cut -d: -f1)
@@ -537,8 +554,9 @@ for required in \
 done
 [ "$(grep -Fc '${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh' "${freebsd_qemu}")" -eq 3 ] ||
   fail "FreeBSD Stage 2/3/4 bootstrap commands do not all use library search paths"
+! grep -Fq 'bootstrap-from-scratch.sh --strategy=adhoc' "${freebsd_qemu}" || fail "FreeBSD QEMU wrapper retains invalid direct adhoc bootstrap invocation"
 grep -Fq 'error: failed to fingerprint Rust seed inputs' scripts/bootstrap/bootstrap-from-scratch.sh || fail "seed fingerprint failure is silent"
-grep -Fq 'STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
+grep -Fq 'STAGE_BIN="${GUEST_BOOTSTRAP_OUTPUT}/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
 freebsd_dynload_archive_body=$(awk '
 $0 == "    info \"Running FreeBSD Stage4 dynload provider archive proof...\"" { inside=1; print; next }
 inside && /^    info "/ { exit }
@@ -712,7 +730,7 @@ for required in \
 done
 grep -Fq 'val payload = value?' test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl || fail "uniform Option fixture must exercise annotated/local try lowering"
 grep -Fq 'val payload = direct_value()?' test/fixtures/compiler/native_option_try_direct_loud.spl || fail "direct Option fixture must exercise call-result try lowering"
-grep -Fq 'return _sffi_rt_enum_new(1, 1, 3)' src/runtime/simple_core/core_string.spl || fail "text index_of absence must return canonical Option.None"
+grep -Fq 'return _sffi_core_string_rt_enum_new(1, 1, 3)' src/runtime/simple_core/core_string.spl || fail "text index_of absence must return canonical Option.None"
 grep -Fq 'declare i8 @rt_enum_check_discriminant(i64, i64)' src/compiler/70.backend/backend/llvm_backend.spl || fail "LLVM enum discriminant predicate ABI drift"
 printf '%s\n' "${open_bug_repros}" | grep -Fq 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' || fail "exact brace-literal scope reproduction is not an opt-in known-red case"
 [ "$(grep -Fc 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "exact brace-literal scope reproduction must be registered exactly once"
@@ -1208,8 +1226,8 @@ grep -Fq 'and not predicate_has_custom_owner:' src/compiler/50.mir/_MirLoweringE
 grep -Fq 'run_strict_dual_backend_case method_owner_dispatch write_case_method_owner_dispatch "179918100Mcompiledtruefalsetruetruefalsetrue"' scripts/check/check-native-seed-parity.shs || fail "custom text predicate strict-dual oracle missing"
 grep -Fq "function name '__simple_rt_string_char_code_at' is reserved for compiler-generated text calls" src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl || fail "char_code_at runtime alias reservation missing"
 grep -Fq 'self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"' src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl || fail "char_code_at runtime alias owner is not the canonical repository path"
-grep -Fq 'var hir_low = hirlowering_for_module(source_file, {})' src/compiler/70.backend/backend/compile_c_entry.spl || fail "C backend HIR lowering loses source provenance"
-grep -Fq 'if hir_failed:' src/compiler/70.backend/backend/compile_c_entry.spl || fail "C backend does not stop after fatal HIR diagnostics"
+grep -Fq 'var hir_low = hirlowering_for_module(source_file, retained_module_surfaces)' src/plugins/backend_c/compile_c_entry.spl || fail "C backend HIR lowering loses source provenance"
+grep -Fq 'if hir_failed:' src/plugins/backend_c/compile_c_entry.spl || fail "C backend does not stop after fatal HIR diagnostics"
 grep -Fq 'int64_t  __simple_rt_string_char_code_at(int64_t string, int64_t index);' src/runtime/runtime.h || fail "char_code_at C runtime alias prototype missing"
 grep -Fq 'rejects a source definition of the compiler-reserved alias' test/01_unit/compiler/mir/text_builtin_rfind_lowering_spec.spl || fail "char_code_at reserved-alias regression missing"
 enum_eq_mir=src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl

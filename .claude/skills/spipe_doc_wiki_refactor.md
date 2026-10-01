@@ -26,6 +26,10 @@ doc/wiki/process links. Its job is documentation hygiene, not product behavior.
 
 ## Actions
 
+0. Validate the retained knowledge-selection receipt against the current
+   registry and touched paths. Private wiki entries may extend stable IDs but
+   cannot override the registry or kernel/driver MDSOC-only policy.
+
 1. Identify docs and wiki-style knowledge that mention the changed feature,
    changed APIs, changed commands, or changed file paths.
 2. Update stale links, command names, phase references, and file paths.
@@ -75,8 +79,3 @@ doc/wiki/process links. Its job is documentation hygiene, not product behavior.
   `N/A` with reason.
 - `.spipe/<feature>/state.md` lists doc/wiki updates or states that none were
   needed.
-
-For changed SSpec sources, include the `sspec-maintain scan` scorecard and
-mirror status in the refactor inventory. Document preview/confirmation/rollback
-for applied improvements. Keep reference scaffolds visibly fail-fast and keep
-SPipe as the canonical complete-manual generator.

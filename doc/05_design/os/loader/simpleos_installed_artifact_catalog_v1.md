@@ -10,15 +10,15 @@ path, digest, signature, nor catalog status is loader or scheduler authority.
 
 The population session and all lifecycle mutations are `pub(package)` within
 `os.kernel.loader`. Public callers cannot construct a session, consume one of
-the 16 permanent slots, seal the owner, or reset it. The lifecycle is one-way:
+the 17 permanent slots per target, seal the owner, or reset it. The lifecycle is one-way:
 
 `Uninitialized -> Populating -> Sealed`, with any indeterminate serialization
 or integrity failure transitioning permanently to `Quarantined`.
 
 ## Retained records
 
-The owner retains at most 16 records for each of the six canonical SimpleOS
-targets (96 records total) and at most 8 aliases per record. The admitted target
+The owner retains at most 17 records for each of the six canonical SimpleOS
+targets (102 records total) and at most 64 aliases per record. The admitted target
 tuples are `simpleos/simpleos` with architecture `x86_64`, `x86`, `aarch64`,
 `arm`, `riscv64`, or `riscv32`. Paths
 are canonical absolute paths capped at 4096 UTF-8 bytes. Every record retains:
@@ -31,8 +31,8 @@ are canonical absolute paths capped at 4096 UTF-8 bytes. Every record retains:
 - a fully bounded, deeply owned `SimpleArtifactManifest`.
 
 Canonical paths and aliases are keyed by the complete
-`(path, os, architecture, ABI)` tuple in one 2048-slot open-addressed collision
-domain. At most 864 keys can be retained, keeping load below 43%. A duplicate
+`(path, os, architecture, ABI)` tuple in one 8192-slot open-addressed collision
+domain. At most 6630 keys can be retained, keeping load below 81%. A duplicate
 name for one target fails before mutation, while the same executable path may
 soundly identify a distinct record for every target. Sealing requires at least
 one record and destroys the bootstrap nonce. No deletion or slot reuse exists
@@ -61,10 +61,10 @@ only after acquiring the same mutex, avoiding an unsynchronized pre-lock read.
 
 Bootstrap insertion and target-bound lookup use bounded open addressing. A
 cached tuple hash avoids text equality for ordinary nonmatching probes: expected
-O(path + target bytes), with the honest adversarial bound O(2048 × tuple bytes)
+O(path + target bytes), with the honest adversarial bound O(8192 × tuple bytes)
 if every occupied key has the same 64-bit hash. The compatibility path-only
-diagnostic scans at most 96 records and rejects a second match. Per-target
-capacity admission scans at most 96 compact slots and occurs only during
+diagnostic scans at most 102 records and rejects a second match. Per-target
+capacity admission scans at most 102 compact slots and occurs only during
 bootstrap. Each admitted target tuple maps one-to-one to a compact integer tag
 in the key table, avoiding three retained text fields per key; hashing does not
 allocate a concatenated key. Copying and integrity work are O(one manifest's bytes), with

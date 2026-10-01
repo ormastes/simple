@@ -1,0 +1,108 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Reproducing spec for
+# doc/08_tracking/bug/seed_cross_module_selfless_method_drops_receiver_2026-09-26.md
+#
+# A struct method declared WITHOUT an explicit `self` parameter whose body
+# uses `self` is compiled by the seed as taking `(self, args...)` (HIR injects
+# the implicit receiver, hir/lower/module_lowering/function.rs). But the
+# parser marks every self-less method `is_static`, and the native-project
+# import arity table (pipeline/native_project/imports.rs `method_arity`)
+# trusted that flag, declaring the imported symbol one parameter short. The
+# cranelift call site prepends the receiver only when the declared signature
+# is longer than the explicit args (codegen/instr/closures_structs.rs), so
+# every CROSS-MODULE call of such a method dropped the receiver: the callee
+# read `self` from the first user argument (a text or a struct pointer), and
+# `self.<field>` on that faulted. Same-module calls were never affected.
+#
+# This is the second stage-2 admission blocker of 2026-09-26 (raw rc=139 in
+# `driver_native_shadow_witness_v1` -> `NativeModuleCacheFactSetV1.witness`,
+# a self-less method that reads `self.valid`), reached once the bare-`return`
+# `ud2` defect was fixed. The fixture native-builds two modules through the
+# compiler binary and asserts the exact transcript, so a dropped receiver
+# shows up as either a crash (non-zero rc) or the shifted-argument output the
+# 09-19 seed produced silently (`a=B2 b=C3 c=0 self=<value:...>`).
+
+use std.spec.step
+
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val FACTS = """struct Cfg:
+    compiler_identity: text
+    target_identity: text
+
+struct FactSet:
+    module_id: text
+    valid: bool
+
+    fn three(a: text, b: text, c: text) -> text:
+        "a=" + a + " b=" + b + " c=" + c + " self=" + self.module_id
+
+    fn witness(mir_identity: text, cfg: Cfg) -> text:
+        if not self.valid:
+            return "invalid"
+        "ok:" + cfg.compiler_identity + "/" + cfg.target_identity + "/" + mir_identity + "/" + self.module_id
+
+fn make_facts(module_id: text) -> FactSet:
+    FactSet(module_id: module_id, valid: true)
+"""
+
+val MAIN = """use facts.{Cfg, make_facts}
+
+fn main():
+    val fs = make_facts("m1")
+    print(fs.three("A1", "B2", "C3"))
+    val cfg = Cfg(compiler_identity: "cc", target_identity: "tt")
+    print(fs.witness("mir-1", cfg))
+    print("ok")
+"""
+
+val EXPECTED = "a=A1 b=B2 c=C3 self=m1\nok:cc/tt/mir-1/m1\nok"
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-cross-module-selfless-method"
+    dir_create_all(dir)
+    dir
+
+# The compiler under test: `SIMPLE_SPEC_COMPILER` (a rebuilt seed or a stage
+# candidate; the runner refuses a SIMPLE_BINARY that is not itself), else
+# `SIMPLE_BINARY`, else the deployed `bin/simple` — which may be a stale seed
+# that predates the fix and then fails this spec for the wrong reason.
+fn compiler_binary() -> text:
+    val spec_compiler = env_get("SIMPLE_SPEC_COMPILER")
+    if spec_compiler != "":
+        return spec_compiler
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
+
+fn native_build(dir: text, exe: text) -> (text, text, i64):
+    env_set("SIMPLE_NATIVE_BUILD_RUST", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    process_run(compiler_binary(), ["native-build", "--backend", "cranelift", "--cache-dir", dir + "/cache",
+        "--source", dir, "--entry-closure", "--entry", dir + "/main.spl", "-o", exe])
+
+describe "a cross-module self-less method that uses self receives its receiver":
+
+    """`fs.three(a, b, c)` on a struct imported from another module must reach
+    the callee as (self, a, b, c). Natively compiled, the transcript must show
+    every argument in its own slot and `self` bound to the receiver; a dropped
+    receiver either crashes or shifts every argument one slot left."""
+
+    it "natively compiles the two-module fixture and gets the exact transcript":
+        step("write the two modules")
+        val dir = work_dir()
+        assert_true(file_write(dir + "/facts.spl", FACTS))
+        assert_true(file_write(dir + "/main.spl", MAIN))
+
+        step("native-build through the compiler binary")
+        val exe = dir + "/main.bin"
+        val built = native_build(dir, exe)
+        assert_equal(built[2], 0)
+
+        step("every argument lands in its own slot and self is the receiver")
+        val ran = process_run(exe, [])
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), EXPECTED)

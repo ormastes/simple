@@ -93,7 +93,7 @@ impl LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM call to '{}' failed: {}", name, e))?;
         result
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| format!("'{}' did not return a value", name))
     }
 
@@ -336,7 +336,11 @@ impl LlvmEmitter<'_> {
             "char_code_at" => Some("rt_string_char_code_at"),
             "byte_at" => Some("rt_string_byte_at"),
             "join" => Some("rt_string_join"),
-            "trim" => Some("rt_string_trim"),
+            // "strip"/"trimmed" are synonyms for "trim" (see
+            // interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
+            // Missing here left `.strip()` on a text receiver unresolved as
+            // `str.strip` at the final Stage-4 macOS link (2026-09-07).
+            "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
             "trim_start" => Some("rt_string_trim_start"),
             "trim_end" => Some("rt_string_trim_end"),
             "split" => Some("rt_string_split"),
@@ -361,7 +365,22 @@ impl LlvmEmitter<'_> {
             "get" => Some("rt_index_get"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
-            "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+            // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+            // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+            // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+            // the representation `rt_is_some`/`rt_is_none` already accept) is not
+            // one -- so every `.unwrap()` on a flat optional silently produced nil
+            // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+            // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+            // implements the flat-nullable convention ("not a boxed enum: return
+            // the value unchanged") and traps only on a genuine None/Err.
+            // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+            // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+            // exported err-trap twin, and routing it through the Ok-trap helper
+            // would abort on the very receiver it exists to read.
+            "unwrap" => Some("rt_unwrap_or_trap"),
+            "unwrap_or" => Some("rt_unwrap_or_value"),
+            "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
         }
     }
@@ -596,7 +615,11 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
         if matches!(method, "unwrap" | "unwrap_err") && args.len() == 1 {
             let recv = self.get(args[0])?;
-            let result = self.call_runtime("rt_enum_payload", &[recv])?;
+            // See the redirect table above: `rt_enum_payload` returns NIL for a
+            // FLAT nullable, so `.unwrap()` must go to `rt_unwrap_or_trap`.
+            // `unwrap_err` keeps the raw reader (no exported err-trap twin).
+            let helper = if method == "unwrap" { "rt_unwrap_or_trap" } else { "rt_enum_payload" };
+            let result = self.call_runtime(helper, &[recv])?;
             if let Some(d) = dest {
                 self.set(*d, result);
             }
@@ -606,8 +629,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         if matches!(method, "is_ok" | "is_err") && args.len() == 1 {
             let recv = self.get(args[0])?;
             let variant = if method == "is_ok" { "Ok" } else { "Err" };
+            let enum_id = self.i64_const(0);
             let disc = self.i64_const(Self::enum_variant_discriminant(variant));
-            let result = self.call_runtime("rt_enum_check_discriminant", &[recv, disc])?;
+            let result = self.call_runtime("rt_enum_check_variant", &[recv, enum_id, disc])?;
             if let Some(d) = dest {
                 self.set(*d, result);
             }
@@ -635,7 +659,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM call failed: {}", e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 self.set(*d, ret_val);
             }
         }
@@ -688,7 +712,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .map_err(|e| format!("LLVM rt_alloc call failed: {}", e))?;
             let argv_raw = alloc_call
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .ok_or_else(|| "LLVM rt_alloc missing return value".to_string())?
                 .into_int_value();
             let argv_ptr = self
@@ -741,7 +765,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM interp_call failed: {}", e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 self.set(*d, ret_val);
             }
         }
@@ -762,7 +786,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .build_call(interp_eval, &[idx.into()], "eval")
             .map_err(|e| format!("LLVM interp_eval failed: {}", e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             self.set(dest, ret_val);
         }
         Ok(())
@@ -772,8 +796,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let fn_type = self.backend.context_ref().void_type().fn_type(&[], false);
         let asm = self.backend.context_ref().create_inline_asm(
             fn_type,
-            instructions.join("\n"),
-            String::new(),
+            super::raw_asm::raw_asm_template(instructions),
+            "~{memory}".to_string(),
             volatile,
             false,
             Some(InlineAsmDialect::ATT),
@@ -794,77 +818,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         args: &[VReg],
         _effect: Effect,
     ) -> Result<(), String> {
-        let callee_val = self.get(callee)?;
-        let i8_type = self.backend.context_ref().i8_type();
-        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
-
-        if let BasicValueEnum::PointerValue(closure_ptr) = callee_val {
-            // Load function pointer from closure (at offset 0)
-            let base_ptr = self
-                .builder
-                .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| format!("cast failed: {}", e))?;
-            let offset_val = self.backend.context_ref().i32_type().const_int(0, false);
-            let fn_ptr_slot = unsafe {
-                self.builder
-                    .build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot")
-                    .map_err(|e| format!("gep failed: {}", e))?
-            };
-            let fn_ptr_slot = self
-                .builder
-                .build_pointer_cast(
-                    fn_ptr_slot,
-                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "fn_ptr_slot_cast",
-                )
-                .map_err(|e| format!("cast failed: {}", e))?;
-            let func_ptr = self
-                .builder
-                .build_load(i8_ptr_type, fn_ptr_slot, "loaded_func")
-                .map_err(|e| format!("load failed: {}", e))?;
-
-            if let BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
-                let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::new();
-                for arg in args {
-                    let val = self.get(*arg)?;
-                    arg_vals.push(val.into());
-                }
-
-                let llvm_param_types: Result<Vec<inkwell::types::BasicMetadataTypeEnum>, String> = param_types
-                    .iter()
-                    .map(|ty| self.backend.llvm_type(ty).map(|t| t.into()).map_err(|e| e.to_string()))
-                    .collect();
-                let llvm_param_types = llvm_param_types?;
-
-                let fn_type = if return_type == TypeId::VOID {
-                    self.backend.context_ref().void_type().fn_type(&llvm_param_types, false)
-                } else {
-                    let ret_llvm = self.backend.llvm_type(&return_type).map_err(|e| e.to_string())?;
-                    match ret_llvm {
-                        inkwell::types::BasicTypeEnum::ArrayType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
-                    }
-                };
-
-                let call_site = self
-                    .builder
-                    .build_indirect_call(fn_type, fn_ptr, &arg_vals, "indirect_call")
-                    .map_err(|e| format!("indirect call failed: {}", e))?;
-
-                if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                        self.set(*d, ret_val);
-                    }
-                }
-            }
-        } else {
-            return Err("IndirectCall requires closure pointer".to_string());
-        }
-        Ok(())
+        self.backend.compile_indirect_call(
+            *dest, callee, param_types, &return_type, args, self.vreg_map, self.builder,
+        ).map_err(|error| error.to_string())
     }
 
     // =========================================================================
@@ -949,7 +905,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .build_call(dict_new, &[capacity.into()], "dict")
             .map_err(|e| format!("dict_new call failed: {}", e))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| "dict_new returned void".to_string())?;
 
         for (key, value) in keys.iter().zip(values.iter()) {
@@ -1051,7 +1007,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             )
             .map_err(|e| format!("slice call failed: {}", e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             self.set(dest, ret_val);
         }
         Ok(())
@@ -1378,103 +1334,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         capture_offsets: &[u32],
         captures: &[VReg],
     ) -> Result<(), String> {
-        let i8_type = self.backend.context_ref().i8_type();
-        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
-        // Closures can escape the creator via runtime pool/thread APIs. Heap
-        // allocation keeps captures stable after the creating frame advances.
-        let i64_type = self.backend.runtime_int_type();
-        let alloc_fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
-        let alloc_fn = self
-            .module
-            .get_function("rt_alloc")
-            .unwrap_or_else(|| self.module.add_function("rt_alloc", alloc_fn_type, None));
-        let allocation_size = closure_size.max(16);
-        let size_val = i64_type.const_int(allocation_size as u64, false);
-        let alloc_call = self
-            .builder
-            .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
-            .map_err(|e| format!("rt_alloc call failed: {}", e))?;
-        let alloc_value = alloc_call
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| "rt_alloc did not return a value".to_string())?;
-        let closure_ptr = match alloc_value {
-            BasicValueEnum::PointerValue(ptr) => self
-                .builder
-                .build_pointer_cast(ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| format!("cast failed: {}", e))?,
-            BasicValueEnum::IntValue(iv) => self
-                .builder
-                .build_int_to_ptr(iv, i8_ptr_type, "closure_ptr")
-                .map_err(|e| format!("int_to_ptr failed: {}", e))?,
-            _ => return Err("rt_alloc returned unsupported value kind".to_string()),
-        };
-
-        // Store function pointer at offset 0
-        let func_ptr = self
-            .module
-            .get_function(func_name)
-            .map(|f| f.as_global_value().as_pointer_value())
-            .unwrap_or_else(|| i8_ptr_type.const_null());
-        let func_ptr_cast = self
-            .builder
-            .build_pointer_cast(func_ptr, i8_ptr_type, "fn_ptr_cast")
-            .map_err(|e| format!("cast failed: {}", e))?;
-        let fn_slot = self
-            .builder
-            .build_pointer_cast(
-                closure_ptr,
-                self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                "fn_slot",
-            )
-            .map_err(|e| format!("cast failed: {}", e))?;
-        self.builder
-            .build_store(fn_slot, func_ptr_cast)
-            .map_err(|e| format!("store failed: {}", e))?;
-
-        if closure_size < 16 {
-            let offset_val = self.backend.context_ref().i32_type().const_int(8, false);
-            let marker_ptr = unsafe {
-                self.builder
-                    .build_gep(i8_type, closure_ptr, &[offset_val], "closure_marker_ptr")
-                    .map_err(|e| format!("gep failed: {}", e))?
-            };
-            let marker_slot = self
-                .builder
-                .build_pointer_cast(
-                    marker_ptr,
-                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "closure_marker_slot",
-                )
-                .map_err(|e| format!("cast failed: {}", e))?;
-            self.builder
-                .build_store(marker_slot, i64_type.const_zero())
-                .map_err(|e| format!("store failed: {}", e))?;
-        }
-
-        // Store captured values at their offsets
-        for (offset, value) in capture_offsets.iter().zip(captures.iter()) {
-            let capture_val = self.get(*value)?;
-            let offset_val = self.backend.context_ref().i32_type().const_int(*offset as u64, false);
-            let field_ptr = unsafe {
-                self.builder
-                    .build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr")
-                    .map_err(|e| format!("gep failed: {}", e))?
-            };
-            let typed_ptr = self
-                .builder
-                .build_pointer_cast(
-                    field_ptr,
-                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "cap_typed_ptr",
-                )
-                .map_err(|e| format!("cast failed: {}", e))?;
-            self.builder
-                .build_store(typed_ptr, capture_val)
-                .map_err(|e| format!("store failed: {}", e))?;
-        }
-        self.set(dest, closure_ptr.into());
-        Ok(())
+        let size = u32::try_from(closure_size)
+            .map_err(|_| "LLVM closure size exceeds MIR layout".to_string())?;
+        let capture_types = vec![TypeId::I64; captures.len()];
+        self.backend.compile_closure_create(
+            dest, func_name, size, capture_offsets, &capture_types, captures,
+            self.vreg_map, self.builder, self.module,
+        ).map_err(|error| error.to_string())
     }
 
     // =========================================================================
@@ -1500,6 +1366,45 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 "to_u32" | "to_i32" => self.backend.context_ref().i32_type(),
                 _ => self.backend.context_ref().i64_type(),
             };
+            // `to_i64`/`to_int` on a value that is ALREADY i64-wide is a no-op
+            // coercion -- and in this ABI a `text` handle IS an i64, so the
+            // identity silently yielded the handle's own word instead of the
+            // parsed number. Measured 2026-09-07 on the aarch64 Stage 2
+            // candidate: `native_build_shard_threads` (src/app/cli/
+            // native_build_main.spl) compiled all three `args[i].to_i64() ?? 0`
+            // sites to NOTHING -- no int-parse call appears in its
+            // disassembly -- so `--threads 1` became the argv string's own
+            // pointer (163343233 / 219057025 across runs, tracking the heap),
+            // the memory clamp turned that into 79 shard workers for a
+            // single-unit build, and 78 of them lost the object publish race
+            // with `AOT object destination already exists`.
+            //
+            // The redirect table below (`builtin_method_redirect`) already maps
+            // `to_int`/`to_i64` -> `rt_string_to_int`, but this cast block
+            // matches FIRST and preempts it. Routing unconditionally to
+            // `rt_string_to_int` is NOT the fix either: it returns 0 for a
+            // non-string, which would silently zero every erased NUMERIC
+            // `.to_i64()`. Dispatch on the receiver at runtime instead --
+            // `rt_to_int_dynamic` parses a registry-validated heap string and
+            // is the IDENTITY for everything else, so the genuinely-i64 case
+            // is bit-for-bit unchanged. This mirrors the pure-Simple lowering
+            // fixed by PR #335 (src/compiler/50.mir/_MirLoweringExpr/
+            // method_calls_literals.spl, "dynamic to_i64 arm"); only the seed's
+            // LLVM arm was left behind, and the seed is what emits Stage 2.
+            // Narrower targets (to_u8/to_i8/.../to_u32/to_i32) genuinely change
+            // width and keep the coercion.
+            // doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md
+            if matches!(method, "to_i64" | "to_int") {
+                if let BasicValueEnum::IntValue(v) = recv {
+                    if v.get_type() == int_type {
+                        let dynamic = self.call_runtime("rt_to_int_dynamic", &[recv])?;
+                        if let Some(d) = dest {
+                            self.set(*d, dynamic);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
             let value = match recv {
                 BasicValueEnum::IntValue(v) => {
                     if v.get_type() == int_type {
@@ -2352,6 +2257,99 @@ mod tests {
         assert_eq!(LlvmEmitter::runtime_method_name("repeat"), None);
         assert_eq!(LlvmEmitter::runtime_method_name("unwrap_err"), Some("rt_enum_payload"));
         assert_eq!(LlvmEmitter::runtime_method_name("to_string"), Some("rt_to_string"));
+    }
+
+    /// `.unwrap()` must NOT reach `rt_enum_payload` under LLVM.
+    ///
+    /// `rt_enum_payload` (runtime/src/value/objects.rs:519) returns
+    /// `RuntimeValue::NIL` for every receiver that is not a boxed heap Enum.
+    /// A FLAT nullable -- a `text?` holding a bare text pointer, which is the
+    /// representation `rt_is_some`/`rt_is_none` already accept as present --
+    /// is not one, so this mapping made EVERY `.unwrap()` on a flat optional
+    /// evaluate to nil under LLVM while the Cranelift path
+    /// (`codegen/instr/closures_structs.rs`, pinned by
+    /// `codegen_bare_unwrap_calls_rt_unwrap_or_self_not_rt_enum_payload`) and
+    /// the tree-walk interpreter (`interpreter_helpers/method_dispatch.rs`,
+    /// which returns the receiver itself for a non-enum) both returned the
+    /// value. One backend was fixed in 2026-08-11; LLVM was never brought
+    /// along, and there was no LLVM-side assertion to notice.
+    ///
+    /// Measured consequence (2026-09-13, macOS Stage 2): `find_mold_path()`
+    /// returns `text?`, so `Ok(mold_path.unwrap())` in
+    /// `src/compiler/70.backend/linker/mold.spl` constructed `Ok(nil)`;
+    /// `find_linker_path()`'s caller then unwrapped a real `Ok` enum and got
+    /// that nil back, `darwin_resolve_link_tool` failed `file_exists` on it,
+    /// and the link died as `Linking failed: no error payload`. The bare
+    /// print of the nil rendered as `0`, consistent with NIL's special
+    /// sentinel read through an int decode.
+    ///
+    /// Each assertion pairs the dead mapping being gone with the live one
+    /// being present, so deleting an arm cannot satisfy this test.
+    /// `unwrap_err` deliberately KEEPS `rt_enum_payload`: no err-trap twin is
+    /// exported, and the Ok-trap helper would abort on the very `Err`
+    /// receiver `unwrap_err` exists to read.
+    #[test]
+    fn llvm_unwrap_family_routes_to_the_flat_nullable_aware_helpers() {
+        assert_eq!(LlvmEmitter::runtime_method_name("unwrap"), Some("rt_unwrap_or_trap"));
+        assert_ne!(LlvmEmitter::runtime_method_name("unwrap"), Some("rt_enum_payload"));
+
+        // `.unwrap_or(d)` was mapped to the SAME one-argument helper, which
+        // dropped `d` entirely; `rt_unwrap_or_value` is the two-argument one.
+        assert_eq!(LlvmEmitter::runtime_method_name("unwrap_or"), Some("rt_unwrap_or_value"));
+        assert_ne!(LlvmEmitter::runtime_method_name("unwrap_or"), Some("rt_enum_payload"));
+
+        assert_eq!(LlvmEmitter::runtime_method_name("unwrap_err"), Some("rt_enum_payload"));
+    }
+
+    /// The emitter's table is only ONE of the four `unwrap` redirect tables in
+    /// the LLVM backend (`functions.rs`, `functions/calls.rs` x2 are inline
+    /// `match` closures that no unit test can call), plus two direct-call
+    /// sites. They were all copies of the same arm, and a partial fix would
+    /// leave the live one broken -- which is exactly the failure mode that
+    /// let this survive: `emitter.rs` is not the table the native pipeline
+    /// actually used. Assert the invariant over the SOURCE so no table can be
+    /// repaired in isolation.
+    #[test]
+    fn no_llvm_redirect_table_still_sends_unwrap_to_rt_enum_payload() {
+        let sources: [(&str, &str); 3] = [
+            ("emitter.rs", include_str!("emitter.rs")),
+            ("functions.rs", include_str!("functions.rs")),
+            ("functions/calls.rs", include_str!("functions/calls.rs")),
+        ];
+        let mut offenders: Vec<String> = Vec::new();
+        let mut live_mappings = 0usize;
+        for (name, text) in sources {
+            for (line_no, line) in text.lines().enumerate() {
+                let code = line.split('#').next().unwrap_or(line);
+                let code = if let Some(idx) = code.find("//") { &code[..idx] } else { code };
+                // A line that names BOTH helpers is one of the two direct-call
+                // sites' `if method == "unwrap" { trap } else { payload }`
+                // ternaries (or this test's own assert_ne), which are correct.
+                // Only a line that sends `"unwrap"` to the payload reader and
+                // nowhere else is an offender.
+                if code.contains("rt_unwrap_or_trap") || code.contains("assert_ne!") {
+                    if code.contains("\"unwrap\"") && code.contains("rt_unwrap_or_trap") {
+                        live_mappings += 1;
+                    }
+                    continue;
+                }
+                if code.contains("\"unwrap\"") && code.contains("rt_enum_payload") {
+                    offenders.push(format!("{}:{}: {}", name, line_no + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "an LLVM unwrap redirect still names rt_enum_payload: {:?}",
+            offenders
+        );
+        // Non-vacuity: an empty offender list proves nothing if the scan found
+        // no unwrap mapping at all (a rename would silently pass otherwise).
+        assert!(
+            live_mappings >= 4,
+            "expected at least 4 live `unwrap -> rt_unwrap_or_trap` mappings across the LLVM backend, found {}",
+            live_mappings
+        );
     }
 
     /// The type-BLIND table must not send a receiver-polymorphic method to a

@@ -1,161 +1,119 @@
-# Tiny Ui Web Wm Specification
+# Tiny UI/Web/WM system specification
 
-> **Stale generated-manual handoff (2026-08-16):** the executable source now has seven scenarios, including three intentional fail-closed blockers for optional descriptor/Vulkan evidence, RV32 R0-R4 evidence, and the S0 409,600-byte closure. This four-scenario generated body is retained only as the last docgen artifact; it is not current PASS evidence. Regenerate only with an admitted pure-Simple runner after the blockers are satisfied. See `doc/08_tracking/bug/tiny_ui_web_wm_integration_blockers_2026-08-14.md`.
+> **Fail-closed manual handoff (2026-08-16):** this Markdown mirrors the nine
+> scenarios in the executable SSpec. It was updated by hand because no admitted
+> pure-Simple self-hosted runtime is available. It is not docgen output and is
+> not runtime PASS evidence. Current verdict: `TEST_BLOCKED`. Regenerate it only after the qualified runtime can
+> execute the source.
 
-> Tests covering Tiny fullscreen browser profile.
+Source: `test/03_system/app/tiny_browser/feature/tiny_ui_web_wm_spec.spl`
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+## Operator purpose
 
-<details>
-<summary>Full Scenario Manual</summary>
+The specification checks the bounded fullscreen Tiny browser path from local
+Web resources through layout, draw, software 2D, Tiny WM, and presentation. It
+also keeps optional Vulkan/module, RV32, and size claims explicitly red until
+their required artifacts exist.
 
-# Tiny Ui Web Wm Specification
+## Preconditions
 
-## Scenarios
+- Use an admitted pure-Simple self-hosted runtime and record its qualification
+  receipt. The Rust bootstrap seed is never admissible evidence.
+- Execute the system source once. Do not remove or skip fail-closed scenarios.
+- Preserve captures under the paths recorded in the lane test plan.
 
-### Tiny fullscreen browser profile
+## Operator workflow
 
-#### presents an admitted page as one fullscreen opaque root
+The executable source exposes these literal manual steps:
 
-- Boot the bounded Tiny browser profile
-   - Expected: browser.install_controls().code equals `0`
-- Render the shared nested-pane page fullscreen
-   - Expected: receipt.status.code equals `0`
-   - Expected: receipt.frame.visible_surfaces equals `1`
+1. `step("Boot the bounded Tiny browser profile")`
+2. `step("Render the shared nested-pane page fullscreen")`
+3. `step("Bind one sealed host with built-in ROM and VFS pages")`
+4. `step("Navigate to ROM and then VFS while repainting each accepted page")`
+5. `step("Initialize all bounded arenas before admitting runtime work")`
+6. `step("Render and navigate repeatedly through retained logical extents")`
+7. `step("Edit and wheel without rebuilding GUI or resolved-pane storage")`
+8. `step("Compare allocation instrumentation with the initialization baseline")`
+9. `step("Navigate controls with keyboard and pointer")`
+10. `step("Scroll and clip nested content")`
+11. `step("Clip nested popup content to the fullscreen root")`
+12. `step("Open and dismiss a bounded popup")`
+13. `step("Report backend, memory, dependency, and size evidence")`
 
+Repeated uses of the render, navigation, and evidence steps are deliberate:
+the fail-closed rows share operator vocabulary with the corresponding future
+evidence-producing flows.
 
-<details>
-<summary>Executable SSpec</summary>
+## Scenario matrix
 
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+| Scenario | Requirements | Expected result when fully qualified |
+|---|---|---|
+| Should present an admitted page as one fullscreen opaque root | REQ-001, REQ-002, REQ-005, REQ-006, REQ-011; NFR-004, NFR-009-012 | One opaque root, real pixels, CSS and controls |
+| Should navigate built-in ROM and VFS resources through one bounded host | REQ-005, REQ-011; NFR-004, NFR-009, NFR-012 | Each accepted resource repaints and presents |
+| Should reuse every Web and GUI arena across render navigation edit and wheel loops | REQ-003-005; NFR-004, NFR-010-012 | Twelve backing stores remain fixed while reuse and logical counts advance |
+| Should route keyboard text and pointer events to visible controls | REQ-003-005; NFR-009, NFR-012 | Focus, edit, capture, scroll, damage, and present change |
+| Should clip nested content and compose one bounded popup | REQ-002, REQ-003, REQ-009 | Absolute popup geometry and clipped coverage remain distinct |
+| Should report bounded failure instead of rendering partial over-capacity input | REQ-015; NFR-004, NFR-010, NFR-012 | Typed failure and no partial checksum |
+| Should block optional module and strict Vulkan claims until retained evidence exists | REQ-007-010, REQ-012, REQ-014-015; NFR-002, NFR-005-007, NFR-012 | Fails until descriptor parity and device readback exist |
+| Should block RV32 completion until build framebuffer and physical input evidence exists | REQ-001-003, REQ-005-006, REQ-011; NFR-004, NFR-008-011 | Fails until fresh build, framebuffer, fullscreen, physical-input, and module receipts exist |
+| Should block the 409600-byte closure claim until ELF and PT_LOAD evidence exists | REQ-008, REQ-013; NFR-001-003, NFR-005-006 | Fails until ELF/PT_LOAD and closure reports exist |
 
-```simple
-step("Boot the bounded Tiny browser profile")
-var browser = TinyBrowser.create(160, 120)
-expect(browser.install_controls().code).to_equal(0)
+## Arena-reuse procedure
 
-step("Render the shared nested-pane page fullscreen")
-val receipt = browser.render_html("<body><div><p>Tiny Browser</p><button>Open</button><input></body>")
-expect(receipt.status.code).to_equal(0)
-expect(receipt.parsed_nodes).to_be_greater_than(4)
-expect(receipt.draw_words).to_be_greater_than(10)
-expect(receipt.checksum).to_be_greater_than(0)
-expect(receipt.frame.visible_surfaces).to_equal(1)
-```
+1. **Initialize all bounded arenas before admitting runtime work.** Create the
+   browser and resource host, then require a successful arena receipt reporting
+   twelve preallocated backing stores.
+2. **Render and navigate repeatedly through retained logical extents.** Render
+   one built-in page, navigate to ROM, and navigate back; every accepted page
+   must advance the frame.
+3. **Edit and wheel without rebuilding GUI or resolved-pane storage.** Focus the
+   retained input, append text, then scroll a page larger than the viewport;
+   both state changes must present.
+4. **Compare allocation instrumentation with the initialization baseline.** The
+   backing-store count must be unchanged, reuse must increase, logical token,
+   node, style, and paint counts must be valid, and the presented checksum must
+   match the renderer.
 
-</details>
+The receipt proves the intended owner/store discipline at the language level.
+It does not by itself prove that the runtime performed zero hidden allocations;
+that claim remains blocked until the qualified runtime supplies allocator
+instrumentation for the same loop.
 
-#### routes keyboard text and pointer events to visible controls
-
-- Navigate controls with keyboard and pointer
-   - Expected: browser.dispatch(tab).target_index equals `0`
-   - Expected: browser.dispatch(click).target_index equals `2`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var browser = TinyBrowser.create(160, 120)
-browser.install_controls()
-
-step("Navigate controls with keyboard and pointer")
-val tab = TinyEvent(kind: TINY_EVENT_KEY, point: TinyPoint(x: 0, y: 0), code: TINY_KEY_TAB, value: 0)
-expect(browser.dispatch(tab).target_index).to_equal(0)
-val typed = TinyEvent(kind: TINY_EVENT_TEXT, point: TinyPoint(x: 0, y: 0), code: 84, value: 0)
-expect(browser.dispatch(typed).changed).to_be(true)
-val click = TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 20, y: 90), code: 1, value: 1)
-expect(browser.dispatch(click).target_index).to_equal(2)
-```
-
-</details>
-
-#### clips nested content and composes one bounded popup
-
-- Scroll and clip nested content
-   - Expected: browser.open_popup(2, TinyRect(x: 140, y: 100, width: 40, height: 40)).code equals `0`
-   - Expected: browser.wm.surfaces[1].resolved.width equals `20`
-   - Expected: browser.wm.surfaces[1].resolved.height equals `20`
-- Open and dismiss a bounded popup
-   - Expected: browser.close_popup(2).code equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var browser = TinyBrowser.create(160, 120)
-browser.render_html("<body><p>Tiny</p></body>")
-
-step("Scroll and clip nested content")
-expect(browser.open_popup(2, TinyRect(x: 140, y: 100, width: 40, height: 40)).code).to_equal(0)
-expect(browser.wm.surfaces[1].resolved.width).to_equal(20)
-expect(browser.wm.surfaces[1].resolved.height).to_equal(20)
-
-step("Open and dismiss a bounded popup")
-expect(browser.wm.frame_receipt().direct_present).to_be(false)
-expect(browser.close_popup(2).code).to_equal(0)
-```
-
-</details>
-
-#### reports bounded failure instead of rendering partial over-capacity input
-
-- Report backend, memory, dependency, and size evidence
-   - Expected: result.status.code equals `1`
-   - Expected: result.checksum equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Report backend, memory, dependency, and size evidence")
-var browser = TinyBrowser.create(80, 60)
-browser.max_nodes = 2
-val result = browser.render_html("<body><div><p>over capacity</p></div></body>")
-expect(result.status.code).to_equal(1)
-expect(result.checksum).to_equal(0)
-```
-
-</details>
-
-## At a Glance
+## Quality scorecard
 
 | Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/03_system/app/tiny_browser/feature/tiny_ui_web_wm_spec.spl` |
-| Updated | 2026-08-14 |
-| Generator | `simple spipe-docgen` (Simple) |
+|---|---|
+| Source scenarios | 9 active, 0 skipped |
+| Intentional fail-closed scenarios | 3 |
+| Real-assertion/static traceability | Required before delivery |
+| Runtime execution this handoff | `TEST_BLOCKED`: no admitted pure-Simple runtime |
+| Runtime PASS | Not claimed |
+| Manual provenance | Hand-mirrored, pending pure-Simple docgen |
 
-## Overview
+## Findings and remediation
 
-Tests covering Tiny fullscreen browser profile.
-- Tiny fullscreen browser profile
+The three environmental rows deliberately call `fail(...)`; they are not
+placeholders or skips. Replace a row only when its named descriptor/Vulkan,
+RV32, or size artifacts exist and the admitted runner validates them. If the
+arena-reuse flow changes, update its SSpec assertions, this procedure, the test
+plan traceability row, and the lane state in the same commit.
 
-## Scenario Summary
+## Evidence and provenance
 
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+- Executable source: `test/03_system/app/tiny_browser/feature/tiny_ui_web_wm_spec.spl`
+- Test plan: `doc/03_plan/sys_test/tiny_ui_web_wm.md`
+- Acceptance state: `.spipe/tiny_ui_web_wm/state.md`
+- Runtime evidence: none accepted in this handoff; Rust-seed output is excluded.
+- Static gate evidence: reported by the delivery session, not represented as a
+  runtime or docgen receipt in this manual.
 
+## Compatibility and limitations
 
-</details>
+The compatibility helpers may allocate standalone temporary arenas; the Tiny
+browser product path retains its constructor-owned arenas. In-band allocation
+counters prove stable owner/store discipline only. They do not prove hidden
+runtime allocator behavior, strict Vulkan execution, RV32 framebuffer/input,
+or the 409,600-byte closure.
+
+The canonical open evidence and resume conditions are in
+`doc/08_tracking/bug/tiny_ui_web_wm_integration_blockers_2026-08-14.md`.

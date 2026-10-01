@@ -1,7 +1,10 @@
 """Explicit compatibility-loader intent checks."""
 
-use compiler.loader.module_loader_compat.*
-use std.spec.step
+use compiler.loader.test_loader_cases.{
+    loader_registers_source_metadata, loader_rejects_source_as_smf,
+    loader_rejects_cross_intent_cache
+}
+use std.spec.{describe, it, expect, step}
 
 fn source_fixture() -> text:
     "test/01_unit/compiler/loader/module_load_intent_spec.spl"
@@ -9,41 +12,19 @@ fn source_fixture() -> text:
 describe "Module load intent":
     it "registers source metadata only when explicitly requested":
         step("Load a source path with SourceMetadata intent")
-        var loader = ModuleLoader.with_defaults()
-        val path = source_fixture()
-
-        match loader.load_with_intent(path, ModuleLoadIntent.SourceMetadata):
-            case LoadResult.Success(module):
-                expect(module.path).to_equal(path)
-            case _:
-                expect("unexpected").to_equal(path)
-        expect(loader.is_loaded(path)).to_equal(true)
+        expect(loader_registers_source_metadata(source_fixture())).to_equal(true)
 
     it "rejects source bytes when an SMF artifact is required":
         step("Load the same source path with the default SMF intent")
-        var loader = ModuleLoader.with_defaults()
-        val path = source_fixture()
-
-        match loader.load(path):
-            case LoadResult.Error(message):
-                expect(message).to_contain("invalid SMF artifact")
-            case _:
-                expect("unexpected").to_equal("invalid SMF artifact")
-        expect(loader.is_loaded(path)).to_equal(false)
+        expect(loader_rejects_source_as_smf(source_fixture())).to_equal(true)
 
     it "does not reuse a source metadata cache entry for SMF intent":
         step("Load source metadata, then request the same path as an SMF artifact")
-        var loader = ModuleLoader.with_defaults()
-        val path = source_fixture()
-        val first = loader.load_with_intent(path, ModuleLoadIntent.SourceMetadata)
-        match first:
-            case LoadResult.Success(_):
-                pass
-            case _:
-                expect("unexpected").to_equal("source metadata load")
+        expect(loader_rejects_cross_intent_cache(source_fixture())).to_equal(true)
 
-        match loader.load(path):
-            case LoadResult.Error(message):
-                expect(message).to_contain("different intent")
-            case _:
-                expect("unexpected").to_equal("cross-intent rejection")
+    it "does not count a missing fixture as intent coverage":
+        step("Require all three real loader cases to reject a missing source fixture")
+        val missing_path = "test/01_unit/compiler/loader/__missing_loader_intent_fixture__.spl"
+        expect(loader_registers_source_metadata(missing_path)).to_equal(false)
+        expect(loader_rejects_source_as_smf(missing_path)).to_equal(false)
+        expect(loader_rejects_cross_intent_cache(missing_path)).to_equal(false)

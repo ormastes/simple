@@ -1,0 +1,66 @@
+# codex-system-test
+# @req REQ-003 REQ-008 REQ-010 REQ-012
+"""DbgEng reuses its existing adapter while DebugServiceV1 owns policy and evidence."""
+
+use std.spec.*
+use std.common.debug.contracts_v1.{DebugSessionId, DebugPerturbationV1, DebugRootOperationV1, debug_policy_observe_only_v1}
+use std.common.debug.service_v1.{central_debug_service_v1_graph, central_debug_service_v1_receipts}
+use std.nogc_sync_mut.dap.adapter.dbgeng.{DbgEngAdapter, dbgeng_config}
+use std.nogc_sync_mut.dap.adapter.mod.AdapterCapabilities
+use std.nogc_sync_mut.debug.remote.protocol.dbgeng.DbgEngClient
+use std.nogc_sync_mut.debug.remote.protocol.dbgeng_debug_service_adapter_v1.{
+    dbgeng_debug_bind_existing_v1, dbgeng_debug_unbind_v1,
+    dbgeng_debug_action_perturbation_v1, dbgeng_debug_authorize_v1,
+    dbgeng_debug_retain_minidump_v1,
+}
+
+fn attached_fixture() -> DbgEngAdapter:
+    DbgEngAdapter(
+        client: Some(DbgEngClient(host: "fixture.invalid", port: 0, connected: true, target_pid: 42, platform: "windows")),
+        config: dbgeng_config("fixture.invalid", 0, "fixture.exe"),
+        attached: true,
+        capabilities: AdapterCapabilities.basic(),
+    )
+
+fn require_session(result: Result<DebugSessionId, text>) -> DebugSessionId:
+    match result:
+        case Ok(value): value
+        case Err(reason): fail("expected DbgEng binding: {reason}")
+
+describe "DbgEng DebugServiceV1 harmony adapter":
+    it "binds the existing adapter and reports ETW unavailable independently":
+        val session_id = require_session(dbgeng_debug_bind_existing_v1(attached_fixture(), "dbgeng://fixture/process/42", "build-dbgeng", debug_policy_observe_only_v1()))
+        match central_debug_service_v1_graph(session_id):
+            case Some(graph):
+                expect(graph.nodes.len()).to_equal(2)
+                expect(graph.nodes[0].kind).to_equal("windows.dbgeng")
+                expect(graph.nodes[1].kind).to_equal("windows.etw")
+                expect(graph.capabilities[1].reason).to_contain("not connected")
+            case None: fail("central debug graph missing")
+        dbgeng_debug_unbind_v1("dbgeng://fixture/process/42")!
+
+    it "classifies inspect, stopping control, and mutation before dispatch":
+        expect(dbgeng_debug_action_perturbation_v1("stack_trace") == DebugPerturbationV1.Passive).to_equal(true)
+        expect(dbgeng_debug_action_perturbation_v1("resume") == DebugPerturbationV1.Stopping).to_equal(true)
+        expect(dbgeng_debug_action_perturbation_v1("write_memory") == DebugPerturbationV1.Mutating).to_equal(true)
+        val session_id = require_session(dbgeng_debug_bind_existing_v1(attached_fixture(), "dbgeng://fixture/process/43", "build-policy", debug_policy_observe_only_v1()))
+        val inspect = dbgeng_debug_authorize_v1(session_id, "stack_trace")
+        val control = dbgeng_debug_authorize_v1(session_id, "resume")
+        val mutation = dbgeng_debug_authorize_v1(session_id, "write_register")
+        expect(inspect.allowed).to_equal(true)
+        expect(inspect.operation == DebugRootOperationV1.Inspect).to_equal(true)
+        expect(control.allowed).to_equal(false)
+        expect(mutation.allowed).to_equal(false)
+        expect(mutation.reason).to_equal("mutation denied by policy")
+        val receipts = central_debug_service_v1_receipts(session_id)
+        expect(receipts[receipts.len() - 1].action).to_equal("dbgeng.write_register")
+        dbgeng_debug_unbind_v1("dbgeng://fixture/process/43")!
+
+    it "retains a native minidump artifact instead of translating its bytes":
+        val session_id = require_session(dbgeng_debug_bind_existing_v1(attached_fixture(), "dbgeng://fixture/dump/1", "build-dump", debug_policy_observe_only_v1()))
+        val manifest = dbgeng_debug_retain_minidump_v1(session_id, "raw/crash.dmp", "sha256:fixture", "restricted", 123)!
+        expect(manifest.artifacts.len()).to_equal(1)
+        expect(manifest.artifacts[0].native).to_equal(true)
+        expect(manifest.artifacts[0].path).to_equal("raw/crash.dmp")
+        expect(manifest.artifacts[0].media_type).to_contain("minidump")
+        dbgeng_debug_unbind_v1("dbgeng://fixture/dump/1")!

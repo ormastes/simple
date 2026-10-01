@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+status_output=${SFFI_ADMISSION_STATUS_OUTPUT:-}
+
+# A status is a verifier-authored decision, not signed provider evidence. Drop
+# any previous decision before even validating argv so usage/arity failures can
+# never leave a stale `admitted` status for the caller to consume.
+if test "$status_output" != ""; then
+    rm -f -- "$status_output"
+fi
+
 usage() {
     echo "usage: $0 MANIFEST SIGNATURE TRUST_STORE ARTIFACT SOURCE_SNAPSHOT BUILD_INPUT COMPILER ABI_REGISTRY VERIFICATION_REPORT OUTPUT" >&2
     exit 2
@@ -18,11 +27,48 @@ abi_registry=$8
 verification_report=$9
 output=${10}
 
-for input in "$manifest" "$signature" "$trust_store" "$artifact" \
-    "$source_snapshot" "$build_input" "$compiler" "$abi_registry" \
-    "$verification_report"; do
-    test -f "$input" || { echo "sffi evidence admission: missing input: $input" >&2; exit 1; }
-done
+# Consumers that need a machine-readable verifier decision opt in through a
+# separate status path. Human diagnostics retain their existing form. A
+# rejected status may describe why authentication could not begin; only the
+# admission receipt is signed-evidence-derived and it is still written after
+# every cryptographic check succeeds.
+write_status() {
+    decision=$1
+    code=$2
+    test "$status_output" != "" || return 0
+    umask 077
+    status_stage=${status_output}.part.$$
+    {
+        printf 'schema\tsimple.sffi-admission-status.v1\n'
+        printf 'decision\t%s\n' "$decision"
+        printf 'code\t%s\n' "$code"
+    } >"$status_stage"
+    mv "$status_stage" "$status_output"
+}
+
+reject() {
+    code=$1
+    shift
+    write_status rejected "$code"
+    echo "sffi evidence admission: $*" >&2
+    exit 1
+}
+
+require_input() {
+    label=$1
+    path=$2
+    test -f "$path" || reject "E-SFFI-ADM-MISSING-$label" "missing input: $path"
+}
+
+require_input MANIFEST "$manifest"
+require_input SIGNATURE "$signature"
+require_input TRUST-STORE "$trust_store"
+require_input ARTIFACT "$artifact"
+require_input SOURCE-SNAPSHOT "$source_snapshot"
+require_input BUILD-INPUT "$build_input"
+require_input COMPILER "$compiler"
+require_input ABI-REGISTRY "$abi_registry"
+require_input VERIFICATION-REPORT "$verification_report"
 
 command -v openssl >/dev/null 2>&1 || {
     echo 'sffi evidence admission: openssl unavailable' >&2
@@ -131,21 +177,67 @@ for digest in "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" "$a
     sha_valid "$digest" || { echo 'sffi evidence admission: invalid SHA-256 field' >&2; exit 1; }
 done
 
-check_hash() {
-    expected=$1
-    path=$2
-    actual=$(sha256sum "$path" | awk '{ print $1 }')
-    test "$actual" = "$expected" || {
-        echo "sffi evidence admission: digest mismatch: $path" >&2
+# Authenticate the canonical manifest and its scoped Ed25519 key before any
+# machine-readable admission category is exposed. In particular, an unsigned
+# local fixture is only blocked diagnostic input, never admission evidence.
+authenticate_signed_manifest() {
+    if grep -q "$(printf '\r')" "$trust_store" ||
+       test "$(tail -c 1 "$trust_store" | od -An -tu1 | tr -d ' ')" != 10 ||
+       ! awk -F '\t' '
+           BEGIN { previous="" }
+           NF != 3 || $1 == "" || $2 == "" || $3 == "" ||
+               (previous != "" && $0 <= previous) { exit 1 }
+           { previous=$0 }
+       ' "$trust_store"; then
+        echo 'sffi evidence admission: trust store is not canonical sorted TSV' >&2
+        exit 1
+    fi
+    trust_matches=$(awk -F '\t' -v key="$signer_key_id" -v provider="$provider_id" '
+        NF == 3 && $1 == key && $2 == provider { count++; path=$3 }
+        END { if (count == 1) print path }
+    ' "$trust_store")
+    test "$trust_matches" != "" ||
+        reject E-SFFI-ADM-UNTRUSTED-SIGNER 'signer is not trusted for provider'
+    case "$trust_matches" in
+        /*) public_key=$trust_matches ;;
+        *) public_key=$(dirname "$trust_store")/$trust_matches ;;
+    esac
+    test -f "$public_key" || {
+        echo 'sffi evidence admission: trusted public key is missing' >&2; exit 1;
+    }
+    openssl pkey -pubin -in "$public_key" -text_pub -noout 2>/dev/null |
+        grep -qx 'ED25519 Public-Key:' || {
+        echo 'sffi evidence admission: trusted public key is not Ed25519' >&2
+        exit 1
+    }
+    test "$(wc -c <"$signature" | tr -d ' ')" -eq 64 || {
+        echo 'sffi evidence admission: Ed25519 signature must be 64 raw bytes' >&2
+        exit 1
+    }
+    openssl pkeyutl -verify -pubin -inkey "$public_key" -rawin \
+        -in "$manifest" -sigfile "$signature" >/dev/null 2>&1 || {
+        echo 'sffi evidence admission: Ed25519 signature invalid' >&2
         exit 1
     }
 }
-check_hash "$artifact_hash" "$artifact"
-check_hash "$source_hash" "$source_snapshot"
-check_hash "$build_hash" "$build_input"
-check_hash "$compiler_hash" "$compiler"
-check_hash "$abi_hash" "$abi_registry"
-check_hash "$report_hash" "$verification_report"
+
+authenticate_signed_manifest
+
+check_hash() {
+    code=$1
+    expected=$2
+    path=$3
+    actual=$(sha256sum "$path" | awk '{ print $1 }')
+    test "$actual" = "$expected" || {
+        reject "$code" "digest mismatch: $path"
+    }
+}
+check_hash E-SFFI-ADM-ARTIFACT-DIGEST-MISMATCH "$artifact_hash" "$artifact"
+check_hash E-SFFI-ADM-SOURCE-DIGEST-MISMATCH "$source_hash" "$source_snapshot"
+check_hash E-SFFI-ADM-BUILD-INPUT-DIGEST-MISMATCH "$build_hash" "$build_input"
+check_hash E-SFFI-ADM-COMPILER-DIGEST-MISMATCH "$compiler_hash" "$compiler"
+check_hash E-SFFI-ADM-ABI-REGISTRY-DIGEST-MISMATCH "$abi_hash" "$abi_registry"
+check_hash E-SFFI-ADM-VERIFICATION-REPORT-DIGEST-MISMATCH "$report_hash" "$verification_report"
 
 # A signed digest is useful only when it names a structured, passing report
 # bound to this exact provider artifact and ABI registry.
@@ -154,66 +246,25 @@ if grep -q "$(printf '\r')" "$verification_report" ||
     echo 'sffi evidence admission: verification report is not canonical LF text' >&2
     exit 1
 fi
-awk -F '\t' -v provider="$provider_id" -v artifact="$artifact_hash" \
+report_kind=$(awk -F '\t' -v provider="$provider_id" -v artifact="$artifact_hash" \
     -v abi="$abi_hash" '
-    NR == 1 { good = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-verification-report.v1") }
+    NR == 1 { schema = $2; good = (NF == 2 && (schema == "simple.sffi-verification-report.v1" || schema == "simple.sffi-verification-report.v2")) }
     NR == 2 { good = good && NF == 2 && $1 == "provider_id" && $2 == provider }
     NR == 3 { good = good && NF == 2 && $1 == "artifact_sha256" && $2 == artifact }
     NR == 4 { good = good && NF == 2 && $1 == "abi_registry_sha256" && $2 == abi }
-    NR == 5 { good = good && NF == 2 && $1 == "result" && $2 == "pass" }
-    NR > 5 { good = 0 }
-    END { exit !(NR == 5 && good) }
-' "$verification_report" || {
-    echo 'sffi evidence admission: verification report is stale, malformed, or not passing' >&2
-    exit 1
-}
-
-# Trust roots are outside the signed manifest. Each canonical row scopes one
-# key ID to one provider ID and names a PEM public key provisioned by policy.
-if grep -q "$(printf '\r')" "$trust_store" ||
-   test "$(tail -c 1 "$trust_store" | od -An -tu1 | tr -d ' ')" != 10 ||
-   ! awk -F '\t' '
-       BEGIN { previous="" }
-       NF != 3 || $1 == "" || $2 == "" || $3 == "" ||
-           (previous != "" && $0 <= previous) { exit 1 }
-       { previous=$0 }
-   ' "$trust_store"; then
-    echo 'sffi evidence admission: trust store is not canonical sorted TSV' >&2
-    exit 1
+    NR == 5 { good = good && NF == 2 && $1 == "result"; result = $2 }
+    NR == 6 { reason = (NF == 2 && $1 == "reason") ? $2 : "" }
+    END {
+        if (!good) exit 1
+        if (schema == "simple.sffi-verification-report.v1" && NR == 5 && result == "pass") { print "pass"; exit 0 }
+        if (schema == "simple.sffi-verification-report.v2" && NR == 6 && result == "fail" && reason == "null-contract") { print "null-contract"; exit 0 }
+        exit 1
+    }
+' "$verification_report") ||
+    reject E-SFFI-ADM-VERIFICATION-REPORT-INVALID 'verification report is stale, malformed, or not passing'
+if test "$report_kind" = null-contract; then
+    reject E-SFFI-ADM-NULL-CONTRACT 'verification report records a null contract violation'
 fi
-trust_matches=$(awk -F '\t' -v key="$signer_key_id" -v provider="$provider_id" '
-    NF == 3 && $1 == key && $2 == provider { count++; path=$3 }
-    END { if (count == 1) print path }
-' "$trust_store")
-test "$trust_matches" != "" || {
-    echo 'sffi evidence admission: signer is not trusted for provider' >&2
-    exit 1
-}
-case "$trust_matches" in
-    /*) public_key=$trust_matches ;;
-    *) public_key=$(dirname "$trust_store")/$trust_matches ;;
-esac
-test -f "$public_key" || {
-    echo 'sffi evidence admission: trusted public key is missing' >&2; exit 1;
-}
-# `pkeyutl -rawin` does not itself impose an algorithm policy. Keep this
-# verifier's Ed25519 contract fail-closed: a trusted RSA/ECDSA/etc. key must
-# not silently select a different signature scheme merely because OpenSSL can
-# parse it. The inspection emits no key material into admission output.
-openssl pkey -pubin -in "$public_key" -text_pub -noout 2>/dev/null |
-    grep -qx 'ED25519 Public-Key:' || {
-    echo 'sffi evidence admission: trusted public key is not Ed25519' >&2
-    exit 1
-}
-test "$(wc -c <"$signature" | tr -d ' ')" -eq 64 || {
-    echo 'sffi evidence admission: Ed25519 signature must be 64 raw bytes' >&2
-    exit 1
-}
-openssl pkeyutl -verify -pubin -inkey "$public_key" -rawin \
-    -in "$manifest" -sigfile "$signature" >/dev/null 2>&1 || {
-    echo 'sffi evidence admission: Ed25519 signature invalid' >&2
-    exit 1
-}
 
 umask 077
 stage=${output}.part.$$
@@ -233,4 +284,5 @@ manifest_hash=$(sha256sum "$manifest" | awk '{ print $1 }')
     done <"$symbols"
 } >"$stage"
 mv "$stage" "$output"
+write_status admitted SFFI-ADMITTED
 echo 'sffi evidence admission: PASS'

@@ -1,20 +1,13 @@
 # @cover src/lib/nogc_sync_mut/database/core.spl 60%
 # @cover src/lib/nogc_sync_mut/database/query.spl 60%
 
-"""
-## Purpose and audience
-Purpose: saves and reloads an SDN database through the production API
-Audience: compiler and tooling engineers who maintain this spec
-"""
-
-# @req: REQ-STDLIB-DataSyst-001
-
 use std.spipe.*
 use std.database.core.{SdnDatabase, SdnTable, SdnRow, load_sdn_database}
 use std.database.query.{QueryBuilder, CompareOp, query_table}
 
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 fn _db_path(name: text) -> text:
     "/tmp/simple_database_system_{name}.sdn"
@@ -41,7 +34,6 @@ fn _database_with_items(path: text) -> SdnDatabase:
     db.set_table("items", table)
     db
 
-use std.spec.step
 describe "Database system production workflow":
     it "saves and reloads an SDN database through the production API":
         step("Verify: saves and reloads an SDN database through the production API")
@@ -49,24 +41,44 @@ describe "Database system production workflow":
         val path = _db_path("round_trip")
         _cleanup(path)
 
+    it "persists an empty terminal field without trailing whitespace and reloads it":
+        val path = _db_path("empty_terminal_field")
+        _cleanup(path)
+
+        var db = SdnDatabase.new(path)
+        var table = SdnTable.new("notes", ["id", "content"])
+        var row = SdnRow.empty()
+        row.set("id", "note-1")
+        row.set("content", "")
+        table.add_row(row)
+        db.set_table("notes", table)
+
+        expect(db.save()).to_equal(true)
+        val persisted = rt_file_read_text(path) ?? ""
+        expect(persisted.contains("note-1, \n")).to_equal(false)
+        expect(persisted.contains("note-1, \"\"\n")).to_equal(true)
+        expect(persisted.ends_with("\n\n")).to_equal(false)
+        val loaded = load_sdn_database(path)?
+        expect(loaded.get_table("notes")?.get_row("note-1")?.get("content")?).to_equal("")
+
+        _cleanup(path)
+
         var db = _database_with_items(path)
         expect(db.save()).to_equal(true)
         expect(rt_file_exists(path)).to_equal(true)
 
         val loaded_opt = load_sdn_database(path)
-        expect(loaded_opt != nil).to_equal(true)
+        expect(loaded_opt.?).to_equal(true)
         val loaded = loaded_opt?
         val table_opt = loaded.get_table("items")
-        expect(table_opt != nil).to_equal(true)
+        expect(table_opt.?).to_equal(true)
         val table = table_opt?
-        expect(table.rows.len()).to_equal(3)  # oracle: value fixed by the spec contract
+        expect(table.rows.len()).to_equal(3)
         expect(table.get_row("item-1").unwrap().get("name").unwrap()).to_equal("alpha")
 
         _cleanup(path)
 
     it "updates and soft-deletes rows while keeping indexes usable":
-        step("Verify: updates and soft-deletes rows while keeping indexes usable")
-        # @req: REQ-STDLIB-DataSyst-001
         val path = _db_path("mutations")
         _cleanup(path)
 
@@ -82,13 +94,11 @@ describe "Database system production workflow":
         val loaded_table = loaded.get_table("items")?
         expect(loaded_table.get_row("item-2").unwrap().get("name").unwrap()).to_equal("beta-updated")
         expect(loaded_table.get_row("item-1").unwrap().get("valid").unwrap()).to_equal("false")
-        expect(loaded_table.valid_rows().len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(loaded_table.valid_rows().len()).to_equal(1)
 
         _cleanup(path)
 
     it "queries saved production rows with filters and ordering":
-        step("Verify: queries saved production rows with filters and ordering")
-        # @req: REQ-STDLIB-DataSyst-001
         val path = _db_path("query")
         _cleanup(path)
 
@@ -96,27 +106,25 @@ describe "Database system production workflow":
         expect(db.save()).to_equal(true)
         val loaded = load_sdn_database(path)?
         val query_opt = query_table(loaded, "items")
-        expect(query_opt != nil).to_equal(true)
+        expect(query_opt.?).to_equal(true)
         var query = query_opt?
         val rows = query.filter_by("status", CompareOp.Eq, "open")
             .filter_by("valid", CompareOp.Eq, "true")
             .order_by("name", false)
             .execute()
 
-        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(rows.len()).to_equal(1)
         expect(rows[0].get("id").unwrap()).to_equal("item-1")
 
         _cleanup(path)
 
     it "rejects malformed SDN table imports without mutating the database":
-        step("Verify: rejects malformed SDN table imports without mutating the database")
-        # @req: REQ-STDLIB-DataSyst-001
         val path = _db_path("malformed")
         _cleanup(path)
 
         var db = SdnDatabase.new(path)
         expect(db.import_table_sdn("not a table")).to_equal(false)
-        expect(db.get_table("not") != nil).to_equal(false)
+        expect(db.get_table("not").?).to_equal(false)
         expect(db.modified).to_equal(false)
 
         _cleanup(path)

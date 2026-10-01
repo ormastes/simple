@@ -1,0 +1,40 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+"""
+# Cortex-M33 Uno Q console rides LPUART1
+
+**Feature IDs:** #UNOQ-PORT
+**Category:** OS / board bring-up
+**Difficulty:** 2/5
+**Status:** Active
+
+## Overview
+
+On the Arduino Uno Q the only MCU UART that reaches something observable is
+LPUART1 (PG7/PG8, AF8) -> Qualcomm `/dev/ttyHS1` @115200. USART1 on PB6/PB7
+goes to header pins D1/D0. The board header must therefore clock, power
+(VDDIO2 via PWR_SVMCR.IO2SV) and mux LPUART1, not USART1 on PA9/PA10.
+Bug: doc/08_tracking/bug/uno_q_simpleos_flashed_uart_poll_never_completes_2026-09-26.md
+"""
+use std.spec.*
+use std.fs.{read_file}
+
+describe "STM32U585 board header console":
+    val header = read_file("src/os/kernel/arch/cortex_m33/board_stm32u585.h")
+
+    it "polls LPUART1 (0x46002400), not USART1":
+        expect(header).to_contain("#define LPUART1_BASE  0x46002400")
+        expect(header).to_contain("LPUART1_ISR & (1 << 7)")
+        expect(header).to_contain("LPUART1_ISR & (1 << 5)")
+        expect(header).to_not_contain("0x40013800")
+        expect(header).to_not_contain("GPIOA_")
+
+    it "clocks GPIOG + LPUART1 and validates VDDIO2 before the mux":
+        expect(header).to_contain("RCC_AHB2ENR1 |= (1 << 6)")
+        expect(header).to_contain("RCC_APB3ENR  |= (1 << 6)")
+        expect(header).to_contain("PWR_SVMCR |= (1u << 29)")
+
+    it "muxes PG7/PG8 to AF8 at 115200 from a 4 MHz PCLK3":
+        expect(header).to_contain("(8u << 28)")
+        expect(header).to_contain("(8u << 0)")
+        expect(header).to_contain("#define LPUART1_BRR_115200 8889")

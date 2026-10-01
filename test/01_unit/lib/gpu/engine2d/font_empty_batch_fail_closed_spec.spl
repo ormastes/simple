@@ -1,0 +1,84 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# Acceptance item 4 of
+# doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md:
+# an empty or degenerate FontRenderBatch must return a named failure at the
+# emitter and must NOT enter any backend batch method. The oracle is
+# structural (dispatch counter) plus an absolute framebuffer-pixel oracle.
+# @tag: unit, gpu, engine2d, vector-font
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontRenderer}
+
+val DRAWABLE_TRANSFORM = "uniform-scale;translate-late"
+
+fn _batch(quads: [FontRenderQuad]) -> FontRenderBatch:
+    FontRenderBatch(
+        program_version: 1, font_identity: "test", face_generation: 1, valid: true,
+        atlas_width: 2, atlas_height: 2,
+        atlas_pixels: [0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32],
+        quads: quads, atlas_generation: 1, dirty_rects: [],
+        transform_identity: DRAWABLE_TRANSFORM
+    )
+
+fn _quad(w: i32, h: i32) -> FontRenderQuad:
+    FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+        width: w, height: h, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)
+
+describe "Engine2D font batch fail-closed on an empty or degenerate payload":
+    it "never dispatches a zero-glyph batch to a backend and keeps the framebuffer unchanged":
+        # @req REQ-SSPEC-LIB
+        var engine = Engine2D.create_with_backend(16, 12, "cpu")
+        val before_pixels = engine.read_pixels()
+        val before_dispatches = engine.font_backend_dispatch_count()
+        expect(engine._draw_font_batch_plan(0, 0, _batch([]), ["cpu"])).to_be(false)
+        expect(engine.font_backend_dispatch_count()).to_equal(before_dispatches)
+        expect(engine.font_batches_skipped_empty_count()).to_equal(1)
+        expect(engine.font_skip_reason()).to_equal("empty-quads")
+        expect(engine.font_execution_target()).to_equal("")
+        expect(engine.font_execution_attempts()).to_equal(["nothing-to-draw:empty-quads"])
+        expect(engine.read_pixels()).to_equal(before_pixels)
+        engine.shutdown()
+
+    it "never dispatches an all-zero-area batch to a backend":
+        # @req REQ-SSPEC-LIB
+        var engine = Engine2D.create_with_backend(16, 12, "cpu")
+        val before_pixels = engine.read_pixels()
+        expect(engine._draw_font_batch_plan(0, 0, _batch([_quad(0, 0), _quad(1, 0)]), ["cpu"])).to_be(false)
+        expect(engine.font_backend_dispatch_count()).to_equal(0)
+        expect(engine.font_batches_skipped_empty_count()).to_equal(1)
+        expect(engine.font_skip_reason()).to_equal("zero-area-quads")
+        expect(engine.read_pixels()).to_equal(before_pixels)
+        engine.shutdown()
+
+    it "still dispatches and still draws a batch that carries one drawable quad":
+        # @req REQ-SSPEC-LIB
+        var engine = Engine2D.create_with_backend(16, 12, "cpu")
+        val before_pixels = engine.read_pixels()
+        expect(engine._draw_font_batch_plan(0, 0, _batch([_quad(1, 1)]), ["cpu"])).to_be(true)
+        expect(engine.font_backend_dispatch_count()).to_equal(1)
+        expect(engine.font_batches_skipped_empty_count()).to_equal(0)
+        expect(engine.font_skip_reason()).to_equal("")
+        expect(engine.font_execution_target()).to_equal("cpu")
+        # Absolute pixel oracle: the drawable quad really paints pixel (0, 0).
+        expect(engine.read_pixels()[0]).to_not_equal(before_pixels[0])
+        engine.shutdown()
+
+describe "FontRenderer staging refuses a degenerate payload with a named reason":
+    it "refuses a zero-glyph batch instead of storing a zero-length payload":
+        # @req REQ-SSPEC-LIB
+        var renderer = FontRenderer.new()
+        expect(renderer._stage_batch(_batch([]))).to_equal(0)
+        expect(renderer.staged_reject_reason_text()).to_equal("empty-quads")
+        expect(renderer.staged_is_drawable()).to_be(false)
+        expect(renderer.receipt_staged_quads_nonempty()).to_be(false)
+
+    it "refuses an all-zero-area batch and accepts a drawable one":
+        # @req REQ-SSPEC-LIB
+        var renderer = FontRenderer.new()
+        expect(renderer._stage_batch(_batch([_quad(0, 3)]))).to_equal(0)
+        expect(renderer.staged_reject_reason_text()).to_equal("zero-area-quads")
+        expect(renderer._stage_batch(_batch([_quad(1, 1)]))).to_equal(1)
+        expect(renderer.staged_reject_reason_text()).to_equal("")
+        expect(renderer.staged_is_drawable()).to_be(true)

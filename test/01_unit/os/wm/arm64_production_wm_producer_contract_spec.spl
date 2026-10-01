@@ -6,8 +6,9 @@ describe "ARM64 production WM producer contract":
         val producer = file_read("src/os/services/wm/arm64_production_wm_producer.spl")
         expect(producer).to_contain("launcher_launch_path_with_args(binary_path, args)")
         expect(producer).to_contain("if launched_pid <= 0:")
-        expect(producer).to_contain("owned_scene.process_surface_count <= 0")
-        expect(producer).to_contain("snapshot.owned_scene.process_id != self.process_id")
+        expect(producer).to_contain("owned_scene.scene.windows.len() == 0")
+        expect(producer).to_contain("rv64_process_owned_render_cardinality_valid(")
+        expect(producer).to_contain("rv64_process_owned_presentation_binding_valid(")
 
     it "pumps one publication action before snapshotting the PID-owned scene":
         val entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
@@ -17,10 +18,29 @@ describe "ARM64 production WM producer contract":
         expect(launch).to_be_greater_than(0)
         expect(pump).to_be_greater_than(launch)
         expect(snapshot).to_be_greater_than(pump)
-        expect(entry).to_contain("published_snapshot.owned_scene.process_surface_count <= 0")
+        expect(entry).to_contain("published_snapshot.owned_scene.scene.windows.len() == 0")
         expect(entry).to_contain("boot_monotonic_deadline_us(")
         expect(entry).to_contain("yield_()")
         expect(entry.contains("ARM64_WM_PUBLICATION_PUMP_LIMIT")).to_equal(false)
+
+    it "selects the first visible process-owned surface for animation":
+        val entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+        val selection_start = entry.index_of("var animation_surface_id: i32 = 0")
+        val selection_end = entry.index_of("if animation_surface_id <= 0:")
+        expect(selection_start).to_be_greater_than(0)
+        expect(selection_end).to_be_greater_than(selection_start)
+        val selection = entry.substring(selection_start, selection_end)
+        expect(selection).to_contain("animation_surface_id == 0 and")
+        expect(selection).to_contain("surface.visible and")
+        expect(selection).to_contain("surface.process_id > 0 and")
+        expect(selection).to_contain("surface.process_id.to_u64() == wm_producer.process_id")
+        expect(selection.index_of("surface.visible and")).to_be_greater_than(
+            selection.index_of("animation_surface_id == 0 and")
+        )
+        expect(selection.index_of("surface.process_id > 0 and")).to_be_greater_than(
+            selection.index_of("surface.visible and")
+        )
+        expect(selection).to_contain("animation_surface_id = surface.id")
 
     it "revalidates process and surface ownership during every desktop turn":
         val entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
@@ -29,7 +49,7 @@ describe "ARM64 production WM producer contract":
         expect(loop_body).to_contain("wm_producer.pump_one_published_action(shell)")
         expect(loop_body).to_contain("wm_producer.snapshot_published_scene(shell)")
         expect(loop_body).to_contain("live_verdict.failed")
-        expect(loop_body).to_contain("live_snapshot.owned_scene.process_surface_count <= 0")
+        expect(loop_body).to_contain("live_snapshot.owned_scene.scene.windows.len() == 0")
 
     it "renders publication-only revision changes from a fresh owned snapshot":
         val entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")

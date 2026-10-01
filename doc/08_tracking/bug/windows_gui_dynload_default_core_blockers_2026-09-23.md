@@ -1,0 +1,9 @@
+# Windows default Simple still statically closes over GUI
+
+Status: OPEN. The requested lean default binary and dynamically loaded GUI are not yet implemented or verified. Do not treat an IDE provider source file as a deployed provider.
+
+`scripts/bootstrap/bootstrap-from-scratch.sh` builds Stage 4 from `src/app/cli/main.spl` in `one-binary` mode; that entry re-exports `_CliMain/main_and_help.spl`, which directly imports IDE/GUI and other UI command bodies. `src/app/cli/bootstrap_main.spl` admits only the full CLI or OS entry for Stage 4 and requires one-binary mode. Replacing one shell entry or removing the IDE import would break ordinary commands, not make a valid lean deployment.
+
+The separate `src/app/simple_core/main.spl` route is not deployable yet: it lacks an admitted CLI-1 provider for `-c`, `check`, and `test`; its SCI path is working-directory relative; provider paths are not release-generation relative; `simple_cli_status_valid_v1` is unresolved; and capability grants and application exit-status mapping need a verified policy. On Windows, `src/os/posix/dynlib.spl` currently rejects `.dll`, so a native IDE provider cannot load through that path. The default full CLI also imports GUI-related Office, UI, browser, play, and other code beyond IDE.
+
+Required rollout: build real essential CLI and IDE providers; bind exact artifact digests in a generated SCI; implement generation-relative provider lookup and Windows DLL loading with fail-closed tests; build a separate lean core artifact while retaining the Stage 4 compiler producer; transactionally deploy core, providers, and SCI; then verify command parity, missing/tampered artifact rejection, and closure/symbol/size evidence. Do not enlarge the core with static GUI or use raw-source fallbacks. The existing minimal-bootstrap composition architecture remains the target.

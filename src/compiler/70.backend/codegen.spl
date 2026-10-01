@@ -25,8 +25,11 @@ use compiler.common.diagnostics.span.{Span}
 use std.sffi.codegen*
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
-use compiler.loader.jit_instantiator.{JitStats}
+# Module-level, not a `use` inside the method body: stage1 HIR lowering does not
+# resolve function-local imports the way the Rust seed does.
+use compiler.loader.jit_instantiator.{JitStats, JitInstantiator, JitInstantiatorConfig}
 
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 extern fn rt_file_delete(path: text) -> bool
 
 # ============================================================================
@@ -350,6 +353,7 @@ impl CraneliftCodegenState:
                 self.local_values[dest.id] = addr
 
             case Call(dest, func, args):
+                val call_dest: LocalId? = dest
                 val func_value = self.compile_operand(func)
                 var arg_values: [i64] = []
                 for arg in args:
@@ -359,8 +363,8 @@ impl CraneliftCodegenState:
                     func_value,
                     arg_values
                 )
-                if dest.?:
-                    self.local_values[dest.unwrap().id] = result
+                if val dest_local = call_dest:
+                    self.local_values[dest_local.id] = result
 
             case Cast(dest, operand, target):
                 val v = self.compile_operand(operand)
@@ -402,6 +406,12 @@ impl CraneliftCodegenState:
             case PipeForward(dest, value, func):
                 # x |> f  ->  f(x)
                 # Compile to function call
+                # `dest` is a plain (non-optional) `LocalId` here
+                # (mir_instruction_kinds.spl:189), unlike `Call`'s `dest:
+                # LocalId?` above. The previous `dest.?`/`dest.unwrap().id`
+                # treated it as an Option anyway, leaving `dest` receiver-typed
+                # ANY through the unwrap call. Use it directly.
+                val pipe_dest: LocalId = dest
                 val func_value = self.compile_operand(func)
                 val value_arg = self.compile_operand(value)
                 val result = cranelift_call(
@@ -409,8 +419,7 @@ impl CraneliftCodegenState:
                     func_value,
                     [value_arg]
                 )
-                if dest.?:
-                    self.local_values[dest.unwrap().id] = result
+                self.local_values[pipe_dest.id] = result
 
             case Compose(dest, f, g, forward):
                 # Composition: f >> g or f << g
@@ -698,8 +707,12 @@ impl CodegenPipeline:
         and calls the main entry point.
         """
         # Phase 1: delegate to JitInstantiator's SMF loading infrastructure
-        use compiler.loader.jit_instantiator.{JitInstantiator, JitInstantiatorConfig}
-        val config = JitInstantiatorConfig(verbose: false, cache_dir: "build/smf")
+        val config = JitInstantiatorConfig(
+            update_smf: true,
+            max_depth: 50,
+            enabled: true,
+            verbose: false
+        )
         var jit = JitInstantiator.new(config)
         jit.load_smf_metadata(smf_path)
         val result = jit.try_jit_instantiate("main")

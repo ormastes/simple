@@ -1,0 +1,64 @@
+"""
+# Retained packed-byte interpreter RSS gate contract
+
+The focused shell gate measures the packed-byte interpreter path with three
+fresh workloads (1, 4, and 32 MiB).  A row is admitted only when the process
+prints the exact requested length and zero-fill checksum and emits one
+canonical `simple_execution_mode_v1` receipt proving that the requested and
+actual engines are both the interpreter with `fallback=false`.
+
+The gate retains one raw RSS sample row per measured process and records p50,
+p95, and max RSS for every payload.  Max RSS is total process RSS, compared
+directly against four times the payload in bytes; no baseline process or
+baseline subtraction is part of this proof.  Missing mode receipts are
+UNAVAILABLE and fail closed.  A native artifact is never a substitute.
+"""
+
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+val GATE = "scripts/check/check-interpreter-packed-byte-rss.shs"
+val FIXTURE = "test/05_perf/bytes_push_1mib.spl"
+
+describe "retained packed-byte interpreter RSS gate contract":
+    it "requires a fallback-proof interpreter receipt and never a native substitute":
+        val gate = file_read(GATE)
+        expect(gate).to_contain("SIMPLE_EXECUTION_MODE=interpreter")
+        expect(gate).to_contain("SIMPLE_EXECUTION_MODE_RECEIPT=1")
+        expect(gate).to_contain("EXPECTED_RECEIPT='simple_execution_mode_v1 requested=interpreter actual=interpreter fallback=false'")
+        expect(gate).to_contain("interpreter-receipt-unavailable")
+        expect(gate).to_contain("STATUS: UNAVAILABLE")
+        expect(gate).to_contain("SIMPLE_NO_BOOTSTRAP_DELEGATE=1")
+        expect(gate).to_contain("never names a native artifact or compile path")
+        expect(gate).to_contain("fallback=true")
+        expect(gate).to_contain("actual_mode=interpreter fallback=false")
+        expect(gate).to_contain("native artifact")
+
+    it "checks exact length and checksum for all three payload sizes":
+        val gate = file_read(GATE)
+        val fixture = file_read(FIXTURE)
+        expect(gate).to_contain("run_row '1 MiB' 1048576 1mib")
+        expect(gate).to_contain("run_row '4 MiB' 4194304 4mib")
+        expect(gate).to_contain("run_row '32 MiB' 33554432 32mib")
+        expect(gate).to_contain("actual_len=")
+        expect(gate).to_contain("checksum=")
+        expect(gate).to_contain("zero_fill_checksum=\\([0-9][0-9]*\\)")
+        expect(fixture).to_contain("if buf.len() != n:")
+        expect(fixture).to_contain("checksum != 0")
+        expect(fixture).to_contain("zero_fill_checksum=")
+
+    it "retains raw RSS samples and computes p50 p95 and absolute four-times budget":
+        val gate = file_read(GATE)
+        expect(gate).to_contain("raw=\"")
+        expect(gate).to_contain("sort -t'|' -k3,3n")
+        expect(gate).to_contain("p50_line=")
+        expect(gate).to_contain("p95_line=")
+        expect(gate).to_contain("max_rss=")
+        expect(gate).to_contain("rss_bytes=")
+        expect(gate).to_contain("budget_bytes=")
+        expect(gate).to_contain("-le")
+        expect(gate.contains("baseline_rss")).to_equal(false)
+        expect(gate).to_contain("raw_sha256=")
+        expect(gate).to_contain("p50_rss_kib=")
+        expect(gate).to_contain("p95_rss_kib=")
+        expect(gate).to_contain("max_rss_kib=")

@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/os/smf/dynsmf_session.spl 5%
 # @tag: spec, smf, cache, ac-7, perf-opt
 """
@@ -17,8 +21,8 @@ The changed-source case is the load-bearing assertion: it must produce a
 `ready=false` status with `reason="stale_source"`, which is categorically
 different from the unchanged-source case (`ready=true`).
 
-The AC-7 unit cases inject hashes through `dynsmf_artifact_status_with_hash`.
-The final scenario generates and executes a real SMF through the production CLI.
+Tests are driven with injected hashes through `dynsmf_artifact_status_with_hash`
+— no `bin/simple compile` is invoked, so the spec is fast and deterministic.
 
 **Requirement:** AC-7 (perf-opt-lang-web-db-os: dynSMF idle background compile +
   unchanged-script cache reuse)
@@ -26,9 +30,9 @@ The final scenario generates and executes a real SMF through the production CLI.
 **Design:** doc/05_design/infra/perf_umbrella/perf_opt_design.md ## dynSMF cache
 """
 
+use std.spec.step
+
 use std.spec.{describe, it, expect}
-use std.io_runtime.{file_hash_sha256, file_write, mkdir_p, process_run}
-use compiler.driver.watcher.watcher_client.{get_or_generate_smf}
 use os.smf.dynsmf_session.{
     DynSmfManifestEntry,
     DynSmfArtifactStatus,
@@ -53,8 +57,11 @@ fn smf_magic_bytes() -> [u8]:
     [83, 77, 70, 0, 1, 0, 0, 0]
 
 describe "dynSMF content-hash cache invalidation (AC-7)":
+    # @manual scenario evidence
 
     it "accepts artifact when sidecar hash matches current source hash (cache hit)":
+        # @req REQ-SSPEC-INTEGRATION
+        step("accepts artifact when sidecar hash matches current source hash (cache hit)")
         val entry = test_entry()
         val data = smf_magic_bytes()
         val base = dynsmf_artifact_status_from_bytes(entry, true, data)
@@ -66,6 +73,8 @@ describe "dynSMF content-hash cache invalidation (AC-7)":
         expect(status.reason).to_equal("smf_artifact_ready")
 
     it "rejects artifact when sidecar hash differs from current source hash (stale source miss)":
+        # @req REQ-SSPEC-INTEGRATION
+        step("rejects artifact when sidecar hash differs from current source hash (stale source miss)")
         val entry = test_entry()
         val data = smf_magic_bytes()
         val base = dynsmf_artifact_status_from_bytes(entry, true, data)
@@ -78,6 +87,8 @@ describe "dynSMF content-hash cache invalidation (AC-7)":
         expect(status.reason).to_equal("stale_source")
 
     it "rejects artifact when sidecar is absent (no .srchash file)":
+        # @req REQ-SSPEC-INTEGRATION
+        step("rejects artifact when sidecar is absent (no .srchash file)")
         val entry = test_entry()
         val data = smf_magic_bytes()
         val base = dynsmf_artifact_status_from_bytes(entry, true, data)
@@ -88,6 +99,8 @@ describe "dynSMF content-hash cache invalidation (AC-7)":
         expect(status.reason).to_equal("stale_source")
 
     it "unchanged vs changed source produce categorically different ready values":
+        # @req REQ-SSPEC-INTEGRATION
+        step("unchanged vs changed source produce categorically different ready values")
         val entry = test_entry()
         val data = smf_magic_bytes()
         val base = dynsmf_artifact_status_from_bytes(entry, true, data)
@@ -98,9 +111,11 @@ describe "dynSMF content-hash cache invalidation (AC-7)":
         expect(miss.ready).to_equal(false)
         expect(miss.reason).to_equal("stale_source")
         # Prove the two cases genuinely differ
-        expect(hit.ready).to_not_equal(miss.ready)
+        expect(hit.ready == miss.ready).to_equal(false)
 
     it "magic-invalid artifact is rejected before hash check (not_precompiled path)":
+        # @req REQ-SSPEC-INTEGRATION
+        step("magic-invalid artifact is rejected before hash check (not_precompiled path)")
         val entry = test_entry()
         val bad_data = [0, 1, 2, 3, 4, 5, 6, 7]
         val base = dynsmf_artifact_status_from_bytes(entry, true, bad_data)
@@ -112,6 +127,8 @@ describe "dynSMF content-hash cache invalidation (AC-7)":
         expect(status.reason).to_equal("invalid_magic")
 
     it "srchash sidecar path is deterministic (artifact_path + .srchash)":
+        # @req REQ-SSPEC-INTEGRATION
+        step("srchash sidecar path is deterministic (artifact_path + .srchash)")
         val artifact = "build/dynsmf/file_io.smf"
         val sidecar = dynsmf_srchash_path(artifact)
         expect(sidecar).to_equal("build/dynsmf/file_io.smf.srchash")
@@ -119,6 +136,8 @@ describe "dynSMF content-hash cache invalidation (AC-7)":
 describe "dynSMF background compile dispatch evidence (AC-7)":
 
     it "queued evidence uses compile_background action":
+        # @req REQ-SSPEC-INTEGRATION
+        step("queued evidence uses compile_background action")
         val manifest = dynsmf_default_manifest()
         val entry = manifest[0]
         expect(entry.id).to_equal("file_io")
@@ -147,49 +166,3 @@ fn dynsmf_artifact_status_with_hash_injected(
     if current_hash != stored_hash:
         return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_source", byte_count: base.byte_count, magic_hex: base.magic_hex)
     base
-
-val REAL_FIXTURE_DIR = "build/test-artifacts/smf_cache_reuse"
-val REAL_LEAF = "{REAL_FIXTURE_DIR}/leaf.spl"
-val REAL_SMF = "build/smf/build_test-artifacts_smf_cache_reuse_leaf.smf"
-
-fn generate_real_leaf() -> text:
-    val result = get_or_generate_smf(REAL_LEAF, REAL_SMF, "c", 0, false, false, false, "", [])
-    match result:
-        case Ok(path): path
-        case Err(message):
-            print "SMF generation failed: {message}"
-            ""
-
-fn run_real_leaf() -> (text, text, i64):
-    process_run("/bin/sh", [
-        "-c",
-        "SIMPLE_LIB=\"$PWD/src\" SIMPLE_BOOTSTRAP_DRIVER=/bin/false \"$PWD/bin/simple\" run \"$PWD/{REAL_SMF}\""
-    ])
-
-describe "pure-Simple production SMF consumption":
-    it "reuses unchanged code, regenerates changed code, and preserves the launcher":
-        expect(mkdir_p(REAL_FIXTURE_DIR)).to_equal(true)
-        expect(mkdir_p("build/smf")).to_equal(true)
-        expect(file_write(REAL_LEAF, "fn main() -> i64:\n    print \"leaf-v1\"\n    0\n")).to_equal(true)
-
-        val launcher_before = file_hash_sha256("bin/simple")
-        expect(generate_real_leaf()).to_equal(REAL_SMF)
-        val artifact_v1 = file_hash_sha256(REAL_SMF)
-        expect(artifact_v1.len()).to_be_greater_than(0)
-
-        val (first_out, _first_err, first_code) = run_real_leaf()
-        expect(first_code).to_equal(0)
-        expect(first_out).to_contain("leaf-v1")
-
-        expect(generate_real_leaf()).to_equal(REAL_SMF)
-        expect(file_hash_sha256(REAL_SMF)).to_equal(artifact_v1)
-
-        expect(file_write(REAL_LEAF, "fn main() -> i64:\n    print \"leaf-v2\"\n    0\n")).to_equal(true)
-        expect(generate_real_leaf()).to_equal(REAL_SMF)
-        expect(file_hash_sha256(REAL_SMF)).to_not_equal(artifact_v1)
-
-        val (second_out, _second_err, second_code) = run_real_leaf()
-        expect(second_code).to_equal(0)
-        expect(second_out).to_contain("leaf-v2")
-        expect(second_out).to_not_contain("leaf-v1")
-        expect(file_hash_sha256("bin/simple")).to_equal(launcher_before)

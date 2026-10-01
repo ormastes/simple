@@ -1,0 +1,57 @@
+# @cover src/lib/gc_async_mut/ui/gui_content_renderer.spl 80%
+# @cover src/os/compositor/host_compositor_core.spl 5%
+# @tag: integration, wm, gui, content_frame
+
+use std.spec.*
+use common.ui.builder.{button, column, label, text_input}
+use common.ui.widget.{UITree, WidgetNode}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_GUI}
+use common.window_protocol.geometry.{Size}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.host_compositor_entry.{HostCompositor}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
+
+fn fixed_height(node: WidgetNode, height: i32) -> WidgetNode:
+    node.set_prop("height", height.to_string())
+    node
+
+fn non_black_count(pixels: [u32]) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel != 0xff000000u32 and pixel != 0u32:
+            count = count + 1
+    count
+
+describe "host GUI content-frame production":
+    # @req AC-3 AC-5 AC-9
+    it "renders a UISession into the production WM and releases its frame":
+        val root = column("wm-demo-root", [
+            fixed_height(label("wm-demo-label", "Simple GUI"), 24),
+            fixed_height(text_input("wm-demo-input", "Type"), 28),
+            fixed_height(button("wm-demo-button", "Click", "demo.click"), 28),
+        ])
+        var session = UISession.new(UITree.new(root))
+        var compositor = HostCompositor.new_headless(Size.wh(240, 180))
+        compositor.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "WM Demo",
+            20, 20, 160, 120, "", 99, "wm.demo"
+        )
+        expect(compositor.require_external_web_frame(1)).to_be(true)
+
+        val frame = gui_session_content_frame(
+            session, "1", "", 0, 0, 152, 84, 1, 1, []
+        )
+        expect(frame.origin_kind).to_equal(WM_CONTENT_ORIGIN_GUI)
+        expect(frame.pixels.len()).to_equal(152 * 84)
+        expect(frame.checksum > 0u64).to_be(true)
+        expect(compositor.set_external_web_frame(1, frame)).to_be(true)
+
+        compositor.render_frame()
+        val desktop = compositor.pure_simple_pixel_buffer()
+        expect(desktop.len()).to_equal(240 * 180)
+        expect(non_black_count(desktop)).to_be_greater_than(100)
+
+        compositor.destroy_window(1)
+        expect(compositor.windows.len()).to_equal(0)
+        expect(compositor.external_web_frames.len()).to_equal(0)

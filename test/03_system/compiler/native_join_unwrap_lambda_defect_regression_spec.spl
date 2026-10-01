@@ -1,0 +1,199 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""Native regression for the seed HIR join/unwrap/lambda defect class
+(src/compiler_rust/compiler/src/hir/lower/expr/control.rs).
+
+Three independent defects, all in value-position type inference for the Rust
+seed's HIR lowerer:
+
+1. `if`/`match` used as a value: a `nil` or diverging (panic/return) arm used
+   to win the type join over a sibling arm that actually produced the value,
+   degrading a real struct/scalar to `Nil`/`ANY`.
+2. Bare `x!` on a subject the compiler could not prove is a Result/Option
+   enum (untyped/ANY) took the propagate-style "is-Err -> return" path even
+   though `!` never propagates, so a non-enum ANY value silently unwrapped to
+   `nil` via `rt_enum_payload` instead of its real value.
+3. A placeholder-lambda param (`_`/`_1`/`_2` desugared to `__p0`/`__p1`/...)
+   with no expected callee type defaulted to `I64`, which made a non-numeric
+   receiver (e.g. a struct field access) wrongly "proven scalar" and take an
+   unsafe raw-scalar codegen path instead of a dynamic one.
+
+Each scenario's expected value is computed at module scope (which `bin/simple
+test` runs through the seed's tree-walking interpreter — always correct here,
+per the doc/08_tracking/bug notes this defect class already accumulated), then
+re-derived by compiling the same source through the deployed self-hosted
+native-build path and running the artifact, so the two must agree.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell, ProcessResult}
+
+val BUILD_DIR = "build/native_join_unwrap_lambda_defect_regression"
+
+fn compile_and_run(name: text, source: text) -> ProcessResult:
+    val source_path = BUILD_DIR + "/" + name + ".spl"
+    val binary_path = BUILD_DIR + "/" + name
+    dir_create_all(BUILD_DIR)
+    remove_file_if_exists(binary_path)
+    file_write(source_path, source)
+    val compiled = shell(
+        "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 " +
+        "bin/simple native-build --entry " + source_path + " -o " + binary_path + " --clean"
+    )
+    if compiled.exit_code != 0:
+        return compiled
+    shell(binary_path)
+
+# --- Class 5: if-value with a nil arm, both arm orders --------------------
+
+struct Widget:
+    id: i64
+
+fn make_widget() -> Widget:
+    return Widget(id: 7)
+
+fn pick_else_nil(c: bool) -> Widget?:
+    val x = if c: make_widget() else: nil
+    return x
+
+fn pick_then_nil(c: bool) -> Widget?:
+    val x = if c: nil else: make_widget()
+    return x
+
+val IF_NIL_JOIN_SOURCE =
+    "struct Widget:\n" +
+    "    id: i64\n" +
+    "fn make_widget() -> Widget:\n" +
+    "    return Widget(id: 7)\n" +
+    "fn pick_else_nil(c: bool) -> Widget?:\n" +
+    "    val x = if c: make_widget() else: nil\n" +
+    "    return x\n" +
+    "fn pick_then_nil(c: bool) -> Widget?:\n" +
+    "    val x = if c: nil else: make_widget()\n" +
+    "    return x\n" +
+    "fn main():\n" +
+    "    print(pick_else_nil(true)!.id)\n" +
+    "    print(pick_then_nil(false)!.id)\n"
+
+# --- Class 5 (match) + class 2 (bare `!` on an ANY subject) ----------------
+
+fn load_result() -> Result<i64, text>:
+    return Ok(6)
+
+fn read_or_panic() -> i64:
+    val value = match load_result():
+        Err(error): panic(error)
+        Ok(found): found
+    return value + 1
+
+fn is_big(v: any) -> bool:
+    return v! > 10
+
+fn guard_nil_or_big(x: any) -> text:
+    if x == nil or is_big(x):
+        return "big-or-nil"
+    else:
+        return "small"
+
+val PANIC_ARM_AND_BARE_UNWRAP_SOURCE =
+    "fn load_result() -> Result<i64, text>:\n" +
+    "    return Ok(6)\n" +
+    "fn read_or_panic() -> i64:\n" +
+    "    val value = match load_result():\n" +
+    "        Err(error): panic(error)\n" +
+    "        Ok(found): found\n" +
+    "    return value + 1\n" +
+    "fn is_big(v: any) -> bool:\n" +
+    "    return v! > 10\n" +
+    "fn guard_nil_or_big(x: any) -> text:\n" +
+    "    if x == nil or is_big(x):\n" +
+    "        return \"big-or-nil\"\n" +
+    "    else:\n" +
+    "        return \"small\"\n" +
+    "fn main():\n" +
+    "    print(read_or_panic())\n" +
+    "    print(guard_nil_or_big(42))\n"
+
+# --- Class 3: placeholder-lambda param must not default to I64 ------------
+
+struct Item:
+    flag: bool
+    value: i64
+
+fn count_flagged(items: [Item]) -> i64:
+    return items.filter(_.flag).len()
+
+val PLACEHOLDER_LAMBDA_FILTER_SOURCE =
+    "struct Item:\n" +
+    "    flag: bool\n" +
+    "    value: i64\n" +
+    "fn count_flagged(items: [Item]) -> i64:\n" +
+    "    return items.filter(_.flag).len()\n" +
+    "fn main():\n" +
+    "    val items = [\n" +
+    "        Item(flag: true, value: 1),\n" +
+    "        Item(flag: false, value: 2),\n" +
+    "        Item(flag: true, value: 3)\n" +
+    "    ]\n" +
+    "    print(count_flagged(items))\n"
+
+describe "seed HIR join/unwrap/lambda defect class — native-build matches interpreter":
+    # @manual: show
+    # Before the fix, `lower_if`'s join unconditionally took the then-arm's
+    # type, so a `nil` then-arm degraded the whole expression to `Nil`
+    # regardless of what the else-arm produced.
+    it "if-value with a nil arm joins to the real sibling type, both directions":
+        # @req REQ-SSPEC-SYSTEM
+        step("if-value with a nil arm joins to the real sibling type, both directions")
+
+        step("Interpreted result (trusted): else-nil then-real, and then-nil else-real")
+        expect(pick_else_nil(true)!.id).to_equal(7)
+        expect(pick_then_nil(false)!.id).to_equal(7)
+
+        step("Native-build result must agree for both arm orders")
+        val ran = compile_and_run("if_nil_join", IF_NIL_JOIN_SOURCE)
+        expect(ran.exit_code).to_equal(0)
+        expect(ran.stdout).to_equal("7\n7")
+
+    # @manual: show
+    # `case Err(e): panic(e); case Ok(v): v` must not degrade the match's
+    # value type via the panic arm, and a `x == nil or f(x!)`-shaped guard on
+    # an ANY subject must force an actual dynamic unwrap rather than
+    # silently reading nil.
+    it "match with a panic arm and a bare `!` on an ANY subject both stay real values":
+        # @req REQ-SSPEC-SYSTEM
+        step("match with a panic arm and a bare `!` on an ANY subject both stay real values")
+
+        step("Interpreted result (trusted)")
+        expect(read_or_panic()).to_equal(7)
+        expect(guard_nil_or_big(42)).to_equal("big-or-nil")
+
+        step("Native-build result must agree")
+        val ran = compile_and_run("panic_arm_and_bare_unwrap", PANIC_ARM_AND_BARE_UNWRAP_SOURCE)
+        expect(ran.exit_code).to_equal(0)
+        expect(ran.stdout).to_equal("7\nbig-or-nil")
+
+    # @manual: show
+    # The placeholder's generated `__p0` param used to default to `I64`,
+    # making the struct receiver "proven scalar" instead of routing its
+    # `.flag` field access dynamically.
+    it "list.filter(_.flag) keeps struct-field placeholder access dynamic":
+        # @req REQ-SSPEC-SYSTEM
+        step("list.filter(_.flag) keeps struct-field placeholder access dynamic")
+
+        step("Interpreted result (trusted)")
+        val interpreted = count_flagged([
+            Item(flag: true, value: 1),
+            Item(flag: false, value: 2),
+            Item(flag: true, value: 3)
+        ])
+        expect(interpreted).to_equal(2)
+
+        step("Native-build result must agree")
+        val ran = compile_and_run("placeholder_lambda_filter", PLACEHOLDER_LAMBDA_FILTER_SOURCE)
+        expect(ran.exit_code).to_equal(0)
+        expect(ran.stdout).to_equal("2")

@@ -34,13 +34,6 @@ The capsule owns cross-cutting status, deterministic command ordering, and harde
 5. `nogc_sync_mut/gpu/engine3d` or `engine/audio`: 3D listener/entity adapter.
 6. `os/drivers/audio` and `os/game/platform`: Simple OS capability and driver evidence.
 
-The current x86 SimpleOS adapter is
-`src/os/services/audio/audio_service.spl`. It keeps only scalar hardware state
-across boot/IRQ boundaries, prepares a four-period BDL over a 16-KiB PCM ring,
-programs the Q35 I/O-APIC INTx redirection entry before setting RUN, and counts
-IOC completions. This is device plumbing, not a second mixer; SoundEngine PCM
-refill remains above it.
-
 ## Backend Status Contract
 Every target reports one of:
 - `native`: real target backend available and selected.
@@ -52,14 +45,6 @@ No boolean init result may be used as the only platform evidence.
 
 ## Device Boundary
 The native bridge may use miniaudio for Linux, BSD, macOS, Android, and iOS. Simple OS uses the OS audio service/driver contracts. The public Simple layer depends on capability records and backend traits, not direct `rt_audio_*` calls.
-
-SDL2 is also a real host device boundary. It owns one generation-counted,
-main-thread queue device with an exact 48-kHz stereo `f32` format. SoundEngine
-submits its existing scalar-owned `f64` click buffer; the C boundary clamps,
-converts, and queues an owned copy. SDL2 does not expose hardware underrun
-counts through this API, so that query returns `-1` rather than invented data.
-Closed or stale device handles return false, and sample byte counts that cannot
-fit SDL2's `Uint32` queue length are rejected before allocation.
 
 ## Mixer And Parallelism
 Background workers may decode, resample, and prepare buffers. The mixer consumes a deterministic queue:
@@ -89,7 +74,6 @@ Hardening belongs in codec parsers, backend lifecycle, mixer queues, and teardow
 ## Observability
 Required counters:
 - selected backend and status;
-- live device, source, and playback handles;
 - no-audio backend selected;
 - mixer command count;
 - streaming chunks decoded;
@@ -97,18 +81,6 @@ Required counters:
 - inline fallback count;
 - codec corrupt-input rejects;
 - teardown cleanup count.
-- SimpleOS HDA IRQ and completed-period counts.
-
-Cleanup evidence reads those native counters after teardown. It must not infer
-zero merely because the high-level `device_started` flag was cleared.
-
-Miniaudio client ownership uses generation-counted engine handles. Closing one
-client leaves the shared native engine alive for other clients; the final
-client close releases remaining global slots and the device. Repeating a close
-is safe and returns false because that invocation released nothing. Source and
-playback handles remain global in this MVP, so raw FFI clients must explicitly
-unload/stop their own handles; add per-client ownership tags only when raw
-multi-client isolation becomes a supported contract.
 
 ## Architecture Risks
 - Runtime effects declarations currently exceed sampled `runtime_audio.c` implementation evidence; implementation must reconcile declarations and C symbols.

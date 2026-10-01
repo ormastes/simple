@@ -1,0 +1,48 @@
+# Source regression coverage for the future protocol. Not qualified by the
+# retained manager/worker images; those binaries predate this protocol.
+use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1, builder_no_child_started_decode_v1}
+use app.bootstrap_builder.contracts.{BuildHostV1, BuildResultV1}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_no_child_started_v1, builder_transport_reaped_v1, builder_transport_terminal_v1}
+use app.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+val NO_CHILD_DIGEST = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+fn no_child_fixture_attempt(root: text) -> BuilderAttemptV1:
+    val host = BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: root,
+        worker_program: "configured-worker", worker_digest: NO_CHILD_DIGEST, slots: 1)
+    BuilderAttemptV1(task_id: "rejected", attempt: 1, host: host, pid: 0,
+        local_root: root, remote_root: root, error: "", identity_digest: NO_CHILD_DIGEST,
+        process: builder_process_portable_v1())
+
+describe "bootstrap builder no-child-started protocol":
+    it "preserves typed rejection text and rejects the tree-reaped record format":
+        val original = BuilderNoChildStartedV1(NO_CHILD_DIGEST, "local", "invalid argv\nNUL: %00")
+        val encoded = builder_no_child_started_encode_v1(original)
+        match builder_no_child_started_decode_v1(encoded):
+            Ok(decoded): expect(decoded.reason).to_equal(original.reason)
+            Err(reason): expect(reason).to_equal("")
+        match builder_no_child_started_decode_v1(NO_CHILD_DIGEST + "\nlocal"):
+            Ok(_value): expect("accepted a tree marker as no-child").to_equal("")
+            Err(reason): expect(reason != "").to_equal(true)
+
+    it "requires the matching ERROR result without claiming a reaped compiler":
+        val root = "build/bootstrap-no-child-test-" + str(getpid())
+        expect(dir_create_all(root)).to_equal(true)
+        val attempt = no_child_fixture_attempt(root)
+        val proof = BuilderNoChildStartedV1(NO_CHILD_DIGEST, "local", "request rejected before CreateProcess")
+        expect(file_atomic_write(root + "/compiler.not-started.sdn", builder_no_child_started_encode_v1(proof))).to_equal(true)
+        expect(builder_transport_no_child_started_v1(attempt)).to_equal(false)
+        var result = BuildResultV1(task_id: "rejected", attempt: 1, identity_digest: NO_CHILD_DIGEST,
+            host_id: "local", status: "ERROR", exit_code: 2, outputs: [],
+            cache_hits: -1, cache_misses: -1, cache_stores: -1)
+        expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
+        expect(builder_transport_no_child_started_v1(attempt)).to_equal(true)
+        expect(builder_transport_terminal_v1(attempt)).to_equal(true)
+        expect(builder_transport_reaped_v1(attempt)).to_equal(false)
+        result.host_id = "different"
+        expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
+        expect(builder_transport_no_child_started_v1(attempt)).to_equal(false)

@@ -21,6 +21,18 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#ifndef SIMPLE_ABI_VERSION
+#define SIMPLE_ABI_VERSION 0
+#endif
+#ifndef SIMPLE_ABI_VERSION_DEFERRED
+#define SIMPLE_ABI_VERSION_DEFERRED (SIMPLE_ABI_VERSION == 0)
+#endif
+#if SIMPLE_ABI_VERSION_DEFERRED && SIMPLE_ABI_VERSION != 0
+#error "deferred SIMPLE_ABI_VERSION must be zero"
+#endif
+#if !SIMPLE_ABI_VERSION_DEFERRED && SIMPLE_ABI_VERSION <= 0
+#error "selected SIMPLE_ABI_VERSION must be positive"
+#endif
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -38,6 +50,14 @@ extern "C" {
 void rt_set_macro_trace(bool enabled);
 bool rt_is_macro_trace_enabled(void);
 void rt_set_debug_mode(bool enabled);
+
+/* Fail-closed host capability probes used by compiler SIMD dispatch. */
+int64_t rt_getauxval(int64_t key);
+bool rt_is_darwin_arm64(void);
+int32_t rt_sysctlbyname_i32(int64_t name);
+int32_t rt_riscv_read_vlenb(void);
+bool rt_riscv_has_v_ext(void);
+int32_t rt_cuda_sm_version(int32_t device);
 
 /* ===== Recoverable language exception frames =====
  *
@@ -70,6 +90,28 @@ bool rt_is_jit_runtime(void);
 /* Runtime-owned gate for Simple's Vulkan dependency quarantine. */
 int64_t rt_vulkan_dependency_quarantine_lock(void);
 int64_t rt_vulkan_dependency_quarantine_unlock(void);
+
+/* Optional Vulkan async-session extension revision 1; provider core ABI v1
+ * does not require these symbols. Snapshot words are documented in
+ * doc/07_guide/platform/ffi/vulkan_async_session.md. */
+int64_t rt_vulkan_async_session_supported(void);
+int64_t rt_vulkan_async_session_create(int64_t capacity);
+int64_t rt_vulkan_async_session_create_with_wait(int64_t capacity, int64_t timeout_ns);
+int64_t rt_vulkan_async_session_acquire(int64_t session);
+int64_t rt_vulkan_async_session_command(int64_t session, int64_t token);
+int64_t rt_vulkan_async_session_submit(int64_t session, int64_t token);
+int64_t rt_vulkan_async_session_poll(int64_t session, int64_t token);
+int64_t rt_vulkan_async_session_retire(int64_t session, int64_t token);
+int64_t rt_vulkan_async_session_receipt(int64_t session, int64_t sequence);
+int64_t rt_vulkan_async_session_cancel(int64_t session);
+int64_t rt_vulkan_async_session_close(int64_t session);
+int64_t rt_vulkan_async_session_capacity(int64_t session);
+int64_t rt_vulkan_async_session_in_flight(int64_t session);
+int64_t rt_vulkan_async_session_published_sequence(int64_t session);
+int64_t rt_vulkan_async_session_recover(int64_t session);
+int64_t rt_vulkan_async_session_abandon_device(int64_t session);
+int64_t rt_vulkan_async_session_snapshot(int64_t session);
+int64_t rt_vulkan_async_session_snapshot_word(int64_t session, int64_t snapshot, int64_t index);
 
 /* ===== Tagged Value System ===== */
 
@@ -222,6 +264,11 @@ bool     rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursiv
 bool     rt_dir_create_cpath(const char* path, bool recursive);
 bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
+int64_t  rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
+                            const uint8_t* prefix_ptr, uint64_t prefix_len);
+/* 1=published, 0=destination exists, -1=operational failure. */
+int64_t  rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
+                                   const uint8_t* destination_ptr, uint64_t destination_len);
 /* -> RuntimeValue (I64) array of text, per runtime_sffi.rs:1888. */
 int64_t  rt_dir_list(const uint8_t* path_ptr, uint64_t path_len);
 /* (path_ptr, path_len, recursive) -> bool; recursive=false is a plain rmdir. */
@@ -232,7 +279,12 @@ void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
 
-int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
+/* ABI: rt_file_lock IS in text_arg_indices (calls.rs:2672 `Some(&[0])`), so
+ * `text` splits into a raw (ptr, len) pair -- the OPPOSITE of rt_mmap above.
+ * Confirmed by the codegen spec (runtime_sffi.rs:323 = [I64,I64,I64] -> [I64])
+ * and the Rust runtime (file_ops.rs:679). platform_win.h:276 already had the
+ * correct shape; this declaration was the stale one. */
+int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
 
 /* ===== Offset-based File I/O ===== */
@@ -244,11 +296,20 @@ int64_t  rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_
 int64_t     rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value);
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
+/* Nullable tagged RuntimeValue: nil on failure, owned byte array on success. */
+int64_t     rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len);
 
 /* ===== Memory-Mapped File I/O ===== */
 
-void*    rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly);
-bool     rt_munmap(void* addr, int64_t size);
+/* ABI: rt_mmap/rt_munmap/rt_madvise/rt_msync are ABSENT from text_arg_indices
+ * (50.mir/text_extern_abi.spl + the Rust twin calls.rs), so generated code
+ * passes `text` as ONE tagged value, not a (ptr, len) pair, and passes the
+ * mapped address as a plain i64. Confirmed by the codegen specs
+ * (runtime_sffi.rs:326 `rt_mmap` = [I64,I64,I64,I64] -> [I64]) and by the Rust
+ * runtime (file_ops.rs:1018). The old `const char*`/`void*` shapes never
+ * matched any generated caller -- same class as rt_readdir above. */
+int64_t  rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly);
+bool     rt_munmap(int64_t addr, int64_t size);
 void     rt_invlpg(uint64_t addr);
 uint64_t unsafe_addr_of(int64_t value);
 uint64_t rt_read_cr3(void);
@@ -273,8 +334,8 @@ void     rt_volatile_write_u64(int64_t addr, int64_t value);
 void     rt_memory_barrier(void);
 void     rt_load_barrier(void);
 void     rt_store_barrier(void);
-bool     rt_madvise(void* addr, int64_t size, int64_t advice);
-bool     rt_msync(void* addr, int64_t size);
+bool     rt_madvise(int64_t addr, int64_t size, int64_t advice);
+bool     rt_msync(int64_t addr, int64_t size);
 
 /* ===== Raw mmap/mprotect Syscall Wrappers (address-based, for SMF loader) ===== */
 
@@ -287,6 +348,8 @@ int64_t  rt_mlock(int64_t addr, int64_t length);
 int64_t  rt_munlock(int64_t addr, int64_t length);
 int64_t  rt_open_fd(const char* path, int64_t flags, int64_t mode);
 int64_t  rt_close_fd(int64_t fd);
+int64_t  rt_get_host_target_code(void);
+int64_t  rt_current_task_id(void);
 int64_t  rt_page_size(void);
 
 /* ===== High-Resolution Time ===== */
@@ -358,7 +421,41 @@ int64_t  rt_host_dynlib_close(int64_t handle);
 int64_t  rt_gpu_provider_loaded(int64_t backend_bit);
 int64_t  rt_gpu_provider_abi_version(int64_t backend_bit);
 int64_t  rt_gpu_provider_backend_bits(int64_t backend_bit);
+int64_t  rt_gpu_provider_capability_bits(int64_t backend_bit);
+int64_t  rt_gpu_provider_identity(int64_t backend_bit);
+int64_t  rt_gpu_provider_generation(int64_t backend_bit);
+int64_t  rt_gpu_provider_artifact_digest_word(int64_t backend_bit, int64_t word);
+/* Bounded thread-local copy; valid until the next path query on this thread. */
 const char* rt_gpu_provider_path(int64_t backend_bit);
+/* Returns 0 while pinned calls are draining; retry to perform the close. */
+int64_t  rt_gpu_provider_unload(int64_t backend_bit);
+int64_t  rt_gpu_provider_session_open(int64_t backend_bit, int64_t device);
+int64_t  rt_gpu_provider_session_close(int64_t backend_bit, int64_t session);
+int64_t  rt_gpu_provider_resource_alloc(int64_t backend_bit, int64_t session,
+        int64_t size_bytes, int64_t flags, int64_t usage_bits);
+int64_t  rt_gpu_provider_resource_release(int64_t backend_bit, int64_t session,
+        int64_t resource);
+int64_t  rt_gpu_provider_submit_raw(int64_t backend_bit, int64_t session,
+        int64_t resource, int64_t format, int64_t data, int64_t length,
+        int64_t correlation_id);
+int64_t  rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session,
+        int64_t completion, int64_t timeout_ns, int64_t receipt_ptr);
+int64_t  rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session,
+        int64_t resource, int64_t bytes_ptr);
+int64_t  rt_gpu_provider_completion_release(int64_t backend_bit, int64_t session,
+        int64_t completion);
+int64_t  rt_gpu_provider_quarantine_drain(int64_t backend_bit);
+int64_t  rt_gpu_provider_session_authority_word(int64_t backend_bit,
+        int64_t session, int64_t word);
+int64_t  rt_gpu_provider_resource_authority_word(int64_t backend_bit,
+        int64_t session, int64_t resource, int64_t word);
+int64_t  rt_gpu_provider_completion_authority_word(int64_t backend_bit,
+        int64_t session, int64_t completion, int64_t word);
+/* Reserved typed projection for a future runtime-owned, exact-byte device
+ * image lease. Returns zero until an authenticated image owner is installed. */
+int64_t  rt_gpu_provider_device_image_authority_word(int64_t backend_bit,
+        int64_t session, int64_t image, int64_t word);
+int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
@@ -368,7 +465,18 @@ int64_t  rt_heap_registry_count(void);
 int8_t rt_transient_array_scope_begin(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
+/* Graph-operation success for a supported root in an active paused scope,
+ * never an ownership/membership query. Array roots support repeated promotion
+ * and persistent/aliased text children. Persistent leaf-root acceptance is
+ * provider-specific; callers retaining scalar texts use an explicit array. */
 int8_t rt_transient_heap_promote(int64_t value);
+/* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
+ * registry; an alternate rt_alloc provider must register through this API. */
+int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
+int8_t rt_transient_raw_owner_register_state(void* ptr, uint64_t bytes, int8_t owned);
+int8_t rt_transient_raw_owner_query(void* ptr, uint64_t* bytes, int8_t* owned);
+void rt_transient_raw_owner_unregister(void* ptr);
+int8_t rt_transient_raw_owner_thread_allows(void);
 int64_t  rt_time_now_unix(void);
 int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_nanos(int64_t ns);
@@ -407,6 +515,23 @@ int64_t  rt_string_builder_finish(int64_t handle);
 int64_t  rt_string_builder_len(int64_t handle);
 void     rt_string_builder_free(int64_t handle);
 int64_t  rt_string_char_code_at(int64_t string, int64_t index);
+
+/* Descriptor-pinned, beneath-root read-only file views. Text arguments use
+ * tagged runtime strings; optional byte arrays return NULL on failure. */
+int64_t  rt_file_view_open_beneath_no_follow_v1(int64_t root, int64_t path);
+int8_t   rt_file_view_mapping_supported_v1(int64_t handle);
+int64_t  rt_file_view_map_copy_v1(int64_t handle, uint64_t offset, uint64_t length);
+int64_t  rt_file_view_pread_exact_v1(int64_t handle, uint64_t offset, uint64_t length);
+int8_t   rt_file_view_prefetch_v1(int64_t handle, uint64_t offset, uint64_t length);
+int64_t  rt_file_view_device_v1(int64_t handle);
+int64_t  rt_file_view_inode_v1(int64_t handle);
+int64_t  rt_file_view_size_v1(int64_t handle);
+int8_t   rt_file_view_close_v1(int64_t handle);
+int64_t  rt_pinned_archive_open_beneath_v1(int64_t root, int64_t path);
+int64_t  rt_pinned_archive_device_v1(int64_t handle);
+int64_t  rt_pinned_archive_inode_v1(int64_t handle);
+int64_t  rt_pinned_archive_size_v1(int64_t handle);
+int8_t   rt_pinned_archive_close_v1(int64_t handle);
 int64_t  __simple_rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  rt_string_byte_at(int64_t string, int64_t index);
 int64_t  __simple_rt_string_byte_at(int64_t string, int64_t index);
@@ -439,7 +564,12 @@ int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
+SplArray* rt_f64_array_alloc(int64_t len);
+SplArray* rt_f32_array_alloc(int64_t len);
+SplArray* rt_i64_array_alloc(int64_t len);
 SplArray* rt_array_new_uninit(int64_t cap);
+/* 1 when the array is packed bytes ([u8]), 0 when tagged int64 slots. */
+int rt_array_is_byte_packed(SplArray* value);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
 void      rt_array_free(SplArray* array);  /* shallow: preserves element handles */
 /* Deep array free. Returns 1 only if the ENTIRE structure was reclaimed, 0 if
@@ -462,6 +592,8 @@ int64_t   rt_dict_free_deep(int64_t value);
 int64_t   rt_free_deep(int64_t value);
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
+int64_t   rt_random_bytes_c(uint64_t count);
+double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
 int64_t  rt_array_len(SplArray* array);
@@ -657,11 +789,16 @@ int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
 int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
+/* Formation probe for heap-typed enum/Option payloads at fail-closed
+ * handoffs: 1 for a tagged or raw/untagged class reference outside the zero
+ * page. This is a FORMATION check, not liveness -- see runtime_native.c. */
+int8_t   rt_heap_ref_wellformed(int64_t value);
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
+int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
@@ -671,6 +808,15 @@ int64_t  rt_native_neq(int64_t left, int64_t right);
 /* Ordering counterpart of rt_native_eq (strcmp-style signed result). Backs the
  * codegen `<`/`<=`/`>`/`>=` arm when neither operand is statically typed. */
 int64_t  rt_native_cmp(int64_t left, int64_t right);
+/* OrderedMap key comparison: 2 means unsupported erased key representation. */
+int64_t  spl_ordered_key_cmp(int64_t left, int64_t right);
+int64_t  spl_collection_capture_begin(int64_t target);
+int64_t  spl_collection_capture_note_size(int64_t site, int64_t target, int64_t size);
+int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);
+int64_t  spl_collection_capture_note_materialization(int64_t site, int64_t target);
+int64_t  spl_collection_capture_note_hash_probe(int64_t site, int64_t target, int64_t probes, int64_t collisions);
+int64_t  spl_collection_capture_finish(void);
+int64_t  spl_collection_capture_abort(void);
 int64_t  rt_text_eq_any(int64_t left, int64_t right);
 int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
 int64_t  rt_string_starts_with(int64_t value, int64_t prefix);
@@ -736,11 +882,42 @@ int64_t  rt_gpu_atomic_xchg_i64(int64_t a, int64_t b);  /* NAMED TRAP */
 int64_t  rt_gpu_atomic_cmpxchg_i64(int64_t a, int64_t b, int64_t c);  /* NAMED TRAP */
 int8_t   rt_is_none(int64_t value);
 int8_t   rt_is_some(int64_t value);
+/* `.?` presence: nil/None or an EMPTY array/dict/string is absent. */
+int8_t   rt_is_present(int64_t value);
 double   rt_math_pow(double base, double exponent);
-/* Remove by raw index, returning a tagged element or NIL for invalid receiver/index.
- * Negative indices do not count from the end. */
+/* Core-C-only lane twins of Rust-runtime-only kernels (runtime_native.c; see
+ * the block beside rt_array_pop and doc/08_tracking/bug/
+ * core_c_bootstrap_runtime_lane_missing_rt_utf8_math_array_symbols_2026-09-13.md).
+ * The byte arguments are tagged RuntimeValues, not pointers. */
+double   rt_math_sqrt(double x);
+double   rt_math_exp(double x);
+double   rt_math_cbrt(double x);
+double   rt_math_sin(double x);
+double   rt_math_cos(double x);
+double   rt_math_tan(double x);
+double   rt_math_hypot(double x, double y);
+double   rt_math_fma(double x, double y, double z);
+int64_t  rt_f64_to_bits(double value);
+/* IEEE-754 minNum/maxNum (fmin/fmax), matching Rust f64::min / f64::max. */
+double   rt_math_min(double a, double b);
+double   rt_math_max(double a, double b);
+int64_t  rt_utf8_count_codepoints(int64_t bytes_value);
+int8_t   rt_utf8_validate(int64_t bytes_value);
+int64_t  rt_utf8_find_invalid(int64_t bytes_value);
+int64_t  rt_numeric_sum_f64(int64_t value);
+int64_t  rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value);
+int64_t  rt_numeric_sum_f64(int64_t array_value);
+int64_t  rt_array_sorted(int64_t receiver);
+void     rt_gui_present_html(int64_t tagged_html);
+void     rt_gui_begin_session(void);
+void     rt_gui_session_present_html(int64_t tagged_html);
+int64_t  rt_gui_poll_event(void);
+void     rt_gui_end_session(void);
+/* Removes and RETURNS the element at `index` (tagged). NIL for a non-array
+ * receiver or an out-of-range index; a negative index is out of range here,
+ * it does NOT count from the end. */
 int64_t  rt_array_remove(int64_t array_value, int64_t index);
-/* Erased receiver dispatcher: key/index and removed value are tagged. */
+/* Tagged array index or dictionary key; returns the removed element/value. */
 int64_t  rt_collection_remove(int64_t receiver, int64_t key);
 int64_t  rt_dict_new(int64_t cap_hint);
 int64_t  rt_dict_get(int64_t dict, int64_t key);
@@ -864,6 +1041,21 @@ typedef struct RtOwnedProcessCancelReceipt {
 /* Async identity-owned process lease.  The random token is authority; the
  * diagnostic PID fields returned after start/termination are not. */
 #define RT_OWNED_PROCESS_ASYNC_VERSION 2
+#define RT_OWNED_PROCESS_INPUT_VERSION 3
+#define RT_OWNED_PROCESS_OPAQUE_V3_VERSION 1
+#define RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION 1
+#define RT_PROCESS_OBSERVATION_CAP_LIFECYCLE          (1ULL << 0)
+#define RT_PROCESS_OBSERVATION_CAP_PID                (1ULL << 1)
+#define RT_PROCESS_OBSERVATION_CAP_DIRECT_CHILD_RUSAGE (1ULL << 2)
+#define RT_PROCESS_OBSERVATION_CAP_CANCELLATION       (1ULL << 3)
+#define RT_PROCESS_OBSERVATION_CAP_INDEPENDENT_CAPTURE (1ULL << 4)
+#define RT_PROCESS_OBSERVATION_CAP_REQUIRED \
+    (RT_PROCESS_OBSERVATION_CAP_LIFECYCLE | \
+     RT_PROCESS_OBSERVATION_CAP_PID | \
+     RT_PROCESS_OBSERVATION_CAP_DIRECT_CHILD_RUSAGE | \
+     RT_PROCESS_OBSERVATION_CAP_CANCELLATION | \
+     RT_PROCESS_OBSERVATION_CAP_INDEPENDENT_CAPTURE)
+#define RT_OWNED_PROCESS_MAX_INPUT_BYTES (16U * 1024U * 1024U)
 typedef struct RtOwnedProcessTokenV2 {
     uint64_t high;
     uint64_t low;
@@ -874,6 +1066,20 @@ typedef struct RtOwnedProcessStartReceiptV2 {
     int32_t accepted;
     int32_t runtime_error;
 } RtOwnedProcessStartReceiptV2;
+
+/* V3 atomically copies one bounded immutable byte sequence into the process
+ * lease.  The runtime owns delivery and closes child stdin exactly once; no
+ * PID is returned as authority. */
+typedef struct RtOwnedProcessInputReceiptV3 {
+    uint64_t version;
+    uint8_t input_sha256[32];
+    uint64_t input_bytes_accepted;
+    uint64_t input_bytes_written;
+    int32_t stdin_closed;
+    int32_t terminal;
+    int32_t reaped;
+    int32_t runtime_error;
+} RtOwnedProcessInputReceiptV3;
 
 typedef struct RtOwnedProcessPollReceiptV2 {
     uint64_t version;
@@ -890,6 +1096,10 @@ typedef struct RtOwnedProcessPollReceiptV2 {
     uint64_t stderr_bytes_seen;
     uint64_t stdout_bytes_kept;
     uint64_t stderr_bytes_kept;
+    /* Bytes copied into the caller buffers by this poll.  These are distinct
+     * from retained bytes: an observer with a zero-sized buffer consumes none. */
+    uint64_t stdout_bytes_delivered;
+    uint64_t stderr_bytes_delivered;
     int32_t runtime_error;
 } RtOwnedProcessPollReceiptV2;
 
@@ -924,6 +1134,7 @@ typedef struct RtOwnedProcessResultV2 {
 #define RT_PROCESS_EVIDENCE_TREE_CHARGE         (1ULL << 1)
 #define RT_PROCESS_EVIDENCE_TREE_PIDS           (1ULL << 2)
 #define RT_PROCESS_EVIDENCE_SAMPLED_TREE        (1ULL << 3)
+#define RT_PROCESS_EVIDENCE_OUTPUT_EOF          (1ULL << 4)
 typedef struct RtOwnedProcessObservationV1 {
     uint64_t version;
     uint64_t evidence_flags;
@@ -945,6 +1156,7 @@ int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
+int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1423. NOT a bare SplArray*. */
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -971,10 +1183,21 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 /* ===== Process Async ===== */
 
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+#ifdef _WIN32
+/* Core-C PID/handle ownership shared with rt_process_wait. */
+int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
+#endif
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
+/* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
+int64_t  rt_process_spawn_inherit(void);
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
+int64_t  rt_process_start_identity(int64_t pid);
 bool     rt_process_kill(int64_t pid);
+/* C lane of the rt_pty_* family's liveness probe. POSIX takes the pty MASTER
+   fd and answers from POLLHUP; Windows cannot resolve the Rust lane's session
+   handle and answers false. See runtime_process.c for the full contract. */
+bool     rt_pty_is_running(int64_t handle);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,
                                  RtOwnedProcessCancelReceipt* receipt);
@@ -987,6 +1210,23 @@ bool     rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                    uint64_t max_output_bytes,
                                    RtOwnedProcessTokenV2* token,
                                    RtOwnedProcessStartReceiptV2* receipt);
+bool     rt_process_owned_start_v3(const char* cmd, const char* const* argv,
+                                   const uint8_t* input, uint64_t input_len,
+                                   int64_t timeout_ms, int64_t term_grace_ms,
+                                   uint64_t max_output_bytes,
+                                   RtOwnedProcessTokenV2* token,
+                                   RtOwnedProcessStartReceiptV2* receipt);
+/* Executes only a duplicated, sealed static ELF admitted by
+ * rt_process_pin_executable; it never resolves a path or consults PATH. */
+bool     rt_process_owned_start_pinned_v3(int64_t executable_handle,
+                                          const char* const* argv,
+                                          const uint8_t* input, uint64_t input_len,
+                                          int64_t timeout_ms, int64_t term_grace_ms,
+                                          uint64_t max_output_bytes,
+                                          RtOwnedProcessTokenV2* token,
+                                          RtOwnedProcessStartReceiptV2* receipt);
+bool     rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
+                                           RtOwnedProcessInputReceiptV3* receipt);
 bool     rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
                                   char* out, uint64_t out_cap, char* err,
                                   uint64_t err_cap,
@@ -1000,10 +1240,92 @@ bool     rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
 bool     rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                      RtOwnedProcessResultV2* result);
 
+/* Runtime-owned Simple ABI facade for V3.  The handle is a positive random
+ * capability mapped privately to a token; no PID, token word, or start
+ * identity crosses this boundary.  All numeric receipts are SplArray values.
+ * poll returns [stdout_bytes, stderr_bytes, receipt], where both byte arrays
+ * retain all bytes (including NUL) and receipt contains delivered counts. */
+SplArray* rt_process_owned_v3_start_value(const char* command_data,
+                                          uint64_t command_len,
+                                          SplArray* args, SplArray* input,
+                                          int64_t timeout_ms,
+                                          int64_t term_grace_ms,
+                                          int64_t max_output_bytes);
+SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
+                                                  SplArray* args, SplArray* input,
+                                                  int64_t timeout_ms,
+                                                  int64_t term_grace_ms,
+                                                  int64_t max_output_bytes);
+/* [adapter_version, available, capability_bits]. Querying never starts a
+ * process.  available=1 only when the complete required hosted provider is
+ * usable on the current host. */
+SplArray* rt_process_owned_v3_capabilities_value(void);
+/* Atomically specializes a fresh V3 lease's preallocated capture arena into
+ * independent stdout/stderr ceilings. Returns [version, accepted, errno]. */
+SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
+                                                        int64_t stdout_limit,
+                                                        int64_t stderr_limit);
+/* [adapter_version, pid, wall_ms, observation_version, evidence_flags,
+ * user_ms, system_ms, direct_rss_bytes, tree_charge_bytes, io_read_bytes,
+ * io_write_bytes, pids_peak, termination_signal, eintr_retries, errno]. */
+SplArray* rt_process_owned_v3_observation_value(int64_t handle);
+SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
+                                         int64_t stdout_capacity,
+                                         int64_t stderr_capacity);
+SplArray* rt_process_owned_v3_input_value(int64_t handle);
+SplArray* rt_process_owned_v3_cancel_value(int64_t handle);
+SplArray* rt_process_owned_v3_result_value(int64_t handle);
+SplArray* rt_process_owned_v3_collect_value(int64_t handle);
+int       rt_process_owned_v3_release_value(int64_t handle);
+
+/* Process Observation V4. The common Simple module owns the canonical request
+ * codec and 64-word receipt schema. start_pinned is the sole spawning entry:
+ * executable and cwd handles are opaque, separately supplied capabilities and
+ * must match the canonical binding. Every operation result is
+ * [stdout_bytes, stderr_bytes, binding_digest, receipt_words]. */
+SplArray* rt_process_observation_v4_capabilities_value(void);
+int64_t   rt_process_observation_v4_pin_cwd_value(const char* path_data,
+                                                   uint64_t path_len);
+SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle);
+int       rt_process_observation_v4_close_cwd_value(int64_t handle);
+SplArray* rt_process_observation_v4_start_value(SplArray* binding);
+SplArray* rt_process_observation_v4_start_pinned_value(
+              int64_t executable_handle, int64_t cwd_handle,
+              SplArray* binding);
+SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
+                                                int64_t caller_wait_ns);
+SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
+                                                  int64_t caller_wait_ns);
+SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
+                                                   int64_t caller_wait_ns);
+SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
+                                                       SplArray* digest);
+
+/* Inspector input V1 uses the same pinned exact-environment process and V4
+ * ticket. Its 75-word input receipt binds written/closed facts and SHA-256
+ * to that ticket and to the domain-separated request digest. */
+SplArray* rt_process_inspection_v1_start_pinned_value(
+              int64_t executable_handle, int64_t cwd_handle,
+              SplArray* binding, SplArray* atomic_input,
+              SplArray* expected_input_digest);
+SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
+
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
 int64_t     rt_process_pin_executable(const char* canonical_path);
+/* Separately named opaque owner for consumers that cannot safely retain a raw
+ * descriptor.  It is acquired only through rt_process_acquire_pinned_executable. */
+int64_t     rt_process_pin_executable_owned(const char* canonical_path);
+bool        rt_process_close_pinned_executable_owned(int64_t handle);
+/* Length-safe language values: the path is copied, bounded, absolute, and
+ * rejects embedded NUL.  Digest bytes describe the final sealed owner image. */
+int64_t     rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len);
+int         rt_process_close_pinned_executable_owned_value(int64_t handle);
+SplArray*   rt_process_pinned_executable_sha256_value(int64_t handle);
+/* Runtime-private borrow of an opaque owned pin.  Returns a CLOEXEC duplicate held
+ * independently of the caller's handle, or -1; it is not a language ABI. */
+int64_t     rt_process_acquire_pinned_executable(int64_t handle);
 bool        rt_process_close_pinned_executable(int64_t handle);
 int64_t     rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args);
 int64_t     rt_browser_renderer_spawn_sandboxed(const char* cmd, SplArray* args);
@@ -1113,8 +1435,19 @@ void        spl_init_args(int argc, char** argv);
 int64_t     spl_arg_count(void);
 const char* spl_get_arg(int64_t idx);
 void        rt_set_args(int argc, char** argv);
+#ifdef _WIN32
+/* Windows wide-argv entry point (wmain). Converts each UTF-16 argv
+ * element to UTF-8 and forwards to rt_set_args's underlying storage
+ * (spl_init_args), so CLI arg access is identical to the narrow path.
+ * See src/compiler_rust/compiler/src/pipeline/native_project/linker.rs
+ * compile_main_stub -- the generated MSVC wmain() calls this. */
+void        rt_set_args_wide(int argc, const wchar_t** argv);
+#endif
 int32_t     rt_get_argc(void);
 SplArray*   rt_get_args(void);
+bool        rt_math_is_nan(double value);
+bool        rt_math_is_inf(double value);
+bool        rt_math_is_finite(double value);
 
 /* ===== File Prefetch (CLI keyword support) ===== */
 
@@ -1129,6 +1462,12 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 int64_t     rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_file_read_regular_no_follow_bounded(
                 const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
+/* Byte-array sibling for binary payloads (images/archives); identical
+ * admission arms, no UTF-8 decode. Returns a [u8] RuntimeValue. */
+int64_t     rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
+/* Arm code of the last bounded no-follow read: 77 never called, 100 succeeded,
+ * 1..10 a named rejection, 0 this extern unresolved in the reading lane. */
+int64_t     rt_file_read_regular_no_follow_last_failure(void);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
 /* Failed-existence-probe measurement. begin returns a non-reusable monotonic
@@ -1167,6 +1506,34 @@ int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
+/* Descriptor-pinned read-only view ABI. The root/path parameters are tagged
+ * runtime text values; byte-returning operations return a tagged [u8] array
+ * or the runtime nil sentinel on failure. */
+int64_t     rt_file_view_open_beneath_no_follow_v1(int64_t root_value,
+                                                    int64_t path_value);
+int8_t      rt_file_view_mapping_supported_v1(int64_t descriptor);
+int64_t     rt_file_view_map_copy_v1(int64_t descriptor, uint64_t offset,
+                                     uint64_t length);
+int8_t      rt_file_view_prefetch_v1(int64_t descriptor, uint64_t offset,
+                                     uint64_t length);
+int8_t      rt_file_view_close_v1(int64_t descriptor);
+int64_t     rt_file_view_pread_exact_v1(int64_t descriptor, uint64_t offset,
+                                        uint64_t length);
+int64_t     rt_file_view_device_v1(int64_t descriptor);
+int64_t     rt_file_view_inode_v1(int64_t descriptor);
+int64_t     rt_file_view_size_v1(int64_t descriptor);
+int64_t     rt_pinned_archive_open_beneath_v1(int64_t root_value,
+                                               int64_t path_value);
+int64_t     rt_pinned_archive_device_v1(int64_t descriptor);
+int64_t     rt_pinned_archive_inode_v1(int64_t descriptor);
+int64_t     rt_pinned_archive_size_v1(int64_t descriptor);
+int8_t      rt_pinned_archive_close_v1(int64_t descriptor);
+int         rt_file_copy_create_excl_no_follow(
+                    const char* source, int64_t source_len,
+                    const char* destination, int64_t destination_len);
+int         rt_file_link_create_excl_no_follow(
+                    const char* source, int64_t source_len,
+                    const char* destination, int64_t destination_len);
 int64_t     rt_mem_snapshot_open(const char* path, int64_t path_len);
 int         rt_mem_snapshot_append_flush(int64_t fd, const char* record, int64_t record_len);
 int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
@@ -1178,6 +1545,7 @@ int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
                     int64_t hir_names, int64_t hir_symbols,
                     int64_t hir_functions, int64_t hir_constants,
                     int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
+int         rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_t message_len);
 int         rt_mem_snapshot_close(int64_t fd);
 int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
@@ -1185,9 +1553,16 @@ int64_t     rt_heap_live_bytes(void);
 int64_t     rt_heap_peak_bytes(void);
 int64_t     rt_push(int64_t receiver, int64_t value);
 int64_t     rt_file_stat(const uint8_t* path_ptr, uint64_t path_len);
-const char* rt_shell_output(const char* cmd);
+/* Native extern ABI (2026-08-31): `rt_shell_output` is absent from
+ * text_arg_indices (50.mir/text_extern_abi.spl + codegen/instr/calls.rs),
+ * so generated code passes the command as ONE tagged text value and reads
+ * the return as a tagged text value. The old `const char*` shape never
+ * matched any caller that actually linked. */
+int64_t     rt_shell_output(int64_t cmd_value);
 SplArray*   rt_cli_get_args(void);
 int64_t     rt_cli_arg_count(void);
+int64_t     rt_simple_abi_version(void);
+int64_t     rt_simple_abi_version_deferred(void);
 #if defined(SPL_LEGACY_VALUE_RUNTIME)
 SplValue    rt_cli_arg_at(int64_t index);
 #else
@@ -1209,6 +1584,20 @@ int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol);
 int64_t spl_dlclose(int64_t handle);
 int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, int64_t* out);
 int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs);
+int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
+int64_t spl_wffi_call_i32_i64_u32_u32_f64_bits(int64_t fptr, int64_t arg0,
+                                                 int64_t arg1, int64_t arg2,
+                                                 int64_t arg3_bits);
+int64_t rt_bytes_from_raw(int64_t ptr, int64_t len);
+int64_t spl_backend_plugin_run_v1(int64_t path_bytes, int64_t request_bytes,
+                                  int64_t mir_bytes);
+int64_t spl_backend_plugin_batch_open_v1(int64_t provider_bytes,
+                                         int64_t request_bytes);
+int64_t spl_backend_plugin_batch_compile_v1(int64_t batch_handle,
+                                            int64_t mir_bytes);
+int64_t spl_backend_plugin_batch_finalize_v1(int64_t batch_handle);
+int32_t spl_backend_plugin_batch_close_v1(int64_t batch_handle);
+SplArray* rt_strsplit(const char* value, const char* delimiter);
 
 /* ===== JIT Exec Manager (stubs) ===== */
 
@@ -1262,8 +1651,12 @@ int64_t     rt_driver_poll(int64_t handle, int64_t max, int64_t timeout_ms);
 int64_t     rt_driver_poll_id(int64_t handle, int64_t index);
 int64_t     rt_driver_poll_result(int64_t handle, int64_t index);
 int64_t     rt_driver_poll_flags(int64_t handle, int64_t index);
+int64_t     rt_driver_poll_data(int64_t handle, int64_t index);
+int64_t     rt_driver_poll_data_len(int64_t handle, int64_t index);
+const uint8_t* rt_driver_poll_data_ptr(int64_t handle, int64_t index);
 bool        rt_driver_cancel(int64_t handle, int64_t op_id);
 int64_t     rt_driver_backend_name(int64_t handle);
+const char* rt_driver_backend_name_ptr(int64_t handle);
 bool        rt_driver_supports_sendfile(int64_t handle);
 bool        rt_driver_supports_zero_copy(int64_t handle);
 
@@ -1553,6 +1946,44 @@ int64_t  rt_sdl2_get_display_usable_h(int64_t index);
 
 /* ===== Panic / Abort ===== */
 
+/* SPL_WEAK: portable spelling of `__attribute__((weak))`.
+ *
+ * cl.exe (MSVC proper) has no `__attribute__` syntax at all -- it is a hard
+ * parse error (C2143/C2059), which is what blocked the embedded runtime-compile
+ * path on the Windows MSVC lane. MSVC has no weak-symbol concept either, so the
+ * only portable expansion there is nothing: the definition becomes strong.
+ *
+ * CROSS-PLATFORM: gated on `_MSC_VER && !__clang__`, so clang-cl (which DOES
+ * accept the attribute, and whose weak-external lowering the SPL_CLI_ARGS_WEAK
+ * note below depends on) is byte-identical, as are Linux, macOS and FreeBSD. */
+/* Windows <sys/stat.h> defines _S_IFMT/_S_IFDIR/_S_IFREG but none of the POSIX
+ * classification macros. runtime.c carried private copies of these, so every
+ * OTHER translation unit that used them -- runtime_native.c uses S_ISREG/S_ISDIR
+ * in nine places -- compiled them as implicit function calls instead, which C
+ * permits with only a warning and which then fail at link:
+ *
+ *     LNK2019: unresolved external symbol S_ISDIR referenced in
+ *              rt_io_file_meta_flags
+ *
+ * Defining them in the shared header fixes every consumer at once. The
+ * `#ifndef` guards keep runtime.c's own copies harmless, and POSIX hosts, which
+ * already provide the real macros, are unaffected. */
+#ifdef _WIN32
+#include <sys/stat.h>
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#endif
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define SPL_WEAK
+#else
+#  define SPL_WEAK __attribute__((weak))
+#endif
+
 #ifdef _MSC_VER
 __declspec(noreturn) void spl_panic(const char* msg);
 #else
@@ -1566,6 +1997,7 @@ void     simd_text_init(void);
 bool     rt_simd_has_sse(void);
 bool     rt_simd_has_avx(void);
 bool     rt_simd_has_avx2(void);
+bool     rt_x86_avx512_os_state_usable(void);
 bool     rt_simd_has_neon(void);
 bool     rt_simd_has_rvv(void);
 

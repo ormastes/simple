@@ -1,17 +1,64 @@
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, cwd}
-use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
+use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
+use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
+use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
+use app.io.file_ops.{path_absolute, file_size_raw}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.bug.workaround_store.{refresh_workarounds}
+# Unambiguous, non-builtin stderr write for the worker-failure relay path
+# (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
+# below). `eprint` is a compiler builtin that a co-compiled `fn eprint` in
+# std.nogc_sync_mut.io.process_ops shadows program-wide under the interpreter
+# but NOT under native/JIT codegen (see doc/08_tracking/bug/
+# stdlib_eprint_shadows_prelude_builtin_program_wide_2026-08-17.md and
+# doc/08_tracking/bug/eprint_loses_newline_on_jit_and_llvm_backend_2026-08-17.md
+# for two prior `eprint`-dispatch defects with this exact shape) -- a real
+# native-build worker failure has been observed to SIGILL this JIT'd relay
+# code instead of printing the worker's error text
+# (doc/08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md,
+# defect 3). `stderr_write` calls `rt_stderr_write` directly with no builtin
+# name to mis-resolve, so the relay path no longer depends on that dispatch.
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 
 use std.io_runtime.{get_args}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, file_delete}
 use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
-use std.io_runtime.{dir_create_all, dir_remove_all}
+use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory}
+use app.cli.native_build_warm_receipt.{
+    NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
+    native_build_warm_artifact_restore, native_build_warm_receipt_finish
+}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_prepare_v1,
+    environment_variant_policy_handoff_attach_v1,
+    environment_variant_policy_handoff_owner_error_label_v1
+}
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
+    # argv[0] first: it names the running compiler on EVERY platform and needs
+    # neither /proc (Linux-only) nor `ps -o comm=` (POSIX-only). Windows has
+    # neither, so before this probe self_exe() returned "" there and
+    # resolve_simple_binary() fell through to the literal "bin/simple" -- a
+    # name that does not exist on Windows (the binary is bin/simple.exe),
+    # producing "The filename, directory name, or volume label syntax is
+    # incorrect." from CreateProcess and a native-build worker spawn failure.
+    # Same shape as the existing probe in
+    # src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl:119.
+    val argv = get_args() ?? []
+    if argv.len() > 0:
+        val argv0 = argv[0]
+        if argv0 != "" and (argv0.ends_with("/simple") or argv0.ends_with("simple.exe")) and file_exists(argv0):
+            return argv0
     val pid = getpid()
     val (out, _err, code) = process_run_timeout("readlink", ["-f", "/proc/{pid}/exe"], 2000)
     if code == 0 and out != "":
@@ -22,19 +69,63 @@ fn self_exe() -> text:
     val (darwin_out, _darwin_err, darwin_code) = process_run_timeout("ps", ["-p", "{pid}", "-o", "comm="], 2000)
     if darwin_code == 0 and darwin_out != "":
         return darwin_out.trim()
-    ""
+    # Windows has neither /proc nor ps, and under the seed argv[0] is the
+    # script path, not the exe. Without this probe the worker fell through to
+    # bin/simple.exe -- a stale copy that lacked rt_env_vars and failed every
+    # native-build with "unknown extern function: rt_env_vars".
+    _cli_self_exe_via_pid_query()
 
 # Absolutize a repo-relative path for the timeout wrapper.
 fn abs_path(rel: text) -> text:
     val here = cwd()
     if here == "" or here == ".":
         return rel
-    "{here}/{rel}"
+    # cwd() can come back in MSYS form ("/c/Users/...") when launched from an
+    # MSYS2/Git-bash shell (PWD-derived); normalize so CreateProcess can spawn
+    # the result. Verified-rewrite only — a no-op on Unix (see
+    # windows_native_path).
+    windows_native_path("{here}/{rel}")
+
+# A Windows drive-absolute path ("C:\..." or "C:/..."). Detected by the
+# drive-colon at index 1 so this needs no backslash literal.
+fn is_drive_absolute(p: text) -> bool:
+    if p.len() < 3:
+        return false
+    p.substring(1).starts_with(":")
+
+# MSYS2/Git-bash hand argv[0] in POSIX form ("/c/Users/.../simple.exe").
+# CreateProcess cannot parse that — the spawn dies with "The filename,
+# directory name, or volume label syntax is incorrect." — so rewrite
+# "/<drive>/rest" to "<DRIVE>:/rest", but only when the rewritten path is
+# VERIFIED to exist (never assume the mapping). On Unix a real path like
+# "/c/foo" never has an existing "C:/foo" twin, so this is a no-op there;
+# no env probe is involved.
+fn windows_native_path(p: text) -> text:
+    if p.len() >= 3 and p.starts_with("/") and p.substring(2).starts_with("/"):
+        val drive = p.substring(1, 2)
+        val lower = drive.lower()
+        if lower >= "a" and lower <= "z":
+            val candidate = drive.upper() + ":" + p.substring(2)
+            if file_exists(candidate):
+                return candidate
+    p
 
 fn abs_if_needed(p: text) -> text:
-    if p.starts_with("/"):
-        return p
+    # A leading "/" is the POSIX absolute form; a drive-colon is the Windows
+    # one. Testing only for "/" made abs_path() prepend the cwd to an ALREADY
+    # absolute Windows path, so an explicit SIMPLE_BINARY=C:/.../simple.exe was
+    # rewritten to "/c/Users/.../simple/C:/Users/.../simple.exe" and the worker
+    # spawn failed.
+    if p.starts_with("/") or is_drive_absolute(p):
+        return windows_native_path(p)
     abs_path(p)
+
+# Opt-in parent-side receipt for distinguishing a worker that was never
+# spawned from one that is still executing below process_run_timeout_live.
+# Keep the gate independent of broader compiler/profile traces so normal
+# native-build output remains unchanged.
+fn native_build_worker_spawn_trace_enabled() -> bool:
+    (env_get("SIMPLE_NATIVE_BUILD_WORKER_SPAWN_TRACE") ?? "") == "1"
 
 # Resolve the compiler binary used to run the native-build worker. The old
 # `SIMPLE_BINARY -> SIMPLE_BIN -> "bin/simple"` chain handed an empty/relative
@@ -55,6 +146,10 @@ fn resolve_simple_binary() -> text:
     val se = self_exe()
     if se != "" and file_exists(se):
         return abs_if_needed(se)
+    # Windows deploys the compiler as bin/simple.exe; probe it before the
+    # extensionless POSIX name so the fallback names a file that exists.
+    if file_exists("bin/simple.exe"):
+        return abs_path("bin/simple.exe")
     if file_exists("bin/simple"):
         return abs_path("bin/simple")
     if file_exists("src/compiler_rust/target/bootstrap/simple"):
@@ -62,6 +157,7 @@ fn resolve_simple_binary() -> text:
     "bin/simple"
 
 val OUTPUT_LIMIT = 12000
+var native_build_stderr_spill_seq: i64 = 0
 
 fn native_build_text_eq(a: text, b: text) -> bool:
     a.len() == b.len() and a.starts_with(b)
@@ -83,7 +179,18 @@ fn native_build_entry_args() -> [text]:
     args
 
 # The interpreted worker loads the compiler graph before codegen.
-val DEFAULT_TIMEOUT_MS = 7200000
+#
+# Raised from 7200000 (2h) to 6h on 2026-09-04. 2h is not enough for a Stage-3
+# self-host on aarch64: measured here, phase 3 alone takes ~57 min and the AOT
+# phase after it ran >1h33m in a comparable build, so the worker was reaped
+# mid-codegen with no artifact and no compile error — the failure surfaces as
+# "worker timed out ... before producing a binary", which reads like a hang
+# rather than a budget. The cost is dominated by step 5 being SERIAL regardless
+# of --threads (a 20-core box runs it at cpu_pct=100); see
+# doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md
+# and doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md.
+# Lower this again once step 5 is genuinely parallel.
+val DEFAULT_TIMEOUT_MS = 21600000
 
 fn print_help():
     print "Simple Native Build"
@@ -98,7 +205,7 @@ fn print_help():
     print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
     print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
     print "  --mode <name>        Build mode: dynload (default) or one-binary"
-    print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
+    print "  --cache-dir <dir>    Native cache directory (default: SIMPLE_USER_STORAGE_ROOT/cache/compiler/native-build/v1)"
     print "  --timeout <secs>     Worker timeout in seconds (default 7200)"
     print "  --emit-object        Emit relocatable object output"
     print "  --emit-archive       Emit a static archive instead of an executable"
@@ -189,6 +296,52 @@ fn output_path_arg(args: [text]) -> text:
         i = i + 1
     ""
 
+# An output path that merely exists is not proof that native-build produced an
+# artifact. A failed worker can leave a pre-created empty file behind while
+# still returning status 0. Keep the decision pure so the parent check and its
+# regression spec exercise the same rule.
+pub fn native_build_artifact_valid(
+    present: bool, size: i64, worker_success: bool
+) -> bool:
+    # The worker receipt is emitted only after the staged artifact has passed
+    # the driver's existence check and has been published. This accepts a
+    # deterministic rebuild with unchanged bytes while rejecting a silent
+    # zero-exit/no-work worker that leaves an old file in place.
+    present and size > 0 and worker_success
+
+pub fn native_build_worker_success_receipt(
+    requested_output: text, stdout: text, stderr: text
+) -> bool:
+    if requested_output == "":
+        return false
+    val receipt = "[native-build] Artifact published: {requested_output}"
+    stdout.replace("\r\n", "\n").split("\n").contains(receipt) or
+        stderr.replace("\r\n", "\n").split("\n").contains(receipt)
+
+# Do not enter the timeout runner with a guessed fallback path. On a stale
+# self-hosted deployment that path can be missing or non-runnable; some seed
+# runtimes collapse that spawn failure into a successful-looking parent return,
+# which is the original silent-no-artifact failure mode.
+pub fn native_build_worker_binary_valid(path: text, present: bool) -> bool:
+    path != "" and present
+
+fn native_build_output_exists(path: text, worker_success: bool) -> bool:
+    if path == "" or not file_exists(path):
+        return false
+    native_build_artifact_valid(true, file_size_raw(path), worker_success)
+
+pub fn native_build_strict_stub_evidence(output: text) -> bool:
+    output.contains("stub functions for unresolved symbols") or
+        output.contains("Unresolved symbol preview:") or
+        output.contains("fabricated as weak stubs") or
+        output.contains("fabricated stub") or
+        output.contains("stub fallback")
+
+pub fn native_build_strict_stub_violation(strict_no_stub: bool, stdout: text, stderr: text) -> bool:
+    strict_no_stub and
+        (native_build_strict_stub_evidence(stdout) or
+            native_build_strict_stub_evidence(stderr))
+
 # Keep the front-end cache beside the explicitly selected native-build cache.
 # Parse shards inherit this environment, so an isolated bootstrap worktree can
 # reuse its warmed parser entries across parent/child processes.
@@ -203,32 +356,99 @@ fn native_build_frontend_cache_dir_arg(args: [text]) -> text:
         i = i + 1
     ""
 
+fn native_build_normalize_exit_code(raw: i64) -> i64:
+    """The worker's exit status, sign-restored.
+
+    It is an i32 that arrives ZERO-EXTENDED across the wrapper boundary, so a
+    genuine -1 presents as 4294967295 (0xFFFFFFFF). Every `code == -1` test
+    downstream therefore never matched and BOTH abnormal-exit branches were dead
+    code: an operator saw the bare number 4294967295 instead of this file's own
+    accurate message.
+
+    Widened 2026-09-05 from an equality test on 4294967295 alone: `rt_process_wait`
+    now reports a signal death as `-(128+signo)`, and a SIGSEGV (-139) would
+    otherwise have surfaced as the equally unreadable 4294967157.
+    See doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md"""
+    if raw > 2147483647:
+        return raw - 4294967296
+    raw
+
 fn native_build_line_is_diagnostic(line: text) -> bool:
     """True for lines a caller greps for when deciding why native-build failed.
 
     Deliberately broad: a missed diagnostic is silently dropped evidence, while
-    an extra kept line only costs a few bytes in the preserved block."""
-    line.contains("error:") or line.contains("error :") or line.contains("[ERROR]")
-        or line.contains("warning:") or line.contains("[WARN]")
-        or line.contains("undefined field") or line.contains("type 'nil'")
-        or line.contains("MIR error") or line.contains("MIR lowering error")
-        or line.contains("panic") or line.contains("Traceback")
-        or line.contains("unresolved") or line.contains("unsupported")
-        or line.contains("Assertion") or line.contains("Segmentation fault")
+    an extra kept line only costs a few bytes in the preserved block.
+
+    `timeout: the monitored command dumped core` earns its place here: it is the
+    ONLY record that a worker died by SIGSEGV rather than being killed or
+    exiting -1. On 2026-09-05 that line sat in the middle of a 9.9 MB Stage-3
+    stderr, was dropped by the truncation below, and three investigations (OOM,
+    rogue killer, double reap) chased causes measurement had already excluded.
+    See doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md"""
+    native_build_range_is_diagnostic(line, 0, line.len())
+
+fn native_build_range_contains(
+    output: text, needle: text, line_start: i64, line_end: i64
+) -> bool:
+    val needle_len = needle.len()
+    if needle_len == 0: return true
+    var at = line_start
+    val last_start = line_end - needle_len
+    while at <= last_start:
+        var offset = 0
+        while (offset < needle_len and
+            output.byte_at(at + offset) == needle.byte_at(offset)):
+            offset = offset + 1
+        if offset == needle_len: return true
+        at = at + 1
+    false
+
+fn native_build_range_is_diagnostic(
+    output: text, line_start: i64, line_end: i64
+) -> bool:
+    native_build_range_contains(output, "error:", line_start, line_end)
+        or native_build_range_contains(output, "error :", line_start, line_end)
+        or native_build_range_contains(output, "[ERROR]", line_start, line_end)
+        or native_build_range_contains(output, "warning:", line_start, line_end)
+        or native_build_range_contains(output, "[WARN]", line_start, line_end)
+        or native_build_range_contains(output, "undefined field", line_start, line_end)
+        or native_build_range_contains(output, "type 'nil'", line_start, line_end)
+        or native_build_range_contains(output, "MIR error", line_start, line_end)
+        or native_build_range_contains(output, "MIR lowering error", line_start, line_end)
+        or native_build_range_contains(output, "panic", line_start, line_end)
+        or native_build_range_contains(output, "Traceback", line_start, line_end)
+        or native_build_range_contains(output, "unresolved", line_start, line_end)
+        or native_build_range_contains(output, "unsupported", line_start, line_end)
+        or native_build_range_contains(output, "Assertion", line_start, line_end)
+        or native_build_range_contains(output, "Segmentation fault", line_start, line_end)
+        or native_build_range_contains(output, "dumped core", line_start, line_end)
+        or native_build_range_contains(output, "core dumped", line_start, line_end)
+        or native_build_range_contains(output, "[hir-fatal", line_start, line_end)
+        or native_build_range_contains(output, "[post-hir-validation-fatal", line_start, line_end)
+        or native_build_range_contains(output, "[bootstrap-phase3-error", line_start, line_end)
+        or native_build_range_contains(output, "[mir-type-invariant]", line_start, line_end)
+        or native_build_range_contains(output, "[mir-tag-probe]", line_start, line_end)
 
 fn native_build_collect_diagnostics(output: text) -> [text]:
     """Every diagnostic line in the WHOLE stream, including the part head+tail drops."""
     var kept: [text] = []
-    for line in output.split("\n"):
-        if native_build_line_is_diagnostic(line):
-            kept = kept.push(line)
+    var line_start = 0
+    while line_start <= output.len():
+        val newline = output.index_of("\n", line_start)
+        var line_end = output.len()
+        if newline >= 0: line_end = newline
+        if native_build_range_is_diagnostic(output, line_start, line_end):
+            val line = output.substring(line_start, line_end)
+            kept.push(line)
+        if newline < 0: break
+        line_start = newline + 1
     kept
 
 fn eprint_bounded(output: text):
     if output.len() == 0:
         return
     if output.len() <= OUTPUT_LIMIT:
-        eprint output
+        stderr_write(output + "\n")
         return
     # OVER THE LIMIT. A plain head+tail print DISCARDS THE MIDDLE, so a
     # `grep -c` over this output can report 0 for a diagnostic that actually
@@ -237,7 +457,7 @@ fn eprint_bounded(output: text):
     # truncating we re-emit every diagnostic line found in the FULL text,
     # and we make the truncation itself impossible to overlook.
     val omitted = output.len() - OUTPUT_LIMIT
-    eprint "!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!"
+    stderr_write("!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!\n")
     # Truncation must never make evidence UNRECOVERABLE. Spill the FULL stream
     # to a file first and name the path, so a head+tail print is a convenience
     # view rather than the only surviving copy. Best-effort: a failed spill is
@@ -251,36 +471,82 @@ fn eprint_bounded(output: text):
     # native-build's stderr-truncation path, that parse error was emitted
     # INSTEAD of the real build diagnostic. See
     # doc/08_tracking/bug/fstring_nested_quoted_literal_in_interpolation_misparsed_2026-08-17.md
-    val spill_root = env_get("TMPDIR") ?? "/tmp"
-    val spill_path = "{spill_root}/native-build-stderr-{getpid()}.log"
+    # Windows has no TMPDIR and no writable "/tmp": the CRT-visible temp dir is
+    # TEMP (or TMP). Falling through to "/tmp" there made file_write fail on
+    # every truncated build, so the FULL stderr was lost and 1.3 MB of
+    # diagnostics were dropped from the middle (measured 2026-08-31 on the
+    # lint_entry native-build). A provenance-bound native cache is preferred
+    # when available so cleanup of TMPDIR cannot erase the full stream; the
+    # platform temp variables remain the portable fallback.
+    val cache_dir_env = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    val tmpdir_env = env_get("TMPDIR") ?? ""
+    val temp_env = env_get("TEMP") ?? ""
+    val tmp_env = env_get("TMP") ?? ""
+    var spill_root = "/tmp"
+    if cache_dir_env != "":
+        val durable_diagnostic_dir = "{cache_dir_env}/diagnostics"
+        if dir_create_all(durable_diagnostic_dir):
+            spill_root = durable_diagnostic_dir
+        elif tmpdir_env != "":
+            spill_root = tmpdir_env
+        elif temp_env != "":
+            spill_root = temp_env
+        elif tmp_env != "":
+            spill_root = tmp_env
+    elif tmpdir_env != "":
+        spill_root = tmpdir_env
+    elif temp_env != "":
+        spill_root = temp_env
+    elif tmp_env != "":
+        spill_root = tmp_env
+    native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
+    var spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
+    while file_exists(spill_path):
+        native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
+        spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
     if file_write(spill_path, output):
-        eprint "[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}"
+        stderr_write("[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}\n")
     else:
-        eprint "[native-build] WARNING: could not save full stderr to {spill_path}; only the excerpt below survives."
-    eprint "[native-build] TRUNCATED: {omitted} of {output.len()} bytes of worker stderr were dropped from the MIDDLE."
-    eprint "[native-build] Raw head+tail below is INCOMPLETE -- counting over it is unreliable."
+        stderr_write("[native-build] WARNING: could not save full stderr to {spill_path}; only the excerpt below survives.\n")
+    stderr_write("[native-build] TRUNCATED: {omitted} of {output.len()} bytes of worker stderr were dropped from the MIDDLE.\n")
+    stderr_write("[native-build] Raw head+tail below is INCOMPLETE -- counting over it is unreliable.\n")
     val diags = native_build_collect_diagnostics(output)
     if diags.len() > 0:
-        eprint "[native-build] BEGIN PRESERVED DIAGNOSTICS ({diags.len()} line(s), from the full stream)"
+        stderr_write("[native-build] BEGIN PRESERVED DIAGNOSTICS ({diags.len()} line(s), from the full stream)\n")
         for line in diags:
-            eprint line
-        eprint "[native-build] END PRESERVED DIAGNOSTICS"
+            stderr_write(line + "\n")
+        stderr_write("[native-build] END PRESERVED DIAGNOSTICS\n")
     else:
-        eprint "[native-build] PRESERVED DIAGNOSTICS: none matched in the full stream."
+        stderr_write("[native-build] PRESERVED DIAGNOSTICS: none matched in the full stream.\n")
     val head_len = OUTPUT_LIMIT / 2
     val tail_len = OUTPUT_LIMIT - head_len
-    eprint output[0:head_len]
-    eprint "[stderr truncated by native-build entry: {omitted} bytes omitted from the middle]"
-    eprint output[output.len() - tail_len:output.len()]
-    eprint "!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!"
+    stderr_write(output[0:head_len] + "\n")
+    stderr_write("[stderr truncated by native-build entry: {omitted} bytes omitted from the middle]\n")
+    stderr_write(output[output.len() - tail_len:output.len()] + "\n")
+    stderr_write("!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!\n")
 
 fn native_build_output_has_nil_field_id(stdout: text, stderr: text) -> bool:
     stdout.contains("undefined field 'id'") or stderr.contains("undefined field 'id'")
 
 fn native_build_print_failure_hints(stdout: text, stderr: text):
     if native_build_output_has_nil_field_id(stdout, stderr):
-        eprint "hint: nil `.id` field access usually lost the MIR/HIR context above."
-        eprint "      Rerun with SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1 to print phase and function names."
+        stderr_write("hint: nil `.id` field access usually lost the MIR/HIR context above.\n")
+        stderr_write("      Rerun with SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1 to print phase and function names.\n")
+
+fn native_build_last_diagnostic_line(output: text) -> text:
+    """The single most useful line to show FIRST, before any bulk relay.
+
+    A real worker failure has been observed to SIGILL partway through the bulk
+    stderr relay below (see the comment on the `stderr_ops` import above), which
+    can lose the worker's own error text entirely if that text is only ever
+    printed as part of the bulk dump. Extracting and printing the last matching
+    diagnostic line immediately -- via the unambiguous `stderr_write`, not the
+    bulk path -- means the essential fact survives even if the detailed dump
+    that follows does not.
+    """
+    val diags = native_build_collect_diagnostics(output)
+    if diags.len() > 0: return diags[diags.len() - 1]
+    ""
 
 
 # ===== Parse sharding =======================================================
@@ -306,6 +572,12 @@ fn native_build_print_failure_hints(stdout: text, stderr: text):
 # sharding. Sharding is a pure optimisation and must never be able to turn a
 # working build into a broken one.
 fn native_build_parse_shard_count(args: [text]) -> i64:
+    # Shard children do not install collection feedback. Their unprofiled
+    # parser cache is bypassed by the real profiled build, so warming it wastes
+    # work and can publish misleading cache entries into the profile scope.
+    for arg in args:
+        if arg == "--collection-profile" or arg.starts_with("--collection-profile="):
+            return 0
     if (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
         return 0      # already a shard child; never recurse
     if (env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
@@ -314,7 +586,7 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0
     if native_build_streaming_surfaces(args):
         return 0      # streaming parse has no front-end parse cache to warm
-    val requested = native_build_shard_threads(args)
+    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_PARSE_SHARD_WORKER_KB", 1650000))
     if requested <= 0:
         return 0
     # A parse shard is a process, not a lightweight task: the seed interpreter
@@ -339,8 +611,12 @@ fn native_build_streaming_surfaces(args: [text]) -> bool:
         (env_get("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" and
         args.contains("--entry-closure")
 
-fn native_build_shard_threads(args: [text]) -> i64:
-    var threads: i64 = 0
+fn native_build_shard_threads(args: [text], budget_kb: i64) -> i64:
+    # Keep the Phase-2 shard request aligned with the existing AOT setting.
+    # An explicit command-line worker count remains the narrower, per-build
+    # override; without it SIMPLE_NATIVE_BUILD_THREADS must warm the same
+    # process-isolated parser cache rather than only influencing later AOT.
+    var threads: i64 = (env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? "").to_i64() ?? 0
     var i = 0
     while i < args.len():
         val a = args[i]
@@ -353,7 +629,10 @@ fn native_build_shard_threads(args: [text]) -> i64:
         i = i + 1
     if threads <= 1:
         return 0
-    threads
+    val capped = shard_threads_mem_cap(threads, budget_kb)
+    if capped <= 1:
+        return 0
+    capped
 
 # Shared work queue for the shard children. Mirrors frontend_parse_cache_dir()
 # so the claim markers live next to the entries they guard, one private dir
@@ -369,7 +648,10 @@ fn parse_shard_queue_dir() -> text:
     if root == "":
         val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
         val lane_name = if lane == "": "default" else: lane
-        root = "build/bootstrap/native_cache/{lane_name}/frontend"
+        val user_root = env_get("SIMPLE_USER_STORAGE_ROOT") ?? ""
+        if user_root == "":
+            return ""
+        root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/frontend"
     val dir = "{root}/queue-{getpid()}"
     if not dir_create_all(dir):
         return ""
@@ -396,6 +678,15 @@ fn spawn_parse_shards(base: [text], indices: [i64], count: i64, simple_bin: text
         if code != 0:
             eprint "[parse-shard] shard={i}/{count} pid={pid} FAILED {parse_shard_exit_label(code)}"
             failed = failed.push(i)
+            # A timed-out (-2) child is STILL RUNNING and holds its multi-GiB
+            # interpreter heap. If it stays alive it competes with the HIR
+            # shards and the real worker for the runner's memory and can push
+            # the worker into alloc-failure (beta.9 windows leg: leaked shard
+            # + worker OOM, "memory allocation of 65520 bytes failed").
+            # Best-effort kill; an already-exited child makes this a no-op.
+            if pid > 0:
+                val killed = process_kill(pid)
+                eprint "[parse-shard] shard={i}/{count} pid={pid} dead-child cleanup: kill={killed}"
         else:
             print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
         k = k + 1
@@ -452,8 +743,8 @@ fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64)
 # before typecheck; the real build loads every module from the cache and
 # lowers nothing. Claims are taken in dependency-level order of the import
 # graph (see driver_hir_cache.spl for why no inter-level barrier is needed).
-# A shard that fails is NOT fatal: its modules simply have no entry and the
-# real build lowers them itself.
+# A failed shard preserves completed cache entries but fails the build. Only
+# unfinished modules are visited by replacement workers; linking needs PASS.
 fn native_build_hir_shard_count(args: [text]) -> i64:
     if (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
         return 0      # already a shard child; never recurse
@@ -465,55 +756,195 @@ fn native_build_hir_shard_count(args: [text]) -> i64:
         return 0      # the HIR cache keys off the front-end cache scope
     if (env_get("SIMPLE_PARSE_SHARDING") ?? "") == "0":
         return 0
-    native_build_shard_threads(args)
+    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", 3000000))
+    # One isolated worker still contains a module crash in a serial build.
+    if requested > 0: requested else: 1
 
-fn hir_shard_queue_dir() -> text:
+fn hir_shard_queue_dir(args: [text]) -> text:
     var root = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+    if root == "":
+        root = native_build_frontend_cache_dir_arg(args)
     if root == "":
         val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
         val lane_name = if lane == "": "default" else: lane
-        root = "build/bootstrap/native_cache/{lane_name}/hir"
-    val dir = "{root}/queue-{getpid()}"
+        val user_root = env_get("SIMPLE_USER_STORAGE_ROOT") ?? ""
+        if user_root == "":
+            root = "{machine_cache_root()}/hir-recovery"
+        else:
+            root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/hir"
+    # A prior invocation can retain its evidence even after PID reuse.
+    var serial: i64 = 0
+    var dir = "{root}/queue-{getpid()}-{serial}"
+    while dir_exists(dir):
+        serial = serial + 1
+        dir = "{root}/queue-{getpid()}-{serial}"
     if not dir_create_all(dir):
         return ""
     dir
 
-fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
+fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64) -> i64:
     var base = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         base = base.push(arg)
-    val queue_dir = hir_shard_queue_dir()
+    val queue_dir = hir_shard_queue_dir(args)
+    if queue_dir == "":
+        eprint "[hir-shard] BLOCKED: cannot establish invocation ledger"
+        return 1
     val old_queue = env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
-    if queue_dir != "":
-        env_set("SIMPLE_HIR_SHARD_QUEUE", queue_dir)
-    var pids: [i64] = []
+    val old_owner = env_get("SIMPLE_HIR_SHARD_OWNER") ?? ""
+    env_set("SIMPLE_HIR_SHARD_QUEUE", queue_dir)
+    val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
+    var pending: [i64] = []
     var i: i64 = 0
     while i < count:
-        var shard_args = base
-        shard_args = shard_args.push("--hir-shard={i}/{count}")
-        val pid = process_spawn_async(simple_bin, shard_args)
-        if pid > 0:
-            pids = pids.push(pid)
+        pending = pending.push(i)
         i = i + 1
-    var done = 0
-    for pid in pids:
-        val code = process_wait(pid, timeout_ms)
-        if code == 0:
-            done = done + 1
-    if queue_dir != "":
-        env_set("SIMPLE_HIR_SHARD_QUEUE", old_queue)
-        val _removed = dir_remove_all(queue_dir)
-    val mode = if queue_dir != "": "queue" else: "static"
-    print "[hir-shard] {done}/{count} shard(s) completed split={mode}"
+    var generation: i64 = 0
+    var failed_workers: i64 = 0
+    var done: i64 = 0
+    var all_stopped = true
+    while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
+        var pids: [i64] = []
+        var owners: [text] = []
+        for index in pending:
+            val owner = "{index}/{count}@{generation}"
+            env_set("SIMPLE_HIR_SHARD_OWNER", owner)
+            var shard_args = base
+            shard_args = shard_args.push("--hir-shard={index}/{count}")
+            pids = pids.push(process_spawn_async(simple_bin, shard_args))
+            owners = owners.push(owner)
+        var replacements: [i64] = []
+        i = 0
+        while i < pids.len():
+            val pid = pids[i]
+            val owner = owners[i]
+            val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, timeout_ms)) else: -1
+            # -1 is a wait error, not proof of exit. Even a false liveness
+            # probe also means invalid handle; require a real reap result.
+            var owner_stopped = pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
+            if not owner_stopped and pid > 0:
+                val _killed = process_kill(pid)
+                val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
+                owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
+                if not owner_stopped:
+                    all_stopped = false
+                    val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
+            val progress = hir_shard_recovery_progress(queue_dir, owner)
+            val finished = hir_shard_recovery_finished(queue_dir, owner)
+            val state = if hir_shard_recovery_blocked(queue_dir): "BLOCKED" elif code < 0: "CRASH" elif finished: "FAILED" else: "BLOCKED"
+            val sealed = if owner_stopped: hir_shard_recovery_seal(queue_dir, owner, state) else: -1
+            if code != 0 or sealed != 0 or not finished:
+                failed_workers = failed_workers + 1
+                eprint "[hir-shard] owner={owner} status={state} exit={code} claimed={progress} sealed={sealed} finished={finished}"
+                if sealed < 0 or progress < 0 or (not finished and progress == 0) or code == 0 or (code > 0 and sealed > 0):
+                    val _blocked = hir_shard_recovery_block(queue_dir, "incomplete worker or ledger publication")
+                elif not finished and not hir_shard_recovery_blocked(queue_dir) and hir_shard_recovery_can_replace(fail_fast, code, progress):
+                    replacements = replacements.push(pending[i])
+            else:
+                done = done + 1
+            if fail_fast and failed_workers > 0:
+                var remaining = i + 1
+                while remaining < pids.len():
+                    if pids[remaining] > 0:
+                        val _killed = process_kill(pids[remaining])
+                        val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
+                        if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
+                            val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
+                        else:
+                            all_stopped = false
+                            val _blocked = hir_shard_recovery_block(queue_dir, "cancelled worker could not be reaped")
+                    remaining = remaining + 1
+                break
+            i = i + 1
+        if fail_fast and failed_workers > 0:
+            break
+        pending = replacements
+        generation = generation + 1
+    env_set("SIMPLE_HIR_SHARD_QUEUE", old_queue)
+    env_set("SIMPLE_HIR_SHARD_OWNER", old_owner)
+    val unfinished = if all_stopped: hir_shard_recovery_close_inventory(queue_dir, fail_fast) else: -1
+    if unfinished != 0:
+        failed_workers = failed_workers + 1
+        eprint "[hir-shard] inventory incomplete rows={unfinished} policy_fail_fast={fail_fast}"
+    val failed_modules = hir_shard_recovery_failure_count(queue_dir)
+    print "[hir-shard] completed_workers={done} failed_workers={failed_workers} failed_modules={failed_modules} unfinished={unfinished} ledger={queue_dir}"
+    if hir_shard_recovery_blocked(queue_dir): return 1
+    hir_shard_aggregate_exit(failed_workers, failed_modules)
 
-fn run_native_build_worker(args: [text]) -> i64:
+pub fn run_native_build_worker(args: [text]) -> i64:
+    val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
+    env_set("SIMPLE_COMPILE_FAIL_FAST", if fail_fast: "1" else: "0")
+    # This is the parent coordinator; native_build_worker.spl and shard
+    # children never publish the derived index. One changed-path batch keeps
+    # recovery links current without changing compilation cache identities.
+    if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
+        match refresh_workarounds(false, []):
+            case Ok(index):
+                if not index.complete:
+                    stderr_write("workarounds: incomplete coverage; run simple check-dbs --fullscan bugs\n")
+            case Err(reason):
+                stderr_write("workarounds: refresh failed: " + reason + "\n")
+    val compiled_bootstrap_route =
+        (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
+    val simple_bin = if compiled_bootstrap_route:
+        match bootstrap_native_build_producer_binding(
+            cli_kernel_executable_path(), env_get("SIMPLE_BINARY") ?? "", env_get("SIMPLE_BIN") ?? ""):
+            case Ok(binary): binary
+            case Err(reason):
+                eprint "error: " + reason
+                return 1
+    else:
+        resolve_simple_binary()
+    if not native_build_worker_binary_valid(simple_bin, file_exists(simple_bin)):
+        eprint "error: native-build worker binary is unavailable: {simple_bin}"
+        return 1
+    if compiled_bootstrap_route:
+        env_set("SIMPLE_BINARY", simple_bin)
+        env_set("SIMPLE_BIN", simple_bin)
+    val policy = match environment_variant_policy_handoff_prepare_v1(args):
+        case Ok(value): value
+        case Err(failure):
+            val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
+            eprint "error: native-build could not collect a valid environment variant policy: {reason}"
+            return 1
+    val forwarded_args = match environment_variant_policy_handoff_attach_v1(
+        args, policy.encoded_payload):
+        case Ok(value): value
+        case Err(failure):
+            val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
+            eprint "error: native-build could not create its internal policy handoff: {reason}"
+            return 1
+    # The full CLI publishes the compile-source inventory through
+    # compiler_entrypoint_admit_v1 before native-build; this seed-run entry
+    # skipped it, so the worker's snapshot acquire always failed with
+    # snapshot-inventory-unavailable. Run the same refresh, same cold-init gate.
+    if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") == "":
+        var scv_root = path_absolute(".").replace("\\", "/")
+        if scv_root.starts_with("//?/"):
+            scv_root = scv_root.substring(4)
+        val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
+        val inventory_roots = if cold_init: ["src", "test"] else: ["src"]
+        val refresh = compiler_inventory_refresh_v1(
+            scv_root, scv_root + "/build/scv", inventory_roots, cold_init)
+        if not refresh.valid:
+            eprint "SCV-E-ADMISSION: " + refresh.reason
+            return 1
+        if not env_set("SIMPLE_SCV_INVENTORY_GENERATION", str(refresh.inventory_generation)):
+            eprint "SCV-E-ADMISSION: snapshot-generation-env-publish-failed"
+            return 1
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
-    if mode == nil or mode == "":
+    # A compiled bootstrap capsule can route the two internal `run` targets
+    # itself. Do not label that native subprocess lane as interpreted: doing so
+    # clamps parse warming to one child before the memory-aware clamp is even
+    # consulted. Source-run wrappers retain the established interpreter marker.
+    if (mode == nil or mode == "") and not compiled_bootstrap_route:
         env_set("SIMPLE_EXECUTION_MODE", "interpret")
-    for arg in args:
+    for arg in forwarded_args:
+        # Preserve every public argument byte and its order. Only the worker
+        # removes the one internal handoff argument before cli_native_build.
         worker_args = worker_args.push(arg)
-    val simple_bin = resolve_simple_binary()
+    val requested_output = output_path_arg(args)
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
     # an empty one.
@@ -523,6 +954,18 @@ fn run_native_build_worker(args: [text]) -> i64:
         env_set("SIMPLE_FRONTEND_CACHE_DIR", frontend_cache_dir)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+    val warm_receipt = native_build_warm_receipt_prepare(
+        args, simple_bin, policy.handoff.cache_identity)
+    if warm_receipt.hit:
+        if native_build_warm_artifact_restore(warm_receipt):
+            print "[native-build-warm] exact final artifact restored; worker skipped"
+            env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+            return 0
+        print "[native-build-warm] final artifact restore refused; running normal worker"
+    val old_warm_candidate = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
+    # Never leak a caller's stale candidate into warm-up children. The real
+    # worker receives only this invocation's pid-private path below.
+    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, "")
     # process_run_timeout_live relays the worker's stdout/stderr to ours AS
     # THEY ARE PRODUCED (see process_ops.spl), so a slow-but-progressing
     # multi-minute worker no longer reads as a silent hang. stdout/stderr
@@ -535,46 +978,121 @@ fn run_native_build_worker(args: [text]) -> i64:
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
     if shard_count > 0:
-        run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
+        run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
     val hir_shard_count = native_build_hir_shard_count(args)
-    if hir_shard_count > 1:
-        run_hir_shards(args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
-    val (stdout, stderr, code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
+    if hir_shard_count > 0:
+        val hir_result = run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
+        if hir_result != 0:
+            env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+            env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+            eprint "error: HIR aggregate failure; final worker and artifact publication blocked"
+            return hir_result
+    # Publish the candidate path only for the real worker. Parse-shard_main
+    # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this
+    # env into warm-up children would let a partial child author the candidate.
+    if warm_receipt.eligible:
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, warm_receipt.candidate_path)
+    val worker_spawn_trace = native_build_worker_spawn_trace_enabled()
+    if worker_spawn_trace:
+        eprint "[native-build-trace] worker_spawn:start timeout_ms={native_build_timeout_ms(args)} args={worker_args.len()}"
+    val (stdout, stderr, code_raw) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
+    val code = native_build_normalize_exit_code(code_raw as i64)
+    if worker_spawn_trace:
+        eprint "[native-build-trace] worker_spawn:returned status={code} stdout_len={stdout.len()} stderr_len={stderr.len()}"
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-    val output_path = output_path_arg(args)
-    if code == 0 and output_path != "" and not file_exists(output_path):
+    val output_path = requested_output
+    val output_ok = native_build_output_exists(
+        output_path, native_build_worker_success_receipt(output_path, stdout, stderr))
+    val strict_no_stub = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
+    if native_build_strict_stub_violation(strict_no_stub, stdout, stderr):
+        if output_ok:
+            file_delete(output_path)
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+        stderr_write("error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence.\n")
+        stderr_write("  The worker reported success, but strict mode forbids publishing or caching a fabricated binary.\n")
+        return 1
+    val _warm_promoted = native_build_warm_receipt_finish(
+        warm_receipt, stdout, code == 0, output_ok)
+    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+    if code == 0 and output_path != "" and not output_ok:
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
         # worker chain died in a way that still reports success (an early-exit
         # helper, a killed sibling, etc.) but left no output file, fail loudly
         # here immediately instead of letting the caller silently proceed with a
         # stale/missing binary.
+        stderr_write("error: native-build worker exited 0 but produced no output binary: {output_path}\n")
+        stderr_write("  Treating a successful-looking exit with a missing output file as a hard failure.\n")
         eprint_bounded(stderr)
         native_build_print_failure_hints(stdout, stderr)
-        eprint "error: native-build worker exited 0 but produced no output binary: {output_path}"
-        eprint "  Treating a successful-looking exit with a missing output file as a hard failure."
         return 1
     if code != 0:
+        # Front-load the single most important fact -- via the unambiguous
+        # stderr_write, before the bulk relay below -- so it survives even if
+        # the bulk dump does not reach the terminal (see the stderr_ops import
+        # comment above and defect 3 of
+        # doc/08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md).
+        val last_diag = native_build_last_diagnostic_line(stderr)
+        stderr_write("error: native-build worker exited with code {code}.\n")
+        if last_diag != "":
+            stderr_write("  worker error: {last_diag}\n")
         eprint_bounded(stderr)
+        # On Windows process_run_timeout_live degrades to a captured (non-live)
+        # run, so on failure the worker's stdout — which carries the [build]
+        # step log and the real error line — would otherwise be discarded.
+        # Bounded, failure-path only.
+        if stdout.trim() != "":
+            stderr_write("--- worker stdout (bounded) ---\n")
+            eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
-        if code == -1 and not stderr.contains("[TIMEOUT:"):
+        if code == -1 and (stderr.contains("dumped core") or stderr.contains("core dumped")):
+            # A crash, not a kill and not a wait failure. `timeout` reports
+            # WCOREDUMP on the monitored command, and that single line is the
+            # only evidence that survives to here -- the wrapper collapses the
+            # child's signal status to -1 (rt_process_wait's Rust twin does
+            # `status.code().unwrap_or(-1)`, discarding WTERMSIG), so the number
+            # alone cannot tell a SIGSEGV from a failed wait. Say which.
+            stderr_write("error: native-build worker CRASHED -- the child dumped core (see the 'dumped core' line above). NOT a timeout, NOT a kill, NOT a compile failure.\n")
+            stderr_write("  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:\n")
+            stderr_write("    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings\n")
+            stderr_write("    apport-unpack /var/crash/<report>.crash /tmp/u\n")
+            # `bt` alone is not enough: measured 2026-09-05 on a real compiler
+            # SIGSEGV, the PC lands in a non-executable mimalloc heap mapping
+            # with no symbol and an unwindable-to-garbage stack. The registers
+            # and the PC's mapping are what identify the fault.
+            stderr_write("    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'\n")
+            stderr_write("    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address\n")
+        elif code < -128:
+            # -(128+signo) from rt_process_wait: the wrapper really was killed,
+            # and the signal number survived. 139 = SIGSEGV, 137 = SIGKILL
+            # (an out-of-memory reaper), 143 = SIGTERM.
+            val signo = 0 - code - 128
+            stderr_write("error: native-build worker was KILLED by signal {signo} before producing a binary; NOT a compile failure.\n")
+            if signo == 11 or signo == 6:
+                stderr_write("  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash).\n")
+            elif signo == 9 or signo == 15:
+                stderr_write("  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom').\n")
+        elif code == -1 and not stderr.contains("[TIMEOUT:"):
             # -1 without the wrapper's [TIMEOUT:] marker is NOT a timeout: the
             # wrapper died by a signal (status.code() is None) or the wait
             # itself failed. Say so instead of blaming --timeout (run6, 2026-08-21:
             # reported "timed out after 569328s" at 2742 s of wall).
-            eprint "error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated."
+            stderr_write("error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated.\n")
         elif code == -1:
             val secs = native_build_timeout_ms(args) / 1000
-            eprint "error: native-build worker timed out after {secs}s before producing a binary."
-            eprint "  The interpreted worker loads the whole compiler + LLVM import graph before any"
-            eprint "  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget. Raise"
-            eprint "  --timeout, shrink --source, or use the in-process backend for cross-target builds."
+            stderr_write("error: native-build worker timed out after {secs}s before producing a binary.\n")
+            stderr_write("  The interpreted worker loads the whole compiler + LLVM import graph before any\n")
+            stderr_write("  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget.\n")
+            stderr_write("  Read the last '[build] N/6' progress line to see which phase ran out of time.\n")
+            stderr_write("  Steps 4 (mir, driver_pipeline_lowering.spl:262) and 5 (native_compile,\n")
+            stderr_write("  driver_build/parallel.spl:480) are both SEQUENTIAL regardless of --threads.\n")
+            stderr_write("  Options: shrink --source, keep build/native_cache warm, pass --low-memory,\n")
+            stderr_write("  use --backend llvm-lib (in-process LLVM C API), or raise --timeout.\n")
         else:
-            eprint "error: native-build worker exited with code {code}."
-            eprint "  interpreter: {simple_bin} (exit code {code})"
+            stderr_write("  interpreter: {simple_bin} (exit code {code})\n")
     code as i64
 
 fn native_build_has_help(args: [text]) -> bool:
@@ -587,9 +1105,9 @@ fn native_build_has_help(args: [text]) -> bool:
 # doc/08_tracking/bug/native_build_scoping_and_bootstrap_readthrough_2026-07-30.md):
 # the worker's own entry-point check (compile_targets.spl `cli_native_build`,
 # `if entry_point == "": ... return 1`) is logically immediate, but the
-# worker only runs under a forced tree-walking interpreter
-# (`run_native_build_worker` always sets `SIMPLE_EXECUTION_MODE=interpret`
-# when unset) and must first interpret its own large `compiler.driver`-
+# source-run worker normally runs under a forced tree-walking interpreter
+# (`run_native_build_worker` sets `SIMPLE_EXECUTION_MODE=interpret` when unset
+# outside the compiled bootstrap route) and must first interpret its large `compiler.driver`-
 # touching module graph before that check's first line ever executes. So an
 # invocation that is DESTINED to fail this check still pays the full,
 # multi-minute interpreter-bootstrap cost before the (correct) error ever
@@ -629,12 +1147,16 @@ fn native_build_has_help(args: [text]) -> bool:
 # entry, via `--entry <file>` or a bare positional -- so no legitimate
 # caller depends on reaching the worker without one.
 fn native_build_is_value_consuming_flag(arg: text) -> bool:
-    arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path"
+    arg == "--backend" or arg == "--backend-plugin" or arg == "--runtime-bundle" or arg == "--runtime-path"
         or arg == "--linker-script" or arg == "--entry" or arg == "--source"
         or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode"
         or arg == "--cache-dir" or arg == "--target" or arg == "--cpu"
         or arg == "--opt-level" or arg == "--timeout" or arg == "--threads"
         or arg == "--jobs" or arg == "-j" or arg == "--log"
+        or arg == "--parser-impl" or arg == "--parser-prefer"
+        or arg == "--parser-require" or arg == "--host-cpu-max"
+        or arg == "--frontend-offload"
+        or arg == "--frontend-offload-fallback"
 
 fn native_build_has_entry(args: [text]) -> bool:
     var i = 0

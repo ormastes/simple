@@ -1,0 +1,69 @@
+"""RV64 modern VirtIO PCI windows remain broker-derived and bounded."""
+
+use std.spec.{describe, it, expect}
+
+describe "assigned VirtIO region mapper":
+    it "walks only bounded vendor capabilities and verifies containment":
+        val source = file_read("src/os/kernel/ipc/syscall_device.spl")
+        expect(source).to_contain("while cap >= 0x40u8 and cap != 0xFFu8 and visits < 48u8")
+        expect(source).to_contain("cap_id == 0x09u8 and cfg_type == want and cap_len >= 16u8")
+        expect(source).to_contain("byte_len <= bar_size - offset")
+
+    it "maps only a numbered assigned capability window after an exact BAR check":
+        val source = file_read("src/os/kernel/ipc/syscall_device.spl")
+        expect(source).to_contain("args.arg0 < 1u64 or args.arg0 > 4u64")
+        expect(source).to_contain("capability_set_assigned_device_grant_bdf")
+        expect(source).to_contain("bar_index: region.bar_index")
+        expect(source).to_contain("map_args.arg0 = phys")
+        expect(source).to_contain("fn _pci_memory_bar_phys")
+        expect(source).to_contain("bar_num >= 5u8")
+        expect(source).to_contain("region.offset > 0xFFFFFFFFFFFFFFFFu64 - bar_phys")
+
+    it "keeps the public user API and target selection explicit":
+        val user_device = file_read("src/os/userlib/device.spl")
+        val driver = file_read("src/os/drivers/virtio/_VirtioNet/driver_operations.spl")
+        expect(user_device).to_contain("pub fn request_assigned_virtio_net_transport")
+        expect(user_device).to_contain("pub fn map_assigned_virtio_net_region")
+        expect(driver).to_contain("@cfg(riscv64)\nfn _assigned_modern_transport")
+        expect(driver).to_contain("elif _modern_transport_required()")
+
+    it "pins the PID1 QEMU evidence device to modern PCI transport":
+        val harness = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
+        expect(harness).to_contain("-device virtio-net-pci,netdev=pid1net,disable-legacy=on")
+
+    it "keeps RV64 syscall 88 behind the per-job syscall filter":
+        val source = file_read("src/os/kernel/arch/riscv64/syscall.spl")
+        expect(source).to_contain("if args.id == 88u64")
+        expect(source).to_contain("_handle_assigned_virtio_region_map(args, sched, caller)")
+
+    it "makes syscall 82 version explicit and rejects the legacy-sized output":
+        val source = file_read("src/os/kernel/ipc/syscall_device.spl")
+        expect(source).to_contain("if args.arg2 == 1u64:")
+        expect(source).to_contain("_handle_assigned_virtio_transport_copyout")
+        expect(source).to_contain("vmm_verify_user_write(out, 104u64)")
+        expect(source).to_contain("if args.arg2 != 0u64:")
+        expect(source).to_contain("return SyscallResult(value: -22)")
+
+    it "requires discovered modern BAR handles plus DMA/IOMMU without borrowing BAR0":
+        val source = file_read("src/os/kernel/ipc/syscall_device.spl")
+        expect(source).to_contain("fn _capability_set_assigned_virtio_device_grant_bdf")
+        expect(source).to_contain("_caps_has_device_dma_and_iommu(caps, owner, bus, dev, func)")
+        expect(source).to_contain("for bar in [common.bar_index, notify.bar_index, isr.bar_index, device.bar_index]:")
+        expect(source).to_contain("_caps_has_device_bar(caps, owner, bus, dev, func, bar)")
+        expect(source).to_contain("val bdf = _capability_set_assigned_virtio_device_grant_bdf(caps, owner)")
+        expect(source).to_contain("val bdf = _capability_set_assigned_virtio_device_grant_bdf(task.unwrap().capabilities, caller)")
+
+    it "retains BAR0 as the separate legacy MapBar gate":
+        val source = file_read("src/os/kernel/ipc/syscall_device.spl")
+        expect(source).to_contain("fn capability_set_assigned_device_grant_bdf(")
+        expect(source).to_contain("_caps_has_device_bar(caps, owner, bus, dev, func, 0u8)")
+        expect(source).to_contain("fn _handle_assigned_bar_map")
+
+    it "programs RV64 net queues through modern config and never a legacy PFN":
+        val driver = file_read("src/os/drivers/virtio/_VirtioNet/driver_operations.spl")
+        expect(driver).to_contain("request_assigned_virtio_net_transport")
+        expect(driver).to_contain("MODERN_COMMON_QUEUE_DESC_LO")
+        expect(driver).to_contain("MODERN_COMMON_QUEUE_ENABLE")
+        expect(driver).to_contain("self.modern_notify_virt + notify_off * self.modern_notify_multiplier")
+        expect(driver).to_contain("return mmio_read8(self.modern_isr_virt)")
+        expect(driver).to_contain("val config = if self.is_modern_pci: self.modern_device_virt")

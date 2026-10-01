@@ -1,0 +1,79 @@
+# Paired compile-time regression decision. Measurement orchestration alternates
+# baseline/candidate processes while reusing one explicit cache identity; this
+# pure contract makes the release decision deterministic and testable.
+
+pub struct CompileTimeGateV1:
+    status: text
+    reason: text
+    sample_count: i64
+    median_ratio: f64
+    trimmed_mean_ratio: f64
+    coefficient_of_variation: f64
+
+fn _result(status: text, reason: text, count: i64, median: f64, trimmed: f64, cv: f64) -> CompileTimeGateV1:
+    CompileTimeGateV1(
+        status: status,
+        reason: reason,
+        sample_count: count,
+        median_ratio: median,
+        trimmed_mean_ratio: trimmed,
+        coefficient_of_variation: cv)
+
+fn _sqrt(value: f64) -> f64:
+    if value <= 0.0: return 0.0
+    var x = value
+    var i = 0
+    while i < 20:
+        x = (x + value / x) / 2.0
+        i = i + 1
+    x
+
+fn _sorted(values: [f64]) -> [f64]:
+    var out = values.copy()
+    var i = 1
+    while i < out.len():
+        val held = out[i]
+        var j = i
+        while j > 0 and held < out[j - 1]:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[j] = held
+        i = i + 1
+    out
+
+pub fn evaluate_compile_time_gate_v1(baseline_seconds: [f64], candidate_seconds: [f64], cache_identity: text) -> CompileTimeGateV1:
+    if cache_identity == "": return _result("inconclusive", "cache identity is required", 0, 0.0, 0.0, 0.0)
+    if baseline_seconds.len() != candidate_seconds.len() or baseline_seconds.len() < 7:
+        return _result("inconclusive", "at least seven complete pairs are required", baseline_seconds.len(), 0.0, 0.0, 0.0)
+    var ratios: [f64] = []
+    var i = 0
+    while i < baseline_seconds.len():
+        if baseline_seconds[i] <= 0.0 or candidate_seconds[i] <= 0.0:
+            return _result("inconclusive", "samples must be positive", baseline_seconds.len(), 0.0, 0.0, 0.0)
+        ratios.push(candidate_seconds[i] / baseline_seconds[i])
+        i = i + 1
+    val ordered = _sorted(ratios)
+    val median = ordered[ordered.len() / 2]
+    val trim = (ordered.len() * 20) / 100
+    var total = 0.0
+    i = trim
+    while i < ordered.len() - trim:
+        total = total + ordered[i]
+        i = i + 1
+    val trimmed = total / (ordered.len() - trim * 2).to_f64()
+    var mean = 0.0
+    for ratio in ratios: mean = mean + ratio
+    mean = mean / ratios.len().to_f64()
+    var variance = 0.0
+    for ratio in ratios:
+        val delta = ratio - mean
+        variance = variance + delta * delta
+    variance = variance / ratios.len().to_f64()
+    val cv = _sqrt(variance) / mean
+    if cv > 0.05:
+        return _result("inconclusive", "pair-ratio coefficient of variation exceeds 5%", ratios.len(), median, trimmed, cv)
+    if median <= 1.10 and trimmed <= 1.10:
+        return _result("pass", "paired compile-time ratios are within 10%", ratios.len(), median, trimmed, cv)
+    if median > 1.10 and trimmed > 1.10:
+        return _result("fail", "paired compile-time ratios exceed 10%", ratios.len(), median, trimmed, cv)
+    _result("inconclusive", "median and trimmed mean disagree at the 10% boundary", ratios.len(), median, trimmed, cv)

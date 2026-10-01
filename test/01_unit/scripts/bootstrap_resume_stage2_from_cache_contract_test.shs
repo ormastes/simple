@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+helper="$root/scripts/bootstrap/resume-stage2-from-cache.sh"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+sh -n "$helper" || fail "shell syntax"
+grep -Fq 'stage2-native-cache' "$helper" || fail "cache precondition missing"
+grep -Fq 'bootstrap_stage3_stage2_canonical_env_names' "$helper" ||
+    fail "canonical environment validation missing"
+grep -Fq 'bootstrap-from-scratch.sh' "$helper" ||
+    fail "canonical bootstrap delegation missing"
+grep -Fq -- '--full-bootstrap' "$helper" || fail "full-bootstrap authority missing"
+grep -Fq -- '--stop-after-stage2' "$helper" || fail "Stage 2 stop missing"
+grep -Fq '10485760' "$helper" || fail "10 GiB disk floor missing"
+grep -Fq -- '--output="$fresh_output"' "$helper" || fail "fresh output delegation missing"
+if grep -Fq 'bootstrap_stage3_write_stage2_admission_receipt' "$helper" ||
+   grep -Fq 'bootstrap_stage3_verify_stage2_admission_receipt' "$helper" ||
+   grep -Fq 'publish-stage2-parent-receipts.shs' "$helper" ||
+   grep -Fq 'simple.rejected' "$helper"; then
+    fail "wrapper duplicates admission or consumes a rejected artifact"
+fi
+
+# Refusal fixture: a cache shape below the worktree with no transcript/runtime
+# authority must stop before delegation. A rejected artifact remains inert.
+mkdir -p "$root/build"
+tmp=$(mktemp -d "$root/build/resume-stage2-contract.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) platform=aarch64-apple-darwin ;;
+    *) platform=$(uname -m)-unknown-$(uname -s | tr '[:upper:]' '[:lower:]') ;;
+esac
+mkdir -p "$tmp/stage2/$platform" "$tmp/stage3/$platform/stage2-native-cache" \
+    "$tmp/stage3/$platform/stage2-runtime-authority"
+printf rejected >"$tmp/stage2/$platform/simple.rejected"
+if "$helper" "$tmp" >"$tmp/refusal.log" 2>&1; then
+    fail "missing transcript/runtime authority was accepted"
+fi
+[ -f "$tmp/stage2/$platform/simple.rejected" ] ||
+    fail "rejected artifact was removed"
+[ ! -e "$tmp/stage2/$platform/simple" ] ||
+    fail "canonical output was published on refusal"
+
+# Exercise the production clone helper with the real provenance and lock
+# implementations. Old evidence/candidates outside the cache must stay inert.
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$root/scripts/check/lib/portable-process-lock.shs"
+. "$root/scripts/bootstrap/stage2-cache-clone.shs"
+cache="$tmp/stage3/$platform/stage2-native-cache"
+mkdir -p "$cache/scope-fixture"
+printf 'lane=default\n' >"$cache/scope-fixture/.cache_scope"
+printf 'compiled object fixture\n' >"$cache/scope-fixture/unit.o"
+printf 'old sanity evidence\n' >"$tmp/stage3/$platform/stage2-sanity.env"
+portable_lock_acquire "$tmp/locks" source 0 || fail "fixture lock"
+clone_lock=$PORTABLE_LOCK_HANDLE
+bootstrap_stage2_clone_cache "$cache" "$tmp" "$platform" "$clone_lock" ||
+    fail "valid cache clone"
+clone=$BOOTSTRAP_STAGE2_CLONE_OUTPUT
+[ "$clone" != "$tmp" ] || fail "old output reused"
+clone_cache="$clone/stage3/$platform/stage2-native-cache"
+cmp -s "$cache/scope-fixture/unit.o" "$clone_cache/scope-fixture/unit.o" ||
+    fail "cache bytes changed"
+[ -w "$clone_cache/scope-fixture/unit.o" ] || fail "clone is not writable"
+[ ! -e "$clone/stage2" ] || fail "candidate crossed into fresh output"
+[ ! -e "$clone/stage3/$platform/stage2-sanity.env" ] || fail "old evidence copied"
+[ ! -e "$clone/stage3/$platform/stage2-runtime-authority" ] || fail "old runtime copied"
+printf 'changed clone\n' >"$clone_cache/scope-fixture/unit.o"
+grep -Fq 'compiled object fixture' "$cache/scope-fixture/unit.o" || fail "clone shares writable inode"
+ln -s "$tmp/stage2/$platform/simple.rejected" "$cache/forbidden-link"
+if bootstrap_stage2_clone_cache "$cache" "$tmp" "$platform" "$clone_lock" >/dev/null 2>&1; then
+    fail "symlink cache accepted"
+fi
+portable_lock_release "$clone_lock" || fail "fixture lock release"
+if bootstrap_stage2_clone_cache "$cache" "$tmp" "$platform" "$clone_lock" >/dev/null 2>&1; then
+    fail "clone without owned lock accepted"
+fi
+
+printf '%s\n' \
+  'PASS: Stage 2 cache resume validates an independent cache clone, preserves old evidence, and delegates fresh admission to the canonical bootstrap'

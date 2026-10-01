@@ -1,7 +1,62 @@
 # Bootstrap planner v1 unbound authorization
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: CLOSED — superseded by the canonical v2 producer (bug database closure: 2026-09-14).
+
+## Current tracking status, source-inspected 2026-09-22
+
+The current `bug_db.sdn` row closes this original v1 defect. The canonical
+producer now exists at
+`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`; it verifies
+the Stage2 parent evidence, builds and executes the planner, records canonical
+argv/environment digests, rejects an untyped reason in a negative smoke, and
+emits a v2 admission receipt. The public verifier in
+`scripts/check/lib/bootstrap-planner-admission-bound.shs` delegates to the
+bound verifier rather than the historical unconditional refusal.
+
+The existing producer regression is
+`scripts/check/check-bootstrap-planner-admission-producer.shs`. Its parent
+compiler and planner are fixtures: a passing result does not establish a real
+native planner build, full bootstrap completion, or implementation of the v3
+design below. The legacy consumer regression is
+`scripts/check/check-bootstrap-reason-receipt-guard.shs`.
+
+### Windows re-verification limits (2026-09-22)
+
+Baseline: `origin/main` at `e0dd873da1b`, isolated D: sparse worktree, Windows
+x86_64 with MSYS2 shell tools. This update changes documentation only; no
+compiler, codegen, runtime, CPU, or backend implementation changed.
+
+- The producer gate was stopped after 325.60 seconds before any final verdict.
+  Its execution location at termination was not captured or proven. Initial setup also
+  exposed a missing `release/version.sdn` in the sparse checkout; that tracked
+  authority was restored before the bounded attempt. No PASS is claimed.
+- At termination, the largest observed Windows process peak working set among
+  the six surviving owned shell/time processes was 12,689,408 bytes. This is
+  **not** a complete process-tree peak: short-lived descendants were not
+  sampled. A total peak RSS measurement remains unavailable.
+- The legacy consumer guard failed after 51.05 seconds with
+  `None receipt did not return the canonical diagnostic`. A direct diagnostic
+  replay entered the default strategy supervisor and ended with
+  `stage-engine-failed`, producing scheduler evidence before the expected
+  receipt refusal. This is a current verification gap; it does not establish
+  acceptance by `bootstrap_planner_v2_verify`. MSYS2 GNU time reported
+  6,378,096 KiB max RSS for that run; its accounting was not validated and must
+  not be treated as a reliable Windows working-set measurement.
+
+Verification TODO: bound and profile the Windows producer gate through its
+positive and negative fixtures, using process-tree memory sampling. Reconcile
+the legacy consumer guard with the default strategy supervisor: separately
+prove direct receipt-validation refusal and that ordinary bootstrap rejects
+legacy receipts before stage execution. The historical Linux fixture pass in
+the database is not fresh Windows, macOS, FreeBSD, alternate CPU, or native
+codegen evidence. Do not infer a performance comparison from this documentation
+change or mark these verification tasks complete from source inspection.
+
+The sections below preserve the original investigation and proposed v3 design.
+Statements that no v2 producer exists and the August STILL-OPEN verdict describe
+the historical state; they are not the current implementation status.
+
+## Historical report (2026-08-17)
 
 The version-1 planner receipt authorized any target with a bootstrap or release
 prefix and bound only a typed reason. It did not identify the admitted parent

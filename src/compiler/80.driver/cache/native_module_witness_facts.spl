@@ -1,0 +1,210 @@
+# Authoritative retained-fact producers for NativeModuleCacheWitnessV1.
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
+use compiler.mir.mir_data.{MirModule}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index}
+use compiler.driver.cache.action_key.{
+    ActionDep, ResolutionProbe, interface_digest_of_source
+}
+use compiler.driver.cache.native_module_witness.{
+    NativeModuleResolutionFactV1, NativeModuleLayoutFactV1, NativeModuleConfigFactV1,
+    NativeModuleCacheWitnessV1, native_module_cache_witness_invalid_v1,
+    native_module_cache_witness_v1
+}
+
+type NativeExternalLayoutTraceV1 = MirExternalLayoutTraceV1
+
+struct NativeModuleCacheFactSetV1:
+    module_id: text
+    dependencies: [ActionDep]
+    resolutions: [NativeModuleResolutionFactV1]
+    layouts: [NativeModuleLayoutFactV1]
+    valid: bool
+    reason: text
+
+    fn witness(
+        mir_identity: text, config: NativeModuleConfigFactV1 = NativeModuleConfigFactV1(
+            compiler_identity: "", target_identity: "", options_identity: "",
+            provider_identity: "")
+    ) -> NativeModuleCacheWitnessV1:
+        if not self.valid:
+            return native_module_cache_witness_invalid_v1(self.reason)
+        native_module_cache_witness_v1(
+            self.module_id, mir_identity, self.dependencies,
+            self.resolutions, self.layouts, config)
+
+fn native_module_cache_fact_set_invalid_v1(
+    module_id: text, reason: text
+) -> NativeModuleCacheFactSetV1:
+    NativeModuleCacheFactSetV1(
+        module_id: module_id, dependencies: [], resolutions: [], layouts: [],
+        valid: false, reason: reason)
+
+fn native_module_source_content_v1(
+    sources: [SourceFile], module_id: text, canonical_path: text
+) -> (text, i64):
+    var content = ""
+    var count = 0
+    for source in sources:
+        val physical_path = if source.authored_path == "": source.path else: source.authored_path
+        if physical_path == canonical_path:
+            if count == 0:
+                content = source.content
+                count = 1
+            elif content != source.content:
+                count = count + 1
+    (content, count)
+
+fn native_direct_dependency_facts_v1(
+    module_id: text, surfaces: ModuleSurfacesByName, sources: [SourceFile]
+) -> NativeModuleCacheFactSetV1:
+    val consumer_index = module_surface_registry_index(surfaces, module_id)
+    if consumer_index < 0 or consumer_index >= surfaces.surfaces.len():
+        return native_module_cache_fact_set_invalid_v1(
+            module_id, "missing-consumer-surface")
+    val consumer = surfaces.surfaces[consumer_index]
+    if consumer.import_target_indices.len() != consumer.imports.len() or
+       consumer.import_target_names.len() != consumer.imports.len():
+        return native_module_cache_fact_set_invalid_v1(
+            module_id, "missing-direct-dependency-routing")
+    var dependencies: [ActionDep] = []
+    var dependency_ids: [text] = []
+    var index = 0
+    while index < consumer.import_target_indices.len():
+        val target_index = consumer.import_target_indices[index]
+        if target_index < 0 or target_index >= surfaces.surfaces.len():
+            return native_module_cache_fact_set_invalid_v1(
+                module_id, "unresolved-direct-dependency")
+        val target = surfaces.surfaces[target_index]
+        val target_id = target.preferred_registry_name
+        if target_id == "":
+            return native_module_cache_fact_set_invalid_v1(
+                module_id, "missing-dependency-module-id")
+        val (source_content, source_count) = native_module_source_content_v1(
+            sources, target.module_name, target.canonical_path)
+        if source_count != 1 or source_content == "":
+            return native_module_cache_fact_set_invalid_v1(
+                module_id, "ambiguous-dependency-source")
+        if not dependency_ids.contains(target_id):
+            dependency_ids.push(target_id)
+            dependencies.push(ActionDep(
+                module_id: target_id,
+                iface_digest: interface_digest_of_source(source_content)))
+        index = index + 1
+    NativeModuleCacheFactSetV1(
+        module_id: module_id, dependencies: dependencies,
+        resolutions: [], layouts: [], valid: true, reason: "ok")
+
+fn native_resolution_facts_v1(
+    module_id: text, surfaces: ModuleSurfacesByName
+) -> NativeModuleCacheFactSetV1:
+    val consumer_index = module_surface_registry_index(surfaces, module_id)
+    if consumer_index < 0 or consumer_index >= surfaces.surfaces.len():
+        return native_module_cache_fact_set_invalid_v1(
+            module_id, "missing-consumer-surface")
+    val consumer = surfaces.surfaces[consumer_index]
+    if consumer.import_resolution_traces.len() != consumer.imports.len():
+        return native_module_cache_fact_set_invalid_v1(
+            module_id, "missing-resolution-instrumentation")
+    var facts: [NativeModuleResolutionFactV1] = []
+    var trace_index = 0
+    while trace_index < consumer.import_resolution_traces.len():
+        val trace = consumer.import_resolution_traces[trace_index]
+        val import_id = consumer.imports[trace_index].module
+        if trace.consumer_module_id != consumer.preferred_registry_name or
+           trace.import_id != import_id:
+            return native_module_cache_fact_set_invalid_v1(
+                module_id, "misaligned-resolution-trace")
+        if trace.probes.len() == 0 or trace.selected == "" or
+           trace.selected_count != 1 or trace.dir_generation == "" or
+           trace.resolver_version == "":
+            return native_module_cache_fact_set_invalid_v1(
+                module_id, "incomplete-resolution-trace")
+        var probes: [ResolutionProbe] = []
+        for probe in trace.probes:
+            probes.push(ResolutionProbe(path: probe.path, found: probe.found))
+        facts.push(NativeModuleResolutionFactV1(
+            import_id: trace.import_id, probes: probes,
+            selected: trace.selected, selected_count: trace.selected_count,
+            dir_generation: trace.dir_generation,
+            resolver_version: trace.resolver_version))
+        trace_index = trace_index + 1
+    NativeModuleCacheFactSetV1(
+        module_id: module_id, dependencies: [], resolutions: facts,
+        layouts: [], valid: true, reason: "ok")
+
+fn native_external_layout_facts_v1(
+    module_id: text, traces: [NativeExternalLayoutTraceV1],
+    instrumentation_complete: bool
+) -> NativeModuleCacheFactSetV1:
+    if not instrumentation_complete:
+        return native_module_cache_fact_set_invalid_v1(
+            module_id, "missing-layout-instrumentation")
+    var facts: [NativeModuleLayoutFactV1] = []
+    var fact_ids: [text] = []
+    for trace in traces:
+        if trace.consumer_module_id != module_id:
+            continue
+        # Only cross-module references belong in this witness.
+        if trace.owner_module_id == module_id:
+            continue
+        val fact_id = trace.owner_module_id + "::" + trace.type_id
+        if trace.owner_module_id == "" or trace.type_id == "" or
+           trace.layout_digest == "" or trace.owner_count != 1 or
+           fact_ids.contains(fact_id):
+            return native_module_cache_fact_set_invalid_v1(
+                module_id, "missing-or-ambiguous-external-layout")
+        fact_ids.push(fact_id)
+        facts.push(NativeModuleLayoutFactV1(
+            owner_module_id: trace.owner_module_id, type_id: trace.type_id,
+            layout_digest: trace.layout_digest,
+            owner_count: trace.owner_count))
+    NativeModuleCacheFactSetV1(
+        module_id: module_id, dependencies: [], resolutions: [],
+        layouts: facts, valid: true, reason: "ok")
+
+fn native_external_layout_facts_from_mir_v1(
+    module: MirModule, instrumentation_complete: bool
+) -> NativeModuleCacheFactSetV1:
+    var module_id = module.name
+    if module.external_layout_traces.len() > 0:
+        module_id = module.external_layout_traces[0].consumer_module_id
+        for trace in module.external_layout_traces:
+            if trace.consumer_module_id != module_id:
+                return native_module_cache_fact_set_invalid_v1(
+                    module.name, "misaligned-layout-consumer")
+    native_external_layout_facts_v1(
+        module_id, module.external_layout_traces, instrumentation_complete)
+
+fn native_module_cache_fact_set_merge_v1(
+    dependencies: NativeModuleCacheFactSetV1,
+    resolutions: NativeModuleCacheFactSetV1,
+    layouts: NativeModuleCacheFactSetV1
+) -> NativeModuleCacheFactSetV1:
+    if not dependencies.valid:
+        return native_module_cache_fact_set_invalid_v1(
+            dependencies.module_id, dependencies.reason)
+    if not resolutions.valid:
+        return native_module_cache_fact_set_invalid_v1(
+            dependencies.module_id, resolutions.reason)
+    if not layouts.valid:
+        return native_module_cache_fact_set_invalid_v1(
+            dependencies.module_id, layouts.reason)
+    if dependencies.module_id == "" or
+       dependencies.module_id != resolutions.module_id or
+       dependencies.module_id != layouts.module_id:
+        return native_module_cache_fact_set_invalid_v1(
+            dependencies.module_id, "fact-set-module-mismatch")
+    NativeModuleCacheFactSetV1(
+        module_id: dependencies.module_id,
+        dependencies: dependencies.dependencies,
+        resolutions: resolutions.resolutions, layouts: layouts.layouts,
+        valid: true, reason: "ok")
+
+export NativeExternalLayoutTraceV1
+export NativeModuleCacheFactSetV1, native_module_cache_fact_set_invalid_v1
+export native_direct_dependency_facts_v1, native_resolution_facts_v1
+export native_external_layout_facts_v1, native_module_cache_fact_set_merge_v1
+export native_external_layout_facts_from_mir_v1

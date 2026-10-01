@@ -1,6 +1,6 @@
 # Stage 3 stopped self-hosting: `--entry` / `--source` delegate the build to the Rust seed
 
-- **Status:** FIXED (2026-08-04)
+- **Status:** RECURRENCE FIX APPLIED (2026-08-15); rebuilt verification pending
 - **Severity:** critical — silently converted the self-host verification into a
   second Rust-seed build. Stage 3 reported success the entire time.
 - **Component:** `scripts/bootstrap/bootstrap-from-scratch.sh`,
@@ -102,3 +102,22 @@ The gate is a negative marker test. If `native_all`'s summary strings are ever
 reworded the gate goes quiet. A stronger long-term fix is a positive marker: have
 the pure-Simple in-process path print a `stage3: built in-process by <sha>` line
 on success (it is currently silent on success) and gate on that instead.
+
+## 2026-08-15 value-taking flag recurrence
+
+An otherwise positional Stage-3 diagnostic added the admitted Stage-2
+`--compile-stack-mib 64` argument for command parity. The Simple bootstrap
+parser did not classify that option as value-taking. It skipped the option,
+then treated bare `64` as a source input, rejected the focused positional shape,
+and delegated to `rt_native_build`.
+
+Retained evidence is `build/phase3-struct-registry-growth/`: the only progress
+row is `phase=bootstrap_ffi current=rt_native_build`; no pure-Simple
+source/parse/HIR row, object, or candidate exists. The delegated scan timed out
+after 15m02.81s at 29,235,804 KiB RSS. That result belongs to the wrong Rust-FFI
+route and is not evidence about the pure-Simple struct registry.
+
+The bounded repair classifies `--compile-stack-mib`, `--cpu`, and `--opt-level`
+as value-taking. Recovery now derives backend, Stage-2 progress, threads, and
+compile-stack from the immutable admitted transcript instead of hard-coding
+incompatible values.

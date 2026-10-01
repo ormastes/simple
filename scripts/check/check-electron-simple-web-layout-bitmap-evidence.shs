@@ -168,24 +168,35 @@ emit_unavailable() {
         echo "- captured ARGB artifact: fail / not-run / unavailable"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
+    # Verdict line (2026-09-06): this function used to end at the `cat` above,
+    # so every caller died on a bare `exit 1` with an env dump as the last
+    # stdout line and no PASS/FAIL/ERROR verdict at all. Absence of a runtime
+    # or a binary is absence of evidence, so it is ERROR (exit 2), never a pass.
+    case "$reason" in
+        *-failed|*-not-allowed|invalid-*)
+            echo "FAIL — 0 of 1 bitmap comparison(s) completed ($reason)"
+            exit 1
+            ;;
+        *)
+            echo "ERROR — nothing was checked ($reason)"
+            exit 2
+            ;;
+    esac
 }
 
 if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
     emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
-    exit 1
 fi
 
 for required in node npm; do
     if ! have "$required"; then
         emit_unavailable "missing-command:$required"
-        exit 1
     fi
 done
 
 ELECTRON_BIN="${ELECTRON_BIN:-${SIMPLE_ELECTRON_BIN:-}}"
 if [ -n "$ELECTRON_BIN" ] && [ ! -x "$ELECTRON_BIN" ]; then
     emit_unavailable "electron-bin-missing"
-    exit 1
 elif [ -x "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" ]; then
     ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 elif [ -x "tools/electron-shell/node_modules/.bin/electron" ]; then
@@ -196,12 +207,10 @@ fi
 
 if [ ! -f "$VALIDATOR" ]; then
     emit_unavailable "missing-electron-proof-validator"
-    exit 1
 fi
 
 if [ "$ELECTRON_BIN" = "" ]; then
     emit_unavailable "missing-electron-dependency"
-    exit 1
 fi
 
 cat >"$SIMPLE_SRC" <<SIMPLE_EOF
@@ -399,7 +408,6 @@ fi
 
 if [ "$simple_code" -ne 0 ]; then
     emit_unavailable "$SIMPLE_EXPECTED_REASON"
-    exit 1
 fi
 
 simple_status="$(field_of simple_status "$SIMPLE_OUT")"
@@ -409,19 +417,15 @@ simple_blur="$(field_of blur_or_tolerance_used "$SIMPLE_OUT")"
 
 if [ "$simple_status" != "pass" ]; then
     emit_unavailable "simple-layout-status-failed"
-    exit 1
 fi
 if [ ! -s "$HTML_PATH" ]; then
     emit_unavailable "missing-scene-html-file"
-    exit 1
 fi
 if [ ! -s "$EXPECTED_ARGB" ]; then
     emit_unavailable "missing-expected-argb-file"
-    exit 1
 fi
 if [ "$simple_blur" != "false" ]; then
     emit_unavailable "simple-blur-or-tolerance-not-allowed"
-    exit 1
 fi
 
 ELECTRON_CAPTURE_HTML_PATH="$HTML_PATH"
@@ -431,7 +435,6 @@ elif [ "$CAPTURE_MODE" = "auto" ] && [ "$SCENE" = "simple-web-layout-text-flow" 
     ELECTRON_CAPTURE_HTML_PATH=""
 elif [ "$CAPTURE_MODE" != "auto" ] && [ "$CAPTURE_MODE" != "dom" ]; then
     emit_unavailable "invalid-capture-mode:$CAPTURE_MODE"
-    exit 1
 fi
 
 set +e
@@ -904,4 +907,13 @@ fi
 } >"$REPORT_PATH"
 
 cat "$BUILD_DIR/evidence.env"
-[ "$status" = "pass" ]
+# Verdict line (2026-09-06): this script used to end on a bare
+# `[ "$status" = "pass" ]`, which under `set -e` exits 1 with an env dump as
+# the last stdout line and no PASS/FAIL/ERROR verdict. A reader could not tell
+# a real comparison failure from a gate that never compared anything.
+if [ "$status" = "pass" ]; then
+    echo "PASS — 1 layout scene ($SCENE) checked at ${WIDTH}x${HEIGHT} in capture mode $CAPTURE_MODE (checksum $simple_checksum), 0 mismatches"
+else
+    echo "FAIL — 1 layout scene ($SCENE) checked at ${WIDTH}x${HEIGHT} in capture mode $CAPTURE_MODE (checksum $simple_checksum), $reason"
+    exit 1
+fi

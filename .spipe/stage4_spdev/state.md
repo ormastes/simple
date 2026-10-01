@@ -50,3 +50,12 @@ dev-done
 - dev: Pushed typed enum-payload closure and trait terminal-identity fixes through `4505aec902a`; exact focused pure-Simple regressions passed.
 - dev: Admitted Stage 3 at `daa98e2b841a28ada30663ed817b9b3ec39d7dfcc3b919a47cbc72813c84cbbd` and ran the full graph. Stage 4 stopped at HIR 43/1,431 on grouped `LintLevel`/`LintCategory` terminal collisions; no candidate or deployment exists.
 - dev: Remaining execution plan is `doc/03_plan/agent_tasks/stage4_spdev.md`; post-admission frozen SDK work is `doc/03_plan/design/bootstrap_sdk_capsule.md`.
+- verify-preparation: Added the future-executable, fail-closed Phase 4 recovery
+  system contract at
+  `test/03_system/compiler/phase4_compiler_debug_recovery_spec.spl`, its
+  Markdown-only mirror, test plan, guide, and lane-owned feature-expert notes.
+  It traces REQ-P4DBG-001..007 across canonical admission, compiler/lib/MCP/LSP
+  checks, MCP integration, native C5 character exit `42`, explicit non-SKIP DAP
+  smoke, and deployed hash binding. `TEST_BLOCKED`: no admitted current-source
+  Stage 4 exists, so the spec, docgen, and maintenance checks were intentionally
+  not run and no runtime PASS is claimed.

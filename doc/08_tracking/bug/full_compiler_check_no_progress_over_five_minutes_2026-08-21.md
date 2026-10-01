@@ -1,4 +1,8 @@
 # Full compiler check shows no progress for more than five minutes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-21  
 **Status:** Open  
@@ -18,3 +22,4 @@ outside the entry closure. The check should expose bounded progress and a
 measured warm-run target so release verification cannot hang silently.
 
 No retry was performed in this session.
+

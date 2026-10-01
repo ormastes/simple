@@ -1,0 +1,42 @@
+use std.sffi.cli.{cli_get_args}
+use std.io_runtime.{file_read_text, file_delete, env_set, getpid}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if args.len() >= 2 and (args[1] == "--help" or args[1] == "-h"):
+        print "Usage: simple-test <spec.spl>"
+        return 0
+    if args.len() >= 2 and args[1] == "--version":
+        print "simple-test 0.1.0"
+        return 0
+    if args.len() < 2:
+        print "error: missing spec path"
+        return 2
+    val path = args[1]
+    val source = file_read_text(path) ?? ""
+    if source == "":
+        print "error: cannot read spec: {path}"
+        return 2
+    env_set("SIMPLE_NO_JIT", "1")
+    val evidence_path = "/tmp/simple_inprocess_result_{getpid()}.txt"
+    val _ = file_delete(evidence_path)
+    env_set("SIMPLE_TEST_RESULT_FILE", evidence_path)
+    val _ = core_interpret(source, path)
+    if eval_has_error():
+        print "error: {eval_get_error()}"
+        return 1
+    val evidence = file_read_text(evidence_path) ?? ""
+    val _ = file_delete(evidence_path)
+    val lines = evidence.split("\n")
+    if lines.len() < 3 or lines[0] != "simple-bdd-v1":
+        print "error: test-runner: no examples executed"
+        return 1
+    val passed = lines[1].to_i64() ?? 0
+    val failed = lines[2].to_i64() ?? 0
+    val total = passed + failed
+    print "Results: {total} total, {passed} passed, {failed} failed"
+    if total == 0 or failed > 0:
+        return 1
+    0

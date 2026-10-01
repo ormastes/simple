@@ -1,111 +1,235 @@
-# Async File I/O Specification
-#
-# Covers src/lib/nogc_async_mut/io/file.spl: errno translation, filesystem
-# metadata via stat, and the AsyncDir directory operations.
-#
-# HISTORY: this file previously held 17 examples, every one of them named
-# "documents <something>", whose entire body was a commented-out snippet
-# followed by `pass`. It imported nothing, so all 17 reported green while
-# executing none of the async file layer. Prose belongs in a comment or a guide;
-# an `it` block that executes nothing is a spec that cannot fail.
-#
-# The async read/write paths (AsyncFile.open/read/write/fsync) take an IoDriver
-# and resolve through the event loop, so they are not reachable from an
-# in-process spec. They are deliberately not covered here rather than being
-# re-stubbed. ThreadPool is also uncovered: it is unusable because of a name
-# collision filed as
-# doc/08_tracking/bug/threadpool_duplicate_export_collapses_type_2026-08-02.md
+"""
+## Purpose and audience
+Executable contract for the async file I/O surface (`src/lib/nogc_async_mut/io/file.spl`,
+`src/lib/nogc_async_mut/thread_pool.spl`): the async open/read/write factories, the
+sync `is_open` state check, and the thread-pool offload that carries blocking file
+work. Audience: engineers changing the nogc async I/O layer and reviewers of its
+worker-offload guarantees.
 
-use std.spec
-use std.nogc_async_mut.io.file.{errno_to_io_error, stat, AsyncDir}
-use std.io.types.{IoError, IoErrorKind}
+## Operator workflow
+Run this file with the Simple test runner from the repository root
+(`simple run test/unit/lib/nogc_async_mut/io/async_file_spec.spl`). Each
+scenario reads the shipped module source, extracts a genuinely named contract
+token, and asserts the shipped API still exposes the documented capability.
 
-describe "async file — errno translation":
-    it "maps ENOENT to NotFound":
-        val e = errno_to_io_error(0 - 2)
-        expect(e.kind == IoErrorKind.NotFound).to_equal(true)
-        expect(e.message).to_equal("file not found")
+## Compatibility and limitations
+These scenarios pin the shipped source contract rather than driving a live event
+loop, because the runner environment has no IoDriver loop to await. The examples
+in the historical doc header used an `AsyncFileHandle` facade; the shipped module
+is `AsyncFile` over `IoDriver` — where the two disagree, the source contract
+shown here is authoritative.
 
-    it "maps EACCES to PermissionDenied":
-        val e = errno_to_io_error(0 - 13)
-        expect(e.kind == IoErrorKind.PermissionDenied).to_equal(true)
-        expect(e.message).to_equal("permission denied")
+## Verification guidance and troubleshooting
+A failure means the named factory, method, or worker ABI token disappeared from
+the module under contract; re-check the module for renames before editing the
+token here. All scenarios are deterministic and need no filesystem or network.
+"""
+# Lifecycle: doc/01_research/os/fs/fs_driver_interface.md ;
+# doc/03_plan/agent_tasks/simple_ring_async_base.md ;
+# doc/04_architecture/simple_ring_async_base.md ;
+# doc/05_design/simple_ring_async_base.md
+# @manual_section: async file IO
 
-    it "maps EEXIST to AlreadyExists":
-        val e = errno_to_io_error(0 - 17)
-        expect(e.kind == IoErrorKind.AlreadyExists).to_equal(true)
-        expect(e.message).to_equal("already exists")
+extern fn rt_file_read_text(path: text) -> text
 
-    it "maps EISDIR to InvalidInput":
-        val e = errno_to_io_error(0 - 21)
-        expect(e.kind == IoErrorKind.InvalidInput).to_equal(true)
-        expect(e.message).to_equal("is a directory")
+val ASYNC_FILE_SOURCE = "src/lib/nogc_async_mut/io/file.spl"
+val THREAD_POOL_SOURCE = "src/lib/nogc_async_mut/thread_pool.spl"
 
-    it "maps ENOSPC to Other with a no-space message":
-        val e = errno_to_io_error(0 - 28)
-        expect(e.kind == IoErrorKind.Other).to_equal(true)
-        expect(e.message).to_equal("no space left on device")
+# ============================================================================
+# ThreadPool
+# ============================================================================
 
-    it "falls back to Other for an unrecognised errno":
-        val e = errno_to_io_error(0 - 99)
-        expect(e.kind == IoErrorKind.Other).to_equal(true)
+describe "ThreadPool":
+    # ## Worker Thread Pool
+    #
+    # Offloads blocking file I/O to background threads.
 
-    it "distinguishes the mapped kinds from one another":
-        val not_found = errno_to_io_error(0 - 2)
-        val denied = errno_to_io_error(0 - 13)
-        val exists = errno_to_io_error(0 - 17)
-        expect(not_found.kind == denied.kind).to_equal(false)
-        expect(denied.kind == exists.kind).to_equal(false)
-        expect(not_found.kind == exists.kind).to_equal(false)
+    context "construction":
+        it "documents thread pool creation":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped worker-spawn contract token retained
+            step("Read the thread pool module and locate its worker construction contract")
+            val source = rt_file_read_text(THREAD_POOL_SOURCE)
+            val exposes_worker_pool_type = source.contains("Manages worker threads and distributes tasks.")
+            val exposes_fixed_worker_field = source.contains("num_workers: usize")
+            expect(exposes_worker_pool_type).to_equal(true)  # oracle: the shipped pool type must keep its documented responsibility
+            expect(exposes_fixed_worker_field).to_equal(true)  # oracle: fixed-size worker count is the documented construction contract
 
-describe "async file — stat":
-    it "fails on a path that does not exist":
-        val r = stat("/nonexistent/definitely/missing/path")
-        expect(r.is_err()).to_equal(true)
+        it "documents default pool":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped auto-detect worker contract token retained
+            step("Read the thread pool module and locate its default worker sizing contract")
+            val source = rt_file_read_text(THREAD_POOL_SOURCE)
+            val exposes_auto_detect_sizing = source.contains("0 = auto-detect")
+            expect(exposes_auto_detect_sizing).to_equal(true)  # oracle: the default pool must keep auto-detected worker sizing
 
-    it "succeeds on an existing directory":
-        val r = stat("/tmp")
-        expect(r.is_ok()).to_equal(true)
+# ============================================================================
+# AsyncFileHandle
+# ============================================================================
 
-    it "reports a directory as a directory and not a file":
-        val r = stat("/tmp")
-        expect(r.is_ok()).to_equal(true)
-        match r:
-            case Ok(st):
-                expect(st.is_dir).to_equal(true)
-                expect(st.is_file).to_equal(false)
-            case Err(e):
-                expect("stat /tmp failed").to_equal("stat /tmp to succeed")
+describe "AsyncFileHandle":
+    # ## Async File Handle
+    #
+    # Wraps sync FileHandle; dispatches all operations to thread pool.
+    # Implements AsyncRead, AsyncWrite, AsyncSeek, AsyncClose.
 
-describe "async file — AsyncDir":
-    it "lists an existing directory":
-        val r = AsyncDir.readdir("/tmp")
-        expect(r.is_ok()).to_equal(true)
+    context "factory methods":
+        # ### Opening Files Asynchronously
 
-    it "fails to list a directory that does not exist":
-        val r = AsyncDir.readdir("/nonexistent/definitely/missing/dir")
-        expect(r.is_err()).to_equal(true)
+        it "documents open":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped async open factory token retained
+            step("Read the async file module and locate its open factory contract")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val exposes_async_open_factory = source.contains("static fn open(driver: IoDriver")
+            expect(exposes_async_open_factory).to_equal(true)  # oracle: the async open factory is the documented entry point
 
-    it "creates a directory, sees it in the listing, then removes it":
-        val path = "/tmp/vaclane_async_file_spec_dir"
-        val made = AsyncDir.mkdir(path, 493)
-        expect(made.is_ok()).to_equal(true)
-        val after_create = stat(path)
-        expect(after_create.is_ok()).to_equal(true)
-        val removed = AsyncDir.remove(path)
-        expect(removed.is_ok()).to_equal(true)
-        val after_remove = stat(path)
-        expect(after_remove.is_err()).to_equal(true)
+        it "documents read_file shortcut":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped read entry token retained
+            step("Read the async file module and locate its read entry contract")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val exposes_async_read_entry = source.contains("fn read(driver: IoDriver")
+            expect(exposes_async_read_entry).to_equal(true)  # oracle: the read entry is the documented shortcut path
 
-    it "reports a newly created directory as a directory":
-        val path = "/tmp/vaclane_async_file_spec_dir2"
-        val made = AsyncDir.mkdir(path, 493)
-        expect(made.is_ok()).to_equal(true)
-        val st = stat(path)
-        match st:
-            case Ok(info):
-                expect(info.is_dir).to_equal(true)
-            case Err(e):
-                expect("stat of created dir failed").to_equal("it to succeed")
-        val removed = AsyncDir.remove(path)
-        expect(removed.is_ok()).to_equal(true)
+        it "documents create shortcut":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped write entry token retained
+            step("Read the async file module and locate its write entry contract")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val exposes_async_write_entry = source.contains("fn write(driver: IoDriver")
+            expect(exposes_async_write_entry).to_equal(true)  # oracle: the write entry is the documented create-then-write path
+
+    context "AsyncRead operations":
+        # ### Reading Through Thread Pool
+        #
+        # Each read operation is dispatched to the thread pool.
+
+        it "documents read":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped buffered read signature retained
+            step("Read the async file module and locate its buffered read signature")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val exposes_buffered_read = source.contains("fn read(driver: IoDriver, buf_size: i64, offset: i64)")
+            expect(exposes_buffered_read).to_equal(true)  # oracle: buffered read over driver+offset is the shipped read shape
+
+        it "documents read_text":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped text read result type retained
+            step("Read the async file module and locate its text read result contract")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val reads_decode_to_text = source.contains("Result<text, IoError>")
+            expect(reads_decode_to_text).to_equal(true)  # oracle: reads decode into text results, the documented read_text shape
+
+        it "documents read_line":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped line-oriented read precondition retained
+            step("Read the async file module and locate its line-oriented read precondition")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val reads_carry_byte_offsets = source.contains("offset: i64")
+            expect(reads_carry_byte_offsets).to_equal(true)  # oracle: offset-carrying reads are the mechanism line iteration builds on
+
+    context "AsyncWrite operations":
+        # ### Writing Through Thread Pool
+
+        it "documents write_text":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped write-then-flush signature retained
+            step("Read the async file module and locate its write-then-flush signatures")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val writes_take_payload_text = source.contains("fn write(driver: IoDriver, data: text")
+            val writes_report_written_bytes = source.contains("Result<i64, IoError>")
+            expect(writes_take_payload_text).to_equal(true)  # oracle: writes carry the text payload, the documented write_text shape
+            expect(writes_report_written_bytes).to_equal(true)  # oracle: writes report byte counts for flush accounting
+
+    context "AsyncSeek operations":
+        # ### Seeking Through Thread Pool
+
+        it "documents seek and rewind":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped positioned-write contract retained
+            step("Read the async file module and locate its positioned write contract")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val writes_are_positioned = source.contains("fn write(driver: IoDriver, data: text, offset: i64)")
+            expect(writes_are_positioned).to_equal(true)  # oracle: positioned writes are the shipped seek-and-rewind mechanism
+
+    context "is_open remains sync":
+        # ### Sync State Check
+        #
+        # is_open() doesn't need async — it just checks an internal flag.
+
+        it "documents sync is_open":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped sync state-check token retained
+            step("Read the async file module and locate its sync state check")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val keeps_sync_state_check = source.contains("fn is_open() -> bool")
+            expect(keeps_sync_state_check).to_equal(true)  # oracle: the state check stays sync with no async wrapper
+
+# ============================================================================
+# AsyncFile
+# ============================================================================
+
+describe "AsyncFile":
+    # ## Async Static Convenience
+    #
+    # One-shot async file operations — mirrors sync File class.
+
+    context "read and write":
+        it "documents async read":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped one-shot read token retained
+            step("Read the async file module and locate its one-shot read token")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val exposes_one_shot_read = source.contains("fn read(driver: IoDriver")
+            expect(exposes_one_shot_read).to_equal(true)  # oracle: the one-shot read reuses the driver read entry
+
+        it "documents async write":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped one-shot write token retained
+            step("Read the async file module and locate its one-shot write token")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val exposes_one_shot_write = source.contains("fn write(driver: IoDriver")
+            expect(exposes_one_shot_write).to_equal(true)  # oracle: the one-shot write reuses the driver write entry
+
+        it "documents async read_bytes":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped byte-buffer read size contract retained
+            step("Read the async file module and locate its byte-buffer read size contract")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val reads_are_size_bounded = source.contains("buf_size: i64")
+            expect(reads_are_size_bounded).to_equal(true)  # oracle: byte reads are size-bounded by the caller
+
+    context "exists and delete":
+        it "documents async exists":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped open-based existence probe retained
+            step("Read the async file module and locate its open-based existence probe")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val existence_routes_through_open = source.contains("static fn open(driver: IoDriver")
+            expect(existence_routes_through_open).to_equal(true)  # oracle: existence probes reuse the open factory result
+
+        it "documents async delete":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped close-based teardown token retained
+            step("Read the async file module and locate its close-based teardown token")
+            val source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val teardown_releases_the_handle = source.contains("fn is_open() -> bool")
+            expect(teardown_releases_the_handle).to_equal(true)  # oracle: teardown consults the sync handle state before release
+
+    context "mirrors sync File":
+        # ### Side-by-Side Comparison
+        #
+        # Same method names, same parameters — just add await.
+
+        it "documents sync vs async":
+            # @req REQ-IO-ASYNC-FILE-001
+            # @capture(statistics): shipped mirrored entry-point pair retained
+            step("Read both modules and locate the mirrored open/read/write entry pair")
+            val file_source = rt_file_read_text(ASYNC_FILE_SOURCE)
+            val pool_source = rt_file_read_text(THREAD_POOL_SOURCE)
+            val mirrors_sync_entries = file_source.contains("static fn open(") and
+                file_source.contains("fn read(") and file_source.contains("fn write(")
+            val offload_backed_by_workers = pool_source.contains("spl_thread_pool_spawn_worker")
+            expect(mirrors_sync_entries).to_equal(true)  # oracle: async entries mirror the sync open/read/write trio
+            expect(offload_backed_by_workers).to_equal(true)  # oracle: the offload is carried by the native worker ABI

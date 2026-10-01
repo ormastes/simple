@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -52,6 +52,293 @@ expect(source).to_contain("[ \"$renderer_handle\" = \"$handle\" ] || fail \"even
    - Expected: source does not contain `processes whose name is "SimpleGui"`
    - Expected: launcher does not contain `tell application "SimpleGui" to activate`
    - Expected: launcher does not contain `processes whose name is "SimpleGui"`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should route focus keyboard pointer and click input through the launched window")
+step("Inspect PID-scoped focus, input injection, and application receipt checks")
+val gate = gate_text()
+val launcher = launcher_text()
+expect(launcher).to_contain("find_exact_app_pid()")
+expect(launcher).to_contain("launched_pid=%s")
+expect(launcher).to_contain("launched_executable=%s")
+expect(gate).to_contain("SIMPLE_GUI_LAUNCHED_PID_PATH=")
+expect(gate).to_contain("require_launched_process")
+expect(gate).to_contain("[ \"$window_pid\" = \"$app_pid\" ] || fail \"window-pid-mismatch\"")
+expect(gate).to_contain("set frontmost to true")
+expect(gate).to_contain("set targetPid to (item 1 of argv) as integer")
+expect(gate).to_contain("processes whose unix id is targetPid")
+expect(gate).to_contain("keystroke \"g\"")
+expect(gate).to_contain("cliclick \"m:" + SHELL_OPEN + "click_x}," + SHELL_OPEN + "click_y}\" \"c:.\"")
+expect(gate).to_contain("screencapture -x -o -l\"$window_id\" \"$BEFORE_PNG\"")
+expect(gate).to_contain("screencapture -x -o -l\"$window_id\" \"$AFTER_PNG\"")
+expect(gate.contains("tell application \"SimpleGui\" to activate")).to_equal(false)
+expect(gate.contains("processes whose name is \"SimpleGui\"")).to_equal(false)
+expect(launcher.contains("tell application \"SimpleGui\" to activate")).to_equal(false)
+expect(launcher.contains("processes whose name is \"SimpleGui\"")).to_equal(false)
+expect(gate).to_contain("[ \"" + SHELL_OPEN + "keyboard:-0}\" -gt 0 ] || fail \"keyboard-event-missing\"")
+expect(gate).to_contain("[ \"" + SHELL_OPEN + "pointer:-0}\" -gt 0 ] || fail \"pointer-event-missing\"")
+expect(gate).to_contain("[ \"" + SHELL_OPEN + "clicks:-0}\" -gt 0 ] || fail \"click-event-missing\"")
+expect(gate).to_contain("[ \"" + SHELL_OPEN + "revision:-0}\" -gt 0 ] || fail \"interaction-revision-missing\"")
+```
+
+</details>
+
+#### interaction changes both device readback and visible captures
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should prove interaction changes device readback and visible captures
+- Inspect before/after framebuffer and screen-capture difference checks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should prove interaction changes device readback and visible captures")
+step("Inspect before/after framebuffer and screen-capture difference checks")
+val gate = gate_text()
+expect(gate).to_contain("[ \"$initial_checksum\" != \"$interaction_checksum\" ]")
+expect(gate).to_contain("fail \"interaction-frame-unchanged\"")
+expect(gate).to_contain("[ \"$before_bytes\" -gt 1000 ] || fail \"before-capture-empty\"")
+expect(gate).to_contain("[ \"$after_bytes\" -gt 1000 ] || fail \"after-capture-empty\"")
+expect(gate).to_contain("[ \"$before_cksum\" != \"$after_cksum\" ] || fail \"capture-unchanged\"")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_before_png=$BEFORE_PNG")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_after_png=$AFTER_PNG")
+```
+
+</details>
+
+#### Retina composition records logical versus backing pixels
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should enable Retina composition and record logical versus backing pixels
+- Inspect 300 DPI renderer flow and the independent macOS backing-scale proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should enable Retina composition and record logical versus backing pixels")
+step("Inspect 300 DPI renderer flow and the independent macOS backing-scale proof")
+val gate = gate_text()
+val launcher = launcher_text()
+expect(gate).to_contain("REQUESTED_DPI=\"" + SHELL_OPEN + "SHOWCASE_DPI:-300}\"")
+expect(gate).to_contain("SHOWCASE_DPI=\"$REQUESTED_DPI\"")
+expect(gate).to_contain("[ \"$renderer_dpi\" = \"$REQUESTED_DPI\" ]")
+expect(gate).to_contain("fail \"renderer-dpi-mismatch\"")
+expect(launcher).to_contain("<key>NSHighResolutionCapable</key><true/>")
+expect(gate).to_contain("[ \"$high_resolution_capable\" = \"true\" ] || fail \"high-resolution-bundle-disabled\"")
+expect(gate).to_contain("validate_hidpi_geometry")
+expect(gate).to_contain("fail \"high-dpi-backing-mismatch\"")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_logical_dimensions=" + SHELL_OPEN + "window_w}x" + SHELL_OPEN + "window_h}")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_backing_dimensions=" + SHELL_OPEN + "before_pixel_width}x" + SHELL_OPEN + "before_pixel_height}")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_backing_scale=$backing_scale")
+val configure_at = gate.index_of("REQUESTED_DPI=\"" + SHELL_OPEN + "SHOWCASE_DPI:-300}\"")
+val launch_at = gate.index_of("SHOWCASE_DPI=\"$REQUESTED_DPI\"")
+val validate_at = gate.index_of("[ \"$renderer_dpi\" = \"$REQUESTED_DPI\" ]")
+expect(configure_at).to_be_greater_than(-1)  # oracle: -1 sentinel means the DPI pin is absent
+expect(launch_at).to_be_greater_than(configure_at)
+expect(validate_at).to_be_greater_than(launch_at)
+```
+
+</details>
+
+#### the selected vector face transitions from cold rasterization to warm cache hits
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should require the selected vector face and cold-to-warm cache transition
+- Inspect vector-font identity and cache admission checks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require the selected vector face and cold-to-warm cache transition")
+step("Inspect vector-font identity and cache admission checks")
+val gate = gate_text()
+expect(gate).to_contain("[ \"$font_loaded\" = \"true\" ] || fail \"vector-font-not-loaded\"")
+expect(gate).to_contain("[ -n \"$font_expected_identity\" ] || fail \"vector-font-identity-missing\"")
+expect(gate).to_contain("[ \"$font_identity\" = \"$font_expected_identity\" ]")
+expect(gate).to_contain("fail \"vector-font-identity-mismatch\"")
+expect(gate).to_contain("[ \"" + SHELL_OPEN + "font_cold:-0}\" -gt 0 ] || fail \"vector-font-cold-rasterization-missing\"")
+expect(gate).to_contain("[ \"" + SHELL_OPEN + "font_warm:--1}\" -eq 0 ] || fail \"vector-font-warm-rerasterized\"")
+expect(gate).to_contain("[ \"" + SHELL_OPEN + "font_hits:-0}\" -gt 0 ] || fail \"vector-font-warm-cache-hit-missing\"")
+```
+
+</details>
+
+#### vector fonts execute on Vulkan with no CPU fallback
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should require Vulkan vector-font execution without CPU fallback
+- Inspect the font execution target, attempt, and fallback checks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require Vulkan vector-font execution without CPU fallback")
+step("Inspect the font execution target, attempt, and fallback checks")
+val gate = gate_text()
+expect(gate).to_contain("[ -z \"$fallback_reason\" ] || fail \"renderer-cpu-fallback\"")
+expect(gate).to_contain("[ \"$font_target\" = \"vulkan\" ] || fail \"vector-font-execution-target-mismatch\"")
+expect(gate).to_contain("[ -n \"$font_attempts\" ] || fail \"vector-font-execution-attempts-missing\"")
+expect(gate).to_contain("[ \"$font_succeeded\" = \"true\" ] || fail \"vector-font-backend-attempt-failed\"")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_font_execution_target=$font_target")
+```
+
+</details>
+
+#### should admit only the trusted widget source and strict bundled runtime
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should bound startup by timeout and resident memory
+- Inspect the live-process deadline and RSS fail-closed gates
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should bound startup by timeout and resident memory")
+step("Inspect the live-process deadline and RSS fail-closed gates")
+val gate = gate_text()
+expect(gate).to_contain("TIMEOUT_SECS=\"" + SHELL_OPEN + "MACOS_VULKAN_GUI_WIDGET_TIMEOUT_SECS:-180}\"")
+expect(gate).to_contain("MAX_RSS_KB=\"" + SHELL_OPEN + "MACOS_VULKAN_GUI_WIDGET_MAX_RSS_KB:-1048576}\"")
+expect(gate).to_contain("deadline=$(($(date +%s) + TIMEOUT_SECS))")
+expect(gate).to_contain("process_rss_kb()")
+expect(gate).to_contain("[ \"$observed_rss_kb\" -gt \"$MAX_RSS_KB\" ]")
+expect(gate).to_contain("fail \"resource-limit-exceeded\"")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_observed_rss_kb=$observed_rss_kb")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_max_rss_kb=$MAX_RSS_KB")
+expect(gate).to_contain("fail \"window-not-found\"")
+```
+
+</details>
+
+#### an early child exit fails closed with bounded diagnostics
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should fail closed when the child exits before opening a window
+- Inspect exact launch identity, early-exit detection, and bounded diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed when the child exits before opening a window")
+step("Inspect exact launch identity, early-exit detection, and bounded diagnostics")
+val gate = gate_text()
+expect(gate).to_contain("app_pid=\"\"")
+expect(gate).to_contain("[ -s \"$LAUNCHED_PID_ENV\" ] || fail \"launched-pid-record-missing\"")
+expect(gate).to_contain("pid_matches_executable()")
+expect(gate).to_contain("capture_child_exit_cause()")
+expect(gate).to_contain("child_logs_have_terminal_failure()")
+expect(gate).to_contain("kill -0 \"$app_pid\" 2>/dev/null || fail \"launched-process-missing\"")
+expect(gate).to_contain("fail \"launched-process-identity-mismatch\"")
+expect(gate).to_contain("macos_vulkan_gui_widget_live_child_exit_cause=$child_exit_cause")
+```
+
+</details>
+
+#### cleanup kills only the exact launched child on every exit path
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should clean up only the exact launched child on every exit path
+- Inspect PID-scoped window ownership, signal cleanup, and success cleanup
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should clean up only the exact launched child on every exit path")
+step("Inspect PID-scoped window ownership, signal cleanup, and success cleanup")
+val gate = gate_text()
+expect(gate).to_contain("cleanup()")
+expect(gate).to_contain("trap cleanup EXIT HUP INT TERM")
+expect(gate).to_contain("pid_matches_executable \"$app_pid\" \"$launched_executable\" || return 0")
+expect(gate).to_contain("fail \"invalid-window-pid\"")
+expect(gate).to_contain("if kill -0 \"$app_pid\" 2>/dev/null; then")
+expect(gate).to_contain("kill -TERM \"$app_pid\" 2>/dev/null || true")
+expect(gate).to_contain("cleanup\napp_pid=\"\"")
+```
+
+</details>
+
+#### malformed or mismatched renderer checksum proof is rejected
+
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- should behaviorally reject malformed or mismatched renderer checksum proof
+- Run the wrapper checksum contract probe with invalid evidence
+   - Expected: malformed_code equals `1`
+   - Expected: mismatch_code equals `1`
+- Accept only equal positive integer renderer and initial-event checksums
+   - Expected: matching_code equals `0`
 
 
 <details>
@@ -660,8 +947,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

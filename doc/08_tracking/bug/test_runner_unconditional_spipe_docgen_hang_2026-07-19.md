@@ -1,4 +1,8 @@
 # Test runner unconditional SPipe docgen hang
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
 **Severity:** P1 — passing tests could hang before the runner returned
@@ -29,3 +33,4 @@ unchanged.
 - admitted self-hosted Stage 4 evidence: pending
 - source launch still emits excessive valid-source recovery diagnostics; that
   independent noise/performance defect remains open
+

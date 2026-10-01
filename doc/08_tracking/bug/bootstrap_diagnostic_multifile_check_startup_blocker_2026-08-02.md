@@ -1,7 +1,10 @@
 # Bootstrap diagnostic multi-file check startup blocker
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** BLOCKED — unsafe to enable chunking without per-file terminal records
 **Area:** bootstrap diagnostics / check entrypoint / interpreter startup
 
 ## Live evidence
@@ -133,3 +136,4 @@ search contract. A target root searches the root, `deps`, `bootstrap`, and
 and its `deps` without producing duplicate nested-bootstrap candidates. Exact
 tests cover both accepted path forms and fail closed when neither authority is
 present. No additional checker build was run after the three-cycle cap.
+

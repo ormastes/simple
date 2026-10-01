@@ -15,6 +15,14 @@ fail() {
     exit 1
 }
 
+file_mode() {
+    if mode=$(stat -c %a "$1" 2>/dev/null); then
+        printf '%s\n' "$mode"
+    else
+        stat -f %Lp "$1"
+    fi
+}
+
 make_tuple() {
     tuple_root=$1
     mkdir -p "$tuple_root/deps"
@@ -24,6 +32,8 @@ make_tuple() {
         bs=1048576 count=8 >/dev/null 2>&1
     printf 'backfill\n' >"$tuple_root/libsimple_compiler_backfill.a"
     printf 'runtime-static\n' >"$tuple_root/deps/libsimple_runtime.a"
+    printf 'hosted-runtime\n' \
+        >"$tuple_root/deps/libspl_hosted_runtime-fixture.rlib"
     dd if=/dev/zero of="$tuple_root/deps/decoy.rlib" \
         bs=1048576 count=64 >/dev/null 2>&1
     printf 'metadata\n' >"$tuple_root/decoy.d"
@@ -34,6 +44,11 @@ generation_root="$test_tmp/generations"
 make_tuple "$source_root"
 mkdir "$generation_root"
 fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+details_source="$test_tmp/simple.inputs.sha256.details.env"
+printf 'schema=simple-bootstrap-fingerprint-details-v1\naggregate_sha256=%s\n' \
+    "$fingerprint" >"$details_source"
+BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE=$details_source
+export BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE
 
 # The 64 MiB dependency decoy is larger than this RSS budget. Projection must
 # neither copy nor retain it while selecting the three authority members.
@@ -61,9 +76,19 @@ fi
 bootstrap_stage3_prepare_seed_generation "$source_root" "$generation_root" \
     "$fingerprint" simple libsimple_native_all.a \
     libsimple_compiler_backfill.a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+unset BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE
 staging=$BOOTSTRAP_STAGE3_PREPARED_STAGING
-[ "$(find "$staging" -type f | wc -l | tr -d ' ')" -eq 5 ] ||
+[ "$(find "$staging" -type f | wc -l | tr -d ' ')" -eq 8 ] ||
     fail "prepared generation did not contain consumer tuple plus stamp"
+[ -f "$staging/simple.inputs.sha256.details.env" ] &&
+    [ ! -L "$staging/simple.inputs.sha256.details.env" ] ||
+    fail "fingerprint detail sidecar was not projected as a regular file"
+cmp "$details_source" "$staging/simple.inputs.sha256.details.env" >/dev/null ||
+    fail "fingerprint detail sidecar bytes changed during projection"
+[ "$(file_mode "$staging/simple.inputs.sha256.details.env")" = 400 ] ||
+    fail "fingerprint detail sidecar was not frozen read-only"
+[ "$(file_mode "$staging")" = 700 ] ||
+    fail "prepared staging root was not left publication-writable"
 [ ! -e "$staging/deps/decoy.rlib" ] && [ ! -e "$staging/decoy.d" ] ||
     fail "Cargo decoys entered authority generation"
 [ -f "$staging/deps/libsimple_runtime.a" ] ||
@@ -75,6 +100,8 @@ expected_bytes=$((expected_bytes + $(wc -c \
     <"$source_root/libsimple_compiler_backfill.a")))
 expected_bytes=$((expected_bytes + $(wc -c \
     <"$source_root/deps/libsimple_runtime.a")))
+expected_bytes=$((expected_bytes + $(wc -c \
+    <"$source_root/deps/libspl_hosted_runtime-fixture.rlib")))
 actual_payload_bytes=$(wc -c <"$staging/simple")
 actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
     <"$staging/libsimple_native_all.a")))
@@ -82,6 +109,8 @@ actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
     <"$staging/libsimple_compiler_backfill.a")))
 actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
     <"$staging/deps/libsimple_runtime.a")))
+actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
+    <"$staging/deps/libspl_hosted_runtime-fixture.rlib")))
 [ "$actual_payload_bytes" -eq "$expected_bytes" ] ||
     fail "projected payload byte count changed"
 [ "$actual_payload_bytes" -lt 10485760 ] ||
@@ -92,18 +121,23 @@ actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
 drvfs="$test_tmp/drvfs"
 drvfs_out="$test_tmp/drvfs-out"
 make_tuple "$drvfs"
+printf 'dynamic-runtime\n' >"$drvfs/libsimple_runtime.dylib"
+printf 'cocoa-provider\n' >"$drvfs/libspl_cocoa.dylib"
+printf 'cocoa-producer\n' >"$drvfs/libspl_cocoa.producer.txt"
 for member in simple libsimple_native_all.a libsimple_compiler_backfill.a \
-    deps/libsimple_runtime.a; do
+    deps/libsimple_runtime.a deps/libspl_hosted_runtime-fixture.rlib \
+    libsimple_runtime.dylib libspl_cocoa.dylib libspl_cocoa.producer.txt; do
     chmod 777 "$drvfs/$member"
 done
 bootstrap_stage3_copy_seed_tuple "$drvfs" "$drvfs_out" simple \
-    libsimple_native_all.a libsimple_compiler_backfill.a ||
+    libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin ||
     fail "DrvFS source modes prevented tuple admission"
 for member in simple libsimple_native_all.a libsimple_compiler_backfill.a \
-    deps/libsimple_runtime.a; do
+    deps/libsimple_runtime.a deps/libspl_hosted_runtime-fixture.rlib \
+    libsimple_runtime.dylib libspl_cocoa.dylib libspl_cocoa.producer.txt; do
     expected_mode=400
     [ "$member" != simple ] || expected_mode=500
-    [ "$(stat -c '%a' "$drvfs_out/$member")" = "$expected_mode" ] ||
+    [ "$(file_mode "$drvfs_out/$member")" = "$expected_mode" ] ||
         fail "DrvFS member $member did not freeze by artifact role"
     [ "$(bootstrap_stage3_hash_file "$drvfs/$member")" = \
         "$(bootstrap_stage3_hash_file "$drvfs_out/$member")" ] ||
@@ -147,11 +181,11 @@ if bootstrap_stage3_copy_seed_tuple "$replacing" "$test_tmp/replacing-out" \
 fi
 unset BOOTSTRAP_STAGE3_TEST_REPLACE_AFTER_TUPLE_COPY
 
-[ "$(stat -c '%a' "$staging/simple")" = 500 ] ||
+[ "$(file_mode "$staging/simple")" = 500 ] ||
     fail "seed mode was not frozen executable"
-[ "$(stat -c '%a' "$staging/libsimple_native_all.a")" = 400 ] ||
+[ "$(file_mode "$staging/libsimple_native_all.a")" = 400 ] ||
     fail "native-all mode was not frozen read-only"
-[ "$(stat -c '%a' "$staging/deps/libsimple_runtime.a")" = 400 ] ||
+[ "$(file_mode "$staging/deps/libsimple_runtime.a")" = 400 ] ||
     fail "runtime mode was not frozen read-only"
 
 # Name mapping is target-derived: GNU covers Linux, Darwin, and FreeBSD;
@@ -163,10 +197,96 @@ chmod 755 "$msvc/simple.exe"
 printf 'native\n' >"$msvc/simple_native_all.lib"
 printf 'backfill\n' >"$msvc/simple_compiler_backfill.lib"
 printf 'runtime\n' >"$msvc/deps/simple_runtime.lib"
+printf 'hosted\n' >"$msvc/deps/libspl_hosted_runtime-fixture.rlib"
 bootstrap_stage3_copy_seed_tuple "$msvc" "$test_tmp/msvc-out" \
     simple.exe simple_native_all.lib simple_compiler_backfill.lib ||
     fail "Windows MSVC consumer tuple mapping failed"
 [ -f "$test_tmp/msvc-out/deps/simple_runtime.lib" ] ||
     fail "Windows MSVC runtime archive was omitted"
 
-echo "PASS: bootstrap Stage 3 projects only a stable seed tuple"
+# Cargo >= 1.100 nightly (2026-09-11) artifact layout: deps/ is never
+# created; the hosted rlib lives at build/spl_hosted_runtime/<metadata>/out/
+# and the runtime archive at the profile root. Both must be admitted and
+# projected into the frozen deps/ spelling.
+newlayout="$test_tmp/newlayout"
+mkdir -p "$newlayout/build/spl_hosted_runtime/8325cc995898e003/out"
+printf '#!/bin/sh\necho seed\n' >"$newlayout/simple"
+chmod 755 "$newlayout/simple"
+printf 'native\n' >"$newlayout/libsimple_native_all.a"
+printf 'backfill\n' >"$newlayout/libsimple_compiler_backfill.a"
+printf 'runtime-static\n' >"$newlayout/libsimple_runtime.a"
+printf 'hosted-runtime\n' \
+    >"$newlayout/build/spl_hosted_runtime/8325cc995898e003/out/libspl_hosted_runtime-8325cc995898e003.rlib"
+bootstrap_stage3_copy_seed_tuple "$newlayout" "$test_tmp/newlayout-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a ||
+    fail "cargo 1.100 build/*/out layout was rejected"
+[ ! -e "$newlayout/deps" ] ||
+    fail "new-layout fixture unexpectedly grew a deps/ directory"
+[ -f "$test_tmp/newlayout-out/deps/libspl_hosted_runtime-8325cc995898e003.rlib" ] ||
+    fail "hosted rlib was not projected into deps/ from build/*/out"
+[ -f "$test_tmp/newlayout-out/deps/libsimple_runtime.a" ] ||
+    fail "runtime archive was not projected into deps/ from profile root"
+cmp "$newlayout/libsimple_runtime.a" \
+    "$test_tmp/newlayout-out/deps/libsimple_runtime.a" >/dev/null ||
+    fail "runtime archive bytes changed during alias projection"
+[ "$(file_mode "$test_tmp/newlayout-out/deps/libsimple_runtime.a")" = 400 ] ||
+    fail "new-layout runtime archive was not frozen read-only"
+
+# Mixed layout: both spellings present; the newest candidate wins regardless
+# of which layout produced it, and only the winner is projected.
+mixed="$test_tmp/mixed"
+make_tuple "$mixed"
+mkdir -p "$mixed/build/spl_hosted_runtime/aaaaaaaaaaaaaaaa/out"
+printf 'hosted-newer\n' \
+    >"$mixed/build/spl_hosted_runtime/aaaaaaaaaaaaaaaa/out/libspl_hosted_runtime-aaaaaaaaaaaaaaaa.rlib"
+touch -t 202001010000 "$mixed/deps/libspl_hosted_runtime-fixture.rlib"
+touch -t 202601010000 \
+    "$mixed/build/spl_hosted_runtime/aaaaaaaaaaaaaaaa/out/libspl_hosted_runtime-aaaaaaaaaaaaaaaa.rlib"
+bootstrap_stage3_copy_seed_tuple "$mixed" "$test_tmp/mixed-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a ||
+    fail "mixed cargo layout was rejected"
+[ -f "$test_tmp/mixed-out/deps/libspl_hosted_runtime-aaaaaaaaaaaaaaaa.rlib" ] ||
+    fail "newest hosted rlib (build/*/out) did not win the deps/ slot"
+[ ! -e "$test_tmp/mixed-out/deps/libspl_hosted_runtime-fixture.rlib" ] ||
+    fail "stale hosted rlib spelling was projected alongside the winner"
+
+# A new-layout candidate that is a symlink must still be refused (alias
+# selection keeps the non-symlink discipline).
+linkalias="$test_tmp/linkalias"
+make_tuple "$linkalias"
+mkdir -p "$linkalias/build/spl_hosted_runtime/evilmeta/out"
+mv "$linkalias/deps/libspl_hosted_runtime-fixture.rlib" \
+    "$linkalias/build/hosted.real"
+ln -s ../../../hosted.real \
+    "$linkalias/build/spl_hosted_runtime/evilmeta/out/libspl_hosted_runtime-evil.rlib"
+if bootstrap_stage3_copy_seed_tuple "$linkalias" "$test_tmp/linkalias-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "symlinked new-layout hosted rlib was accepted"
+fi
+
+# The macOS target explicitly admits the sole Cocoa provider with the tuple.
+macos="$test_tmp/macos"
+mkdir -p "$macos/deps"
+cp "$source_root/simple" "$source_root/libsimple_native_all.a" \
+    "$source_root/libsimple_compiler_backfill.a" "$macos/"
+cp "$source_root/deps/libsimple_runtime.a" \
+    "$source_root/deps/libspl_hosted_runtime-fixture.rlib" "$macos/deps/"
+if bootstrap_stage3_copy_seed_tuple "$macos" "$test_tmp/macos-missing" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin; then
+    fail "macOS authority accepted a missing dynamic runtime"
+fi
+printf 'macos-cocoa-provider\n' > "$macos/libsimple_runtime.dylib"
+bootstrap_stage3_copy_seed_tuple "$macos" "$test_tmp/macos-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin
+cmp "$macos/libsimple_runtime.dylib" "$test_tmp/macos-out/libsimple_runtime.dylib" ||
+    fail "macOS dynamic runtime was omitted or changed"
+[ "$(file_mode "$test_tmp/macos-out/libsimple_runtime.dylib")" = 400 ] ||
+    fail "macOS dynamic runtime was not frozen"
+mv "$macos/libsimple_runtime.dylib" "$macos/dylib.real"
+ln -s dylib.real "$macos/libsimple_runtime.dylib"
+if bootstrap_stage3_copy_seed_tuple "$macos" "$test_tmp/macos-symlink" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin; then
+    fail "macOS authority accepted a symlink dynamic runtime"
+fi
+
+echo "PASS: bootstrap Stage 3 projects only a stable seed tuple, including required macOS dylib"

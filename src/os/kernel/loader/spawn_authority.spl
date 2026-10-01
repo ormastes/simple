@@ -70,6 +70,25 @@ pub fn spawn_authority_seal_bootstrap():
     g_spawn_bootstrap_sealed = true
     serial_println("[spawn-auth] bootstrap sealed root={g_spawn_root_task}")
 
+pub fn spawn_authority_forbid_ambient_after_pid1():
+    """Permanently deny the legacy ambient spawn path after PID1 is prepared.
+
+    This is intentionally stronger than `spawn_authority_seal_bootstrap()`.
+    The latter remains the compatibility guard used by the older inline-init
+    path and can retain a declared root caller.  Filesystem-backed PID1 has a
+    concrete CSpace and RootMintAuthority instead, so *no* task may retain an
+    ambient `spawn_full()` exception at the ring-3 handoff.  A negative root
+    id is outside the kernel TaskId domain; `spawn_authority_is_root()` also
+    rejects it explicitly so a forged scalar cannot recover the exception.
+
+    The function lives in this provider module (rather than PID1 boot code) so
+    the state transition and every ambient lookup share the same scalars.
+    Idempotent: repeating the handoff cannot reopen or widen authority.
+    """
+    g_spawn_root_task = -1
+    g_spawn_bootstrap_sealed = true
+    serial_println("[spawn-auth] ambient spawning forbidden after PID1")
+
 pub fn spawn_authority_reopen_bootstrap():
     """Reopen the bootstrap window (boot-phase restart / test harness only)."""
     g_spawn_bootstrap_sealed = false
@@ -88,8 +107,12 @@ pub fn spawn_authority_root_task() -> i64:
     g_spawn_root_task
 
 pub fn spawn_authority_is_root(caller: i64) -> bool:
-    """True when `caller` is the root task (0 = kernel-origin sentinel)."""
-    caller == g_spawn_root_task
+    """True when `caller` is the configured, valid ambient root task.
+
+    The PID1 handoff uses a negative sentinel to deliberately configure no
+    ambient root at all; it must not be treated as a caller identity.
+    """
+    g_spawn_root_task >= 0 and caller >= 0 and caller == g_spawn_root_task
 
 # ============================================================================
 # The guard

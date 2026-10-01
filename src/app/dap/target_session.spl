@@ -40,6 +40,15 @@ use std.common.debug.debug_target.{DebugState}
 use std.common.debug.host_profile_target.{HostProfileTarget}
 use std.common.debug.profile_target.{ProfileReport, profile_report_unavailable}
 use std.common.debug.session_core.{AttachOpts, attach_opts_default}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugPolicyV1, DebugRootOperationV1, DebugPerturbationV1,
+    debug_policy_development_v1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_authorize,
+    central_debug_service_v1_record,
+    central_debug_service_v1_close,
+}
 use std.notebook.gpu_config.{GpuConfig, default_gpu_config}
 use std.notebook.gpu_mode_resolver.{GpuBackendProbe, resolve_gpu_mode_spec}
 
@@ -231,6 +240,13 @@ pub class TargetDapSession:
     # "" when the session is usable; otherwise a complete, honest diagnostic.
     error: text
     launched: bool
+    # DAP is a client facade: the mutable registry remains centrally owned and
+    # this object retains only its opaque identity. The class-typed target
+    # fields above remain direct fields because copying a capability value
+    # would break mutation aliasing.
+    session_id: DebugSessionId
+    build_id: text
+    session_open: bool
 
 impl TargetDapSession:
     static fn idle() -> TargetDapSession:
@@ -244,6 +260,9 @@ impl TargetDapSession:
             target_kind: TARGET_HOST,
             error: "",
             launched: false,
+            session_id: DebugSessionId(value: ""),
+            build_id: "",
+            session_open: false,
         )
 
     fn is_host() -> bool:
@@ -268,8 +287,10 @@ impl TargetDapSession:
         self.target_kind = resolved.target
         self.error = resolved.error
 
-    me launch_with(launch_json: text, config: GpuConfig, probe: GpuBackendProbe, opts: AttachOpts):
+    me launch_with_policy(launch_json: text, config: GpuConfig, probe: GpuBackendProbe,
+                          opts: AttachOpts, policy: DebugPolicyV1):
         self.program = json_string_field(launch_json, "program")
+        self.build_id = json_string_field(launch_json, "buildId")
         self.route(launch_json, config, probe)
         if self.error != "":
             self.launched = false
@@ -294,9 +315,36 @@ impl TargetDapSession:
             self.error = "launch: no 'program' in the launch configuration"
             self.launched = false
             return
+        # Preserve compatibility with older DAP launch configurations while
+        # making the absence of an exact build identity explicit on receipts.
+        if self.build_id == "":
+            self.build_id = "unverified-path:" + self.program
+        val opened = central_debug_service_v1_open(self.build_id, policy)
+        match opened:
+            case Err(reason):
+                self.error = "launch: debug service refused session: " + reason
+                self.launched = false
+                return
+            case Ok(id):
+                self.session_id = id
+                self.session_open = true
+        val launch_receipt = central_debug_service_v1_authorize(
+            self.session_id, DebugRootOperationV1.Control,
+            DebugPerturbationV1.Cooperative, "dap.launch")
+        if not launch_receipt.allowed:
+            self.error = "launch: DebugServiceV1 denied launch: " + launch_receipt.reason
+            self.launched = false
+            return
         self.target = HostDebugTarget.launch(self.program)
         self.profiler = HostProfileTarget.new(opts)
         self.launched = true
+        central_debug_service_v1_record(
+            self.session_id, DebugRootOperationV1.Control,
+            DebugPerturbationV1.Cooperative, "dap.launch", true, true, "")
+
+    me launch_with(launch_json: text, config: GpuConfig, probe: GpuBackendProbe, opts: AttachOpts):
+        self.launch_with_policy(launch_json, config, probe, opts,
+            debug_policy_development_v1())
 
     # --- DAP request handling ---------------------------------------------
 
@@ -319,18 +367,52 @@ impl TargetDapSession:
         if not self.launched:
             return error_response(seq, command, self.not_ready_reason())
         if command == "setBreakpoints":
-            return success_response(seq, command, self.set_breakpoints_body(request_json))
+            val denied = self.denied_response(seq, command, DebugRootOperationV1.Probe,
+                DebugPerturbationV1.Stopping, "dap.breakpoint.set")
+            if denied != "": return denied
+            val body = self.set_breakpoints_body(request_json)
+            central_debug_service_v1_record(self.session_id, DebugRootOperationV1.Probe,
+                DebugPerturbationV1.Stopping, "dap.breakpoint.set.outcome", true, true, "")
+            return success_response(seq, command, body)
         if command == "threads":
+            val denied = self.denied_response(seq, command, DebugRootOperationV1.Inspect,
+                DebugPerturbationV1.Passive, "dap.threads")
+            if denied != "": return denied
+            central_debug_service_v1_record(self.session_id, DebugRootOperationV1.Inspect,
+                DebugPerturbationV1.Passive, "dap.threads.outcome", true, false, "")
             return success_response(seq, command, "{\"threads\":[{\"id\":1,\"name\":\"main\"}]}")
         if command == "stackTrace":
+            val denied = self.denied_response(seq, command, DebugRootOperationV1.Inspect,
+                DebugPerturbationV1.Passive, "dap.stackTrace")
+            if denied != "": return denied
+            central_debug_service_v1_record(self.session_id, DebugRootOperationV1.Inspect,
+                DebugPerturbationV1.Passive, "dap.stackTrace.outcome", true, false, "")
             return success_response(seq, command, self.state_body())
         if command == "next" or command == "stepIn" or command == "stepOut":
+            val denied = self.denied_response(seq, command, DebugRootOperationV1.Control,
+                DebugPerturbationV1.Stopping, "dap." + command)
+            if denied != "": return denied
             val stepped = self.target.step()
+            central_debug_service_v1_record(self.session_id, DebugRootOperationV1.Control,
+                DebugPerturbationV1.Stopping, "dap." + command + ".outcome", true, true, "")
             return success_response(seq, command, self.state_body_of(stepped))
         if command == "continue":
+            val denied = self.denied_response(seq, command, DebugRootOperationV1.Control,
+                DebugPerturbationV1.Stopping, "dap.continue")
+            if denied != "": return denied
             val resumed = self.target.resume()
+            central_debug_service_v1_record(self.session_id, DebugRootOperationV1.Control,
+                DebugPerturbationV1.Stopping, "dap.continue.outcome", true, true, "")
             return success_response(seq, command, self.state_body_of(resumed))
         error_response(seq, command, "unsupported request '{command}'")
+
+    fn denied_response(seq: i64, command: text, operation: DebugRootOperationV1,
+                       perturbation: DebugPerturbationV1, action: text) -> text:
+        val receipt = central_debug_service_v1_authorize(
+            self.session_id, operation, perturbation, action)
+        if not receipt.allowed:
+            return error_response(seq, command, "DebugServiceV1 denied " + action + ": " + receipt.reason)
+        ""
 
     fn not_ready_reason() -> text:
         if self.error != "":
@@ -401,10 +483,24 @@ impl TargetDapSession:
         self.profiler.profile_end()
 
     me detach() -> text:
-        if not self.launched:
+        if not self.session_open:
             return ""
-        self.launched = false
-        self.target.detach()
+        var reason = ""
+        if self.launched:
+            self.launched = false
+            reason = self.target.detach()
+        central_debug_service_v1_record(
+            self.session_id, DebugRootOperationV1.Control,
+            DebugPerturbationV1.Cooperative, "dap.detach", reason == "",
+            reason == "", reason)
+        val closed = central_debug_service_v1_close(self.session_id)
+        match closed:
+            case Err(close_reason):
+                self.error = close_reason
+                return close_reason
+            case Ok(_):
+                self.session_open = false
+        reason
 
 # ============================================================================
 # Response framing
@@ -441,6 +537,12 @@ pub fn target_dap_session_launch_with_opts(launch_json: text, config: GpuConfig,
     session.launch_with(launch_json, config, probe, opts)
     session
 
+pub fn target_dap_session_launch_with_policy(launch_json: text, config: GpuConfig,
+        probe: GpuBackendProbe, opts: AttachOpts, policy: DebugPolicyV1) -> TargetDapSession:
+    var session = TargetDapSession.idle()
+    session.launch_with_policy(launch_json, config, probe, opts, policy)
+    session
+
 pub fn target_dap_session_host(program: text) -> TargetDapSession:
     """Shorthand for the default (host) lane, no config or probe needed --
     the resolver returns the host resolution for an absent tag without
@@ -461,4 +563,5 @@ fn _never_probe() -> NeverProbe:
     NeverProbe(calls: 0)
 
 export TargetDapSession, target_dap_session_launch, target_dap_session_launch_with_opts
+export target_dap_session_launch_with_policy
 export target_dap_session_host, profile_report_json, success_response, error_response

@@ -1,0 +1,64 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md ; plan: doc/03_plan/ui/gpu_offload/web_vulkan_cpu_gpu_boundary_fix_plan_2026-09-11.md
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn example_source(path: text) -> text:
+    rt_file_read_text("examples/06_io/ui/" + path) ?? ""
+
+describe "web render entry points: backend env precedence + argv size parsing":
+    it "web_render_page_ppm reads SIMPLE_2D_BACKEND instead of a hardcoded cpu_simd":
+        # @req REQ-SSPEC-LIB
+        step("web_render_page_ppm reads SIMPLE_2D_BACKEND")
+        val src = example_source("web_render_page_ppm.spl")
+        expect(src.contains('env_get("SIMPLE_2D_BACKEND")')).to_equal(true)
+        # oracle: no remaining literal "cpu_simd" backend argument passed to
+        # the render call — the value must flow through requested_backend()
+        expect(src.contains('simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, "cpu_simd")')).to_equal(false)
+
+    it "web_render_page_ppm parses optional argv <w> <h> and rejects non-numeric tokens":
+        # @req REQ-SSPEC-LIB
+        step("web_render_page_ppm argv size parsing rejects non-numeric")
+        val src = example_source("web_render_page_ppm.spl")
+        expect(src.contains("fn size_from_args_or_env")).to_equal(true)
+        expect(src.contains("fn _is_numeric")).to_equal(true)
+        # env (PAGE_W/PAGE_H) must win over argv-derived defaults
+        expect(src.contains('int_env("PAGE_W", default_w)')).to_equal(true)
+
+    it "web_render_page_ppm prints the effective backend_requested/backend_reported/size line":
+        # @req REQ-SSPEC-LIB
+        step("web_render_page_ppm prints effective backend + size")
+        val src = example_source("web_render_page_ppm.spl")
+        val marker = r"""backend_requested={requested} backend_reported={reported} size={W}x{H}"""
+        expect(src.contains(marker)).to_equal(true)
+
+    it "web_engine2d_gui reads SIMPLE_2D_BACKEND instead of a hardcoded cpu_simd":
+        # @req REQ-SSPEC-LIB
+        step("web_engine2d_gui reads SIMPLE_2D_BACKEND")
+        val src = example_source("web_engine2d_gui.spl")
+        expect(src.contains('env_get("SIMPLE_2D_BACKEND")')).to_equal(true)
+        expect(src.contains('render_backend("cpu_simd")')).to_equal(false)
+
+    it "web_render_file_gui prefers SIMPLE_GUI_BACKEND over SIMPLE_2D_BACKEND, both over the vulkan default":
+        # @req REQ-SSPEC-LIB
+        # oracle: showcase_backend() must check SIMPLE_GUI_BACKEND first, then
+        # SIMPLE_2D_BACKEND, and only default to "vulkan" when neither is set
+        step("web_render_file_gui backend precedence GUI > 2D > default")
+        val src = example_source("web_render_file_gui.spl")
+        val gui_idx = src.index_of('env_get("SIMPLE_GUI_BACKEND")')
+        val backend_2d_idx = src.index_of('env_get("SIMPLE_2D_BACKEND")')
+        expect(gui_idx >= 0).to_equal(true)
+        expect(backend_2d_idx >= 0).to_equal(true)
+        expect(gui_idx < backend_2d_idx).to_equal(true)
+
+    it "web_render_file_gui replaces the per-frame full pixel scan with a device-side checksum compare":
+        # @req REQ-SSPEC-LIB
+        step("web_render_file_gui uses checksum instead of varied_nonzero_count")
+        val src = example_source("web_render_file_gui.spl")
+        expect(src.contains("fn varied_nonzero_count")).to_equal(false)
+        expect(src.contains("fn blank_frame_checksum")).to_equal(true)
+        expect(src.contains("pixels.checksum == blank_checksum")).to_equal(true)

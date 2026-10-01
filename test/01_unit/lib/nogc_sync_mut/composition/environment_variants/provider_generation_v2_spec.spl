@@ -1,0 +1,136 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+fn d(low: u64, high: u64 = 0u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: low, w1: high, w2: 0u64, w3: 0u64)
+fn evidence(provider: EnvironmentDigest256V1, variant: u64, mapped: u64) -> ProviderActivationEvidenceV2:
+    ProviderActivationEvidenceV2(provider_identity: provider, variant_identity: d(variant),
+        artifact_identity: d(3u64, variant), abi_identity: d(4u64, variant),
+        contract_identity: d(5u64), semantic_identity: d(6u64), grammar_identity: d(7u64),
+        program_identity: d(8u64), plan_identity: d(9u64), environment_identity: d(10u64),
+        environment_generation: 11u64, mapped_handle: mapped,
+        callable_binding_identity: d(12u64, mapped), activation_authority_identity: d(13u64))
+fn pre_evidence(provider: EnvironmentDigest256V1, variant: u64, mapped: u64) -> ProviderPrePublicationEvidenceV2:
+    val e = evidence(provider, variant, mapped)
+    ProviderPrePublicationEvidenceV2(provider_identity: e.provider_identity,
+        variant_identity: e.variant_identity, artifact_identity: e.artifact_identity,
+        abi_identity: e.abi_identity, contract_identity: e.contract_identity,
+        semantic_identity: e.semantic_identity, grammar_identity: e.grammar_identity,
+        program_identity: e.program_identity, environment_identity: e.environment_identity,
+        environment_generation: e.environment_generation, mapped_handle: e.mapped_handle,
+        callable_binding_identity: e.callable_binding_identity,
+        activation_authority_identity: e.activation_authority_identity)
+
+describe "full-width provider generation manager V2":
+    it "reserves exact generation without activation then finalizes once":
+        val manager = ProviderGenerationManagerV2.create()
+        val reservation = provider_generation_reserve_v2(
+            manager, pre_evidence(d(70u64, 71u64), 72u64, 73u64)).unwrap()
+        expect(manager.generations.len()).to_equal(0)
+        expect(provider_generation_pin_v2(manager, ProviderGenerationActivationV2(
+            provider_handle: reservation.provider_handle, generation: reservation.generation,
+            previous_generation: 0u64)).is_err()).to_equal(true)
+        val activation = provider_generation_finalize_reservation_v2(manager, reservation, d(74u64)).unwrap()
+        expect(activation.generation).to_equal(reservation.generation)
+        expect(manager.generations.len()).to_equal(1)
+        expect(provider_generation_finalize_reservation_v2(manager, reservation, d(74u64))).to_equal(
+            Err(ProviderGenerationErrorV2.ReservationUnknown))
+
+    it "rejects reservation substitution conflict and cancel replay without activation":
+        val manager = ProviderGenerationManagerV2.create()
+        val reservation = provider_generation_reserve_v2(
+            manager, pre_evidence(d(80u64), 81u64, 82u64)).unwrap()
+        expect(provider_generation_reserve_v2(manager,
+            pre_evidence(d(80u64), 83u64, 84u64))).to_equal(
+            Err(ProviderGenerationErrorV2.ReservationConflict))
+        val other = ProviderGenerationManagerV2.create()
+        expect(provider_generation_cancel_reservation_v2(other, reservation)).to_equal(
+            Err(ProviderGenerationErrorV2.ReservationUnknown))
+        expect(provider_generation_cancel_reservation_v2(manager, reservation)).to_equal(Ok(()))
+        expect(provider_generation_cancel_reservation_v2(manager, reservation)).to_equal(
+            Err(ProviderGenerationErrorV2.ReservationUnknown))
+        expect(manager.generations.len()).to_equal(0)
+    it "distinguishes identities with equal low words":
+        val manager = ProviderGenerationManagerV2.create()
+        val first = provider_generation_activate_v2(manager, evidence(d(1u64, 2u64), 20u64, 30u64)).unwrap()
+        val collision = provider_generation_activate_v2(manager, evidence(d(1u64, 3u64), 21u64, 31u64)).unwrap()
+        expect(first.provider_handle == collision.provider_handle).to_equal(false)
+        expect(manager.generations.len()).to_equal(2)
+
+    it "replaces while retaining a pinned old generation and rejects ABA pin replay":
+        val manager = ProviderGenerationManagerV2.create()
+        val provider = d(1u64, 2u64)
+        val first_evidence = evidence(provider, 20u64, 30u64)
+        val first = provider_generation_activate_v2(manager, first_evidence).unwrap()
+        val pin = provider_generation_pin_v2(manager, first).unwrap()
+        val second = provider_generation_activate_v2(manager, evidence(provider, 21u64, 31u64)).unwrap()
+        expect(second.provider_handle).to_equal(first.provider_handle)
+        expect(second.previous_generation).to_equal(first.generation)
+        expect(provider_generation_pin_live_v2(manager, pin)).to_equal(true)
+        expect(provider_generation_retire_exact_v2(manager, first, first_evidence)).to_equal(
+            Err(ProviderGenerationErrorV2.PinsLive))
+        var substituted = first_evidence
+        substituted.semantic_identity = d(6u64, 99u64)
+        expect(provider_generation_exact_pin_count_v2(manager, first, substituted)).to_equal(
+            Err(ProviderGenerationErrorV2.GenerationMismatch))
+        expect(manager.generations.len()).to_equal(2)
+        var forged = pin; forged.variant_identity = d(99u64)
+        expect(provider_generation_pin_live_v2(manager, forged)).to_equal(false)
+        expect(provider_generation_pin_release_v2(manager, pin)).to_equal(Ok(()))
+        expect(provider_generation_retire_exact_v2(manager, first, first_evidence)).to_equal(Ok(()))
+        expect(provider_generation_pin_release_v2(manager, pin)).to_equal(Err(ProviderGenerationErrorV2.PinUnknown))
+        expect(manager.generations.len()).to_equal(1)
+
+    it "fails without mutation on invalid evidence and exhausted counters":
+        val manager = ProviderGenerationManagerV2.create()
+        var invalid = evidence(d(1u64), 2u64, 3u64); invalid.abi_identity = d(0u64)
+        expect(provider_generation_activate_v2(manager, invalid)).to_equal(Err(ProviderGenerationErrorV2.InvalidEvidence))
+        expect(manager.generations.len()).to_equal(0)
+        manager.next_generation = 0xffffffffffffffffu64
+        expect(provider_generation_activate_v2(manager, evidence(d(1u64), 2u64, 3u64))).to_equal(
+            Err(ProviderGenerationErrorV2.CounterOverflow))
+        expect(manager.generations.len()).to_equal(0)
+
+    it "derives a full-width opaque cache authority from a live pin":
+        val manager = ProviderGenerationManagerV2.create()
+        val activation = provider_generation_activate_v2(
+            manager, evidence(d(41u64, 42u64), 43u64, 44u64)).unwrap()
+        val pin = provider_generation_pin_v2(manager, activation).unwrap()
+        val authority = provider_generation_pinned_cache_authority_v2(manager, pin).unwrap()
+        expect(authority.provider_identity).to_equal(d(41u64, 42u64))
+        expect(authority.artifact_identity).to_equal(d(3u64, 43u64))
+        expect(authority.authority_digest == d(0u64)).to_equal(false)
+        expect(provider_generation_pinned_cache_authority_live_v2(
+            manager, pin, authority)).to_equal(true)
+        var substituted = authority
+        substituted.contract_identity = d(5u64, 99u64)
+        expect(provider_generation_pinned_cache_authority_live_v2(
+            manager, pin, substituted)).to_equal(false)
+        val other = ProviderGenerationManagerV2.create()
+        val other_activation = provider_generation_activate_v2(
+            other, evidence(d(41u64, 42u64), 43u64, 45u64)).unwrap()
+        val other_pin = provider_generation_pin_v2(other, other_activation).unwrap()
+        val other_authority = provider_generation_pinned_cache_authority_v2(other, other_pin).unwrap()
+        expect(other_authority.authority_digest == authority.authority_digest).to_equal(false)
+        expect(provider_generation_pin_release_v2(manager, pin)).to_equal(Ok(()))
+        expect(provider_generation_pinned_cache_authority_live_v2(
+            manager, pin, authority)).to_equal(false)
+
+    it "rejects an identical local pin issued by another manager":
+        val first = ProviderGenerationManagerV2.create()
+        val second = ProviderGenerationManagerV2.create()
+        val identical = evidence(d(91u64, 92u64), 93u64, 94u64)
+        val first_activation = provider_generation_activate_v2(first, identical).unwrap()
+        val second_activation = provider_generation_activate_v2(second, identical).unwrap()
+        val first_pin = provider_generation_pin_v2(first, first_activation).unwrap()
+        val second_pin = provider_generation_pin_v2(second, second_activation).unwrap()
+        expect(first_pin.pin_id).to_equal(second_pin.pin_id)
+        expect(first_pin.provider_handle).to_equal(second_pin.provider_handle)
+        expect(first_pin.generation).to_equal(second_pin.generation)
+        expect(provider_generation_pin_live_v2(second, first_pin)).to_equal(false)
+        expect(provider_generation_pin_release_v2(second, first_pin)).to_equal(
+            Err(ProviderGenerationErrorV2.PinUnknown))
+        val first_authority = provider_generation_pinned_cache_authority_v2(first, first_pin).unwrap()
+        val second_authority = provider_generation_pinned_cache_authority_v2(second, second_pin).unwrap()
+        expect(first_authority.authority_digest == second_authority.authority_digest).to_equal(false)

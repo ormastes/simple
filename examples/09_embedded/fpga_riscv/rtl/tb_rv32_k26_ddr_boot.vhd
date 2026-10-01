@@ -24,19 +24,6 @@ use ieee.std_logic_textio.all;
 use std.env.all;
 
 entity tb_rv32_k26_ddr_boot is
-  generic (
-    -- Real PS DDR4 is NOT zeroed at power-up. GHDL/QEMU always hand the
-    -- kernel pristine zero RAM, which masks any reliance on implicit
-    -- zero-initialised .bss (e.g. g_heap_off at 0x80007004: garbage there
-    -- makes every rv_alloc return null and every rt_string-based println
-    -- print an empty line). Set true to fill all DDR words beyond the
-    -- loaded kernel image with a deterministic nonzero pseudo-random
-    -- pattern, rehearsing what silicon actually provides.
-    G_GARBAGE_FILL : boolean := false;
-    G_MARKER       : string := "TEST PASSED";
-    G_TRACE_BASE   : natural := 0;
-    G_TRACE_BYTES  : natural := 0
-  );
 end entity tb_rv32_k26_ddr_boot;
 
 architecture sim of tb_rv32_k26_ddr_boot is
@@ -49,8 +36,6 @@ architecture sim of tb_rv32_k26_ddr_boot is
   signal rst_n : std_logic := '0';
   signal uart_tx : std_logic;
   signal done : boolean := false;
-  signal trace_reads : natural := 0;
-  signal trace_writes: natural := 0;
 
   -- AXI4 (core master -> DDR model)
   signal awaddr  : std_logic_vector(31 downto 0);
@@ -109,20 +94,7 @@ architecture sim of tb_rv32_k26_ddr_boot is
     variable word_v : std_logic_vector(31 downto 0);
     variable mem_v : ram_t := (others => x"00000000");
     variable idx : natural := 0;
-    variable lfsr : unsigned(31 downto 0) := x"DEADBEEF";
   begin
-    if G_GARBAGE_FILL then
-      -- xorshift32: deterministic nonzero garbage in every word, standing in
-      -- for un-zeroed power-up DDR4 content. The kernel image is loaded OVER
-      -- this below, so only .bss/heap/stack and unused DDR stay garbage --
-      -- exactly the silicon situation (board loads only kernel + ramdisk).
-      for i in 0 to RAM_WORDS - 1 loop
-        lfsr := lfsr xor shift_left(lfsr, 13);
-        lfsr := lfsr xor shift_right(lfsr, 17);
-        lfsr := lfsr xor shift_left(lfsr, 5);
-        mem_v(i) := std_logic_vector(lfsr);
-      end loop;
-    end if;
     while not endfile(f) loop
       readline(f, line_v);
       hread(line_v, word_v);
@@ -179,31 +151,6 @@ begin
       m_axi_hp_rdata => rdata, m_axi_hp_rresp => rresp,
       m_axi_hp_rlast => rlast, m_axi_hp_rvalid => rvalid,
       m_axi_hp_rready => rready,
-      m_axi_nvme_dma_awaddr => open, m_axi_nvme_dma_awlen => open,
-      m_axi_nvme_dma_awsize => open, m_axi_nvme_dma_awburst => open,
-      m_axi_nvme_dma_awcache => open, m_axi_nvme_dma_awprot => open,
-      m_axi_nvme_dma_awvalid => open, m_axi_nvme_dma_awready => '0',
-      m_axi_nvme_dma_wdata => open, m_axi_nvme_dma_wstrb => open,
-      m_axi_nvme_dma_wlast => open, m_axi_nvme_dma_wvalid => open,
-      m_axi_nvme_dma_wready => '0', m_axi_nvme_dma_bresp => "00",
-      m_axi_nvme_dma_bvalid => '0', m_axi_nvme_dma_bready => open,
-      m_axi_nvme_dma_araddr => open, m_axi_nvme_dma_arlen => open,
-      m_axi_nvme_dma_arsize => open, m_axi_nvme_dma_arburst => open,
-      m_axi_nvme_dma_arcache => open, m_axi_nvme_dma_arprot => open,
-      m_axi_nvme_dma_arvalid => open, m_axi_nvme_dma_arready => '0',
-      m_axi_nvme_dma_rdata => (others => '0'), m_axi_nvme_dma_rresp => "00",
-      m_axi_nvme_dma_rlast => '0', m_axi_nvme_dma_rvalid => '0',
-      m_axi_nvme_dma_rready => open, nvme_irq => open,
-      s_axi_nvme_awaddr => (others => '0'), s_axi_nvme_awprot => "000",
-      s_axi_nvme_awvalid => '0', s_axi_nvme_awready => open,
-      s_axi_nvme_wdata => (others => '0'), s_axi_nvme_wstrb => (others => '0'),
-      s_axi_nvme_wvalid => '0', s_axi_nvme_wready => open,
-      s_axi_nvme_bresp => open, s_axi_nvme_bvalid => open,
-      s_axi_nvme_bready => '0', s_axi_nvme_araddr => (others => '0'),
-      s_axi_nvme_arprot => "000", s_axi_nvme_arvalid => '0',
-      s_axi_nvme_arready => open, s_axi_nvme_rdata => open,
-      s_axi_nvme_rresp => open, s_axi_nvme_rvalid => open,
-      s_axi_nvme_rready => '0',
       s_axi_ctrl_awaddr => l_awaddr, s_axi_ctrl_awprot => "000",
       s_axi_ctrl_awvalid => l_awvalid, s_axi_ctrl_awready => l_awready,
       s_axi_ctrl_wdata => l_wdata, s_axi_ctrl_wstrb => "1111",
@@ -234,7 +181,6 @@ begin
       if rst_n = '0' then
         arready <= '0'; rvalid <= '0'; rlast <= '0';
         awready <= '0'; wready <= '0'; bvalid <= '0';
-        trace_reads <= 0; trace_writes <= 0;
         phase := 0; jitter := 1;
       else
         -- default deasserts for one-shot handshakes
@@ -249,11 +195,6 @@ begin
             if arvalid = '1' then
               arready <= '1';
               saved_addr := unsigned(araddr);
-              if G_TRACE_BYTES > 0 and
-                 saved_addr >= G_TRACE_BASE and
-                 saved_addr < G_TRACE_BASE + G_TRACE_BYTES then
-                trace_reads <= trace_reads + 1;
-              end if;
               jitter := (jitter mod 4) + 1;
               wait_n := jitter;
               phase := 1;
@@ -261,11 +202,6 @@ begin
               awready <= '1';
               wready  <= '1';
               saved_addr := unsigned(awaddr);
-              if G_TRACE_BYTES > 0 and
-                 saved_addr >= G_TRACE_BASE and
-                 saved_addr < G_TRACE_BASE + G_TRACE_BYTES then
-                trace_writes <= trace_writes + 1;
-              end if;
               -- capture write immediately
               addr_v := saved_addr;
               is_rdisk := addr_v >= (DDR_BASE + RDISK_OFF);
@@ -343,7 +279,7 @@ begin
     variable last_count : natural := 0;
     -- Rolling match on the terminal marker so the run ends on SUCCESS rather
     -- than on a guessed timeout.
-    constant MARKER : string := G_MARKER;
+    constant MARKER : string := "TEST PASSED";
     variable mi : natural := 0;
     variable matched : boolean := false;
 
@@ -380,18 +316,12 @@ begin
       l_awvalid <= '0';
       l_wdata   <= dat;
       l_wvalid  <= '1';
+      l_bready  <= '1';
       loop
         wait until rising_edge(clk);
         exit when l_wready = '1';
       end loop;
       l_wvalid <= '0';
-      -- BVALID is asserted at WREADY time and held only until BREADY: with
-      -- BREADY pre-asserted it is a single-cycle pulse landing on the exact
-      -- edge the WREADY loop exits on, so waiting one more edge missed it
-      -- forever (the original tb hang). Assert BREADY only now, after the W
-      -- handshake -- the slave holds BVALID until it sees BREADY, so the
-      -- handshake below cannot be missed.
-      l_bready <= '1';
       loop
         wait until rising_edge(clk);
         exit when l_bvalid = '1';
@@ -465,7 +395,7 @@ begin
 
     if txt /= null and txt'length > 0 then writeline(output, txt); end if;
     if matched then
-      write(txt, string'("K26_MARKER_SEEN"));
+      write(txt, string'("K26_MARKER_TEST_PASSED_SEEN"));
     else
       write(txt, string'("K26_MARKER_NOT_SEEN"));
     end if;
@@ -479,8 +409,6 @@ begin
     write(txt, string'("K26_AXI_READS=0x")); hwrite(txt, rd); writeline(output, txt);
     lite_read(x"0020", rd);
     write(txt, string'("K26_AXI_WRITES=0x")); hwrite(txt, rd); writeline(output, txt);
-    write(txt, string'("K26_TRACE_READS=")); write(txt, trace_reads); writeline(output, txt);
-    write(txt, string'("K26_TRACE_WRITES=")); write(txt, trace_writes); writeline(output, txt);
     write(txt, string'("K26_UART_BYTES=")); write(txt, count); writeline(output, txt);
     write(txt, string'("K26_DDR_TB_DONE"));
     writeline(output, txt);

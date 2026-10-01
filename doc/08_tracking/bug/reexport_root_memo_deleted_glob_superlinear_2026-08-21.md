@@ -1,4 +1,9 @@
 # Glob expansion superlinear in the import closure: the re-export root memo was deleted
+## Closed 2026-09-16 — ...*Date:** 2026-08-21 (filed), fixed 2026-08-22 **Area:** `src/compiler/20.hir/hir_lowering/
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-21 (filed), fixed 2026-08-22
 **Area:** `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl`
@@ -77,3 +82,4 @@ Wall-clock re-measure on the 662-module closure is owed after the next seed
 deploy, as for the other HIR fixes in this series: `[hir-prof]` numbers come
 from the compiler doing the work, so a change under `src/compiler/**` only shows
 once a compiler built from the patched tree runs.
+

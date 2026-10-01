@@ -81,7 +81,7 @@ fn expr_to_text(expr: &MathExpr) -> String {
 
         MathExpr::Subscript(base, index) => {
             let base_str = expr_to_text(base);
-            let idx_str = expr_to_text(index);
+            let idx_str = subscript_index_to_text(index);
             if let Some(sub) = to_subscript(&idx_str) {
                 format!("{}{}", base_str, sub)
             } else {
@@ -137,6 +137,13 @@ fn expr_to_text(expr: &MathExpr) -> String {
         MathExpr::Gt(l, r) => format!("{} > {}", expr_to_text(l), expr_to_text(r)),
         MathExpr::Ge(l, r) => format!("{} \u{2265} {}", expr_to_text(l), expr_to_text(r)),
         MathExpr::Approx(l, r) => format!("{} \u{2248} {}", expr_to_text(l), expr_to_text(r)),
+    }
+}
+
+fn subscript_index_to_text(expr: &MathExpr) -> String {
+    match expr {
+        MathExpr::Array(items) => items.iter().map(subscript_index_to_text).collect::<Vec<_>>().join(","),
+        _ => expr_to_text(expr),
     }
 }
 
@@ -294,5 +301,26 @@ mod tests {
     fn test_text_comparison() {
         let expr = MathExpr::Le(Box::new(MathExpr::Var("x".to_string())), Box::new(MathExpr::Int(5)));
         assert_eq!(to_text(&expr), "x \u{2264} 5");
+    }
+
+    #[test]
+    fn test_text_matmul_and_slice_contract() {
+        let matmul = MathExpr::MatMul(
+            Box::new(MathExpr::Var("A".to_string())),
+            Box::new(MathExpr::Var("B".to_string())),
+        );
+        assert_eq!(to_text(&matmul), "A @ B");
+
+        let slice = MathExpr::Subscript(
+            Box::new(MathExpr::Var("A".to_string())),
+            Box::new(MathExpr::Array(vec![
+                MathExpr::Slice {
+                    start: Some(Box::new(MathExpr::Var("i".to_string()))),
+                    end: Some(Box::new(MathExpr::Var("j".to_string()))),
+                },
+                MathExpr::Var("k".to_string()),
+            ])),
+        );
+        assert_eq!(to_text(&slice), "A[i:j,k]");
     }
 }

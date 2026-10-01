@@ -1,0 +1,79 @@
+# CEF (Chromium Embedded Framework) binary-distribution pin.
+#
+# Consumed by scripts/setup/setup-cef-dynlib.shs (POSIX sh: Linux / macOS / FreeBSD /
+# MSYS git-bash) and its Windows twin scripts/setup/setup-cef-dynlib.ps1. This file is the
+# SINGLE source of truth for the pinned version; neither script carries a second copy.
+#
+# WHAT IS PINNED, AND WHAT IS NOT (changed 2026-09-11).
+#
+# The pin is the VERSION LINE, not a hand-copied digest table. CEF's publisher index
+# (https://cef-builds.spotifycdn.com/index.json) already publishes, per platform and per
+# file, the exact archive name and its `sha1`. Maintaining a parallel sha256 table here
+# meant every digest was either copied by hand from that same index — adding nothing — or,
+# worse, computed from a file already downloaded, which proves only that the file is
+# itself. Both were live risks: the previous revision of this file shipped `sha256: UNSET`
+# for all six platforms, so every install needed --allow-unpinned and nothing was verified.
+#
+# The admission chain is now:
+#   1. `--install` fetches the index and resolves the archive whose `cef_version` starts
+#      with `version:` below and whose `type` is `distribution:` for this platform.
+#   2. The archive is admitted against the index's OWN `sha1` for that exact file, which is
+#      printed in the receipt as `cef_index_sha1=`. This is a publisher-side digest, not a
+#      self-comparison.
+#   3. Only after that does the script compute the archive's sha256 and record it at
+#      `build/cef/<version>/<platform>/admitted.sha256`.
+#   4. `--check` (which never touches the network) verifies the staged drop against THAT
+#      recorded file. A drop with no `admitted.sha256` is `unadmitted`, never `present`.
+#
+# `--allow-unpinned` keeps its meaning and is still loud: it is the escape for a version
+# that is NOT in the index (a locally built or vendor-supplied drop). It skips step 2 only;
+# steps 3 and 4 still run, and the receipt still reports `cef_sha256_status=unpinned`, so
+# such a drop is never admitted evidence for a gate.
+
+cef_pin:
+  # The "minimal" distribution: Release binaries + headers, no debug symbols, no samples.
+  distribution: minimal
+
+  # Pinned version LINE. Matched as a prefix against the index's `cef_version`, because the
+  # published string carries build metadata (e.g. "143.0.13+g<hash>+chromium-143.x.y.z")
+  # that is not knowable without reading the index. Current stable 14x line as of
+  # 2026-09-11. UNVERIFIED here: this authoring sandbox has no network, so the index has
+  # not been read. `--install` resolves and records the exact string it actually admitted;
+  # if no index entry starts with this prefix, the install is REFUSED with
+  # `cef_reason=version-not-in-index` rather than falling back to a different version.
+  version: 143.0.13
+
+  index_url: "https://cef-builds.spotifycdn.com/index.json"
+  url_template: "https://cef-builds.spotifycdn.com/{archive}"
+
+  # Where an admitted drop is extracted, and where `admitted.sha256` is written. Both setup
+  # scripts only ever create or delete paths under this prefix.
+  install_root: build/cef
+
+  # Per-platform rows carry only what the index cannot tell us: the index's platform key
+  # and the path of the shared library inside the extracted drop. Archive names and digests
+  # are resolved from the index at install time and are deliberately absent here.
+  platforms:
+    - platform: linux64
+      lib: Release/libcef.so
+    - platform: linuxarm64
+      lib: Release/libcef.so
+    - platform: macosx64
+      lib: "Release/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+    - platform: macosarm64
+      lib: "Release/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+    - platform: windows64
+      lib: Release/libcef.dll
+    - platform: windowsarm64
+      lib: Release/libcef.dll
+
+  # macOS only: CEF spawns its render/GPU subprocesses from a separate helper .app bundle.
+  # Whether that can be satisfied when libcef is dlopen'ed from a NON-bundled CLI binary is
+  # UNVERIFIED and is the single largest macOS risk for stage B of the dynlib probe
+  # (blocked row B2 in doc/03_plan/ui/chrome_dynlib/chrome_dynlib_vulkan_showcase_plan.md).
+  macos_helper_required: true
+
+  # macOS ANGLE backs onto Metal; `--use-angle=vulkan` is not a shipped backend there, so a
+  # macOS host records vulkan-angle-unavailable per doc/07_guide/tooling/
+  # renderdoc_capture_infra.md:748. Chrome availability is never Vulkan proof.
+  macos_vulkan_proof: unavailable

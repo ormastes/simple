@@ -150,59 +150,94 @@ fn _rra_fix_note(name: text) -> text:
         return "use `file_read_text` from the canonical std/app I/O facade; `simple lint --fix` keeps this as a warning-only migration because nullable return contracts can differ"
     "route `{name}` through its std semantic facade; if none exists, create a provider wrapper instead of a product-side rt_* alias"
 
-pub fn raw_rt_lexical_code_lines(source: text) -> [text]:
-    """Blank comments and normal/triple strings while preserving columns."""
-    var result: [text] = []
-    var in_string = false
-    var in_triple = false
-    var escaped = false
-    for raw_line in source.split("\n"):
+class RawRtLexState:
+    in_string: bool
+    in_triple: bool
+    escaped: bool
+
+    static fn new() -> RawRtLexState:
+        RawRtLexState(in_string: false, in_triple: false, escaped: false)
+
+    me clean_line(raw_line: text) -> text:
+        """Blank comments and strings on one line while preserving columns."""
+        # Most candidate lines have neither comments nor strings. Returning the
+        # original line avoids one array cell allocation per source byte.
+        if not self.in_string and not self.in_triple and not raw_line.contains("\"") and not raw_line.contains("#"):
+            return raw_line
         var pieces: [text] = []
         var i = 0
-        while i < raw_line.len():
-            val ch = raw_line.substring(i, i + 1)
-            val triple = i + 2 < raw_line.len() and raw_line.substring(i, i + 3) == "\"\"\""
-            if in_triple:
-                if triple:
-                    pieces.push(" ")
-                    pieces.push(" ")
-                    pieces.push(" ")
-                    i = i + 3
-                    in_triple = false
+        val line_len = raw_line.len()
+        while i < line_len:
+            if self.in_triple:
+                # Blank in one run to the closing `\"\"\"` instead of one interpreted
+                # `substring` + `push` per character. `index_of` matches only a
+                # complete 3-char sequence, exactly like the old bounds test.
+                val close = raw_line.index_of("\"\"\"", i)
+                if close < 0:
+                    pieces.push(" ".repeat(line_len - i))
+                    i = line_len
                 else:
-                    pieces.push(" ")
-                    i = i + 1
+                    pieces.push(" ".repeat(close - i + 3))
+                    i = close + 3
+                    self.in_triple = false
                 continue
-            if in_string:
+            val ch = raw_line.substring(i, i + 1)
+            if self.in_string:
                 pieces.push(" ")
-                if escaped:
-                    escaped = false
+                if self.escaped:
+                    self.escaped = false
                 elif ch == "\\":
-                    escaped = true
+                    self.escaped = true
                 elif ch == "\"":
-                    in_string = false
+                    self.in_string = false
                 i = i + 1
                 continue
             if ch == "#":
-                while i < raw_line.len():
-                    pieces.push(" ")
-                    i = i + 1
+                pieces.push(" ".repeat(line_len - i))
+                i = line_len
                 break
-            if triple:
-                pieces.push(" ")
-                pieces.push(" ")
-                pieces.push(" ")
-                i = i + 3
-                in_triple = true
-                continue
+            # A `\"\"\"` can only start at a quote, so the 3-char probe is taken
+            # there instead of once per character.
             if ch == "\"":
+                if i + 2 < line_len and raw_line.substring(i, i + 3) == "\"\"\"":
+                    pieces.push("   ")
+                    i = i + 3
+                    self.in_triple = true
+                    continue
                 pieces.push(" ")
                 i = i + 1
-                in_string = true
+                self.in_string = true
                 continue
-            pieces.push(ch)
-            i = i + 1
-        result.push(pieces.join(""))
+            # Ordinary text: copy the whole run up to the next `\"` or `#` in one
+            # slice. Every character in it takes the verbatim-copy branch of the
+            # original per-character walk, so the join is unchanged.
+            var nq = raw_line.index_of("\"", i + 1)
+            var nh = raw_line.index_of("#", i + 1)
+            if nq < 0: nq = line_len
+            if nh < 0: nh = line_len
+            var run_end = nq
+            if nh < run_end: run_end = nh
+            pieces.push(raw_line.substring(i, run_end))
+            i = run_end
+        pieces.join("")
+
+    me scan_line(raw_line: text) -> text:
+        """Return lexical code needed by private token scans."""
+        # On a neutral line with no quote, # starts a trailing comment. Token
+        # columns before it are unchanged, so truncation avoids filling the
+        # rest of the line with one-space array elements.
+        if not self.in_string and not self.in_triple and not raw_line.contains("\""):
+            val comment_at = raw_line.find("#")
+            if comment_at >= 0:
+                return raw_line.substring(0, comment_at)
+        self.clean_line(raw_line)
+
+pub fn raw_rt_lexical_code_lines(source: text) -> [text]:
+    """Blank comments and normal/triple strings while preserving columns."""
+    var result: [text] = []
+    var state = RawRtLexState.new()
+    for raw_line in source.split("\n"):
+        result.push(state.clean_line(raw_line))
     result
 
 fn _rra_names_in_call_position(line: text) -> [text]:

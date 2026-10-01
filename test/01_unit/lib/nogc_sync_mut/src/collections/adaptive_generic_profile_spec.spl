@@ -1,0 +1,251 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use std.nogc_sync_mut.sffi.ordered_key_cmp.{ordered_key_native_usable}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile,
+    AdaptiveSetWorkloadProfile
+}
+
+extern fn rt_dict_new(cap_hint: i64) -> i64
+
+describe "generic adaptive collections consume paired collision feedback":
+    it "keeps auto storage sound when a key has no native order":
+        val opaque_key = rt_dict_new(8)
+        expect(ordered_key_native_usable(7)).to_be(true)
+        expect(ordered_key_native_usable(opaque_key)).to_be(false)
+        val policy = AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: true)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://generic/opaque#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 10, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 20,
+            hash_probe_count_p95: 100, hash_collision_count_p95: 40
+        )
+        var queried: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(queried.apply_workload_profile(prior)).to_be(true)
+        expect(queried.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(queried.get(opaque_key) == nil).to_be(true)
+        expect(queried.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        queried.clear()
+        expect(queried.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(queried.put(7, "supported")).to_be(true)
+        expect(queried.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var checked: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(checked.apply_workload_profile(prior)).to_be(true)
+        expect(checked.contains_key(opaque_key)).to_be(false)
+        expect(checked.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        var removed: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(removed.apply_workload_profile(prior)).to_be(true)
+        expect(removed.remove(opaque_key) == nil).to_be(true)
+        expect(removed.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        var empty: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(empty.apply_workload_profile(prior)).to_be(true)
+        expect(empty.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(empty.put(opaque_key, "value")).to_be(true)
+        expect(empty.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(empty.get(opaque_key) ?? "").to_equal("value")
+        expect(empty.keys()).to_equal([opaque_key])
+        val empty_snapshot = empty.entries()
+        expect(empty_snapshot.len()).to_equal(1)
+        expect(empty_snapshot[0].value).to_equal("value")
+        empty.clear()
+        expect(empty.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(empty.put(7, "seven")).to_be(true)
+        expect(empty.get(7) ?? "").to_equal("seven")
+        var populated: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(populated.put(opaque_key, "value")).to_be(true)
+        expect(populated.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(populated.apply_workload_profile(prior)).to_be(true)
+        expect(populated.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(populated.get(opaque_key) ?? "").to_equal("value")
+        expect(populated.remove(opaque_key) ?? "").to_equal("value")
+        expect(populated.put(7, "seven")).to_be(true)
+        expect(populated.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var mixed: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(mixed.put(opaque_key, "opaque")).to_be(true)
+        expect(mixed.put(7, "seven")).to_be(true)
+        expect(mixed.apply_workload_profile(prior)).to_be(true)
+        expect(mixed.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(mixed.put(opaque_key, "opaque-updated")).to_be(false)
+        expect(mixed.keys()).to_equal([opaque_key, 7])
+        val mixed_snapshot = mixed.entries()
+        expect(mixed_snapshot.len()).to_equal(2)
+        expect(mixed_snapshot[0].key).to_equal(opaque_key)
+        expect(mixed_snapshot[1].key).to_equal(7)
+        var saw_opaque = false
+        var saw_supported = false
+        for entry in mixed_snapshot:
+            if entry.key == opaque_key:
+                expect(entry.value).to_equal("opaque-updated")
+                saw_opaque = true
+            elif entry.key == 7:
+                expect(entry.value).to_equal("seven")
+                saw_supported = true
+        expect(saw_opaque).to_be(true)
+        expect(saw_supported).to_be(true)
+        expect(mixed.remove(opaque_key) ?? "").to_equal("opaque-updated")
+        expect(mixed.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(mixed.get(7) ?? "").to_equal("seven")
+        val second_opaque_key = rt_dict_new(8)
+        var two_opaque: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(two_opaque.put(opaque_key, "first")).to_be(true)
+        expect(two_opaque.put(second_opaque_key, "second")).to_be(true)
+        expect(two_opaque.put(7, "seven")).to_be(true)
+        expect(two_opaque.apply_workload_profile(prior)).to_be(true)
+        expect(two_opaque.keys()).to_equal([opaque_key, second_opaque_key, 7])
+        expect(two_opaque.remove(opaque_key) ?? "").to_equal("first")
+        expect(two_opaque.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(two_opaque.remove(second_opaque_key) ?? "").to_equal("second")
+        expect(two_opaque.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(two_opaque.get(7) ?? "").to_equal("seven")
+        val no_hash = AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: false)
+        var linear: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            no_hash, prior.site_id, prior.target_profile_id)
+        expect(linear.apply_workload_profile(prior)).to_be(true)
+        expect(linear.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(linear.put(opaque_key, "value")).to_be(true)
+        expect(linear.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(linear.get(opaque_key) ?? "").to_equal("value")
+        expect(linear.keys()).to_equal([opaque_key])
+        expect(linear.put(7, "seven")).to_be(true)
+        expect(linear.keys()).to_equal([opaque_key, 7])
+        linear.clear()
+        expect(linear.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(linear.put(7, "seven")).to_be(true)
+        expect(linear.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var existing: AdaptiveMap<i64, text> = AdaptiveMap.with_profile(policy)
+        expect(existing.put(7, "seven")).to_be(true)
+        expect(existing.put(3, "three")).to_be(true)
+        expect(existing.put(opaque_key, "opaque")).to_be(true)
+        expect(existing.keys()).to_equal([3, 7, opaque_key])
+        expect(existing.put(5, "five")).to_be(true)
+        existing.set_attribute(AdaptiveSetAttribute.Linear)
+        expect(existing.keys()).to_equal([3, 7, opaque_key, 5])
+        val linear_snapshot = existing.entries()
+        expect(linear_snapshot.len()).to_equal(4)
+        expect(linear_snapshot[2].value).to_equal("opaque")
+        existing.set_attribute(AdaptiveSetAttribute.Hash)
+        expect(existing.keys()).to_equal([3, 7, opaque_key, 5])
+        val hash_snapshot = existing.entries()
+        expect(hash_snapshot.len()).to_equal(4)
+        expect(hash_snapshot[2].value).to_equal("opaque")
+        expect(existing.remove(opaque_key) ?? "").to_equal("opaque")
+        expect(existing.keys()).to_equal([3, 5, 7])
+        var fallback_set: AdaptiveSet<i64> = AdaptiveSet.with_profile(policy)
+        expect(fallback_set.insert(7)).to_be(true)
+        expect(fallback_set.insert(opaque_key)).to_be(true)
+        expect(fallback_set.insert(3)).to_be(true)
+        expect(fallback_set.snapshot_values()).to_equal([7, opaque_key, 3])
+        fallback_set.set_attribute(AdaptiveSetAttribute.Linear)
+        expect(fallback_set.snapshot_values()).to_equal([7, opaque_key, 3])
+        expect(fallback_set.remove(opaque_key)).to_be(true)
+        expect(fallback_set.snapshot_values()).to_equal([3, 7])
+
+    it "moves auto integer-key map and set after live hash collisions":
+        val policy = AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: true)
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.with_profile(policy)
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_profile(policy)
+        expect(map.put(0, "zero")).to_be(true)
+        expect(set.insert(0)).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        for candidate in 1..257:
+            if map.selected_algorithm() == AdaptiveSetAlgorithm.Hash:
+                map.contains_key(candidate as i64)
+            if set.selected_algorithm() == AdaptiveSetAlgorithm.Hash:
+                set.contains(candidate as i64)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(map.get(0) ?? "").to_equal("zero")
+        expect(set.contains(0)).to_be(true)
+        map.clear()
+        set.clear()
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+
+    it "counts a present nil payload as a lookup hit in every storage":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var map: AdaptiveMap<i64, text?> = AdaptiveMap.with_profile(policy)
+        expect(map.put(7, nil)).to_be(true)
+        expect(map.contains_key(7)).to_be(true)
+        map.get(7)
+        expect(map.observation().hits).to_equal(2)
+        expect(map.observation().misses).to_equal(0)
+        map.set_attribute(AdaptiveSetAttribute.Hash)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        map.get(7)
+        expect(map.observation().hits).to_equal(3)
+        map.set_attribute(AdaptiveSetAttribute.Ordered)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        map.get(7)
+        expect(map.observation().hits).to_equal(4)
+        expect(map.observation().misses).to_equal(0)
+
+    it "uses ordered integer-key storage from a hot no-hash profile":
+        val policy = AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 32, allow_hash: false)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://generic/no-hash#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 3, lookup_count_p95: 40,
+            hit_count_p95: 30, miss_count_p95: 10
+        )
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(map.put(7, "seven")).to_be(true)
+        expect(map.apply_workload_profile(prior)).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(map.get(7) ?? "").to_equal("seven")
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(set.insert(7)).to_be(true)
+        expect(set.apply_workload_profile(prior)).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.contains(7)).to_be(true)
+
+    it "moves integer-key map entries to ordered storage without losing values":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://generic/map-collision#stable", target_profile_id: "x86_64-v3",
+            sample_count: 2, size_p95: 20, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 20,
+            hash_probe_count_p95: 100, hash_collision_count_p95: 40
+        )
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(map.put(7, "seven")).to_be(true)
+        expect(map.apply_workload_profile(prior)).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(map.get(7) ?? "").to_equal("seven")
+        map.clear()
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var forced: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        forced.set_attribute(AdaptiveSetAttribute.Hash)
+        expect(forced.apply_workload_profile(prior)).to_be(false)
+        expect(forced.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+
+    it "delegates integer-key set feedback to one ordered map backing":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://generic/set-collision#stable", target_profile_id: "x86_64-v3",
+            sample_count: 2, size_p95: 20, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 20,
+            hash_probe_count_p95: 100, hash_collision_count_p95: 40
+        )
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_site_and_target(
+            policy, prior.site_id, prior.target_profile_id)
+        expect(set.insert(7)).to_be(true)
+        expect(set.apply_workload_profile(prior)).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.contains(7)).to_be(true)
+        expect(set.remove(7)).to_be(true)
+        set.clear()
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)

@@ -1,0 +1,593 @@
+# Purpose: focused G0 evidence for the frozen common three-payload DTO/codecs.
+# @req REQ-CSM-003 REQ-CSM-024 REQ-CSM-026 REQ-CSM-027 NFR-CSM-010
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use std.common.structural.wire.{wire_magic, wire_put_envelope, wire_put_u8,
+    wire_put_u32, wire_put_u64}
+use compiler.common.cache_contract.physical_tld_v1.{TldPayloadRoleV1, TldSectionRefV1,
+    PhysicalTldHeaderV1, PhysicalTldObjectV1, PhysicalTldExtensionV2, PhysicalTldObjectV2,
+    physical_tld_header_decode_v1,
+    physical_tld_header_decode_bounded_v1,
+    physical_tld_header_digest_v1, physical_tld_object_decode_v1,
+    physical_tld_object_decode_bounded_v1,
+    physical_tld_object_digest_v1, physical_tld_object_encode_v1,
+    physical_tld_object_decode_v2, physical_tld_object_decode_bounded_v2,
+    physical_tld_object_digest_v2, physical_tld_object_encode_v2,
+    physical_tld_header_encode_v1, physical_tld_projection_text_v1,
+    physical_tld_projection_text_v2, physical_tld_presentation_field_id_v2,
+    physical_tld_section_table_bytes_v1, physical_tld_section_table_digest_v1,
+    three_payload_contract_put_digest_v1}
+use compiler.common.cache_contract.package_init_tld_v1.{PackageInitTldV1,
+    package_init_tld_decode_v1, package_init_tld_encode_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    SemanticQueryKeyV1, SemanticQueryReadV1, SemanticQueryReadManifestV1,
+    semantic_query_key_canonical_v1, semantic_query_read_manifest_decode_v1,
+    semantic_query_read_manifest_encode_v1}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{ReverseReferenceEdgeV1,
+    ReverseReferenceShardV1, ReverseReferenceDeltaV1, reverse_reference_delta_decode_v1,
+    reverse_reference_delta_encode_v1, reverse_reference_shard_decode_v1,
+    reverse_reference_shard_encode_v1}
+use compiler.common.cache_contract.portable_object_ref_v1.{PortableObjectRefV1,
+    PortableObjectStageV1, PortablePortabilityV1, portable_object_ref_decode_v1,
+    portable_object_ref_encode_v1}
+use compiler.common.cache_contract.generation_manifest_v1.{GenerationManifestV1,
+    generation_manifest_decode_v1, generation_manifest_digest_v1,
+    generation_manifest_encode_v1}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{ClosureCoverageRootV1,
+    ThreePayloadClosureSealV2, ThreePayloadSemanticRefV2, closure_coverage_dimension_v1,
+    three_payload_closure_seal_decode_v2, three_payload_closure_seal_digest_v2,
+    three_payload_closure_seal_encode_v2}
+use compiler.common.cache_contract.three_payload_worker_v1.{ThreePayloadInputIdentityV1,
+    ThreePayloadReadReceiptV1, ThreePayloadWorkerResultV1,
+    three_payload_worker_result_decode_bounded_v1,
+    three_payload_worker_result_decode_v1, three_payload_worker_result_encode_v1}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn d(ch: text) -> text: ch.repeat(64)
+
+fn section(role: TldPayloadRoleV1, object_digest: text) -> TldSectionRefV1:
+    TldSectionRefV1(role: role, section_index: 0, kind: "semantic-body",
+        semantic_object_digest: object_digest, offset: 0, stored_bytes: 16,
+        decoded_bytes: 16, encoding_profile: "raw-v1")
+
+fn header(role: TldPayloadRoleV1, object_digest: text) -> PhysicalTldHeaderV1:
+    val sections = [section(role, object_digest)]
+    PhysicalTldHeaderV1(schema: 1, role: role, semantic_record_digest: d("a"),
+        section_table_digest: physical_tld_section_table_digest_v1(sections),
+        payload_bytes: 16, sections: sections)
+
+# Test-only malformed-wire builder. Production encoders correctly refuse an
+# overlapping table, so this fixture deliberately bypasses encoder admission
+# while recomputing the table digest from the exact malformed rows.
+fn unchecked_package_init_object_wire(header: PhysicalTldHeaderV1,
+        payload: [u8]) -> [u8]:
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("TLD1"), 1)
+    out = wire_put_u64(out, header.schema)
+    out = wire_put_u8(out, 2)
+    out = three_payload_contract_put_digest_v1(out, header.semantic_record_digest)
+    out = three_payload_contract_put_digest_v1(out, header.section_table_digest)
+    out = wire_put_u64(out, header.payload_bytes)
+    for byte in physical_tld_section_table_bytes_v1(header.sections): out.push(byte)
+    for byte in payload: out.push(byte)
+    out
+
+struct ExtensionWireRowV2:
+    field_id: i64
+    mandatory_tag: i64
+    offset: i64
+    stored_bytes: i64
+
+# Test-only malformed TLD2 builder.  Production admission stays strict.
+fn unchecked_tld_v2_wire(core: [u8], rows: [ExtensionWireRowV2],
+        extension_payload: [u8]) -> [u8]:
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("TLD2"), 2)
+    out = wire_put_u64(out, core.len())
+    out = wire_put_u32(out, rows.len())
+    for row in rows:
+        out = wire_put_u64(out, row.field_id)
+        out = wire_put_u8(out, row.mandatory_tag)
+        out = wire_put_u64(out, row.offset)
+        out = wire_put_u64(out, row.stored_bytes)
+    for byte in core: out.push(byte)
+    for byte in extension_payload: out.push(byte)
+    out
+
+fn query(name: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "type", stable_entity_id: name,
+        semantic_profile_digest: d("b"), parameter_digest: d("c"))
+
+fn read_manifest() -> SemanticQueryReadManifestV1:
+    val consumer = query("consumer")
+    val read = SemanticQueryReadV1(producer: query("producer"), consumer: consumer,
+        facet: "signature", ordinal: 0, consumed_fingerprint: d("d"),
+        witness_digest: d("e"), partition_id: "pkg", completeness: SemanticCoverageV1.Complete)
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: [read])
+
+fn portable_ref() -> PortableObjectRefV1:
+    PortableObjectRefV1(content_digest: d("1"), stage: PortableObjectStageV1.Base,
+        portability: PortablePortabilityV1.Portable, ir_schema: 1,
+        required_semantics_digest: d("2"), target_contract_digest: nil,
+        verification_receipt_digest: d("3"))
+
+fn coverage_roots(unknown_index: i64) -> [ClosureCoverageRootV1]:
+    var roots: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        roots.push(ClosureCoverageRootV1(dimension: closure_coverage_dimension_v1(index),
+            root_digest: d("4"), coverage: if index == unknown_index:
+                SemanticCoverageV1.Unknown else: SemanticCoverageV1.Complete))
+        index = index + 1
+    roots
+
+fn seal_v2() -> ThreePayloadClosureSealV2:
+    val macro_section = section(TldPayloadRoleV1.PackageInitTld, d("5"))
+    val aspect = ThreePayloadSemanticRefV2(kind: ThreePayloadSemanticRefKindV1.AspectCallable,
+        stable_entity_id: "aspect.before", callable_signature_digest: d("6"),
+        effect_digest: d("7"), body_or_object_digest: d("8"), embedded: nil,
+        selection_contract_digest: d("9"))
+    val macro = ThreePayloadSemanticRefV2(kind: ThreePayloadSemanticRefKindV1.MacroExpansion,
+        stable_entity_id: "macro.expand", callable_signature_digest: d("a"),
+        effect_digest: d("b"), body_or_object_digest: d("5"), embedded: Some(macro_section),
+        selection_contract_digest: d("c"))
+    ThreePayloadClosureSealV2(schema: 2, input_generation_digest: d("d"),
+        snapshot_digest: d("e"), source_digest: d("f"), prior_tld_digest: Some(d("0")),
+        init_tld_digest: d("1"), compiler_semantics_digest: d("2"),
+        consumed_inputs_digest: d("3"), semantic_refs: [aspect, macro],
+        coverage_roots: coverage_roots(-1), section_count: 1, payload_bytes: 48,
+        max_decode_bytes: 16)
+
+describe "Physical TLD common contract":
+    it "roundtrips a deterministic generated projection and preserves object identities":
+        step("Encode and decode one authenticated physical TLD body")
+        val original = header(TldPayloadRoleV1.PackageInitTld, d("4"))
+        val encoded = physical_tld_header_encode_v1(original)
+        val decoded = physical_tld_header_decode_v1(encoded)
+        expect(decoded.ok).to_equal(true)
+        expect(physical_tld_header_digest_v1(original).len()).to_equal(64)
+        expect(physical_tld_projection_text_v1(original)).to_start_with("# generated Simple .tld projection; not source\n")
+        val value = match decoded.value:
+            case Some(result): result
+            case nil: original
+        expect(value.sections[0].semantic_object_digest).to_equal(d("4"))
+        expect(physical_tld_header_encode_v1(value)).to_equal(encoded)
+        val body: [u8] = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8(),
+            5.to_u8(), 6.to_u8(), 7.to_u8(), 8.to_u8(), 9.to_u8(), 10.to_u8(),
+            11.to_u8(), 12.to_u8(), 13.to_u8(), 14.to_u8(), 15.to_u8(), 16.to_u8()]
+        val body_header = header(TldPayloadRoleV1.PackageInitTld, sha256_u8_hex(body))
+        val object = PhysicalTldObjectV1(header: body_header, canonical_sections: [body])
+        val object_bytes = physical_tld_object_encode_v1(object)
+        expect(physical_tld_object_decode_v1(object_bytes).ok).to_equal(true)
+        expect(physical_tld_object_decode_bounded_v1(object_bytes, 0, 16).ok).to_equal(false)
+        expect(physical_tld_object_decode_bounded_v1(object_bytes, 1, 15).ok).to_equal(false)
+        expect(physical_tld_object_digest_v1(object).len()).to_equal(64)
+        var corrupt_body = object_bytes.copy()
+        corrupt_body[corrupt_body.len() - 1] = 0.to_u8()
+        expect(physical_tld_object_decode_v1(corrupt_body).ok).to_equal(false)
+
+    it "rejects version drift, truncation, trailing bytes, overlap, and stale section-table identity":
+        step("Reject malformed header envelopes and stale section-table identities")
+        val original = header(TldPayloadRoleV1.PriorModuleTld, d("5"))
+        val encoded = physical_tld_header_encode_v1(original)
+        var wrong_version = encoded.copy()
+        wrong_version[4] = 2.to_u8()
+        expect(physical_tld_header_decode_v1(wrong_version).ok).to_equal(false)
+        expect(physical_tld_header_decode_v1(encoded[0..(encoded.len() - 1)]).ok).to_equal(false)
+        var trailing = encoded.copy()
+        trailing.push(0.to_u8())
+        expect(physical_tld_header_decode_v1(trailing).ok).to_equal(false)
+        expect(physical_tld_header_decode_bounded_v1(encoded, 0, 16).ok).to_equal(false)
+        var excessive_count = encoded.copy()
+        excessive_count[89] = 1.to_u8()
+        excessive_count[90] = 0.to_u8()
+        excessive_count[91] = 16.to_u8()
+        excessive_count[92] = 0.to_u8()
+        expect(physical_tld_header_decode_v1(excessive_count).ok).to_equal(false)
+        var bad_sections = original.sections.copy()
+        bad_sections[0].stored_bytes = 17
+        val stale = PhysicalTldHeaderV1(schema: 1, role: original.role,
+            semantic_record_digest: original.semantic_record_digest,
+            section_table_digest: original.section_table_digest, payload_bytes: 16,
+            sections: bad_sections)
+        expect(physical_tld_header_encode_v1(stale).len()).to_equal(0)
+
+    it "preflights raw encoding and aggregate retained bytes before body slices":
+        step("Validate encoding and aggregate decode budgets before retaining body slices")
+        val body: [u8] = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8(),
+            5.to_u8(), 6.to_u8(), 7.to_u8(), 8.to_u8(), 9.to_u8(), 10.to_u8(),
+            11.to_u8(), 12.to_u8(), 13.to_u8(), 14.to_u8(), 15.to_u8(), 16.to_u8()]
+
+        val mismatch_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 0, kind: "semantic-body", semantic_object_digest: sha256_u8_hex(body),
+            offset: 0, stored_bytes: 16, decoded_bytes: 0, encoding_profile: "raw-v1")
+        val mismatch_sections = [mismatch_section]
+        val mismatch_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld, semantic_record_digest: d("a"),
+            section_table_digest: physical_tld_section_table_digest_v1(mismatch_sections),
+            payload_bytes: 16, sections: mismatch_sections)
+        var mismatch_wire = physical_tld_header_encode_v1(mismatch_header)
+        for byte in body: mismatch_wire.push(byte)
+        val mismatch = physical_tld_object_decode_bounded_v1(mismatch_wire, 1, 0)
+        expect(mismatch.ok).to_equal(false)
+        expect(mismatch.error).to_equal("tld_raw_length_mismatch")
+
+        val encoded_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 0, kind: "semantic-body", semantic_object_digest: sha256_u8_hex(body),
+            offset: 0, stored_bytes: 16, decoded_bytes: 16, encoding_profile: "zstd-v1")
+        val encoded_sections = [encoded_section]
+        val encoded_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld, semantic_record_digest: d("a"),
+            section_table_digest: physical_tld_section_table_digest_v1(encoded_sections),
+            payload_bytes: 16, sections: encoded_sections)
+        var encoded_wire = physical_tld_header_encode_v1(encoded_header)
+        for byte in body: encoded_wire.push(byte)
+        val unsupported = physical_tld_object_decode_bounded_v1(encoded_wire, 1, 16)
+        expect(unsupported.ok).to_equal(false)
+        expect(unsupported.error).to_equal("tld_unsupported_encoding")
+
+        val first: [u8] = body[0..8]
+        val second: [u8] = body[8..16]
+        val first_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 0, kind: "semantic-body", semantic_object_digest: sha256_u8_hex(first),
+            offset: 0, stored_bytes: 8, decoded_bytes: 8, encoding_profile: "raw-v1")
+        val second_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 1, kind: "semantic-body", semantic_object_digest: sha256_u8_hex(second),
+            offset: 8, stored_bytes: 8, decoded_bytes: 8, encoding_profile: "raw-v1")
+        val aggregate_sections = [first_section, second_section]
+        val aggregate_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld, semantic_record_digest: d("a"),
+            section_table_digest: physical_tld_section_table_digest_v1(aggregate_sections),
+            payload_bytes: 16, sections: aggregate_sections)
+        var aggregate_wire = physical_tld_header_encode_v1(aggregate_header)
+        for byte in body: aggregate_wire.push(byte)
+        val over_budget = physical_tld_object_decode_bounded_v1(aggregate_wire, 2, 8)
+        expect(over_budget.ok).to_equal(false)
+        expect(over_budget.error).to_equal("tld_aggregate_decode_limit_exceeded")
+        expect(physical_tld_object_decode_bounded_v1(aggregate_wire, 2, 16).ok).to_equal(true)
+
+    it "rejects an independently rehashed two-section overlap before retaining bodies":
+        step("Decode two overlapping sections whose malformed table digest was recomputed")
+        val payload: [u8] = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8(),
+            5.to_u8(), 6.to_u8(), 7.to_u8(), 8.to_u8(), 9.to_u8(),
+            10.to_u8(), 11.to_u8(), 12.to_u8()]
+        val first_body: [u8] = payload[0..8]
+        val second_body: [u8] = payload[4..12]
+        val first = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 0, kind: "semantic-body",
+            semantic_object_digest: sha256_u8_hex(first_body), offset: 0,
+            stored_bytes: 8, decoded_bytes: 8, encoding_profile: "raw-v1")
+        val second = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 1, kind: "semantic-body",
+            semantic_object_digest: sha256_u8_hex(second_body), offset: 4,
+            stored_bytes: 8, decoded_bytes: 8, encoding_profile: "raw-v1")
+        val overlapping = [first, second]
+        val malformed = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld,
+            semantic_record_digest: d("a"),
+            section_table_digest: physical_tld_section_table_digest_v1(overlapping),
+            payload_bytes: 12, sections: overlapping)
+        val decoded = physical_tld_object_decode_bounded_v1(
+            unchecked_package_init_object_wire(malformed, payload), 2, 16)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.error).to_equal("noncanonical_tld_header")
+
+    it "keeps legacy TLD1 presentation outside canonical identity and rejects appended bytes":
+        step("Render out-of-band presentation without changing the strict TLD1 object")
+        val body: [u8] = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8(),
+            5.to_u8(), 6.to_u8(), 7.to_u8(), 8.to_u8(), 9.to_u8(), 10.to_u8(),
+            11.to_u8(), 12.to_u8(), 13.to_u8(), 14.to_u8(), 15.to_u8(), 16.to_u8()]
+        val canonical_header = header(TldPayloadRoleV1.PackageInitTld, sha256_u8_hex(body))
+        val canonical = PhysicalTldObjectV1(header: canonical_header,
+            canonical_sections: [body])
+        val canonical_bytes = physical_tld_object_encode_v1(canonical)
+        val presentation = physical_tld_projection_text_v1(canonical_header) +
+            "\n# optional-display-label=demo"
+        expect(presentation).to_contain("optional-display-label=demo")
+        expect(physical_tld_object_digest_v1(canonical)).to_equal(sha256_u8_hex(canonical_bytes))
+        step("Reject an unknown appended wire field instead of guessing its semantics")
+        var unknown_field = canonical_bytes.copy()
+        unknown_field.push(1.to_u8())
+        val rejected = physical_tld_object_decode_v1(unknown_field)
+        expect(rejected.ok).to_equal(false)
+        expect(rejected.error).to_equal("tld_payload_length_mismatch")
+
+    it "roundtrips known and unknown optional TLD2 presentation fields losslessly":
+        step("Frame a canonical TLD1 object with known and unknown optional fields")
+        val body: [u8] = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8(),
+            5.to_u8(), 6.to_u8(), 7.to_u8(), 8.to_u8(), 9.to_u8(), 10.to_u8(),
+            11.to_u8(), 12.to_u8(), 13.to_u8(), 14.to_u8(), 15.to_u8(), 16.to_u8()]
+        val core_header = header(TldPayloadRoleV1.PackageInitTld, sha256_u8_hex(body))
+        val core = PhysicalTldObjectV1(header: core_header, canonical_sections: [body])
+        val known_bytes: [u8] = [10.to_u8(), 11.to_u8()]
+        val unknown_bytes: [u8] = [12.to_u8(), 13.to_u8(), 14.to_u8()]
+        val known = PhysicalTldExtensionV2(field_id: physical_tld_presentation_field_id_v2(),
+            mandatory: false, offset: 0, stored_bytes: known_bytes.len(),
+            opaque_bytes: known_bytes)
+        val unknown = PhysicalTldExtensionV2(field_id: 77, mandatory: false,
+            offset: known_bytes.len(), stored_bytes: unknown_bytes.len(),
+            opaque_bytes: unknown_bytes)
+        val original = PhysicalTldObjectV2(core: core, extensions: [known, unknown])
+        val encoded = physical_tld_object_encode_v2(original)
+        val decoded = physical_tld_object_decode_v2(encoded)
+        expect(decoded.ok).to_equal(true)
+        val value = match decoded.value:
+            case Some(result): result
+            case nil: original
+        expect(value.extensions.len()).to_equal(2)
+        expect(value.extensions[1].field_id).to_equal(77)
+        expect(value.extensions[1].opaque_bytes).to_equal(unknown_bytes)
+        expect(physical_tld_object_encode_v2(value)).to_equal(encoded)
+        expect(physical_tld_object_digest_v2(value)).to_equal(sha256_u8_hex(encoded))
+        step("Derive presentation only from the canonical core")
+        expect(physical_tld_projection_text_v2(value)).to_equal(
+            physical_tld_projection_text_v1(core_header))
+
+    it "rejects a large valid TLD2 core against a tiny caller budget before the full-core slice":
+        step("Build a valid 256 KiB canonical core and apply a one-byte decode budget")
+        val large_body = text_to_bytes("0123456789abcdef".repeat(16384))
+        val large_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 0, kind: "semantic-body",
+            semantic_object_digest: sha256_u8_hex(large_body), offset: 0,
+            stored_bytes: large_body.len(), decoded_bytes: large_body.len(),
+            encoding_profile: "raw-v1")
+        val large_sections = [large_section]
+        val large_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld, semantic_record_digest: d("a"),
+            section_table_digest: physical_tld_section_table_digest_v1(large_sections),
+            payload_bytes: large_body.len(), sections: large_sections)
+        val large_core = PhysicalTldObjectV1(header: large_header,
+            canonical_sections: [large_body])
+        val wrapped = physical_tld_object_encode_v2(
+            PhysicalTldObjectV2(core: large_core, extensions: []))
+        expect(wrapped.len()).to_be_greater_than(262144)
+        val rejected = physical_tld_object_decode_bounded_v2(wrapped, 1, 1, 0, 0)
+        expect(rejected.ok).to_equal(false)
+        expect(rejected.error).to_equal("tld_decode_byte_limit_exceeded")
+
+        step("Reject malformed large and zero-count cores during original-buffer preflight")
+        val mismatched_section = TldSectionRefV1(
+            role: TldPayloadRoleV1.PackageInitTld, section_index: 0,
+            kind: "semantic-body", semantic_object_digest: sha256_u8_hex(large_body),
+            offset: 0, stored_bytes: large_body.len(), decoded_bytes: 1,
+            encoding_profile: "raw-v1")
+        val mismatched_sections = [mismatched_section]
+        val mismatched_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld, semantic_record_digest: d("a"),
+            section_table_digest: physical_tld_section_table_digest_v1(mismatched_sections),
+            payload_bytes: large_body.len(), sections: mismatched_sections)
+        val mismatched_core = unchecked_package_init_object_wire(
+            mismatched_header, large_body)
+        val mismatched_wrapped = unchecked_tld_v2_wire(mismatched_core, [], [])
+        val mismatched_rejected = physical_tld_object_decode_bounded_v2(
+            mismatched_wrapped, 1, 1, 0, 0)
+        expect(mismatched_rejected.ok).to_equal(false)
+        expect(mismatched_rejected.error).to_equal("tld_raw_length_mismatch")
+
+        val no_sections: [TldSectionRefV1] = []
+        val zero_count_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld, semantic_record_digest: d("a"),
+            section_table_digest: physical_tld_section_table_digest_v1(no_sections),
+            payload_bytes: large_body.len(), sections: no_sections)
+        val zero_count_core = unchecked_package_init_object_wire(
+            zero_count_header, large_body)
+        val zero_count_wrapped = unchecked_tld_v2_wire(zero_count_core, [], [])
+        val zero_count_rejected = physical_tld_object_decode_bounded_v2(
+            zero_count_wrapped, 0, 0, 0, 0)
+        expect(zero_count_rejected.ok).to_equal(false)
+        expect(zero_count_rejected.error).to_equal("tld_noncontiguous_payload")
+
+        step("Pin the offset-aware caller-bound preflight before the body-containing core slice")
+        val source = rt_file_read_text(
+            "src/compiler/00.common/cache_contract/physical_tld_v1.spl") ?? ""
+        val decoder_start = source.index_of("pub fn physical_tld_object_decode_bounded_v2")
+        val decoder_end = source.index_of("pub fn physical_tld_object_decode_v2(bytes")
+        expect(decoder_start).to_be_greater_than(0)
+        expect(decoder_end).to_be_greater_than(decoder_start)
+        val decoder_source = source.substring(decoder_start, decoder_end)
+        val preflight_index = decoder_source.index_of(
+            "_physical_tld_core_bounds_preflight_v2(bytes")
+        val full_core_slice_index = decoder_source.index_of(
+            "bytes[core_start..extension_payload_start]")
+        expect(preflight_index).to_be_greater_than(0)
+        expect(full_core_slice_index).to_be_greater_than(preflight_index)
+        val helper_start = source.index_of("fn _physical_tld_core_bounds_preflight_v2")
+        expect(helper_start).to_be_greater_than(0)
+        val helper_source = source.substring(helper_start, decoder_start)
+        expect(helper_source).to_contain("encoding_profile != \"raw-v1\"")
+        expect(helper_source).to_contain("stored_bytes != decoded_bytes")
+        expect(helper_source).to_contain("offset != retained_stored_bytes")
+        expect(helper_source).to_contain(
+            "retained_stored_bytes != payload_bytes or retained_decoded_bytes != payload_bytes")
+
+    it "rejects unknown mandatory, overlapping, overflowing, over-budget and raw TLD2 fields":
+        step("Reject unknown mandatory semantics before retaining extension payloads")
+        val body: [u8] = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8(),
+            5.to_u8(), 6.to_u8(), 7.to_u8(), 8.to_u8(), 9.to_u8(), 10.to_u8(),
+            11.to_u8(), 12.to_u8(), 13.to_u8(), 14.to_u8(), 15.to_u8(), 16.to_u8()]
+        val core_header = header(TldPayloadRoleV1.PackageInitTld, sha256_u8_hex(body))
+        val core = PhysicalTldObjectV1(header: core_header, canonical_sections: [body])
+        val core_bytes = physical_tld_object_encode_v1(core)
+        val mandatory = unchecked_tld_v2_wire(core_bytes,
+            [ExtensionWireRowV2(field_id: 99, mandatory_tag: 1, offset: 0,
+                stored_bytes: 1)], [9.to_u8()])
+        val mandatory_result = physical_tld_object_decode_v2(mandatory)
+        expect(mandatory_result.ok).to_equal(false)
+        expect(mandatory_result.error).to_equal("unknown_mandatory_tld_v2_extension")
+
+        step("Reject overlap and u64 arithmetic overflow during the table preflight")
+        val overlap = unchecked_tld_v2_wire(core_bytes,
+            [ExtensionWireRowV2(field_id: 1, mandatory_tag: 0, offset: 0,
+                stored_bytes: 3),
+             ExtensionWireRowV2(field_id: 2, mandatory_tag: 0, offset: 2,
+                stored_bytes: 2)],
+            [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8()])
+        val overlap_result = physical_tld_object_decode_v2(overlap)
+        expect(overlap_result.ok).to_equal(false)
+        expect(overlap_result.error).to_equal("tld_v2_extension_overlap_or_gap")
+        val overflow = unchecked_tld_v2_wire(core_bytes,
+            [ExtensionWireRowV2(field_id: 1, mandatory_tag: 0, offset: 0,
+                stored_bytes: -1)], [])
+        val overflow_result = physical_tld_object_decode_v2(overflow)
+        expect(overflow_result.ok).to_equal(false)
+        expect(overflow_result.error).to_equal("u64_overflow")
+
+        step("Reject aggregate extension bytes before slicing and reject trailing raw bytes")
+        val optional = PhysicalTldExtensionV2(field_id: 77, mandatory: false,
+            offset: 0, stored_bytes: 3,
+            opaque_bytes: [1.to_u8(), 2.to_u8(), 3.to_u8()])
+        val valid = physical_tld_object_encode_v2(
+            PhysicalTldObjectV2(core: core, extensions: [optional]))
+        val bounded = physical_tld_object_decode_bounded_v2(valid, 1, 16, 1, 2)
+        expect(bounded.ok).to_equal(false)
+        expect(bounded.error).to_equal("tld_v2_extension_bytes_exceeded")
+        var trailing = valid.copy()
+        trailing.push(8.to_u8())
+        val trailing_result = physical_tld_object_decode_v2(trailing)
+        expect(trailing_result.ok).to_equal(false)
+        expect(trailing_result.error).to_equal("trailing_tld_v2_bytes")
+
+describe "Package, query, and reverse-reference common codecs":
+    it "roundtrips package scope and typed ordered query reads without delimiter collisions":
+        step("Roundtrip package scope and length-framed query identities")
+        val package = PackageInitTldV1(package_id: "pkg", parent_scope_digest: nil,
+            membership_root_digest: d("1"), ordered_member_ids: ["a", "b"],
+            aspect_root_digest: d("2"), trait_root_digest: d("3"), macro_root_digest: d("4"),
+            extension_root_digest: d("5"), template_root_digest: d("6"),
+            initializer_contract_digest: d("7"), ordered_initializer_refs: ["init.a"])
+        expect(package_init_tld_decode_v1(package_init_tld_encode_v1(package)).ok).to_equal(true)
+        val manifest = read_manifest()
+        expect(semantic_query_read_manifest_decode_v1(
+            semantic_query_read_manifest_encode_v1(manifest)).ok).to_equal(true)
+        val left = SemanticQueryKeyV1(kind: "a\u0000b", stable_entity_id: "c",
+            semantic_profile_digest: d("1"), parameter_digest: d("2"))
+        val right = SemanticQueryKeyV1(kind: "a", stable_entity_id: "b\u0000c",
+            semantic_profile_digest: d("1"), parameter_digest: d("2"))
+        expect(semantic_query_key_canonical_v1(left) == semantic_query_key_canonical_v1(right)).to_equal(false)
+        val original_read = manifest.ordered_reads[0]
+        val bad_read = SemanticQueryReadV1(producer: original_read.producer,
+            consumer: original_read.consumer, facet: original_read.facet, ordinal: 1,
+            consumed_fingerprint: original_read.consumed_fingerprint,
+            witness_digest: original_read.witness_digest, partition_id: original_read.partition_id,
+            completeness: original_read.completeness)
+        val bad = SemanticQueryReadManifestV1(schema: 1, consumer: manifest.consumer,
+            ordered_reads: [bad_read])
+        expect(semantic_query_read_manifest_encode_v1(bad).len()).to_equal(0)
+
+    it "roundtrips shards and cross-partition deltas while binding old and new manifests":
+        step("Roundtrip reverse-reference shards and generation-bound deltas")
+        val consumer = query("consumer")
+        val old_digest = d("8")
+        val new_digest = d("9")
+        val inserted_a = ReverseReferenceEdgeV1(producer: query("a"), facet: "body",
+            consumer: consumer, consumed_fingerprint: d("1"),
+            forward_manifest_digest: new_digest, partition_id: "a")
+        val inserted_b = ReverseReferenceEdgeV1(producer: query("b"), facet: "body",
+            consumer: consumer, consumed_fingerprint: d("2"),
+            forward_manifest_digest: new_digest, partition_id: "b")
+        val removed = ReverseReferenceEdgeV1(producer: query("c"), facet: "body",
+            consumer: consumer, consumed_fingerprint: d("3"),
+            forward_manifest_digest: old_digest, partition_id: "c")
+        val shard = ReverseReferenceShardV1(schema: 1, partition_id: "a",
+            coverage: SemanticCoverageV1.Complete, sorted_edges: [inserted_a])
+        expect(reverse_reference_shard_decode_v1(reverse_reference_shard_encode_v1(shard)).ok).to_equal(true)
+        val delta = ReverseReferenceDeltaV1(consumer: consumer,
+            old_manifest_digest: Some(old_digest), new_manifest_digest: new_digest,
+            inserted: [inserted_a, inserted_b], removed: [removed])
+        expect(reverse_reference_delta_decode_v1(reverse_reference_delta_encode_v1(delta)).ok).to_equal(true)
+        val wrong_edge = ReverseReferenceEdgeV1(producer: inserted_a.producer,
+            facet: inserted_a.facet, consumer: inserted_a.consumer,
+            consumed_fingerprint: inserted_a.consumed_fingerprint,
+            forward_manifest_digest: old_digest, partition_id: inserted_a.partition_id)
+        val wrong = ReverseReferenceDeltaV1(consumer: consumer,
+            old_manifest_digest: Some(old_digest), new_manifest_digest: new_digest,
+            inserted: [wrong_edge, inserted_b], removed: [removed])
+        expect(reverse_reference_delta_encode_v1(wrong).len()).to_equal(0)
+
+describe "Portable, generation, and strict V2 seals":
+    it "roundtrips portable and generation identities without a recursive final digest":
+        step("Roundtrip portable references and a non-recursive generation manifest")
+        val portable = portable_ref()
+        expect(portable_object_ref_decode_v1(portable_object_ref_encode_v1(portable)).ok).to_equal(true)
+        val generation = GenerationManifestV1(schema: 1, snapshot_digest: d("1"),
+            catalog_digest: d("2"), summary_refs: [d("3")], scope_refs: [d("4")],
+            rr_shard_refs: [d("5")], forward_manifest_refs: [d("6")],
+            portable_refs: [portable], target_refs: [d("7")], diagnostic_refs: [d("8")])
+        val encoded = generation_manifest_encode_v1(generation)
+        expect(generation_manifest_decode_v1(encoded).ok).to_equal(true)
+        expect(generation_manifest_digest_v1(generation).len()).to_equal(64)
+
+    it "roundtrips only strict V2 and binds semantic, embedded, and complete coverage facts":
+        step("Admit only strict V2 seals with complete semantic coverage")
+        val seal = seal_v2()
+        val encoded = three_payload_closure_seal_encode_v2(seal)
+        expect(three_payload_closure_seal_decode_v2(encoded).ok).to_equal(true)
+        val digest = three_payload_closure_seal_digest_v2(seal)
+        expect(digest.len()).to_equal(64)
+        val aspect = seal.semantic_refs[0]
+        val macro = seal.semantic_refs[1]
+        val changed_aspect = ThreePayloadSemanticRefV2(kind: aspect.kind,
+            stable_entity_id: aspect.stable_entity_id,
+            callable_signature_digest: aspect.callable_signature_digest,
+            effect_digest: d("0"), body_or_object_digest: aspect.body_or_object_digest,
+            embedded: aspect.embedded, selection_contract_digest: aspect.selection_contract_digest)
+        var changed = seal
+        changed.semantic_refs = [changed_aspect, macro]
+        expect(three_payload_closure_seal_digest_v2(changed) == digest).to_equal(false)
+        var v1_tagged = encoded.copy()
+        v1_tagged[4] = 1.to_u8()
+        expect(three_payload_closure_seal_decode_v2(v1_tagged).ok).to_equal(false)
+        var incomplete = seal
+        incomplete.coverage_roots = coverage_roots(0)
+        expect(three_payload_closure_seal_encode_v2(incomplete).len()).to_equal(0)
+        val changed_macro = ThreePayloadSemanticRefV2(kind: macro.kind,
+            stable_entity_id: macro.stable_entity_id,
+            callable_signature_digest: macro.callable_signature_digest,
+            effect_digest: macro.effect_digest, body_or_object_digest: d("6"),
+            embedded: macro.embedded, selection_contract_digest: macro.selection_contract_digest)
+        var wrong_body = seal
+        wrong_body.semantic_refs = [aspect, changed_macro]
+        expect(three_payload_closure_seal_encode_v2(wrong_body).len()).to_equal(0)
+        val embedded_aspect = ThreePayloadSemanticRefV2(kind: aspect.kind,
+            stable_entity_id: aspect.stable_entity_id,
+            callable_signature_digest: aspect.callable_signature_digest,
+            effect_digest: aspect.effect_digest, body_or_object_digest: aspect.body_or_object_digest,
+            embedded: Some(section(TldPayloadRoleV1.PackageInitTld, d("8"))),
+            selection_contract_digest: aspect.selection_contract_digest)
+        var aspect_body = seal
+        aspect_body.semantic_refs = [embedded_aspect, macro]
+        expect(three_payload_closure_seal_encode_v2(aspect_body).len()).to_equal(0)
+
+describe "Worker result common codec":
+    it "roundtrips exact cold/warm identity and rejects RR or external read receipts":
+        step("Roundtrip a confined worker receipt and reject forbidden input evidence")
+        val identity = ThreePayloadInputIdentityV1(source_digest: d("1"),
+            prior_tld_digest: Some(d("2")), init_tld_digest: d("3"), seal_digest: d("4"))
+        val receipt = ThreePayloadReadReceiptV1(input_identity: identity,
+            executor_digest: d("5"), distinct_source: 1, distinct_prior: 1,
+            distinct_init: 1, external_input_count: 0, rr_input_count: 0,
+            open_calls: 3, read_calls: 3, read_bytes: 128, decoded_sections: 1,
+            peak_decode_bytes: 16, denied_io_attempts: 0)
+        val result = ThreePayloadWorkerResultV1(input_identity: identity,
+            new_summary_digest: d("6"), query_reads: read_manifest(), portable_refs: [],
+            diagnostic_digest: d("7"), read_receipt: receipt)
+        expect(three_payload_worker_result_decode_v1(
+            three_payload_worker_result_encode_v1(result)).ok).to_equal(true)
+        val with_portable = ThreePayloadWorkerResultV1(input_identity: identity,
+            new_summary_digest: d("6"), query_reads: read_manifest(),
+            portable_refs: [portable_ref()], diagnostic_digest: d("7"),
+            read_receipt: receipt)
+        val bounded_bytes = three_payload_worker_result_encode_v1(with_portable)
+        expect(three_payload_worker_result_decode_bounded_v1(bounded_bytes, 1).ok).to_equal(false)
+        expect(three_payload_worker_result_decode_bounded_v1(bounded_bytes, 2).ok).to_equal(true)
+        var rr = result
+        rr.read_receipt.rr_input_count = 1
+        expect(three_payload_worker_result_encode_v1(rr).len()).to_equal(0)
+        var denied = result
+        denied.read_receipt.denied_io_attempts = 1
+        expect(three_payload_worker_result_encode_v1(denied).len()).to_equal(0)

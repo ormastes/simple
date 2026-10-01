@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Purpose: Pin that a chained substring().to_int()/to_i64() call resolves to the correct integer under JIT.
+Audience: maintainers of the feature under test.
+
+# Chained substring().to_int() Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 2/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/jit_substring_chained_to_int_returns_pointer_2026-08-04.md
+
+## Overview
+
+`jit_substring_chained_to_int_returns_pointer_2026-08-04` reported that
+
+```simple
+arg.substring(10).to_int()
+```
+
+returned the raw **text pointer** under the JIT, silently, while binding the
+substring to a `val` first and then calling `.to_int()` on it gave the right
+answer. That asymmetry is the whole defect, so this spec asserts the **chained**
+form and keeps the `val`-bound form only as an attribution control — a guard
+written the `val`-bound way would be vacuous here.
+
+The failure was silent and produced a large plausible-looking integer, so the
+guard asserts an exact value and additionally pins that the chained and
+`val`-bound forms agree with each other.
+
+Re-checked 2026-09-12: chained and bound forms agree on both lanes.
+
+## Syntax
+
+```simple
+val arg: text = "--timeout=800"
+arg.substring(10).to_int() ?? -1     # must be 800
+```
+
+"""
+
+use std.spec
+
+
+fn flag_value() -> text:
+    return "--timeout=800"
+
+
+# ============================================================================
+# Test Group 1: the record's own reproducer
+# ============================================================================
+
+describe "chained substring().to_int()":
+    """
+    ## `--timeout=800`
+
+    The exact reproducer. The defect returned a pointer-valued integer.
+    """
+
+    it "parses the chained form to the right integer":
+        step("Run the chained substring-to-integer conversion under JIT")
+        # @req REQ-JIT-SUBSTRING-CHAIN-001
+        val arg: text = flag_value()
+        expect(arg.substring(10).to_int() ?? 0 - 1).to_equal(800)
+
+    it "yields the expected substring text":
+        step("Run the chained substring-to-integer conversion under JIT")
+        # @req REQ-JIT-SUBSTRING-CHAIN-002
+        val arg: text = flag_value()
+        expect(arg.substring(10)).to_equal("800")
+
+    it "yields the expected substring length":
+        step("Run the chained substring-to-integer conversion under JIT")
+        # @req REQ-JIT-SUBSTRING-CHAIN-003
+        val arg: text = flag_value()
+        expect(arg.substring(10).len()).to_equal(3)
+
+
+# ============================================================================
+# Test Group 2: chained vs val-bound agreement
+# ============================================================================
+
+describe "chained and val-bound forms agree":
+    """
+    ## Attribution control
+
+    The `val`-bound form was correct while the defect was live. Asserting that
+    the two forms agree is what makes a future divergence attributable to the
+    chaining rather than to parsing.
+    """
+
+    it "matches the val-bound result":
+        step("Run the chained substring-to-integer conversion under JIT")
+        # @req REQ-JIT-SUBSTRING-CHAIN-004
+        val arg: text = flag_value()
+        val s: text = arg.substring(10)
+        expect(arg.substring(10).to_int() ?? 0 - 1).to_equal(s.to_int() ?? 0 - 2)
+
+    it "chains over a two-argument substring too":
+        step("Run the chained substring-to-integer conversion under JIT")
+        # @req REQ-JIT-SUBSTRING-CHAIN-005
+        val arg: text = "abc123def"
+        expect(arg.substring(3, 6).to_int() ?? 0 - 1).to_equal(123)
+
+    it "chains to_i64 as well as to_int":
+        step("Run the chained substring-to-integer conversion under JIT")
+        # @req REQ-JIT-SUBSTRING-CHAIN-006
+        val arg: text = flag_value()
+        expect(arg.substring(10).to_i64() ?? 0 - 1).to_equal(800)

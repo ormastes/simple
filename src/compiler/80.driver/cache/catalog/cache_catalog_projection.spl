@@ -1,0 +1,96 @@
+#![allow(primitive_api)]
+
+use std.common.crypto.sha256 (sha256_text)
+use std.database.sql.types.{DbValue, DbRow}
+use std.database.pure_sql (PureDatabase)
+use compiler.driver.cache.journal.action_root_journal_v1 (ActionRootRecordV1)
+
+pub struct CatalogLookupV1:
+    present: bool
+    quarantined: bool
+    object_kind: text
+    object_digest: text
+    manifest_digest: text
+    generation: i64
+
+fn _catalog_absent_v1() -> CatalogLookupV1:
+    CatalogLookupV1(present: false, quarantined: false, object_kind: "",
+        object_digest: "", manifest_digest: "", generation: -1)
+
+pub class CacheCatalogProjectionV1:
+    db: PureDatabase
+    generation: i64
+
+    static fn memory() -> Result<CacheCatalogProjectionV1, text>:
+        val db = match PureDatabase.memory_deferred():
+            case Ok(value): value
+            case Err(error): return Err(error.message())
+        var result = CacheCatalogProjectionV1(db: db, generation: -1)
+        result._init()?
+        Ok(result)
+
+    me _init() -> Result<(), text>:
+        match self.db.exec("CREATE TABLE IF NOT EXISTS cache_catalog_projection_v1 (action_digest TEXT PRIMARY KEY, object_kind TEXT, object_digest TEXT, manifest_digest TEXT, generation INTEGER, quarantined INTEGER)", []):
+            case Ok(_): Ok(())
+            case Err(error): Err(error.message())
+
+    me clear() -> Result<(), text>:
+        match self.db.exec("DELETE FROM cache_catalog_projection_v1", []):
+            case Ok(_):
+                self.generation = -1
+                Ok(())
+            case Err(error): Err(error.message())
+
+    me apply(record: ActionRootRecordV1, generation: i64) -> Result<(), text>:
+        val existing = self.lookup(record.action_digest)?
+        if existing.present:
+            val same = existing.object_kind == record.object_kind and existing.object_digest == record.object_digest and
+                existing.manifest_digest == record.manifest_digest
+            if same: return Ok(())
+            val values = [DbValue.Integer(value: 1), DbValue.Integer(value: generation),
+                DbValue.Text(value: record.action_digest)]
+            match self.db.exec("UPDATE cache_catalog_projection_v1 SET quarantined = ?, generation = ? WHERE action_digest = ?", values):
+                case Ok(_):
+                    self.generation = max(self.generation, generation)
+                    Ok(())
+                case Err(error): Err(error.message())
+        else:
+            val values = [DbValue.Text(value: record.action_digest), DbValue.Text(value: record.object_kind),
+                DbValue.Text(value: record.object_digest), DbValue.Text(value: record.manifest_digest),
+                DbValue.Integer(value: generation), DbValue.Integer(value: 0)]
+            match self.db.exec("INSERT INTO cache_catalog_projection_v1 VALUES (?, ?, ?, ?, ?, ?)", values):
+                case Ok(_):
+                    self.generation = max(self.generation, generation)
+                    Ok(())
+                case Err(error): Err(error.message())
+
+    me rebuild(records: [ActionRootRecordV1], generation: i64) -> Result<(), text>:
+        self.clear()?
+        for record in records: self.apply(record, generation)?
+        match self.db.checkpoint():
+            case Ok(_):
+                self.generation = generation
+                Ok(())
+            case Err(error): Err(error.message())
+
+    me lookup(action_digest: text) -> Result<CatalogLookupV1, text>:
+        val rows = match self.db.query("SELECT * FROM cache_catalog_projection_v1 WHERE action_digest = ?", [DbValue.Text(value: action_digest)]):
+            case Ok(value): value
+            case Err(error): return Err(error.message())
+        if rows.len() == 0: return Ok(_catalog_absent_v1())
+        if rows.len() != 1: return Err("catalog action identity is not unique")
+        val row = rows[0]
+        Ok(CatalogLookupV1(present: true, quarantined: row.get_int("quarantined")? != 0,
+            object_kind: row.get_text("object_kind")?, object_digest: row.get_text("object_digest")?,
+            manifest_digest: row.get_text("manifest_digest")?, generation: row.get_int("generation")?))
+
+    me digest() -> Result<text, text>:
+        val rows = match self.db.query("SELECT * FROM cache_catalog_projection_v1 ORDER BY action_digest ASC", []):
+            case Ok(value): value
+            case Err(error): return Err(error.message())
+        var canonical = "simple.cache.catalog.v1\u0000"
+        for row in rows:
+            canonical = canonical + row.get_text("action_digest")? + "\u0000" + row.get_text("object_kind")? + "\u0000" +
+                row.get_text("object_digest")? + "\u0000" + row.get_text("manifest_digest")? + "\u0000" +
+                row.get_int("generation")?.to_string() + "\u0000" + row.get_int("quarantined")?.to_string() + "\u0000"
+        Ok(sha256_text(canonical))

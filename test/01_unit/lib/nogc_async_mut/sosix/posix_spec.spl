@@ -1,0 +1,79 @@
+"""The exact POSIX leg of the hosted SOSIX capsule reads and writes at a file offset straight from a descriptor into a caller-owned buffer, and reports failures as -errno. Requires a binary that backs `rt_fd_pread`/`rt_fd_pwrite` (seed change 2026-09-05); on an older binary these externs return nil and this spec is red by design, never skipped."""
+
+use std.spec.*
+use std.env.platform.{get_temp_dir}
+use std.nogc_async_mut.io.{file_write_text_at, file_read_text_at, file_remove}
+use std.nogc_async_mut.sosix.posix.{
+    SOSIX_POSIX_OPEN_READ, SOSIX_POSIX_OPEN_READ_WRITE,
+    sosix_posix_open, sosix_posix_close, sosix_posix_pread, sosix_posix_pwrite
+}
+
+# Test scaffolding only: the caller-owned buffer the POSIX leg is defined over.
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+
+val ERRNO_EBADF: i64 = 9
+val ERRNO_EINVAL: i64 = 22
+
+fn scratch_path(name: text) -> text:
+    val path = get_temp_dir() + "/sosix_posix_" + name + ".txt"
+    file_remove(path)
+    path
+
+# ASCII "sosix" as the bytes pread must deposit.
+fn buffer_is_sosix(addr: i64) -> bool:
+    rt_ptr_read_u8(addr, 0) == 115 and rt_ptr_read_u8(addr, 1) == 111 and
+        rt_ptr_read_u8(addr, 2) == 115 and rt_ptr_read_u8(addr, 3) == 105 and
+        rt_ptr_read_u8(addr, 4) == 120
+
+describe "SOSIX exact POSIX positioned I/O":
+    it "reads bytes at an offset straight from the descriptor into a caller-owned buffer":
+        # @req REQ-SOSIX-POSIX-PREAD
+        step("Seed a file and open a read-only descriptor")
+        val path = scratch_path("pread")
+        expect(file_write_text_at(path, 0, "hello sosix world")).to_equal(17)
+        val fd = sosix_posix_open(path, SOSIX_POSIX_OPEN_READ)
+        expect(fd).to_be_greater_than(-1)
+        step("pread five bytes at offset 6 into a 16-byte buffer")
+        val buffer = rt_alloc(16)
+        expect(sosix_posix_pread(fd, buffer, 5, 6)).to_equal(5)
+        expect(buffer_is_sosix(buffer)).to_equal(true)
+        step("At end of file pread returns 0, not an error")
+        expect(sosix_posix_pread(fd, buffer, 5, 17)).to_equal(0)
+        expect(sosix_posix_close(fd)).to_equal(true)
+        rt_free(buffer)
+
+    it "writes bytes at an offset from a caller-owned buffer without touching the rest of the file":
+        # @req REQ-SOSIX-POSIX-PWRITE
+        step("Seed a five-byte file and open it read-write")
+        val path = scratch_path("pwrite")
+        expect(file_write_text_at(path, 0, "01234")).to_equal(5)
+        val fd = sosix_posix_open(path, SOSIX_POSIX_OPEN_READ_WRITE)
+        expect(fd).to_be_greater_than(-1)
+        step("pwrite the bytes A B C at offset 2")
+        val buffer = rt_alloc(8)
+        rt_ptr_write_u8(buffer, 0, 65)
+        rt_ptr_write_u8(buffer, 1, 66)
+        rt_ptr_write_u8(buffer, 2, 67)
+        expect(sosix_posix_pwrite(fd, buffer, 3, 2)).to_equal(3)
+        expect(sosix_posix_close(fd)).to_equal(true)
+        step("The file now reads 01ABC: bytes before the offset are untouched")
+        match file_read_text_at(path, 0, 5):
+            case Ok(bytes): expect(bytes).to_equal("01ABC")
+            case Err(_): fail("could not read the file back")
+        rt_free(buffer)
+
+    it "reports failures as -errno: a bad descriptor is -EBADF and a negative length is -EINVAL before any syscall":
+        step("pread on a closed descriptor")
+        val path = scratch_path("errno")
+        expect(file_write_text_at(path, 0, "x")).to_equal(1)
+        val fd = sosix_posix_open(path, SOSIX_POSIX_OPEN_READ)
+        expect(sosix_posix_close(fd)).to_equal(true)
+        val buffer = rt_alloc(8)
+        expect(sosix_posix_pread(fd, buffer, 1, 0)).to_equal(0 - ERRNO_EBADF)
+        step("A negative length never reaches the kernel")
+        expect(sosix_posix_pread(fd, buffer, -1, 0)).to_equal(0 - ERRNO_EINVAL)
+        expect(sosix_posix_pwrite(fd, buffer, -1, 0)).to_equal(0 - ERRNO_EINVAL)
+        rt_free(buffer)

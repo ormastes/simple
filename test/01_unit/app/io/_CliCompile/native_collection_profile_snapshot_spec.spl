@@ -1,0 +1,42 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-PSC-004
+# @cover src/app/io/_CliCompile/native_collection_profile.spl
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
+use app.optimize.sprof_collection_profile.{sprof_serialize_collection_profile}
+use app.io._CliCompile.native_collection_profile.{native_collection_profile_select_from_body}
+
+fn snapshot_profile_body(size: i64) -> text:
+    val sample = AdaptiveSetWorkloadProfile(
+        site_id: "ast://module/hot#stable", target_profile_id: "x86_64-v3",
+        sample_count: 1, size_p95: size, lookup_count_p95: 10,
+        hit_count_p95: 7, miss_count_p95: 3
+    )
+    sprof_serialize_collection_profile("module-hash", "lookup-workload", [], [sample])
+
+describe "native collection profile snapshot admission":
+    it "binds selected feedback to the digest used by the native cache":
+        val first = snapshot_profile_body(8)
+        val changed = snapshot_profile_body(64)
+        val first_digest = sha256_text(first)
+        val selected = native_collection_profile_select_from_body(
+            first, first_digest, "module-hash", "lookup-workload", "x86_64-v3"
+        ).unwrap()
+        expect(selected.len()).to_equal(1)
+        expect(selected[0].size_p95).to_equal(8)
+
+        val stale = native_collection_profile_select_from_body(
+            changed, first_digest, "module-hash", "lookup-workload", "x86_64-v3"
+        )
+        expect(stale.is_err()).to_be(true)
+        match stale:
+            case Err(reason): expect(reason).to_contain("does not match the native cache identity")
+            case Ok(_): panic("changed profile body was admitted under an earlier digest")
+
+        val wrong_target = native_collection_profile_select_from_body(
+            first, first_digest, "module-hash", "lookup-workload", "aarch64-neon"
+        )
+        expect(wrong_target.is_err()).to_be(true)

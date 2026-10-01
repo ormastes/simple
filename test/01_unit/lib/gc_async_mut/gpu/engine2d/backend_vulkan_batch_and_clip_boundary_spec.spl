@@ -1,0 +1,225 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing the F2 CPU<->GPU boundary fixes of
+`doc/03_plan/ui/gpu_offload/web_vulkan_cpu_gpu_boundary_fix_plan_2026-09-11.md`
+(census rows R4, R5, R6, R8, R9). It answers four questions that were each a
+per-primitive CPU or sync cost before: does the pending dispatch table still
+impose a fixed 256-entry ceiling that forces a mid-frame submit+fence-wait; does
+a clipped text run still leave the GPU glyph lane; is the host coverage atlas
+still rasterised once per `draw_text`; and is a clipped composite still
+pixel-identical to the CPU raster it replaces.
+## Operator workflow
+`SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ bin/release/aarch64-apple-darwin-macho/simple run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_batch_and_clip_boundary_spec.spl`
+No GPU is required for any scenario in this file.
+## Compatibility and limitations
+Every assertion here is DEVICE-FREE and says so deliberately. The batch
+bookkeeping scenarios read `pending_compute_descriptors` / `midframe_flush_count`
+/ `font_atlas_cpu_build_count` on a backend that was never initialised against a
+device, so they prove the SHAPE of the batch (no fixed ceiling, no per-band
+flush call, one atlas raster per identity) and NOT that a device executed one
+submit. The clip scenarios evaluate `font_atlas_subrect_pixels`, the same subrect
+the SPIR-V kernel implements, so they prove the composited pixels but not the
+dispatch. Proving `observed_device_submit_count == 1` for a real 300-rect frame
+needs a host whose Vulkan SFFI is admitted; on this Mac under the seed it is not,
+and that half is recorded `environment-blocked` in
+`doc/08_tracking/bug/vulkan_backend_midframe_fence_and_clip_text_fallback_2026-09-11.md`.
+## Verification guidance and troubleshooting
+A failure naming a non-zero `pending_compute_descriptors.len()` on a fresh
+backend means the fixed `[0i64; 256]` preallocation came back — that is the R6
+regression, and it reinstates a mid-frame submit+fence-wait once a frame exceeds
+256 image composites. A failure in the clip scenarios names the block reason the
+gate returned, which is also what `last_text_fallback_reason` records; if it says
+`clip-unsupported-by-font-composite` the R4 fix was reverted and every clipped
+glyph is back on the CPU raster + image upload path.
+"""
+# Lifecycle: doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md ;
+# doc/03_plan/ui/gpu_offload/web_vulkan_cpu_gpu_boundary_fix_plan_2026-09-11.md ;
+# doc/08_tracking/bug/vulkan_backend_midframe_fence_and_clip_text_fallback_2026-09-11.md
+# @manual_section: vulkan_batch_and_clip_boundary
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 20%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 20%
+# @tag: unit, gpu, engine2d, vulkan, text, font, batching
+
+use std.spec.*
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
+    vulkan_bitmap_font_atlas_width, vulkan_bitmap_font_atlas_height,
+    vulkan_bitmap_font_atlas_pixels,
+    vulkan_bitmap_text_quads, vulkan_bitmap_text_clip_quads,
+    vulkan_bitmap_text_atlas_block_reason, vulkan_bitmap_text_atlas_eligible
+}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderQuad}
+use std.gpu.engine2d.helpers_text.{text_metrics}
+
+val READY = "ready"
+val OPAQUE_BLUE: u32 = 0xFF3366CCu32
+val SAMPLE = "Simple"
+
+fn gate(clip_unbakeable: bool, mask_bytes: i64, color: u32, sample: text) -> text:
+    val metrics = text_metrics(sample, 16)
+    vulkan_bitmap_text_atlas_block_reason(
+        true, clip_unbakeable, mask_bytes, READY, 7, 9, color, sample.len(),
+        vulkan_bitmap_text_atlas_eligible(sample), metrics.scale,
+        metrics.glyph_height_px)
+
+fn sample_quads(sample: text) -> [FontRenderQuad]:
+    val metrics = text_metrics(sample, 16)
+    vulkan_bitmap_text_quads(sample, OPAQUE_BLUE, metrics.scale, metrics.advance,
+                             metrics.glyph_height_px)
+
+fn quad_alpha_at(q: FontRenderQuad, sample: text, u: i64, v: i64) -> u32:
+    """The composited colour the SPIR-V kernel produces at one pixel of a quad."""
+    val metrics = text_metrics(sample, 16)
+    val atlas = vulkan_bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+    val pixels = font_atlas_subrect_pixels(
+        atlas, vulkan_bitmap_font_atlas_width(metrics.scale),
+        vulkan_bitmap_font_atlas_height(metrics.scale, metrics.glyph_height_px),
+        q.atlas_x, q.atlas_y, q.width, q.height, q.color)
+    val index = v * q.width.to_i64() + u
+    if index < 0 or index >= pixels.len():
+        return 0u32
+    pixels[index]
+
+describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on the GPU":
+
+    # ---- R6: the pending dispatch table no longer has a fixed ceiling ----
+    it "starts a frame with no preallocated dispatch ceiling":
+        # @req REQ-VKBATCHCLIP-001
+        # REPRODUCING. Before the fix these three arrays were literally
+        # `[0i64; 256]`, so `pending_compute_count >= len()` tripped at the 256th
+        # image composite and forced `_flush_pending_compute` -> submit + fence
+        # wait in the MIDDLE of a frame. An empty, push-grown table cannot trip.
+        step("Create a fresh Vulkan backend and inspect its pending dispatch tables")
+        val backend = VulkanBackend.create()
+        # @capture(statistics): pending compute descriptor/pipeline/source table lengths start at zero
+        expect(backend.pending_compute_descriptors.len()).to_equal(0)
+        expect(backend.pending_compute_pipelines.len()).to_equal(0)
+        expect(backend.pending_compute_sources.len()).to_equal(0)
+        expect(backend.pending_compute_count).to_equal(0)
+
+    it "records zero mid-frame flushes before any primitive is enqueued":
+        # @req REQ-VKBATCHCLIP-002
+        # GENERALIZING. `midframe_flush_count` is the counter the device lane
+        # reads to prove one-submit-per-frame; on a fresh backend it must be 0,
+        # and the image-composite descriptor pool must start empty so pooling is
+        # observed growing rather than presumed.
+        step("Create a fresh Vulkan backend and inspect its mid-frame flush counter")
+        val backend = VulkanBackend.create()
+        # @capture(statistics): mid-frame flush count and image descriptor pool length start at zero
+        expect(backend.midframe_flush_count).to_equal(0)
+        expect(backend.image_descriptor_pool.len()).to_equal(0)
+
+    # ---- R8: the host coverage atlas is built once per identity ----
+    it "rasterises the host coverage atlas once for a repeated draw size":
+        # @req REQ-VKBATCHCLIP-003
+        # REPRODUCING. `vulkan_bitmap_font_atlas_pixels` was called
+        # UNCONDITIONALLY per `draw_text` (backend_vulkan_font.spl:641) and then
+        # discarded by the generation cache, i.e. ~2000 wasted 95-cell rasters on
+        # a 4K page. The memo keys on the same identity the device cache does.
+        step("Request the host coverage atlas three times for the same glyph identity")
+        val backend = VulkanBackend.create()
+        val metrics = text_metrics(SAMPLE, 16)
+        val first = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+        val second = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+        val third = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+        # @capture(statistics): host atlas CPU build count stays 1 across three requests of the same identity
+        expect(backend.font_atlas_cpu_build_count).to_equal(1)
+        expect(second.len()).to_equal(first.len())
+        expect(third.len()).to_equal(first.len())
+        # Absolute oracle: the memo returns the SAME pixels the pure builder does.
+        val direct = vulkan_bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
+        expect(second.len()).to_equal(direct.len())
+
+    it "rebuilds the host atlas when the glyph identity actually changes":
+        # @req REQ-VKBATCHCLIP-004
+        # GENERALIZING. A memo that never invalidates would be a correctness bug,
+        # not an optimisation: a second size must raster again, and returning to
+        # the first size must raster a third time (single-slot memo, stated).
+        step("Request the host atlas at two different glyph sizes, then back at the first size")
+        val backend = VulkanBackend.create()
+        val small = text_metrics(SAMPLE, 16)
+        val large = text_metrics(SAMPLE, 48)
+        backend._bitmap_font_atlas_pixels(small.scale, small.glyph_height_px)
+        backend._bitmap_font_atlas_pixels(large.scale, large.glyph_height_px)
+        # @capture(statistics): CPU build count increments once per distinct glyph identity
+        expect(backend.font_atlas_cpu_build_count).to_equal(2)
+        val back_to_small = backend._bitmap_font_atlas_pixels(small.scale, small.glyph_height_px)
+        expect(backend.font_atlas_cpu_build_count).to_equal(3)
+        expect(back_to_small.len()).to_equal(
+            vulkan_bitmap_font_atlas_pixels(small.scale, small.glyph_height_px).len())
+
+    # ---- R4: a clipped text run stays on the atlas lane ----
+    it "no longer blocks the glyph lane merely because a scissor is set":
+        # @req REQ-VKBATCHCLIP-005
+        # REPRODUCING. `clip-unsupported-by-font-composite` used to be returned
+        # for EVERY clipped run, which on a clipped 4K page is essentially all
+        # ~5000 glyphs taking `text_blit_buffer` + `draw_image_blend`. The clip is
+        # now baked into the quads on the host, so the gate admits the run; the
+        # mask and non-opaque reasons are deliberately UNCHANGED.
+        step("Evaluate the atlas-eligibility gate for a plain clipped run")
+        # @capture(statistics): gate block reason for each clip/mask/color combination
+        expect(gate(false, 0, OPAQUE_BLUE, SAMPLE)).to_equal("")
+        expect(gate(false, 64, OPAQUE_BLUE, SAMPLE)).to_equal("mask-unsupported-by-font-composite")
+        expect(gate(false, 0, 0x80FFFFFFu32, SAMPLE)).to_equal("non-opaque-text-color")
+        # A clip this module genuinely cannot express still blocks honestly.
+        expect(gate(true, 0, OPAQUE_BLUE, SAMPLE)).to_equal("clip-unsupported-by-font-composite")
+
+    it "clips a glyph run to the scissor with a known pixel at a fixed point":
+        # @req REQ-VKBATCHCLIP-006
+        # REPRODUCING, with an ABSOLUTE oracle. Cut 2 columns off the left of the
+        # first glyph. The surviving quad must advance `atlas_x` by exactly 2 and
+        # shrink `width` by exactly 2, so the composited colour at local (0,0) of
+        # the clipped quad equals the UNCLIPPED quad's colour at (2,0) — the same
+        # pixel the CPU raster would have kept.
+        step("Clip the first sample glyph quad 2 columns in from the left edge")
+        val quads = sample_quads(SAMPLE)
+        expect(quads.len() > 0).to_equal(true)
+        val first = quads[0]
+        val clipped = vulkan_bitmap_text_clip_quads(
+            quads, 0i32, 0i32, 2i32, 0i32, first.width - 2i32, 1000i32)
+        # @capture(bit_table): clipped quad geometry and its composited pixel colours
+        expect(clipped.len()).to_equal(1)
+        val kept = clipped[0]
+        expect(kept.width).to_equal(first.width - 2i32)
+        expect(kept.atlas_x).to_equal(first.atlas_x + 2i32)
+        expect(kept.dst_x).to_equal(2i32)
+        expect(kept.atlas_y).to_equal(first.atlas_y)
+        expect(kept.height).to_equal(first.height)
+        expect(quad_alpha_at(kept, SAMPLE, 0, 0)).to_equal(
+            quad_alpha_at(first, SAMPLE, 2, 0))
+        expect(quad_alpha_at(kept, SAMPLE, 1, 0)).to_equal(
+            quad_alpha_at(first, SAMPLE, 3, 0))
+
+    it "keeps, drops and trims adjacent glyphs consistently across the scissor":
+        # @req REQ-VKBATCHCLIP-007
+        # GENERALIZING. Adjacent primitives on every edge of the same scissor:
+        # a scissor that contains everything is the identity, one that excludes
+        # everything keeps nothing, a top cut moves `atlas_y` not `atlas_x`, and
+        # a right cut shrinks `width` while leaving `atlas_x` alone.
+        step("Apply an all-inclusive scissor to the sample glyph quads")
+        val quads = sample_quads(SAMPLE)
+        val first = quads[0]
+        val all_in = vulkan_bitmap_text_clip_quads(quads, 0i32, 0i32, -9999i32, -9999i32, 99999i32, 99999i32)
+        # @capture(bit_table): quad count and geometry across all-in, all-out, top-cut and right-cut scissors
+        expect(all_in.len()).to_equal(quads.len())
+        expect(all_in[0].width).to_equal(first.width)
+        expect(all_in[0].atlas_x).to_equal(first.atlas_x)
+        val none_in = vulkan_bitmap_text_clip_quads(quads, 0i32, 0i32, 100000i32, 0i32, 10i32, 10i32)
+        expect(none_in.len()).to_equal(0)
+        val degenerate = vulkan_bitmap_text_clip_quads(quads, 0i32, 0i32, 0i32, 0i32, 0i32, 10i32)
+        expect(degenerate.len()).to_equal(0)
+        val top_cut = vulkan_bitmap_text_clip_quads(
+            quads, 0i32, 0i32, -9999i32, 3i32, 99999i32, 99999i32)
+        expect(top_cut.len()).to_equal(quads.len())
+        expect(top_cut[0].atlas_y).to_equal(first.atlas_y + 3i32)
+        expect(top_cut[0].atlas_x).to_equal(first.atlas_x)
+        expect(top_cut[0].height).to_equal(first.height - 3i32)
+        val right_cut = vulkan_bitmap_text_clip_quads(
+            quads, 0i32, 0i32, 0i32, 0i32, first.width - 1i32, 99999i32)
+        expect(right_cut.len()).to_equal(1)
+        expect(right_cut[0].atlas_x).to_equal(first.atlas_x)
+        expect(right_cut[0].width).to_equal(first.width - 1i32)
+        expect(right_cut[0].dst_x).to_equal(first.dst_x)

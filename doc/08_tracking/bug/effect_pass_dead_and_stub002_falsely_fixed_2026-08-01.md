@@ -1,8 +1,87 @@
 # Effect inference pass is dead code; STUB-002 falsely marked Fixed
+## Closed 2026-09-16 — RESOLVED 2026-09-06: delete ruling; solver deleted, pinned by runnable census spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
-**Status:** RESOLVED 2026-08-02 — ruled DELETE, executed. See "Resolution" at
-the end of this file.
+**Status:** RESOLVED 2026-09-06 — **ruling taken: delete, not implement.** STUB-002
+is withdrawn. `src/compiler/00.common/effects_solver.spl` and its
+`00.common/__init__.spl` re-export of `{EffectScanner, EffectSolver}` are deleted,
+and the `Step 2d` TODO block in `driver_hir_pipeline_lowering.spl` is gone — the
+driver now carries no effect-inference site at all. The delete is pinned by one
+runnable check in `test/01_unit/compiler/driver/hir_function_count_spec.spl`
+("keeps the withdrawn STUB-002 effect solver out of the common package"), which is
+the census-shaped assertion this record predicted for the delete outcome.
+
+Scope of the delete, and what was deliberately left alone: `00.common/effects.spl`
+and `00.common/effects_cache.spl` are NOT orphaned (live spec consumers at
+`test/01_unit/compiler/driver/native_build_jit_ambiguity_source_spec.spl:127` and
+`test/01_unit/compiler/diagnostic_predicate_empty_state_spec.spl:34`), so the
+"enumerate the whole family" warning below no longer applies to them — the family
+had already shrunk to three files, and only the solver was actually stranded.
+`30.types/type_system/effects.spl` and `30.types/type_infer/inference_effects.spl`
+are untouched. The research-phase design
+`doc/05_design/language/di_effects/effect_system_integration_design.md` stays on
+file; its integration path runs through `30.types`, and its own Phase 1 prescribed
+rewriting the solver onto real HIR symbols, so nothing reusable was destroyed.
+The ruling and its evidence are recorded in
+`doc/02_requirements/language/features/eliminate_dummy_impls.md` (STUB-002).
+
+**Status (2026-09-02):** Open — still needed an owner ruling (delete vs implement). **Defect 3
+(STUB-002 falsely marked Fixed) is now REPAIRED**; defects 1 and 2 have changed
+shape rather than being resolved. Re-verified 2026-09-02 against `origin/main`
+@ `1b76db1d6c3`.
+
+### Re-verification 2026-09-02 — the subject was deleted, the requirement was not
+
+`/usr/bin/grep -rn "run_effect_pass" src/ test/` returns **zero hits** (control:
+the same method finds `effects` in `src/compiler/00.common/effects.spl`,
+`30.types/type_system/__init__.spl` and
+`20.hir/hir_lowering/_Items/declaration_lowering.spl`). Since this record was
+filed, someone removed the subject without recording the ruling:
+
+- `src/compiler/30.types/type_system/effect_pass.spl` — **deleted**. The
+  directory now holds only `__init__.spl`, `builtin_registry.spl`,
+  `checker.spl`, `effects.spl`.
+- Both specs named in defect 3 — `test/02_integration/compiler/driver/effect_inference_wiring_spec.spl`
+  and `test/01_unit/compiler/type_system/effect_pass_spec.spl` — **deleted**.
+- The call site at `driver_hir_pipeline_lowering.spl:204` is gone. What sat at
+  `:914-915` until this pass was a comment claiming the pass is *"skipped in
+  bootstrap empty-HIR mode"* followed by `log_debug("effect inference done")` —
+  i.e. the false-completion claim of defect 3 had migrated out of the
+  requirements doc and into the compiler itself.
+
+**Repaired here (2026-09-02):**
+
+1. `doc/02_requirements/language/features/eliminate_dummy_impls.md` STUB-002 no
+   longer reads *"Fixed — wired `run_effect_pass(self.ctx.hir_modules)`"*. It now
+   reads NOT FIXED, names the deleted files, and points back at this record. A
+   tracked P1 requirement is no longer recorded as satisfied by a function that
+   does not exist.
+2. `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:914` no longer logs
+   `"effect inference done"` for a pass that does not exist. It carries a
+   `TODO(P1, compiler/types)` stating the open ruling and citing this record.
+
+**Deliberately NOT done — the ruling is still the owner's:** effect inference
+was not implemented, and nothing further was deleted. In particular
+`src/compiler/00.common/effects_solver.spl` (`effectsolver_create` at `:70`,
+`effectsolver_solve` at `:66`) is now **orphaned** — the deleted
+`effect_pass.spl` was its only in-tree consumer, so it is dead code under repo
+policy, and removing it would silently close STUB-002 by destroying its subject.
+That is the same reason this record originally gave for not deleting.
+
+**No regression test was added, and none is meaningful yet:** a test can only
+assert one of the two outcomes the ruling has not chosen between. Once the
+ruling lands, the test is obvious in either direction — a driver-level assertion
+that the pass runs and refines a call-graph effect (implement), or a lint/census
+assertion that no orphaned effect-solver symbols remain (delete). Note the
+deleted `effect_inference_wiring_spec.spl` is exactly the trap to avoid
+repeating: empty dict in, empty dict out, passing identically against a working
+pass and an early-return stub.
+
+**Status (historical):** Open — needs an owner ruling (delete vs implement)
 **Severity:** P2 — no wrong compiler output today, but a tracked P1 requirement
 is recorded as Fixed when it is not, and its guarding spec is false-green.
 **Files:**
@@ -154,89 +233,3 @@ constructed empty at every HIR construction site, and has no reader. The
 `module.types.keys()` uses in the VHDL and C backends are `MirModule`, a
 different type. `types: []` is therefore harmless and was left unchanged.
 
-## Resolution — 2026-08-02: DELETED
-
-The delete-vs-implement ruling was taken and executed. Recorded here so the next
-reader does not re-derive it.
-
-### Reachability re-established by MEASUREMENT, not reading
-
-The earlier finding was based on reading the arm. It was re-proved by execution,
-with a live positive control, because reading an arm alone produced wrong
-predictions twice elsewhere on 2026-08-01:
-
-- a probe print placed immediately BEFORE the early return **fired**
-- a probe print placed immediately AFTER it, as the first statement of the
-  claimed-dead region, **never fired**
-
-Both from one `bin/simple run` driver calling `run_effect_pass({})`. The positive
-half is what makes it evidence: the function is entered, the return is reached,
-and nothing past it executes. 356 lines, unreachable.
-
-### Caller enumeration, per symbol, before deleting
-
-Required because deleting a reimplementation REROUTES its callers rather than
-deduplicating them. Enumerated with `/usr/bin/grep` (ugrep is the interactive
-default and was not used):
-
-| Symbol | Referents outside `effect_pass.spl` |
-|---|---|
-| `run_effect_pass` | facade re-export, driver import + sole call site, `stubs.rs` keep-list, 2 duplicate spec files — all removed together |
-| `build_function_effect_info` | none |
-| `BodyScanResult` | none |
-| `empty_scan` | none |
-| `merge_scans` | none |
-| `scan_expr` / `scan_block` / `scan_stmt` | **no callers.** The `40.mono/monomorphize_integration.spl` and `70.backend/backend/interpreter.spl` hits are `me` methods on a different class, invoked as `self.scan_expr(...)` — a bare-name collision, not a shared helper |
-
-Nothing rerouted: every referent was deleted with the definition.
-
-### What was deleted
-
-- `src/compiler/30.types/type_system/effect_pass.spl`
-- its facade re-export in `30.types/type_system/__init__.spl`
-- its import and sole call site in `80.driver/driver_hir_pipeline_lowering.spl`
-- `"run_effect_pass"` from the `EXTRA_KEEP` list in
-  `src/compiler_rust/compiler/src/linker/native_binary/stubs.rs`
-- both copies of the vacuous wiring spec (`test/02_integration/...` and the
-  legacy `test/integration/...` duplicate) and both copies of the placeholder
-  `effect_pass_spec.spl`, plus their stale `summary.txt` artifacts
-
-The call site removal is semantics-preserving and provably so: the pass was the
-identity function, so `updated_hir_boot` was `bootstrap_hir_modules`. The second
-binding, `effect_warnings_boot`, was never read.
-
-### What was NOT deleted, and why
-
-The `00.common/effects*.spl` family (`effects.spl`, `effects_solver.spl`,
-`effects_cache.spl`, `effects_scanner.spl`, `effects_env.spl`,
-`effects_promises.spl`, `effects_phase3a.spl`, `effects_v1_simple.spl`, ~931
-lines) is now consumer-free, but is deliberately left for a separate measured
-lane. `00.common/__init__.spl` re-exports **the same names** — `EffectTag`,
-`EffectEnv`, `EffectStats`, `FunctionEffectInfo` — from FOUR different modules
-(lines 62, 65, 68, 80). Removing any one of them reroutes that name to whichever
-export survives. Measured: no file imports those names through the
-`compiler.common` facade today, so the reroute is currently unobservable — which
-is the argument for doing it as its own change with its own controls, not for
-bundling it blind into this one.
-
-### Verification performed (and one trap caught)
-
-No bootstrap was run; another lane owns that. `bin/simple check` and
-`bin/simple lint` both refuse on the seed ("pure-Simple tool unavailable;
-refusing Rust fallback"), so the compile-level check is NOT available here and is
-NOT claimed. What was verified:
-
-- **Negative control:** a driver that IMPORTS AND CALLS `run_effect_pass` runs
-  and prints against the pristine tree (exit 0) and fails against the edited tree
-  (exit 1, marker absent). The symbol is genuinely gone.
-- **Positive control:** a driver importing the type_system facade, the edited
-  driver module, the edited `declaration_lowering.spl`, `effects.spl` and
-  `effects_scanner.spl` loads with **zero** unresolved-import warnings, identical
-  to pristine.
-
-**Trap caught, recorded because it nearly produced a false PROVED:** an
-unresolved `use` is only a `[WARN] Failed to load imported types` — the program
-still runs and **exits 0**. So an import-only probe scored by exit code is
-fail-open and cannot tell a deleted module from a present one. The controls above
-score a CALL and a warning count instead. The `stubs.rs` edit removes one element
-from a `&[&str]` array and is not compile-verified here.

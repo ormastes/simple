@@ -1,0 +1,614 @@
+# GPU-boundary audit for the pure-Simple web renderer.
+#
+# Goal being audited: the web renderer must use GPU buffers and GPU operations
+# with MINIMAL CPU<->GPU interaction. Every counter read here already existed on
+# the Vulkan backend or its web-lane funnel; this module only (a) renders N
+# frames and dumps the raw census, and (b) classifies a captured log into
+# `key=value` audit keys plus a verdict.
+#
+# Two modes, ONE parser: `--selftest` and the shell gate feed fixture logs
+# through the same `audit_classify` used on real runs, so a fixture cannot
+# diverge from production.
+#
+# Fail-closed rule: a counter that is not reachable emits `<key>=unavailable`,
+# never `0`. A silent zero would fake a PASS on an invariant nothing measured.
+
+use std.sffi.cli.{cli_get_args}
+use std.io_runtime.{read_file, file_exists, env_get}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name_with_reason}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_vulkan_lane_census_line, web_vulkan_lane_census_drain,
+    web_vulkan_lane_timing_table}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    web_route_stage_drain}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+
+# --- log scraping helpers ---------------------------------------------------
+
+pub fn audit_field(line: text, key: text) -> text:
+    """Value of `key=<value>` in `line`, or "" when absent. Whitespace ends it."""
+    val needle = key + "="
+    var i = 0
+    while i + needle.len() <= line.len():
+        if line.substring(i, i + needle.len()) == needle:
+            var pre_ok = true
+            if i > 0:
+                val prev = line.substring(i - 1, i)
+                pre_ok = prev == " " or prev == "["
+            if pre_ok:
+                var j = i + needle.len()
+                while j < line.len() and line.substring(j, j + 1) != " " and line.substring(j, j + 1) != "]":
+                    j = j + 1
+                return line.substring(i + needle.len(), j)
+        i = i + 1
+    ""
+
+pub fn audit_field_in_log(log: text, key: text) -> text:
+    """Last `key=<value>` seen anywhere in a multi-line log, or ""."""
+    var out = ""
+    for line in log.split("\n"):
+        val v = audit_field(line, key)
+        if v != "":
+            out = v
+    out
+
+fn _audit_to_int(v: text) -> i64:
+    if v == "":
+        return 0
+    v.to_i64()
+
+# `bucket n total_ms max_ms` rows of the vk-timing table.
+pub fn audit_bucket_n(log: text, bucket: text) -> i64:
+    var out: i64 = 0
+    for raw in log.split("\n"):
+        val line = raw.trim()
+        if line.starts_with(bucket + " "):
+            val parts = line.split(" ")
+            if parts.len() >= 2:
+                out = _audit_to_int(parts[1])
+    out
+
+pub fn audit_bucket_ms(log: text, bucket: text) -> i64:
+    var out: i64 = 0
+    for raw in log.split("\n"):
+        val line = raw.trim()
+        if line.starts_with(bucket + " "):
+            val parts = line.split(" ")
+            if parts.len() >= 3:
+                out = _audit_to_int(parts[2])
+    out
+
+# --- classification ---------------------------------------------------------
+
+# Every interpreted per-pixel loop bucket the backend can report. Each is
+# O(surface) or O(atlas) host work per call; any non-zero `n` is a violation of
+# "minimal CPU/GPU interaction", so the audit reports both the bucket names and
+# the summed call count.
+#
+# `font_atlas_payload_sha256` is deliberately NOT here: since the 2026-09-12
+# identity-pair digest it is O(1) (38 ms / 5 calls), so counting it would make
+# every frame fail on work that is no longer per-pixel.
+val HOST_PIXEL_BUCKETS: [text] = [
+    "font_atlas_pack_u32_to_u8",
+    "image_pack_u32_to_u8",
+    "image_exact_size_byte_fallback",
+    "readback_unpack_u8_to_u32",
+    "mirror_scatter",
+    "emu_scanline_expand"]
+
+pub fn audit_host_pixel_report(log: text) -> (i64, text):
+    var total: i64 = 0
+    var names = ""
+    var i = 0
+    while i < HOST_PIXEL_BUCKETS.len():
+        val b = HOST_PIXEL_BUCKETS[i]
+        val n = audit_bucket_n(log, b)
+        if n > 0:
+            total = total + n
+            names = names + (if names == "": "" else: ",") + "{b}:{n}"
+        i = i + 1
+    (total, if names == "": "none" else: names)
+
+pub fn audit_host_fallback_report(log: text) -> (i64, text):
+    """Real mid-frame host-readback submits of the LAST frame, and their reasons.
+
+    A `[vk-order] flush site=_flush_for_host_fallback:<reason>` line with
+    `pending_n=0` submitted nothing (`_flush_pending_compute_impl` returns at
+    `cmd <= 0` before the queue submit), so only `pending_n>0` lines are
+    counted -- counting the no-ops would attribute submits that never happened.
+    A frame's flush lines precede its `[audit-frame]` line, so the counter is
+    reset at every frame marker and the last completed frame is reported.
+    """
+    var n: i64 = 0
+    var reasons = ""
+    var last_n: i64 = 0
+    var last_reasons = ""
+    for raw in log.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("[audit-frame"):
+            last_n = n
+            last_reasons = reasons
+            n = 0
+            reasons = ""
+        elif line.contains("flush site=_flush_for_host_fallback"):
+            if _audit_to_int(audit_field(line, "pending_n")) > 0:
+                n = n + 1
+                val site = audit_field(line, "site")
+                val reason = if site.contains(":"): site.split(":")[1] else: "unnamed"
+                if not reasons.contains(reason):
+                    reasons = reasons + (if reasons == "": "" else: ",") + reason
+    (last_n, if last_reasons == "": "none" else: last_reasons)
+
+pub fn audit_classify(log: text) -> text:
+    """Multi-line `key=value` audit block ending in the verdict line."""
+    var frames: i64 = 0
+    for line in log.split("\n"):
+        if line.trim().starts_with("[audit-frame"):
+            frames = frames + 1
+    if frames <= 0 or log.trim() == "":
+        return "ERROR — nothing was checked (no [audit-frame] record in log)"
+
+    # Submit / dispatch / fence counts come from the vk-timing SFFI buckets, NOT
+    # from the pooled-slot fields: `submits=` and `fences=` on the census line
+    # read 0 against 112 real dispatches, because the slot a probe can reach is
+    # not always the instance that drew (recorded in the 2026-09-12 attribution
+    # metrics). A bucket that is absent means timing was disarmed, and the key
+    # is reported `unavailable` rather than 0.
+    val timing_armed = log.contains("vk-timing bucket")
+    val backend_raw = audit_field_in_log(log, "backend_reported")
+    val backend_reported = if backend_raw == "": "unavailable" else: backend_raw
+    val submits = audit_bucket_n(log, "sffi_submit_and_wait")
+    val dispatches = audit_bucket_n(log, "sffi_dispatch")
+    val readbacks = _audit_to_int(audit_field_in_log(log, "readbacks"))
+    val readback_px = _audit_to_int(audit_field_in_log(log, "readback_pixels"))
+    val fences = audit_bucket_n(log, "sffi_wait_fence")
+    val midframe = _audit_to_int(audit_field_in_log(log, "midframe_flushes"))
+    val full_rb = _audit_to_int(audit_field_in_log(log, "full_readbacks"))
+    val uploads = audit_bucket_n(log, "image_source_alloc") + audit_bucket_n(log, "font_atlas_sffi_upload") + audit_bucket_n(log, "upload")
+    val upload_mode_raw = audit_field_in_log(log, "upload_mode")
+    val upload_mode = if upload_mode_raw == "": "unavailable" else: upload_mode_raw
+    val cpu_fb = _audit_to_int(audit_field_in_log(log, "cpu_fallback_count")) + (if audit_field_in_log(log, "cpu_fallback") == "true": 1 else: 0)
+    val cpu_fb_reason_raw = audit_field_in_log(log, "cpu_fallback_reason")
+    val cpu_fb_reason = if cpu_fb_reason_raw == "": "none" else: cpu_fb_reason_raw
+    val full_surface = _audit_to_int(audit_field_in_log(log, "full_surface"))
+    val pack_full = _audit_to_int(audit_field_in_log(log, "pack_full"))
+    val (host_px, host_px_names) = audit_host_pixel_report(log)
+    val upload_ms = audit_bucket_ms(log, "upload") + audit_bucket_ms(log, "font_atlas_sffi_upload")
+
+    # The census and the timing table are BOTH drained per frame by
+    # `web_vulkan_lane_census_drain()`, and this parser reads the LAST
+    # occurrence of each key, so every value below is already per-frame
+    # (the final, steady frame). No division by `frames`.
+    val na = "unavailable"
+    var out = "frames_audited={frames}\n"
+    out = out + "backend_reported={backend_reported}\n"
+    out = out + "timing_armed={timing_armed}\n"
+    out = out + "submits_per_frame=" + (if timing_armed: "{submits}" else: na) + "\n"
+    out = out + "dispatches_per_frame=" + (if timing_armed: "{dispatches}" else: na) + "\n"
+    out = out + "readbacks_per_frame={readbacks}\n"
+    out = out + "readback_bytes={readback_px * 4}\n"
+    out = out + "uploads_per_frame=" + (if timing_armed: "{uploads}" else: na) + "\n"
+    out = out + "upload_bytes=unavailable\n"
+    out = out + "upload_ms={upload_ms}\n"
+    out = out + "upload_mode={upload_mode}\n"
+    out = out + "host_pixel_iterations=" + (if timing_armed: "{host_px}" else: na) + "\n"
+    out = out + "host_pixel_buckets={host_px_names}\n"
+    # `host_pixel_iterations` counts LOOP INVOCATIONS, not pixels: the backend
+    # exposes no per-pack pixel count and no dirty-area total, so the true
+    # iteration count is not reachable. What IS reachable is a lower bound —
+    # every full atlas repack walks the fixed 1024x1024 atlas whatever the glyph
+    # count. The gap between the two is a missing counter, reported as such.
+    out = out + "host_pixel_iterations_lower_bound={pack_full * 1048576}\n"
+    out = out + "host_pixel_exact=unavailable (no per-pack pixel counter in the backend)\n"
+    out = out + "cpu_fallback_count={cpu_fb}\n"
+    out = out + "cpu_fallback_reason={cpu_fb_reason}\n"
+    out = out + "full_surface_composites={full_surface}\n"
+    out = out + "atlas_full_repacks={pack_full}\n"
+    out = out + "fence_waits={fences + midframe}\n"
+    # Pixel-level observability. Every other key here is a COUNT, so a sabotage
+    # that keeps the op counts identical and changes only the pixels those ops
+    # wrote is invisible to all of them. `frame_digest` is FNV-1a/32 over the
+    # final readback words of the LAST frame, printed by the render mode; a log
+    # produced before this key existed reports `unavailable`, never a fabricated
+    # digest. It is reported, not gated: the expected value is page- and
+    # font-dependent, so the comparison belongs to whoever holds the baseline.
+    val digest_raw = audit_field_in_log(log, "frame_digest")
+    out = out + "frame_digest=" + (if digest_raw == "": na else: digest_raw) + "\n"
+    # Which flush turned a one-submit frame into a multi-submit one. A
+    # `_flush_for_host_fallback` line with `pending_n>0` is a REAL mid-frame
+    # submit taken so the host could read the surface back; the tag after the
+    # colon names the host round-trip that forced it.
+    val (hf_n, hf_reasons) = audit_host_fallback_report(log)
+    out = out + "host_fallback_submits={hf_n}\n"
+    out = out + "host_fallback_reasons={hf_reasons}\n"
+    out = out + "full_readbacks={full_rb}\n"
+    # Presenter-owned route attribution. `host_paint_pixels` is the one boundary
+    # term no Vulkan counter can carry: pixels rasterized on the HOST and then
+    # uploaded write no GPU op, so the vk-timing table reads 0 for them however
+    # much CPU they burned. An absent `[web-route-stage]` line means the counters
+    # were never drained, which is reported as `unavailable`, never as 0.
+    val route_line_present = log.contains("[web-route-stage]")
+    val host_paint_px = _audit_to_int(audit_field_in_log(log, "host_paint_pixels"))
+    val rb_gpu_paint = _audit_to_int(audit_field_in_log(log, "readbacks_gpu_paint"))
+    val rb_upload = _audit_to_int(audit_field_in_log(log, "readbacks_upload"))
+    out = out + "host_paint_pixels=" + (if route_line_present: "{host_paint_px}" else: na) + "\n"
+    out = out + "presenter_readbacks_gpu_paint=" + (if route_line_present: "{rb_gpu_paint}" else: na) + "\n"
+    out = out + "presenter_readbacks_upload=" + (if route_line_present: "{rb_upload}" else: na) + "\n"
+
+    # Fail closed: a disarmed timing table means three invariants were never
+    # measured, so the run cannot pass on them.
+    if not timing_armed:
+        return out + "ERROR — nothing was checked (vk-timing disarmed; set SIMPLE_VK_TIMING=1)"
+
+    # Fail closed on the LANE. Every invariant here is a property of the Vulkan
+    # backend, and every counter that feeds them is written only by that
+    # backend. On a cpu_simd run — or a Vulkan request that silently resolved to
+    # `software` — the timing header still prints, no `sffi_*` bucket ever
+    # fires, no readback is noted, and no atlas is packed: the block would read
+    # submits=0 readbacks=0 host_pixel_iterations=0 and PASS on four invariants
+    # nothing measured. That is the exact failure this gate exists to refuse.
+    if backend_reported != "vulkan":
+        return out + "ERROR — nothing was checked (backend_reported={backend_reported} is not the Vulkan lane; frame times are valid, boundary counters are not)"
+
+    var bad: [text] = []
+    if host_px > 0:
+        bad = bad + ["host_pixel_iterations={host_px} (>0): {host_px_names}"]
+    if readbacks > 1:
+        bad = bad + ["readbacks_per_frame={readbacks} (>1)"]
+    if submits > 1:
+        bad = bad + ["submits_per_frame={submits} (>1)"]
+    if cpu_fb > 0:
+        bad = bad + ["cpu_fallback_count={cpu_fb} ({cpu_fb_reason})"]
+    if route_line_present and host_paint_px > 0:
+        bad = bad + ["host_paint_pixels={host_paint_px} (>0) on the Vulkan lane"]
+    if bad.len() == 0:
+        return out + "PASS — {frames} frame(s) audited, host_pixel_iterations=0, readbacks_per_frame<=1, submits_per_frame<=1"
+    var why = ""
+    var i = 0
+    while i < bad.len():
+        why = why + (if why == "": "" else: "; ") + bad[i]
+        i = i + 1
+    out + "FAIL — {frames} frame(s) audited, violated: {why}"
+
+# --- selftest ---------------------------------------------------------------
+
+# Fixtures mirror the REAL log shape (captured 2026-09-12 from css-layout.html
+# at 300x253), so the selftest exercises the same parse path as a live run.
+val FIXTURE_CLEAN: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "draws[rect_opaque=3 image_blend=0 readbacks=1 readback_pixels=100] creates=1 " +
+    "| slot=vulkan@10x10 vk_init=true cpu_fallback=false cpu_fallback_reason= " +
+    "dispatches_frame=1 dispatches_last_frame=1 submits=0 fences=0 " +
+    "midframe_flushes=0 font_atlas_cpu_builds=0 full_readbacks=0\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=0 small=0 max_px=1 upload_mode=u32 upload_reason=typed-requested reasons: ok=3\n" +
+    "  rect 3 4 2\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
+val FIXTURE_HOST_LOOP: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "draws[rect_opaque=3 readbacks=1 readback_pixels=100] | slot=vulkan@10x10 " +
+    "submits=0 fences=0 midframe_flushes=0 dispatches_last_frame=1 full_readbacks=0 " +
+    "cpu_fallback=false cpu_fallback_reason=\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=2 gen_changed=2 identity_changed=1 pack_full=2 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=1 small=0 max_px=99 upload_mode=bytes upload_reason=byte-default reasons: ok=1\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0\n" +
+    "  image_pack_u32_to_u8 7 900 200")
+
+val FIXTURE_TWO_READBACKS: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=200 kind=cold\n" +
+    "draws[rect_opaque=3 readbacks=2 readback_pixels=200] | slot=vulkan@10x10 " +
+    "submits=0 fences=0 midframe_flushes=0 dispatches_last_frame=1 full_readbacks=2 " +
+    "cpu_fallback=false cpu_fallback_reason=\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=0 small=0 max_px=0 upload_mode=u32 upload_reason=typed-requested reasons: ok=0\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
+# A frame rendered with SIMPLE_VK_TIMING unset: three invariants were never
+# measured, so the run must ERROR rather than pass on unmeasured zeroes.
+val FIXTURE_DISARMED: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "draws[rect_opaque=3 readbacks=1 readback_pixels=100] | slot=vulkan@10x10 " +
+    "submits=0 fences=0 cpu_fallback=false\n" +
+    "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)")
+
+# A cpu_simd run (or a Vulkan request that silently resolved to `software`):
+# the timing header prints, but no SFFI bucket ever fires and no readback is
+# noted, so every boundary counter reads a structural zero. It must ERROR.
+val FIXTURE_WRONG_LANE: text = ("audit page=p.html size=10x10 backend_requested=cpu_simd backend_reported=cpu_simd fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "draws[rect_opaque=0 readbacks=0 readback_pixels=0] pool=empty\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=0 small=0 max_px=0 upload_mode=u32 upload_reason= reasons:")
+
+# A frame whose per-frame counts are all within the invariants but whose
+# presenter route-stage line reports HOST-painted pixels handed to the device.
+# No Vulkan counter can see that work — the census and every vk-timing bucket
+# read exactly as they do on the clean fixture — so without this key the run
+# would PASS while the page was rastered on the CPU and the GPU used as a
+# pass-through. It must FAIL.
+val FIXTURE_HOST_PAINT: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "[web-route-stage] readbacks_gpu_paint=0 readbacks_upload=1 host_paint_pixels=100\n" +
+    "draws[rect_opaque=3 image_blend=0 readbacks=1 readback_pixels=100] creates=1 " +
+    "| slot=vulkan@10x10 vk_init=true cpu_fallback=false cpu_fallback_reason= " +
+    "dispatches_frame=1 dispatches_last_frame=1 submits=0 fences=0 " +
+    "midframe_flushes=0 font_atlas_cpu_builds=0 full_readbacks=0\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=0 small=0 max_px=1 upload_mode=u32 upload_reason=typed-requested reasons: ok=3\n" +
+    "  rect 3 4 2\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
+# The same frame with the route-stage line present and ZERO host paint: the
+# key must be reported as a measured 0 (never `unavailable`) and must not
+# invent a violation. Pairs with FIXTURE_HOST_PAINT so the classifier is
+# proven to discriminate rather than to fail on the line's mere presence.
+val FIXTURE_ROUTE_STAGE_CLEAN: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+    "[web-route-stage] readbacks_gpu_paint=0 readbacks_upload=0 host_paint_pixels=0\n" +
+    "draws[rect_opaque=3 image_blend=0 readbacks=1 readback_pixels=100] creates=1 " +
+    "| slot=vulkan@10x10 vk_init=true cpu_fallback=false cpu_fallback_reason= " +
+    "dispatches_frame=1 dispatches_last_frame=1 submits=0 fences=0 " +
+    "midframe_flushes=0 font_atlas_cpu_builds=0 full_readbacks=0\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+    "  image_composite_stats full_surface=0 small=0 max_px=1 upload_mode=u32 upload_reason=typed-requested reasons: ok=3\n" +
+    "  rect 3 4 2\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
+# A frame log carrying the digest key (render mode prints it on the frame line).
+val FIXTURE_DIGEST: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold frame_digest=deadbeef\n" +
+    "draws[rect_opaque=3 image_blend=0 readbacks=1 readback_pixels=100] creates=1 " +
+    "| slot=vulkan@10x10 vk_init=true cpu_fallback=false cpu_fallback_reason= " +
+    "dispatches_frame=1 dispatches_last_frame=1 submits=0 fences=0 " +
+    "midframe_flushes=0 font_atlas_cpu_builds=0 full_readbacks=0\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
+# A frame that took a mid-frame host round-trip (real submit, `pending_n=3`)
+# alongside a no-op flush (`pending_n=0`) that must NOT be counted as a submit.
+val FIXTURE_HOST_FALLBACK: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[vk-order] flush site=_flush_for_host_fallback:image-blend-host-readback rc=1 pending_n=3 font_n=0\n" +
+    "[vk-order] flush site=_flush_for_host_fallback:blur-host-readback rc=1 pending_n=0 font_n=0\n" +
+    "[vk-order] flush site=submit_batch rc=1 pending_n=78 font_n=19\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold frame_digest=deadbeef\n" +
+    "draws[rect_opaque=3 readbacks=2 readback_pixels=100] | slot=vulkan@10x10\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  sffi_submit_and_wait 2 5 5")
+
+# --- frame pixel digest -----------------------------------------------------
+
+# Every counter this gate reads is a COUNT: submits, dispatches, readbacks,
+# host-pixel loop invocations. A sabotage that keeps the op counts identical and
+# changes only what the ops WROTE — a shader that drops a glyph, an atlas slot
+# that composites the wrong rectangle — is invisible to all of them, which is
+# the observability gap recorded in
+# `doc/08_tracking/bug/vulkan_font_atlas_midframe_flush_per_run_2026-09-12.md`.
+# The digest closes it: it is FNV-1a/32 over the FINAL readback words in order,
+# so it changes for a single altered pixel AND for two pixels swapped.
+#
+# It is computed from the pixels the audit already holds -- NOT from a second
+# readback, which would add a submit and a fence wait to the very frame this
+# gate bounds at one of each.
+val _AUDIT_FNV_PRIME: i64 = 16777619
+val _AUDIT_FNV_OFFSET: i64 = 2166136261
+val _AUDIT_U32_MASK: i64 = 4294967295
+
+pub fn audit_frame_digest(pixels: [u32]) -> text:
+    """FNV-1a/32 over the frame words, as 8 lowercase hex digits."""
+    var h: i64 = _AUDIT_FNV_OFFSET
+    var i = 0
+    while i < pixels.len():
+        h = ((h ^ pixels[i].to_i64()) * _AUDIT_FNV_PRIME) & _AUDIT_U32_MASK
+        i = i + 1
+    var out = ""
+    var shift = 28
+    while shift >= 0:
+        val nib = (h >> shift) & 15
+        out = out + "0123456789abcdef".substring(nib, nib + 1)
+        shift = shift - 4
+    out
+
+pub fn audit_verdict_of(block: text) -> text:
+    var last = ""
+    for line in block.split("\n"):
+        if line != "":
+            last = line
+    last
+
+pub fn audit_selftest() -> i64:
+    var failures = 0
+    var examples = 0
+
+    examples = examples + 1
+    val v1 = audit_verdict_of(audit_classify(FIXTURE_CLEAN))
+    if not v1.starts_with("PASS"):
+        print "selftest FAIL clean: {v1}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v2 = audit_verdict_of(audit_classify(FIXTURE_HOST_LOOP))
+    if not (v2.starts_with("FAIL") and v2.contains("host_pixel_iterations")):
+        print "selftest FAIL host-loop: {v2}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v3 = audit_verdict_of(audit_classify(FIXTURE_TWO_READBACKS))
+    if not (v3.starts_with("FAIL") and v3.contains("readbacks_per_frame")):
+        print "selftest FAIL two-readbacks: {v3}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v4 = audit_verdict_of(audit_classify(""))
+    if not v4.starts_with("ERROR"):
+        print "selftest FAIL empty: {v4}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v6 = audit_verdict_of(audit_classify(FIXTURE_WRONG_LANE))
+    if not (v6.starts_with("ERROR") and v6.contains("not the Vulkan lane")):
+        print "selftest FAIL wrong-lane: {v6}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v7 = audit_verdict_of(audit_classify(FIXTURE_HOST_PAINT))
+    if not (v7.starts_with("FAIL") and v7.contains("host_paint_pixels=100")):
+        print "selftest FAIL host-paint: {v7}"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v8 = audit_verdict_of(audit_classify(FIXTURE_ROUTE_STAGE_CLEAN))
+    if not v8.starts_with("PASS"):
+        print "selftest FAIL route-stage-clean: {v8}"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_ROUTE_STAGE_CLEAN).contains("host_paint_pixels=0"):
+        print "selftest FAIL route-stage-clean key: measured 0 not reported"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_CLEAN).contains("host_paint_pixels=unavailable"):
+        print "selftest FAIL no-route-line: absent counters must be unavailable, not 0"
+        failures = failures + 1
+
+    examples = examples + 1
+    val v5 = audit_verdict_of(audit_classify(FIXTURE_DISARMED))
+    if not (v5.starts_with("ERROR") and v5.contains("disarmed")):
+        print "selftest FAIL disarmed: {v5}"
+        failures = failures + 1
+
+    # --- frame digest: the pixel-level sabotage detector ---------------------
+    # A deliberate ONE-pixel change must flip the digest; identical frames must
+    # agree. Device-free by construction, so it runs wherever the selftest does.
+    val base_px: [u32] = [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32]
+    val same_px: [u32] = [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32]
+    val one_px_changed: [u32] = [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 9u32]
+    val swapped_px: [u32] = [2u32, 1u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32]
+    examples = examples + 1
+    if audit_frame_digest(base_px) != audit_frame_digest(same_px):
+        print "selftest FAIL digest-stable: identical frames disagree"
+        failures = failures + 1
+    examples = examples + 1
+    if audit_frame_digest(base_px) == audit_frame_digest(one_px_changed):
+        print "selftest FAIL digest-sabotage: a 1-pixel change did not flip the digest"
+        failures = failures + 1
+    examples = examples + 1
+    if audit_frame_digest(base_px) == audit_frame_digest(swapped_px):
+        print "selftest FAIL digest-order: swapping two pixels did not flip the digest"
+        failures = failures + 1
+    examples = examples + 1
+    if audit_frame_digest(base_px).len() != 8:
+        print "selftest FAIL digest-width: {audit_frame_digest(base_px)}"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_CLEAN).contains("frame_digest=unavailable"):
+        print "selftest FAIL digest-absent: a log without the key must be unavailable, not fabricated"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_DIGEST).contains("frame_digest=deadbeef"):
+        print "selftest FAIL digest-parsed: {audit_classify(FIXTURE_DIGEST)}"
+        failures = failures + 1
+
+    # --- host-fallback submit attribution -----------------------------------
+    examples = examples + 1
+    val (hf_n, hf_why) = audit_host_fallback_report(FIXTURE_HOST_FALLBACK)
+    if hf_n != 1 or hf_why != "image-blend-host-readback":
+        print "selftest FAIL host-fallback: n={hf_n} why={hf_why}"
+        failures = failures + 1
+    examples = examples + 1
+    val (hf0_n, hf0_why) = audit_host_fallback_report(FIXTURE_CLEAN)
+    if hf0_n != 0 or hf0_why != "none":
+        print "selftest FAIL host-fallback-clean: n={hf0_n} why={hf0_why}"
+        failures = failures + 1
+
+    print "selftest: {examples} examples, {failures} failures"
+    if failures > 0: 1 else: 0
+
+# --- main -------------------------------------------------------------------
+
+fn arg_at(args: [text], i: i64, fallback: text) -> text:
+    if i < args.len(): args[i] else: fallback
+
+fn main() -> i64:
+    val args = cli_get_args()
+    var mode = ""
+    var rest: [text] = []
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if not a.ends_with("gpu_boundary_audit.spl"):
+            if mode == "":
+                mode = a
+            else:
+                rest = rest + [a]
+        i = i + 1
+
+    if mode == "--selftest":
+        return audit_selftest()
+
+    if mode == "classify":
+        val p = arg_at(rest, 0, "")
+        if p == "" or not file_exists(p):
+            print "ERROR — nothing was checked (log not found: {p})"
+            return 2
+        val block = audit_classify(read_file(p))
+        print block
+        val v = audit_verdict_of(block)
+        if v.starts_with("PASS"):
+            return 0
+        if v.starts_with("FAIL"):
+            return 1
+        return 2
+
+    if mode != "render":
+        print "usage: gpu_boundary_audit.spl [--selftest | render <page.html> <w> <h> <frames> | classify <log>]"
+        return 2
+
+    val page = arg_at(rest, 0, "")
+    if page == "" or not file_exists(page):
+        print "ERROR — nothing was checked (page not found: {page})"
+        return 2
+    val w = arg_at(rest, 1, "900").to_i32()
+    val h = arg_at(rest, 2, "760").to_i32()
+    val frames = arg_at(rest, 3, "2").to_i64()
+    val requested = env_get("SIMPLE_2D_BACKEND") ?? "cpu_simd"
+    val (reported, fb_reason) = simple_web_resolved_engine2d_backend_name_with_reason(w, h, requested)
+    print "audit page={page} size={w}x{h} backend_requested={requested} backend_reported={reported} fallback_reason={fb_reason}"
+    val html = read_file(page)
+
+    var f: i64 = 0
+    while f < frames:
+        web_vulkan_lane_census_drain()
+        # Drain the presenter route-stage counters with the census, so both are
+        # per-frame and the last occurrence in the log describes the last frame.
+        web_route_stage_drain()
+        val t0 = default_frame_clock().now_micros()
+        val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, requested)
+        val dt = (default_frame_clock().now_micros() - t0) / 1000
+        val kind = if f == 0: "cold" else: "steady"
+        val digest = audit_frame_digest(pixels)
+        print "[audit-frame {f + 1}] ms={dt} px={pixels.len()} kind={kind} frame_digest={digest}"
+        print web_route_stage_drain()
+        print web_vulkan_lane_census_line()
+        print web_vulkan_lane_timing_table()
+        f = f + 1
+    0

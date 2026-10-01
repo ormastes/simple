@@ -1,5 +1,18 @@
 # std.async Runtime Native Backend Gaps - 2026-06-11
 
+## Not closed 2026-09-13 — partly stale, partly unverified; left OPEN with the stale half recorded
+
+- **measured** Gap 1 is STALE as written: `src/lib/nogc_async_mut/async/sffi.spl` no longer
+  exists (the directory now holds future/poll/promise/executor/scheduler/sleep/timer/sync/
+  cancellation/combinators/task/io/runtime `.spl`), and `grep -rl future_alloc_pending src/`
+  returns nothing — the 14 named externs are not declared anywhere any more.
+- **inferred** Gaps 2-5 (no real cooperative yield; `Poll.unwrap()` unknown `panic`; chained
+  `self.poll().is_ready()`; poll-once `gather`/`race`/`timeout`) are behavioural and need the
+  acceptance specs under `test/01_unit/lib/async/` this entry itself demands; none exist, so
+  nothing here can be closed on evidence.
+- Left OPEN: rewrite gap 1 against the current module layout before working the rest.
+
+
 Status: open (triaged 2026-06-11)
 
 ## Summary

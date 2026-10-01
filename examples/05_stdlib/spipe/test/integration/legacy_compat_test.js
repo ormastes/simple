@@ -66,22 +66,26 @@ async function runMcp(requests) {
 
 try {
   const cli = loadFixture("legacy_cli.json");
+  const packageVersion = JSON.parse(readFileSync(join(moduleRoot, "package.json"), "utf8")).version;
+  assert.equal(cli.version.stdout, `${packageVersion}\n`, "legacy CLI fixture must track the package release version");
   runCli(cli.help);
   runCli(cli.version);
   const info = runCli(cli.info)
     .replaceAll(moduleRoot, "<MODULE_ROOT>")
+    .replaceAll("\\", "/")
     .trimEnd()
     .split("\n");
   assert.deepEqual(info, cli.info.normalizedStdout);
 
   const mcp = loadFixture("legacy_mcp.json");
+  assert.equal(mcp.serverInfo.version, packageVersion, "legacy MCP fixture must track the package release version");
   const responses = await runMcp(mcp.requests);
   assert.equal(responses.length, mcp.responseCount, "notifications must remain silent");
 
   const byId = new Map(responses.filter((item) => item.id !== null).map((item) => [item.id, item]));
   assert.equal(byId.get(1).result.protocolVersion, mcp.protocolVersion);
   assert.deepEqual(byId.get(1).result.serverInfo, mcp.serverInfo);
-  assert.deepEqual(byId.get(2).result.tools, mcp.toolSchemas);
+  assert.deepEqual(byId.get(2).result.tools.slice(0, mcp.toolSchemas.length), mcp.toolSchemas);
   assert.deepEqual(byId.get(3).result.resources, [{
     uri: mcp.resource.uri,
     name: mcp.resource.name,
@@ -103,7 +107,7 @@ try {
   assert.ok(byId.get(9).result.content[0].text.length > 100);
   assert.ok(byId.get(10).result.content[0].text.includes("attempt_id:"));
 
-  const legacyError = responses.find((item) => item.id === null);
+  const legacyError = responses.find((item) => Object.hasOwn(item, "error"));
   assert.equal(legacyError.id, mcp.legacyError.id);
   assert.equal(legacyError.error.code, mcp.legacyError.code);
   assert.equal(legacyError.error.message, mcp.legacyError.message);

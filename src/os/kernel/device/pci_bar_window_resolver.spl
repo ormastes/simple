@@ -1,0 +1,83 @@
+"""Pure, fail-closed policy for resolving an authorized PCI BAR subwindow."""
+
+struct KernelPciBarWindow:
+    index: u8
+    physical_base: u64
+    byte_len: u64
+    memory: bool
+    upper_half: bool
+
+struct KernelPciFunctionWindows:
+    bdf: u64
+    present: bool
+    bars: [KernelPciBarWindow]
+
+struct PciBarWindowRequest:
+    bdf: u64
+    bar_index: u8
+    byte_offset: u64
+    byte_len: u64
+
+struct PciBarWindowResolution:
+    ok: bool
+    reason: text
+    physical_base: u64
+    byte_len: u64
+    bar_base: u64
+    bar_size: u64
+
+fn _pci_bar_blocked(reason: text) -> PciBarWindowResolution:
+    PciBarWindowResolution(ok: false, reason: reason, physical_base: 0u64,
+        byte_len: 0u64, bar_base: 0u64, bar_size: 0u64)
+
+fn resolve_pci_bar_window(functions: [KernelPciFunctionWindows],
+        request: PciBarWindowRequest) -> PciBarWindowResolution:
+    # @decision KBW_BDF
+    var function_count: i64 = 0
+    var function = KernelPciFunctionWindows(bdf: 0u64, present: false, bars: [])
+    for candidate in functions:
+        if candidate.bdf == request.bdf and candidate.present:
+            function_count = function_count + 1
+            function = candidate
+    if function_count != 1:
+        return _pci_bar_blocked("blocked:bdf-not-present")
+
+    # @decision KBW_INDEX
+    if request.bar_index > 5u8:
+        return _pci_bar_blocked("blocked:bar-index-out-of-range")
+    var bar_count: i64 = 0
+    var bar = KernelPciBarWindow(index: 0u8, physical_base: 0u64,
+        byte_len: 0u64, memory: false, upper_half: false)
+    for candidate in function.bars:
+        if candidate.index == request.bar_index:
+            bar_count = bar_count + 1
+            bar = candidate
+    if bar_count != 1:
+        return _pci_bar_blocked("blocked:bar-not-implemented")
+    # @decision KBW_KIND
+    if bar.upper_half:
+        return _pci_bar_blocked("blocked:bar-index-is-64-bit-upper")
+    if not bar.memory:
+        return _pci_bar_blocked("blocked:io-bar-unsupported")
+    # @decision KBW_APERTURE
+    if bar.physical_base == 0u64:
+        return _pci_bar_blocked("blocked:bar-unassigned")
+    if bar.byte_len == 0u64:
+        return _pci_bar_blocked("blocked:bar-size-zero")
+    if request.byte_len == 0u64:
+        return _pci_bar_blocked("blocked:empty-window")
+    # Subtraction avoids wrapping offset + length.
+    # @decision KBW_CONTAIN
+    if request.byte_offset > bar.byte_len or
+            request.byte_len > bar.byte_len - request.byte_offset:
+        return _pci_bar_blocked("blocked:window-out-of-range")
+    val physical = bar.physical_base + request.byte_offset
+    # @decision KBW_PHYS_ADD
+    if physical < bar.physical_base:
+        return _pci_bar_blocked("blocked:physical-range-overflow")
+    PciBarWindowResolution(ok: true, reason: "ok:pci-bar-window",
+        physical_base: physical, byte_len: request.byte_len,
+        bar_base: bar.physical_base, bar_size: bar.byte_len)
+
+export KernelPciBarWindow, KernelPciFunctionWindows, PciBarWindowRequest,
+    PciBarWindowResolution, resolve_pci_bar_window

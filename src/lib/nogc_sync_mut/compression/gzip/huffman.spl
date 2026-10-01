@@ -222,6 +222,24 @@ fn huffman_lookup(codes, symbol) -> [Any]?:
     if codes == nil:
         return nil
 
+    # Fast path for dense, index-ordered tables. `deflate_fixed_huffman` and
+    # `deflate_fixed_distances` build their entries by pushing symbol 0,1,2,...
+    # in order, so entry `k` always has `entry[0] == k` and a symbol indexes its
+    # own row directly. Without this, every token in a block paid a linear scan
+    # over the 288-entry literal/length table (~128 comparisons for an average
+    # literal), which is the dominant constant factor in fixed-Huffman deflate.
+    #
+    # The guard is what makes this safe rather than an assumption: the identity
+    # `codes[symbol][0] == symbol` is CHECKED before the row is used, so a table
+    # that is sparse, reordered, or dynamically built (as in `huffman_encode`)
+    # simply falls through to the linear scan below. The returned value is
+    # byte-identical to the scan's for every table shape, so compressed output
+    # and compression ratio are unchanged.
+    if symbol >= 0 and symbol < codes.len():
+        val direct = codes[symbol]
+        if direct[0] == symbol:
+            return [direct[1], direct[2]]
+
     var i = 0
     loop:
         if i >= codes.len():

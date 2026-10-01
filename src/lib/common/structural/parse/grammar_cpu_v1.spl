@@ -1,0 +1,161 @@
+"""Opt-in transactional scalar grammar VM. The legacy frontend is not called.
+
+Input is an already-tokenized source blob. MatchByte matches exactly one byte;
+MatchTokenText compares an exact token byte span without copying source text.
+Lexical modes remain the dialect adapter's responsibility. All effects
+are private until root acceptance at token EOF. Resource errors are fatal,
+never an ordered-choice mismatch. Step fuel counts grammar AND action dispatch
+and is not part of any checkpoint. Choice copies bounded call frames and marks
+semantic arenas; overwrite journals are bounded by action fuel.
+"""
+use std.common.structural.parse.program_v1.*
+use std.common.structural.parse.program_output_v1.*
+use std.common.structural.parse.transaction_v1.*
+use std.common.structural.parse.action_cpu_v1.{parse_action_execute_v1}
+use std.common.structural.parse.parse_types.{ParseSourceBlob, ParseTokenArena, PARSE_SCHEMA_ID}
+
+fn _input_valid_v1(source: ParseSourceBlob, tokens: ParseTokenArena, limits: ParseProgramLimitsV1) -> bool:
+    if source.schema_id != PARSE_SCHEMA_ID or tokens.schema_id != PARSE_SCHEMA_ID: return false
+    if source.bytes.len() > limits.max_source_bytes or tokens.kind.len() > limits.max_tokens: return false
+    if tokens.kind.len() != tokens.start.len() or tokens.kind.len() != tokens.count.len(): return false
+    var end = 0
+    var i = 0
+    while i < tokens.kind.len():
+        val start = tokens.start[i] as i64
+        val count = tokens.count[i] as i64
+        if tokens.kind[i] == 0u16 or start < end or start > source.bytes.len(): return false
+        if count > source.bytes.len() - start: return false
+        end = start + count
+        i = i + 1
+    true
+
+fn _parse_grammar_execute_v2(
+    program: ParseProgramV1, literal_offsets: [i64], literal_bytes: [u8],
+    source: ParseSourceBlob, tokens: ParseTokenArena,
+    entry_rule: i64, limits: ParseProgramLimitsV1
+) -> ParseProgramExecutionV1:
+    if not _input_valid_v1(source, tokens, limits):
+        return parse_program_execution_failed_v1("invalid_input", 0)
+    var entry_allowed = false
+    for entry in program.entry_rules:
+        if entry == entry_rule: entry_allowed = true
+    if not entry_allowed: return parse_program_execution_failed_v1("invalid_entry", 0)
+
+    var rule = entry_rule
+    var pc = program.production_offsets[rule]
+    var cursor = 0
+    var steps = 0
+    var state = parse_semantic_empty_v1()
+    var calls: [ParseCallFrameV1] = []
+    var choices: [ParseCheckpointV1] = []
+    while true:
+        if steps >= limits.max_steps: return parse_program_execution_failed_v1("fuel_exhausted", steps)
+        if pc < program.production_offsets[rule] or pc >= program.production_offsets[rule + 1]:
+            return parse_program_execution_failed_v1("rule_fallthrough", steps)
+        steps = steps + 1
+        val op = program.grammar_words[pc]
+        val a = program.grammar_words[pc + 1]
+        var mismatch = false
+        if op == PG_MATCH_KIND_V1 or op == PG_MATCH_BYTE_V1 or
+            op == PG_MATCH_TOKEN_TEXT_V2:
+            var matched = false
+            if cursor < tokens.kind.len():
+                if op == PG_MATCH_KIND_V1:
+                    matched = tokens.kind[cursor] as i64 == a
+                elif op == PG_MATCH_BYTE_V1 and tokens.count[cursor] == 1u32:
+                    matched = source.bytes[tokens.start[cursor] as i64] as i64 == a
+                elif op == PG_MATCH_TOKEN_TEXT_V2:
+                    val literal_start = literal_offsets[a]
+                    val literal_end = literal_offsets[a + 1]
+                    val token_start = tokens.start[cursor] as i64
+                    if tokens.count[cursor] as i64 == literal_end - literal_start:
+                        matched = true
+                        var i = 0
+                        while i < literal_end - literal_start:
+                            if source.bytes[token_start + i] !=
+                                literal_bytes[literal_start + i]:
+                                matched = false
+                                break
+                            i = i + 1
+            if matched:
+                state.last_start = tokens.start[cursor] as i64
+                state.last_count = tokens.count[cursor] as i64
+                state.last_valid = true
+                cursor = cursor + 1
+                pc = pc + 3
+            else:
+                mismatch = true
+        elif op == PG_FAIL_V1:
+            mismatch = true
+        elif op == PG_CHOICE_V1:
+            if choices.len() >= limits.max_choices:
+                return parse_program_execution_failed_v1("choice_capacity", steps)
+            choices.push(parse_checkpoint_v1(a, rule, cursor, calls, state))
+            state.journal_active = true
+            pc = pc + 3
+        elif op == PG_COMMIT_V1:
+            if choices.len() == 0: return parse_program_execution_failed_v1("choice_underflow", steps)
+            val checkpoint = choices[choices.len() - 1]
+            if checkpoint.rule != rule or checkpoint.calls.len() != calls.len():
+                return parse_program_execution_failed_v1("foreign_choice_commit", steps)
+            choices.pop()
+            if choices.len() == 0: parse_semantic_clear_journal_v1(state)
+            pc = a
+        elif op == PG_CALL_V1:
+            if calls.len() >= limits.max_calls:
+                return parse_program_execution_failed_v1("call_capacity", steps)
+            calls.push(ParseCallFrameV1(return_pc: pc + 3, rule: rule, choice_depth: choices.len()))
+            rule = a
+            pc = program.production_offsets[rule]
+        elif op == PG_RETURN_V1 or op == PG_END_V1:
+            if op == PG_RETURN_V1 and calls.len() > 0:
+                val frame = calls[calls.len() - 1]
+                if choices.len() != frame.choice_depth:
+                    return parse_program_execution_failed_v1("unclosed_choice", steps)
+                calls.pop()
+                rule = frame.rule
+                pc = frame.return_pc
+            else:
+                if calls.len() != 0 or choices.len() != 0:
+                    return parse_program_execution_failed_v1("unbalanced_end", steps)
+                if cursor != tokens.kind.len():
+                    return parse_program_execution_failed_v1("trailing_tokens", steps)
+                val output = parse_semantic_output_v1(state)
+                return ParseProgramExecutionV1(ok: true, error: "", output: output,
+                    steps_used: steps, tokens_consumed: cursor)
+        elif op == PG_ACTION_V1:
+            val action = parse_action_execute_v1(program, a, state, limits, limits.max_steps - steps)
+            steps = steps + action.steps_used
+            if not action.ok: return parse_program_execution_failed_v1(action.error, steps)
+            state = action.state
+            pc = pc + 3
+        else:
+            return parse_program_execution_failed_v1("unsupported_grammar", steps)
+
+        if mismatch:
+            if choices.len() == 0: return parse_program_execution_failed_v1("no_match", steps)
+            val checkpoint = choices[choices.len() - 1]
+            choices.pop()
+            pc = checkpoint.resume_pc
+            rule = checkpoint.rule
+            cursor = checkpoint.cursor
+            calls = checkpoint.calls
+            parse_semantic_rollback_v1(state, checkpoint)
+            if choices.len() == 0: parse_semantic_clear_journal_v1(state)
+    parse_program_execution_failed_v1("unreachable_executor_end", steps)
+
+pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob,
+    tokens: ParseTokenArena, entry_rule: i64, limits: ParseProgramLimitsV1) -> ParseProgramExecutionV1:
+    # The public value record is reconstructible: do not trust a prior receipt.
+    if not parse_program_shape_valid_v1(program, limits):
+        return parse_program_execution_failed_v1("invalid_program", 0)
+    _parse_grammar_execute_v2(program, [0], [], source, tokens, entry_rule, limits)
+
+pub fn parse_grammar_execute_v2(program: ParseProgramV2, source: ParseSourceBlob,
+    tokens: ParseTokenArena, entry_rule: i64, limits: ParseProgramLimitsV1) -> ParseProgramExecutionV1:
+    if not parse_program_shape_valid_v2(program, limits):
+        return parse_program_execution_failed_v1("invalid_program", 0)
+    _parse_grammar_execute_v2(program.base, program.literal_offsets,
+        program.literal_bytes, source, tokens, entry_rule, limits)
+
+export parse_grammar_execute_v1, parse_grammar_execute_v2

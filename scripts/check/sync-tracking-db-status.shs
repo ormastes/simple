@@ -1,0 +1,569 @@
+#!/bin/sh
+# sync-tracking-db-status.shs
+#
+# Makes doc/08_tracking/{bug,todo}/*_db.sdn agree with the record files that
+# are the actual source of truth, instead of a human re-deriving the diff by
+# hand (five agents did exactly that by hand on 2026-09-12).
+#
+# BUG SIDE (doc/08_tracking/bug/bug_db.sdn)
+#   For every row of the `bugs` / `bugs_active` tables whose id has a matching
+#   doc/08_tracking/bug/<id>.md record: read the record's FIRST status-bearing
+#   line using the SAME extraction `check-bug-status-consistency.shs` uses --
+#   same regex (`^[ \t]*(-[ \t]*)?[*_]*[ \t]*[Ss]tatus[ \t]*[*_]*[ \t]*:`), same
+#   "**Generated:**-in-first-6-lines is not a bug doc" skip, same markdown-
+#   emphasis strip, same "first match wins" rule. That extraction is copied
+#   verbatim in `doc_classes()` below -- it is not a second parser, it is the
+#   one parser, reused.
+#   What differs from that script on purpose: this tool's classification
+#   bucket is finer than that script's binary OPEN/DONE, because the task
+#   requires it: RESOLVED/FIXED -> `fixed`; CLOSED/CLOSED-STALE/WONTFIX/
+#   DUPLICATE/SUPERSEDED -> `closed`; OPEN or anything else -> leave the row
+#   alone. Only the status COLUMN of the matched row is ever touched; no
+#   other column, no row add/remove.
+#
+# TODO SIDE (doc/08_tracking/todo/todo_db.sdn)
+#   todo-scan is broken (segfaults after DB write and renumbers ids -- see
+#   doc/08_tracking/bug/todo_scan_segfaults_after_db_write_and_renumbers_ids_2026-09-12.md)
+#   so it cannot be used to re-derive this db. For every row: if the row's
+#   `file` no longer exists, or exists but no longer contains the row's
+#   `description` text anywhere in it, the marker is gone -> set status
+#   `closed`. A row whose marker is still present is left untouched even if
+#   its current status looks wrong -- this tool only ever closes, it never
+#   reopens, and it never renumbers or adds rows.
+#
+# RESEAL
+#   bug_db.sdn is CRC-32/ISO-HDLC-stamped (`#sdn-crc32:<n>` header row, see
+#   reseal-sdn-crc32.shs) and a body edited by hand without resealing makes
+#   the WHOLE db load as nil. todo_db.sdn carries no such header (checked
+#   2026-09-12: first line is `todos |...|`, not `#sdn-crc32:`) -- this tool
+#   detects that at runtime rather than assuming it, and reseals only a db
+#   whose first line actually matches `#sdn-crc32:*`.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS  — <n> row(s) checked, <k> changed     exit 0
+#   FAIL  — ...                                 exit 1
+#   ERROR — nothing was checked                 exit 2
+# A run that checked 0 rows is ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/check/sync-tracking-db-status.shs [--root DIR] [--dry-run] [--selftest]
+#
+# --dry-run prints one line per would-be change as `db<TAB>id<TAB>old<TAB>new`
+# then the verdict; it never writes anything. The default APPLIES the
+# changes, reseals what needs resealing, and re-verifies the write before
+# printing the verdict.
+
+set -u
+
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+SELFDIR=$(dirname "$SELF")
+RESEAL_TOOL="$SELFDIR/reseal-sdn-crc32.shs"
+
+# --------------------------------------------------------------- bug: rows
+# db -> "lineno\tid\tstatus" for every row of the bugs / bugs_active tables
+# (the file has more than one section named each; both are honoured).
+bug_rows() {
+    awk '
+    BEGIN { tbl = "" }
+    {
+        line = $0
+        if (line ~ /^[a-z_]+ \|/) { split(line, h, " "); tbl = h[1]; next }
+        if (line !~ /^    [A-Za-z0-9_.\-]+,/) next
+        if (tbl != "bugs" && tbl != "bugs_active") next
+        n = split(line, f, ",")
+        id = f[1]; gsub(/^[ \t]+|[ \t]+$/, "", id)
+        st = f[3]; gsub(/^[ \t]+|[ \t]+$/, "", st)
+        printf "%d\t%s\t%s\n", NR, id, st
+    }' "$1"
+}
+
+# ---------------------------------------------------------- bug: doc scan
+# dir, dbfile -> "id\tclass" for every id that (a) has a row in bugs/
+# bugs_active and (b) has a doc/<id>.md whose first status-bearing line
+# classifies to fixed/closed/open/other. Extraction logic copied verbatim
+# from check-bug-status-consistency.shs's scan(); classification is this
+# task's own (see header comment).
+doc_classes() {
+    _dir="$1"; _dbfile="$2"
+    awk -v dir="$_dir" -v dbfile="$_dbfile" '
+    function normdoc2(s) {
+        if (s ~ /^RESOLVED/)     return "fixed"
+        if (s ~ /^FIXED/)        return "fixed"
+        if (s ~ /^CLOSED-STALE/) return "closed"
+        if (s ~ /^CLOSED/)       return "closed"
+        if (s ~ /^WONTFIX/)      return "closed"
+        if (s ~ /^DUPLICATE/)    return "closed"
+        if (s ~ /^SUPERSEDED/)   return "closed"
+        if (s ~ /^OPEN/)         return "open"
+        return "other"
+    }
+    BEGIN {
+        tbl = ""
+        while ((getline line < dbfile) > 0) {
+            if (line ~ /^[a-z_]+ \|/) { split(line, h, " "); tbl = h[1]; continue }
+            if (line !~ /^    [A-Za-z0-9_.\-]+,/) continue
+            if (tbl != "bugs" && tbl != "bugs_active") continue
+            split(line, f, ",")
+            id = f[1]; gsub(/^[ \t]+|[ \t]+$/, "", id)
+            haverow[id] = 1
+        }
+        close(dbfile)
+
+        cmd = "ls -1 \"" dir "\"/*.md 2>/dev/null"
+        while ((cmd | getline path) > 0) {
+            base = path; sub(/^.*\//, "", base)
+            if (base == "recent_bugs.md" || base ~ /^triage_/ || base ~ /^bug_report/) continue
+            id = base; sub(/\.md$/, "", id)
+            if (!(id in haverow)) continue
+
+            found = 0; val = ""; generated = 0
+            n = 0
+            while ((getline l < path) > 0) {
+                n++
+                if (n <= 6 && l ~ /\*\*Generated:\*\*|^Generated:/) { generated = 1; break }
+                if (!found &&
+                    l ~ /^[ \t]*(-[ \t]*)?[*_]*[ \t]*[Ss]tatus[ \t]*[*_]*[ \t]*:/) {
+                    val = l
+                    sub(/^[^:]*:[ \t]*/, "", val)
+                    gsub(/[*_`]/, "", val)
+                    gsub(/^[ \t]+|[ \t]+$/, "", val)
+                    found = n
+                }
+            }
+            close(path)
+            if (generated) continue
+            if (!found) continue
+            cls = normdoc2(val)
+            printf "%s\t%s\n", id, cls
+        }
+        close(cmd)
+    }'
+}
+
+# db -> "lineno\tid\tstatus\tfile\tdescription\tsrcline" for every row of
+# `todos`. Quote-aware split: description commonly contains embedded commas.
+todo_rows() {
+    awk '
+    function qsplit(line, arr,    i, c, field, n, inquote, L) {
+        n = 0; field = ""; inquote = 0; L = length(line)
+        for (i = 1; i <= L; i++) {
+            c = substr(line, i, 1)
+            if (inquote) {
+                if (c == "\"") {
+                    if (substr(line, i + 1, 1) == "\"") { field = field "\""; i++ }
+                    else inquote = 0
+                } else field = field c
+            } else {
+                if (c == "\"") inquote = 1
+                else if (c == ",") { n++; arr[n] = field; field = "" }
+                else field = field c
+            }
+        }
+        n++; arr[n] = field
+        return n
+    }
+    BEGIN { tbl = "" }
+    {
+        line = $0
+        if (line ~ /^[a-z_]+ \|/) { split(line, h, " "); tbl = h[1]; next }
+        if (tbl != "todos") next
+        if (line !~ /^    [0-9]+,/) next
+        m = qsplit(line, f)
+        if (m < 11) next
+        id = f[1];   gsub(/^[ \t]+|[ \t]+$/, "", id)
+        desc = f[5]; gsub(/^[ \t]+|[ \t]+$/, "", desc); gsub(/\t/, " ", desc)
+        file = f[6]; gsub(/^[ \t]+|[ \t]+$/, "", file)
+        srcline = f[7]; gsub(/^[ \t]+|[ \t]+$/, "", srcline)
+        st = f[10];  gsub(/^[ \t]+|[ \t]+$/, "", st)
+        printf "%d\t%s\t%s\t%s\t%s\t%s\n", NR, id, st, file, desc, srcline
+    }' "$1"
+}
+
+# root -> stream of "CHECKED\t1" and "CHANGE\t<db>\t<id>\t<old>\t<new>\t<lineno>"
+compute_bug_changes() {
+    _root="$1"
+    _bugdb="$_root/doc/08_tracking/bug/bug_db.sdn"
+    _bugdir="$_root/doc/08_tracking/bug"
+    _clstmp=$(mktemp) || return 1
+    doc_classes "$_bugdir" "$_bugdb" > "$_clstmp"
+    bug_rows "$_bugdb" | awk -F'\t' -v clsfile="$_clstmp" '
+    BEGIN {
+        while ((getline p < clsfile) > 0) { split(p, kv, "\t"); cls[kv[1]] = kv[2] }
+        close(clsfile)
+    }
+    {
+        id = $2; st = $3
+        if (!(id in cls)) next
+        print "CHECKED\t1"
+        c = cls[id]
+        if (c != "fixed" && c != "closed") next
+        if (c == st) next
+        printf "CHANGE\tdoc/08_tracking/bug/bug_db.sdn\t%s\t%s\t%s\t%s\n", id, st, c, $1
+    }'
+    rm -f "$_clstmp"
+}
+
+# root -> same stream shape, for todo_db.sdn
+compute_todo_changes() {
+    _root="$1"
+    _tododb="$_root/doc/08_tracking/todo/todo_db.sdn"
+    todo_rows "$_tododb" | while IFS="$(printf '\t')" read -r lineno id st file desc srcline; do
+        [ -n "${lineno:-}" ] || continue
+        echo "CHECKED	1"
+        [ -n "$desc" ] || continue
+        target="$_root/$file"
+        gone=0
+        if [ ! -f "$target" ]; then
+            gone=1
+        else
+            found=0
+            grep -qF -- "$desc" "$target" 2>/dev/null && found=1
+            if [ "$found" -eq 0 ]; then
+                # quote-style drift (`'"`` interchanged) must not read as "gone".
+                ndesc=$(printf '%s' "$desc" | tr "\"'\`" "QQQ")
+                if tr "\"'\`" "QQQ" < "$target" | grep -qF -- "$ndesc" 2>/dev/null; then
+                    found=1
+                fi
+            fi
+            if [ "$found" -eq 0 ]; then
+                # A curated tracking-doc TODO can be reworded in place while
+                # staying open; its leading "(tag)" (e.g. "(sosix A5)") is the
+                # stable anchor across rewordings, so a hit on just the tag
+                # also counts as "still present" (never as "still absent").
+                tag=$(printf '%s' "$desc" | sed -n 's/^(\([^)]*\)).*/(\1)/p')
+                if [ -n "$tag" ] && grep -qF -- "$tag" "$target" 2>/dev/null; then
+                    found=1
+                fi
+            fi
+            if [ "$found" -eq 0 ] && [ "$srcline" = "1" ]; then
+                # line=1 marks a manually-curated backlog note attached to a
+                # file, not a scanned literal comment (confirmed 2026-09-12:
+                # todo_db.sdn id 292 points at linker.rs:622 with a genuine
+                # line number, yet its own comment there is now about a
+                # completely different topic -- the row is stale, not done;
+                # the id=1-line class is the same failure mode with no real
+                # line to even drift from). We have no literal-text anchor to
+                # trust either way, so leave the row untouched rather than
+                # risk closing real open work on a false "not found".
+                found=1
+            fi
+            [ "$found" -eq 1 ] || gone=1
+        fi
+        if [ "$gone" -eq 1 ] && [ "$st" != "closed" ]; then
+            printf 'CHANGE\tdoc/08_tracking/todo/todo_db.sdn\t%s\t%s\tclosed\t%s\n' "$id" "$st" "$lineno"
+        fi
+    done
+}
+
+# dbfile, fieldnum(1-based), changes-tsv(db\tid\told\tnew\tlineno lines) -> rewrite in place
+apply_changes_to_db() {
+    _db="$1"; _fieldnum="$2"; _changes="$3"
+    _pairs=$(mktemp) || return 1
+    printf '%s\n' "$_changes" | awk -F'\t' 'NF>=5{print $5"\t"$4}' > "$_pairs"
+    if [ -s "$_pairs" ]; then
+        _tmp="$_db.syncsdn.$$"
+        awk -v fieldnum="$_fieldnum" -v pairsfile="$_pairs" '
+        function replace_field(line, fn, newval,    i, c, inquote, fieldidx, start, starts, ends, L, pre, post, raw, lead) {
+            inquote = 0; fieldidx = 1; start = 1; L = length(line)
+            for (i = 1; i <= L; i++) {
+                c = substr(line, i, 1)
+                if (c == "\"") { inquote = !inquote; continue }
+                if (!inquote && c == ",") {
+                    starts[fieldidx] = start; ends[fieldidx] = i - 1
+                    fieldidx++
+                    start = i + 1
+                }
+            }
+            starts[fieldidx] = start; ends[fieldidx] = L
+            if (!(fn in starts)) return line
+            pre = substr(line, 1, starts[fn] - 1)
+            post = substr(line, ends[fn] + 1)
+            raw = substr(line, starts[fn], ends[fn] - starts[fn] + 1)
+            lead = raw
+            sub(/[^ \t].*$/, "", lead)
+            return pre lead newval post
+        }
+        BEGIN {
+            while ((getline p < pairsfile) > 0) { split(p, kv, "\t"); newst[kv[1] + 0] = kv[2] }
+            close(pairsfile)
+        }
+        { if ((NR in newst)) print replace_field($0, fieldnum + 0, newst[NR]); else print $0 }
+        ' "$_db" > "$_tmp" && mv "$_tmp" "$_db"
+        _rc=$?
+    else
+        _rc=0
+    fi
+    rm -f "$_pairs"
+    return $_rc
+}
+
+# root, mode(dry-run|apply) -> prints change lines (dry-run) / does the write
+# (apply) + reseal + verify, then always prints the verdict as the last
+# line. Returns 0 PASS / 1 FAIL / 2 ERROR; never calls exit itself.
+run_sync() {
+    _root="$1"; _mode="$2"
+    _bugdb="$_root/doc/08_tracking/bug/bug_db.sdn"
+    _tododb="$_root/doc/08_tracking/todo/todo_db.sdn"
+    [ -f "$_bugdb" ] && [ -f "$_tododb" ] || { echo "ERROR — nothing was checked"; return 2; }
+
+    _bugout=$(compute_bug_changes "$_root")
+    _todoout=$(compute_todo_changes "$_root")
+
+    _bug_checked=$(printf '%s\n' "$_bugout" | grep -c '^CHECKED\b')
+    _todo_checked=$(printf '%s\n' "$_todoout" | grep -c '^CHECKED\b')
+    _bug_changes=$(printf '%s\n' "$_bugout" | grep '^CHANGE\b' | cut -f2-)
+    _todo_changes=$(printf '%s\n' "$_todoout" | grep '^CHANGE\b' | cut -f2-)
+    _bug_change_n=$(printf '%s\n' "$_bug_changes" | grep -c '^doc/')
+    _todo_change_n=$(printf '%s\n' "$_todo_changes" | grep -c '^doc/')
+
+    _checked=$((_bug_checked + _todo_checked))
+    _changed=$((_bug_change_n + _todo_change_n))
+
+    if [ "$_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+
+    if [ "$_mode" = "dry-run" ]; then
+        [ "$_bug_change_n" -gt 0 ] && printf '%s\n' "$_bug_changes" | cut -f1-4
+        [ "$_todo_change_n" -gt 0 ] && printf '%s\n' "$_todo_changes" | cut -f1-4
+        echo "PASS — $_checked row(s) checked, $_changed changed"
+        return 0
+    fi
+
+    # apply
+    if [ "$_bug_change_n" -gt 0 ]; then
+        apply_changes_to_db "$_bugdb" 3 "$_bug_changes" || { echo "FAIL — could not write $_bugdb"; return 1; }
+    fi
+    if [ "$_todo_change_n" -gt 0 ]; then
+        apply_changes_to_db "$_tododb" 10 "$_todo_changes" || { echo "FAIL — could not write $_tododb"; return 1; }
+    fi
+
+    # verify: re-read the changed rows back and confirm the new value stuck
+    if [ "$_bug_change_n" -gt 0 ]; then
+        _got=$(bug_rows "$_bugdb")
+        _bad=$(printf '%s\n' "$_bug_changes" | awk -F'\t' -v got="$(printf '%s\n' "$_got")" '
+            BEGIN { n = split(got, garr, "\n"); for (i = 1; i <= n; i++) { split(garr[i], gf, "\t"); have[gf[2]] = gf[3] } }
+            { if (have[$2] != $4) { print $2; bad++ } }
+            END { if (bad + 0 > 0) exit 1 }')
+        _vrc=$?
+        if [ "$_vrc" -ne 0 ]; then echo "FAIL — verification mismatch after write: $_bad"; return 1; fi
+    fi
+    if [ "$_todo_change_n" -gt 0 ]; then
+        _got=$(todo_rows "$_tododb")
+        _bad=$(printf '%s\n' "$_todo_changes" | awk -F'\t' -v got="$(printf '%s\n' "$_got")" '
+            BEGIN { n = split(got, garr, "\n"); for (i = 1; i <= n; i++) { split(garr[i], gf, "\t"); have[gf[2]] = gf[3] } }
+            { if (have[$2] != $4) { print $2; bad++ } }
+            END { if (bad + 0 > 0) exit 1 }')
+        _vrc=$?
+        if [ "$_vrc" -ne 0 ]; then echo "FAIL — todo verification mismatch after write: $_bad"; return 1; fi
+    fi
+
+    # reseal only what is actually CRC-stamped
+    if [ "$_bug_change_n" -gt 0 ]; then
+        _hdr=$(head -1 "$_bugdb")
+        case "$_hdr" in
+            '#sdn-crc32:'*)
+                _rout=$(sh "$RESEAL_TOOL" "$_bugdb")
+                _rverdict=$(printf '%s\n' "$_rout" | tail -1)
+                case "$_rverdict" in
+                    PASS\ *) ;;
+                    *) echo "FAIL — reseal of $_bugdb did not PASS: $_rverdict"; return 1 ;;
+                esac
+                ;;
+        esac
+    fi
+    if [ "$_todo_change_n" -gt 0 ]; then
+        _hdr=$(head -1 "$_tododb")
+        case "$_hdr" in
+            '#sdn-crc32:'*)
+                _rout=$(sh "$RESEAL_TOOL" "$_tododb")
+                _rverdict=$(printf '%s\n' "$_rout" | tail -1)
+                case "$_rverdict" in
+                    PASS\ *) ;;
+                    *) echo "FAIL — reseal of $_tododb did not PASS: $_rverdict"; return 1 ;;
+                esac
+                ;;
+        esac
+    fi
+
+    echo "PASS — $_checked row(s) checked, $_changed changed"
+    return 0
+}
+
+# ------------------------------------------------------------------ selftest
+selftest() {
+    _t=$(mktemp -d) || { echo "selftest: mktemp failed"; return 1; }
+    _fails=0
+
+    mkdir -p "$_t/doc/08_tracking/bug" "$_t/doc/08_tracking/todo" "$_t/src"
+
+    cat > "$_t/doc/08_tracking/bug/bug_db.sdn" <<'EOF'
+#sdn-crc32:0
+bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    bug_a, P1, open, "title a", src/a.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_b, P2, open, "title b", src/b.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_c, P1, open, "title c", src/c.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_d, P1, fixed, "title d", src/d.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_f, P1, open, "title f", src/f.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_g, P1, open, "title g", src/g.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_h, P1, open, "title h", src/h.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_i, P1, open, "title i", src/i.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+    bug_j, P1, open, "title j", src/j.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    bug_e, P1, open, "title e", src/e.spl, 1, NONE, 2026-01-01, 2026-01-01, true
+EOF
+    printf '# x\n\nStatus: FIXED\n'        > "$_t/doc/08_tracking/bug/bug_a.md"
+    printf '# x\n\nStatus: CLOSED\n'       > "$_t/doc/08_tracking/bug/bug_b.md"
+    printf '# x\n\nStatus: OPEN (P1)\n'    > "$_t/doc/08_tracking/bug/bug_c.md"
+    printf '# x\n\nStatus: RESOLVED\n'     > "$_t/doc/08_tracking/bug/bug_f.md"
+    printf '# x\n\nStatus: WONTFIX\n'      > "$_t/doc/08_tracking/bug/bug_g.md"
+    printf '# x\n\nStatus: DUPLICATE\n'    > "$_t/doc/08_tracking/bug/bug_h.md"
+    printf '# x\n\nStatus: SUPERSEDED\n'   > "$_t/doc/08_tracking/bug/bug_i.md"
+    printf '# x\n\nStatus: CLOSED-STALE\n' > "$_t/doc/08_tracking/bug/bug_j.md"
+    # bug_d, bug_e: deliberately no record file
+
+    cat > "$_t/doc/08_tracking/todo/todo_db.sdn" <<'EOF'
+todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|
+    0, TODO, general, P3, "marker still present, with a comma", src/x.spl, 1, , "", open, true
+    1, TODO, general, P3, "marker is gone now", src/y.spl, 2, , "", open, true
+    2, TODO, general, P3, "already closed marker gone", src/z.spl, 3, , "", closed, true
+    3, TODO, general, P3, "curated backlog note reworded in place, not literal", src/w.spl, 1, , "", open, true
+EOF
+    printf 'let a = 1 # TODO: marker still present, with a comma\n' > "$_t/src/x.spl"
+    printf 'let b = 2 # nothing here anymore\n' > "$_t/src/y.spl"
+    # src/z.spl intentionally absent
+    printf '# TODO: totally different wording now, no textual overlap\n' > "$_t/src/w.spl"
+
+    # ---- dry-run: assert exact change set, nothing written ----
+    _dryout=$(run_sync "$_t" "dry-run"); _dryrc=$?
+    _verdict=$(printf '%s\n' "$_dryout" | tail -1)
+    case "$_verdict" in
+        'PASS — 12 row(s) checked, 8 changed') ;;
+        *) echo "selftest FAIL: dry-run verdict = $_verdict"; _fails=$((_fails + 1)) ;;
+    esac
+    for want in \
+        'doc/08_tracking/bug/bug_db.sdn	bug_a	open	fixed' \
+        'doc/08_tracking/bug/bug_db.sdn	bug_b	open	closed' \
+        'doc/08_tracking/bug/bug_db.sdn	bug_f	open	fixed' \
+        'doc/08_tracking/bug/bug_db.sdn	bug_g	open	closed' \
+        'doc/08_tracking/bug/bug_db.sdn	bug_h	open	closed' \
+        'doc/08_tracking/bug/bug_db.sdn	bug_i	open	closed' \
+        'doc/08_tracking/bug/bug_db.sdn	bug_j	open	closed' \
+        'doc/08_tracking/todo/todo_db.sdn	1	open	closed' \
+    ; do
+        printf '%s\n' "$_dryout" | grep -qF "$want" || { echo "selftest FAIL: dry-run missing '$want'"; _fails=$((_fails + 1)); }
+    done
+    for unwanted in bug_c bug_d bug_e; do
+        printf '%s\n' "$_dryout" | grep -q "	$unwanted	" && { echo "selftest FAIL: dry-run touched untouchable $unwanted"; _fails=$((_fails + 1)); }
+    done
+    printf '%s\n' "$_dryout" | grep -qF 'todo_db.sdn	0	' && { echo "selftest FAIL: dry-run touched todo row 0 (marker present)"; _fails=$((_fails + 1)); }
+    printf '%s\n' "$_dryout" | grep -qF 'todo_db.sdn	2	' && { echo "selftest FAIL: dry-run touched todo row 2 (already closed)"; _fails=$((_fails + 1)); }
+    printf '%s\n' "$_dryout" | grep -qF 'todo_db.sdn	3	' && { echo "selftest FAIL: dry-run touched todo row 3 (line=1 reworded-in-place, no reliable anchor)"; _fails=$((_fails + 1)); }
+    if ! cmp -s "$_t/doc/08_tracking/bug/bug_db.sdn" "$_t/doc/08_tracking/bug/bug_db.sdn"; then :; fi
+    grep -q '^    bug_a, P1, open,' "$_t/doc/08_tracking/bug/bug_db.sdn" || { echo "selftest FAIL: dry-run mutated bug_db.sdn"; _fails=$((_fails + 1)); }
+
+    # ---- apply: assert the write, ids stable, reseal applied ----
+    _applyout=$(run_sync "$_t" "apply"); _applyrc=$?
+    _averdict=$(printf '%s\n' "$_applyout" | tail -1)
+    case "$_averdict" in
+        'PASS — 12 row(s) checked, 8 changed') ;;
+        *) echo "selftest FAIL: apply verdict = $_averdict"; _fails=$((_fails + 1)) ;;
+    esac
+
+    _newbugrows=$(bug_rows "$_t/doc/08_tracking/bug/bug_db.sdn")
+    check_status() { # id want
+        _v=$(printf '%s\n' "$_newbugrows" | awk -F'\t' -v id="$1" '$2==id{print $3}')
+        [ "$_v" = "$2" ] || { echo "selftest FAIL: bug $1 status = '$_v', want '$2'"; _fails=$((_fails + 1)); }
+    }
+    check_status bug_a fixed
+    check_status bug_b closed
+    check_status bug_c open
+    check_status bug_d fixed
+    check_status bug_e open
+    check_status bug_f fixed
+    check_status bug_g closed
+    check_status bug_h closed
+    check_status bug_i closed
+    check_status bug_j closed
+
+    _newtodorows=$(todo_rows "$_t/doc/08_tracking/todo/todo_db.sdn")
+    check_todo() { # id want
+        _v=$(printf '%s\n' "$_newtodorows" | awk -F'\t' -v id="$1" '$2==id{print $3}')
+        [ "$_v" = "$2" ] || { echo "selftest FAIL: todo $1 status = '$_v', want '$2'"; _fails=$((_fails + 1)); }
+    }
+    check_todo 0 open
+    check_todo 1 closed
+    check_todo 2 closed
+    check_todo 3 open
+
+    # ids stable: same id set, same count of data rows, nothing renumbered
+    _idcount=$(printf '%s\n' "$_newtodorows" | grep -c '.')
+    [ "$_idcount" -eq 4 ] || { echo "selftest FAIL: todo row count changed to $_idcount"; _fails=$((_fails + 1)); }
+
+    # reseal: bug_db.sdn header must now match its recomputed crc32; todo_db.sdn stays unstamped
+    _hdr=$(head -1 "$_t/doc/08_tracking/bug/bug_db.sdn")
+    _body_crc=$(tail -n +2 "$_t/doc/08_tracking/bug/bug_db.sdn" | gzip -c -n | tail -c 8 | od -An -tu4 | awk '{print $1; exit}')
+    [ "$_hdr" = "#sdn-crc32:$_body_crc" ] || { echo "selftest FAIL: bug_db.sdn not resealed (hdr=$_hdr want #sdn-crc32:$_body_crc)"; _fails=$((_fails + 1)); }
+    _thdr=$(head -1 "$_t/doc/08_tracking/todo/todo_db.sdn")
+    [ "$_thdr" = "todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|" ] || { echo "selftest FAIL: todo_db.sdn header touched: $_thdr"; _fails=$((_fails + 1)); }
+
+    # a second apply run must be a no-op (idempotent) and PASS with 0 changed
+    _applyout2=$(run_sync "$_t" "apply")
+    _averdict2=$(printf '%s\n' "$_applyout2" | tail -1)
+    case "$_averdict2" in
+        'PASS — 12 row(s) checked, 0 changed') ;;
+        *) echo "selftest FAIL: second apply not idempotent: $_averdict2"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # ---- ERROR path: an empty tree yields 0 checked ----
+    _e=$(mktemp -d)
+    mkdir -p "$_e/doc/08_tracking/bug" "$_e/doc/08_tracking/todo"
+    printf '#sdn-crc32:0\nbugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n' > "$_e/doc/08_tracking/bug/bug_db.sdn"
+    printf 'todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|\n' > "$_e/doc/08_tracking/todo/todo_db.sdn"
+    _eout=$(run_sync "$_e" "dry-run"); _erc=$?
+    [ "$_erc" -eq 2 ] || { echo "selftest FAIL: empty tree did not ERROR (rc=$_erc)"; _fails=$((_fails + 1)); }
+    printf '%s\n' "$_eout" | grep -q '^ERROR — nothing was checked$' || { echo "selftest FAIL: empty tree verdict wrong: $_eout"; _fails=$((_fails + 1)); }
+    rm -rf "$_e"
+
+    rm -rf "$_t"
+    if [ "$_fails" -ne 0 ]; then
+        echo "selftest: $_fails fixture(s) failed"
+        return 1
+    fi
+    echo "selftest: fixtures passed"
+    return 0
+}
+
+# --------------------------------------------------------------------- main
+ROOT=""
+MODE="apply"
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --dry-run) MODE="dry-run"; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+selftest
+SELFTEST_RC=$?
+if [ "$SELFTEST_RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — selftest only"
+    exit 0
+fi
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    [ -n "$ROOT" ] || { echo "ERROR — nothing was checked"; exit 2; }
+fi
+
+run_sync "$ROOT" "$MODE"
+exit $?

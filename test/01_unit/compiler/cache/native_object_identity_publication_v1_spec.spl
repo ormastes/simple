@@ -1,0 +1,230 @@
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.structural.wire.{wire_to_hex}
+use compiler.driver.cache.native_object_identity_codec_v1.{
+    NativeObjectScopeV1, NativeObjectActionV1, NativeObjectResultV1,
+    NATIVE_OBJECT_SCOPE_MAX_BYTES_V1, NATIVE_OBJECT_ACTION_MAX_BYTES_V1,
+    NATIVE_OBJECT_RESULT_MAX_BYTES_V1,
+    native_object_scope_encode_v1, native_object_action_encode_v1,
+    native_object_result_encode_v1, native_object_scope_decode_v1,
+    native_object_action_decode_v1, native_object_result_decode_v1,
+    native_object_scope_digest_v1, native_object_action_digest_v1,
+    native_object_result_digest_v1}
+use compiler.driver.cache.native_object_publication_decision_v1.{
+    NativeObjectIdentityDecisionKindV1, NativeObjectPublishDecisionKindV1,
+    NativeObjectIdentityDecisionV1,
+    native_object_identity_decide_v1, native_object_shared_bundle_path_v1,
+    native_object_private_output_path_v1, native_object_prepare_result_v1,
+    native_object_cold_publish_decision_v1,
+    native_object_existing_winner_decision_v1}
+
+fn identity_scope(format: text = "elf") -> NativeObjectScopeV1:
+    NativeObjectScopeV1(
+        compiler_executable_digest: sha256_text("compiler"),
+        compiler_semantics_manifest_digest: sha256_text("semantics"),
+        runtime_contract_manifest_digest: sha256_text("runtime"),
+        backend_provider_manifest_digest: sha256_text("provider"),
+        toolchain_manifest_digest: sha256_text("toolchain"),
+        target_contract_digest: sha256_text("target"),
+        isa_tuning_manifest_digest: sha256_text("isa"),
+        codegen_options_manifest_digest: sha256_text("options"),
+        pass_pipeline_manifest_digest: sha256_text("passes"),
+        object_format: format, object_semantics_schema: 1,
+        required_capabilities_manifest_digest: sha256_text("capabilities"))
+
+fn identity_action(scope_digest: text, module_id: text = "demo.main",
+                   source_label: text = "source") -> NativeObjectActionV1:
+    NativeObjectActionV1(
+        scope_digest: scope_digest, module_id: module_id,
+        frozen_source_digest: sha256_text(source_label),
+        mir_digest: sha256_text("mir"), storage_digest: sha256_text("storage"),
+        module_witness_digest: sha256_text("witness"),
+        observed_inputs_manifest_digest: sha256_text("observed"))
+
+fn identity_object(marker: i64 = 4) -> [u8]:
+    [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 1u8, 2u8, 3u8, marker as u8]
+
+fn copy_bytes(data: [u8]) -> [u8]:
+    var result: [u8] = []
+    for value in data: result.push(value)
+    result
+
+fn shared_fixture(root: text = "/tmp/native-object-v1") -> (
+    NativeObjectScopeV1, NativeObjectActionV1,
+    NativeObjectIdentityDecisionV1
+):
+    val scope = identity_scope()
+    val action = identity_action(native_object_scope_digest_v1(scope))
+    val decision = native_object_identity_decide_v1(
+        root, Some(native_object_scope_encode_v1(scope)),
+        Some(native_object_action_encode_v1(action)), "owner-nonce", "unit-7")
+    (scope, action, decision)
+
+describe "native object identity and publication v1":
+    it "encodes exact canonical NOS1 NOA1 NOR1 vectors":
+        val scope = identity_scope()
+        val scope_bytes = native_object_scope_encode_v1(scope)
+        expect(scope_bytes.len()).to_equal(383)
+        expect(scope_bytes.len()).to_be_less_than(NATIVE_OBJECT_SCOPE_MAX_BYTES_V1 + 1)
+        expect(native_object_scope_digest_v1(scope)).to_equal(
+            "c5e5409260cda224c49861cc6e1458c66a691e66b718db777bfa5e6bdcd6f85d")
+        expect(native_object_scope_decode_v1(scope_bytes).is_ok()).to_equal(true)
+
+        val action = identity_action(native_object_scope_digest_v1(scope))
+        val action_bytes = native_object_action_encode_v1(action)
+        expect(action_bytes.len()).to_equal(237)
+        expect(action_bytes.len()).to_be_less_than(NATIVE_OBJECT_ACTION_MAX_BYTES_V1 + 1)
+        expect(native_object_action_digest_v1(action)).to_equal(
+            "0c80fb3d26e04f9cecb9468915defc86c677c2720c9b3e3d46c44d1a98157e6a")
+        expect(native_object_action_decode_v1(action_bytes).is_ok()).to_equal(true)
+
+        val (_, _, identity) = shared_fixture()
+        val result = native_object_prepare_result_v1(
+            identity, identity_object(), "elf", sha256_text("receipt")
+        ).ok().unwrap()
+        expect(result.scope_digest).to_equal(
+            "c5e5409260cda224c49861cc6e1458c66a691e66b718db777bfa5e6bdcd6f85d")
+        expect(result.action_digest).to_equal(
+            "0c80fb3d26e04f9cecb9468915defc86c677c2720c9b3e3d46c44d1a98157e6a")
+        expect(result.object_digest).to_equal(
+            "1ce1805693fc7e6df020e40f78385981789a078c681dbbcbd1551be1c3939a3e")
+        expect(result.producer_receipt_digest).to_equal(
+            "6f32860910ca0fb2a20c7fda143666b09dbf8db5238195c90a586fb542ff0cad")
+        val result_bytes = native_object_result_encode_v1(result)
+        print "NOR1_ACTUAL_HEX={wire_to_hex(result_bytes)}"
+        expect(result_bytes.len()).to_equal(171)
+        expect(result_bytes.len()).to_be_less_than(NATIVE_OBJECT_RESULT_MAX_BYTES_V1 + 1)
+        expect(native_object_result_digest_v1(result)).to_equal(
+            "226f9e82a93a0696eabaebdd6f02537433001e8a04d75dfba199f978dcab6a5c")
+        expect(native_object_result_decode_v1(result_bytes).is_ok()).to_equal(true)
+
+    it "rejects malformed framing digest UTF8 NUL enum and bounds":
+        val scope = identity_scope()
+        val action = identity_action(native_object_scope_digest_v1(scope))
+
+        step("wrong field count and digest length fail before payload use")
+        var wrong_count = copy_bytes(native_object_scope_encode_v1(scope))
+        wrong_count[6] = 11
+        expect(native_object_scope_decode_v1(wrong_count).is_err()).to_equal(true)
+        var wrong_digest_length = copy_bytes(native_object_scope_encode_v1(scope))
+        wrong_digest_length[8] = 31
+        expect(native_object_scope_decode_v1(wrong_digest_length).is_err()).to_equal(true)
+
+        step("invalid UTF8 and NUL module identities are never normalized")
+        var invalid_utf8 = copy_bytes(native_object_action_encode_v1(action))
+        invalid_utf8[48] = 0xC0
+        expect(native_object_action_decode_v1(invalid_utf8).is_err()).to_equal(true)
+        var nul_module = copy_bytes(native_object_action_encode_v1(action))
+        nul_module[48] = 0
+        expect(native_object_action_decode_v1(nul_module).is_err()).to_equal(true)
+
+        step("closed formats empty-preimage digests and oversize input fail")
+        expect(native_object_scope_encode_v1(identity_scope("pe")).len()).to_equal(0)
+        val empty_digest_action = identity_action(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        expect(native_object_action_encode_v1(empty_digest_action).len()).to_equal(0)
+        val oversize: [u8] = [0u8; NATIVE_OBJECT_ACTION_MAX_BYTES_V1 + 1]
+        expect(native_object_action_decode_v1(oversize).is_err()).to_equal(true)
+
+    it "separates shared private and invalid decisions without path authority leakage":
+        val root = "/tmp/native-object-root"
+        val scope = identity_scope()
+        val scope_bytes = native_object_scope_encode_v1(scope)
+        val action = identity_action(native_object_scope_digest_v1(scope))
+        val action_bytes = native_object_action_encode_v1(action)
+
+        val shared = native_object_identity_decide_v1(
+            root, Some(scope_bytes), Some(action_bytes), "nonce-a", "unit-a")
+        expect(shared.kind).to_equal(NativeObjectIdentityDecisionKindV1.Shared)
+        expect(shared.shared_index_allowed).to_equal(true)
+        expect(shared.output_path).to_equal(
+            native_object_shared_bundle_path_v1(root, shared.action_digest) + "object.o")
+        expect(shared.output_path.contains("nonce-a")).to_equal(false)
+
+        step("unknown witness selects only an owner-private path")
+        val private = native_object_identity_decide_v1(
+            root, Some(scope_bytes), nil, "nonce-a", "unit-a")
+        expect(private.kind).to_equal(NativeObjectIdentityDecisionKindV1.Private)
+        expect(private.shared_index_allowed).to_equal(false)
+        expect(private.output_path).to_equal(
+            native_object_private_output_path_v1(root, "nonce-a", "unit-a"))
+        expect(private.output_path.contains("/nobj/v1/")).to_equal(false)
+
+        step("malformed input and path traversal are invalid, not private")
+        val malformed = native_object_identity_decide_v1(
+            root, Some(scope_bytes), Some([1u8, 2u8]), "nonce-a", "unit-a")
+        expect(malformed.kind).to_equal(
+            NativeObjectIdentityDecisionKindV1.InvalidInput)
+        expect(native_object_private_output_path_v1(
+            root, "../escape", "unit-a")).to_equal("")
+        expect(native_object_shared_bundle_path_v1(
+            "relative/root", native_object_action_digest_v1(action))).to_equal("")
+
+    it "keeps cache relocation out of identity and changes action-qualified paths":
+        val scope = identity_scope()
+        val scope_digest = native_object_scope_digest_v1(scope)
+        val action = identity_action(scope_digest)
+        val moved = native_object_identity_decide_v1(
+            "/tmp/moved-root", Some(native_object_scope_encode_v1(scope)),
+            Some(native_object_action_encode_v1(action)), "nonce", "unit")
+        val original = native_object_identity_decide_v1(
+            "/tmp/original-root", Some(native_object_scope_encode_v1(scope)),
+            Some(native_object_action_encode_v1(action)), "nonce", "unit")
+        expect(moved.action_digest).to_equal(original.action_digest)
+        expect(moved.output_path == original.output_path).to_equal(false)
+
+        val changed = identity_action(scope_digest, source_label: "changed-source")
+        val changed_decision = native_object_identity_decide_v1(
+            "/tmp/original-root", Some(native_object_scope_encode_v1(scope)),
+            Some(native_object_action_encode_v1(changed)), "nonce", "unit")
+        expect(changed_decision.action_digest == original.action_digest).to_equal(false)
+        expect(changed_decision.output_path == original.output_path).to_equal(false)
+
+    it "classifies cold and identical concurrent publication without overwriting":
+        val (_, _, identity) = shared_fixture()
+        val object_bytes = identity_object()
+        val prepared = native_object_prepare_result_v1(
+            identity, object_bytes, "elf", sha256_text("receipt")
+        ).ok().unwrap()
+        val cold = native_object_cold_publish_decision_v1(prepared)
+        expect(cold.kind).to_equal(NativeObjectPublishDecisionKindV1.Published)
+
+        val winner = native_object_existing_winner_decision_v1(
+            prepared, object_bytes, native_object_result_encode_v1(prepared),
+            object_bytes, true)
+        expect(winner.kind).to_equal(
+            NativeObjectPublishDecisionKindV1.IdenticalWinner)
+        expect(winner.object_digest).to_equal(prepared.object_digest)
+
+        val repeated = native_object_existing_winner_decision_v1(
+            prepared, object_bytes, native_object_result_encode_v1(prepared),
+            object_bytes, true)
+        expect(repeated.kind).to_equal(winner.kind)
+        expect(repeated.result_digest).to_equal(winner.result_digest)
+
+    it "rejects unsafe winners and reports same-action byte conflicts":
+        val (_, _, identity) = shared_fixture()
+        val staged = identity_object(4)
+        val winner_bytes = identity_object(5)
+        val staged_result = native_object_prepare_result_v1(
+            identity, staged, "elf", sha256_text("receipt-a")
+        ).ok().unwrap()
+        val winner_result = native_object_prepare_result_v1(
+            identity, winner_bytes, "elf", sha256_text("receipt-b")
+        ).ok().unwrap()
+
+        val conflict = native_object_existing_winner_decision_v1(
+            staged_result, staged, native_object_result_encode_v1(winner_result),
+            winner_bytes, true)
+        expect(conflict.kind).to_equal(NativeObjectPublishDecisionKindV1.Conflict)
+        expect(conflict.reason).to_equal(
+            "same complete action produced different bytes")
+
+        val symlink_like = native_object_existing_winner_decision_v1(
+            staged_result, staged, native_object_result_encode_v1(winner_result),
+            winner_bytes, false)
+        expect(symlink_like.kind).to_equal(NativeObjectPublishDecisionKindV1.Rejected)
+        val malformed = native_object_existing_winner_decision_v1(
+            staged_result, staged, [1u8, 2u8], winner_bytes, true)
+        expect(malformed.kind).to_equal(NativeObjectPublishDecisionKindV1.Rejected)

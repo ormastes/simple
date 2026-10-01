@@ -1,0 +1,93 @@
+# POSIX dynamic-library public facade TDD contract.
+# @cover src/os/posix/dynlib.spl 80%
+# @evidence-display: links
+
+use std.spec.*
+use os.posix.dynlib.{
+    DynLibKind,
+    ElfLibState,
+    dynlib_open,
+    dynlib_symbol,
+    dynlib_symbol_is_process_callable,
+    dynlib_close,
+    dynlib_is_valid,
+    dynlib_handle_is_valid,
+    dynlib_path,
+    dynlib_format_name,
+    dynlib_format_for_path,
+}
+
+val FIXTURE_SO: text = "build/test-artifacts/posix-dynlib/libsimple_dynlib_fixture.so"
+val FIXTURE_SONAME: text = "build/test-artifacts/posix-dynlib/libsimple_dynlib_fixture.so.1"
+
+describe "POSIX dynlib public facade":
+    it "opens resolves and closes a target-built shared object through DynLibKind":
+        step("Open the real .so fixture through dynlib_open")
+        val lib = dynlib_open(FIXTURE_SO, 0)
+        expect(dynlib_is_valid(lib)).to_equal(true)
+        expect(dynlib_format_name(lib)).to_equal("ELF")
+        expect(dynlib_path(lib)).to_equal(FIXTURE_SO)
+        expect(dynlib_symbol(lib, "simple_dynlib_return42")).to_be_greater_than(0)
+        expect(dynlib_symbol_is_process_callable(lib, "simple_dynlib_return42")).to_equal(true)
+        expect(dynlib_close(lib)).to_equal(0)
+
+    it "admits an ELF versioned shared-object name through the public facade":
+        step("Open the target-built .so.1 fixture through dynlib_open")
+        val lib = dynlib_open(FIXTURE_SONAME, 0)
+        expect(dynlib_is_valid(lib)).to_equal(true)
+        expect(dynlib_path(lib)).to_equal(FIXTURE_SONAME)
+        expect(dynlib_symbol(lib, "simple_dynlib_return42")).to_be_greater_than(0)
+        expect(dynlib_close(lib)).to_equal(0)
+
+    it "classifies a Mach-O suffix without claiming a copied ELF payload is Mach-O":
+        step("Classify a dylib path without opening a Linux ELF fixture under a false Mach-O name")
+        expect(dynlib_format_for_path("/host/lib/libsimple_dynlib_fixture.dylib")).to_equal("macho")
+
+    it "rejects PE names and preserves Invalid facade behavior":
+        step("Reject the unavailable WS3 PE format")
+        val lib = dynlib_open("kernel32.dll", 0)
+        expect(dynlib_is_valid(lib)).to_equal(false)
+        expect(dynlib_format_name(lib)).to_equal("Invalid")
+        expect(dynlib_path(lib)).to_equal("")
+        expect(dynlib_symbol(lib, "GetProcAddress")).to_be_less_than(0)
+        expect(dynlib_close(lib)).to_be_less_than(0)
+
+    it "rejects a non-positive Elf handle before public symbol lookup or close":
+        step("Reject an invalid public Elf state without entering the host provider")
+        val invalid = DynLibKind.Elf(state: ElfLibState(
+            handle: 0,
+            base: 0,
+            path: FIXTURE_SO,
+        ))
+        expect(dynlib_is_valid(invalid)).to_equal(false)
+        expect(dynlib_symbol(invalid, "simple_dynlib_return42")).to_be_less_than(0)
+        expect(dynlib_close(invalid)).to_be_less_than(0)
+
+    it "keeps filename classification separate from a native payload claim":
+        step("Classify the suffix without treating a carrier instance as payload proof")
+        expect(dynlib_format_for_path("/host/lib/libsimple_dynlib_fixture.dylib")).to_equal("macho")
+        expect(dynlib_handle_is_valid(1)).to_equal(true)
+        expect(dynlib_handle_is_valid(0)).to_equal(false)
+        expect(dynlib_handle_is_valid(-1)).to_equal(false)
+        expect(dynlib_format_for_path("build/providers/provider_cli_native.smf")).to_equal("smf")
+
+    it "classifies only complete numeric ELF version suffixes":
+        step("Accept .so.1 and .so.1.2 but reject malformed version lookalikes")
+        expect(dynlib_format_for_path(FIXTURE_SONAME)).to_equal("elf")
+        expect(dynlib_format_for_path(FIXTURE_SONAME + ".2")).to_equal("elf")
+        expect(dynlib_format_for_path("libsimple_dynlib_fixture.so.")).to_equal("unknown")
+        expect(dynlib_format_for_path("libsimple_dynlib_fixture.so.x")).to_equal("unknown")
+        expect(dynlib_format_for_path("libsimple_dynlib_fixture.so.1.")).to_equal("unknown")
+        expect(dynlib_format_for_path("libsimple_dynlib_fixture.so..1")).to_equal("unknown")
+        expect(dynlib_format_for_path("libsimple_dynlib_fixture.so.1.x")).to_equal("unknown")
+
+    it "classifies only the basename rather than suffix text in a directory":
+        step("Reject directory lookalikes that contain a library suffix but no library basename")
+        expect(dynlib_format_for_path("/tmp/libsimple_dynlib_fixture.so.1/not-a-library")).to_equal("unknown")
+        expect(dynlib_format_for_path("/tmp/libsimple_dynlib_fixture.dylib/not-a-library")).to_equal("unknown")
+        expect(dynlib_format_for_path("/tmp/kernel32.dll/not-a-library")).to_equal("unknown")
+
+    it "gives PE suffix refusal precedence over embedded ELF-looking text":
+        step("Refuse PE names without routing them into native ELF loading")
+        expect(dynlib_format_for_path("libsimple_dynlib_fixture.so.1.dll")).to_equal("pe")
+        expect(dynlib_format_for_path("/tmp/cache.so.1/kernel32.dll")).to_equal("pe")

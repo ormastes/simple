@@ -1,0 +1,125 @@
+"""
+## Purpose and audience
+Purpose: Pin that a face loaded on the SELECTED-BLOB lane applies its legacy
+`kern` table's horizontal format-0 pair adjustments, folded into round 12's
+milli-pixel cumulative pen rather than rounded on its own.
+
+Audience: text-layout / web-parity maintainers.
+
+The defect this pins. `FontRasterizer.load_unmanaged`
+(src/lib/nogc_sync_mut/sffi/spl_fonts.spl:280) builds the rasterizer with
+`kern_fp: 0` — there is no dylib behind that lane, so
+`FontRasterizer.horizontal_kern` (:624) short-circuits to 0 for every face it
+loads. `sfnt_ttc_extract_face` copies EVERY table when it repacks a collection
+face, so the `kern` data was present in `selected_blob` the whole time; nothing
+read it. Chrome applies kerning by default (`font-kerning: auto`), so every
+Helvetica run measured here was systematically wider than Chrome's.
+
+Measured, not assumed (probe on this host, 2026-09-13):
+  /System/Library/Fonts/Helvetica.ttc face 0  kern=656 bytes, GPOS/GSUB absent
+  /System/Library/Fonts/Helvetica.ttc face 1  kern=632 bytes, GPOS/GSUB absent
+  /System/Library/Fonts/Menlo.ttc     face 0  kern/GPOS/GSUB all absent
+So legacy `kern` is the whole of what Chrome can be applying on these faces, and
+GPOS `PairPos` is deliberately NOT implemented — it would be dead code on every
+face this renderer loads. A face that ships GPOS instead answers 0 from here,
+exactly as it does today.
+
+What this spec does NOT pin: that `strong` on the catalog `overview` page
+becomes exact. It does not — that element's pairs (st, tr, ro, on, ng) all kern
+ZERO in Helvetica Bold, and its 6 px excess is a separate, still-open defect.
+Recorded honestly rather than claimed.
+"""
+
+"""
+Traceability: REQ-TEXT-LAYOUT-KERN-PAIR-001 — a selected-blob face applies its `kern` table's horizontal format-0 pair values, in milli-pixels, inside the cumulative pen.
+"""
+# @cover src/lib/common/encoding/sfnt_kern.spl 1%
+use std.spec.*
+use std.common.encoding.sfnt.{sfnt_face_blob, font_face_spec_path, font_face_spec_index}
+use std.common.encoding.sfnt_glyf.{sfnt_blob_glyph_ids_into}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px}
+use std.nogc_sync_mut.fs.{file_read_bytes, file_exists}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+
+val HELVETICA: text = "/System/Library/Fonts/Helvetica.ttc#0"
+val MENLO: text = "/System/Library/Fonts/Menlo.ttc#0"
+
+fn face_blob(spec: text) -> [u8]:
+    val path = font_face_spec_path(spec)
+    if not file_exists(path): return []
+    sfnt_face_blob(file_read_bytes(path), font_face_spec_index(spec))
+
+fn gid(blob: [u8], codepoint: i64) -> i64:
+    var out: [i64] = [0]
+    sfnt_blob_glyph_ids_into(blob, [codepoint], out)
+    out[0]
+
+fn kern_milli(blob: [u8], left: i64, right: i64, size_px: i64) -> i64:
+    sfnt_blob_kern_pair_milli_px(blob, gid(blob, left), gid(blob, right), size_px)
+
+fn sum_of(values: [i32]) -> i64:
+    var total: i64 = 0
+    for value in values: total = total + (value as i64)
+    total
+
+describe "kern pair advances on the selected-blob lane":
+
+    it "reads Helvetica's `AV` pair out of the real kern table, in font units scaled to milli-px":
+        val blob = face_blob(HELVETICA)
+        expect(blob.len() > 0).to_be_true()
+        # -151/2048 em. At 16 px that is -1.18 px, i.e. -1180 milli-pixels.
+        # The value is the table's own, read here, not a constant chosen to fit.
+        expect(kern_milli(blob, 65, 86, 16)).to_equal(-1180)
+
+    it "reads `To`, a second real pair, rather than answering one hardcoded case":
+        val blob = face_blob(HELVETICA)
+        expect(kern_milli(blob, 84, 111, 16)).to_equal(-1773)
+
+    it "answers 0 for a pair the table does not list":
+        val blob = face_blob(HELVETICA)
+        expect(kern_milli(blob, 111, 110, 16)).to_equal(0)
+
+    it "scales with size, rounding the exact product at each size rather than doubling":
+        val blob = face_blob(HELVETICA)
+        # -151/2048 em is -1179.6875 milli-px at 16 and -2359.375 at 32. The
+        # rounded answers are -1180 and -2359, so the 32 px value is NOT twice
+        # the 16 px one -- doubling a rounded number would carry the 16 px
+        # rounding error into every larger size, which is exactly the
+        # sum-of-rounded-parts error round 12 removed from advances. The
+        # invariant that does hold is that each size rounds its own exact
+        # product, and the two therefore differ by at most 1 milli-pixel.
+        expect(kern_milli(blob, 65, 86, 32)).to_equal(-2359)
+        val doubled = 2 * kern_milli(blob, 65, 86, 16)
+        expect(kern_milli(blob, 65, 86, 32) - doubled).to_equal(1)
+
+    it "answers 0 for a face with no kern table at all (Menlo), which is the regression half":
+        val blob = face_blob(MENLO)
+        expect(blob.len() > 0).to_be_true()
+        expect(kern_milli(blob, 65, 86, 16)).to_equal(0)
+
+    it "measures a kerned Helvetica run NARROWER than the sum of its advances":
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_runtime_ttf(HELVETICA)).to_be_true()
+        val kerned = renderer.measure_text_width("AV", 16)
+        val unkerned = renderer.measure_text_width("A", 16) + renderer.measure_text_width("V", 16)
+        expect(kerned < unkerned).to_be_true()
+
+    it "measures `AV` as round(exact advances + exact kern), the round-12 rule":
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_runtime_ttf(HELVETICA)).to_be_true()
+        # A and V are both 1367/2048 em = 10.680 px at 16. 21.359 - 1.180 =
+        # 20.179, which rounds to 20; the unkerned run rounds to 21.
+        expect(renderer.measure_text_width("AV", 16)).to_equal(20)
+
+    it "keeps measure_text_width and measure_text_advances in agreement on a kerned run":
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_runtime_ttf(HELVETICA)).to_be_true()
+        expect(sum_of(renderer.measure_text_advances("AV", 16))).to_equal(
+            renderer.measure_text_width("AV", 16) as i64)
+
+    it "leaves an unkerned Menlo run byte-identical to round 12's array":
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_runtime_ttf(MENLO)).to_be_true()
+        # Eight Menlo `M` is round 12's own case: 1233/2048 em = 9.633 px, and
+        # round(8 x 9.633) = 77. Menlo has no kern table, so this must not move.
+        expect(renderer.measure_text_width("MMMMMMMM", 16)).to_equal(77)

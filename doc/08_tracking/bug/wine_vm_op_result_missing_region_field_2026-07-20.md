@@ -1,4 +1,8 @@
 # Bug: `WineVmOpResult` is missing a `region` field that both src and test callers depend on
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-20
 
@@ -79,3 +83,4 @@ test-only shard fix.
 
 - `test/01_unit/lib/common/wine_dll_file_view_spec.spl` (all 3 examples)
 - Production src: `src/lib/common/wine_dll_file_view.spl:48` (same `.region` reference, latent breakage)
+

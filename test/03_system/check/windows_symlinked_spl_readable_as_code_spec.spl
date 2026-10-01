@@ -1,0 +1,177 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: verify that a git-symlinked `.spl` is readable as CODE on a Windows
+checkout, and that the guard which loads committed content materialises its
+worktrees before compiling anything.
+Audience: maintainers of this spec and reviewers of the behavior it proves.
+
+# A Symlinked `.spl` Must Be Readable As Code, Not As Path Text
+
+Reproducing spec for
+`doc/08_tracking/bug/windows_git_symlinks_materialize_as_path_text_2026-09-02.md`.
+
+`git worktree add` and `git checkout` honour `core.symlinks`. On a Windows host
+without Developer Mode / `SeCreateSymbolicLinkPrivilege` that config is
+necessarily `false`, and git then writes a tracked symlink (mode `120000`) as a
+**regular file whose entire content is the literal target path**. 35 tracked
+paths under `src/` are symlinks; 12 of them are `.spl`. The compiler reads
+`../../lib/nogc_sync_mut/debug/coordinator.spl` as Simple source, consumes `..`,
+meets `/`, and reports:
+
+    Unexpected token: expected expression, found Slash
+
+That diagnostic names the wrong thing entirely — there is no syntax error, there
+is a symlink that was never materialised. It made
+`check-main-test-runnable-push.shs` fail its own C1 selftest on a clean tree and
+blocked that push-tier gate outright.
+
+## Overview
+
+The fix runs `scripts/setup/materialize-symlinks-windows.shs` on every worktree
+`check-main-test-runnable-push.shs` creates. The materialiser replaces a
+directory-target placeholder with an NTFS junction and a file-target placeholder
+with an NTFS hard link — neither needs the symlink privilege, so it works on a
+restricted session where `core.symlinks=true` cannot.
+
+## Requirements
+
+**Requirements:** N/A
+
+- REQ-WIN-SPLLINK-001: A `.spl` placeholder produced by a `core.symlinks=false`
+  checkout is rejected by the compiler with the misleading `found Slash`
+  diagnostic — this is the defect, asserted so a regression is visible.
+- REQ-WIN-SPLLINK-002: After the materialiser runs, the same path compiles
+  cleanly, because it now reads as the target's real source.
+- REQ-WIN-SPLLINK-003: `check-main-test-runnable-push.shs` materialises symlinks
+  at EVERY worktree it creates, behind an explicit Windows-only branch, passing
+  the worktree root explicitly rather than relying on the script's default root.
+
+## Plan
+
+**Plan:** doc/08_tracking/bug/windows_git_symlinks_materialize_as_path_text_2026-09-02.md
+
+1. Build a throwaway git repo holding a real `.spl` and a mode-120000 `.spl`
+   symlink to it; check it out with `core.symlinks=false` so the link degrades.
+2. Compile the placeholder with the real compiler and record the exit status
+   read DIRECTLY into a variable, never through a pipe.
+3. Run the materialiser on that repo, compile again, and require success.
+4. Assert the guard's wiring by source, at all three `git worktree add` sites.
+
+## Design
+
+**Design:** doc/04_architecture/compiler/misc/file_class_structure.md
+
+Both scripts are POSIX `sh` invoked as external processes via `process_run`, and
+the compiler is invoked as a real process — this spec asserts on real exit codes
+and real stdout, not on source text alone, except for the wiring check in the
+last scenario where source IS the contract.
+
+## Examples
+
+```sh
+bin/simple test test/03_system/check/windows_symlinked_spl_readable_as_code_spec.spl --clean
+```
+"""
+
+# @tag: system, check, windows, symlink, compiler, guard
+
+use std.spec.step
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+describe "a git-symlinked .spl on a core.symlinks=false checkout":
+    # @manual scenario evidence
+
+    it "reads as path text before materialisation and as code after":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-WIN-SPLLINK-001
+        # @req REQ-WIN-SPLLINK-002
+        step("reads as path text before materialisation and as code after")
+        val root = "build/test-windows-symlinked-spl"
+        val bin = "bin/simple"
+        # Two compiles of the SAME path, straddling one materialiser run. The
+        # exit status of each is captured on the line after the invocation and
+        # written to a file -- never piped, because a pipeline's $? belongs to
+        # the last command in it and has produced false greens in this repo.
+        # The target must be reached through a DIRECTORY component: a bare
+        # `real.spl` placeholder lexes as `real . spl`, an ordinary expression,
+        # and would never reproduce the defect. `../srcdir/real.spl` is what the
+        # 12 real paths look like, and `..` followed by `/` is the exact shape
+        # that yields "expected expression, found Slash".
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/pkg " + root + "/srcdir && cd " + root + " && " +
+            "git init -q && " +
+            "git config user.email t@example.com && " +
+            "git config user.name t && " +
+            "git config core.symlinks false && " +
+            "printf 'pub fn linked_answer() -> i64:\\n    return 42\\n' > srcdir/real.spl && " +
+            "git add -A && git commit -q -m base && " +
+            "printf '../srcdir/real.spl' > pkg/alias.spl && " +
+            "git update-index --add --cacheinfo 120000,$(git hash-object -w pkg/alias.spl),pkg/alias.spl && " +
+            "git commit -q -m 'add .spl symlink' && " +
+            "rm -f pkg/alias.spl && git checkout -q -- pkg/alias.spl && " +
+            "cd - >/dev/null && " +
+            "cp " + root + "/pkg/alias.spl " + root + "/before.spl && " +
+            bin + " check " + root + "/before.spl > " + root + "/before.txt 2>&1; " +
+            "echo \"EXIT=$?\" >> " + root + "/before.txt; " +
+            "sh scripts/setup/materialize-symlinks-windows.shs --strict-missing " + root +
+            " > " + root + "/mat.txt 2>&1; echo \"EXIT=$?\" >> " + root + "/mat.txt; " +
+            "cp " + root + "/pkg/alias.spl " + root + "/after.spl && " +
+            bin + " check " + root + "/after.spl > " + root + "/after.txt 2>&1; " +
+            "echo \"EXIT=$?\" >> " + root + "/after.txt"
+        val (_stdout, _stderr, code) = process_run("sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val mat = file_read(root + "/mat.txt")
+
+        step("Non-Windows hosts have real symlinks and the materialiser is a scoped no-op")
+        if mat.contains("Windows-only"):
+            expect(mat).to_contain("materialize-symlinks-windows: this script is Windows-only")
+        else:
+            step("BEFORE: the placeholder is path text and the compiler rejects it")
+            # Wording differs by entry point -- the `test`/compile path reports
+            # "expected expression, found Slash" (the form quoted in the bug
+            # record), `check` reports "unexpected token in expression: ..".
+            # Both are the same defect: the leading `..` of a relative target
+            # being lexed as Simple source. Assert the invariant part.
+            val before = file_read(root + "/before.txt")
+            expect(before).to_contain("unexpected token in expression")
+            expect(before).to_contain("before.spl")
+            expect(before).to_contain("EXIT=1")
+
+            step("The materialiser resolves the .spl placeholder as a hard link")
+            expect(mat).to_contain("created=1")
+            expect(mat).to_contain("failed=0")
+            expect(mat).to_contain("EXIT=0")
+
+            step("AFTER: the same path now holds the target's real source and compiles")
+            val after = file_read(root + "/after.txt")
+            expect(after).to_contain("EXIT=0")
+            val materialized = file_read(root + "/pkg/alias.spl")
+            expect(materialized).to_contain("pub fn linked_answer")
+
+describe "check-main-test-runnable-push worktree wiring":
+
+    it "materialises symlinks at every worktree it creates, Windows-only":
+        # @req REQ-SSPEC-SYSTEM
+        # @req REQ-WIN-SPLLINK-003
+        step("materialises symlinks at every worktree it creates, Windows-only")
+        val guard = file_read("scripts/check/check-main-test-runnable-push.shs")
+
+        step("The helper exists and is gated to MSYS/MinGW/Cygwin hosts only")
+        expect(guard).to_contain("materialise_symlinks_if_windows()")
+        expect(guard).to_contain("MINGW*|MSYS*|CYGWIN*")
+        expect(guard).to_contain("--strict-missing")
+
+        step("Every worktree the guard adds is materialised -- one call per add site")
+        # The three `git worktree add --detach` sites are the C selftest fixture
+        # ($_c), the F selftest fixture ($_f), and the real scan ($WT/tree). All
+        # three must be materialised: wiring only the scan leaves C1 failing on a
+        # clean tree, which is exactly how the gate was blocked.
+        expect(guard).to_contain("materialise_symlinks_if_windows \"$_c\"")
+        expect(guard).to_contain("materialise_symlinks_if_windows \"$_f\"")
+        expect(guard).to_contain("materialise_symlinks_if_windows \"$WT/tree\"")

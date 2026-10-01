@@ -1,0 +1,306 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/environment_resident_executor_v1.spl 80%
+# @tag: unit, gpu, engine2d, egl, package7
+"""
+## Purpose and audience
+EGL package 7 left three things open: the starvation bound was proven for a
+deferral count the caller supplied rather than over a live loop, the executor
+refused every device provider outright, and every transfer cost was declared.
+This manual is for the engineers closing those three, and it pins what each
+closure is and is NOT evidence of. Feature IDs: gpu_scheduler_hardening.
+Category: Stdlib.
+
+## Operator workflow
+bin/simple test test/01_unit/lib/gpu/engine2d/environment_resident_executor_deferral_v1_spec.spl
+
+## Compatibility and limitations
+Runs on any host, with or without a device. The device-lane scenario completes
+through `engine2d_draw_ir_runtime_queue_complete_packed_with_authority`, whose
+authority record is caller-constructed here and is therefore a validator
+fixture -- exactly as the queue owner's own spec states. Passing a qualifying
+evidence record through the seam proves the executor did not substitute its own
+evidence; it does not prove a GPU ran. Issuing an authority from a retained
+native Vulkan fence is the Vulkan owner's line and is not in this tree.
+
+The measured costs below are measured on the EMULATED lane: they are the
+software backend's own damage plan and readback receipt, in bytes. The software
+backend's damage is sticky (`present()` is its only clear owner and this island
+never presents), so each execution measures the resident surface the backend
+reports as needing transport, not an incremental delta.
+
+## Verification guidance and troubleshooting
+A RED here means one of the three closures regressed: the deferral feed-forward
+loop, the device-lane authority join, or the measured-cost derivation. Fix the
+executor or the scheduler, never the spec.
+"""
+# Lifecycle: doc/03_plan/agent_tasks/environment_optimized_dynamic_libraries.md
+# @manual_section: primary
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use common.gpu.environment_variant_task_contract_v1.*
+use common.gpu.environment_transfer_scheduler_v1.*
+use std.gc_async_mut.gpu.engine2d.environment_resident_executor_v1.*
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    draw_ir_batch,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use common.ui.draw_ir_v3_ports.{DRAW_IR_V3_CAP_COMPUTE_PASSES}
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PROFILE_SCENE_BALANCED,
+    Engine2dGpuDeviceEvidence
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{
+    engine2d_draw_ir_epoch_request_from_batch,
+    engine2d_draw_ir_runtime_queue_submit_packed
+}
+use std.nogc_async_mut.gpu.engine2d.packed_completion_authority_v1.{
+    Engine2dPackedCompletionAuthorityV1
+}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    engine2d_host_gpu_runtime_queue_with_backend_handle,
+    engine2d_host_gpu_runtime_reset
+}
+
+val GREEN: u32 = 0xff00ff00u32
+
+fn identity(v: u64) -> GpuTaskIdentityV1:
+    GpuTaskIdentityV1(w0: v, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn cpu_task(invocation: u64) -> GpuBoundedTaskV1:
+    GpuBoundedTaskV1(
+        descriptor_size: GPU_ENVIRONMENT_TASK_DESCRIPTOR_BYTES_V1,
+        schema_version: GPU_ENVIRONMENT_TASK_SCHEMA_V1,
+        operation_kind: GpuTaskOperationKindV1.Engine2d,
+        fallback_policy: GpuTaskFallbackPolicyV1.AllowCpu,
+        invocation_id: invocation,
+        provider_generation: 3u64,
+        lease_generation: 1u64,
+        input_arena: GpuTaskArenaRangeV1(offset: 0u64, length: 64u64),
+        output_arena: GpuTaskArenaRangeV1(offset: 64u64, length: 64u64),
+        arena_capacity_bytes: 256u64,
+        resource_layout_identity: identity(5u64),
+        required_effect_bits: 1u64,
+        numerical_contract_id: 2u32,
+        cpu_fallback_semantically_allowed: true)
+
+fn task(invocation: u64, residency_class: u64, upload: u64) -> TransferTaskV1:
+    TransferTaskV1(invocation_id: invocation, residency_class: residency_class,
+        cost: TransferCostV1(host_to_device_bytes: upload, device_to_host_bytes: 0u64),
+        deferrals: 0)
+
+# The over-budget task costs more than the whole budget, so no round can ever
+# make it fit: only the starvation bound can admit it.
+fn starvation_fixture() -> [TransferTaskV1]:
+    [task(1u64, 10u64, 900u64), task(2u64, 20u64, 40u64)]
+
+fn run_loop_identities() -> [text]:
+    var loop = ResidentDeferralLoopV1.create(starvation_fixture(), 200u64)
+    var out: [text] = []
+    var round: i64 = 0
+    while round < 8:
+        val plan = loop.next_round()
+        if plan.is_err():
+            return out
+        out.push(plan.unwrap().plan_identity)
+        round = round + 1
+    out
+
+describe "Resident deferral feedback loop V1":
+
+    it "feeds each round's deferrals into the next round automatically":
+        # @req REQ-SSPEC-UNIT
+        step("feeds each round's deferrals into the next round automatically")
+        var loop = ResidentDeferralLoopV1.create(starvation_fixture(), 200u64)
+        val first = loop.next_round().unwrap()
+        # The cheap class fits and leaves the pending set; the over-budget one
+        # is deferred and is the only thing left to plan.
+        expect(first.deferred).to_equal([1u64])
+        expect(loop.pending_count()).to_equal(1)
+        val second = loop.next_round().unwrap()
+        # Nothing was re-supplied by the caller: the count came from round 1.
+        expect(second.deferred).to_equal([1u64])
+        expect(loop.deferrals_of(1u64)).to_equal(2)
+
+    it "forces a persistently over-budget task at the starvation bound":
+        # @req REQ-SSPEC-UNIT
+        step("forces a persistently over-budget task at the starvation bound")
+        var loop = ResidentDeferralLoopV1.create(starvation_fixture(), 200u64)
+        var forced_round: i64 = 0
+        var forced_at_deferrals: i64 = 0
+        var exceeded_rounds: i64 = 0
+        var round: i64 = 0
+        while round < 8:
+            # Read the count the loop itself carries, BEFORE the round that
+            # acts on it, so the assertion below measures the loop rather than
+            # restating the constant.
+            val carried = loop.deferrals_of(1u64)
+            val outcome = loop.next_round()
+            if outcome.is_err():
+                break
+            round = round + 1
+            val plan = outcome.unwrap()
+            if plan.budget_exceeded_by_forced:
+                exceeded_rounds = exceeded_rounds + 1
+                if forced_round == 0:
+                    forced_round = round
+                    forced_at_deferrals = carried
+            expect(plan.forced.len() <= 1).to_equal(true)
+        # The bound counts DEFERRALS, so a task that starts at zero is forced on
+        # the round after its bound-th deferral: round == bound + 1.
+        expect(forced_at_deferrals).to_equal(TRANSFER_SCHEDULER_STARVATION_BOUND_V1)
+        expect(forced_round).to_equal(TRANSFER_SCHEDULER_STARVATION_BOUND_V1 + 1)
+        # Reported once, not on every subsequent round.
+        expect(exceeded_rounds).to_equal(1)
+        # No task is deferred forever: the pending set drains.
+        expect(loop.pending_count()).to_equal(0)
+        expect(loop.next_round()).to_equal(Err(TransferScheduleErrorV1.EmptyPlan))
+
+    it "admits every task exactly once across the loop":
+        # @req REQ-SSPEC-UNIT
+        step("admits every task exactly once across the loop")
+        var loop = ResidentDeferralLoopV1.create(starvation_fixture(), 200u64)
+        var admitted: [u64] = []
+        var round: i64 = 0
+        while round < 8:
+            val outcome = loop.next_round()
+            if outcome.is_err():
+                break
+            for batch in outcome.unwrap().batches:
+                for id in batch.invocation_ids:
+                    admitted.push(id)
+            round = round + 1
+        expect(admitted).to_equal([2u64, 1u64])
+
+    it "produces the same plan identities every time the loop is replayed":
+        # @req REQ-SSPEC-UNIT
+        step("produces the same plan identities every time the loop is replayed")
+        val first = run_loop_identities()
+        val second = run_loop_identities()
+        expect(first.len()).to_equal(4)
+        expect(first).to_equal(second)
+
+describe "Resident device lane joined to packed completion":
+
+    it "admits a device provider on the authority lane and refuses the CPU body for it":
+        # @req REQ-SSPEC-UNIT
+        step("admits a device provider on the authority lane and refuses the CPU body for it")
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        val lease = island.admit(cpu_task(1u64), true, 1).unwrap()
+        # The CPU rasterizer must never serve a device-lane lease; that is the
+        # impersonation the module refuses, not the provider itself.
+        expect(island.execute(lease, 2, 0, 0, 4, 4, GREEN)).to_equal(
+            Err(ResidentExecutorErrorV1.LaneMismatch))
+
+    it "completes a resident device task through an owner-issued authority once":
+        # @req REQ-SSPEC-UNIT
+        step("completes a resident device task through an owner-issued authority once")
+        engine2d_host_gpu_runtime_reset()
+        val queued = engine2d_draw_ir_runtime_queue_submit_packed(
+            engine2d_draw_ir_epoch_request_from_batch(
+                draw_ir_batch("pkg7", DRAW_IR_BACKEND_GPU,
+                    draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false),
+                    [draw_ir_rect("body", 2, 3, 6, 5, GREEN)]),
+                ENGINE2D_GPU_PROFILE_SCENE_BALANCED,
+                engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096),
+                4096u64, 1u64, 2u64, 3u64, 4u64, 5u64),
+            engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096),
+            true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        # Fixture evidence: field values imitate what a backend owner retains
+        # from its own fence. Nothing here read a device.
+        val authority = Engine2dPackedCompletionAuthorityV1(
+            completion_handle: 11u64, owner_identity: 5u64, queue_handle: 1,
+            backend_handle: 7, queue_generation: 1u64, operation_generation: 2u64,
+            scene_generation: 3u64, surface_generation: 4u64, arena_generation: 5u64,
+            evidence: Engine2dGpuDeviceEvidence(
+                binary_identity: "fixture-backend-owner", device_name: "fixture-device",
+                device_type: "integrated_gpu", driver_identity: "fixture-driver-1.0",
+                host_submit_ns: 1000, host_complete_ns: 2000,
+                device_timestamp_available: true, device_begin_ticks: 10,
+                device_end_ticks: 40, transfer_bytes: 64, negative_control_passed: true))
+
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        val lease = island.admit(cpu_task(1u64), true, 1).unwrap()
+        # Without an authority the device lane completes nothing.
+        expect(island.complete_device(lease, 2, queued, queue, nil)).to_equal(
+            Err(ResidentExecutorErrorV1.CompletionRefused))
+
+        val receipt = island.complete_device(lease, 3, queued, queue, authority).unwrap()
+        expect(receipt.lane).to_equal(RESIDENT_LANE_DEVICE_AUTHORITY_V1)
+        expect(receipt.executions).to_equal(1)
+        # Pass-through, not derivation: the flag is the queue's verdict on the
+        # OWNER's evidence. A fixture authority proves the executor did not
+        # substitute evidence of its own, never that a GPU ran.
+        expect(receipt.device_execution_proven).to_equal(true)
+
+        # Single-use: the same authority is refused on replay.
+        expect(island.complete_device(lease, 4, queued, queue, authority)).to_equal(
+            Err(ResidentExecutorErrorV1.CompletionRefused))
+        expect(island.retire(lease, 5).unwrap().executions).to_equal(1)
+
+describe "Measured transfer costs on the emulated lane":
+
+    it "measures bytes actually moved from the backend's own receipts":
+        # @req REQ-SSPEC-UNIT
+        step("measures bytes actually moved from the backend's own receipts")
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        val lease = island.admit(cpu_task(1u64), false, 1).unwrap()
+        val once = island.execute(lease, 2, 0, 0, 8, 8, GREEN).unwrap()
+        # 32x32 surface, 4 bytes per pixel, read back whole.
+        expect(once.measured_readback_bytes).to_equal(4096u64)
+        # The damage plan names the whole resident surface, not the 8x8 rect:
+        # damage is sticky and this island never presents. Pinned as a number
+        # so that limitation is a checked fact rather than a docstring claim.
+        expect(once.measured_upload_bytes).to_equal(4096u64)
+        val twice = island.execute(lease, 3, 0, 0, 8, 8, GREEN).unwrap()
+        # Costs accumulate per crossing: two executions moved twice the bytes.
+        expect(twice.measured_readback_bytes).to_equal(8192u64)
+        expect(twice.measured_upload_bytes).to_equal(once.measured_upload_bytes * 2u64)
+        val cost = resident_measured_transfer_cost_v1(twice)
+        expect(cost.device_to_host_bytes).to_equal(8192u64)
+        expect(cost.host_to_device_bytes).to_equal(twice.measured_upload_bytes)
+
+    it "orders the fixture the same way under measured and declared costs":
+        # @req REQ-SSPEC-UNIT
+        step("orders the fixture the same way under measured and declared costs")
+        # Declared fixture: class 20 cheapest, then 30, then 10 over budget.
+        val declared = transfer_aware_plan_v1([
+            task(1u64, 10u64, 900u64), task(2u64, 20u64, 40u64),
+            task(3u64, 30u64, 120u64)], 200u64).unwrap()
+
+        # Measured: the same three tasks resident on one island, crossing the
+        # boundary 3 / 1 / 2 times respectively. Every byte below comes from
+        # the software backend's damage plan and readback receipt.
+        var island = ResidentExecutionIslandV1.create(100, 32, 32)
+        var measured: [TransferTaskV1] = []
+        var invocation: u64 = 1u64
+        val crossings: [i64] = [3, 1, 2]
+        val classes: [u64] = [10u64, 20u64, 30u64]
+        while invocation <= 3u64:
+            val lease = island.admit(cpu_task(invocation), false, 1).unwrap()
+            var receipt = island.execute(lease, 2, 0, 0, 8, 8, GREEN).unwrap()
+            var crossing: i64 = 1
+            while crossing < crossings[(invocation - 1u64).to_i64()]:
+                receipt = island.execute(lease, 2 + crossing, 0, 0, 8, 8, GREEN).unwrap()
+                crossing = crossing + 1
+            measured.push(TransferTaskV1(invocation_id: invocation,
+                residency_class: classes[(invocation - 1u64).to_i64()],
+                cost: resident_measured_transfer_cost_v1(receipt), deferrals: 0))
+            invocation = invocation + 1u64
+
+        # A budget in measured units: enough for the two cheapest crossings.
+        val measured_plan = transfer_aware_plan_v1(measured, 24576u64).unwrap()
+
+        var declared_classes: [u64] = []
+        for batch in declared.batches:
+            declared_classes.push(batch.residency_class)
+        var measured_classes: [u64] = []
+        for batch in measured_plan.batches:
+            measured_classes.push(batch.residency_class)
+        expect(measured_classes).to_equal(declared_classes)
+        expect(measured_plan.deferred).to_equal(declared.deferred)
+        # The pin is the ordering, not the numbers: measured bytes are larger
+        # than the fixture's declared ones by orders of magnitude.
+        expect(measured_plan.planned_bytes > declared.planned_bytes).to_equal(true)

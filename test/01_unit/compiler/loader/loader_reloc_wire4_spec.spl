@@ -1,0 +1,322 @@
+# loader_reloc_wire4_spec — REPLACED (lane A4b) the hand-written
+# reproduction that used to live in this file with a test that drives the
+# REAL loader helper, `loader_smf_reloc_value`
+# (compiler.loader.module_loader_compat), plus a synthesized GOT slot built
+# the same way the live loader's relocation loop builds one.
+#
+# History: this file used to hand-reproduce the loader's buggy inline
+# expression (`target_addr - place + addend`, using the resolved symbol's
+# OWN address as S) and assert it differed from the oracle's GOT-based
+# result via `to_not_equal` -- a pin of the pre-A4b defect that could not
+# flip itself when the loader was fixed, because it never called the loader.
+#
+# Lane A4a's bug doc (doc/08_tracking/bug/
+# smf_gotrel32_applied_as_symbol_value_2026-09-18.md) and design §4
+# (doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md) establish
+# the rule: for wire 4 (GotRel32 / R_X86_64_GOTPCREL), S must be the address
+# of a per-module GOT slot that HOLDS the resolved symbol's address (S ==
+# G), never the symbol's own address, because a GOTPCREL site LOADS THROUGH
+# the slot at runtime.
+#
+# Lane A4b converged both live relocation loops
+# (module_loader_compat.spl's relocation block, object_mapper.spl's
+# apply_smf_relocations) onto `loader_smf_reloc_value` /
+# `smf_reloc_compute_wire` and, for module_loader_compat.spl and
+# object_mapper.spl specifically, added GOT synthesis: one 8-byte RW slot
+# per distinct wire-4 target symbol, filled with that symbol's resolved
+# address, allocated before any relocation is patched. The first test below
+# proves the formula-level half of that fix directly against the real
+# helper. The second test drives `apply_smf_relocations`
+# (compiler.loader.loader.object_mapper) itself end to end -- real allocated
+# memory standing in for a loaded code region and a resolved symbol, no
+# hand-reproduced arithmetic -- to prove the GOT-slot ALLOCATION and
+# DICT-LOOKUP machinery (which is inline in the loader's relocation loop,
+# not a pure function, since it needs `native_alloc_rw_memory` and the
+# loader's own symbol tables) actually indirects through a slot rather than
+# repeating the pre-A4b bug.
+
+use std.spec
+use compiler.loader.module_loader_compat.{loader_smf_reloc_value}
+use compiler.loader.loader.object_mapper.{
+    apply_smf_relocations, ResolvedSymbol,
+    SharedExecMapper, SharedExecMapperConfig, SharedExecRecord
+}
+use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
+use compiler.loader.smf_mmap_native.{
+    native_alloc_rw_memory, native_mmap_read_bytes, native_exec_memory_count,
+    native_free_exec_memory
+}
+
+# Manual little-endian decode, NOT `as i32`-and-shift: i32 arithmetic in
+# this language does not wrap at 32 bits under `<<`/`|`, so a naive decode
+# misreads any negative patched value (e.g. bytes for -12345 decode as
+# 4294954951, not -12345) -- verified empirically before writing this spec.
+# Accumulate in i64, then apply the two's-complement correction by hand.
+fn _wire4_bytes_to_i32_le(bytes: [u8]) -> i64:
+    var raw = 0i64
+    var shift = 0i64
+    var i = 0
+    while i < 4:
+        raw = raw | ((bytes[i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    if raw >= 2147483648:
+        raw = raw - 4294967296
+    raw
+
+fn _wire4_bytes_to_i64_le(bytes: [u8]) -> i64:
+    var value = 0i64
+    var shift = 0i64
+    var i = 0
+    while i < 8:
+        value = value | ((bytes[i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    value
+
+describe "loader wire-4 (GotRel32) via the real loader helper, with a synthesized GOT slot":
+    it "using the GOT slot's address as S yields a value distinct from using the symbol's own address":
+        # Same scenario as the original hand reproduction: a symbol resolved
+        # to address 0x00410000, inside a loaded blob based at 0x00400000,
+        # relocation site at offset 0x20 (place P = 0x00400020), addend = 4.
+        val symbol_address = 0x00410000
+        val loaded_sym_base = 0x00400000
+        val reloc_offset = 0x20
+        val addend = 4
+        val place = loaded_sym_base + reloc_offset
+
+        # A per-module GOT slot lives at a DISTINCT address from the symbol
+        # it points at -- that is the entire point of an indirection slot.
+        # (In the live loader this address comes from `native_alloc_rw_memory`;
+        # here it stands in for "wherever the synthesized GOT places this
+        # symbol's slot".)
+        val got_slot_address = 0x00500000
+
+        val buggy_using_symbol_address = loader_smf_reloc_value(4, symbol_address, place, addend)
+        val correct_using_got_slot = loader_smf_reloc_value(4, got_slot_address, place, addend)
+
+        expect(buggy_using_symbol_address.is_ok()).to_equal(true)
+        expect(correct_using_got_slot.is_ok()).to_equal(true)
+        # The two are NOT equal: the fixed loader path (which always passes
+        # the GOT-slot address per the contract) produces a different patch
+        # value than a hypothetical caller that (incorrectly) passed the
+        # symbol's own address. This is the exact distinction the pre-A4b
+        # bug erased -- both loops used to compute the "buggy" value above.
+        expect(correct_using_got_slot.unwrap()).to_not_equal(buggy_using_symbol_address.unwrap())
+        expect(correct_using_got_slot.unwrap()).to_equal(got_slot_address - place + addend)
+
+    it "apply_smf_relocations (the real caller, object_mapper.spl) synthesizes a GOT slot and patches through it, end to end":
+        # Drives the REAL `apply_smf_relocations` with real allocated memory
+        # standing in for a loaded code region and a resolved symbol -- no
+        # hand-reproduced arithmetic. This is the caller-level proof that
+        # the formula-level test above only assumes.
+        val code_size = 16i64
+        val code_addr = native_alloc_rw_memory(code_size)
+        expect(code_addr).to_not_equal(0)
+        val sym_addr = native_alloc_rw_memory(8)
+        expect(sym_addr).to_not_equal(0)
+        expect(sym_addr).to_not_equal(code_addr)
+
+        val reloc_offset = 4i64
+        val addend = 0i64
+        val reloc = SmfRelocEntry(offset: reloc_offset, symbol_index: 0, reloc_type: 4, addend: addend)
+        val symbols = [ResolvedSymbol(name: "target_symbol", address: sym_addr)]
+        val global_symbols: Dict<text, i64> = {}
+
+        val result = apply_smf_relocations(code_addr, code_size, [reloc], symbols, global_symbols)
+        expect(result.is_ok()).to_equal(true)
+
+        val place = code_addr + reloc_offset
+        val patch_bytes = native_mmap_read_bytes(code_addr, reloc_offset, 4)
+        val patched_value = _wire4_bytes_to_i32_le(patch_bytes)
+
+        # If the loader had (incorrectly) used the symbol's own address as S
+        # -- the pre-A4b bug -- the patched value would equal sym_addr -
+        # place + addend. It must NOT: the real code must go through a
+        # synthesized GOT slot instead.
+        val buggy_value_using_symbol_address = sym_addr - place + addend
+        expect(patched_value).to_not_equal(buggy_value_using_symbol_address)
+
+        # Solve for S (the GOT slot's address) from the patched value:
+        # value = S - place + addend  =>  S = value + place - addend.
+        val derived_slot_addr = patched_value + place - addend
+
+        # The derived slot must be real, distinct memory that HOLDS the
+        # symbol's actual resolved address -- proving a genuine GOT
+        # indirection happened, not merely a different constant.
+        expect(derived_slot_addr).to_not_equal(sym_addr)
+        expect(derived_slot_addr).to_not_equal(code_addr)
+        val slot_bytes = native_mmap_read_bytes(derived_slot_addr, 0, 8)
+        val slot_value = _wire4_bytes_to_i64_le(slot_bytes)
+        expect(slot_value).to_equal(sym_addr)
+
+    # ------------------------------------------------------------------
+    # GOT lifetime (Fable review of lane A4b commit ac8b46d8af0, BLOCKING):
+    # apply_smf_relocations allocates the GOT but does not itself know "the
+    # symbol's mapping" -- SharedExecMapper does. The caller
+    # (module_loader.spl) now records a non-zero GotAllocation against the
+    # symbol's own SharedExecRecord via `set_got`, and both `map_symbol`'s
+    # replace path and `unmap_symbol` free `got_base`/`got_size` alongside
+    # `address`/`size` through a single shared helper,
+    # `_free_mapped_resources`, so a GOTPCREL-bearing symbol cannot leak its
+    # slot page. Probed via `native_exec_memory_count` -- the SAME
+    # allocation-tracking dict (`EXEC_MEMORY_ALLOCS`,
+    # compiler.loader.smf_mmap_native) that both the code mapping
+    # (`exec_mapping_map_rx`/`exec_mapping_free`) and the GOT
+    # (`native_alloc_rw_memory`/`native_free_exec_memory`) share, so a leaked
+    # GOT slot shows up directly as a stuck count.
+    #
+    # `map_symbol`'s NEW-mapping half (`exec_mapping_map_rx`) needs
+    # mprotect(PROT_EXEC), which this sandbox refuses (verified: even a
+    # from-scratch `map_symbol` call on a trivial 1-byte code blob fails
+    # with "Failed to switch RW->RX for <symbol>" -- a pre-existing,
+    # unrelated sandbox limitation, not a lane A4b defect; the object_mapper
+    # tests elsewhere in this test tree already show the same failure and
+    # are baselined). That half is not exercised here. What IS exercised,
+    # against the real methods with real allocated memory: `unmap_symbol`
+    # end to end (has-check, freeing, records-dict removal), and the shared
+    # `_free_mapped_resources` helper that `map_symbol`'s replace path calls
+    # with the exact same code -- so both call sites are covered without
+    # depending on the sandbox-blocked mprotect step.
+    # ------------------------------------------------------------------
+
+    it "unmap_symbol frees a GOTPCREL symbol's GOT slot, not just its code mapping":
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val baseline = native_exec_memory_count()
+
+        # Real allocated memory standing in for a mapped code region and its
+        # synthesized GOT slot -- what module_loader.spl would have produced
+        # via map_symbol + apply_smf_relocations + set_got, without needing
+        # the sandbox-blocked mprotect(PROT_EXEC) step.
+        val code_addr = native_alloc_rw_memory(8)
+        val got_addr = native_alloc_rw_memory(8)
+        expect(code_addr).to_not_equal(0)
+        expect(got_addr).to_not_equal(0)
+        expect(native_exec_memory_count()).to_equal(baseline + 2)
+
+        mapper.records["gotrel32_fn"] = SharedExecRecord(
+            owner_id: "owner_gotrel32", symbol: "gotrel32_fn",
+            address: code_addr, size: 8, generation: 1,
+            got_base: got_addr, got_size: 8)
+        expect(mapper.get_record("gotrel32_fn").unwrap().got_base).to_equal(got_addr)
+
+        expect(mapper.unmap_symbol("gotrel32_fn")).to_equal(true)
+        expect(mapper.get_record("gotrel32_fn")).to_equal(nil)
+        # Before the fix, unmap_symbol only freed `rec.address`/`rec.size`
+        # (the code mapping) -- the count would have stayed at baseline + 1,
+        # a leaked GOT page. It must return all the way to baseline.
+        expect(native_exec_memory_count()).to_equal(baseline)
+
+    it "the replace-path helper (_free_mapped_resources, shared with unmap_symbol) frees a GOT slot too":
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val baseline = native_exec_memory_count()
+
+        val code_addr = native_alloc_rw_memory(8)
+        val got_addr = native_alloc_rw_memory(8)
+        expect(native_exec_memory_count()).to_equal(baseline + 2)
+
+        val old_record = SharedExecRecord(
+            owner_id: "owner_gotrel32", symbol: "replace_fn",
+            address: code_addr, size: 8, generation: 1,
+            got_base: got_addr, got_size: 8)
+
+        mapper.records["replace_fn"] = old_record
+
+        # This is the EXACT call `map_symbol`'s replace branch makes on the
+        # outgoing record before attempting the new mapping -- unmodified
+        # copy-paste of the call site, not a re-implementation.
+        expect(mapper._free_mapped_resources("replace_fn", old_record)).to_equal(true)
+        # Both the old code mapping and its old GOT slot must be gone.
+        expect(native_exec_memory_count()).to_equal(baseline)
+
+    it "hot-reload keying: set_got on the new generation's prefixed key never touches the old generation's record":
+        # Reproduces module_loader.spl's moduleloader_replace_live keying
+        # exactly: the OLD generation stays mapped under the PLAIN symbol
+        # name until it is explicitly retired (module_loader.spl:493-513),
+        # while the candidate is mapped under
+        # "{path}#gen{N}:{symbol}" (module_loader.spl:403,435) --
+        # `candidate_prefix + name`. Fable review of lane A4b commit
+        # 939c924dc16: calling `set_got(plain_name, ...)` while both records
+        # exist attaches the NEW GOT to the OLD (still-live) record; when the
+        # old record retires, its GOT (actually the live candidate's GOT) is
+        # freed out from under the running code (use-after-free), while the
+        # candidate's own record keeps `got_base == 0` forever (leak).
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val baseline = native_exec_memory_count()
+
+        # Old generation: mapped under the plain name, already owns a GOT
+        # from ITS OWN load.
+        val old_code = native_alloc_rw_memory(8)
+        val old_got = native_alloc_rw_memory(8)
+        mapper.records["target_fn"] = SharedExecRecord(
+            owner_id: "path", symbol: "target_fn",
+            address: old_code, size: 8, generation: 1,
+            got_base: old_got, got_size: 8)
+
+        # New generation: mapped under the hot-reload candidate-prefixed key.
+        val new_code = native_alloc_rw_memory(8)
+        mapper.records["path#gen2:target_fn"] = SharedExecRecord(
+            owner_id: "path", symbol: "path#gen2:target_fn",
+            address: new_code, size: 8, generation: 1,
+            got_base: 0, got_size: 0)
+        expect(native_exec_memory_count()).to_equal(baseline + 3)
+
+        val new_got = native_alloc_rw_memory(8)
+        expect(native_exec_memory_count()).to_equal(baseline + 4)
+
+        # A caller passing the PLAIN name (the pre-fix bug) must be
+        # REJECTED, not silently attached: the address check fails because
+        # `target_fn`'s record address is `old_code`, not `new_code`.
+        expect(mapper.set_got("target_fn", new_code, new_got, 8)).to_equal(false)
+        expect(mapper.get_record("target_fn").unwrap().got_base).to_equal(old_got)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(0)
+
+        # The correct call: the EXACT key the candidate was mapped under,
+        # with its OWN address.
+        expect(mapper.set_got("path#gen2:target_fn", new_code, new_got, 8)).to_equal(true)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(new_got)
+        expect(mapper.get_record("target_fn").unwrap().got_base).to_equal(old_got)
+
+        # A second attempt to attach a GOT to the already-GOT-bearing new
+        # record must also be rejected (never silently overwritten/leaked).
+        val another_got = native_alloc_rw_memory(8)
+        expect(mapper.set_got("path#gen2:target_fn", new_code, another_got, 8)).to_equal(false)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(new_got)
+        _ = native_free_exec_memory(another_got, 8)
+
+        # Retire the OLD generation's record, exactly as
+        # generation_sweeper.spl / resource_lifecycle.spl do.
+        expect(mapper.unmap_symbol("target_fn")).to_equal(true)
+        # Only the OLD code + OLD GOT are freed. The NEW generation's code
+        # and its own (correctly attached) GOT remain fully allocated --
+        # nothing was freed out from under the live candidate.
+        expect(native_exec_memory_count()).to_equal(baseline + 2)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(new_got)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().address).to_equal(new_code)
+
+        expect(mapper.unmap_symbol("path#gen2:target_fn")).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(baseline)
+
+    # ------------------------------------------------------------------
+    # module_loader_compat.spl's INLINE GOT synthesis (~1330-1420, in `me
+    # load_with_intent`) is NOT extracted into a standalone function the way
+    # object_mapper.spl's apply_smf_relocations is -- it needs the loader's
+    # own `symbols`/`ordered_symbols`/`self.global_symbols` state in place,
+    # so the only real entry point is `ModuleLoader.load(path)` on an actual
+    # SMF file. That path was attempted (compile a small `.c` fixture with
+    # `cc`, build an SMF via `build_smf_with_relocations`, force wire 4 via
+    # the same byte-patch technique `module_loader_relocation_spec.spl` uses
+    # for `symbol_index`) and is NOT reachable in this sandbox: even a
+    # completely vanilla fixture with ZERO relocations fails at the
+    # unconditional `native_make_executable` call that runs before any
+    # relocation code (module_loader_compat.spl:1327,
+    # "Failed to mark executable memory for main") -- mprotect(PROT_EXEC) is
+    # refused here, independent of anything this lane changed. This is also
+    # why `module_loader_relocation_spec.spl` fails today (compile-time,
+    # via a `use compiler.loader.*` wildcard pulling in an unrelated broken
+    # file) rather than at this same runtime step: it never gets far enough
+    # to hit it. Said precisely per the lane's own escape clause: coverage
+    # of module_loader_compat's inline GOT synthesis is therefore limited to
+    # `loader_reloc_oracle_spec.spl`'s formula-level tests of
+    # `loader_smf_reloc_value` and the first test in this file; nothing in
+    # this tree drives its GOT ALLOCATION/DICT-LOOKUP loop end to end.

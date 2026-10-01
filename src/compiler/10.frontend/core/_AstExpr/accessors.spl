@@ -10,6 +10,7 @@ use compiler.frontend.core.ast_expr.*
 use std.string_core.{char_code}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.env.{env_get_or}
 
 # ===== Expression Kind Tags =====
 fn expr_unit(span_id: i64) -> i64:
@@ -66,6 +67,24 @@ fn expr_pass_todo(msg: text, span_id: i64) -> i64:
     expr_owner_str_set(idx, msg)
     idx
 
+# Same AST shape as expr_pass_todo (tag 40), but marks the node's `int`
+# field with 1 to record that the SOURCE literally wrote `todo(...)`, not
+# the `pass_todo` keyword -- both desugar to the same node otherwise, which
+# made REQC003 (todo-specific rationale check) unreachable from real parsed
+# source. Uses `int`, NOT `extra`: several generic AST walkers treat
+# `expr_get_extra` as an optional child-expression index and recurse into it
+# whenever it is >= 0 (e.g. unused_vars.spl's collect_refs_in_expr), so
+# repurposing `extra` as a boolean flag here would make them walk into
+# whatever unrelated node sits at arena index 1. `int` carries no such
+# generic-recursion contract (precedent: expr_mark_string_processed already
+# reuses it as a per-tag marker, see above).
+# See doc/08_tracking/bug/todo_call_collapses_to_pass_todo_node_reqc003_unreachable_2026-08-07.md
+fn expr_pass_todo_call(msg: text, span_id: i64) -> i64:
+    val idx = expr_alloc(40, span_id)
+    expr_owner_str_set(idx, msg)
+    expr_owner_int_set(idx, 1)
+    idx
+
 fn expr_pass_do_nothing(msg: text, span_id: i64) -> i64:
     val idx = expr_alloc(41, span_id)
     expr_owner_str_set(idx, msg)
@@ -95,6 +114,13 @@ fn expr_suffixed_bool(value: i64, suffix: text, span_id: i64) -> i64:
     expr_owner_str_set(idx, suffix)
     idx
 
+fn expr_suffixed_string(value: text, suffix: text, span_id: i64) -> i64:
+    val idx = expr_alloc(EXPR_SUFFIXED_LIT, span_id)
+    expr_owner_str_set(idx, value)
+    expr_owner_float_set(idx, suffix)
+    expr_owner_extra_set(idx, 2)
+    idx
+
 # ===== Expression Accessors =====
 
 fn expr_get_tag(idx: i64) -> i64:
@@ -104,10 +130,14 @@ fn expr_get_tag(idx: i64) -> i64:
     # build. Return -1 (no-tag sentinel, mirrors module_decl_at) so tag
     # dispatchers fall through to their safe default instead of crashing. See
     # doc/08_tracking/bug/flat_bridge_type_index_across_ast_reset_2026-07-12.md
-    if idx < 0 or idx >= expr_owner_len():
+    # Keep the bound in this module. A native cross-module i64 return from
+    # expr_owner_len lost comparison provenance in Phase 3: diagnostics proved
+    # `idx=9, arena_len=10` was still taking this branch.
+    val arena_len = expr_tag.len()
+    if idx < 0 or idx >= arena_len:
         # L6: include the live arena generation so a stale index (minted before
         # an ast_reset) is diagnosable from ONE line instead of an OOB flood.
-        val message = "[expr_get_tag] OOB idx={idx} arena_len={expr_owner_len()} arena_gen={ast_generation()} -> -1"
+        val message = "[expr_get_tag] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()} -> -1"
         if frontend_trace_suppressed():
             eprint(message)
         else:
@@ -146,12 +176,12 @@ fn expr_get_tag(idx: i64) -> i64:
 fn expr_oob_trace(accessor: text, idx: i64, arena_len: i64):
     if frontend_trace_suppressed():
         return
-    val trace_ast_oob = rt_env_get("SIMPLE_TRACE_AST_OOB") ?? ""
+    val trace_ast_oob = env_get_or("SIMPLE_TRACE_AST_OOB", "")
     if trace_ast_oob != "":
         print "[{accessor}] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()}"
 
 fn expr_idx_is_live(idx: i64) -> bool:
-    idx >= 0 and idx < expr_owner_len()
+    idx >= 0 and idx < expr_tag.len()
 
 fn expr_get_span(idx: i64) -> i64:
     if not expr_idx_is_live(idx):

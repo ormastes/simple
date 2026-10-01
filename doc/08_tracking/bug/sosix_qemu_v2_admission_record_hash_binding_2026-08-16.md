@@ -55,3 +55,14 @@ With a provenance-admitted Stage-4 CLI, run
 `test/01_unit/os/sosix/qemu_v2_admission_contract_spec.spl` and
 `test/01_unit/os/sosix/qemu_v2_trusted_importer_spec.spl` once each. Do not use
 Stage 3 or the Rust seed.
+
+## Triage 2026-09-13
+
+Unblock contract requires running the two v2 focused specs "on a
+source-matched admitted Stage-4 CLI" — this worktree has no self-hosted
+binary (only the Rust seed, symlinked in from the shared clone), and
+the record itself notes prior attempts against the deployed self-hosted
+CLI exited 139. Cannot progress verification without a Stage-4 CLI
+build, which is out of this lane's budget. Leaving OPEN, source fix
+already landed per the record.
+

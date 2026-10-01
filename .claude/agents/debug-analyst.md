@@ -2,6 +2,7 @@
 
 **Use when:** Actively debugging a running session with breakpoints and LSP-enriched inspection. For log-based debugging (env vars, IR export, bug database), use the `debug` agent instead.
 **Skills:** `/debug-lsp`, `/debug`
+**Mandatory step order + host-verified commands:** `.claude/skills/lib/debug_ladder.md`
 
 ## Session Lifecycle
 

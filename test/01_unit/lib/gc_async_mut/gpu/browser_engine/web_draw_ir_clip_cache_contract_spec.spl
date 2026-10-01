@@ -1,0 +1,83 @@
+# @req REQ-GPUUI-006 REQ-GPUUI-008
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl
+# @tag: unit, web, draw_ir, gpu, cpu-boundary
+"""Guard the shared ancestor-clip cache contract.
+
+The retained Draw IR composition computes visibility and command lowering from
+the same layout snapshot.  The cache must therefore be built once and passed
+to both consumers; rebuilding it in the command phase is redundant O(nodes)
+CPU work and can make the two consumers observe different state if the layout
+owner is ever made incremental.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+
+describe "Web Draw IR shared ancestor clip cache":
+    it "passes one cache from retained composition to command lowering":
+        # @req REQ-GPUUI-006 REQ-GPUUI-008
+        step("Inspect the retained composition call boundary")
+        val renderer = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl")
+        val paint = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl")
+        val compose_start = renderer.find("fn _simple_web_layout_compose_retained(")
+        val compose_end = renderer.find("pub fn simple_web_layout_compose_prepared(", compose_start)
+        expect(compose_start >= 0).to_be(true)
+        expect(compose_end > compose_start).to_be(true)
+        val compose = renderer.substring(compose_start, compose_end)
+        expect(compose.split("build_ancestor_clip_cache(").len() - 1).to_equal(1)
+        expect(compose).to_contain(
+            "_html_draw_ir_visible_nodes(\n        nodes, styles, boxes, clip_cache"
+        )
+        val call_start = renderer.find("val (commands, command_owner_nodes) = _html_draw_ir_commands(")
+        val call_end = renderer.find("    )", call_start)
+        expect(call_start >= 0).to_be(true)
+        expect(call_end > call_start).to_be(true)
+        val call = renderer.substring(call_start, call_end)
+        expect(call).to_contain("visible_nodes, images, clip_cache")
+
+        step("Confirm command lowering consumes the supplied cache")
+        val fn_start = paint.find("fn _html_draw_ir_commands(")
+        val fn_end = paint.find("fn _html_draw_ir_", fn_start + 1)
+        expect(fn_start >= 0).to_be(true)
+        expect(fn_end > fn_start).to_be(true)
+        val body = paint.substring(fn_start, fn_end)
+        expect(body).to_contain("clip_cache: PaintClipCache")
+        expect(body.find("val clip_cache = build_ancestor_clip_cache(")).to_equal(-1)
+
+    it "preserves clipped command visibility and lowering bounds":
+        # @req REQ-GPUUI-008
+        step("Render a partially clipped command through the retained Draw IR path")
+        val html = "<html><head><style>html,body{margin:0;padding:0;background:#fff}.clip{display:block;width:22px;height:16px;overflow:hidden}#query{display:block;width:40px;height:16px;padding:2px;border:1px solid #111827;color:#22c55e;font-size:8px;text-transform:uppercase;direction:rtl;text-align:center}#hint{display:block;width:20px;height:14px;padding:1px;border:1px solid #111827;color:#ef4444;font-size:16px}</style></head><body><div class='clip'><input id='query' value='abcdefghijk'></div><input id='hint' placeholder='hint'></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 48)
+        var query_found = false
+        var hint_found = false
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.component_id == "query_value":
+                    query_found = true
+                    expect(command.kind).to_equal("text")
+                    expect(command.text_value).to_equal("KJIHGFEDCBA")
+                    expect(command.clip_rect.present).to_be(true)
+                    expect(command.clip_rect.x).to_equal(3)
+                    expect(command.clip_rect.y).to_equal(3)
+                    expect(command.clip_rect.width).to_equal(19)
+                    expect(command.clip_rect.height).to_equal(13)
+                if command.component_id == "hint_value":
+                    hint_found = true
+                    expect(command.kind).to_equal("text")
+                    # The existing input planner keeps content_w / advance + 1
+                    # glyphs before clipping: 20 / 10 + 1 = 3 at font-size 16.
+                    # Ancestor-cache sharing must preserve this bounded prefix.
+                    expect(command.text_value).to_equal("hin")
+                    expect(command.clip_rect.present).to_be(true)
+                    expect(command.clip_rect.width).to_equal(20)
+                    expect(command.clip_rect.height).to_equal(14)
+                    expect(command.color).to_equal(0xFFEF4444u32)
+        expect(query_found).to_be(true)
+        expect(hint_found).to_be(true)

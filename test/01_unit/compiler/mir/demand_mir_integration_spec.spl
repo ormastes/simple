@@ -1,0 +1,33 @@
+use app.spipe.testing.*
+use compiler.driver.demand_mir_integration.{
+    DemandMirIntegrationErrorV1, DemandMirIntegrationInputV1,
+    demand_mir_integrate_v1
+}
+use compiler.hir.import_materialization.state.{ImportSnapshotIdentityV1}
+use compiler.hir.demand.deferred_body.{DeferredHirBodyV1}
+use compiler.hir.demand.hir_demand_set.{HirDemandRequestV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn integration_snapshot_v1() -> ImportSnapshotIdentityV1:
+    ImportSnapshotIdentityV1(
+        sha256_text("revision"), sha256_text("tree"), sha256_text("inventory"))
+
+fn integration_body_v1() -> DeferredHirBodyV1:
+    DeferredHirBodyV1(
+        "pkg.alpha.run", "pkg.alpha.run", integration_snapshot_v1().revision,
+        sha256_text("body"), false, ["call"], [], [])
+
+describe "D6 D7 D8 MIR integration":
+    it "rejects a demanded body without pinned materialization":
+        val result = demand_mir_integrate_v1(DemandMirIntegrationInputV1(
+            integration_snapshot_v1(), [integration_body_v1()],
+            [HirDemandRequestV1("pkg.alpha.run", "call")], []))
+        expect(result.unwrap_err()).to_equal(
+            DemandMirIntegrationErrorV1.missing_materialization)
+
+    it "rejects invalid snapshot authority before demand closure":
+        val invalid = ImportSnapshotIdentityV1("", "", "")
+        val result = demand_mir_integrate_v1(DemandMirIntegrationInputV1(
+            invalid, [], [], []))
+        expect(result.unwrap_err()).to_equal(
+            DemandMirIntegrationErrorV1.invalid_snapshot)

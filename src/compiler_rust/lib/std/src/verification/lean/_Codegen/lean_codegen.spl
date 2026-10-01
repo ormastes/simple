@@ -8,7 +8,7 @@ use compiler_rust.lib.std.src.verification.lean.codegen.*
 # - Helper functions for regeneration scripts
 # - Integration with all submodules (types, expressions, traits, etc.)
 
-use verification.lean.emitter.{LeanEmitter}
+use verification.lean.emitter.{LeanEmitter, lean_type_name}
 use verification.lean.types
 use verification.lean.expressions.{translate_contract_expr}
 use verification.lean.naming
@@ -401,20 +401,21 @@ class LeanCodegen:
 
         # Emit inductives before structures so structures can refer to them.
         for inductive in sorted_inductives:
-            structured_types = structured_types + "inductive {inductive.name} where\n"
+            val ind_name = lean_type_name(inductive.name)
+            structured_types = structured_types + "inductive {ind_name} where\n"
             for (ctor_name, params) in inductive.constructors:
                 if params.len() == 0:
                     structured_types = structured_types + "  | {ctor_name}\n"
                 else:
                     val param_str = params.join(" → ")
-                    structured_types = structured_types + "  | {ctor_name} : {param_str} → {inductive.name}\n"
+                    structured_types = structured_types + "  | {ctor_name} : {param_str} → {ind_name}\n"
             if inductive.deriving.len() > 0:
                 val derives = inductive.deriving.join(", ")
                 structured_types = structured_types + "deriving {derives}\n"
             structured_types = structured_types + "\n"
 
         for structure in sorted_structures:
-            structured_types = structured_types + "structure {structure.name} where\n"
+            structured_types = structured_types + "structure {lean_type_name(structure.name)} where\n"
             for (field_name, field_type) in structure.fields:
                 structured_types = structured_types + "  {field_name} : {field_type}\n"
             if structure.deriving.len() > 0:
@@ -505,6 +506,11 @@ class LeanCodegen:
                 result = result + structured_types
             result = result + structured_rest
             result = result + lean_block_content
+
+        # Wrap in the module namespace, mirroring generate()'s section layout
+        # (the frozen emit contract requires the namespace line to be present).
+        result = "namespace {self.options.module_name}\n\n" + result +
+            "end {self.options.module_name}\n"
 
         result
 

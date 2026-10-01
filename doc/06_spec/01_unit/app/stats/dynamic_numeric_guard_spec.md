@@ -1,4 +1,4 @@
-# Dynamic Numeric Guard Specification
+# @manual: primary
 
 > <details>
 
@@ -27,12 +27,12 @@ dynamic_numeric_guard_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Dynamic Numeric Guard Specification
+# @manual: primary
 
 ## Scenarios
 
@@ -67,7 +67,24 @@ expect(source.contains("run_cmd(cmd).to_int()")).to_equal(false)
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Purpose: Verify dynamic stats shell-count parsing guard at runtime — the
+production count parser must coerce malformed shell output to 0 instead of
+crashing or trusting raw text.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-STATS-001
+doc/01_research/local/REQ-APP-STATS-001.md
+doc/03_plan/sys_test/REQ-APP-STATS-001.md
+doc/04_architecture/REQ-APP-STATS-001.md
+doc/05_design/REQ-APP-STATS-001.md
 
 Tests covering:
 - dynamic stats numeric guard
@@ -76,8 +93,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

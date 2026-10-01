@@ -1,4 +1,9 @@
 # decode_chunked treats a malformed chunk size as end-of-body (silent truncation)
+## Closed 2026-09-16 — Status FIXED 2026-08-07; Result channel added; 15/15 spec plus sabotage verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
@@ -148,3 +153,4 @@ caller at :7875 already tests with `if (!...)`.
 
 - `doc/08_tracking/bug/http_parser_chunk_terminator_scan_ignores_chunk_boundaries_2026-08-07.md`
 - `doc/08_tracking/bug/try_operator_early_return_matches_neither_ok_nor_err_2026-08-07.md`
+

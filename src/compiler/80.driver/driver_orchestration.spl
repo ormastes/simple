@@ -1,6 +1,14 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
+
+# Formation probe, NOT a liveness proof. `== nil` cannot be used to validate a
+# context here: the nil sentinel is raw 3, so a ZEROED value is not the nil
+# representation and every `!= nil` guard reports "present" on it. That is the
+# documented defect class rt_heap_ref_wellformed was written for -- see
+# doc/08_tracking/bug/rt_heap_ref_wellformed_lost_in_stale_snapshot_clobber_2026-08-31.md
+# and the same extern in driver_hir_pipeline_lowering.spl.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_aot_pipeline.*
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
@@ -22,10 +30,67 @@ use compiler.common.attributes.{
 use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit, compiler_mcdc_obligation_manifest_emit}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1
+}
+use compiler.driver.cache.native_noop_admission.{
+    NativeNoopRequestV1, native_noop_request_v1, native_noop_admit_v1,
+    native_noop_publish_built_v1, native_noop_admission_hit_v1,
+    native_noop_admission_generation_v1, native_noop_admission_input_count_v1,
+    native_noop_request_output_v1, native_noop_normalized_invocation_v1
+}
+use compiler.driver.cache.native_build_environment_identity.{
+    native_build_environment_fingerprint_v1
+}
+use compiler.common.driver_core_modes.{driver_output_format_native}
+use compiler.common.driver_compile_options.{compileoptions_effective_mir_opt_level}
+use compiler.driver.perf.compiler_work_counters.{
+    compiler_work_counters_reset_v1, compiler_work_counters_snapshot_v1,
+    compiler_work_counters_zero_v1, compiler_work_counters_receipt_v1
+}
+use std.io_runtime.{file_copy, env_get_opt}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_route}
+use compiler.driver.driver_streaming_surface_policy.{driver_streaming_surface_rejection}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+
+fn driver_noop_default_output_v1(input_files: [text]) -> text:
+    if input_files.len() == 0:
+        return "build/native/out"
+    val path = input_files[0]
+    val slash = path.rfind("/")
+    val base = if slash >= 0: path.substring(slash + 1) else: path
+    val dot = base.rfind(".")
+    val stem = if dot > 0: base.substring(0, dot) else: base
+    "build/native/{stem}"
+
+fn driver_native_noop_request_v1(ctx: CompileContext) -> NativeNoopRequestV1:
+    val options = ctx.options
+    val delivery_output = options.output_file ?? driver_noop_default_output_v1(options.input_files)
+    # env_get_opt, not env_get: std.nogc_sync_mut.io.env_ops.env_get is TOTAL
+    # (env_ops.spl:48 returns "" for an unset name), so `??` never reached its
+    # fallback here and both this output and the cache root below came out "".
+    # native_noop_request_v1 then blanked the identity and publication refused
+    # the whole build with `request-invalid`, which is what rejected Stage 2 on
+    # 2026-09-12.
+    val output = env_get_opt("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT") ?? delivery_output
+    val environment = native_build_environment_fingerprint_v1()
+    val environment_digest = if environment.valid: environment.digest else: ""
+    val invocation_identity = native_noop_normalized_invocation_v1(options, output)
+    native_noop_request_v1(
+        env_get_opt("SIMPLE_NATIVE_NOOP_CACHE_ROOT") ?? (machine_cache_root() + "/native-build/noop-v1"),
+        output, options.backend, ctx.native_target,
+        compileoptions_effective_mir_opt_level(options), options.release,
+        options.debug_info, options.gc_off, options.profile,
+        options.allowed_families, options.backend_plugin_path,
+        env_get("SIMPLE_SCV_REVISION") ?? "",
+        env_get("SIMPLE_SCV_TREE_DIGEST") ?? "",
+        env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+        env_get("SIMPLE_BOOTSTRAP_AUTHORITY_DIGEST") ?? "",
+        environment_digest, invocation_identity, options.input_files)
 
 impl CompilerDriver:
     me capture_vhdl_metadata():
@@ -81,6 +146,14 @@ impl CompilerDriver:
             eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
 
     me compile() -> CompileResult:
+        if not reverse_reference_owner_begin_v1():
+            return CompileResult.RuntimeError(
+                "reverse-reference owner already active in this process")
+        val result = self.compile_with_reverse_reference_owner_v1()
+        reverse_reference_owner_end_v1()
+        result
+
+    me compile_with_reverse_reference_owner_v1() -> CompileResult:
         val log = self.ctx.logger
         if self.ctx.config.contains_key("mcdc_config_error"):
             val mcdc_config_error = self.ctx.config["mcdc_config_error"] ?? "invalid MC/DC configuration"
@@ -90,11 +163,42 @@ impl CompilerDriver:
         if self.ctx.options.cli_mode_text != "":
             compile_mode_text = self.ctx.options.cli_mode_text
 
+        val streaming_route = driver_streaming_surface_route(self.ctx)
+        if streaming_route < 0:
+            val streaming_error = driver_streaming_surface_rejection(streaming_route)
+            self.ctx.add_error(streaming_error)
+            return CompileResult.CodegenError(streaming_error)
+
+        val native_noop_eligible = compile_mode_text == "aot" and
+            self.ctx.options.output_format == driver_output_format_native() and
+            (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
+        # The request hashes compiler and environment authority. Check,
+        # interpret, JIT, and other non-native modes never consume it.
+        var native_noop_request = NativeNoopRequestV1("", "", "")
+        if native_noop_eligible:
+            native_noop_request = driver_native_noop_request_v1(self.ctx)
+        compiler_work_counters_reset_v1()
+        if native_noop_eligible:
+            val admission = native_noop_admit_v1(native_noop_request)
+            if native_noop_admission_hit_v1(admission):
+                val work = compiler_work_counters_snapshot_v1()
+                if not compiler_work_counters_zero_v1(work):
+                    return CompileResult.RuntimeError(
+                        "native no-op admission occurred after compiler work was scheduled")
+                val delivery_output = self.ctx.options.output_file ??
+                    driver_noop_default_output_v1(self.ctx.options.input_files)
+                if delivery_output != native_noop_request_output_v1(native_noop_request) and
+                        not file_copy(native_noop_request_output_v1(native_noop_request), delivery_output):
+                    return CompileResult.RuntimeError(
+                        "native no-op admission could not stage the admitted output")
+                print "[MBH-NFR-002] admission=hit generation={native_noop_admission_generation_v1(admission)} inputs={native_noop_admission_input_count_v1(admission)} {compiler_work_counters_receipt_v1(work)}"
+                return CompileResult.Success(delivery_output)
+
         log_phase("compile:start")
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
         log_phase("phase1:load_sources:start")
-        val sources_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
+        val sources_streaming_in_place = streaming_route == 1
         val (loaded_ctx, load_ok) = self.load_sources_impl()
         # `load_sources_impl` commits directly for the streaming owner. A
         # second aggregate assignment at this exact boundary corrupted the
@@ -111,6 +215,13 @@ impl CompilerDriver:
         if compile_mode_text == "aot":
             log_phase("phase1:load_sources:fingerprint:start")
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
+        if sources_streaming_in_place:
+            # Streaming phase 2 consumes source_contents_owner. The boxed
+            # SourceFile payloads are independent copies needed only through
+            # the AOT fingerprint above; retaining both graphs made them peak
+            # together with parser/surface allocations.
+            val reclaimed_preparse_sources = self.ctx.reclaim_streaming_preparse_source_records()
+            log_phase("phase1:streaming_preparse_source_reclaim:done sources={reclaimed_preparse_sources} owners={self.ctx.source_contents_owner.len()}")
         log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
         log_build_progress("load_sources", "files", self.ctx.sources.len(),
             self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
@@ -186,17 +297,45 @@ impl CompilerDriver:
         # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
         # the frozen owner before doing any work.
         val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
-        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        var analyze_ok_effective = false
+        if hir_streaming_in_place:
+            analyze_ok_effective = self.lower_and_check_streaming_surfaces_impl()
+        else:
+            val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+            if rt_heap_ref_wellformed(analyzed_ctx):
+                self.ctx = analyzed_ctx
+            # The Stage-2 native tuple ABI can zero the returned CompileContext
+            # and its adjacent success boolean even though lower_and_check_impl
+            # finished the HIR loop and committed no errors. Keep this recovery
+            # deliberately narrow: a malformed returned context, a still-live
+            # retained owner, and exactly zero recorded errors are all required.
+            # Any real diagnostic or well-formed false result stays a failure.
+            analyze_ok_effective = analyze_ok
+            if not analyze_ok and
+               not rt_heap_ref_wellformed(analyzed_ctx) and
+               rt_heap_ref_wellformed(self.ctx) and
+               self.ctx.error_count_value == 0:
+                log_warn("phase 3 recovered zeroed native tuple verdict after a zero-error HIR commit")
+                analyze_ok_effective = true
         # The streaming path is a canonical `me` owner operation and has
         # already committed every field directly to self.ctx. Reassigning its
         # returned whole-context snapshot corrupts adjacent scalar fields under
         # Stage-3 native value semantics (observed error_count 0 before return,
         # nonzero at phase 4). Legacy non-streaming paths still return their
         # newly assembled context and therefore retain the assignment.
-        if not hir_streaming_in_place:
-            self.ctx = analyzed_ctx
+        # Fail-closed on the tuple's first element. `lower_and_check_impl` returns
+        # (CompileContext, bool), and on the FAILURE path -- including the
+        # restored formation guard's `return (self.ctx, false)` -- the context
+        # can arrive as a raw 0 through the staged native tuple transport.
+        # Assigning that straight into self.ctx replaced a live context with
+        # null, and the very next thing the failure branch does is call
+        # self.ctx.has_errors(), which then SEGVs at address 0xc0.
+        # Keeping the previous context is strictly better than adopting a null
+        # one: it is the context every subsequent error read wants, and the
+        # streaming path already declines this assignment for a related
+        # transport reason.
         log_trace("AFTER phase 3")
-        if not analyze_ok:
+        if not analyze_ok_effective:
             log_error("phase 3 FAILED")
             if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
                 val phase3_error_count = self.ctx.errors.len()
@@ -208,11 +347,70 @@ impl CompilerDriver:
                     phase3_error_index = phase3_error_index + 1
             log_build_progress("hir", "modules", -1, -1,
                 "failed", 2, 6, 1, 0, "failed")
-            if self.ctx.has_errors():
-                val first_error = self.ctx.error_message_at(0)
-                if first_error.contains("Method resolution"):
-                    return CompileResult.ResolveError(self.ctx.errors)
-            return CompileResult.TypeError(self.ctx.errors)
+            # A diagnostic path must never be the thing that crashes. If the
+            # context did not survive phase 3 there are no errors to read, but
+            # the failure is still real, so report it instead of dereferencing.
+            if not rt_heap_ref_wellformed(self.ctx):
+                log_error("phase 3 FAILED with no surviving compile context")
+                return CompileResult.TypeError([])
+            # The historical refusal to read the diagnostics here is RETIRED,
+            # and the reason is that the hazard it was avoiding was fixed in the
+            # accessor rather than at this call site.
+            #
+            # The measured defect was real: `errors` and `error_count_value` are
+            # transported SEPARATELY out of `lower_and_check_impl`'s staged
+            # native tuple, so has_errors() could read the intact SCALAR while
+            # `self.errors` arrived as a zeroed reference, faulting at offset
+            # 0xb8. The response at the time was to make no call at all.
+            #
+            # But `error_message_at` / `errors_safe`
+            # (driver_types.spl:1115-1134) now probe formation with
+            # `rt_heap_ref_wellformed(self.errors)` FIRST and return ""/[]
+            # instead of dereferencing a zeroed reference. The crash this
+            # branch was dodging can no longer happen, while the cost of
+            # dodging it was total: an unconditional "unreadable" line was
+            # printed WITHOUT EVER ATTEMPTING A READ, so every phase-3 failure
+            # lost its diagnostics -- including the overwhelmingly common case
+            # where the array survived perfectly well. The non-native sibling
+            # path in this same file (`:335-337`) has always read them.
+            #
+            # So: attempt the guarded read, report whatever survived, and emit
+            # the "no readable diagnostics" line only when nothing came back -- with
+            # the surviving scalar count in it, so an operator can tell "N
+            # diagnostics were lost in transport" apart from "there were none".
+            # Read through the TEXT projection `error_message_at`, not the
+            # aggregate-returning `errors_safe`. Both are guarded identically,
+            # but driver_hir_pipeline_lowering.spl:806-808 records that owner
+            # methods returning only scalar/text projections are the shape that
+            # survives this ABI, and `error_message_at` already has proven call
+            # sites in this file (`:335`, `:356`) whereas `errors_safe` has
+            # none. The reporting list is assembled locally from those reads.
+            val phase3_recorded_count: i64 = self.ctx.error_count()
+            val phase3_show_cap = if phase3_recorded_count < 20: phase3_recorded_count else: 20
+            var phase3_surviving_errors: [text] = []
+            var phase3_report_idx = 0
+            while phase3_report_idx < phase3_show_cap:
+                val phase3_message: text = self.ctx.error_message_at(phase3_report_idx)
+                if phase3_message.len() > 0:
+                    log_error("  {phase3_message}")
+                    phase3_surviving_errors.push(phase3_message)
+                phase3_report_idx = phase3_report_idx + 1
+            if phase3_surviving_errors.len() > 0:
+                if phase3_recorded_count > phase3_show_cap:
+                    val phase3_hidden = phase3_recorded_count - phase3_show_cap
+                    log_error("  ... and {phase3_hidden} further phase 3 error(s)")
+                # Restores the ResolveError/TypeError distinction that the
+                # no-read branch had to give up.
+                if phase3_surviving_errors[0].contains("Method resolution"):
+                    return CompileResult.ResolveError(phase3_surviving_errors)
+                return CompileResult.TypeError(phase3_surviving_errors)
+            # Reached only when nothing readable came back. The recorded scalar
+            # count is included deliberately: count>0 here means N diagnostics
+            # were lost in transport, count==0 means the phase failed without
+            # recording any -- two very different bugs that the old fixed
+            # string conflated.
+            log_error("phase 3 FAILED (no readable diagnostics; recorded error_count={phase3_recorded_count}; per-module root causes were emitted above as [hir-fatal])")
+            return CompileResult.TypeError([])
         log_debug("phase 3 done")
         log_phase("phase3:hir_typecheck:done")
         log_build_progress("hir", "modules", -1, -1,
@@ -228,7 +426,7 @@ impl CompilerDriver:
 
         log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
-        val mono_ok = self.monomorphize_impl(analyze_ok)
+        val mono_ok = self.monomorphize_impl(analyze_ok_effective)
         if not mono_ok:
             log_error("phase 4 FAILED")
             log_build_progress("monomorphize", "modules", -1, -1,
@@ -255,7 +453,16 @@ impl CompilerDriver:
             return self.jit_compile_and_run()
         if compile_mode_text == "aot":
             log_debug("aot mode")
-            return self.aot_compile()
+            val aot_result = self.aot_compile()
+            if aot_result.is_success() and native_noop_eligible:
+                val built_output = self.ctx.options.output_file ??
+                    driver_noop_default_output_v1(self.ctx.options.input_files)
+                val publication = native_noop_publish_built_v1(
+                    native_noop_request, self.ctx.source_paths_owner, built_output)
+                if publication != "ok":
+                    return CompileResult.CodegenError(
+                        "native no-op receipt publication failed: {publication}")
+            return aot_result
         if compile_mode_text == "smf_exec":
             log_debug("smf_exec mode")
             return self.execute_smf()

@@ -1,0 +1,90 @@
+use std.spec.*
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1,
+    DebugTargetNodeV1, debug_policy_development_v1, debug_wire_v1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_add_target,
+}
+use std.common.debug.wire_execute_v1.{execute_debug_wire_v1}
+
+fn execution_session(build_id: text):
+    val session_id = central_debug_service_v1_open(build_id, debug_policy_development_v1())!
+    central_debug_service_v1_add_target(
+        session_id,
+        DebugTargetNodeV1(target_id: "host", parent_target_id: "", kind: "host", label: "Host"),
+        DebugCapabilityV1(
+            target_id: "host",
+            support: CapLevel.Native,
+            verification: DebugVerificationV1.FixtureVerified,
+            perturbation: DebugPerturbationV1.Cooperative,
+            reason: "execution fixture",
+        ),
+    )!
+    session_id
+
+fn command_wire(request_id: text, session_id: text, operation: text, domain: text, command: text, payload: text):
+    debug_wire_v1(request_id, session_id, operation, domain, command, "debug-wire-command-v1", payload)
+
+describe "DebugWireV1 executable probe commands":
+    it "applies lists and removes a real central-service probe":
+        val session_id = execution_session("wire-execute-probe-build")
+        val applied = execute_debug_wire_v1(command_wire(
+            "exec-apply", session_id.value, "probe", "probe", "probe.apply",
+            "log|host|src/app/main.spl:9|cooperative|9000000",
+        ))!
+        expect(applied.probes.len()).to_equal(1)
+        expect(applied.probes[0].target_id).to_equal("host")
+        expect(applied.receipt.action).to_equal("probe.apply")
+
+        val listed = execute_debug_wire_v1(command_wire(
+            "exec-list", session_id.value, "probe", "probe", "probe.list", "",
+        ))!
+        expect(listed.probes.len()).to_equal(1)
+        expect(listed.summary).to_contain("1 applied probes")
+
+        val removed = execute_debug_wire_v1(command_wire(
+            "exec-remove", session_id.value, "probe", "probe", "probe.remove",
+            applied.probes[0].probe_id,
+        ))!
+        expect(removed.probes.len()).to_equal(0)
+        expect(removed.receipt.action).to_equal("probe.remove")
+
+    it "rejects malformed probe payload without applying a probe":
+        val session_id = execution_session("wire-execute-malformed-probe")
+        match execute_debug_wire_v1(command_wire(
+            "exec-bad-apply", session_id.value, "probe", "probe", "probe.apply", "log|host",
+        )):
+            case Ok(_): fail("malformed probe payload executed")
+            case Err(reason): expect(reason).to_contain("kind|target|source-anchor")
+
+describe "DebugWireV1 executable evidence commands":
+    it "inspects a typed artifact and exports a build-bound manifest":
+        val session_id = execution_session("wire-execute-evidence-build")
+        val inspected = execute_debug_wire_v1(command_wire(
+            "exec-inspect", session_id.value, "evidence", "evidence", "inspect",
+            "raw/core|application/x-core|sha256:abc123|true|restricted",
+        ))!
+        match inspected.inspected_artifact:
+            case Some(artifact): expect(artifact.digest).to_equal("sha256:abc123")
+            case None: fail("inspect did not return the artifact")
+
+        val exported = execute_debug_wire_v1(command_wire(
+            "exec-export", session_id.value, "evidence", "evidence", "evidence.export",
+            "123456|raw/core|application/x-core|sha256:abc123|true|restricted",
+        ))!
+        match exported.manifest:
+            case Some(manifest):
+                expect(manifest.build_id).to_equal("wire-execute-evidence-build")
+                expect(manifest.artifacts[0].path).to_equal("raw/core")
+            case None: fail("export did not return a manifest")
+
+    it "fails closed for reproduce and replay until a verified executor exists":
+        val session_id = execution_session("wire-execute-control-build")
+        for command in ["reproduce", "replay"]:
+            match execute_debug_wire_v1(command_wire(
+                "exec-" + command, session_id.value, "control", "evidence", command, "bundle-a",
+            )):
+                case Ok(_): fail(command + " executed without a verified executor")
+                case Err(reason): expect(reason).to_contain("has no verified executor")

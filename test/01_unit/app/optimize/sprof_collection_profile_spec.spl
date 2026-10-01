@@ -1,0 +1,501 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+use std.spec.*
+use app.optimize.sprof_loader.{sprof_counter_record, sprof_load_profile_text}
+use app.optimize.sprof_collection_profile.{
+    sprof_collection_record_from_set,
+    sprof_collection_record_from_map,
+    sprof_collection_record_from_generic_map,
+    sprof_collection_record_from_generic_set,
+    sprof_collection_metrics_from_set,
+    sprof_collection_metrics_from_map,
+    sprof_collection_metrics_from_generic_map,
+    sprof_collection_metrics_from_generic_set,
+    sprof_serialize_collection_profile,
+    SprofCollectionMetric, sprof_collection_metric_valid,
+    sprof_serialize_collection_profile_with_metrics, sprof_collection_metric_stats,
+    sprof_merge_collection_profile_text,
+    sprof_build_collection_metric_index, sprof_indexed_collection_metric_stats,
+    sprof_write_collection_profile_file_with_metrics,
+    sprof_write_collection_profile_file,
+    sprof_load_collection_profile_text,
+    sprof_load_collection_profile_file,
+    sprof_source_module_identity_from_text,
+    sprof_collection_profile_for_site,
+    sprof_build_collection_set_index, sprof_prepared_collection_profile_for_site,
+    sprof_adapt_text_set_with_prepared_profile,
+    sprof_load_and_install_collection_feedback_text
+}
+use app.optimize.collection_plan_profile_bridge.{collection_plan_select_with_profile, collection_plan_select_with_prepared_profile, collection_plan_explain_with_prepared_profile, collection_plan_select_with_prepared_metrics, collection_plan_explain_with_prepared_metrics}
+use compiler.mir_opt.mir_opt.collection_plan_selection.{
+    CollectionPlanAlgorithm, collection_plan_unproven_facts
+}
+use compiler.core.parser.{parser_init, parser_skip_newlines, parser_has_errors}
+use compiler.core.parser_stmts.{parse_statement}
+use compiler.core.ast.{stmt_get_name}
+use std.io.{file_delete, time_now_unix_micros}
+use std.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetProfile, AdaptiveSetWorkloadProfile, AdaptiveTextSet,
+    adaptive_set_clear_feedback
+}
+use std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use std.io_runtime.{cwd_process}
+
+extern fn rt_getpid() -> i64
+
+describe "sprof v2 collection feedback":
+    it "computes source identity without changing an active parser":
+        parser_init("val first = 1\nval second = 2\n")
+        expect(stmt_get_name(parse_statement())).to_equal("first")
+        val identity = sprof_source_module_identity_from_text(
+            "profiled.spl", "@collection_algorithm(\"auto\")\nval chosen = AdaptiveTextSet.new()\n"
+        )
+        expect(identity).to_start_with("source-fnv64-collection-v2:")
+        parser_skip_newlines()
+        expect(stmt_get_name(parse_statement())).to_equal("second")
+        expect(parser_has_errors()).to_be(false)
+
+    it "admits an attribute switch while retaining code and path identity checks":
+        val prefix = "@collection_algorithm(\""
+        val suffix = "\")\nval chosen = AdaptiveTextSet.new()\n"
+        val auto_source = prefix + "auto" + suffix
+        val ordered_source = prefix + "ordered" + suffix
+        val identity = sprof_source_module_identity_from_text("app.spl", auto_source)
+        expect(sprof_source_module_identity_from_text("app.spl", ordered_source)).to_equal(identity)
+        expect(sprof_source_module_identity_from_text("other.spl", ordered_source) == identity).to_be(false)
+        expect(sprof_source_module_identity_from_text(
+            "{cwd_process()}/app.spl", ordered_source)).to_equal(identity)
+        expect(sprof_source_module_identity_from_text("app.spl", ordered_source + "print(1)\n") == identity).to_be(false)
+        val comment_auto = auto_source + "# @collection_algorithm(\"auto\")\n"
+        val comment_ordered = auto_source + "# @collection_algorithm(\"ordered\")\n"
+        expect(sprof_source_module_identity_from_text("app.spl", comment_auto) ==
+            sprof_source_module_identity_from_text("app.spl", comment_ordered)).to_be(false)
+        val string_auto = auto_source + "val s = \"@collection_algorithm('auto')\"\n"
+        val string_ordered = auto_source + "val s = \"@collection_algorithm('ordered')\"\n"
+        expect(sprof_source_module_identity_from_text("app.spl", string_auto) ==
+            sprof_source_module_identity_from_text("app.spl", string_ordered)).to_be(false)
+
+    it "persists typed integer-key map and set observations together":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(policy, "ast://module/int-map#stable", "x86_64-v3")
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_site_and_target(policy, "ast://module/int-set#stable", "x86_64-v3")
+        expect(map.put(7, "seven")).to_be(true)
+        expect(map.get(7) ?? "").to_equal("seven")
+        expect(set.insert(3)).to_be(true)
+        expect(set.contains(3)).to_be(true)
+        val map_sample = sprof_collection_record_from_generic_map(map)
+        val set_sample = sprof_collection_record_from_generic_set(set)
+        expect(map_sample.site_id).to_equal("ast://module/int-map#stable")
+        expect(set_sample.site_id).to_equal("ast://module/int-set#stable")
+        expect(map_sample.lookup_count_p95).to_equal(1)
+        expect(set_sample.hit_count_p95).to_equal(1)
+        expect(sprof_collection_metrics_from_generic_map(map).len()).to_equal(3)
+        expect(sprof_collection_metrics_from_generic_set(set).len()).to_equal(3)
+        val body = sprof_serialize_collection_profile("module-hash", "mixed-workload", [], [map_sample, set_sample])
+        expect(sprof_load_collection_profile_text(body, "module-hash", "mixed-workload").profile_count).to_equal(2)
+
+    it "captures a text map with the same admitted site and target metrics":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var map = AdaptiveTextMap.with_site_and_target(policy, "ast://module/map#stable", "x86_64-v3")
+        map.put("key", "value")
+        expect(map.get("key") ?? "").to_equal("value")
+        val sample = sprof_collection_record_from_map(map)
+        expect(sample.size_p95).to_equal(1)
+        expect(sample.lookup_count_p95).to_equal(1)
+        val metrics = sprof_collection_metrics_from_map(map)
+        expect(metrics.len()).to_equal(3)
+        expect(metrics[0].name).to_equal("collection_size")
+        expect(metrics[1].name).to_equal("lookup_count")
+        expect(metrics[2].name).to_equal("distinct_key_count")
+
+    it "automatically replays admitted load at an attributed construction site":
+        val prior = AdaptiveSetWorkloadProfile(site_id: "ast://module/hot#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 100, lookup_count_p95: 500, hit_count_p95: 250, miss_count_p95: 250)
+        val body = sprof_serialize_collection_profile("module-hash", "lookup-workload", [], [prior])
+        expect(sprof_load_and_install_collection_feedback_text(body, "module-hash", "lookup-workload", "x86_64-v3")).to_be(true)
+        var hot = AdaptiveTextSet.attributed_at_site(AdaptiveTextSet.new(), "auto", "ast://module/hot#stable")
+        var cold = AdaptiveTextSet.attributed_at_site(AdaptiveTextSet.new(), "auto", "ast://module/cold#stable")
+        var explicit = AdaptiveTextSet.attributed_at_site(AdaptiveTextSet.new(), "ordered", "ast://module/hot#stable")
+        expect(hot.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(cold.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(explicit.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        hot.insert("alpha")
+        cold.insert("alpha")
+        explicit.insert("alpha")
+        expect(hot.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(cold.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(explicit.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(hot.observation().target_profile_id).to_equal("x86_64-v3")
+        expect(hot.observation().lookups).to_equal(0)
+        expect(sprof_load_and_install_collection_feedback_text(body, "module-hash", "different-workload", "x86_64-v3")).to_be(false)
+        expect(sprof_load_and_install_collection_feedback_text(body, "module-hash", "lookup-workload", "aarch64-neon")).to_be(false)
+        var after_rejection = AdaptiveTextSet.attributed_at_site(AdaptiveTextSet.new(), "auto", "ast://module/hot#stable")
+        expect(after_rejection.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        after_rejection.insert("alpha")
+        expect(after_rejection.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        adaptive_set_clear_feedback()
+
+    it "keeps embedded target feedback isolated from a different installed catalog":
+        val sites = [
+            "ast://module/embedded-text-set#stable", "ast://module/embedded-text-map#stable",
+            "ast://module/embedded-generic-map#stable", "ast://module/embedded-generic-set#stable"
+        ]
+        var catalog: [AdaptiveSetWorkloadProfile] = []
+        for site in sites:
+            catalog.push(AdaptiveSetWorkloadProfile(
+                site_id: site, target_profile_id: "target-a", sample_count: 1,
+                size_p95: 100, lookup_count_p95: 500,
+                hit_count_p95: 250, miss_count_p95: 250
+            ))
+        val body = sprof_serialize_collection_profile("module-hash", "catalog-a", [], catalog)
+        expect(sprof_load_and_install_collection_feedback_text(
+            body, "module-hash", "catalog-a", "target-a")).to_be(true)
+        val text_set = AdaptiveTextSet.attributed_with_prior_at_site(
+            AdaptiveTextSet.new(), "auto", sites[0], "target-b", 1, 0, 0, 0, 0, -1, -1)
+        val text_map = AdaptiveTextMap.attributed_with_prior_at_site(
+            AdaptiveTextMap.new(), "auto", sites[1], "target-b", 1, 0, 0, 0, 0, -1, -1)
+        val generic_map: AdaptiveMap<i64, text> = AdaptiveMap.attributed_with_prior_at_site(
+            AdaptiveMap.new(), "auto", sites[2], "target-b", 1, 0, 0, 0, 0, -1, -1)
+        val generic_set: AdaptiveSet<i64> = AdaptiveSet.attributed_with_prior_at_site(
+            AdaptiveSet.new(), "auto", sites[3], "target-b", 1, 0, 0, 0, 0, -1, -1)
+        expect(text_set.observation().target_profile_id).to_equal("target-b")
+        expect(text_map.observation().target_profile_id).to_equal("target-b")
+        expect(generic_map.observation().target_profile_id).to_equal("target-b")
+        expect(generic_set.observation().target_profile_id).to_equal("target-b")
+        expect(text_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(text_map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(generic_map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(generic_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        adaptive_set_clear_feedback()
+
+    it "accepts distinct marginal p95 values from multiple valid samples":
+        val hit_run = AdaptiveSetWorkloadProfile(site_id: "ast://module/mixed#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 2, lookup_count_p95: 100, hit_count_p95: 100, miss_count_p95: 0)
+        val miss_run = AdaptiveSetWorkloadProfile(site_id: "ast://module/mixed#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 2, lookup_count_p95: 100, hit_count_p95: 0, miss_count_p95: 100)
+        val body = sprof_serialize_collection_profile("module-hash", "mixed-workload", [], [hit_run, miss_run])
+        expect(sprof_load_and_install_collection_feedback_text(body, "module-hash", "mixed-workload", "x86_64-v3")).to_be(true)
+        var replay = AdaptiveTextSet.attributed_at_site(AdaptiveTextSet.new(), "auto", "ast://module/mixed#stable")
+        replay.insert("alpha")
+        expect(replay.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        adaptive_set_clear_feedback()
+
+    it "round trips measured load and selects the exact container site":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 2, allow_hash: true)
+        var measured = AdaptiveTextSet.with_site_and_target(policy, "ast://module/lookup#stable", "x86_64-v3")
+        measured.insert("alpha")
+        expect(measured.contains("alpha")).to_be(true)
+        expect(measured.contains("absent")).to_be(false)
+        val sample = sprof_collection_record_from_set(measured)
+        val counters = [sprof_counter_record("function", "fn:lookup", "", 2)]
+        val body = sprof_serialize_collection_profile("module-hash", "lookup-workload", counters, [sample])
+        expect(body).to_contain("schema=sprof-v2")
+        val legacy = sprof_load_profile_text(body, "module-hash", "lookup-workload")
+        expect(legacy.status).to_equal("loaded")
+        expect(legacy.function_count).to_equal(1)
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "lookup-workload")
+        expect(loaded.status).to_equal("loaded")
+        expect(loaded.profile_count).to_equal(1)
+        val selected = sprof_collection_profile_for_site(loaded, "ast://module/lookup#stable", "x86_64-v3")
+        expect(selected.found).to_be(true)
+        var replay = AdaptiveTextSet.with_site_and_target(policy, "ast://module/lookup#stable", "x86_64-v3")
+        expect(replay.apply_workload_profile(selected.profile)).to_be(true)
+        replay.insert("alpha")
+        expect(replay.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(replay.observation().lookups).to_equal(0)
+
+    it "does not apply feedback to another target or workload":
+        val body = "header;schema=sprof-v2;module=module-hash;workload=lookup-workload\ncollection;sample=0;site=ast://module/lookup#stable;target=x86_64-v3;samples=1;size_p95=1;lookup_p95=40;hits_p95=0;misses_p95=40"
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "lookup-workload")
+        expect(sprof_collection_profile_for_site(loaded, "ast://module/lookup#stable", "aarch64-neon").found).to_be(false)
+        val stale = sprof_load_collection_profile_text(body, "module-hash", "different-workload")
+        expect(stale.status).to_equal("ignored")
+        expect(sprof_collection_profile_for_site(stale, "ast://module/lookup#stable", "x86_64-v3").found).to_be(false)
+
+    it "applies prepared prior load only to an automatic matching instance":
+        val prior = AdaptiveSetWorkloadProfile(site_id: "ast://module/lookup#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 100, lookup_count_p95: 500, hit_count_p95: 250, miss_count_p95: 250)
+        val body = sprof_serialize_collection_profile("module-hash", "lookup-workload", [], [prior])
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "lookup-workload")
+        val index = sprof_build_collection_set_index(loaded)
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var automatic = sprof_adapt_text_set_with_prepared_profile(AdaptiveTextSet.with_site_and_target(policy, "ast://module/lookup#stable", "x86_64-v3"), index)
+        automatic.insert("a")
+        expect(automatic.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        var forced = sprof_adapt_text_set_with_prepared_profile(AdaptiveTextSet.attributed(AdaptiveTextSet.with_site_and_target(policy, "ast://module/lookup#stable", "x86_64-v3"), "linear"), index)
+        forced.insert("a")
+        expect(forced.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        var other_target = sprof_adapt_text_set_with_prepared_profile(AdaptiveTextSet.with_site_and_target(policy, "ast://module/lookup#stable", "aarch64-neon"), index)
+        other_target.insert("a")
+        expect(other_target.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "captures only provable set metrics after inserts, lookups, and removals":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var set = AdaptiveTextSet.with_site_and_target(policy, "ast://module/set#stable", "x86_64-v3")
+        set.insert("a")
+        set.insert("b")
+        expect(set.contains("a")).to_be(true)
+        expect(set.remove("b")).to_be(true)
+        val metrics = sprof_collection_metrics_from_set(set)
+        expect(metrics.len()).to_equal(3)
+        val body = sprof_serialize_collection_profile_with_metrics("module-hash", "set-workload", [], [sprof_collection_record_from_set(set)], metrics)
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "set-workload")
+        expect(loaded.status).to_equal("loaded")
+        expect(sprof_collection_metric_stats(loaded, "ast://module/set#stable", "x86_64-v3", "collection_size").max).to_equal(2)
+        expect(sprof_collection_metric_stats(loaded, "ast://module/set#stable", "x86_64-v3", "lookup_count").max).to_equal(1)
+        expect(sprof_collection_metric_stats(loaded, "ast://module/set#stable", "x86_64-v3", "distinct_key_count").max).to_equal(1)
+        val index = sprof_build_collection_metric_index(loaded)
+        expect(sprof_indexed_collection_metric_stats(index, "ast://module/set#stable", "x86_64-v3", "collection_size").max).to_equal(2)
+        expect(sprof_indexed_collection_metric_stats(index, "ast://module/set#stable", "x86_64-v3", "lookup_count").max).to_equal(1)
+        expect(sprof_indexed_collection_metric_stats(index, "ast://module/set#stable", "x86_64-v3", "distinct_key_count").max).to_equal(1)
+
+    it "merges separate valid runs into distinct site samples and keeps counters":
+        val site = "ast://module/set#stable"
+        val first_profile = AdaptiveSetWorkloadProfile(
+            site_id: site, target_profile_id: "x86_64-v3", sample_count: 1,
+            size_p95: 4, lookup_count_p95: 3, hit_count_p95: 2, miss_count_p95: 1
+        )
+        val second_profile = AdaptiveSetWorkloadProfile(
+            site_id: site, target_profile_id: "x86_64-v3", sample_count: 1,
+            size_p95: 80, lookup_count_p95: 100, hit_count_p95: 70, miss_count_p95: 30
+        )
+        val first = sprof_serialize_collection_profile_with_metrics(
+            "module-hash", "lookup-workload",
+            [sprof_counter_record("function", "fn:lookup", "", 2)], [first_profile],
+            [SprofCollectionMetric(site_id: site, target_profile_id: "x86_64-v3", name: "lookup_count", value: 3)]
+        )
+        val second = sprof_serialize_collection_profile_with_metrics(
+            "module-hash", "lookup-workload",
+            [sprof_counter_record("function", "fn:lookup", "", 3)], [second_profile],
+            [SprofCollectionMetric(site_id: site, target_profile_id: "x86_64-v3", name: "lookup_count", value: 100)]
+        )
+        val merged = sprof_merge_collection_profile_text(first, second, "module-hash", "lookup-workload")
+        val loaded = sprof_load_collection_profile_text(merged, "module-hash", "lookup-workload")
+        expect(loaded.status).to_equal("loaded")
+        expect(loaded.profile_count).to_equal(2)
+        expect(loaded.metrics.len()).to_equal(2)
+        expect(sprof_collection_profile_for_site(loaded, site, "x86_64-v3").profile.lookup_count_p95).to_equal(100)
+        expect(sprof_collection_metric_stats(loaded, site, "x86_64-v3", "lookup_count").p95).to_equal(100)
+        expect(sprof_load_profile_text(merged, "module-hash", "lookup-workload").merged_count).to_equal(5)
+        expect(sprof_merge_collection_profile_text(first, second, "other-module", "lookup-workload")).to_equal("")
+        expect(sprof_merge_collection_profile_text(first, "header;schema=sprof-v2;module=module-hash;workload=lookup-workload\nmetric;sample=0;site=bad;target=x86_64-v3;name=lookup_count;value=1", "module-hash", "lookup-workload")).to_equal("")
+
+    it "persists and reloads the v2 collection profile file":
+        val path = get_temp_dir() + "/simple_collection_profile_{rt_getpid()}_{time_now_unix_micros()}.sprof"
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 2, allow_hash: true)
+        var measured = AdaptiveTextSet.with_site_and_target(policy, "ast://module/lookup#stable", "x86_64-v3")
+        measured.insert("alpha")
+        expect(measured.contains("alpha")).to_be(true)
+        expect(measured.contains("absent")).to_be(false)
+        val sample = sprof_collection_record_from_set(measured)
+        expect(sprof_write_collection_profile_file(path, "module-hash", "lookup-workload", [], [sample])).to_be(true)
+        val loaded = sprof_load_collection_profile_file(path, "module-hash", "lookup-workload")
+        expect(loaded.status).to_equal("loaded")
+        expect(loaded.profile_count).to_equal(1)
+        expect(file_delete(path)).to_be(true)
+
+    it "rejects ambiguous and malformed collection records":
+        val header = "header;schema=sprof-v2;module=module-hash;workload=lookup-workload"
+        val record = "collection;sample=0;site=ast://module/lookup#stable;target=x86_64-v3;samples=1;size_p95=1;lookup_p95=40;hits_p95=0;misses_p95=40"
+        val duplicate = sprof_load_collection_profile_text("{header}\n{record}\n{record}", "module-hash", "lookup-workload")
+        expect(duplicate.status).to_equal("invalid")
+        expect(duplicate.profile_count).to_equal(0)
+        val invalid = sprof_load_collection_profile_text("{header}\ncollection;sample=0;site=ast://module/lookup#stable;target=x86_64-v3;samples=0;size_p95=1;lookup_p95=40;hits_p95=0;misses_p95=40", "module-hash", "lookup-workload")
+        expect(invalid.status).to_equal("invalid")
+        val inconsistent = sprof_load_collection_profile_text("{header}\ncollection;sample=0;site=ast://module/lookup#stable;target=x86_64-v3;samples=1;size_p95=1;lookup_p95=40;hits_p95=41;misses_p95=0", "module-hash", "lookup-workload")
+        expect(inconsistent.status).to_equal("invalid")
+        val malformed = sprof_load_collection_profile_text("{header}\ncollection:broken", "module-hash", "lookup-workload")
+        expect(malformed.status).to_equal("invalid")
+        expect(malformed.diagnostics[0]).to_contain("unknown_profile_record")
+        val duplicate_field = sprof_load_collection_profile_text("{header}\n{record};site=ast://other/site#stable", "module-hash", "lookup-workload")
+        expect(duplicate_field.status).to_equal("invalid")
+        val duplicate_header_field = sprof_load_collection_profile_text("{header};module=other", "module-hash", "lookup-workload")
+        expect(duplicate_header_field.status).to_equal("invalid")
+        val duplicate_counter_field = sprof_load_collection_profile_text("{header}\nfunction;key=fn:lookup;count=1;count=2", "module-hash", "lookup-workload")
+        expect(duplicate_counter_field.status).to_equal("invalid")
+        val v1 = sprof_load_collection_profile_text("header;schema=sprof-v1;module=module-hash;workload=lookup-workload", "module-hash", "lookup-workload")
+        expect(v1.status).to_equal("incompatible")
+        val two_headers = sprof_load_collection_profile_text("{header}\n{header}\n{record}", "module-hash", "lookup-workload")
+        expect(two_headers.status).to_equal("invalid")
+
+    it "computes nearest-rank p95 from distinct workload samples":
+        var samples: [AdaptiveSetWorkloadProfile] = []
+        for i in 0..19:
+            samples.push(AdaptiveSetWorkloadProfile(site_id: "ast://module/lookup#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 1, lookup_count_p95: 2, hit_count_p95: 1, miss_count_p95: 1))
+        samples.push(AdaptiveSetWorkloadProfile(site_id: "ast://module/lookup#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 100, lookup_count_p95: 200, hit_count_p95: 100, miss_count_p95: 100))
+        val body = sprof_serialize_collection_profile("module-hash", "lookup-workload", [], samples)
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "lookup-workload")
+        expect(loaded.status).to_equal("loaded")
+        expect(loaded.profile_count).to_equal(20)
+        val selected = sprof_collection_profile_for_site(loaded, "ast://module/lookup#stable", "x86_64-v3")
+        expect(selected.found).to_be(true)
+        expect(selected.profile.sample_count).to_equal(20)
+        expect(selected.profile.size_p95).to_equal(1)
+        expect(selected.profile.lookup_count_p95).to_equal(2)
+        expect(selected.profile.hit_count_p95).to_equal(1)
+        expect(selected.profile.miss_count_p95).to_equal(1)
+        val index = sprof_build_collection_set_index(loaded)
+        expect(index.admitted).to_be(true)
+        expect(index.sample_count).to_equal(20)
+        val prepared = sprof_prepared_collection_profile_for_site(index, "ast://module/lookup#stable", "x86_64-v3")
+        expect(prepared.found).to_be(true)
+        expect(prepared.profile.size_p95).to_equal(selected.profile.size_p95)
+
+    it "feeds only an exact admitted profile into guarded plan selection":
+        val sample = AdaptiveSetWorkloadProfile(site_id: "ast://module/lookup#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 100, lookup_count_p95: 1000, hit_count_p95: 500, miss_count_p95: 500)
+        val body = sprof_serialize_collection_profile("module-hash", "lookup-workload", [], [sample])
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "lookup-workload")
+        var facts = collection_plan_unproven_facts()
+        facts.collection_kind = "set"
+        facts.equality_pure = true
+        facts.duplicate_semantics_preserved = true
+        facts.order_insensitive = true
+        facts.mutation_epoch_stable = true
+        facts.key_hashable = true
+        facts.key_orderable = true
+        facts.target_has_hash = true
+        facts.target_has_ordered = true
+        facts.ordered_update_bound_proven = true
+        facts.p0_correctness_ready = true
+        val matched = collection_plan_select_with_profile(facts, loaded, "ast://module/lookup#stable", "x86_64-v3")
+        expect(matched.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(matched.evidence).to_equal("admitted-profile")
+        val index = sprof_build_collection_set_index(loaded)
+        val prepared = collection_plan_select_with_prepared_profile(facts, index, "ast://module/lookup#stable", "x86_64-v3")
+        expect(prepared.selected).to_equal(matched.selected)
+        expect(prepared.evidence).to_equal(matched.evidence)
+        val explained = collection_plan_explain_with_prepared_profile(facts, index, "ast://module/lookup#stable", "x86_64-v3")
+        expect(explained).to_contain("selected=hash")
+        expect(explained).to_contain("profile.status=admitted")
+        expect(explained).to_contain("profile.size_p95=100")
+        val wrong_target = collection_plan_select_with_profile(facts, loaded, "ast://module/lookup#stable", "aarch64-neon")
+        expect(wrong_target.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(wrong_target.reason).to_equal("insufficient-cost-evidence")
+        val wrong_target_prepared = collection_plan_select_with_prepared_profile(facts, index, "ast://module/lookup#stable", "aarch64-neon")
+        expect(wrong_target_prepared.reason).to_equal("insufficient-cost-evidence")
+        val wrong_target_explanation = collection_plan_explain_with_prepared_profile(facts, index, "ast://module/lookup#stable", "aarch64-neon")
+        expect(wrong_target_explanation).to_contain("profile.status=not-admitted")
+        expect(wrong_target_explanation).to_contain("selected=original")
+        facts.p0_correctness_ready = false
+        val gated = collection_plan_select_with_profile(facts, loaded, "ast://module/lookup#stable", "x86_64-v3")
+        expect(gated.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(gated.reason).to_equal("p0-correctness-gate")
+
+    it "feeds paired hash metrics into prepared guarded selection":
+        val site = "ast://module/collision#stable"
+        val target = "x86_64-v3"
+        val sample = AdaptiveSetWorkloadProfile(
+            site_id: site, target_profile_id: target, sample_count: 1,
+            size_p95: 100, lookup_count_p95: 1000,
+            hit_count_p95: 500, miss_count_p95: 500
+        )
+        val metrics: [SprofCollectionMetric] = [
+            SprofCollectionMetric(site_id: site, target_profile_id: target, name: "hash_probe_count", value: 100),
+            SprofCollectionMetric(site_id: site, target_profile_id: target, name: "hash_collision_count", value: 40)
+        ]
+        val body = sprof_serialize_collection_profile_with_metrics(
+            "module-hash", "collision-workload", [], [sample], metrics)
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "collision-workload")
+        expect(loaded.status).to_equal("loaded")
+        val collection_index = sprof_build_collection_set_index(loaded)
+        val metric_index = sprof_build_collection_metric_index(loaded)
+        expect(collection_index.profiles[0].hash_probe_count_p95).to_equal(100)
+        expect(collection_index.profiles[0].hash_collision_count_p95).to_equal(40)
+        val one_off_profile = sprof_collection_profile_for_site(loaded, site, target)
+        expect(one_off_profile.found).to_be(true)
+        expect(one_off_profile.profile.hash_probe_count_p95).to_equal(100)
+        expect(one_off_profile.profile.hash_collision_count_p95).to_equal(40)
+        var runtime_set = AdaptiveTextSet.with_site_and_target(
+            AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true),
+            site, target)
+        expect(runtime_set.apply_workload_profile(collection_index.profiles[0])).to_be(true)
+        expect(runtime_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var facts = collection_plan_unproven_facts()
+        facts.collection_kind = "map"
+        facts.equality_pure = true
+        facts.duplicate_semantics_preserved = true
+        facts.order_insensitive = true
+        facts.mutation_epoch_stable = true
+        facts.key_hashable = true
+        facts.key_orderable = true
+        facts.target_has_hash = true
+        facts.target_has_ordered = true
+        facts.ordered_update_bound_proven = true
+        facts.p0_correctness_ready = true
+        val decision = collection_plan_select_with_prepared_metrics(
+            facts, collection_index, metric_index, site, target)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        expect(decision.reason).to_equal("hash-collision-pressure")
+        val one_off = collection_plan_select_with_profile(facts, loaded, site, target)
+        expect(one_off.selected).to_equal(decision.selected)
+        expect(one_off.reason).to_equal(decision.reason)
+        val explained = collection_plan_explain_with_prepared_metrics(
+            facts, collection_index, metric_index, site, target)
+        expect(explained).to_contain("profile.hash_probes_p95=100")
+        expect(explained).to_contain("profile.hash_collisions_p95=40")
+        expect(explained).to_contain("selected=ordered")
+        facts.profile_hash_probes_p95 = 100
+        facts.profile_hash_collisions_p95 = 40
+        val no_metric_decision = collection_plan_select_with_prepared_profile(
+            facts, collection_index, site, target)
+        expect(no_metric_decision.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        val other_target_decision = collection_plan_select_with_prepared_profile(
+            facts, collection_index, site, "aarch64-neon")
+        expect(other_target_decision.reason).to_equal("insufficient-cost-evidence")
+        val unpaired_body = sprof_serialize_collection_profile_with_metrics(
+            "module-hash", "collision-workload", [], [sample], [metrics[0]])
+        val unpaired = sprof_load_collection_profile_text(
+            unpaired_body, "module-hash", "collision-workload")
+        val unpaired_decision = collection_plan_select_with_prepared_metrics(
+            facts, sprof_build_collection_set_index(unpaired),
+            sprof_build_collection_metric_index(unpaired), site, target)
+        expect(unpaired_decision.reason).to_equal("invalid-profile-hash-facts")
+        expect(collection_plan_select_with_profile(
+            facts, unpaired, site, target).reason).to_equal("invalid-profile-hash-facts")
+
+    it "persists named P6 samples and summarizes their distribution":
+        var metrics: [SprofCollectionMetric] = []
+        for value in 0..20:
+            metrics.push(SprofCollectionMetric(site_id: "ast://module/join#stable", target_profile_id: "x86_64-v3", name: "join_output_count", value: value))
+        val body = sprof_serialize_collection_profile_with_metrics("module-hash", "join-workload", [], [], metrics)
+        expect(body).to_contain("metric;sample=0")
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "join-workload")
+        expect(loaded.status).to_equal("loaded")
+        expect(loaded.metrics.len()).to_equal(20)
+        val stats = sprof_collection_metric_stats(loaded, "ast://module/join#stable", "x86_64-v3", "join_output_count")
+        expect(stats.found).to_be(true)
+        expect(stats.count).to_equal(20)
+        expect(stats.min).to_equal(0)
+        expect(stats.max).to_equal(19)
+        expect(stats.mean).to_equal(9.5)
+        expect(stats.p50).to_equal(9)
+        expect(stats.p95).to_equal(18)
+        expect(stats.histogram[0]).to_equal(1)
+        expect(sprof_collection_metric_stats(loaded, "ast://module/join#stable", "other-target", "join_output_count").found).to_be(false)
+        val index = sprof_build_collection_metric_index(loaded)
+        expect(index.admitted).to_be(true)
+        expect(index.metric_count).to_equal(20)
+        val prepared = sprof_indexed_collection_metric_stats(index, "ast://module/join#stable", "x86_64-v3", "join_output_count")
+        expect(prepared.found).to_be(true)
+        expect(prepared.count).to_equal(stats.count)
+        expect(prepared.p95).to_equal(stats.p95)
+        expect(prepared.histogram[0]).to_equal(stats.histogram[0])
+        expect(sprof_indexed_collection_metric_stats(index, "ast://module/join#stable", "other-target", "join_output_count").found).to_be(false)
+        val stale = sprof_load_collection_profile_text(body, "other-module", "join-workload")
+        expect(sprof_collection_metric_stats(stale, "ast://module/join#stable", "x86_64-v3", "join_output_count").found).to_be(false)
+        expect(sprof_build_collection_metric_index(stale).admitted).to_be(false)
+        val path = get_temp_dir() + "/simple_collection_metrics_{rt_getpid()}_{time_now_unix_micros()}.sprof"
+        expect(sprof_write_collection_profile_file_with_metrics(path, "module-hash", "join-workload", [], [], metrics)).to_be(true)
+        val reloaded = sprof_load_collection_profile_file(path, "module-hash", "join-workload")
+        expect(reloaded.metrics.len()).to_equal(20)
+        expect(file_delete(path)).to_be(true)
+
+    it "rejects malformed named metrics and duplicate sample identities":
+        val header = "header;schema=sprof-v2;module=module-hash;workload=join-workload"
+        val metric = "metric;sample=0;site=ast://module/join#stable;target=x86_64-v3;name=hash_probe_count;value=7"
+        expect(sprof_load_collection_profile_text("{header}\n{metric}\n{metric}", "module-hash", "join-workload").status).to_equal("invalid")
+        val set_record = "collection;sample=0;site=ast://module/join#stable;target=x86_64-v3;samples=1;size_p95=1;lookup_p95=1;hits_p95=1;misses_p95=0"
+        expect(sprof_load_collection_profile_text("{header}\n{set_record}\n{metric}", "module-hash", "join-workload").status).to_equal("invalid")
+        expect(sprof_load_collection_profile_text("{header}\n{metric};value=8", "module-hash", "join-workload").status).to_equal("invalid")
+        expect(sprof_load_collection_profile_text("{header}\nmetric;sample=0;site=ast://module/join#stable;target=x86_64-v3;name=unknown;value=7", "module-hash", "join-workload").status).to_equal("invalid")
+        val invalid_selectivity = SprofCollectionMetric(site_id: "ast://module/join#stable", target_profile_id: "x86_64-v3", name: "filter_selectivity", value: 1000001)
+        expect(sprof_collection_metric_valid(invalid_selectivity)).to_be(false)

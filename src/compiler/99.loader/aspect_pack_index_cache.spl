@@ -15,6 +15,7 @@
 
 use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size, APKIO_MAX_RANGE_BYTES}
 use std.common.string_core.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
 
 val APKIDX_MAGIC_V1: text = "SMFAPK1\0"
 val APKIDX_HEADER_SIZE_V1: i64 = 32
@@ -33,6 +34,7 @@ struct PackIndexEntry:
     pack_path: text
     file_size: i64
     index_bytes: [u8]      # header + directory ONLY, never payload
+    index_sha256: text     # exact identity of the bounded cached object
     dir_size: i64
     module_count: i64
     ok: bool
@@ -59,7 +61,7 @@ fn pack_index_cache_new() -> PackIndexCache:
 
 fn _apkidx_error(path: text, code: text, message: text) -> PackIndexEntry:
     var empty: [u8] = []
-    PackIndexEntry(pack_path: path, file_size: 0, index_bytes: empty,
+    PackIndexEntry(pack_path: path, file_size: 0, index_bytes: empty, index_sha256: "",
         dir_size: 0, module_count: 0, ok: false, error_code: code, error_message: message)
 
 fn _apkidx_read_u16(data: [u8], offset: i64) -> i64:
@@ -143,27 +145,36 @@ fn pack_index_read(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
         d = d + 1
 
     PackIndexEntry(pack_path: pack_path, file_size: fsize,
-        index_bytes: index_bytes, dir_size: dir_size, module_count: module_count,
+        index_bytes: index_bytes, index_sha256: sha256_u8_hex(index_bytes),
+        dir_size: dir_size, module_count: module_count,
         ok: true, error_code: "", error_message: "")
 
 fn pack_index_get(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
-    """Cached index read, keyed on file SIZE alone.
+    """Reuse a cached index only after bounded content-identity validation.
 
-    KNOWN GAP, stated rather than papered over: this does not use mtime,
-    because rt_file_stat in this runtime returns the file SIZE, not a
-    modification time (measured: a 264-byte pack reports stat == 264 == size),
-    so folding it in would add a second copy of the same signal and read like
-    a stronger check than it is. Consequence: a rebuild that produces a pack of
-    exactly the same length is NOT detected. Callers that rebuild a pack in
-    place must call pack_index_invalidate. Closing this needs a real
-    mtime extern, which is tracked in the interfaces doc, not worked around
-    here."""
+    The available modification time is second-granularity, so `(size, mtime)`
+    cannot authorize reuse after a same-length in-place rewrite. Re-read only
+    the bounded header+directory object and compare its SHA-256 instead. The
+    payload stays cold; valid payload changes are represented by their frame
+    CRC/extent directory fields and payload bytes are checked when loaded.
+
+    A validation read failure is returned fail-closed without deleting the
+    prior entry. This keeps the last admitted object available for a later
+    retry, but never serves it as a hit while the path cannot be validated."""
     val cached = c.entries.get(pack_path)
     if cached != nil:
         val e = cached!
         if e.ok and e.file_size == pack_file_size(pack_path):
-            c.hits = c.hits + 1
-            return e
+            val observed = pack_index_read(c, pack_path)
+            if not observed.ok:
+                c.misses = c.misses + 1
+                return observed
+            if observed.index_sha256 == e.index_sha256:
+                c.hits = c.hits + 1
+                return e
+            c.misses = c.misses + 1
+            c.entries[pack_path] = observed
+            return observed
     c.misses = c.misses + 1
     val fresh = pack_index_read(c, pack_path)
     if fresh.ok:

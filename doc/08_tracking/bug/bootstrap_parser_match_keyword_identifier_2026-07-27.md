@@ -1,7 +1,9 @@
 # Bootstrap Parser Rejects Indexed Match Identifier
+## Closed 2026-09-16 — FIXED AND CLEARED IN FULL BOOTSTRAP; strict Stage4 retry parsed beyond lz77.spl
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -61,3 +63,4 @@ preserves real match syntax while allowing the keyword-named local.
 The strict retry at source commit `3e68805fb09f` cleared this source and later
 stopped at the unrelated prefix address-of defect tracked in
 `bootstrap_parser_address_of_cast_2026-07-27.md`.
+

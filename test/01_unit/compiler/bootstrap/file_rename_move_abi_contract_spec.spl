@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+ABI-contract evidence for `rt_file_move` / `rt_file_rename` as main actually
+wires them: the MIR text-extern ABI table splits both calls' text arguments
+into `(ptr, len)` pairs, and the LLVM IR text-emission lane declares
+`rt_file_move` with the matching four-word `(ptr, i64, ptr, i64) -> i1`
+signature. Audience: the compiler backend/runtime engineer maintaining the
+file-rename/move ABI.
+
+## Operator workflow
+bin/simple test test/01_unit/compiler/bootstrap/file_rename_move_abi_contract_spec.spl
+
+## Compatibility and limitations
+Reads committed source text of the MIR ABI table and the LLVM backend; it does
+not compile or execute the emitted LLVM IR.
+
+The wider four-lane contract this spec used to pin (an `rt_file_rename`
+declaration in both LLVM lanes, bool-returning SFFI generator specs, no no-op
+native-binary stub, EXDEV temp-file-then-rename publish in both C runtimes)
+does not exist on main. It was retired from this spec by owner decision on
+2026-09-26 and stays tracked by
+`doc/08_tracking/bug/rt_file_rename_move_abi_lanes_drifted_2026-09-06.md`.
+"""
+# research: doc/01_research/local/sffi_v2_hardening.md ; plan: doc/03_plan/compiler/bootstrap/stage4_stub_symbol_plan_2026-07-11.md ; architecture: doc/04_architecture/platform/sffi_v2_hardening.md ; design: doc/05_design/platform/platform_sffi_optional_features.md
+# @manual_section: file-rename-move-abi-contract
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.{describe, it, expect}
+
+describe "file rename and move runtime ABI":
+    it "keeps the MIR text ABI and the LLVM text lane on four words":
+        # @req REQ-FILE-RENAME-ABI-001
+        step("Read the MIR text-extern ABI table and the LLVM IR text-emission lane")
+        val mir_abi = rt_file_read_text("src/compiler/50.mir/text_extern_abi.spl") ?? ""
+        val backend = rt_file_read_text("src/compiler/70.backend/backend/llvm_backend.spl") ?? ""
+
+        # d29ab47e99e: text args of both externs are split into (ptr, len).
+        step("Verify MIR splits both text arguments of rt_file_rename and rt_file_move")
+        val case_at = mir_abi.index_of("case \"rt_file_write_text\" | \"rt_file_append_text\" | \"rt_file_copy\" | \"rt_file_rename\" | \"rt_file_move\" |")
+        val split_at = mir_abi.find("return Some([0, 1])", case_at) ?? -1
+        val next_case = mir_abi.find("case ", case_at + 5) ?? -1
+        expect(case_at).to_be_greater_than(-1)
+        expect(split_at).to_be_greater_than(case_at)
+        expect(next_case).to_be_greater_than(split_at)
+
+        # 463c12f5c7e: the pure-Simple LLVM extern list declares the four-word move.
+        step("Verify the LLVM IR text lane declares the four-word rt_file_move")
+        expect(backend).to_contain("declare i1 @rt_file_move(ptr, i64, ptr, i64)")
+        expect(backend.contains("declare i1 @rt_file_move(ptr, ptr)")).to_equal(false)
+        expect(backend.contains("declare i1 @rt_file_rename(ptr, ptr)")).to_equal(false)

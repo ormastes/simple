@@ -1,0 +1,108 @@
+# Durable-worker launcher: this owner deliberately creates NO JobObject. Closing
+# manager handles (including a manager crash) leaves the worker alive. The worker
+# independently owns its compiler JobObject and proves cleanup over its protocol.
+# A token is a nonreused local handle slot, never a PID or a restart identity.
+use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1, _windows_process_pin_v1, windows_process_quote_arg_v1, windows_process_path_valid_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateProcessW, CloseHandle, WaitForSingleObject, GetExitCodeProcess, TerminateProcess, GetLastError}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_read_u32, volatile_read_u64}
+
+struct WindowsWorkerHandleV1:
+    process: i64
+    image_pin: i64
+    heap: i64
+    exit_slot: i64
+    closed: bool
+
+var _windows_worker_handles_v1: [WindowsWorkerHandleV1] = []
+
+@unsafe(reason: "pinned executable and exact UTF16 argv/cwd; no inherited handles or parent-owned job", capabilities: [ffi, raw_ptr])
+fn windows_worker_spawn_v1(program: text, digest: text, args: [text], directory: text) -> Result<i64, text>:
+    if not windows_process_path_valid_v1(program) or not windows_process_path_valid_v1(directory):
+        return Err("worker launcher requires absolute drive-rooted executable and cwd")
+    if _windows_worker_handles_v1.len() >= 100000 or args.len() > 4096:
+        return Err("worker launcher ownership bound exceeded")
+    var command = windows_process_quote_arg_v1(program)
+    for arg in args:
+        if arg.contains("\0"): return Err("NUL in worker argument")
+        command = command + " " + windows_process_quote_arg_v1(arg)
+    if command.len() > 32766: return Err("worker command line exceeds Windows bound")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("worker launcher heap unavailable")
+    val pin = _windows_process_pin_v1(heap, program, digest)
+    if pin == 0: return Err("worker executable pin/digest mismatch")
+    val application = _windows_process_wide_v1(heap, program)
+    val argv = _windows_process_wide_v1(heap, command)
+    val cwd = _windows_process_wide_v1(heap, directory)
+    val startup = HeapAlloc(heap, 8u32, 104u64)
+    val information = HeapAlloc(heap, 8u32, 24u64)
+    val exit_slot = HeapAlloc(heap, 8u32, 8u64)
+    var error = ""
+    val allocations = [application, argv, cwd, startup, information]
+    for address in allocations:
+        if address == 0: error = "worker launcher allocation failed"
+    if exit_slot == 0: error = "worker exit observation allocation failed"
+    var process: i64 = 0
+    if error == "":
+        volatile_write_u32(startup, 104)
+        # CREATE_NO_WINDOW. Environment is inherited; handles are not inherited.
+        # There is no job here: graceful control/recovery belongs to the worker.
+        if CreateProcessW(application, argv, 0, 0, 0, 134217728u32, 0, cwd, startup, information) == 0:
+            error = "worker CreateProcessW failed: " + str(GetLastError())
+        else:
+            process = volatile_read_u64(information)
+            val thread = volatile_read_u64(information + 8)
+            val _thread_closed = CloseHandle(thread)
+    for address in allocations:
+        if address != 0:
+            val _freed = HeapFree(heap, 0u32, address)
+    if error != "":
+        val _closed = CloseHandle(pin)
+        if exit_slot != 0:
+            val _freed = HeapFree(heap, 0u32, exit_slot)
+        return Err(error)
+    _windows_worker_handles_v1 = _windows_worker_handles_v1.push(WindowsWorkerHandleV1(
+        process: process, image_pin: pin, heap: heap, exit_slot: exit_slot, closed: false))
+    Ok(_windows_worker_handles_v1.len())
+
+fn _windows_worker_slot_v1(token: i64) -> Result<i64, text>:
+    if token < 1 or token > _windows_worker_handles_v1.len(): return Err("invalid worker handle token")
+    val slot = token - 1
+    if _windows_worker_handles_v1[slot].closed: return Err("worker handle already closed")
+    Ok(slot)
+
+@unsafe(reason: "invalidates nonreused token before closing handles; process lifetime remains independent", capabilities: [ffi, raw_ptr])
+fn windows_worker_detach_v1(token: i64) -> Result<bool, text>:
+    val slot = _windows_worker_slot_v1(token)?
+    var state = _windows_worker_handles_v1[slot]
+    state.closed = true
+    _windows_worker_handles_v1[slot] = state
+    var closed = CloseHandle(state.process) != 0
+    if CloseHandle(state.image_pin) == 0: closed = false
+    if HeapFree(state.heap, 0u32, state.exit_slot) == 0: closed = false
+    if not closed: return Err("worker handle release failed")
+    Ok(true)
+
+@unsafe(reason: "waits exact retained process HANDLE; terminal status consumes the token once", capabilities: [ffi, raw_ptr])
+fn windows_worker_wait_v1(token: i64, timeout_ms: i64) -> Result<i64, text>:
+    if timeout_ms < 0 or timeout_ms > 60000: return Err("worker wait bound must be 0..60000ms")
+    val slot = _windows_worker_slot_v1(token)?
+    val state = _windows_worker_handles_v1[slot]
+    val waited = WaitForSingleObject(state.process, timeout_ms as u32)
+    if waited == 258u32: return Ok(-2)
+    if waited != 0u32: return Err("worker owned process wait failed")
+    if GetExitCodeProcess(state.process, state.exit_slot) == 0: return Err("worker exit status unavailable")
+    val code = volatile_read_u32(state.exit_slot)
+    val _released = windows_worker_detach_v1(token)?
+    Ok(code)
+
+# This is leader-only fault injection/termination, NOT compiler-tree cleanup.
+# Transport cancels workers via their protocol and must never use this to claim
+# a compiler tree was reaped. A terminated manager's workers remain independent.
+@unsafe(reason: "terminates only the exact retained process identity, never a reused PID", capabilities: [ffi])
+fn windows_worker_terminate_v1(token: i64) -> Result<bool, text>:
+    val slot = _windows_worker_slot_v1(token)?
+    if TerminateProcess(_windows_worker_handles_v1[slot].process, 125u32) == 0:
+        return Err("worker leader termination failed")
+    Ok(true)
+
+export windows_worker_spawn_v1, windows_worker_wait_v1, windows_worker_detach_v1, windows_worker_terminate_v1

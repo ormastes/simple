@@ -1,7 +1,10 @@
 # Duplicate-check accepted impossible similarity thresholds — 2026-07-23
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** SOURCE FIXED / PURE-SIMPLE QUALIFICATION PENDING
 
 ## Reproduction
 
@@ -17,3 +20,4 @@ reject values outside inclusive `0..1`, including NaN, before scanning.
 
 The focused contract covers configuration fields plus split and equals CLI
 forms. A fresh pure-Simple Stage 4 CLI must run it before qualification.
+

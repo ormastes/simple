@@ -1,0 +1,109 @@
+use std.common.crypto.sha256.sha256_bytes
+use std.simd.profile.has_avx2
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use compiler.driver.execution_domain_affinity_lease_v1.{ExecutionDomainAffinityLeaseOwnerV1,
+    ExecutionDomainAffinityLeaseV1, execution_domain_affinity_lease_validate_v1}
+
+pub enum LiveSimdVerifierErrorV1:
+    InvalidEnvironment
+    AffinityRejected
+    CapabilityUnavailable
+    CapacityExceeded
+    UnknownOrRevoked
+    ReceiptSubstituted
+pub struct LiveSimdVerifierReceiptV1:
+    receipt_id: u64
+    owner_identity: EnvironmentDigest256V1
+    verifier_generation: u64
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    execution_domain_identity: EnvironmentDigest256V1
+    execution_domain_generation: u64
+    verifier_implementation_identity: EnvironmentDigest256V1
+    evidence_digest: EnvironmentDigest256V1
+struct _LiveVerifierRecordV1:
+    receipt: LiveSimdVerifierReceiptV1
+    live: bool
+var _next_live_verifier_owner_v1: u64 = 1u64
+pub class LiveSimdVerifierOwnerV1:
+    var records: [_LiveVerifierRecordV1]
+    var owner_identity: EnvironmentDigest256V1
+    var generation: u64
+    var next_receipt_id: u64
+    pub static fn create() -> LiveSimdVerifierOwnerV1:
+        val id = _next_live_verifier_owner_v1
+        if id != 0u64 and id != 0xffffffffffffffffu64: _next_live_verifier_owner_v1 = id + 1u64
+        LiveSimdVerifierOwnerV1(records: [], owner_identity: EnvironmentDigest256V1(w0: id,
+            w1: 0x6c69766573696d64u64, w2: 0x7665726966696572u64, w3: 1u64),
+            generation: 1u64, next_receipt_id: 1u64)
+fn _read64_lv(raw: [i64], at: i64) -> u64:
+    var v = 0u64
+    for i in 0..8: v = v | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    v
+fn _digest_lv(snapshot: EnvironmentSnapshotV1, words: [u64], affinity: ExecutionDomainAffinityLeaseV1,
+              owner: LiveSimdVerifierOwnerV1, receipt_id: u64) -> EnvironmentDigest256V1:
+    var raw: [i64] = []
+    for v in [snapshot.snapshot_identity.w0, snapshot.snapshot_identity.w1, snapshot.snapshot_identity.w2,
+              snapshot.snapshot_identity.w3, snapshot.snapshot_generation,
+              snapshot.execution_domain_identity.w0, snapshot.execution_domain_identity.w1,
+              snapshot.execution_domain_identity.w2, snapshot.execution_domain_identity.w3,
+              affinity.execution_domain_generation, owner.owner_identity.w0, owner.owner_identity.w1,
+              owner.owner_identity.w2, owner.owner_identity.w3, owner.generation, receipt_id,
+              snapshot.execution_architecture as u64, snapshot.vector_state_mode as u64,
+              snapshot.vector_length_bits as u64, words.len() as u64]:
+        for i in 0..8: raw.push(((v >> ((i as u64) * 8u64)) & 255u64) as i64)
+    for word in words:
+        for i in 0..8: raw.push(((word >> ((i as u64) * 8u64)) & 255u64) as i64)
+    val h = sha256_bytes(raw)
+    EnvironmentDigest256V1(w0: _read64_lv(h, 0), w1: _read64_lv(h, 8), w2: _read64_lv(h, 16), w3: _read64_lv(h, 24))
+fn _impl_lv() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0x6c69766573696d64u64, w1: 0x617678322d763100u64,
+        w2: 0x7665726966696572u64, w3: 1u64)
+
+pub fn live_simd_verifier_issue_v1(owner: LiveSimdVerifierOwnerV1,
+    affinity_owner: ExecutionDomainAffinityLeaseOwnerV1, affinity: ExecutionDomainAffinityLeaseV1,
+    snapshot: EnvironmentSnapshotV1, feature_words: [u64]
+) -> Result<LiveSimdVerifierReceiptV1, LiveSimdVerifierErrorV1>:
+    if owner.records.len() >= 256 or owner.next_receipt_id == 0u64 or owner.next_receipt_id == 0xffffffffffffffffu64:
+        return Err(LiveSimdVerifierErrorV1.CapacityExceeded)
+    if execution_domain_affinity_lease_validate_v1(affinity_owner, snapshot, affinity).is_err():
+        return Err(LiveSimdVerifierErrorV1.AffinityRejected)
+    if not has_avx2(): return Err(LiveSimdVerifierErrorV1.CapabilityUnavailable)
+    val id = owner.next_receipt_id
+    val receipt = LiveSimdVerifierReceiptV1(receipt_id: id, owner_identity: owner.owner_identity,
+        verifier_generation: owner.generation, environment_identity: snapshot.snapshot_identity,
+        environment_generation: snapshot.snapshot_generation,
+        execution_domain_identity: snapshot.execution_domain_identity,
+        execution_domain_generation: affinity.execution_domain_generation,
+        verifier_implementation_identity: _impl_lv(),
+        evidence_digest: _digest_lv(snapshot, feature_words, affinity, owner, id))
+    owner.next_receipt_id = id + 1u64; owner.records.push(_LiveVerifierRecordV1(receipt: receipt, live: true)); Ok(receipt)
+
+pub fn live_simd_verifier_validate_v1(owner: LiveSimdVerifierOwnerV1,
+    receipt: LiveSimdVerifierReceiptV1, affinity: ExecutionDomainAffinityLeaseV1,
+    snapshot: EnvironmentSnapshotV1, feature_words: [u64]) -> bool:
+    var i = 0
+    while i < owner.records.len():
+        if owner.records[i].live and owner.records[i].receipt == receipt:
+            return receipt.owner_identity == owner.owner_identity and receipt.verifier_generation == owner.generation and
+                receipt.environment_identity == snapshot.snapshot_identity and
+                receipt.environment_generation == snapshot.snapshot_generation and
+                receipt.execution_domain_identity == snapshot.execution_domain_identity and
+                receipt.execution_domain_generation == affinity.execution_domain_generation and
+                receipt.verifier_implementation_identity == _impl_lv() and
+                receipt.evidence_digest == _digest_lv(snapshot, feature_words, affinity, owner, receipt.receipt_id) and has_avx2()
+        i = i + 1
+    false
+
+pub fn live_simd_verifier_revoke_v1(owner: LiveSimdVerifierOwnerV1,
+    receipt: LiveSimdVerifierReceiptV1) -> Result<(), LiveSimdVerifierErrorV1>:
+    var i = 0
+    while i < owner.records.len():
+        if owner.records[i].receipt == receipt and owner.records[i].live:
+            var kept: [_LiveVerifierRecordV1] = []; var j = 0
+            while j < owner.records.len():
+                if j != i: kept.push(owner.records[j])
+                j = j + 1
+            owner.records = kept; return Ok(())
+        i = i + 1
+    Err(LiveSimdVerifierErrorV1.UnknownOrRevoked)

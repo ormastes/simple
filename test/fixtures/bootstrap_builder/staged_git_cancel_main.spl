@@ -1,0 +1,34 @@
+use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_vars}
+use app.io.file_ops.{file_exists, file_atomic_write}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, builder_task_identity_v1}
+use app.bootstrap_builder.windows_staged_git.{BuilderStagedGitErrorV1, builder_staged_git_command_v1}
+use app.bootstrap_builder.windows_worker.{builder_windows_setup_failure_v1}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 4: return 2
+    val root = args[1]
+    val program = args[2]
+    val digest = windows_process_file_digest_v1(program)
+    val script_digest = windows_process_file_digest_v1(root + "/work/child.ps1")
+    val task = BuildTaskV1("cancel-proof", 1, "bootstrap", digest, digest, digest, [], program, ["native-build"], [BuildInputV1("child.ps1", script_digest)], ["out/result.exe"], digest, 60000)
+    if not file_atomic_write(root + "/probe-identity.txt", builder_task_identity_v1(task)): return 8
+    if not dir_create_all(root + "/unknown"): return 3
+    val unknown = builder_windows_setup_failure_v1(task, root + "/unknown", "local-a", BuilderStagedGitErrorV1("injected ownership unknown", false))
+    if not unknown.contains("ownership unknown") or file_exists(root + "/unknown/compiler.not-started.sdn"): return 4
+    var environment: [text] = []
+    for pair in env_vars() ?? []:
+        if pair.0 != "" and not pair.0.contains("="): environment.push(pair.0 + "=" + pair.1)
+    val outcome = builder_staged_git_command_v1(task, root, program, digest, environment,
+        ["-NoProfile", "-File", root + "/work/child.ps1", root, args[3]], 0, "local-a")
+    match outcome:
+        Ok(_value): return 5
+        Err(failure):
+            if not failure.tree_cleanup_confirmed or not failure.message.contains("cancelled"): return 6
+            val reason = builder_windows_setup_failure_v1(task, root, "local-a", failure)
+            if not file_exists(root + "/compiler.not-started.sdn") or not reason.contains("cancelled"): return 7
+    print "PASS staged setup cancellation reaped exact owner tree; unknown cleanup has no terminal certificate"
+    0

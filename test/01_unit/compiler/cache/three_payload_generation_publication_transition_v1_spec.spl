@@ -1,0 +1,282 @@
+# Purpose: focused L7 evidence for all-or-nothing in-memory generation publication.
+# @req REQ-CSM-003 REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-024
+# @cover src/compiler/80.driver/cache/publication/three_payload_generation_publisher_v1.spl 85%
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1,
+    canonical_cache_kind_compile_snapshot_v1,
+    canonical_cache_kind_public_summary_v1
+}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_digest_v1,
+    generation_manifest_encode_v1
+}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_digest_v1
+}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedCasTypedIdentityV1, VerifiedGenerationRootV1,
+    VerifiedGenerationPinV1, VerifiedGenerationPinSnapshotV1,
+    VerifiedCasReadObjectV1, VerifiedGenerationDurableBindingV1,
+    verified_generation_pin_snapshot_v1
+}
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.*
+
+fn d(label: text) -> text: sha256_text(label)
+
+class PublicationFixtureV1:
+    action_digest: text
+    prepared: PreparedThreePayloadGenerationV1
+    root: VerifiedGenerationRootV1
+    pins: VerifiedGenerationPinSnapshotV1
+    objects: [VerifiedCasReadObjectV1]
+    journal: ActionRootJournalV1
+    durable: VerifiedGenerationDurableBindingV1
+
+fn publication_fixture_v1(generation: i64, label: text,
+        journal_action: text? = nil, journal_object: text? = nil,
+        journal_kind: text = "public_summary") -> PublicationFixtureV1:
+    val compile_bytes = canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_compile_snapshot_v1(), 1,
+        text_to_bytes("compile-" + label))
+    val summary_bytes = canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_public_summary_v1(), 1,
+        text_to_bytes("summary-" + label))
+    val compile_digest = verified_cas_kind_digest_v1("compile_snapshot", compile_bytes)
+    val summary_digest = verified_cas_kind_digest_v1("public_summary", summary_bytes)
+    val manifest = GenerationManifestV1(schema: 1,
+        snapshot_digest: compile_digest, catalog_digest: d("catalog-" + label),
+        summary_refs: [summary_digest], scope_refs: [], rr_shard_refs: [],
+        forward_manifest_refs: [], portable_refs: [], target_refs: [], diagnostic_refs: [])
+    val manifest_digest = generation_manifest_digest_v1(manifest)
+    val manifest_bytes = generation_manifest_encode_v1(manifest)
+    val prepared = PreparedThreePayloadGenerationV1(manifest: manifest,
+        manifest_digest: manifest_digest,
+        immutable_objects: [ThreePayloadImmutableObjectV1(
+            digest: summary_digest, kind: "public_summary", bytes: summary_bytes)])
+    val root = VerifiedGenerationRootV1(generation: generation,
+        manifest_digest: manifest_digest)
+    val epoch = generation + 100
+    val pins = verified_generation_pin_snapshot_v1(epoch,
+        [VerifiedGenerationPinV1(pin_id: "pin-" + label, root: root)], []).unwrap()
+    val objects = [
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "generation_manifest", digest: manifest_digest),
+            canonical_bytes: manifest_bytes),
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "compile_snapshot", digest: compile_digest),
+            canonical_bytes: compile_bytes),
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "public_summary", digest: summary_digest),
+            canonical_bytes: summary_bytes)
+    ]
+    val action_digest = d("action-" + label)
+    val rooted_action = journal_action ?? action_digest
+    val rooted_object = journal_object ?? summary_digest
+    val journal = ActionRootJournalV1.empty(generation)
+    val append = journal.prepare(rooted_action, journal_kind, rooted_object,
+        manifest_digest).unwrap()
+    journal.accept_durable(append).unwrap()
+    val journal_digest = sha256_text(journal.bytes)
+    val durable = VerifiedGenerationDurableBindingV1(generation: generation,
+        sequence: append.record.sequence, writer_epoch: epoch,
+        operation_digest: append.operation_digest,
+        host_receipt_digest: d("host-" + label), journal_digest: journal_digest,
+        accepted_journal_bytes: journal.bytes.len(),
+        accepted_journal_prefix_digest: journal_digest,
+        projection_applied: true, projection_digest: manifest.catalog_digest)
+    PublicationFixtureV1(action_digest: action_digest, prepared: prepared,
+        root: root, pins: pins, objects: objects, journal: journal, durable: durable)
+
+fn publish_fixture_v1(owner: ThreePayloadGenerationPublicationOwnerV1,
+        fixture: PublicationFixtureV1
+) -> Result<ThreePayloadGenerationPublicationReceiptV1,
+            ThreePayloadGenerationTransitionFailureV1>:
+    publish_verified_three_payload_generation_v1(owner, fixture.prepared,
+        fixture.action_digest, fixture.root, fixture.pins, fixture.objects,
+        fixture.journal, fixture.durable)
+
+fn expect_active_unchanged_v1(owner: ThreePayloadGenerationPublicationOwnerV1,
+        expected: ActiveThreePayloadGenerationV1):
+    val actual = three_payload_generation_active_v1(owner).unwrap()
+    expect(actual.generation).to_equal(expected.generation)
+    expect(actual.action_digest).to_equal(expected.action_digest)
+    expect(actual.receipt.generation_digest).to_equal(expected.receipt.generation_digest)
+    expect(actual.receipt.journal_receipt_digest).to_equal(
+        expected.receipt.journal_receipt_digest)
+    expect(actual.receipt.lookup_projection_digest).to_equal(
+        expected.receipt.lookup_projection_digest)
+    expect(actual.closure_receipt.owner_seal_digest).to_equal(
+        expected.closure_receipt.owner_seal_digest)
+
+describe "Three-payload generation publication transition V1":
+    it "publishes a complete rooted closure and replays it without replacing state":
+        step("Validate typed CAS bytes and the exact durable action record before one owner assignment")
+        val owner = ThreePayloadGenerationPublicationOwnerV1.empty()
+        val fixture = publication_fixture_v1(7, "initial")
+        val receipt = publish_fixture_v1(owner, fixture).unwrap()
+        val active = three_payload_generation_active_v1(owner).unwrap()
+        expect(active.generation).to_equal(7)
+        expect(receipt.generation_digest).to_equal(fixture.prepared.manifest_digest)
+        expect(active.closure_receipt.ordered_closure.len()).to_equal(3)
+        val replay = publish_fixture_v1(owner, fixture).unwrap()
+        expect(replay.journal_receipt_digest).to_equal(receipt.journal_receipt_digest)
+        expect_active_unchanged_v1(owner, active)
+
+        step("Advance from the complete prior root to a complete next root")
+        val next = publication_fixture_v1(8, "next")
+        publish_fixture_v1(owner, next).unwrap()
+        expect(three_payload_generation_active_v1(owner).unwrap().generation).to_equal(8)
+
+    it "requires same-generation replay to reproduce the active verified closure":
+        val owner = ThreePayloadGenerationPublicationOwnerV1.empty()
+        val original = publication_fixture_v1(7, "exact-replay")
+        publish_fixture_v1(owner, original).unwrap()
+        val before = three_payload_generation_active_v1(owner).unwrap()
+
+        step("Reject an exact action and manifest when a required replay blob is missing")
+        val corrupt_replay = publication_fixture_v1(7, "exact-replay")
+        corrupt_replay.objects = [corrupt_replay.objects[0], corrupt_replay.objects[2]]
+        expect(publish_fixture_v1(owner, corrupt_replay)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Reject a re-journaled replay whose closure seal differs from the active receipt")
+        val changed_receipt = publication_fixture_v1(7, "exact-replay")
+        val second = changed_receipt.journal.prepare(changed_receipt.action_digest,
+            "public_summary", changed_receipt.prepared.immutable_objects[0].digest,
+            changed_receipt.prepared.manifest_digest).unwrap()
+        changed_receipt.journal.accept_durable(second).unwrap()
+        val changed_journal_digest = sha256_text(changed_receipt.journal.bytes)
+        var changed_durable = changed_receipt.durable
+        changed_durable.sequence = second.record.sequence
+        changed_durable.operation_digest = second.operation_digest
+        changed_durable.host_receipt_digest = d("changed-host-receipt")
+        changed_durable.journal_digest = changed_journal_digest
+        changed_durable.accepted_journal_bytes = changed_receipt.journal.bytes.len()
+        changed_durable.accepted_journal_prefix_digest = changed_journal_digest
+        changed_receipt.durable = changed_durable
+        expect(publish_fixture_v1(owner, changed_receipt)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected))
+        expect_active_unchanged_v1(owner, before)
+
+    it "never replaces the prior generation when a required CAS blob is missing or corrupt":
+        step("Publish generation 7 as the prior owner-visible root")
+        val owner = ThreePayloadGenerationPublicationOwnerV1.empty()
+        val prior = publication_fixture_v1(7, "prior-blobs")
+        publish_fixture_v1(owner, prior).unwrap()
+        val before = three_payload_generation_active_v1(owner).unwrap()
+
+        step("Remove a prepared public-summary blob and preserve the prior root")
+        val missing_summary = publication_fixture_v1(8, "missing-summary")
+        val missing_summary_objects = [missing_summary.objects[0],
+            missing_summary.objects[1]]
+        missing_summary.objects = missing_summary_objects
+        expect(publish_fixture_v1(owner, missing_summary)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.InvalidCandidate))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Remove a referenced compile snapshot and preserve the prior root")
+        val missing_snapshot = publication_fixture_v1(8, "missing-snapshot")
+        val missing_snapshot_objects = [missing_snapshot.objects[0],
+            missing_snapshot.objects[2]]
+        missing_snapshot.objects = missing_snapshot_objects
+        expect(publish_fixture_v1(owner, missing_snapshot)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Substitute bytes behind the summary identity and preserve the prior root")
+        val corrupt = publication_fixture_v1(8, "corrupt-summary")
+        var substituted = corrupt.objects[2]
+        substituted.canonical_bytes = text_to_bytes("substituted")
+        var corrupt_objects = corrupt.objects
+        corrupt_objects[2] = substituted
+        corrupt.objects = corrupt_objects
+        expect(publish_fixture_v1(owner, corrupt)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.InvalidCandidate))
+        expect_active_unchanged_v1(owner, before)
+
+    it "rejects invalid stale and mismatched closure candidates without changing the prior root":
+        val owner = ThreePayloadGenerationPublicationOwnerV1.empty()
+        val prior = publication_fixture_v1(7, "prior-validation")
+        publish_fixture_v1(owner, prior).unwrap()
+        val before = three_payload_generation_active_v1(owner).unwrap()
+
+        step("Reject a prepared manifest digest substitution")
+        val invalid = publication_fixture_v1(8, "invalid-prepared")
+        var invalid_prepared = invalid.prepared
+        invalid_prepared.manifest_digest = d("substituted-manifest")
+        invalid.prepared = invalid_prepared
+        expect(publish_fixture_v1(owner, invalid)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.InvalidCandidate))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Reject an older otherwise complete generation")
+        val stale = publication_fixture_v1(6, "stale")
+        expect(publish_fixture_v1(owner, stale)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.StaleGeneration))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Reject a different action and manifest at the active generation number")
+        val same_generation_conflict = publication_fixture_v1(7, "same-generation-conflict")
+        expect(publish_fixture_v1(owner, same_generation_conflict)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.StaleGeneration))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Reject a candidate against the prior generation pin snapshot")
+        val mismatched = publication_fixture_v1(8, "mismatched-pin")
+        expect(publish_verified_three_payload_generation_v1(owner,
+            mismatched.prepared, mismatched.action_digest, mismatched.root,
+            prior.pins, mismatched.objects, mismatched.journal,
+            mismatched.durable)).to_equal(
+                Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected))
+        expect_active_unchanged_v1(owner, before)
+
+    it "rejects journal action object and durable-binding failures before owner publication":
+        val owner = ThreePayloadGenerationPublicationOwnerV1.empty()
+        val prior = publication_fixture_v1(7, "prior-journal")
+        publish_fixture_v1(owner, prior).unwrap()
+        val before = three_payload_generation_active_v1(owner).unwrap()
+
+        step("Reject a durable journal record bound to a different action")
+        val wrong_action = publication_fixture_v1(8, "wrong-action",
+            journal_action: Some(d("other-action")))
+        expect(publish_fixture_v1(owner, wrong_action)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.JournalBindingRejected))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Reject a journal object digest absent from the verified closure")
+        val missing_root = publication_fixture_v1(8, "missing-action-object",
+            journal_object: Some(d("absent-object")))
+        expect(publish_fixture_v1(owner, missing_root)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.JournalBindingRejected))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Reject a canonical CAS object that is present but outside the manifest closure")
+        val extra_bytes = canonical_cache_encode_envelope_v1(
+            canonical_cache_kind_compile_snapshot_v1(), 1,
+            text_to_bytes("extra-unrooted"))
+        val extra_digest = verified_cas_kind_digest_v1("compile_snapshot", extra_bytes)
+        val unrooted = publication_fixture_v1(8, "unrooted-action-object",
+            journal_object: Some(extra_digest), journal_kind: "compile_snapshot")
+        var with_extra = unrooted.objects
+        with_extra.push(VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "compile_snapshot", digest: extra_digest), canonical_bytes: extra_bytes))
+        unrooted.objects = with_extra
+        expect(publish_fixture_v1(owner, unrooted)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.JournalBindingRejected))
+        expect_active_unchanged_v1(owner, before)
+
+        step("Reject a substituted durable catalog projection")
+        val wrong_durable = publication_fixture_v1(8, "wrong-durable")
+        var substituted_durable = wrong_durable.durable
+        substituted_durable.projection_digest = d("other-catalog")
+        wrong_durable.durable = substituted_durable
+        expect(publish_fixture_v1(owner, wrong_durable)).to_equal(
+            Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected))
+        expect_active_unchanged_v1(owner, before)

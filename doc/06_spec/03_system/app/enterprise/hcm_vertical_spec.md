@@ -24,7 +24,7 @@ System spec for the safer-first-release HCM vertical of the Simple Enterprise Su
 | Design | doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §6.5 |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/hcm_vertical_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -65,6 +65,11 @@ Lane: .spipe/simple_enterprise_suite (v2, W6-A HCM vertical).
 
 #### hires, amends with preserved history, and fences a terminated employee
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- hires, amends with preserved history, and fences a terminated employee
 - Hire emp-1 at 1500 cents/h, 40 h/week, effective t0
    - Expected: h.reason equals `accepted`
    - Expected: hcm_employee_status(store, "tenant-a", "emp-1") equals `active`
@@ -86,10 +91,12 @@ Lane: .spipe/simple_enterprise_suite (v2, W6-A HCM vertical).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hires, amends with preserved history, and fences a terminated employee")
 val store = fresh_store("lifecycle")
 val t = tenant_a()
 val hr = hr_a()
@@ -126,6 +133,7 @@ store_close(store)
 
 #### denies rbac and session violations at the outer rungs
 
+- denies rbac and session violations at the outer rungs
 - A viewer role cannot hire (forbidden)
    - Expected: hcm_hire(store, vs, t, viewer, envelope("g-h1", "hcm.hire"), "emp-x", "X", t0(), 1500, 40).reason equals `forbidden`
 - An inactive session is rejected before rbac
@@ -135,10 +143,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies rbac and session violations at the outer rungs")
 val store = fresh_store("guards")
 val t = tenant_a()
 val viewer = viewer_a()
@@ -158,6 +168,7 @@ store_close(store)
 
 #### closes intervals, computes worked seconds, and denies bad transitions
 
+- closes intervals, computes worked seconds, and denies bad transitions
 - Clock in at t0+100; a second clock-in is invalid-transition
    - Expected: hcm_clock_in(store, s, t, hr, envelope("at-i1", "hcm.clock.in"), "emp-1", t0() + 100).reason equals `accepted`
    - Expected: dbl.reason equals `invalid-transition`
@@ -175,10 +186,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("closes intervals, computes worked seconds, and denies bad transitions")
 val store = fresh_store("attendance")
 val t = tenant_a()
 val hr = hr_a()
@@ -215,6 +228,7 @@ store_close(store)
 
 #### approves a leave, then denies an overlapping approval as conflict
 
+- approves a leave, then denies an overlapping approval as conflict
 - Request and approve a 2-day leave [t0, t0+172800)
    - Expected: hcm_leave_request(store, s, t, hr, envelope("lv-r1", "hcm.leave.request"), "lv-1", "emp-1", t0(), t0() + 172800, "vacation").reason equals `accepted`
    - Expected: hcm_leave_decide(store, sa, t, admin, envelope("lv-d1", "hcm.leave.decide"), "lv-1", true).reason equals `accepted`
@@ -237,10 +251,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("approves a leave, then denies an overlapping approval as conflict")
 val store = fresh_store("leave")
 val t = tenant_a()
 val hr = hr_a()
@@ -284,6 +300,7 @@ store_close(store)
 
 #### matches a hand-computed oracle exactly — input rows, not a payroll result
 
+- matches a hand-computed oracle exactly — input rows, not a payroll result
 - Two employees: emp-1 amended mid-period, emp-2 flat wage
 - emp-1 works 3600s in period + 1000s straddling the period end
 - emp-2 works 7200s and takes 1 approved day of leave
@@ -294,10 +311,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches a hand-computed oracle exactly — input rows, not a payroll result")
 val store = fresh_store("payroll")
 val t = tenant_a()
 val hr = hr_a()
@@ -338,6 +357,7 @@ store_close(store)
 
 #### replays a command with duplicate-key and exactly one effect
 
+- replays a command with duplicate-key and exactly one effect
 - Replaying the amend key returns duplicate-key, history unchanged
    - Expected: hcm_contract_amend(store, s, t, hr, envelope("rp-a1", "hcm.contract.amend"), "emp-1", t0() + 1000, 2000, 40).reason equals `accepted`
    - Expected: r.reason equals `duplicate-key`
@@ -347,10 +367,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replays a command with duplicate-key and exactly one effect")
 val store = fresh_store("replay")
 val t = tenant_a()
 val hr = hr_a()
@@ -368,6 +390,7 @@ store_close(store)
 
 #### keeps tenants fully isolated
 
+- keeps tenants fully isolated
 - The same employee id does not exist in tenant-b
    - Expected: hcm_employee_status(store, "tenant-a", "emp-1") equals `active`
    - Expected: hcm_employee_status(store, "tenant-b", "emp-1") equals ``
@@ -382,10 +405,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps tenants fully isolated")
 val store = fresh_store("tenants")
 val ta = tenant_a()
 val tb = tenant_b()
@@ -409,21 +434,24 @@ store_close(store)
 
 #### survives a close/reopen with full state intact
 
+- survives a close/reopen with full state intact
 - Reopen: status, contract, and worked time all survive
    - Expected: hcm_employee_status(store2, "tenant-a", "emp-1") equals `active`
    - Expected: hcm_wage_at(store2, "tenant-a", "emp-1", t0()) equals `1500`
    - Expected: hcm_worked_seconds(store2, "tenant-a", "emp-1", t0(), t0() + 10000) equals `1000`
 - Replay across restart still returns duplicate-key
-   - Expected: hcm_hire(store2, s, t, hr, envelope("rs-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40).reason equals `conflict`
+   - Expected: hcm_hire(store2, s, t, hr, envelope("rs-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40).reason equals `duplicate-key`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("survives a close/reopen with full state intact")
 val store = fresh_store("restart")
 val t = tenant_a()
 val hr = hr_a()
@@ -439,7 +467,12 @@ expect(hcm_employee_status(store2, "tenant-a", "emp-1")).to_equal("active")
 expect(hcm_wage_at(store2, "tenant-a", "emp-1", t0())).to_equal(1500)
 expect(hcm_worked_seconds(store2, "tenant-a", "emp-1", t0(), t0() + 10000)).to_equal(1000)
 step("Replay across restart still returns duplicate-key")
-expect(hcm_hire(store2, s, t, hr, envelope("rs-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40).reason).to_equal("conflict")
+# Was asserting `conflict` — the drift W7-B fixed: the already-hired
+# employee IS this command's own recorded effect, so re-checking it
+# before replay detection denied a command that had been accepted.
+# A hire of the same id with a FRESH key is still `conflict` (covered
+# by the lifecycle scenario above).
+expect(hcm_hire(store2, s, t, hr, envelope("rs-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40).reason).to_equal("duplicate-key")
 expect(audit_verify_chain(store2, "tenant-a")).to_be(true)
 store_close(store2)
 ```
@@ -465,3 +498,54 @@ store_close(store2)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `763597cb9be163fe78fcc49eeb371c01443935e53f4702eda9e2e08f7d1396ca`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `763597cb9be163fe78fcc49eeb371c01443935e53f4702eda9e2e08f7d1396ca`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `763597cb9be163fe78fcc49eeb371c01443935e53f4702eda9e2e08f7d1396ca`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/enterprise/hcm_vertical_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/hcm_vertical_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/hcm_vertical_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/hcm_vertical_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/hcm_vertical_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 15 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/hcm_vertical_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hires, amends with preserved history, and fences a terminated employee' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/hcm_vertical_spec.spl:132:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'denies rbac and session violations at the outer rungs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/hcm_vertical_spec.spl:148:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'closes intervals, computes worked seconds, and denies bad transitions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

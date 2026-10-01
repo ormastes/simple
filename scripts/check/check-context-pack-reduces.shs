@@ -1,0 +1,146 @@
+#!/bin/sh
+# Context-pack reduction gate.
+#
+# WHY THIS EXISTS
+# ---------------
+# src/app/context/main.spl advertises "90% reduction in LLM context tokens".
+# Measured 2026-08-30 on src/app/llm_caret/main.spl it emitted 40,183 bytes from
+# a 39,919-byte input -- the pack was LARGER than the source -- and passing three
+# different target symbols changed the output by under 10 bytes, so the
+# documented "extracts only symbols used by target" was doing nothing at all.
+#
+# The lane was green the whole time. doc/09_report/.../llm_tooling_context_
+# ponytail_mimic_2026-06-29.md records status: pass across a system spec, two
+# unit specs and a 10-entry surface manifest. It certified that the SURFACE
+# exists. Nothing anywhere compared output size to input size, so a tool whose
+# single purpose is compression was free to expand its input and still pass.
+# test/01_unit/app/tooling/context_generate_spec.spl is 208 lines with ZERO
+# `it(` blocks; its closest assertions are to_contain("token_estimate:") and
+# to_contain("token_estimate: 10") -- substring checks on a label.
+#
+# This gate asserts the PROPERTY, not the surface: for every sampled source, the
+# generated pack must be materially smaller than the file it packs. That is the
+# one thing the tool is for, and it is the one thing nothing was checking.
+#
+# OUTPUT CONTRACT
+#   PASS  — <n> file(s) packed, worst reduction <p>%   (n is ALWAYS > 0)
+#   FAIL  — a pack did not reduce, exit 1
+#   ERROR — nothing was checked, exit 2
+# Never read this script's status from a pipeline: $? is the LAST command's.
+set -u
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+SIMPLE=${SIMPLE_BIN:-bin/simple}
+CTX=src/app/context/main.spl
+# Minimum reduction a pack must achieve. Deliberately far below the tool's own
+# "90%" claim: this gate exists to catch NEGATIVE reduction and no-op packing,
+# not to litigate how good the packer is. Raise it as the packer improves;
+# never lower it to make a run pass.
+MIN_REDUCTION_PCT=${CONTEXT_PACK_MIN_REDUCTION_PCT:-10}
+
+# ---------------------------------------------------------------------------
+# pack_bytes <source> -> echoes byte count of the generated pack, or empty on
+# failure. Exit status of the generator is read DIRECTLY into a variable on the
+# line after the call, never through a pipe.
+# ---------------------------------------------------------------------------
+pack_bytes() {
+    _src=$1
+    _out=$(mktemp) || return 1
+    timeout 600 "$SIMPLE" run "$CTX" "$_src" >"$_out" 2>/dev/null
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then rm -f "$_out"; return 1; fi
+    wc -c < "$_out" | tr -d ' '
+    rm -f "$_out"
+    return 0
+}
+
+selftest() {
+    _fail=0
+    # A generator that echoes its input back must be judged NOT to reduce, and a
+    # generator that emits a digest must be judged to reduce. These pin the
+    # comparison itself, independent of the real packer.
+    _t=$(mktemp -d) || return 1
+    _src="$_t/src.txt"
+    i=0; while [ $i -lt 400 ]; do echo "line $i some representative content here" >> "$_src"; i=$((i+1)); done
+    _raw=$(wc -c < "$_src" | tr -d ' ')
+
+    cat "$_src" > "$_t/echo.out"
+    _echo=$(wc -c < "$_t/echo.out" | tr -d ' ')
+    if [ "$_echo" -lt "$_raw" ]; then
+        echo "SELFTEST FAILED: echoing input was scored as a reduction"; _fail=1
+    fi
+
+    head -5 "$_src" > "$_t/digest.out"
+    _dig=$(wc -c < "$_t/digest.out" | tr -d ' ')
+    if [ "$_dig" -ge "$_raw" ]; then
+        echo "SELFTEST FAILED: a 5-line digest of 400 lines was not scored as a reduction"; _fail=1
+    fi
+
+    # The incident shape: output marginally LARGER than input must fail, not pass.
+    { cat "$_src"; echo "trailing wrapper"; } > "$_t/bigger.out"
+    _big=$(wc -c < "$_t/bigger.out" | tr -d ' ')
+    if [ "$_big" -le "$_raw" ]; then
+        echo "SELFTEST FAILED: fixture did not actually grow the input"; _fail=1
+    fi
+    # Byte comparison, NOT percentage. Integer division truncates: a 0.7% growth
+    # (exactly the measured incident: 39,919 -> 40,183) computes to 0%, not to a
+    # negative number, so a percentage test for "< 0" silently misses the real
+    # defect. Tenths are carried for REPORTING only; the verdict is on bytes.
+    if [ "$_big" -le "$_raw" ]; then
+        echo "SELFTEST FAILED: growth fixture was not detected by byte comparison"; _fail=1
+    fi
+    _tenths=$(( 1000 - (_big * 1000 / _raw) ))
+    if [ "$_tenths" -ge 0 ]; then
+        echo "SELFTEST FAILED: growth did not register at tenth-percent resolution (got ${_tenths})"; _fail=1
+    fi
+
+    rm -rf "$_t"
+    [ "$_fail" -eq 0 ] || return 1
+    echo "check-context-pack-reduces: selftest 4/4 fixtures correct"
+    return 0
+}
+
+selftest || { echo "check-context-pack-reduces: SELFTEST FAILED -- the comparison is broken." >&2; exit 2; }
+[ "${1:-}" = --selftest-only ] && exit 0
+
+[ -f "$CTX" ] || { echo "ERROR — nothing was checked: $CTX is missing" >&2; exit 2; }
+command -v "$SIMPLE" >/dev/null 2>&1 || [ -x "$SIMPLE" ] || {
+    echo "ERROR — nothing was checked: no runnable $SIMPLE (absence of a runner is absence of evidence)" >&2; exit 2; }
+
+# Sample real, non-trivial sources. Small files are excluded deliberately: a
+# 20-line file's pack is dominated by fixed header text and would make the gate
+# noisy without testing anything.
+SAMPLES=$(git ls-files 'src/app/*.spl' 'src/app/*/*.spl' 2>/dev/null |
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        _b=$(wc -c < "$f" | tr -d ' ')
+        [ "$_b" -ge 8000 ] && echo "$f"
+    done | head -"${CONTEXT_PACK_SAMPLE_N:-5}")
+
+checked=0; failed=0; worst_tenths=1000; offenders=""
+for f in $SAMPLES; do
+    raw=$(wc -c < "$f" | tr -d ' ')
+    pack=$(pack_bytes "$f") || { echo "  generator failed on $f" >&2; continue; }
+    [ -n "$pack" ] || continue
+    checked=$((checked + 1))
+    tenths=$(( 1000 - (pack * 1000 / raw) ))
+    pct=$(( tenths / 10 ))
+    [ "$tenths" -lt "$worst_tenths" ] && worst_tenths=$tenths
+    printf '  %-58s raw=%s pack=%s reduction=%s.%s%%\n' "$f" "$raw" "$pack" "$pct" "$(( (tenths % 10 + 10) % 10 ))"
+    if [ "$tenths" -lt $(( MIN_REDUCTION_PCT * 10 )) ]; then
+        failed=$((failed + 1)); offenders="$offenders $f(${pct}%)"
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked: no sampled source produced a pack" >&2
+    exit 2
+fi
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $checked file(s) packed, $failed below the ${MIN_REDUCTION_PCT}% floor:$offenders" >&2
+    exit 1
+fi
+echo "PASS — $checked file(s) packed, worst reduction $(( worst_tenths / 10 )).$(( (worst_tenths % 10 + 10) % 10 ))% (floor ${MIN_REDUCTION_PCT}%)"
+exit 0

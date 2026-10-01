@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that PPTX images: export embeds PNG media.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-
-# @req: REQ-APP-OFFICE-001 — stable requirement identity for this spec.
 """PPTX images: deck `![alt](path)` lines through export/import/HTML render.
 
 Ground truth is structural, on the Word lane's 68-byte PNG fixture: the PNG
@@ -21,7 +14,7 @@ per-file time budget (see pptx_layout_spec.spl's note).
 """
 
 use std.spec
-use std.io_runtime.{file_write_bytes}
+use std.fs.{File}
 use std.process.{run}
 use std.common.archive.zip.{zip_extract, zip_extract_text}
 use app.office.pptx_export.{deck_to_pptx_bytes, pptx_bytes_to_deck}
@@ -47,8 +40,6 @@ fn _fixture_png_path() -> text:
 
 describe "PPTX images: export embeds PNG media":
     it "embeds a deck image as ppt/media/image1.png with wired rels and a p:pic":
-        step("Verify: embeds a deck image as ppt/media/image1.png with wired rels and a p:pic")
-        # @req: REQ-APP-OFFICE-001
         val png_path = _fixture_png_path()
         val deck = parse_deck("Pics\nintro line\n![a tiny dot]({png_path})")
         val pptx = deck_to_pptx_bytes(deck)
@@ -56,7 +47,7 @@ describe "PPTX images: export embeds PNG media":
         val media = zip_extract(pptx, "ppt/media/image1.png")
         expect(media != nil).to_be(true)
         if val bytes = media:
-            expect(bytes.len()).to_equal(68)  # oracle: 68 — named expected value from the requirement
+            expect(bytes.len()).to_equal(68)
         # slide rels wire rId3 -> the media part with the image rel type
         val rels = zip_extract_text(pptx, "ppt/slides/_rels/slide1.xml.rels")
         expect(rels).to_contain("Id=\"rId3\"")
@@ -73,14 +64,13 @@ describe "PPTX images: export embeds PNG media":
         expect(types).to_contain("Extension=\"png\"")
         # system unzip agrees: media listed, archive intact
         val out_path = "{_SCRATCH}/pptx_images_spec.pptx"
-        file_write_bytes(out_path, pptx)
+        File.write_bytes(out_path, pptx)
         val list_result = run("unzip", ["-l", out_path])
         expect(list_result.stdout).to_contain("ppt/media/image1.png")
         val test_result = run("unzip", ["-t", out_path])
-        expect(test_result.exit_code).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(test_result.exit_code).to_equal(0)
 
     it "falls back to an alt-text textbox for a missing file (no media, no crash)":
-        step("Verify: falls back to an alt-text textbox for a missing file (no media, no crash)")
         val deck = parse_deck("Pics\n![gone](/no/such/path/missing.png)")
         val pptx = deck_to_pptx_bytes(deck)
         val media = zip_extract(pptx, "ppt/media/image1.png")
@@ -92,19 +82,17 @@ describe "PPTX images: export embeds PNG media":
 
 describe "PPTX images: import round-trip":
     it "preserves the ![alt](path) line in position through deck -> pptx -> deck":
-        step("Verify: preserves the ![alt](path) line in position through deck -> pptx -> deck")
         val png_path = _fixture_png_path()
         val src = "Pics\nbefore line\n![a tiny dot]({png_path})\nafter line"
         val deck = parse_deck(src)
         expect(deck_to_text(deck)).to_equal(src)
         val pptx = deck_to_pptx_bytes(deck)
         val deck2 = pptx_bytes_to_deck(pptx)
-        expect(deck2.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(deck2.len()).to_equal(1)
         expect(deck_to_text(deck2)).to_equal(src)
 
 describe "PPTX images: HTML render":
     it "renders an <img> with inline max-width for an existing file":
-        step("Verify: renders an <img> with inline max-width for an existing file")
         val png_path = _fixture_png_path()
         val deck = parse_deck("Pics\n![a tiny dot]({png_path})")
         val html = render_slide_html(deck[0])
@@ -113,7 +101,6 @@ describe "PPTX images: HTML render":
         expect(html).to_contain("max-width: 100%")
 
     it "renders the alt text in a styled box when the file is missing":
-        step("Verify: renders the alt text in a styled box when the file is missing")
         val deck = parse_deck("Pics\n![gone](/no/such/path/missing.png)")
         val html = render_slide_html(deck[0])
         expect(html.contains("<img")).to_be(false)

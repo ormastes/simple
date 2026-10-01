@@ -7,6 +7,8 @@
  */
 
 #include "cosmos_hal.h"
+#include "cosmos_runtime_core.h"
+#include "cosmos_runtime_residual.h"
 
 typedef unsigned int cosmos_u32;
 typedef int cosmos_i32;
@@ -18,28 +20,11 @@ typedef unsigned int cosmos_size_t;
 static volatile cosmos_u32 cosmos_runtime_ready;
 
 static void *cosmos_copy(void *dst, const void *src, cosmos_size_t n) {
-    volatile unsigned char *d = (volatile unsigned char *)dst;
-    const volatile unsigned char *s = (const volatile unsigned char *)src;
-    cosmos_size_t i;
-    if (dst == (void *)0 || src == (const void *)0) {
-        return dst;
-    }
-    for (i = 0; i < n; i = i + 1U) {
-        d[i] = s[i];
-    }
-    return dst;
+    return cosmos_runtime_core_copy(dst, src, n);
 }
 
 static void *cosmos_fill(void *dst, int value, cosmos_size_t n) {
-    volatile unsigned char *d = (volatile unsigned char *)dst;
-    cosmos_size_t i;
-    if (dst == (void *)0) {
-        return dst;
-    }
-    for (i = 0; i < n; i = i + 1U) {
-        d[i] = (unsigned char)value;
-    }
-    return dst;
+    return cosmos_runtime_core_fill(dst, value, n);
 }
 
 void *memcpy(void *dst, const void *src, cosmos_size_t n) {
@@ -47,23 +32,7 @@ void *memcpy(void *dst, const void *src, cosmos_size_t n) {
 }
 
 void *memmove(void *dst, const void *src, cosmos_size_t n) {
-    volatile unsigned char *d = (volatile unsigned char *)dst;
-    const volatile unsigned char *s = (const volatile unsigned char *)src;
-    cosmos_size_t i;
-    if (dst == (void *)0 || src == (const void *)0 || dst == src) {
-        return dst;
-    }
-    if (d < s) {
-        for (i = 0; i < n; i = i + 1U) {
-            d[i] = s[i];
-        }
-    } else {
-        for (i = n; i != 0U;) {
-            i = i - 1U;
-            d[i] = s[i];
-        }
-    }
-    return dst;
+    return cosmos_runtime_residual_memmove(dst, src, n);
 }
 
 void *memset(void *dst, int value, cosmos_size_t n) {
@@ -71,88 +40,23 @@ void *memset(void *dst, int value, cosmos_size_t n) {
 }
 
 int memcmp(const void *left, const void *right, cosmos_size_t n) {
-    const volatile unsigned char *a = (const volatile unsigned char *)left;
-    const volatile unsigned char *b = (const volatile unsigned char *)right;
-    cosmos_size_t i;
-    if (left == (const void *)0 || right == (const void *)0) {
-        return left == right ? 0 : (left == (const void *)0 ? -1 : 1);
-    }
-    for (i = 0; i < n; i = i + 1U) {
-        if (a[i] != b[i]) {
-            return (int)a[i] - (int)b[i];
-        }
-    }
-    return 0;
+    return cosmos_runtime_residual_memcmp(left, right, n);
 }
 
 cosmos_size_t strlen(const char *text) {
-    const volatile unsigned char *s = (const volatile unsigned char *)text;
-    cosmos_size_t i;
-    if (text == (const char *)0) {
-        return 0U;
-    }
-    for (i = 0; i < COSMOS_RUNTIME_SCAN_LIMIT; i = i + 1U) {
-        if (s[i] == 0U) {
-            return i;
-        }
-    }
-    return COSMOS_RUNTIME_SCAN_LIMIT;
+    return cosmos_runtime_residual_strlen(text);
 }
 
 int strcmp(const char *left, const char *right) {
-    const volatile unsigned char *a = (const volatile unsigned char *)left;
-    const volatile unsigned char *b = (const volatile unsigned char *)right;
-    cosmos_size_t i;
-    if (left == (const char *)0 || right == (const char *)0) {
-        return left == right ? 0 : (left == (const char *)0 ? -1 : 1);
-    }
-    for (i = 0; i < COSMOS_RUNTIME_SCAN_LIMIT; i = i + 1U) {
-        if (a[i] != b[i]) {
-            return (int)a[i] - (int)b[i];
-        }
-        if (a[i] == 0U) {
-            return 0;
-        }
-    }
-    return 0;
+    return cosmos_runtime_residual_strcmp(left, right);
 }
 
 int strncmp(const char *left, const char *right, cosmos_size_t n) {
-    const volatile unsigned char *a = (const volatile unsigned char *)left;
-    const volatile unsigned char *b = (const volatile unsigned char *)right;
-    cosmos_size_t i;
-    if (left == (const char *)0 || right == (const char *)0) {
-        return left == right ? 0 : (left == (const char *)0 ? -1 : 1);
-    }
-    for (i = 0; i < n; i = i + 1U) {
-        if (a[i] != b[i]) {
-            return (int)a[i] - (int)b[i];
-        }
-        if (a[i] == 0U) {
-            return 0;
-        }
-    }
-    return 0;
+    return cosmos_runtime_residual_strncmp(left, right, n);
 }
 
 char *strncpy(char *dst, const char *src, cosmos_size_t n) {
-    volatile unsigned char *d = (volatile unsigned char *)dst;
-    const volatile unsigned char *s = (const volatile unsigned char *)src;
-    cosmos_size_t i;
-    if (dst == (char *)0 || src == (const char *)0) {
-        return dst;
-    }
-    for (i = 0; i < n; i = i + 1U) {
-        d[i] = s[i];
-        if (s[i] == 0U) {
-            i = i + 1U;
-            for (; i < n; i = i + 1U) {
-                d[i] = 0U;
-            }
-            break;
-        }
-    }
-    return dst;
+    return cosmos_runtime_residual_strncpy(dst, src, n);
 }
 
 void *rt_memcpy(void *dst, const void *src, cosmos_size_t n) {
@@ -233,32 +137,8 @@ void __aeabi_memset8(void *dst, cosmos_size_t n, int value) {
 
 static int cosmos_udivmod(cosmos_u32 numerator, cosmos_u32 denominator,
                           cosmos_u32 *quotient, cosmos_u32 *remainder) {
-    cosmos_u32 shift;
-    cosmos_u32 bit;
-    if (denominator == 0U) {
-        return 0;
-    }
-    *quotient = 0U;
-    *remainder = numerator;
-    if (numerator < denominator) {
-        return 1;
-    }
-    shift = (cosmos_u32)__builtin_clz(denominator) -
-            (cosmos_u32)__builtin_clz(numerator);
-    denominator = denominator << shift;
-    bit = 1U << shift;
-    for (;;) {
-        if (*remainder >= denominator) {
-            *remainder = *remainder - denominator;
-            *quotient = *quotient | bit;
-        }
-        if (bit == 1U) {
-            break;
-        }
-        denominator = denominator >> 1;
-        bit = bit >> 1;
-    }
-    return 1;
+    return cosmos_runtime_core_udivmod(numerator, denominator,
+                                       quotient, remainder);
 }
 
 __attribute__((weak)) int __aeabi_idiv0(int return_value) {
@@ -266,17 +146,11 @@ __attribute__((weak)) int __aeabi_idiv0(int return_value) {
 }
 
 static cosmos_u32 cosmos_unsigned_div0_value(cosmos_u32 numerator) {
-    return numerator == 0U ? 0U : ~0U;
+    return cosmos_runtime_core_unsigned_div0_value(numerator);
 }
 
 static cosmos_i32 cosmos_signed_div0_value(cosmos_i32 numerator) {
-    if (numerator > 0) {
-        return (cosmos_i32)0x7FFFFFFFU;
-    }
-    if (numerator < 0) {
-        return (cosmos_i32)0x80000000U;
-    }
-    return 0;
+    return cosmos_runtime_core_signed_div0_value(numerator);
 }
 
 unsigned int __aeabi_uidiv(unsigned int numerator, unsigned int denominator) {

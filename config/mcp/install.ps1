@@ -44,15 +44,7 @@ foreach ($server in $servers) {
 }
 
 & codex mcp remove "chrome-devtools" 2>$null
-
-$node = Get-Command node -ErrorAction SilentlyContinue
-$stitch = Join-Path $projectRoot "bin\codex_stitch_mcp.js"
-if (($null -ne $node) -and (Test-Path -LiteralPath $stitch)) {
-    & codex mcp remove "stitch-mcp" 2>$null
-    & codex mcp remove "stitch" 2>$null
-    & codex mcp add "stitch-mcp" -- node $stitch
-} else {
-    Write-Host "Warning: node or bin\codex_stitch_mcp.js not found, skipping stitch"
-}
+& codex mcp remove "stitch-mcp" 2>$null
+& codex mcp remove "stitch" 2>$null
 
 Write-Host "Installed Codex MCP servers for Windows"

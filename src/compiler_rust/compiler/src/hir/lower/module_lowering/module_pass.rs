@@ -462,11 +462,24 @@ impl Lowerer {
             }
             Node::Function(f) => {
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
-                self.globals.insert(f.name.clone(), ret_ty);
-                self.local_globals.insert(f.name.clone());
+                // Same symbol `lower_function` emits the body under, so a
+                // cross-module same-named function keeps its own return type.
+                let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+                let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
+                self.globals.insert(symbol.clone(), ret_ty);
+                self.local_globals.insert(symbol.clone());
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
-                    self.pure_functions.insert(f.name.clone());
+                    self.pure_functions.insert(symbol.clone());
+                }
+                if ret_ty != TypeId::ANY
+                    && !self.is_reference_type(ret_ty)
+                    && f.body
+                        .statements
+                        .iter()
+                        .all(|statement| matches!(statement, Node::Pass(_)))
+                {
+                    self.proven_nonescaping_functions.insert(symbol);
                 }
             }
             Node::Class(c) => {
@@ -637,6 +650,10 @@ impl Lowerer {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                // Calls consult the callable return-type table before falling
+                // back to the ABI-sized value type. Preserve the declaration's
+                // semantic return type just as imported externs do.
+                self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.local_globals.insert(e.name.clone());
                 // Track as extern function for codegen (BSS slot initialization)
                 self.extern_fn_names.insert(e.name.clone());
@@ -652,6 +669,18 @@ impl Lowerer {
                 self.globals.insert(ec.name.clone(), type_id);
             }
             Node::Static(s) => {
+                // Design A.5: a placed data item is a raw byte image, not a
+                // Simple global — it never enters the tagged-global tables.
+                if let Some(item) = self.raw_data_item_from(
+                    &s.name,
+                    &s.attributes,
+                    s.ty.as_ref(),
+                    &s.value,
+                    matches!(s.mutability, ast::Mutability::Immutable),
+                )? {
+                    self.module.raw_data_items.push(item);
+                    return Ok(());
+                }
                 // Register global/static variable (the explicit `static`
                 // keyword -- NOT `val`/`var` at module scope, which parses
                 // as Node::Let and is handled separately below with the
@@ -664,6 +693,8 @@ impl Lowerer {
                 // Otherwise still ANY for dynamic typing.
                 let ty = if let Some(ref t) = s.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if matches!(&s.value, Expr::Bool(_)) {
+                    TypeId::BOOL
                 } else if try_const_eval(&s.value).is_some() {
                     TypeId::I64
                 } else if matches!(&s.value, Expr::String(_) | Expr::FString { .. }) {
@@ -727,9 +758,16 @@ impl Lowerer {
                 record_struct_literal_init(&mut self.global_init_structs, &s.name, ty, &self.module.types, &s.value);
             }
             Node::Const(c) => {
+                // Design A.5 placed data item (see the Node::Static arm).
+                if let Some(item) = self.raw_data_item_from(&c.name, &c.attributes, c.ty.as_ref(), &c.value, true)? {
+                    self.module.raw_data_items.push(item);
+                    return Ok(());
+                }
                 // Register constant
                 let ty = if let Some(ref t) = c.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if matches!(&c.value, Expr::Bool(_)) {
+                    TypeId::BOOL
                 } else if try_const_eval(&c.value).is_some() {
                     // Unannotated integer literal const → infer i64 so comparisons
                     // against it don't fall into the ANY boxing path (bug: stage4_imported_const_compare)
@@ -818,6 +856,10 @@ impl Lowerer {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
                     } else if let Some(ref t) = extract_pattern_type(&l.pattern) {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
+                    } else if matches!(&l.value, Some(Expr::Bool(_))) {
+                        // Match raw 0/1 global initialization and later typed
+                        // stores; ANY would box assignments but not reads.
+                        TypeId::BOOL
                     } else if l.value.as_ref().and_then(try_const_eval).is_some() {
                         TypeId::I64
                     } else if matches!(&l.value, Some(Expr::String(_)) | Some(Expr::FString { .. })) {
@@ -909,6 +951,135 @@ impl Lowerer {
     ///
     /// This collects all lean blocks (inline code and imports) for later
     /// emission during Lean code generation.
+    /// Design A.5 data items. Returns `Some` when the `const`/`static`
+    /// carries any of `@section`, `@align`, `@global` — it is then a raw
+    /// byte image with a fixed-width integer element type and a
+    /// compile-time array initializer (or `zeroed()`), never a Simple
+    /// value. Anything else under those attributes is an error rather than
+    /// a silent fall-through to the tagged-global path.
+    fn raw_data_item_from(
+        &mut self,
+        name: &str,
+        attributes: &[ast::Attribute],
+        ty: Option<&ast::Type>,
+        value: &Expr,
+        is_const: bool,
+    ) -> LowerResult<Option<crate::hir::HirRawDataItem>> {
+        let mut section = None;
+        let mut align = 0u32;
+        let mut is_global = false;
+        let mut placed = false;
+        for attr in attributes {
+            match attr.name.as_str() {
+                "section" => {
+                    placed = true;
+                    section = attr
+                        .args
+                        .as_ref()
+                        .and_then(|args| args.first())
+                        .and_then(const_string_of);
+                    if section.is_none() {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-DIRECTIVE: @section on `{name}` needs a string section name"
+                        )));
+                    }
+                }
+                "align" => {
+                    placed = true;
+                    let n = match attr.args.as_ref().and_then(|args| args.first()) {
+                        Some(Expr::Integer(n)) => *n,
+                        _ => -1,
+                    };
+                    if n < 1 || n > 4096 || (n & (n - 1)) != 0 {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ALIGN-RANGE: @align on `{name}` must be a power of two in 1..4096, got {n}"
+                        )));
+                    }
+                    align = n as u32;
+                }
+                "global" => {
+                    placed = true;
+                    is_global = true;
+                }
+                _ => {}
+            }
+        }
+        if !placed {
+            return Ok(None);
+        }
+        if is_global
+            && !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'$')
+        {
+            return Err(LowerError::Unsupported(format!(
+                "E-GLOBAL-MANGLE: `{name}` is not a valid assembler symbol name"
+            )));
+        }
+        let Some(ty) = ty else {
+            return Err(LowerError::Unsupported(format!(
+                "E-RAW-DATA-TYPE: placed data item `{name}` needs an explicit `[T; N]` type"
+            )));
+        };
+        let ty_id = self.resolve_type(ty)?;
+        let (element, size) = match self.module.types.get(ty_id) {
+            Some(HirType::Array { element, size }) => (*element, *size),
+            _ => {
+                return Err(LowerError::Unsupported(format!(
+                    "E-RAW-DATA-TYPE: placed data item `{name}` must be a fixed-width integer array `[T; N]`"
+                )))
+            }
+        };
+        let element_bits = match element {
+            TypeId::U8 | TypeId::I8 => 8,
+            TypeId::U16 | TypeId::I16 => 16,
+            TypeId::U32 | TypeId::I32 => 32,
+            TypeId::U64 | TypeId::I64 => 64,
+            _ => {
+                return Err(LowerError::Unsupported(format!(
+                    "E-RAW-DATA-TYPE: placed data item `{name}` element type must be u8/u16/u32/u64 or i8..i64"
+                )))
+            }
+        };
+        let zeroed =
+            matches!(value, Expr::Call { callee, .. } if matches!(&**callee, Expr::Identifier(f) if f == "zeroed"));
+        let values = if zeroed {
+            Vec::new()
+        } else if let Some(values) = try_const_array_eval(value) {
+            values
+        } else {
+            return Err(LowerError::Unsupported(format!(
+                "E-RAW-DATA-INIT: placed data item `{name}` initializer must be a compile-time integer array or zeroed()"
+            )));
+        };
+        let count = match size {
+            Some(n) => n,
+            None if !zeroed => values.len(),
+            None => {
+                return Err(LowerError::Unsupported(format!(
+                    "E-RAW-DATA-TYPE: zeroed() data item `{name}` needs an explicit `[T; N]` length"
+                )))
+            }
+        };
+        if !zeroed && values.len() != count {
+            return Err(LowerError::Unsupported(format!(
+                "E-RAW-DATA-INIT: `{name}` declares {count} elements but the initializer has {}",
+                values.len()
+            )));
+        }
+        Ok(Some(crate::hir::HirRawDataItem {
+            name: name.to_string(),
+            section,
+            align,
+            is_global,
+            is_const,
+            element_bits,
+            count,
+            values,
+            zeroed,
+        }))
+    }
+
     fn lower_lean_blocks(&mut self, ast_module: &Module) {
         let module_name = ast_module.name.clone().unwrap_or_else(|| "module".to_string());
 
@@ -1228,19 +1399,111 @@ impl Lowerer {
         }
     }
 
-    /// M12 3b: record each free function's parameter default-value expressions
+    /// Record callable parameter defaults under the spelling used at each HIR
+    /// call site.  Impl methods must be qualified: a bare method name collides
+    /// across owners and would make an omitted argument select another type's
+    /// default.
     /// so omitted trailing arguments can be filled at call sites (`lower_call`).
     /// Captured here (from the AST) because the HIR function *type* carries only
     /// parameter TypeIds, not the default exprs.
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
-                if f.params.iter().any(|p| p.default.is_some()) {
-                    self.fn_param_defaults
-                        .insert(f.name.clone(), f.params.iter().map(|p| p.default.clone()).collect());
+                let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+                let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
+                // An all-None vector is authoritative too: a declaration with
+                // no defaults must not borrow an imported namesake's defaults.
+                self.fn_param_defaults
+                    .insert(symbol, f.params.iter().map(|p| p.default.clone()).collect());
+            }
+            if let Node::Impl(impl_block) = item {
+                let owner = match &impl_block.target_type {
+                    simple_parser::ast::Type::Simple(name) => Some(name),
+                    simple_parser::ast::Type::Generic { name, .. } => Some(name),
+                    _ => None,
+                };
+                if let Some(owner) = owner {
+                    for method in &impl_block.methods {
+                        let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                            &method.params[1..]
+                        } else { &method.params[..] };
+                        if user_params.iter().any(|p| p.default.is_some()) {
+                            self.fn_param_defaults.insert(
+                                format!("{}.{}", owner, method.name),
+                                user_params.iter().map(|p| p.default.clone()).collect(),
+                            );
+                        }
+                    }
+                }
+            }
+            if let Node::Class(class) = item {
+                for method in &class.methods {
+                    let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                        &method.params[1..]
+                    } else { &method.params[..] };
+                    if user_params.iter().any(|p| p.default.is_some()) {
+                        self.fn_param_defaults.insert(
+                            format!("{}.{}", class.name, method.name),
+                            user_params.iter().map(|p| p.default.clone()).collect(),
+                        );
+                    }
+                }
+            }
+            if let Node::Struct(struct_) = item {
+                for method in &struct_.methods {
+                    let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                        &method.params[1..]
+                    } else { &method.params[..] };
+                    if user_params.iter().any(|p| p.default.is_some()) {
+                        self.fn_param_defaults.insert(
+                            format!("{}.{}", struct_.name, method.name),
+                            user_params.iter().map(|p| p.default.clone()).collect(),
+                        );
+                    }
                 }
             }
         }
+    }
+
+    /// Record the free-function names THIS module's own source declares.
+    ///
+    /// Consumed by `lower_identifier`: a `use m.{f as g}` whose ORIGINAL name
+    /// `f` is also declared here must NOT be rewritten back to the bare `f`,
+    /// because the bare name is claimed by the local definition and the import
+    /// would silently rebind to it (`fn f(): g()` then calls itself forever).
+    /// See `doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md`.
+    /// Populated ONLY for a non-flattened unit. A flattened unit merges every
+    /// imported module's functions into these same `items`, so "declared here"
+    /// would be true of every import and the suppression would misfire — and it
+    /// needs no suppression anyway: `collect_flattened_import_aliases` records
+    /// an owner-exact binding that `lower_identifier` consults FIRST. The
+    /// `__simple_flatten_import_binding__` markers the flattener emits are the
+    /// discriminator (measured: present on the flattened/interpreter lane,
+    /// absent on the native-project lane, which is exactly why that lane's
+    /// `import_alias_bindings` is empty and the bug lived there).
+    fn collect_own_declared_function_names(&mut self, ast_module: &Module) {
+        let flattened = ast_module.items.iter().any(|item| match item {
+            Node::Const(c) => crate::interpreter::decode_import_binding_marker(&c.name).is_some(),
+            _ => false,
+        });
+        if flattened {
+            return;
+        }
+        for item in &ast_module.items {
+            if let Node::Function(f) = item {
+                self.own_declared_function_names.insert(f.name.clone());
+            }
+        }
+    }
+
+    /// Rename colliding flattened globals to owner-exact symbols and record
+    /// the census the reference resolver consults; `None` = no collision.
+    fn qualify_flattened_globals(&mut self, ast_module: &Module) -> Option<Module> {
+        let (module, owners, symbol_owners) =
+            super::flatten_global_owner::module_with_owner_qualified_globals(ast_module)?;
+        self.flatten_global_owners = owners;
+        self.flatten_global_symbol_owners = symbol_owners;
+        Some(module)
     }
 
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
@@ -1250,13 +1513,18 @@ impl Lowerer {
         // See `nested_def_hoist.rs` for the rules and rationale.
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        // Same-named globals of different flattened modules get owner-exact
+        // symbols before any registration (see `flatten_global_owner.rs`).
+        let qualified = self.qualify_flattened_globals(ast_module);
+        let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 
         self.module.name = ast_module.name.clone();
-        self.collect_fn_param_defaults(ast_module);
         // Codegen-side consumer of the flattened import-binding markers, so
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_fn_param_defaults(ast_module);
+        self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         // This registers placeholders so types can reference each other
@@ -1330,9 +1598,24 @@ impl Lowerer {
         // `BeDomNode { style: StyleProps }` and StyleProps is in css.spl,
         // pre-registering ensures StyleProps exists when BeDomNode's fields
         // are resolved in Pass 0.5b.
+        // `export use m.*` re-exports a module AND imports it here; it was
+        // matched by neither pass, so every type reached only that way stayed
+        // unregistered and `resolve_type` degraded it to ANY under
+        // `lenient_types`. That erasure is what made `CompileContext.create`
+        // (driver_types.spl, whose only route to `CompileOptions` is
+        // `export use compiler.common.driver_core_types.*`) resolve field
+        // indices through the receiver-blind "most fields wins" fallback and
+        // read `mcdc_owner_bytes` at MirLowering's index 26 (0xd0) instead of
+        // CompilerConfig's 10 (0x50) -- past the end of a 112-byte object.
         for item in &ast_module.items {
-            if let Node::UseStmt(use_stmt) = item {
-                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            match item {
+                Node::UseStmt(use_stmt) => {
+                    let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+                }
+                Node::ExportUseStmt(export_use) if !export_use.path.segments.is_empty() => {
+                    let _ = self.preregister_imported_type_names(&export_use.path, &export_use.target);
+                }
+                _ => {}
             }
         }
 
@@ -1340,6 +1623,15 @@ impl Lowerer {
         // Now that all type names are pre-registered (Pass 0.5a), field type resolution
         // can find types from other imported modules.
         for item in &ast_module.items {
+            if let Node::ExportUseStmt(export_use) = item {
+                if !export_use.path.segments.is_empty() {
+                    // Best-effort, exactly like the other `export use` loader in
+                    // `import_loader.rs`: a re-export that cannot be loaded must
+                    // not turn into a hard error here, because it was never
+                    // loaded at all before this change.
+                    let _ = self.load_imported_types(&export_use.path, &export_use.target);
+                }
+            }
             if let Node::UseStmt(use_stmt) = item {
                 // Log import loading failures -- silent failures cause cross-module
                 // FieldGet bugs (wrong byte_offset when type falls back to ANY).
@@ -1771,6 +2063,11 @@ impl Lowerer {
                     Node::Const(c) => (c.name.clone(), &c.value),
                     _ => continue,
                 };
+                // Design A.5 raw data items are placed byte images, never
+                // runtime-initialized Simple globals.
+                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
+                    continue;
+                }
                 let has_static_init = self.global_init_values.contains_key(&name)
                     || self.global_init_strings.contains_key(&name)
                     || self.global_init_arrays.contains_key(&name)
@@ -1780,7 +2077,13 @@ impl Lowerer {
                     continue;
                 }
                 let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
-                let hir_val = self.lower_expr(value, &mut dyn_ctx)?;
+                // Resolve the initializer's own references through the owner
+                // of the global it initializes (flattened same-name globals).
+                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx);
+                self.current_function_owner = previous_owner;
+                let hir_val = hir_val?;
                 // Codegen decides whether a global's backing data is writable
                 // by consulting `dynamic_init_globals` (mirrors the same
                 // check for global_init_strings/arrays/functions/structs) --
@@ -1903,14 +2206,19 @@ impl Lowerer {
         // Hoist nested type definitions to module scope (see `lower_module`).
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        // Same-named globals of different flattened modules get owner-exact
+        // symbols before any registration (see `flatten_global_owner.rs`).
+        let qualified = self.qualify_flattened_globals(ast_module);
+        let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
-        self.collect_fn_param_defaults(ast_module);
         // Codegen-side consumer of the flattened import-binding markers, so
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_fn_param_defaults(ast_module);
+        self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         for item in &ast_module.items {
@@ -1974,14 +2282,26 @@ impl Lowerer {
         }
 
         // Pass 0.5a: Pre-register type NAMES from ALL imported modules as empty placeholders
+        // `export use m.*` counts as an import here too -- see the sibling pass.
         for item in &ast_module.items {
-            if let Node::UseStmt(use_stmt) = item {
-                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            match item {
+                Node::UseStmt(use_stmt) => {
+                    let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+                }
+                Node::ExportUseStmt(export_use) if !export_use.path.segments.is_empty() => {
+                    let _ = self.preregister_imported_type_names(&export_use.path, &export_use.target);
+                }
+                _ => {}
             }
         }
 
         // Pass 0.5b: Load full types from imported modules
         for item in &ast_module.items {
+            if let Node::ExportUseStmt(export_use) = item {
+                if !export_use.path.segments.is_empty() {
+                    let _ = self.load_imported_types(&export_use.path, &export_use.target);
+                }
+            }
             if let Node::UseStmt(use_stmt) = item {
                 if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
                     unresolved_import_fatal(&use_stmt.path.segments, &e)?;
@@ -2108,6 +2428,11 @@ impl Lowerer {
                     Node::Const(c) => (c.name.clone(), &c.value),
                     _ => continue,
                 };
+                // Design A.5 raw data items are placed byte images, never
+                // runtime-initialized Simple globals.
+                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
+                    continue;
+                }
                 let has_static_init = self.global_init_values.contains_key(&name)
                     || self.global_init_strings.contains_key(&name)
                     || self.global_init_arrays.contains_key(&name)
@@ -2117,7 +2442,13 @@ impl Lowerer {
                     continue;
                 }
                 let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
-                let hir_val = self.lower_expr(value, &mut dyn_ctx)?;
+                // Resolve the initializer's own references through the owner
+                // of the global it initializes (flattened same-name globals).
+                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx);
+                self.current_function_owner = previous_owner;
+                let hir_val = hir_val?;
                 // Codegen decides whether a global's backing data is writable
                 // by consulting `dynamic_init_globals` (mirrors the same
                 // check for global_init_strings/arrays/functions/structs) --

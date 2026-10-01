@@ -1,0 +1,48 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{SymbolId}
+use compiler.hir.abi_interface.{hir_abi_interface_parts_v1}
+
+describe "method accumulator uses stable symbol numbers":
+    it "finds a method through a separately constructed equivalent SymbolId":
+        val source = "class Holder:\n    value: i64\n    fn first() -> i64:\n        19\n    fn second() -> i64:\n        23\n"
+        val parsed = parse_full_frontend(source, "method_identity", "method_identity", Logger(level: 0))
+        var lowering = HirLowering.with_filename("method_identity")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.lowering_error_count()).to_equal(0)
+        expect(lowering.lowered_impl_functions.keys().len()).to_equal(2)
+        expect(hir.functions.values().len()).to_equal(2)
+        var names: [text] = []
+        for method in hir.functions.values():
+            val copied_id = SymbolId(id: method.symbol.id)
+            val restored = lowering.lowered_impl_functions[copied_id.id]
+            expect(restored.symbol.id).to_equal(method.symbol.id)
+            expect(restored.name).to_equal(method.name)
+            names.push(method.name)
+        expect(names).to_contain("first")
+        expect(names).to_contain("second")
+        # ABI enumeration must inspect both actual method objects safely.
+        # The preceding identity/count/name assertions prohibit a nil-skip fix.
+        match hir_abi_interface_parts_v1(hir):
+            case Ok(parts): expect(parts.len()).to_be_greater_than(0)
+            case Err(reason): assert(false)
+
+    it "preserves multiple explicit impl methods after merging":
+        val source = "struct Holder:\n    value: i64\nimpl Holder:\n    fn first() -> i64:\n        19\n    fn second() -> i64:\n        23\n"
+        val parsed = parse_full_frontend(source, "impl_identity", "impl_identity", Logger(level: 0))
+        var lowering = HirLowering.with_filename("impl_identity")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.lowering_error_count()).to_equal(0)
+        expect(hir.functions.values().len()).to_equal(2)
+        var names: [text] = []
+        for method in hir.functions.values():
+            names.push(method.name)
+            expect(lowering.lowered_impl_functions[method.symbol.id].symbol.id).to_equal(method.symbol.id)
+        expect(names).to_contain("first")
+        expect(names).to_contain("second")
+        match hir_abi_interface_parts_v1(hir):
+            case Ok(parts): expect(parts.len()).to_be_greater_than(0)
+            case Err(reason): assert(false)

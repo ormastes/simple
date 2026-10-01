@@ -1,4 +1,9 @@
 # Pipe-lambda typed parameters rejected by parser (fixed in seed source, pending rebuild)
+## Closed 2026-09-16 — Status RESOLVED 2026-08-17: rebuilt binary repro parses and evaluates correctly
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Status (2026-08-17): RESOLVED — the pending rebuild has happened and the repro passes.**
 
@@ -139,3 +144,4 @@ exception for small, safe, contained parser additions.
 - Summary: **parser-level verified (in-crate tests green); deployment
   pending-rebuild** (the `.spl` regression spec stays RED, correctly, until
   then).
+

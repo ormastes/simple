@@ -1,0 +1,225 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+builder=${CHROMIUM_ORACLE_BUILDER:-"$root/scripts/check/build-chromium-primitive-oracle.shs"}
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+[ -f "$builder" ] || fail builder-missing
+sh -n "$builder" || fail shell-syntax
+grep -Fq 'stage2-admitted/simple' "$builder" || fail admitted-stage3-path-missing
+grep -Fq 'native-build --emit-shared' "$builder" || fail canonical-shared-output-flag-missing
+if grep -Fq 'SIMPLE_NATIVE_BUILD_EMIT_OBJECT=shared' "$builder"; then
+    fail overwritten-shared-output-env-remains
+fi
+grep -Fq -- '--entry "$oracle_source"' "$builder" || fail explicit-entry-missing
+grep -Fq -- '--entry-closure' "$builder" || fail entry-closure-missing
+grep -Fq 'bootstrap_stage3_verify_stage2_admission_receipt' "$builder" ||
+    fail canonical-admission-replay-missing
+grep -Fq 'require_hash_matches output_sha256 "$manifest" "$stage3_bin"' "$builder" ||
+    fail stage3-output-binding-missing
+grep -Fq 'ln "$tmp_artifact" "$output"' "$builder" || fail no-clobber-output-publish-missing
+grep -Fq 'ln "$receipt_tmp" "$receipt"' "$builder" || fail no-clobber-receipt-publish-missing
+grep -Fq 'simple-bootstrap-stage2-parent-sanity-v1' "$builder" || fail parent-sanity-gate-missing
+grep -Fq 'simple-bootstrap-stage2-parent-provenance-v1' "$builder" || fail parent-provenance-gate-missing
+grep -Fq 'simple-bootstrap-stage3-provenance-v4' "$builder" || fail stage3-provenance-gate-missing
+grep -Fq 'simple.rejected' "$builder" || fail rejected-candidate-fence-missing
+grep -Fq 'compiler-version-identity-invalid' "$builder" || fail exact-version-fence-missing
+grep -Fq 'current-source-not-admitted' "$builder" || fail source-freshness-gate-missing
+grep -Fq 'current-runtime-not-admitted' "$builder" || fail runtime-freshness-gate-missing
+grep -Fq 'current-tools-not-admitted' "$builder" || fail tool-freshness-gate-missing
+grep -Fq 'PATH="$build_path"' "$builder" || fail admitted-build-path-not-used
+grep -Fq 'sub(/^_/, "", name)' "$builder" || fail darwin-symbol-normalization-missing
+grep -Fq 'name ~ /^simple_chromium_oracle_/' "$builder" ||
+    fail oracle-symbol-namespace-filter-missing
+if grep -Fq 'sort -u >"$actual"' "$builder"; then
+    fail duplicate-export-suppression-remains
+fi
+grep -Fq 'lipo -archs' "$builder" || fail exact-mach-o-architecture-gate-missing
+
+platform=aarch64-apple-darwin
+tmp_root=${TMPDIR:-/tmp}
+tmp_root=${tmp_root%/}
+fixture=$(mktemp -d "$tmp_root/chromium-oracle-builder-contract.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/stage3/$platform/stage2-admitted" "$fixture/stage2/$platform"
+
+# The builder is intentionally macOS-only, while this refusal-path contract is
+# portable. Keep its host probe deterministic so Linux CI can reach the
+# no-clobber and provenance checks without weakening the production builder.
+mkdir -p "$fixture/bin"
+cat >"$fixture/bin/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -s) printf '%s\n' Darwin ;;
+    -m) printf '%s\n' arm64 ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod 755 "$fixture/bin/uname"
+PATH="$fixture/bin:$PATH"
+export PATH
+# Missing compiler and receipts must reject before any compiler invocation or
+# output creation.  This is the only executable fixture path: it deliberately
+# does not synthesize a compiler or a Mach-O artifact.
+output="$fixture/result/libsimple_chromium_primitive_oracle.dylib"
+
+# Existing output or receipt paths are never overwritten. These checks run
+# before receipt verification, so they need no synthetic compiler authority.
+mkdir -p "$(dirname -- "$output")"
+printf 'stale-output\n' >"$output"
+if "$builder" --bootstrap-output="$fixture" --output="$output" \
+    >"$fixture/collision.out" 2>"$fixture/collision.err"; then
+    fail existing-output-was-overwritten
+fi
+grep -Fq 'output-path-collision' "$fixture/collision.err" ||
+    fail output-collision-diagnostic
+grep -Fqx 'stale-output' "$output" || fail existing-output-was-mutated
+rm -f "$output"
+
+printf 'stale-receipt\n' >"$output.receipt.env"
+if "$builder" --bootstrap-output="$fixture" --output="$output" \
+    >"$fixture/receipt-collision.out" 2>"$fixture/receipt-collision.err"; then
+    fail existing-receipt-was-overwritten
+fi
+grep -Fq 'receipt-path-collision' "$fixture/receipt-collision.err" ||
+    fail receipt-collision-diagnostic
+grep -Fqx 'stale-receipt' "$output.receipt.env" || fail existing-receipt-was-mutated
+rm -f "$output.receipt.env"
+
+if "$builder" --bootstrap-output="$fixture" --output="$output" >"$fixture/out" 2>"$fixture/err"; then
+    fail missing-admission-was-accepted
+fi
+grep -Fq 'compiler-not-canonical' "$fixture/err" || fail missing-admission-diagnostic
+[ ! -e "$output" ] || fail output-created-on-refusal
+[ ! -e "$output.receipt.env" ] || fail receipt-created-on-refusal
+
+# A symlink at the admitted compiler path must remain rejected, even when its
+# target looks executable.  The target is intentionally not a compiler.
+printf 'not-a-compiler\n' >"$fixture/not-a-compiler"
+ln -s "$fixture/not-a-compiler" \
+    "$fixture/stage3/$platform/stage2-admitted/simple"
+if "$builder" --bootstrap-output="$fixture" --output="$output" >"$fixture/symlink.out" 2>"$fixture/symlink.err"; then
+    fail compiler-symlink-was-accepted
+fi
+grep -Fq 'compiler-not-canonical' "$fixture/symlink.err" || fail compiler-symlink-diagnostic
+[ ! -e "$output" ] || fail output-created-on-symlink-refusal
+
+# The rejected output namespace is inert, even if a caller tries to point the
+# builder at it as though it were a fresh bootstrap root.
+rejected_root="$fixture/simple.rejected"
+mkdir -p "$rejected_root/stage3/$platform/stage2-admitted" "$rejected_root/stage2/$platform"
+if "$builder" --bootstrap-output="$rejected_root" --output="$output" \
+    >"$fixture/rejected.out" 2>"$fixture/rejected.err"; then
+    fail rejected-output-was-accepted
+fi
+grep -Fq 'rejected-bootstrap-output' "$fixture/rejected.err" || fail rejected-output-diagnostic
+
+hash_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$1" | awk '{print $1}'
+    else
+        sha256sum -- "$1" | awk '{print $1}'
+    fi
+}
+
+# Build a deliberately incomplete synthetic receipt graph solely to prove that
+# plausible hashes and status strings cannot replace producer evidence. The
+# compiler is never allowed to build an artifact.
+make_receipt_fixture() {
+    lane=$1
+    lane_root="$fixture/$lane"
+    stage2="$lane_root/stage2/$platform"
+    stage3="$lane_root/stage3/$platform"
+    admission_dir="$stage3/stage2-admitted"
+    compiler="$admission_dir/simple"
+    admission="$admission_dir/admission.env"
+    sanity="$stage2/stage2-sanity.receipt"
+    provenance="$stage2/stage2-provenance.receipt"
+    manifest="$stage3/provenance.env"
+    source_snapshot="$stage3/source-inputs-after.txt"
+    runtime_snapshot="$stage3/runtime-admitted.txt"
+    tool_snapshot="$stage3/tool-authority-before.txt"
+    mkdir -p "$admission_dir" "$stage2"
+    printf '#!/bin/sh\nprintf "simple-bootstrap fake\\n"\n' >"$compiler"
+    chmod 755 "$compiler"
+    printf 'source\n' >"$source_snapshot"
+    printf 'runtime\n' >"$runtime_snapshot"
+    printf 'tool\n' >"$tool_snapshot"
+    compiler_sha=$(hash_file "$compiler")
+    source_sha=$(hash_file "$source_snapshot")
+    runtime_sha=$(hash_file "$runtime_snapshot")
+    tool_sha=$(hash_file "$tool_snapshot")
+    {
+        echo schema=simple-bootstrap-stage2-admission-v2
+        echo status=admitted
+        echo candidate_path="$compiler"
+        echo candidate_sha256="$compiler_sha"
+        echo source_snapshot_path="$source_snapshot"
+        echo source_snapshot_sha256="$source_sha"
+        echo runtime_snapshot_path="$runtime_snapshot"
+        echo runtime_snapshot_sha256="$runtime_sha"
+        echo tool_authority_path="$tool_snapshot"
+        echo tool_authority_sha256="$tool_sha"
+        echo checks_executed_at_admission=1
+        echo checks_replayed_during_stage3=0
+    } >"$admission"
+    admission_sha=$(hash_file "$admission")
+    {
+        echo schema=simple-bootstrap-stage2-parent-sanity-v1
+        echo 'stage2-sanity: pass'
+        echo candidate_sha256="$compiler_sha"
+        echo admission_receipt_path="$admission"
+        echo admission_receipt_sha256="$admission_sha"
+    } >"$sanity"
+    {
+        echo schema=simple-bootstrap-stage2-parent-provenance-v1
+        echo 'stage2-provenance: pure-simple'
+        echo authority=admitted-pure-simple-runtime-stage2-trust-root
+        echo candidate_sha256="$compiler_sha"
+        echo admission_receipt_path="$admission"
+        echo source_snapshot_sha256="$source_sha"
+        echo runtime_snapshot_sha256="$runtime_sha"
+        echo tool_authority_sha256="$tool_sha"
+        echo admission_receipt_sha256="$admission_sha"
+    } >"$provenance"
+    {
+        echo schema=simple-bootstrap-stage3-provenance-v4
+        echo status=pass
+        echo artifact_kind=pure-simple-bootstrap-compiler
+        echo full_cli_status=separate-not-proven
+        echo stage2_sanity_status=pass
+        echo stage2_receiver_status=pass
+        echo stage2_admitted_path="$compiler"
+        echo stage2_admitted_sha256="$compiler_sha"
+        echo source_snapshot_path="$source_snapshot"
+        echo source_snapshot_sha256="$source_sha"
+        echo source_fingerprint="$source_sha"
+        echo output_sha256="$compiler_sha"
+    } >"$manifest"
+}
+
+make_receipt_fixture stale
+stale_root="$fixture/stale"
+stale_admission="$stale_root/stage3/$platform/stage2-admitted/admission.env"
+sed 's/^candidate_sha256=.*/candidate_sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$stale_admission" >"$stale_admission.tmp"
+mv "$stale_admission.tmp" "$stale_admission"
+if "$builder" --bootstrap-output="$stale_root" --output="$output" \
+    >"$fixture/stale.out" 2>"$fixture/stale.err"; then
+    fail stale-receipts-were-accepted
+fi
+grep -Fq 'candidate_sha256-mismatch' "$fixture/stale.err" || fail stale-receipt-diagnostic
+
+make_receipt_fixture fabricated
+fabricated_root="$fixture/fabricated"
+if "$builder" --bootstrap-output="$fabricated_root" --output="$output" \
+    >"$fixture/fabricated.out" 2>"$fixture/fabricated.err"; then
+    fail fabricated-receipt-graph-was-accepted
+fi
+grep -Eq 'canonical-bootstrap-file-missing-or-symlink|receipt-key-set-invalid|stage2-admission-deep-replay-failed' \
+    "$fixture/fabricated.err" || fail fabricated-receipt-diagnostic
+[ ! -e "$output" ] || fail output-created-on-fabricated-receipt-refusal
+
+printf '%s\n' 'PASS: Chromium oracle builder is provenance-bound, no-clobber, and has no-build refusal fixtures'

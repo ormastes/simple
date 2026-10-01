@@ -24,6 +24,10 @@ extern fn rt_net_tx_test() -> i64
 extern fn rt_net_rx_ready() -> i64
 extern fn rt_net_stats() -> i64
 extern fn spl_shim_current_task_id() -> u64
+extern fn spl_shim_net_direct_socket_check() -> i64
+extern fn spl_shim_net_direct_bind_check(address: u32, port: u16) -> i64
+extern fn spl_shim_net_direct_listener_check(port: u16) -> i64
+extern fn spl_shim_net_direct_outbound_check() -> i64
 
 val VIRTIO_VENDOR: u16 = 0x1AF4
 val VIRTIO_DEV_NET: u16 = 0x1000
@@ -145,9 +149,15 @@ fn net_boot_init() -> bool:
 
 fn net_boot_init_arm64_mmio() -> bool:
     """Initialize QEMU ARM virt networking without changing PCI users."""
+    # A second initialization would replace the physical socket table while
+    # the direct fd map still owns descriptors, including Closing quarantine.
+    if g_net_initialized or g_arm64_net_fd_map.len() > 0u64:
+        return false
     log_raw_println("[net-init] ARM64 VirtIO-MMIO network initialization")
     g_arm64_net_fd_map = []
     g_arm64_net_fd_ready = true
+    g_arm64_net_next_fd = 100
+    g_arm64_net_quarantine_pending = false
     var driver = VirtioNetDriver.new()
     val initialized = driver.init_arm64_mmio()
     if initialized.is_err():
@@ -171,38 +181,64 @@ struct Arm64NetFdMap:
     owner_task: u64
     external_fd: i32
     internal_fd: i32
+    route: u8
+    address: u32
+    port: u16
 
 val ARM64_NET_FD_CAPACITY: u64 = 64
 val ARM64_NET_IO_MAX: u64 = 1048576
+val ARM64_NET_RESERVED: u8 = 0u8
+val ARM64_NET_LISTENER: u8 = 1u8
+val ARM64_NET_ACCEPTED: u8 = 2u8
+val ARM64_NET_OUTBOUND: u8 = 3u8
+val ARM64_NET_CLOSING: u8 = 4u8
 var g_arm64_net_fd_map: [Arm64NetFdMap] = []
 var g_arm64_net_fd_ready: bool = false
+var g_arm64_net_next_fd: i32 = 100
+var g_arm64_net_quarantine_pending: bool = false
+
+pub struct Arm64NetRetirementReceiptV1:
+    attempted: u64
+    retired: u64
+    pending: u64
 
 fn _arm64_net_fd_ensure():
     if not g_arm64_net_fd_ready:
         g_arm64_net_fd_map = []
         g_arm64_net_fd_ready = true
+        g_arm64_net_next_fd = 100
+        g_arm64_net_quarantine_pending = false
+
+fn _arm64_net_external_fd_valid(external: u64) -> bool:
+    external >= 100u64 and external < 2147483647u64
 
 fn _arm64_net_fd_reserve() -> i64:
     _arm64_net_fd_ensure()
     if g_arm64_net_fd_map.len() >= ARM64_NET_FD_CAPACITY:
+        _ = net_arm64_reap_quarantine_v1(4u64)
+        if g_arm64_net_fd_map.len() >= ARM64_NET_FD_CAPACITY:
+            return -24
+    # Never recycle an external number during one boot: a stale user fd must
+    # not gain authority over a later socket owned by the same task.
+    if g_arm64_net_next_fd == 2147483647:
         return -24
-    # Choose the lowest free descriptor so close deterministically permits
-    # reuse instead of exhausting a monotonic 64-entry namespace.
-    var candidate: i32 = 100
-    while candidate < 100 + ARM64_NET_FD_CAPACITY as i32:
-        var used = false
-        var i: u64 = 0
-        while i < g_arm64_net_fd_map.len():
-            if g_arm64_net_fd_map[i].owner_task == spl_shim_current_task_id() and g_arm64_net_fd_map[i].external_fd == candidate:
-                used = true
-            i = i + 1
-        if not used:
-            g_arm64_net_fd_map.push(Arm64NetFdMap(owner_task: spl_shim_current_task_id(), external_fd: candidate, internal_fd: -1))
-            return candidate as i64
-        candidate = candidate + 1
-    -24
+    val candidate = g_arm64_net_next_fd
+    g_arm64_net_next_fd = g_arm64_net_next_fd + 1
+    g_arm64_net_fd_map.push(Arm64NetFdMap(
+        owner_task: spl_shim_current_task_id(), external_fd: candidate,
+        internal_fd: -1, route: ARM64_NET_RESERVED, address: 0u32, port: 0u16))
+    candidate as i64
 
-fn _arm64_net_fd_commit(external_fd: i32, internal_fd: i32) -> bool:
+fn _arm64_net_fd_reserved(external_fd: i32) -> bool:
+    for entry in g_arm64_net_fd_map:
+        if entry.owner_task == spl_shim_current_task_id() and
+           entry.external_fd == external_fd:
+            return entry.route == ARM64_NET_RESERVED and entry.internal_fd < 0
+    false
+
+fn _arm64_net_fd_commit(
+    external_fd: i32, internal_fd: i32, route: u8, address: u32, port: u16
+) -> bool:
     var i: u64 = 0
     while i < g_arm64_net_fd_map.len():
         if g_arm64_net_fd_map[i].owner_task == spl_shim_current_task_id() and g_arm64_net_fd_map[i].external_fd == external_fd:
@@ -210,20 +246,45 @@ fn _arm64_net_fd_commit(external_fd: i32, internal_fd: i32) -> bool:
             # handle here would orphan it when a caller repeats bind/connect.
             # Both callers already close their newly-created handle when this
             # commit fails, preserving the original socket owner unchanged.
-            if g_arm64_net_fd_map[i].internal_fd >= 0:
+            if g_arm64_net_fd_map[i].route != ARM64_NET_RESERVED or
+               g_arm64_net_fd_map[i].internal_fd >= 0:
                 return false
-            g_arm64_net_fd_map[i] = Arm64NetFdMap(owner_task: spl_shim_current_task_id(), external_fd: external_fd, internal_fd: internal_fd)
+            g_arm64_net_fd_map[i] = Arm64NetFdMap(
+                owner_task: spl_shim_current_task_id(), external_fd: external_fd,
+                internal_fd: internal_fd, route: route, address: address, port: port)
             return true
         i = i + 1
     false
 
+fn _arm64_net_listener_port(external_fd: i32) -> i64:
+    for entry in g_arm64_net_fd_map:
+        if entry.owner_task == spl_shim_current_task_id() and
+           entry.external_fd == external_fd and
+           entry.route == ARM64_NET_LISTENER and entry.internal_fd >= 0:
+            return entry.port as i64
+    -9
+
 fn _arm64_net_fd_resolve(external_fd: i32) -> i32:
-    var i: u64 = 0
-    while i < g_arm64_net_fd_map.len():
-        if g_arm64_net_fd_map[i].owner_task == spl_shim_current_task_id() and g_arm64_net_fd_map[i].external_fd == external_fd:
-            return g_arm64_net_fd_map[i].internal_fd
-        i = i + 1
-    -1
+    for entry in g_arm64_net_fd_map:
+        if entry.owner_task == spl_shim_current_task_id() and
+           entry.external_fd == external_fd:
+            return entry.internal_fd
+    -9
+
+fn _arm64_net_fd_authorized_io(external_fd: i32) -> i32:
+    for entry in g_arm64_net_fd_map:
+        if entry.owner_task == spl_shim_current_task_id() and
+           entry.external_fd == external_fd and entry.internal_fd >= 0:
+            if entry.route == ARM64_NET_ACCEPTED:
+                if spl_shim_net_direct_listener_check(entry.port) < 0:
+                    return -1
+                return entry.internal_fd
+            if entry.route == ARM64_NET_OUTBOUND:
+                if spl_shim_net_direct_outbound_check() < 0:
+                    return -1
+                return entry.internal_fd
+            return -9
+    -9
 
 fn _arm64_net_fd_remove(external_fd: i32) -> i32:
     var i: u64 = 0
@@ -235,17 +296,79 @@ fn _arm64_net_fd_remove(external_fd: i32) -> i32:
         i = i + 1
     -4096
 
-pub fn net_arm64_task_teardown(owner_task: u64):
-    """Close and remove every direct socket owned by one exiting EL0 task."""
+fn _arm64_net_fd_begin_close(external_fd: i32) -> i32:
+    var i: u64 = 0
+    while i < g_arm64_net_fd_map.len():
+        val entry = g_arm64_net_fd_map[i]
+        if entry.owner_task == spl_shim_current_task_id() and
+           entry.external_fd == external_fd:
+            g_arm64_net_fd_map[i] = Arm64NetFdMap(
+                owner_task: entry.owner_task, external_fd: entry.external_fd,
+                internal_fd: entry.internal_fd, route: ARM64_NET_CLOSING,
+                address: entry.address, port: entry.port)
+            g_arm64_net_quarantine_pending = true
+            return entry.internal_fd
+        i = i + 1
+    -4096
+
+pub fn net_arm64_reap_quarantine_v1(max_attempts: u64) -> Arm64NetRetirementReceiptV1:
+    """Attempt bounded physical retirement through the canonical netstack owner."""
+    var attempted: u64 = 0u64
+    var retired: u64 = 0u64
+    var i: u64 = 0u64
+    while i < g_arm64_net_fd_map.len():
+        val entry = g_arm64_net_fd_map[i]
+        if entry.route == ARM64_NET_CLOSING and attempted < max_attempts:
+            if entry.internal_fd < 0:
+                g_arm64_net_fd_map.remove(i)
+                retired = retired + 1u64
+            else:
+                attempted = attempted + 1u64
+                if net_tcp_close(entry.internal_fd as i64):
+                    g_arm64_net_fd_map.remove(i)
+                    retired = retired + 1u64
+                else:
+                    i = i + 1u64
+        else:
+            i = i + 1u64
+    var pending: u64 = 0u64
+    for entry in g_arm64_net_fd_map:
+        if entry.route == ARM64_NET_CLOSING:
+            pending = pending + 1u64
+    g_arm64_net_quarantine_pending = pending > 0u64
+    Arm64NetRetirementReceiptV1(
+        attempted: attempted, retired: retired, pending: pending)
+
+pub fn net_arm64_task_teardown(owner_task: u64) -> Arm64NetRetirementReceiptV1:
+    """Retire an exiting task's sockets and report any retained quarantine."""
+    var attempted: u64 = 0u64
+    var retired: u64 = 0u64
     var i: u64 = 0
     while i < g_arm64_net_fd_map.len():
         if g_arm64_net_fd_map[i].owner_task == owner_task:
-            val internal = g_arm64_net_fd_map[i].internal_fd
-            g_arm64_net_fd_map.remove(i)
-            if internal >= 0:
-                net_tcp_close(internal as i64)
+            val entry = g_arm64_net_fd_map[i]
+            var closed = true
+            if entry.internal_fd >= 0:
+                attempted = attempted + 1u64
+                closed = net_tcp_close(entry.internal_fd as i64)
+            if not closed:
+                # A failed physical close stays quarantined after task exit.
+                # No new task can inherit its external descriptor identity.
+                g_arm64_net_fd_map[i] = Arm64NetFdMap(
+                    owner_task: entry.owner_task, external_fd: entry.external_fd,
+                    internal_fd: entry.internal_fd, route: ARM64_NET_CLOSING,
+                    address: entry.address, port: entry.port)
+                g_arm64_net_quarantine_pending = true
+                i = i + 1
+            else:
+                g_arm64_net_fd_map.remove(i)
+                retired = retired + 1u64
         else:
             i = i + 1
+    val drained = net_arm64_reap_quarantine_v1(ARM64_NET_FD_CAPACITY)
+    Arm64NetRetirementReceiptV1(
+        attempted: attempted + drained.attempted,
+        retired: retired + drained.retired, pending: drained.pending)
 
 struct Arm64SockaddrCopy:
     ip: u32
@@ -270,29 +393,56 @@ fn _arm64_copy_sockaddr(ptr: u64, len: u64) -> Result<Arm64SockaddrCopy, i64>:
 fn spl_arm64_net_socket_direct(domain: u64, type_: u64, protocol: u64, a3: u64, a4: u64, a5: u64) -> i64:
     if not g_net_initialized or domain != 2 or type_ != 1:
         return -22
+    if spl_shim_net_direct_socket_check() < 0:
+        return -1
+    if g_arm64_net_quarantine_pending:
+        _ = net_arm64_reap_quarantine_v1(1u64)
     _arm64_net_fd_reserve()
 
 @export("C", name: "spl_arm64_net_bind_direct")
 fn spl_arm64_net_bind_direct(external: u64, ptr: u64, len: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    if not _arm64_net_external_fd_valid(external):
+        return -9
+    if not _arm64_net_fd_reserved(external as i32):
+        return -9
     match _arm64_copy_sockaddr(ptr, len):
         Err(errno): errno
         Ok(pair):
+            if spl_shim_net_direct_bind_check(pair.ip, pair.port) < 0:
+                return -1
             val internal = net_tcp_bind(pair.ip, pair.port, 16)
             if internal < 0:
                 return internal
-            if not _arm64_net_fd_commit(external as i32, internal as i32):
+            if not _arm64_net_fd_commit(external as i32, internal as i32,
+                    ARM64_NET_LISTENER, pair.ip, pair.port):
                 net_tcp_close(internal)
                 return -9
             0
 
 @export("C", name: "spl_arm64_net_listen_direct")
 fn spl_arm64_net_listen_direct(external: u64, backlog: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
-    if _arm64_net_fd_resolve(external as i32) < 0: -9 else: 0
+    if not _arm64_net_external_fd_valid(external):
+        return -9
+    val port = _arm64_net_listener_port(external as i32)
+    if port < 0:
+        return -9
+    if spl_shim_net_direct_listener_check(port as u16) < 0:
+        return -1
+    0
 
 @export("C", name: "spl_arm64_net_accept_direct")
 fn spl_arm64_net_accept_direct(external: u64, out_addr: u64, out_len: u64, a3: u64, a4: u64, a5: u64) -> i64:
     if out_addr != 0 or out_len != 0:
         return -95
+    if not _arm64_net_external_fd_valid(external):
+        return -9
+    val port = _arm64_net_listener_port(external as i32)
+    if port < 0:
+        return -9
+    if spl_shim_net_direct_listener_check(port as u16) < 0:
+        return -1
+    if g_arm64_net_quarantine_pending:
+        _ = net_arm64_reap_quarantine_v1(1u64)
     val listener = _arm64_net_fd_resolve(external as i32)
     if listener < 0:
         return -9
@@ -303,7 +453,8 @@ fn spl_arm64_net_accept_direct(external: u64, out_addr: u64, out_len: u64, a3: u
     if accepted < 0:
         net_tcp_close(internal)
         return accepted
-    if not _arm64_net_fd_commit(accepted as i32, internal as i32):
+    if not _arm64_net_fd_commit(accepted as i32, internal as i32,
+            ARM64_NET_ACCEPTED, 0u32, port as u16):
         net_tcp_close(internal)
         _arm64_net_fd_remove(accepted as i32)
         return -24
@@ -311,13 +462,20 @@ fn spl_arm64_net_accept_direct(external: u64, out_addr: u64, out_len: u64, a3: u
 
 @export("C", name: "spl_arm64_net_connect_direct")
 fn spl_arm64_net_connect_direct(external: u64, ptr: u64, len: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    if not _arm64_net_external_fd_valid(external):
+        return -9
+    if not _arm64_net_fd_reserved(external as i32):
+        return -9
     match _arm64_copy_sockaddr(ptr, len):
         Err(errno): errno
         Ok(pair):
+            if spl_shim_net_direct_outbound_check() < 0:
+                return -1
             val internal = net_tcp_connect(pair.ip, pair.port, 200000)
             if internal < 0:
                 return internal
-            if not _arm64_net_fd_commit(external as i32, internal as i32):
+            if not _arm64_net_fd_commit(external as i32, internal as i32,
+                    ARM64_NET_OUTBOUND, pair.ip, pair.port):
                 net_tcp_close(internal)
                 return -9
             0
@@ -326,9 +484,11 @@ fn spl_arm64_net_connect_direct(external: u64, ptr: u64, len: u64, a3: u64, a4: 
 fn spl_arm64_net_send_direct(external: u64, ptr: u64, len: u64, dest: u64, dest_len: u64, flags: u64) -> i64:
     if dest != 0 or dest_len != 0 or len > ARM64_NET_IO_MAX:
         return -95
-    val internal = _arm64_net_fd_resolve(external as i32)
-    if internal < 0:
+    if not _arm64_net_external_fd_valid(external):
         return -9
+    val internal = _arm64_net_fd_authorized_io(external as i32)
+    if internal < 0:
+        return internal as i64
     val copied = user_copyin_bytes(ptr, len)
     if not vmm_copy_bytes_result_ok(copied):
         return -14
@@ -338,21 +498,27 @@ fn spl_arm64_net_send_direct(external: u64, ptr: u64, len: u64, dest: u64, dest_
 fn spl_arm64_net_recv_direct(external: u64, ptr: u64, max: u64, src: u64, src_len: u64, flags: u64) -> i64:
     if src != 0 or src_len != 0 or max > ARM64_NET_IO_MAX:
         return -95
-    val internal = _arm64_net_fd_resolve(external as i32)
-    if internal < 0:
+    if not _arm64_net_external_fd_valid(external):
         return -9
+    val internal = _arm64_net_fd_authorized_io(external as i32)
+    if internal < 0:
+        return internal as i64
     val bytes = net_tcp_read(internal as i64, max)
     user_copyout_bytes(ptr, bytes)
 
 @export("C", name: "spl_arm64_net_close_direct")
 fn spl_arm64_net_close_direct(external: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
-    # -4096 is an ownership sentinel, not an errno: the C dispatcher then
-    # routes ordinary file descriptors to the VFS close owner.
-    val internal = _arm64_net_fd_remove(external as i32)
+    # -4096 is an ownership sentinel; the C dispatcher maps it to EBADF.
+    if not _arm64_net_external_fd_valid(external):
+        return -4096
+    val internal = _arm64_net_fd_begin_close(external as i32)
     if internal == -4096:
         return -4096
-    if internal >= 0:
-        net_tcp_close(internal as i64)
+    if internal >= 0 and not net_tcp_close(internal as i64):
+        # Keep the descriptor in Closing so no new I/O can use a mapping whose
+        # physical retirement is unknown. A later close may retry it.
+        return -5
+    _arm64_net_fd_remove(external as i32)
     0
 
 # ============================================================================
@@ -392,6 +558,8 @@ fn net_service_poll():
     """
     if g_net_initialized and g_netstack != nil:
         g_netstack.poll_once()
+        if g_arm64_net_quarantine_pending:
+            _ = net_arm64_reap_quarantine_v1(1u64)
 
 # ============================================================================
 # Query Helpers

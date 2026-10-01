@@ -1,7 +1,6 @@
 # Ed25519 Live Baremetal Self-Test Fails Or Remains Unproven In SSHD QEMU Lane
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: Open.
 
 Date: 2026-06-06
 

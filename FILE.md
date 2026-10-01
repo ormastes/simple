@@ -29,6 +29,8 @@ FILE.md files) are allowed.
 | `.jscpd.json` | Copy-paste detector config |
 | `.dockerignore` | Docker ignore rules |
 | `bin` | Executables and wrappers |
+| `include` | Public native headers |
+| `sdk` | SDK packaging and integration assets |
 | `src` | Source code |
 | `test` | Test files |
 | `examples` | Example projects |
@@ -41,20 +43,27 @@ FILE.md files) are allowed.
 | `.codex` | Codex settings |
 | `.agents` | Agent definitions |
 | `.gemini` | Gemini settings |
+| `.kimi-code` | Kimi Code project MCP layer (`mcp.json`; shell-free spawn spellings, see `doc/07_guide/infra/model_providers/kimi.md`) |
 | `.github` | GitHub workflows and config |
-| `.spipe` | SPipe state files (per-session `.spipe/<slug>/` state; children are not individually declared) |
+| `.spipe` | SPipe state files |
+| `.scv` | SCV workspace state; mutable quarantine lives under `.scv/quarantine/` (`scv/` packs, `jit/` notes, `root/` legacy root artifacts) |
 | `.simple` | Simple language config |
 | `.vscode` | VS Code settings |
-| `build` | Build output (mutable, includes target/ and bootstrap/) |
+| `.claude-plugin` | Claude Code plugin manifest |
+| `build` | Build output and mutable developer probes (`build/scratchpad/`), including target/ and bootstrap/ |
+| `.build` | Mutable local build cache and dashboard state |
 | `tmp` | Temporary files (mutable) |
-| `release` | Deployed self-hosted binaries (`release/<triple>/simple`); root-relative `SIMPLE_BIN` default for check scripts |
-| `target` | Native test/codegen artifacts referenced root-relative by check scripts |
-| `variants` | Module-variant-override overlays (platform/renderer seams selected by explicit `variant:` build config) |
-| `.opencode` | OpenCode tool settings |
-| `.cache` | Host cache (e.g. `cpu_config.sdn`) |
-| `assets` | Pinned licence-attested binary assets (font bundle) required by evidence gates and SimpleOS image staging — see `assets/FILE.md` |
+| `assets` | Fonts and other binary assets consumed by tests and packaging |
+| `plugins` | First-party plugin packages (llm_caret_messaging, ...) |
+| `spec` | Compiler schema contracts (`spec/compiler_schema/`) |
+| `var` | Runtime sample state for web-stack integration specs |
+| `variants` | Platform variant overlays (see `variants/FILE.md`) |
+| `target` | `gc-boundary-check-tests` fixture read by `driver/src/cli/check.rs` |
+| `targets.sdn` | Build target registry read by `src/app/build/targets/targets_cli.spl` |
+| `release` | Tracked release version/support policy; generated release binaries remain ignored |
 
-**No other files at root.**
+**No other files at root.** SCV quarantine artifacts belong under
+`.scv/quarantine/`, never in root-level `tmp*` directories.
 
 ## Child Manifests
 
@@ -71,7 +80,7 @@ FILE.md files) are allowed.
 | `tools/FILE.md` | `tools/` directory |
 | `vendor/FILE.md` | `vendor/` directory |
 | `variants/FILE.md` | `variants/` directory |
-| `assets/FILE.md` | `assets/` directory |
+| `release/FILE.md` | `release/` tracked policy/configuration authorities |
 
 ## src/
 
@@ -81,8 +90,6 @@ FILE.md files) are allowed.
 | `src/compiler` | Unified compiler (numbered layers 00-99) |
 | `src/compiler_rust` | Rust seed compiler and vendor |
 | `src/generated` | Generated source files |
-| `src/hardware` | Hardware/FPGA bundle generators |
-| `src/i18n` | Internationalization |
 | `src/lib` | Standard library (`use std.X`) |
 | `src/os` | OS-specific code |
 | `src/runtime` | Native runtime and support libraries |
@@ -205,27 +212,4 @@ FILE.md files) are allowed.
 | `bin/t32_lsp_mcp_server.cmd` | T32 LSP MCP |
 | `bin/t32_mcp_server.cmd` | T32 MCP |
 | `bin/codex_chrome_devtools_mcp.cmd` | Codex Chrome DevTools MCP |
-| `bin/codex_stitch_mcp.cmd` | Codex Stitch MCP |
 | `bin/FILE.md` | Bin manifest |
-
-## tools/
-
-| Entry | Description |
-|---|---|
-| `tools/chrome-live-bitmap` | Chrome-based live bitmap capture harness |
-| `tools/claude-plugin` | Claude Code plugins (codex-research, dev, gemini-ui-design, sstack, verify-agent, marketplace + cmm-lsp/obsidian-search manifests) |
-| `tools/docker` | Dockerfiles for cross-language perf and test-isolation containers |
-| `tools/electron-live-bitmap` | Electron-based live bitmap capture harness |
-| `tools/electron-shell` | Electron desktop shell |
-| `tools/electron-wasm-gui-exec` | Electron WASM GUI execution harness |
-| `tools/gui_perf_bench` | Cross-toolkit GUI perf benchmark harness (GTK/JS/Python) |
-| `tools/jupyter` | Jupyter integration |
-| `tools/lsp-mcp-registry` | LSP MCP server registry metadata |
-| `tools/mcp-registry` | MCP server registry metadata |
-| `tools/node-render-bitmap` | Node.js render-to-bitmap harness |
-| `tools/pixel_compare` | Pixel comparison tool |
-| `tools/ref_crypto` | Reference crypto implementations |
-| `tools/tauri-live-bitmap` | Tauri live-bitmap capture harness (WKWebView snapshot backend) |
-| `tools/tauri-shell` | Tauri 2 mobile/desktop shell (iOS + Android + desktop) |
-| `tools/web-render-backend` | Web rendering backend harness |
-| `tools/FILE.md` | Tools manifest |

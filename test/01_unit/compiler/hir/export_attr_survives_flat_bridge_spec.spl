@@ -1,0 +1,77 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# RUN THIS WITHOUT `SIMPLE_BOOTSTRAP=1`.
+#   bin/simple run test/01_unit/compiler/hir/export_attr_survives_flat_bridge_spec.spl
+# Measured 2026-09-26: 2/2 pass with the env unset, 2/2 FAIL ("expected false to
+# equal true") when `SIMPLE_BOOTSTRAP=1` is exported. That is an artifact of
+# calling `parse_full_frontend` in-process under the bootstrap env, NOT a product
+# gap -- verified by building the real object in exactly that env and gating it:
+#   SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_FREEZE_FALLBACK=1 <seed> native-build --backend llvm \
+#     --source src/os/kernel/arch/cortex_m33 \
+#     --entry src/os/kernel/arch/cortex_m33/scalar_parser_fs_policy.spl \
+#     --entry-closure --target thumbv8m.main-none-eabi --emit-object -o p.o
+#   sh scripts/check/check-cm33-scalar-parser-fs-object.shs stm32u585 p.o
+#   -> PASS ... exports=11 undefined=0
+# So the exported names are plain in bootstrap mode where it actually matters.
+# Do not "fix" this spec by relaxing its assertions; if you need it green under
+# SIMPLE_BOOTSTRAP=1, find why the in-process frontend call diverges there.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_definitions.{HirModule}
+use compiler.mir.mir_lowering.MirLowering
+
+fn lower_export_fixture() -> HirModule:
+    val source = "@export(\"C\")\nfn cm33_probe_plain() -> u32:\n    1u32\n\n@export(\"C\", name: \"cm33_probe_custom_sym\")\nfn cm33_probe_named() -> u32:\n    2u32\n\nfn cm33_probe_local() -> u32:\n    3u32\n"
+    val path = "src/os/kernel/arch/cortex_m33/export_attr_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    hir
+
+describe "@export(\"C\") through the flat-AST bridge":
+    # @manual scenario evidence
+    """Bug simpleos_cm33_policy_symbols_mangled_2026-09-26: the flat decl pool
+    only carried the asm-placement decorator subset, so `@export("C")` never
+    reached HirFunction.has_export_attr. Since 59cba6907ad (provider naming
+    module-qualifies every non-exported function) that turned every C-ABI
+    export into `os.kernel...cm33_policy_fs_add_file` and the Cortex-M shim
+    could not link. The attribute must survive parse -> HIR and keep the MIR
+    symbol plain even when the module is lowered as a closure provider."""
+
+    it "sets has_export_attr and the custom name on HIR functions":
+        val hir = lower_export_fixture()
+        var plain_seen = false
+        var named_seen = false
+        var local_seen = false
+        for function in hir.functions.values():
+            if function.name == "cm33_probe_plain":
+                plain_seen = true
+                expect(function.has_export_attr).to_equal(true)
+                expect(function.export_attr.is_export_c).to_equal(true)
+            if function.name == "cm33_probe_named":
+                named_seen = true
+                expect(function.has_export_attr).to_equal(true)
+                expect(function.export_attr.export_name).to_equal("cm33_probe_custom_sym")
+            if function.name == "cm33_probe_local":
+                local_seen = true
+                expect(function.has_export_attr).to_equal(false)
+        expect(plain_seen).to_equal(true)
+        expect(named_seen).to_equal(true)
+        expect(local_seen).to_equal(true)
+
+    it "keeps the exported MIR symbol plain in a non-entry (provider) module":
+        val hir = lower_export_fixture()
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir, [], false)
+        var names: [text] = []
+        for function in mir.functions.values():
+            names.push(function.name)
+        expect(names.contains("cm33_probe_plain")).to_equal(true)
+        expect(names.contains("cm33_probe_named")).to_equal(true)
+        # The unexported sibling is still module-qualified: the fix is the
+        # attribute reaching HIR, not a blanket un-qualification.
+        expect(names.contains("cm33_probe_local")).to_equal(false)

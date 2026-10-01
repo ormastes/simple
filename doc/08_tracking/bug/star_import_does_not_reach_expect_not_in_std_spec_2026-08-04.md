@@ -1,4 +1,8 @@
 # BUG: `use std.spec.*` does not import `expect_not` — only the explicit form does
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status 2026-08-17: REPRODUCED, root cause located, NOT fixable inside src/lib
 
@@ -161,3 +165,4 @@ out of scope for a pure-Simple source fix and excluded from this session's
 edit scope. No regression was added beyond the existing
 `test/01_unit/std/spec_expect_bool_shortcut_spec.spl`, which already pins the
 failure precisely and continues to fail for the right reason.
+

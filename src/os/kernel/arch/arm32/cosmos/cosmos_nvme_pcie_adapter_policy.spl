@@ -1,0 +1,487 @@
+# Pure-Simple descriptor/status/state policy for the Cosmos+ NVMe PCIe adapter.
+#
+# C retains pointer admission, descriptor marshalling, callback invocation,
+# volatile staging writes, barriers, DMA submission/poll ordering, and queue
+# publication.  This scalar ABI owns no memory and performs no allocation.
+
+val COSMOS_OK: i32 = 0
+val COSMOS_UNAVAILABLE: i32 = 1
+val COSMOS_INVALID: i32 = 2
+
+val IO_KIND_NONE: u32 = 0u32
+val IO_KIND_RW: u32 = 1u32
+val IO_KIND_FLUSH: u32 = 2u32
+val IO_KIND_WRITE_ZEROES: u32 = 3u32
+val IO_KIND_DSM: u32 = 4u32
+
+val ADMIN_KIND_NONE: u32 = 0u32
+val ADMIN_KIND_QUEUE: u32 = 1u32
+val ADMIN_KIND_IDENTIFY: u32 = 2u32
+val ADMIN_KIND_GET_LOG: u32 = 3u32
+
+val OPCODE_FLUSH: u32 = 0x00u32
+val OPCODE_WRITE: u32 = 0x01u32
+val OPCODE_READ: u32 = 0x02u32
+val OPCODE_WRITE_ZEROES: u32 = 0x08u32
+val OPCODE_DSM: u32 = 0x09u32
+val ADMIN_CREATE_IO_SQ: u32 = 0x01u32
+val ADMIN_GET_LOG_PAGE: u32 = 0x02u32
+val ADMIN_CREATE_IO_CQ: u32 = 0x05u32
+val ADMIN_IDENTIFY: u32 = 0x06u32
+
+val DW0_UNSUPPORTED_MASK: u32 = 0x0000FF00u32
+val DW12_NLB_MASK: u32 = 0x0000FFFFu32
+val RW_CONTROL_MASK: u32 = 0xC0000000u32
+val DSM_NR_MASK: u32 = 0x000000FFu32
+val DSM_RANGE_BYTES: u32 = 16u32
+val DMA_ALIGNMENT: u32 = 4u32
+val HOST_DMA_ALIGNMENT: u32 = 16u32
+val HOST_DMA_MAX_BYTES: u32 = 4096u32
+val PRP_PAGE_BYTES: u32 = 4096u32
+val PRP_PAGE_MASK: u32 = 4095u32
+val MAX_TRANSFER_BYTES: u32 = 1048576u32
+val ADMIN_IDENTIFY_BYTES: u32 = 4096u32
+val ADDRESS_HIGH_MAX: u32 = 15u32
+
+val POLICY_FUNCTIONS: u32 = 34u32
+val POLICY_DECISIONS: u32 = 45u32
+val OUTCOMES_REQUIRED_0: u32 = 0xFFFFFFFFu32
+val OUTCOMES_REQUIRED_1: u32 = 0xFFFFFFFFu32
+val OUTCOMES_REQUIRED_2: u32 = 0x03FFFFFFu32
+
+# Closed actual-execution audit.  False/true outcomes occupy adjacent bits.
+val D_CAPACITY_ZERO: u32 = 0u32
+val D_BLOCK_ZERO: u32 = 1u32
+val D_BLOCK_NOT_POWER_TWO: u32 = 2u32
+val D_BLOCK_UNALIGNED: u32 = 3u32
+val D_COMMON_UNSUPPORTED: u32 = 4u32
+val D_RW_UNSUPPORTED: u32 = 5u32
+val D_FLUSH_NONZERO: u32 = 6u32
+val D_TRANSFER_BASE_INVALID: u32 = 7u32
+val D_TRANSFER_OVERFLOW: u32 = 8u32
+val D_PRP_BASE_INVALID: u32 = 9u32
+val D_PRP_FITS_FIRST: u32 = 10u32
+val D_PRP_FIRST_HAS_SECOND: u32 = 11u32
+val D_PRP_SECOND_MISSING: u32 = 12u32
+val D_PRP_SINGLE_BOUNDARY: u32 = 13u32
+val D_PRP_SECOND_UNALIGNED: u32 = 14u32
+val D_PRP_FIRST_CLAMPED: u32 = 15u32
+val D_IO_IS_RW: u32 = 16u32
+val D_IO_IS_FLUSH: u32 = 17u32
+val D_IO_IS_ZEROES: u32 = 18u32
+val D_IO_IS_DSM: u32 = 19u32
+val D_RW_DECODE_INVALID: u32 = 20u32
+val D_ZEROES_FIELDS_INVALID: u32 = 21u32
+val D_ZEROES_DECODE_INVALID: u32 = 22u32
+val D_DSM_FIELDS_INVALID: u32 = 23u32
+val D_DSM_DECODE_INVALID: u32 = 24u32
+val D_FLUSH_DECODE_INVALID: u32 = 25u32
+val D_IO_KNOWN_INVALID: u32 = 26u32
+val D_ADMIN_COMMON_UNSUPPORTED: u32 = 27u32
+val D_ADMIN_IS_QUEUE: u32 = 28u32
+val D_ADMIN_IS_IDENTIFY: u32 = 29u32
+val D_ADMIN_IS_LOG: u32 = 30u32
+val D_ADMIN_BYTES_IDENTIFY: u32 = 31u32
+val D_ADMIN_BYTES_LOG: u32 = 32u32
+val D_ADMIN_TRANSFER_QUEUE: u32 = 33u32
+val D_ADMIN_QUEUE_INVALID: u32 = 34u32
+val D_ADMIN_TRANSFER_PAYLOAD: u32 = 35u32
+val D_ADMIN_PAYLOAD_INVALID: u32 = 36u32
+val D_ADMIN_NO_PAYLOAD_PRESENT: u32 = 37u32
+val D_ADMIN_INVALID_FIELD: u32 = 38u32
+val D_POST_COMMITTED: u32 = 39u32
+val D_POST_NOT_COMMITTED: u32 = 40u32
+val D_POST_AMBIGUOUS: u32 = 41u32
+val D_PAYLOAD_REQUEST_INVALID: u32 = 42u32
+val D_PAYLOAD_COMMITTED: u32 = 43u32
+val D_INIT_INVALID: u32 = 44u32
+
+var g_outcomes_0: u32 = 0u32
+var g_outcomes_1: u32 = 0u32
+var g_outcomes_2: u32 = 0u32
+
+fn _record(decision_id: u32, result: bool):
+    val outcome_id = decision_id * 2u32 + (result as u32)
+    if outcome_id < 32u32:  # COSMOS-NVME-PCIE-ADAPTER-H001
+        g_outcomes_0 = g_outcomes_0 | (1u32 << outcome_id)
+    elif outcome_id < 64u32:  # COSMOS-NVME-PCIE-ADAPTER-H002
+        g_outcomes_1 = g_outcomes_1 | (1u32 << (outcome_id - 32u32))
+    else:
+        g_outcomes_2 = g_outcomes_2 | (1u32 << (outcome_id - 64u32))
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_coverage_reset")
+pub fn cosmos_nvme_pcie_adapter_policy_coverage_reset():
+    g_outcomes_0 = 0u32
+    g_outcomes_1 = 0u32
+    g_outcomes_2 = 0u32
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_coverage_mask")
+pub fn cosmos_nvme_pcie_adapter_policy_coverage_mask(bank: u32) -> u32:
+    if bank == 0u32:  # COSMOS-NVME-PCIE-ADAPTER-H003
+        return g_outcomes_0
+    if bank == 1u32:  # COSMOS-NVME-PCIE-ADAPTER-H004
+        return g_outcomes_1
+    g_outcomes_2
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_coverage_required")
+pub fn cosmos_nvme_pcie_adapter_policy_coverage_required(bank: u32) -> u32:
+    if bank == 0u32:  # COSMOS-NVME-PCIE-ADAPTER-H005
+        return OUTCOMES_REQUIRED_0
+    if bank == 1u32:  # COSMOS-NVME-PCIE-ADAPTER-H006
+        return OUTCOMES_REQUIRED_1
+    OUTCOMES_REQUIRED_2
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_coverage_decisions")
+pub fn cosmos_nvme_pcie_adapter_policy_coverage_decisions() -> u32:
+    POLICY_DECISIONS
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_function_count")
+pub fn cosmos_nvme_pcie_adapter_policy_function_count() -> u32:
+    POLICY_FUNCTIONS
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_command_cid")
+pub fn cosmos_nvme_pcie_adapter_policy_command_cid(dw0: u32) -> u32:
+    dw0 >> 16u32
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_command_opcode")
+pub fn cosmos_nvme_pcie_adapter_policy_command_opcode(dw0: u32) -> u32:
+    dw0 & 0xFFu32
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_capacity_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_capacity_valid(low: u32, high: u32) -> i32:
+    val zero = low == 0u32 and high == 0u32
+    _record(D_CAPACITY_ZERO, zero)
+    if zero: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D001
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_block_bytes_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_block_bytes_valid(block_bytes: u32) -> i32:
+    val zero = block_bytes == 0u32
+    _record(D_BLOCK_ZERO, zero)
+    if zero:  # COSMOS-NVME-PCIE-ADAPTER-D002
+        return 0
+    val not_power_two = (block_bytes & (block_bytes - 1u32)) != 0u32
+    _record(D_BLOCK_NOT_POWER_TWO, not_power_two)
+    if not_power_two:  # COSMOS-NVME-PCIE-ADAPTER-D003
+        return 0
+    val unaligned = (block_bytes & (DMA_ALIGNMENT - 1u32)) != 0u32
+    _record(D_BLOCK_UNALIGNED, unaligned)
+    if unaligned: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D004
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_common_fields_supported")
+pub fn cosmos_nvme_pcie_adapter_policy_common_fields_supported(
+    dw0: u32, dw2: u32, dw3: u32, dw4: u32, dw5: u32
+) -> i32:
+    val unsupported = ((dw0 & DW0_UNSUPPORTED_MASK) != 0u32 or
+        dw2 != 0u32 or dw3 != 0u32 or dw4 != 0u32 or dw5 != 0u32)
+    _record(D_COMMON_UNSUPPORTED, unsupported)
+    if unsupported: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D005
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_rw_fields_supported")
+pub fn cosmos_nvme_pcie_adapter_policy_rw_fields_supported(
+    dw12: u32, dw13: u32, dw14: u32, dw15: u32
+) -> i32:
+    val unsupported = ((dw12 & ~(DW12_NLB_MASK | RW_CONTROL_MASK)) != 0u32 or
+        dw13 != 0u32 or dw14 != 0u32 or dw15 != 0u32)
+    _record(D_RW_UNSUPPORTED, unsupported)
+    if unsupported: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D006
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_flush_fields_supported")
+pub fn cosmos_nvme_pcie_adapter_policy_flush_fields_supported(
+    dw6: u32, dw7: u32, dw8: u32, dw9: u32, dw10: u32,
+    dw11: u32, dw12: u32, dw13: u32, dw14: u32, dw15: u32
+) -> i32:
+    val nonzero = (dw6 != 0u32 or dw7 != 0u32 or dw8 != 0u32 or
+        dw9 != 0u32 or dw10 != 0u32 or dw11 != 0u32 or dw12 != 0u32 or
+        dw13 != 0u32 or dw14 != 0u32 or dw15 != 0u32)
+    _record(D_FLUSH_NONZERO, nonzero)
+    if nonzero: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D007
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_transfer_bytes")
+pub fn cosmos_nvme_pcie_adapter_policy_transfer_bytes(
+    nlb: u32, block_bytes: u32
+) -> u32:
+    val block_count = nlb + 1u32
+    val base_invalid = block_count == 0u32 or block_bytes == 0u32
+    _record(D_TRANSFER_BASE_INVALID, base_invalid)
+    if base_invalid:  # COSMOS-NVME-PCIE-ADAPTER-D008
+        return 0u32
+    val overflow = block_count > 0xFFFFFFFFu32 / block_bytes
+    _record(D_TRANSFER_OVERFLOW, overflow)
+    if overflow: 0u32 else: block_count * block_bytes  # COSMOS-NVME-PCIE-ADAPTER-D009
+
+fn _address(low: u32, high: u32) -> u64:
+    ((high as u64) << 32u32) | (low as u64)
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_prp_span_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_prp_span_valid(
+    prp1_low: u32, prp1_high: u32, prp2_low: u32, prp2_high: u32,
+    data_bytes: u32
+) -> i32:
+    val prp1 = _address(prp1_low, prp1_high)
+    val prp2 = _address(prp2_low, prp2_high)
+    val base_invalid = (prp1 == 0u64 or data_bytes == 0u32 or
+        data_bytes > MAX_TRANSFER_BYTES or prp1_high > ADDRESS_HIGH_MAX or
+        prp2_high > ADDRESS_HIGH_MAX or
+        (prp1_low & (HOST_DMA_ALIGNMENT - 1u32)) != 0u32)
+    _record(D_PRP_BASE_INVALID, base_invalid)
+    if base_invalid:  # COSMOS-NVME-PCIE-ADAPTER-D010
+        return 0
+
+    val first_room = PRP_PAGE_BYTES - (prp1_low & PRP_PAGE_MASK)
+    val fits_first = data_bytes <= first_room
+    _record(D_PRP_FITS_FIRST, fits_first)
+    if fits_first:  # COSMOS-NVME-PCIE-ADAPTER-D011
+        val has_second = prp2 != 0u64
+        _record(D_PRP_FIRST_HAS_SECOND, has_second)
+        return if has_second: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D012
+
+    val second_missing = prp2 == 0u64
+    _record(D_PRP_SECOND_MISSING, second_missing)
+    if second_missing:  # COSMOS-NVME-PCIE-ADAPTER-D013
+        return 0
+    val boundaries = (data_bytes - first_room + PRP_PAGE_BYTES - 1u32) /
+        PRP_PAGE_BYTES
+    val single_boundary = boundaries == 1u32
+    _record(D_PRP_SINGLE_BOUNDARY, single_boundary)
+    if single_boundary:  # COSMOS-NVME-PCIE-ADAPTER-D014
+        val unaligned = (prp2_low & PRP_PAGE_MASK) != 0u32
+        _record(D_PRP_SECOND_UNALIGNED, unaligned)
+        return if unaligned: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D015
+    val unaligned = (prp2_low & (HOST_DMA_ALIGNMENT - 1u32)) != 0u32
+    _record(D_PRP_SECOND_UNALIGNED, unaligned)
+    if unaligned: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D016
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_prp_first_bytes")
+pub fn cosmos_nvme_pcie_adapter_policy_prp_first_bytes(
+    prp1_low: u32, payload_bytes: u32
+) -> u32:
+    val first_room = PRP_PAGE_BYTES - (prp1_low & PRP_PAGE_MASK)
+    val clamped = first_room > payload_bytes
+    _record(D_PRP_FIRST_CLAMPED, clamped)
+    if clamped: payload_bytes else: first_room  # COSMOS-NVME-PCIE-ADAPTER-D017
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_io_kind")
+pub fn cosmos_nvme_pcie_adapter_policy_io_kind(opcode: u32) -> u32:
+    val is_rw = opcode == OPCODE_READ or opcode == OPCODE_WRITE
+    _record(D_IO_IS_RW, is_rw)
+    if is_rw:  # COSMOS-NVME-PCIE-ADAPTER-D018
+        return IO_KIND_RW
+    val is_flush = opcode == OPCODE_FLUSH
+    _record(D_IO_IS_FLUSH, is_flush)
+    if is_flush:  # COSMOS-NVME-PCIE-ADAPTER-D019
+        return IO_KIND_FLUSH
+    val is_zeroes = opcode == OPCODE_WRITE_ZEROES
+    _record(D_IO_IS_ZEROES, is_zeroes)
+    if is_zeroes:  # COSMOS-NVME-PCIE-ADAPTER-D020
+        return IO_KIND_WRITE_ZEROES
+    val is_dsm = opcode == OPCODE_DSM
+    _record(D_IO_IS_DSM, is_dsm)
+    if is_dsm: IO_KIND_DSM else: IO_KIND_NONE  # COSMOS-NVME-PCIE-ADAPTER-D021
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_io_nlb")
+pub fn cosmos_nvme_pcie_adapter_policy_io_nlb(dw12: u32) -> u32:
+    dw12 & DW12_NLB_MASK
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_rw_control")
+pub fn cosmos_nvme_pcie_adapter_policy_rw_control(dw12: u32) -> u32:
+    dw12 & RW_CONTROL_MASK
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_rw_decode_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_rw_decode_valid(
+    common_supported: u32, fields_supported: u32,
+    data_bytes: u32, prp_valid: u32
+) -> i32:
+    val invalid = (common_supported == 0u32 or fields_supported == 0u32 or
+        data_bytes == 0u32 or prp_valid == 0u32)
+    _record(D_RW_DECODE_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D022
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_write_zeroes_control")
+pub fn cosmos_nvme_pcie_adapter_policy_write_zeroes_control(dw12: u32) -> u32:
+    dw12 & ~DW12_NLB_MASK
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_write_zeroes_fields_supported")
+pub fn cosmos_nvme_pcie_adapter_policy_write_zeroes_fields_supported(
+    prp1_low: u32, prp1_high: u32, prp2_low: u32, prp2_high: u32
+) -> i32:
+    val invalid = (prp1_low != 0u32 or prp1_high != 0u32 or
+        prp2_low != 0u32 or prp2_high != 0u32)
+    _record(D_ZEROES_FIELDS_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D023
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_write_zeroes_decode_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_write_zeroes_decode_valid(
+    common_supported: u32, fields_supported: u32
+) -> i32:
+    val invalid = common_supported == 0u32 or fields_supported == 0u32
+    _record(D_ZEROES_DECODE_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D024
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_dsm_fields_supported")
+pub fn cosmos_nvme_pcie_adapter_policy_dsm_fields_supported(
+    dw10: u32, dw12: u32, dw13: u32, dw14: u32, dw15: u32
+) -> i32:
+    val invalid = ((dw10 & ~DSM_NR_MASK) != 0u32 or dw12 != 0u32 or
+        dw13 != 0u32 or dw14 != 0u32 or dw15 != 0u32)
+    _record(D_DSM_FIELDS_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D025
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_dsm_range_count")
+pub fn cosmos_nvme_pcie_adapter_policy_dsm_range_count(dw10: u32) -> u32:
+    (dw10 & DSM_NR_MASK) + 1u32
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_dsm_attributes")
+pub fn cosmos_nvme_pcie_adapter_policy_dsm_attributes(dw11: u32) -> u32:
+    dw11
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_dsm_data_bytes")
+pub fn cosmos_nvme_pcie_adapter_policy_dsm_data_bytes(range_count: u32) -> u32:
+    range_count * DSM_RANGE_BYTES
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_dsm_decode_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_dsm_decode_valid(
+    common_supported: u32, fields_supported: u32, prp_valid: u32
+) -> i32:
+    val invalid = (common_supported == 0u32 or fields_supported == 0u32 or
+        prp_valid == 0u32)
+    _record(D_DSM_DECODE_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D026
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_flush_decode_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_flush_decode_valid(
+    common_supported: u32, fields_supported: u32
+) -> i32:
+    val invalid = common_supported == 0u32 or fields_supported == 0u32
+    _record(D_FLUSH_DECODE_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D027
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_io_invalid_field")
+pub fn cosmos_nvme_pcie_adapter_policy_io_invalid_field(
+    kind: u32, specific_valid: u32
+) -> i32:
+    val invalid = kind != IO_KIND_NONE and specific_valid == 0u32
+    _record(D_IO_KNOWN_INVALID, invalid)
+    if invalid: 1 else: 0  # COSMOS-NVME-PCIE-ADAPTER-D028
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_admin_common_fields_supported")
+pub fn cosmos_nvme_pcie_adapter_policy_admin_common_fields_supported(
+    dw0: u32, dw2: u32, dw3: u32, dw4: u32, dw5: u32,
+    dw14: u32, dw15: u32
+) -> i32:
+    val unsupported = ((dw0 & DW0_UNSUPPORTED_MASK) != 0u32 or
+        dw2 != 0u32 or dw3 != 0u32 or dw4 != 0u32 or dw5 != 0u32 or
+        dw14 != 0u32 or dw15 != 0u32)
+    _record(D_ADMIN_COMMON_UNSUPPORTED, unsupported)
+    if unsupported: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D029
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_admin_kind")
+pub fn cosmos_nvme_pcie_adapter_policy_admin_kind(opcode: u32) -> u32:
+    val is_queue = (opcode == ADMIN_CREATE_IO_SQ or
+        opcode == ADMIN_CREATE_IO_CQ)
+    _record(D_ADMIN_IS_QUEUE, is_queue)
+    if is_queue:  # COSMOS-NVME-PCIE-ADAPTER-D030
+        return ADMIN_KIND_QUEUE
+    val is_identify = opcode == ADMIN_IDENTIFY
+    _record(D_ADMIN_IS_IDENTIFY, is_identify)
+    if is_identify:  # COSMOS-NVME-PCIE-ADAPTER-D031
+        return ADMIN_KIND_IDENTIFY
+    val is_log = opcode == ADMIN_GET_LOG_PAGE
+    _record(D_ADMIN_IS_LOG, is_log)
+    if is_log: ADMIN_KIND_GET_LOG else: ADMIN_KIND_NONE  # COSMOS-NVME-PCIE-ADAPTER-D032
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_admin_payload_bytes")
+pub fn cosmos_nvme_pcie_adapter_policy_admin_payload_bytes(
+    kind: u32, cdw10: u32
+) -> u32:
+    val identify = kind == ADMIN_KIND_IDENTIFY
+    _record(D_ADMIN_BYTES_IDENTIFY, identify)
+    if identify:  # COSMOS-NVME-PCIE-ADAPTER-D033
+        return ADMIN_IDENTIFY_BYTES
+    val get_log = kind == ADMIN_KIND_GET_LOG
+    _record(D_ADMIN_BYTES_LOG, get_log)
+    if get_log: ((cdw10 >> 16u32) + 1u32) * 4u32 else: 0u32  # COSMOS-NVME-PCIE-ADAPTER-D034
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_admin_transfer_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_admin_transfer_valid(
+    kind: u32, prp1_low: u32, prp1_high: u32,
+    prp2_low: u32, prp2_high: u32, payload_bytes: u32
+) -> i32:
+    val is_queue = kind == ADMIN_KIND_QUEUE
+    _record(D_ADMIN_TRANSFER_QUEUE, is_queue)
+    if is_queue:  # COSMOS-NVME-PCIE-ADAPTER-D035
+        val invalid = ((prp1_low == 0u32 and prp1_high == 0u32) or
+            (prp1_low & PRP_PAGE_MASK) != 0u32 or
+            prp1_high > ADDRESS_HIGH_MAX or prp2_low != 0u32 or
+            prp2_high != 0u32)
+        _record(D_ADMIN_QUEUE_INVALID, invalid)
+        return if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D036
+
+    val is_payload = (kind == ADMIN_KIND_IDENTIFY or
+        kind == ADMIN_KIND_GET_LOG)
+    _record(D_ADMIN_TRANSFER_PAYLOAD, is_payload)
+    if is_payload:  # COSMOS-NVME-PCIE-ADAPTER-D037
+        val invalid = cosmos_nvme_pcie_adapter_policy_prp_span_valid(
+            prp1_low, prp1_high, prp2_low, prp2_high, payload_bytes
+        ) == 0
+        _record(D_ADMIN_PAYLOAD_INVALID, invalid)
+        return if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D038
+
+    val present = (prp1_low != 0u32 or prp1_high != 0u32 or
+        prp2_low != 0u32 or prp2_high != 0u32)
+    _record(D_ADMIN_NO_PAYLOAD_PRESENT, present)
+    if present: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D039
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_admin_invalid_field")
+pub fn cosmos_nvme_pcie_adapter_policy_admin_invalid_field(
+    common_supported: u32, transfer_valid: u32
+) -> u32:
+    val invalid = common_supported == 0u32 or transfer_valid == 0u32
+    _record(D_ADMIN_INVALID_FIELD, invalid)
+    if invalid: 1u32 else: 0u32  # COSMOS-NVME-PCIE-ADAPTER-D040
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_post_result")
+pub fn cosmos_nvme_pcie_adapter_policy_post_result(result: u32) -> u32:
+    val committed = result == 1u32
+    _record(D_POST_COMMITTED, committed)
+    if committed:  # COSMOS-NVME-PCIE-ADAPTER-D041
+        return 0u32
+    val not_committed = result == 0u32
+    _record(D_POST_NOT_COMMITTED, not_committed)
+    if not_committed:  # COSMOS-NVME-PCIE-ADAPTER-D042
+        return 1u32
+    val ambiguous = result == 2u32
+    _record(D_POST_AMBIGUOUS, ambiguous)
+    if ambiguous: 2u32 else: 3u32  # COSMOS-NVME-PCIE-ADAPTER-D043
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_admin_payload_request_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_admin_payload_request_valid(
+    prp1_low: u32, prp1_high: u32, prp2_high: u32, payload_bytes: u32
+) -> i32:
+    val invalid = (payload_bytes == 0u32 or
+        payload_bytes > HOST_DMA_MAX_BYTES or
+        (prp1_low & (HOST_DMA_ALIGNMENT - 1u32)) != 0u32 or
+        prp1_high > ADDRESS_HIGH_MAX or prp2_high > ADDRESS_HIGH_MAX)
+    _record(D_PAYLOAD_REQUEST_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D044
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_admin_payload_result")
+pub fn cosmos_nvme_pcie_adapter_policy_admin_payload_result(status: i32) -> u32:
+    val committed = status == COSMOS_OK
+    _record(D_PAYLOAD_COMMITTED, committed)
+    if committed: 0u32 else: 2u32  # COSMOS-NVME-PCIE-ADAPTER-D045
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_no_async_result")
+pub fn cosmos_nvme_pcie_adapter_policy_no_async_result() -> i32:
+    COSMOS_UNAVAILABLE
+
+@export("C", name: "cosmos_nvme_pcie_adapter_policy_init_values_valid")
+pub fn cosmos_nvme_pcie_adapter_policy_init_values_valid(
+    blocks_low: u32, blocks_high: u32, block_bytes: u32
+) -> i32:
+    val invalid = (cosmos_nvme_pcie_adapter_policy_capacity_valid(
+        blocks_low, blocks_high
+    ) == 0 or cosmos_nvme_pcie_adapter_policy_block_bytes_valid(
+        block_bytes
+    ) == 0)
+    _record(D_INIT_INVALID, invalid)
+    if invalid: 0 else: 1  # COSMOS-NVME-PCIE-ADAPTER-D046

@@ -1,4 +1,8 @@
 # Field-style `.length` (and any unlowered field access on a builtin container) drops the whole module out of JIT
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-08
 - Status: OPEN (P2)
@@ -116,3 +120,4 @@ class cannot be bound even by fully-qualified import, so **no spec can guard
 it**. (Note: nothing binds at all — this is NOT a wrong-binding-to-a-same-named-
 symbol defect.) Its `Environment` is now structurally identical to the live
 `backend/env.spl` `Environment`, so deletion loses nothing.
+

@@ -73,34 +73,3 @@ riscv gen2 qualification CLI contract mismatch (2026-08-14).
 
 Each phase: spipe SSpec tests, land via land.shs, higher-model review of
 results before marking done.
-
-## Status review — end of 2026-08-19 session (reviewed by Fable)
-
-Landed on origin/main (daead78d1a3e..170abc7b9d7, 20+ commits, every tree
-guard-verified):
-- Sanitize: rendering integration 533→584/602; gui system 1132/1425→
-  all triaged, ~45 specs repaired; wm_compare 0/4-gated→46/48;
-  browser_engine 0/14→14/14. 4 interpreter write-back defects + JS-engine
-  scope chain + ~14 real product bugs fixed.
-- Phase 1 ✓ capture-diff (find_diff_regions, shift-align, PNG ingest, 10/10).
-- Phase 2 ✓ layout→text debugger (tree/cmds/grid/diff, 8/8).
-- Phase 3 ✓ srenderdoc↔RenderDoc compare+analysis (LCS drawcall alignment,
-  6/6). Real .rdc capture still blocked on renderdoccmd install (honest
-  blocked-skip wired).
-- Phase 4 ✓ component harness: 9 components (counter/button/input/checkbox/list/table/float/css_zoo/dom_zoo), real IO both engines, shrink-only pins. Coverage MEASURED 61.6→67.9% (foundation module 81%); 80% goal not met — residue is CSS value forms + filed features (implicit tbody, li ::marker), which matter more than more fixtures.
-  5/5, fail-closed divergence pins). Coverage HONESTLY 61.6% (<80% goal);
-  gap list in the spec header — needs more components through the harness.
-- Phase 5 partial: vector_font_diff 10 glyphs/0 findings; chrome text-metric
-  divergence remains the known open front (mdi plan).
-- Phase 6 ✓ vulkan 2d: feature-build E0252 fixed (was failing 5 lanes),
-  clear-8k passes live; blank-WSI present gap filed.
-- Phase 7 ✓ xxIR=HWIR: foundation 50/50, extract 55/55 (was 29/50, 41/55);
-  eager IR allocation (DrawIR-v3 packed scene) 54/54.
-- Phase 8 ✓ SIMD both lanes 31/31 (SIMPLE_2D_SIMD=off scalar knob) + 8k
-  kernels; CUDA device readback/dlopen/break-even green; cuda↔vulkan parity
-  probe blocked on a native-build defect (filed).
-- Phase 9 ✓ doom contract lane: byte-identical frame-hash parity across
-  headless/web_canvas/gui_engine2d (new backends); showcase batch panel.
-Open (all filed): stage-binary SEGV/bootstrap redeploy; renderdoccmd install;
-WSI present; component coverage to 80%; chrome text metrics; effect/glass
-screenshot perf; browser input-path title writes; guard-selftest isolation (P1).

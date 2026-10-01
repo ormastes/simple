@@ -1,0 +1,209 @@
+"""
+nvme_emu_recovery_check — NVMe fault-and-recovery behaviour over emulated media.
+
+Sibling of nvme_emu_media_check.spl (Slice B). That file proves ONE recovery
+path: retention drift the ladder absorbs. This file covers the rest of the
+fault/recovery surface that a storage device is actually judged on:
+
+  A. wear-induced ECC pressure     — a heavily cycled block still serves reads,
+                                     and the recovery is VISIBLE in the health /
+                                     SMART observability sink.
+  B. the ladder really calibrated  — rel_vref persisted a winning offset, so the
+                                     recovery in A was ladder work, not luck.
+  C. UNRECOVERABLE damage          — degrade past the 7-rung ladder's reach and
+                                     require the host to receive a proper NVMe
+                                     error status (SC_MEDIA_ERR), never silently
+                                     wrong data. This is the most important case
+                                     in the file: a device returning wrong bytes
+                                     is far worse than one returning an error.
+
+  bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_recovery_check.spl
+
+SUBMISSION IS NOT HOST-EQUIVALENT (read this before citing this file).
+Commands are submitted by calling the controller directly (`submit_io` below),
+which is a FIRMWARE-level entry point. A real host driver writes an SQE into
+submission-queue memory, rings a doorbell register, and polls the completion
+queue for a phase-tagged CQE. `fw/hil_queue.spl`'s rings are struct fields, not
+memory; there are no doorbell registers and no phase tag, and `fw/host_transport.spl`
+does not exist yet. So these are NOT host tests. Every submission in this file
+goes through the single `submit_io` helper precisely so that swapping in the
+real host transport is a one-function change rather than a rewrite.
+
+Fault injection goes exclusively through the typed emu_* seam
+(emu_set_block_wear / emu_advance_time_s). No media backing array is touched and
+there is no `.nandram` word poking.
+
+GEOMETRY: firmware addresses 64 blocks x 64 pages; the S1 NeChip backs 8 x 4 and
+aliases beyond that. Everything below stays inside the 1:1 window.
+
+READ DISTURB IS DELIBERATELY ABSENT — see the note at the bottom of this file
+and doc/08_tracking/bug/nvme_emu_typed_seam_has_no_read_disturb_injector_2026-09-01.md. The
+typed seam has no disturb injector and the physics needs ~400,000 neighbour
+reads to flip one cell, so a read-disturb scenario here would be an assertion
+that cannot fail. That is reported as a finding rather than faked.
+"""
+
+use nvme_types.*
+use nvme_controller.*
+use ftl.*
+use fil.*
+use nd_types.*
+use rel_health.*
+
+fn expect_eq(got: i64, want: i64, label: text) -> i64:
+    if got == want:
+        print("  PASS: " + label + " (" + got.to_text() + ")")
+        return 0
+    print("  FAIL: " + label + " — got " + got.to_text() + ", want " + want.to_text())
+    1
+
+fn expect_ne(got: i64, unwanted: i64, label: text) -> i64:
+    if got != unwanted:
+        print("  PASS: " + label + " (" + got.to_text() + ")")
+        return 0
+    print("  FAIL: " + label + " — got " + got.to_text() + ", which should differ")
+    1
+
+fn expect_gt(got: i64, floor: i64, label: text) -> i64:
+    if got > floor:
+        print("  PASS: " + label + " (" + got.to_text() + " > " + floor.to_text() + ")")
+        return 0
+    print("  FAIL: " + label + " — got " + got.to_text() + ", want > " + floor.to_text())
+    1
+
+# ── THE SUBMISSION SEAM ──────────────────────────────────────────────────────
+# The single place a command enters the device. Today it is a firmware-level
+# call; when the host transport lands (SQE into queue memory + doorbell + CQ
+# phase poll) this one function changes and every scenario below is unmodified.
+# Returns the device alongside the completion because Simple has value
+# semantics: a controller passed by value would be a COPY, and every SMART
+# counter the command bumped would be discarded at the return (this was
+# measured, not assumed — it silently zeroed media_errors in a first draft).
+fn submit_io(c: NvmeController, cid: i64, op: i64, lba: i64, nblocks: i64, data: i64) -> (NvmeController, NvmeCpl):
+    var dev = c
+    val cpl: NvmeCpl = dev.process_one_io(cmd_make(cid, op, lba, nblocks, data))
+    (dev, cpl)
+
+fn main():
+    var fail: i64 = 0
+
+    # ── A. wear-induced ECC pressure, with the recovery visible in health ────
+    print("A. a heavily cycled block still serves reads, and the recovery shows up")
+    var c: NvmeController = nvme_controller_new_emu()
+
+    # 0x01: seven programmed cells (the state retention/wear drift attacks) plus
+    # one erased bit, so the value is DISTINCT from the 0 payload a failed read
+    # carries. A 0x00 pattern would make the positive control below unfalsifiable.
+    val (cA, wA) = submit_io(c, 1, OP_WRITE, 2, 1, 0x01)
+    c = cA
+    fail = fail + expect_eq(wA.status, SC_SUCCESS, "seed WRITE lba2 (mostly-programmed page)")
+
+    val (cB, r_fresh) = submit_io(c, 2, OP_READ, 2, 1, 0)
+    c = cB
+    fail = fail + expect_eq(r_fresh.data, 0x01, "fresh page reads back correctly (positive control)")
+    fail = fail + expect_eq(r_fresh.status, SC_SUCCESS, "fresh read completes SC_SUCCESS")
+
+    val ppn2: i64 = c.ftl.lba_ppn(2)
+    fail = fail + expect_ne(ppn2, UNMAP, "lba2 mapped to a physical page before wear")
+    val blk2: i64 = ppn_block(ppn2)
+
+    # Baseline the health sink so the post-wear number is a DELTA, not an
+    # absolute that the fresh read alone could also have produced.
+    val depth_before: i64 = c.ftl.rel_health.retry_depth_max[blk2]
+    fail = fail + expect_eq(depth_before, 0, "clean block needed no retry rungs before wear")
+    fail = fail + expect_eq(c.ftl.rel_health.refresh_cause[blk2], rel_cause_none(), "clean block carries no refresh cause before wear")
+
+    # Typed seam only: cycle the block hard, then let it dwell. 6000 P/E + one
+    # day is calibrated to land INSIDE the ladder's reach — measured: 6000/1d
+    # recovers at rung -24, 9000/1d is already unrecoverable (that magnitude is
+    # used in scenario C below). A scenario that silently crossed into
+    # unrecoverable would not be testing recovery at all.
+    c.ftl.emu_set_block_wear(blk2, 6000)
+    c.ftl.emu_advance_time_s(86400.0)   # one day
+
+    val (cC, r_worn) = submit_io(c, 3, OP_READ, 2, 1, 0)
+    c = cC
+    fail = fail + expect_eq(r_worn.data, 0x01, "worn+aged page STILL returns correct data through NVMe read")
+    fail = fail + expect_eq(r_worn.status, SC_SUCCESS, "worn+aged read completes SC_SUCCESS")
+
+    # Observability: the data read path folds (corrected, depth) into rel_health.
+    # A recovery that cost nothing would leave these at the pre-wear zero.
+    #
+    # ORACLE CHOICE, MEASURED. `rel_health_rber` was tried first and CANNOT MOVE
+    # on a recovered read: read_with_ladder returns obs.corrected from the LAST
+    # (winning) sense, which decoded cleanly and so reports corrected = 0, while
+    # the failing offset-0 read's corrected = 2 is overwritten. Measured 0 ppm at
+    # every recoverable wear/dwell point. Keeping it would have been an assertion
+    # that cannot fail. Filed as
+    # doc/08_tracking/bug/rel_health_rber_and_corrected_events_blind_to_ladder_recoveries_2026-09-01.md
+    # retry_depth_max and refresh_cause DO discriminate, so they are the oracle.
+    fail = fail + expect_gt(c.ftl.rel_health.retry_depth_max[blk2], depth_before, "health sink records how deep the ladder had to go")
+    fail = fail + expect_eq(c.ftl.rel_health.refresh_cause[blk2], rel_cause_err(), "health sink tags the block for error-triggered refresh (DEAR)")
+
+    # ── B. non-vacuity + ladder witness ──────────────────────────────────────
+    # A raw device read bypasses the recovery ladder. If it senses clean data,
+    # the wear/ageing above did nothing and A proves nothing.
+    print("B. the damage A survived was real, and the ladder is what survived it")
+    val raw2: FilRead = c.ftl.fil.read(ppn2)
+    fail = fail + expect_eq(raw2.data, 0xFF, "raw ladder-bypassing read senses drifted bits (damage is real)")
+    fail = fail + expect_eq(raw2.code, NAND_ECC_FAIL, "raw ladder-bypassing read FAILS ECC")
+
+    # The ladder persisted a winning Vref offset for this block (ROR). A
+    # discriminating oracle: it stays 0 unless a shifted sense actually won.
+    fail = fail + expect_ne(c.ftl.fil.calibrated_offset(blk2), 0, "ladder persisted a calibrated Vref offset for the block")
+
+    # Control for that probe: an untouched block must have NO calibration, so
+    # the assertion above cannot be satisfied by a constant.
+    fail = fail + expect_eq(c.ftl.fil.calibrated_offset(7), 0, "control: an undamaged block has no calibrated offset")
+
+    # ── C. UNRECOVERABLE damage must produce an NVMe ERROR, not wrong bytes ──
+    print("C. damage past the ladder's reach fails LOUDLY")
+    var c2: NvmeController = nvme_controller_new_emu()
+    val (d0, w3) = submit_io(c2, 20, OP_WRITE, 3, 1, 0x01)
+    c2 = d0
+    fail = fail + expect_eq(w3.status, SC_SUCCESS, "seed WRITE lba3")
+
+    val (d1, r_ok) = submit_io(c2, 21, OP_READ, 3, 1, 0)
+    c2 = d1
+    fail = fail + expect_eq(r_ok.data, 0x01, "positive control: lba3 reads its pattern while healthy")
+    fail = fail + expect_eq(r_ok.status, SC_SUCCESS, "positive control: healthy read is SC_SUCCESS")
+    fail = fail + expect_eq(c2.media_errors, 0, "no media errors counted while healthy")
+
+    val ppn3: i64 = c2.ftl.lba_ppn(3)
+    fail = fail + expect_ne(ppn3, UNMAP, "lba3 mapped before catastrophic damage")
+
+    # Drive the cells far below any reference the 7-rung table can reach: the
+    # table's largest negative rung is -32 (vref = 96), so a page whose stored
+    # charge has collapsed to the erased floor cannot be recovered at ANY rung.
+    c2.ftl.emu_set_block_wear(ppn_block(ppn3), 200000)
+    c2.ftl.emu_advance_time_s(3153600000.0)   # 100 years
+
+    val (d2, r_dead) = submit_io(c2, 22, OP_READ, 3, 1, 0)
+    c2 = d2
+    fail = fail + expect_eq(r_dead.status, SC_MEDIA_ERR, "unrecoverable page returns SC_MEDIA_ERR to the host")
+    fail = fail + expect_ne(r_dead.data, 0x01, "the failed read does NOT hand back data claimed to be the payload")
+    fail = fail + expect_eq(r_dead.cid, 22, "error completion still carries its own cid")
+    fail = fail + expect_gt(c2.media_errors, 0, "SMART media_errors counts the unrecovered read")
+    fail = fail + expect_eq(c2.last_error, SC_MEDIA_ERR, "error log records the media error")
+
+    # Non-vacuity for C: prove the damage is genuinely beyond recovery rather
+    # than the status being some unrelated rejection — a raw read must fail ECC.
+    val raw3: FilRead = c2.ftl.fil.read(ppn3)
+    fail = fail + expect_eq(raw3.code, NAND_ECC_FAIL, "raw read confirms the page is unreadable, not merely rejected")
+
+    # And prove the SC_MEDIA_ERR probe discriminates: an UNDAMAGED lba on the
+    # same controller must still succeed, so the controller has not simply
+    # wedged into a global error state.
+    val (d3, w5) = submit_io(c2, 23, OP_WRITE, 5, 1, 0x3C)
+    c2 = d3
+    fail = fail + expect_eq(w5.status, SC_SUCCESS, "control: a healthy LBA still writes after the media error")
+    val (d4, r_live) = submit_io(c2, 24, OP_READ, 5, 1, 0)
+    c2 = d4
+    fail = fail + expect_eq(r_live.status, SC_SUCCESS, "control: a healthy LBA still reads SC_SUCCESS after the media error")
+    fail = fail + expect_eq(r_live.data, 0x3C, "control: the healthy LBA returns its own pattern")
+
+    if fail == 0:
+        print("NVME EMU RECOVERY OK")
+    else:
+        print("STATUS: FAIL nvme_emu_recovery_check: " + fail.to_text() + " check(s) failed")
+    return ()

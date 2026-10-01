@@ -1,0 +1,64 @@
+use std.common.json.{json_parse, json_to_array, json_to_boolean, json_to_number, json_to_string, json_object_get}
+use app.lint.provider.cpp.model.{CppDiagnosticV1, CppTextEditV1}
+
+pub struct CppStructuredOutputV1:
+    valid: bool
+    diagnostics: [CppDiagnosticV1]
+    reason: text
+
+fn _text_field_v1(record: any, key: text) -> text:
+    if val value = json_object_get(record, key):
+        if val extracted = json_to_string(value): return extracted
+    ""
+
+fn _u64_field_v1(record: any, key: text) -> u64?:
+    if val value = json_object_get(record, key):
+        if val extracted = json_to_number(value):
+            if extracted >= 0.0: return extracted as u64
+    nil
+
+fn _bool_field_v1(record: any, key: text) -> bool:
+    if val value = json_object_get(record, key):
+        if val extracted = json_to_boolean(value): return extracted
+    false
+
+fn _severity_valid_v1(severity: text) -> bool:
+    severity == "error" or severity == "warning" or severity == "note"
+
+fn _fixes_v1(record: any, path: text, revision: u64) -> [CppTextEditV1]?:
+    var fixes: [CppTextEditV1] = []
+    if val raw = json_object_get(record, "fixes"):
+        if val entries = json_to_array(raw):
+            for entry in entries:
+                val start = _u64_field_v1(entry, "start_byte")
+                val finish = _u64_field_v1(entry, "end_byte")
+                if start == nil or finish == nil: return nil
+                if val start_byte = start:
+                    if val end_byte = finish:
+                        if end_byte < start_byte: return nil
+                        fixes.push(CppTextEditV1(path, revision, start_byte, end_byte, _text_field_v1(entry, "replacement"), _bool_field_v1(entry, "machine_applicable")))
+    fixes
+
+pub fn parse_cpp_structured_output_v1(output: text, revision: u64) -> CppStructuredOutputV1:
+    val parsed = json_parse(output)
+    if parsed == nil: return CppStructuredOutputV1(false, [], "clang-tidy wrapper output is malformed JSON")
+    if val records = json_to_array(parsed):
+        var diagnostics: [CppDiagnosticV1] = []
+        for record in records:
+            val rule = _text_field_v1(record, "rule")
+            val severity = _text_field_v1(record, "severity")
+            val path = _text_field_v1(record, "path")
+            val message = _text_field_v1(record, "message")
+            val start = _u64_field_v1(record, "start_byte")
+            val finish = _u64_field_v1(record, "end_byte")
+            if rule == "" or not _severity_valid_v1(severity) or path == "" or message == "" or start == nil or finish == nil:
+                return CppStructuredOutputV1(false, [], "clang-tidy diagnostic is incomplete")
+            if val start_byte = start:
+                if val end_byte = finish:
+                    if end_byte < start_byte: return CppStructuredOutputV1(false, [], "clang-tidy diagnostic range is invalid")
+                    val fixes = _fixes_v1(record, path, revision)
+                    if fixes == nil: return CppStructuredOutputV1(false, [], "clang-tidy fix range is invalid")
+                    if val edits = fixes:
+                        diagnostics.push(CppDiagnosticV1(rule, severity, path, revision, start_byte, end_byte, message, edits))
+        return CppStructuredOutputV1(true, diagnostics, "")
+    CppStructuredOutputV1(false, [], "clang-tidy wrapper output root must be an array")

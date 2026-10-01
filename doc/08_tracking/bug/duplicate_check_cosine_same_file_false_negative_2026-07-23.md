@@ -1,7 +1,10 @@
 # Cosine duplicate check ignored same-file fuzzy clones
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** SOURCE FIXED; RUNTIME QUALIFICATION PENDING
 **Severity:** P1 — renamed duplicate blocks in one file were silently omitted
 
 ## Reproduction
@@ -27,3 +30,4 @@ High-capability source review passed. The deployed pure-Simple test command
 segfaulted with exit 139 and no output. The bounded Rust-seed diagnostic exited
 1 because the runner executed zero examples. Runtime and Stage 4 qualification
 remain pending; neither result is reported as a passing test.
+

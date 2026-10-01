@@ -37,7 +37,10 @@ impl ParsedResult:
         self.positionals.len() >= 0
 
     fn get_flag(name: text) -> bool:
-        self.flags.get(name) ?? false
+        # `.has()` + index, not `.get() ?? false` — under native codegen a
+        # Dict<_, bool> hit storing `true` collapses to false via `?? false`
+        # (dict_native_pitfalls.md). Index read is the reliable access.
+        if self.flags.has(name): self.flags[name] else: false
 
     fn get_option(name: text) -> text?:
         self.options.get(name)
@@ -58,7 +61,12 @@ impl ParsedResult:
         self.positionals.len()
 
     fn has_subcommand() -> bool:
-        self.subcommand.?
+        # `.?` yields T? (payload-or-nil), not a bool -- returning it directly
+        # from a `-> bool` function leaked the subcommand text when present,
+        # or nil (violating the non-optional return contract) when absent,
+        # instead of true/false. See doc/08_tracking/bug/
+        # dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09.md.
+        self.subcommand != nil
 
     fn get_subcommand() -> text?:
         self.subcommand
@@ -200,25 +208,46 @@ impl SimpleParser:
 
         # Initialize options with defaults
         for a in self.args:
-            if a.arg_kind == "option" and a.default_value.?:
-                options[a.name] = a.default_value.unwrap()
+            if a.arg_kind == "option":
+                match a.default_value:
+                    Some(default_text):
+                        options[a.name] = default_text
+                    nil:
+                        pass
 
+        # GNU getopt_long convention: a value option never consumes a following
+        # option as its value, `--` ends option parsing, and an undeclared
+        # `--help` / `-h` sets the `help` flag instead of failing.
         var i = 0
         var positional_idx = 0
+        var options_ended = false
         while i < input_args.len():
             val arg = input_args[i]
+
+            if options_ended:
+                positionals.push(arg)
+                positional_idx = positional_idx + 1
+                i = i + 1
+                continue
+            if arg == "--":
+                options_ended = true
+                i = i + 1
+                continue
 
             # Check for subcommand
             if not arg.starts_with("-") and subcommand == nil and self.subcommands.len() > 0:
                 val resolved = self.resolve_subcommand(arg)
-                if resolved.?:
-                    subcommand = Some(resolved.unwrap())
-                    # Remaining args go to subcommand
-                    var j = i + 1
-                    while j < input_args.len():
-                        subcommand_args.push(input_args[j])
-                        j = j + 1
-                    break
+                match resolved:
+                    Some(name):
+                        subcommand = Some(name)
+                        # Remaining args go to subcommand
+                        var j = i + 1
+                        while j < input_args.len():
+                            subcommand_args.push(input_args[j])
+                            j = j + 1
+                        break
+                    nil:
+                        pass
 
             if arg.starts_with("--"):
                 # Long option/flag
@@ -228,24 +257,32 @@ impl SimpleParser:
                     val name = rest[0:eq_pos]
                     val value = rest[eq_pos + 1:]
                     val opt = self.find_option_by_long(name)
-                    if opt.?:
-                        options[opt.unwrap().name] = value
-                    else:
-                        return Err("Unknown option: --{name}")
+                    match opt:
+                        Some(option_def):
+                            options[option_def.name] = value
+                        nil:
+                            if self.find_flag_by_long(name) != nil:
+                                return Err("Option --{name} does not take a value")
+                            return Err("Unknown option: --{name}")
                 else:
                     val flag_def = self.find_flag_by_long(rest)
-                    if flag_def.?:
-                        flags[flag_def.unwrap().name] = true
-                    else:
-                        val opt_def = self.find_option_by_long(rest)
-                        if opt_def.?:
-                            if i + 1 < input_args.len():
-                                i = i + 1
-                                options[opt_def.unwrap().name] = input_args[i]
-                            else:
-                                return Err("Option --{rest} requires a value")
-                        else:
-                            return Err("Unknown argument: --{rest}")
+                    match flag_def:
+                        Some(flag):
+                            flags[flag.name] = true
+                        nil:
+                            val opt_def = self.find_option_by_long(rest)
+                            match opt_def:
+                                Some(option_def):
+                                    if i + 1 < input_args.len() and not parser_token_is_option(input_args[i + 1]):
+                                        i = i + 1
+                                        options[option_def.name] = input_args[i]
+                                    else:
+                                        return Err("Option --{rest} requires a value")
+                                nil:
+                                    if rest == "help":
+                                        flags["help"] = true
+                                    else:
+                                        return Err("Unknown argument: --{rest}")
             elif arg.starts_with("-") and arg.len() > 1:
                 # Short option/flag (possibly combined)
                 val chars = arg[1:]
@@ -253,24 +290,29 @@ impl SimpleParser:
                 while ci < chars.len():
                     val ch = chars[ci:ci + 1]
                     val flag_def = self.find_flag_by_short(ch)
-                    if flag_def.?:
-                        flags[flag_def.unwrap().name] = true
-                        ci = ci + 1
-                    else:
-                        val opt_def = self.find_option_by_short(ch)
-                        if opt_def.?:
-                            # Rest of string is the option value
-                            val remaining = chars[ci + 1:]
-                            if remaining.len() > 0:
-                                options[opt_def.unwrap().name] = remaining
-                            elif i + 1 < input_args.len():
-                                i = i + 1
-                                options[opt_def.unwrap().name] = input_args[i]
-                            else:
-                                return Err("Option -{ch} requires a value")
-                            break
-                        else:
-                            return Err("Unknown flag: -{ch}")
+                    match flag_def:
+                        Some(flag):
+                            flags[flag.name] = true
+                            ci = ci + 1
+                        nil:
+                            val opt_def = self.find_option_by_short(ch)
+                            match opt_def:
+                                Some(option_def):
+                                    # Rest of string is the option value
+                                    val remaining = chars[ci + 1:]
+                                    if remaining.len() > 0:
+                                        options[option_def.name] = remaining
+                                    elif i + 1 < input_args.len() and not parser_token_is_option(input_args[i + 1]):
+                                        i = i + 1
+                                        options[option_def.name] = input_args[i]
+                                    else:
+                                        return Err("Option -{ch} requires a value")
+                                    break
+                                nil:
+                                    if arg == "-h":
+                                        flags["help"] = true
+                                    else:
+                                        return Err("Unknown flag: -{ch}")
                             break
             else:
                 # Positional argument
@@ -342,6 +384,13 @@ impl SimpleParser:
 # =============================================================================
 # Constructor
 # =============================================================================
+
+fn parser_token_is_option(token: text) -> bool:
+    # `-` (stdin) and negative numbers such as `-5` are values; any other
+    # token starting with `-` is an option and is never consumed as a value.
+    if token.len() < 2 or not token.starts_with("-"):
+        return false
+    not "0123456789".contains(token[1:2])
 
 fn simple_parser(name: text, description: text) -> SimpleParser:
     SimpleParser(

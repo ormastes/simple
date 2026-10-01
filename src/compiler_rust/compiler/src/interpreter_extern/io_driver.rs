@@ -7,13 +7,13 @@ unsafe extern "C" {
     fn rt_driver_create(queue_depth: i64) -> i64;
     fn rt_driver_destroy(handle: i64);
     fn rt_driver_submit_accept(handle: i64, listen_fd: i64) -> i64;
-    fn rt_driver_submit_connect(handle: i64, fd: i64, addr: *const i8, port: i64) -> i64;
+    fn rt_driver_submit_connect(handle: i64, fd: i64, addr: *const i8, addr_len: i64, port: i64) -> i64;
     fn rt_driver_submit_recv(handle: i64, fd: i64, buf_size: i64) -> i64;
     fn rt_driver_submit_send(handle: i64, fd: i64, data: *const i8, len: i64) -> i64;
     fn rt_driver_submit_sendfile(handle: i64, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64;
     fn rt_driver_submit_read(handle: i64, fd: i64, buf_size: i64, offset: i64) -> i64;
     fn rt_driver_submit_write(handle: i64, fd: i64, data: *const i8, len: i64, offset: i64) -> i64;
-    fn rt_driver_submit_open(handle: i64, path: *const i8, flags: i64, mode: i64) -> i64;
+    fn rt_driver_submit_open(handle: i64, path: *const i8, path_len: i64, flags: i64, mode: i64) -> i64;
     fn rt_driver_submit_close(handle: i64, fd: i64) -> i64;
     fn rt_driver_submit_fsync(handle: i64, fd: i64) -> i64;
     fn rt_driver_submit_timeout(handle: i64, timeout_ms: i64) -> i64;
@@ -22,10 +22,10 @@ unsafe extern "C" {
     fn rt_driver_poll_id(handle: i64, index: i64) -> i64;
     fn rt_driver_poll_result(handle: i64, index: i64) -> i64;
     fn rt_driver_poll_flags(handle: i64, index: i64) -> i64;
-    fn rt_driver_poll_data(handle: i64, index: i64) -> *const u8;
+    fn rt_driver_poll_data_ptr(handle: i64, index: i64) -> *const u8;
     fn rt_driver_poll_data_len(handle: i64, index: i64) -> i64;
     fn rt_driver_cancel(handle: i64, op_id: i64) -> bool;
-    fn rt_driver_backend_name(handle: i64) -> *const u8;
+    fn rt_driver_backend_name_ptr(handle: i64) -> *const u8;
     fn rt_driver_supports_sendfile(handle: i64) -> bool;
     fn rt_driver_supports_zero_copy(handle: i64) -> bool;
 }
@@ -97,6 +97,7 @@ fn dispatch_checked(name: &str, args: &[Value]) -> Result<Option<Value>, Compile
                     get_i64(args, 0, name)?,
                     get_i64(args, 1, name)?,
                     addr.as_ptr().cast(),
+                    addr.as_bytes().len() as i64,
                     get_i64(args, 3, name)?,
                 )
             }))
@@ -154,6 +155,7 @@ fn dispatch_checked(name: &str, args: &[Value]) -> Result<Option<Value>, Compile
                 rt_driver_submit_open(
                     get_i64(args, 0, name)?,
                     path.as_ptr().cast(),
+                    path.as_bytes().len() as i64,
                     get_i64(args, 2, name)?,
                     get_i64(args, 3, name)?,
                 )
@@ -189,7 +191,7 @@ fn dispatch_checked(name: &str, args: &[Value]) -> Result<Option<Value>, Compile
             let handle = get_i64(args, 0, name)?;
             let index = get_i64(args, 1, name)?;
             unsafe {
-                let ptr = rt_driver_poll_data(handle, index);
+                let ptr = rt_driver_poll_data_ptr(handle, index);
                 let len = rt_driver_poll_data_len(handle, index);
                 if len < 0 || (ptr.is_null() && len > 0) {
                     Err(CompileError::runtime(format!(
@@ -212,7 +214,7 @@ fn dispatch_checked(name: &str, args: &[Value]) -> Result<Option<Value>, Compile
             Ok(Value::Bool(r))
         }
         "rt_driver_backend_name" => unsafe {
-            let ptr = rt_driver_backend_name(get_i64(args, 0, name)?);
+            let ptr = rt_driver_backend_name_ptr(get_i64(args, 0, name)?);
             if ptr.is_null() {
                 Err(CompileError::runtime(
                     "rt_driver_backend_name: provider returned null".to_string(),

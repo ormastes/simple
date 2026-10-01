@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# A method declared `-> T?` hands the interpreter `Option::Some(obj)` (see
+# `Value::unwrap_option_payload`: a nullable has two runtime shapes). Field
+# READS and `== nil` already see through that wrapper; field WRITES did not:
+# `var s = table.get_symbol_raw(id); s.name = ...` was rejected with
+# `invalid assignment: cannot assign field on non-object value` even though
+# `s.name` read fine on the line before. This is the exact shape of
+# `relocate_provider_type_symbol` (src/compiler/50.mir/_MirLowering/
+# provider_metadata.spl:153-156), which the native-build worker interprets
+# while building `simple_lsp_mcp`, so the wrapper blocked that artifact. The
+# receiver is now peeled with `Value::into_option_payload` at every field
+# write site in interpreter/node_exec.rs.
+
+use std.spec.step
+
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val FIXTURE = """struct Sym:
+    name: text
+    id: i64
+
+class Table:
+    symbols: Dict<i64, Sym>
+
+    fn get_symbol_raw(raw: i64) -> Sym?:
+        if self.symbols.has(raw):
+            return self.symbols[raw]
+        nil
+
+    me put(s: Sym):
+        self.symbols[s.id] = s
+
+class Lowerer:
+    symbols: Table
+
+    me relocate() -> text:
+        var copied = self.symbols.get_symbol_raw(1)
+        if copied == nil:
+            return "nil"
+        copied.name = "renamed"
+        self.symbols.symbols[1] = copied
+        self.symbols.symbols[1].name
+
+fn main():
+    var t = Table(symbols: {})
+    t.put(Sym(name: "a", id: 1))
+    var l = Lowerer(symbols: t)
+    print(l.relocate())
+"""
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-optional-return-field-write"
+    dir_create_all(dir)
+    dir
+
+# The compiler under test: `SIMPLE_SPEC_COMPILER` (a rebuilt seed or a stage
+# candidate), else `SIMPLE_BINARY`, else the deployed `bin/simple` — which may
+# be a stale seed that predates the fix and then fails this spec for the
+# wrong reason.
+fn compiler_binary() -> text:
+    val spec_compiler = env_get("SIMPLE_SPEC_COMPILER")
+    if spec_compiler != "":
+        return spec_compiler
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
+
+describe "a field write through a `-> T?` method result reaches the object":
+
+    """`var copied = table.get_symbol_raw(1); copied.name = "renamed"` must
+    mutate the struct exactly as the direct `table.symbols[1]` form does."""
+
+    it "interprets the fixture and prints the renamed field":
+        step("write the fixture")
+        val dir = work_dir()
+        val src = dir + "/main.spl"
+        assert_true(file_write(src, FIXTURE))
+
+        step("interpret it through the compiler binary")
+        env_set("SIMPLE_EXECUTION_MODE", "interpreter")
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_RUST_SEED_WARNING", "0")
+        val ran = process_run(compiler_binary(), ["run", src])
+        assert_equal(ran[2], 0)
+
+        step("the write landed")
+        assert_equal(ran[0].trim(), "renamed")

@@ -18,6 +18,8 @@ use app.editor.editor_markdown_helpers.*
 use app.editor.editor_path_text_helpers.*
 use app.editor.editor_ctrl_debug.*
 use app.editor.editor_ctrl_lsp.*
+use std.editor.backend.gui_sdl_bridge.{gui_sdl_init, gui_sdl_shutdown}
+use std.nogc_sync_mut.ui.html_gui_sffi.*
 
 struct DragState:
     active: bool
@@ -61,14 +63,16 @@ fn gui_shell_new(session: EditSession) -> GuiShellState:
     )
 
 fn gui_shell_init(state: GuiShellState):
+    state.ctrl.extension_host.activate_event("*")
     state.ctrl.extension_host.activate_language("simple")
     state.ctrl.extension_host.activate_language("markdown")
 
 fn gui_shell_run(session: EditSession):
-    var state = gui_shell_new(session)
+    var state: GuiShellState = gui_shell_new(session)
     gui_shell_init(state)
     state.ctrl.file_tree_visible = true
     var drag = _drag_state_new()
+    html_gui_begin_session()
 
     while state.ctrl.is_running():
         state.ctrl._refresh_lsp_results()
@@ -83,8 +87,10 @@ fn gui_shell_run(session: EditSession):
         state = handled.state
         drag = handled.drag
 
+    html_gui_end_session()
+
 fn gui_shell_run_sdl(session: EditSession):
-    var state = gui_shell_new(session)
+    var state: GuiShellState = gui_shell_new(session)
     gui_shell_init(state)
     state.ctrl.file_tree_visible = true
     var drag = _drag_state_new()
@@ -774,11 +780,7 @@ fn _gui_task_toggle_state(state: GuiShellState, data: text) -> GuiShellState:
         state.ctrl = ctrl
         return state
     val current = buffer.line_at(line)
-    # Routed through the extension kernel's typed CommandRegistry; an Err
-    # dispatch leaves the line unchanged, which reports "not a task" below.
-    var toggled = current
-    if val Ok(kernel_toggled) = ctrl.extension_host.dispatch_command("markdown.toggle_task", current):
-        toggled = kernel_toggled
+    val toggled = md_assist_toggle_task(current)
     if toggled == current:
         ctrl.status_msg = "not a task"
         state.ctrl = ctrl

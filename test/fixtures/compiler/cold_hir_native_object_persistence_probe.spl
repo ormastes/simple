@@ -1,0 +1,114 @@
+"""Native proof that cold HIR object persistence binds real bytes and receipts."""
+
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    cold_hir_native_objects_persist_v1
+}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_read}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_aot_native_output.{
+    driver_cold_hir_record_verified_object_v1,
+    driver_cold_hir_record_objectless_v1,
+    driver_cold_hir_persist_verified_objects_v1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticSeedV1, ColdHirTypedReceiptV1
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.io_runtime.{file_write, getpid, time_now_unix_micros}
+
+fn main() -> i64:
+    val root = "build/tmp/cold_hir_native_object_persistence/" +
+        "{getpid()}-{time_now_unix_micros()}"
+    if not dir_create_all(root):
+        print "FAIL create root"
+        return 1
+    val path = root + "/module-a.o"
+    val bytes: [u8] = [0x7F_u8, 0x45_u8, 0x4C_u8, 0x46_u8,
+        0x02_u8, 0x01_u8, 0x01_u8, 0x31_u8]
+    val digest = sha256_u8_hex(bytes)
+    if not file_write_bytes(path, bytes) or
+            not file_write(path + ".capsule-receipt",
+                "native-capsule-result-v1\nidentity-a\n{path}\n8\n{digest}\n"):
+        print "FAIL create object and capsule receipt"
+        return 2
+    val receipts = [ColdHirTypedReceiptV1(
+        ColdHirSemanticSeedV1("module.a", "module/a.spl", "source",
+            "inventory", "abi", []), "typed-abi")]
+    var paths: Dict<text, text> = {"module.a": path}
+    val identities: Dict<text, text> = {"module.a": "identity-a"}
+    val no_object: Dict<text, bool> = {}
+    val persisted = cold_hir_native_objects_persist_v1(
+        root, receipts, paths, identities, no_object)
+    if persisted.is_err():
+        print "FAIL persist: {persisted.unwrap_err()}"
+        return 3
+    val outputs = persisted.unwrap()
+    if outputs.len() != 1 or outputs[0].module_identity != "module.a" or
+            outputs[0].object_digest != digest or
+            outputs[0].object_byte_count != 8 or
+            outputs[0].object_format != "elf" or
+            outputs[0].capsule_identity != "identity-a":
+        print "FAIL persisted identity"
+        return 4
+    val readback = binary_object_cas_read(root, digest, 64)
+    if readback == nil:
+        print "FAIL persisted readback missing"
+        return 5
+    val persisted_bytes = readback.unwrap()
+    if persisted_bytes.len() != bytes.len() or
+            sha256_u8_hex(persisted_bytes) != digest:
+        print "FAIL persisted readback digest"
+        return 5
+    val facade_receipt = ColdHirTypedReceiptV1(
+        ColdHirSemanticSeedV1("module.facade", "module/facade.spl", "source",
+            "inventory", "abi", []), "typed-abi")
+    val all_receipts = [receipts[0], facade_receipt]
+    val objectless: Dict<text, bool> = {"module.facade": true}
+    val with_facade = cold_hir_native_objects_persist_v1(
+        root, all_receipts, paths, identities, objectless)
+    if with_facade.is_err():
+        print "FAIL objectless facade receipt"
+        return 6
+    val facade_outputs = with_facade.unwrap()
+    if facade_outputs.len() != 2 or
+            facade_outputs[1].object_format != "none":
+        print "FAIL objectless facade receipt"
+        return 6
+    val wrong_identity: Dict<text, text> = {"module.a": "unaccepted-capsule"}
+    if cold_hir_native_objects_persist_v1(
+            root, all_receipts, paths, wrong_identity, objectless).is_ok():
+        print "FAIL unaccepted capsule identity admitted"
+        return 7
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    ctx.cold_hir_typed_receipts = all_receipts
+    if driver_cold_hir_record_verified_object_v1(
+            ctx, "module.a", path, "identity-a") != "" or
+            driver_cold_hir_record_objectless_v1(ctx, "module.facade") != "" or
+            driver_cold_hir_persist_verified_objects_v1(ctx, root) != "" or
+            ctx.cold_hir_native_object_artifacts.len() != 2 or
+            ctx.cold_hir_native_object_artifacts[0].object_digest != digest:
+        print "FAIL production driver persistence handoff"
+        return 8
+    if not file_write(path + ".capsule-receipt",
+            "native-capsule-result-v1\nidentity-a\n{path}\n8\n" +
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"):
+        print "FAIL tamper receipt"
+        return 9
+    if cold_hir_native_objects_persist_v1(
+            root, all_receipts, paths, identities, objectless).is_ok():
+        print "FAIL tampered receipt admitted"
+        return 10
+    if driver_cold_hir_persist_verified_objects_v1(ctx, root) == "" or
+            ctx.cold_hir_native_object_artifacts.len() != 0:
+        print "FAIL driver retained invalid artifact"
+        return 11
+    paths["module.b"] = path
+    if cold_hir_native_objects_persist_v1(
+            root, all_receipts, paths, identities, objectless).is_ok():
+        print "FAIL extra object path admitted"
+        return 12
+    print "PASS cold_hir_native_object_persistence_probe"
+    0

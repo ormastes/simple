@@ -1,0 +1,340 @@
+#!/bin/sh
+
+# Canonical policy for bootstrap-owned native-build/test worker counts.
+# The caller remains the sole process owner for its cache. A worker count
+# authorizes only internal workers; it never authorizes sibling cache writers.
+# Stage4 matrix case workers are internal workers only when the matrix parent
+# gives every case a distinct HOME/TMP/XDG cache/result root and remains the
+# sole writer of the ordered aggregate and provenance summary.
+
+BOOTSTRAP_BUILD_JOBS_HARD_MAX=64
+
+bootstrap_build_jobs_validate_uint() {
+  bbj_uint=$1 bbj_digits=$2 bbj_label=$3
+  case "$bbj_uint" in ''|*[!0-9]*|0*)
+    echo "error: $bbj_label must be a positive decimal integer" >&2
+    return 1
+    ;;
+  esac
+  [ "${#bbj_uint}" -le "$bbj_digits" ] || {
+    echo "error: $bbj_label is too long" >&2
+    return 1
+  }
+}
+
+bootstrap_build_jobs_detect_host_cpus() {
+  bbj_host=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+  case "$bbj_host" in ''|*[!0-9]*|0) bbj_host=1 ;; esac
+  printf '%s\n' "$bbj_host"
+}
+
+bootstrap_build_jobs_resolve() {
+  bbj_requested=${1:-}
+  bbj_source=${2:-default}
+  bbj_host=${3:-}
+  bbj_ceiling=${4:-${SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS:-16}}
+
+  case "$bbj_source" in default|env|cli) ;; *)
+    echo "error: build jobs source must be default, env, or cli" >&2
+    return 1
+  esac
+  case "$bbj_host" in '') bbj_host=$(bootstrap_build_jobs_detect_host_cpus) ;; esac
+  bootstrap_build_jobs_validate_uint "$bbj_host" 6 "host CPU count" || return 1
+  bootstrap_build_jobs_validate_uint "$bbj_ceiling" 2 \
+    SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS || return 1
+  [ "$bbj_ceiling" -le "$BOOTSTRAP_BUILD_JOBS_HARD_MAX" ] || {
+    echo "error: build jobs ceiling exceeds hard maximum $BOOTSTRAP_BUILD_JOBS_HARD_MAX" >&2
+    return 1
+  }
+
+  bbj_symbolic_clamp=0
+  case "$bbj_requested" in
+    '')
+      [ "$bbj_source" = default ] || {
+        echo "error: configured or explicit --jobs value must not be empty" >&2
+        return 1
+      }
+      bbj_requested=default; bbj_desired=1
+      ;;
+    auto|min|minimal|minimum) bbj_desired=1 ;;
+    full) bbj_desired=$bbj_host; bbj_symbolic_clamp=1 ;;
+    half)
+      bbj_desired=$((bbj_host / 2))
+      [ "$bbj_desired" -ge 1 ] || bbj_desired=1
+      bbj_symbolic_clamp=1
+      ;;
+    *)
+      bootstrap_build_jobs_validate_uint "$bbj_requested" 2 --jobs || return 1
+      bbj_desired=$bbj_requested
+      ;;
+  esac
+  bbj_effective=$bbj_desired
+  if [ "$bbj_effective" -gt "$bbj_ceiling" ]; then
+    [ "$bbj_symbolic_clamp" -eq 1 ] || {
+      echo "error: requested build jobs $bbj_desired exceeds configured maximum $bbj_ceiling" >&2
+      return 1
+    }
+    bbj_effective=$bbj_ceiling
+  fi
+  [ "$bbj_effective" -le "$bbj_host" ] || bbj_effective=$bbj_host
+
+  bootstrap_build_jobs_requested=$bbj_requested
+  bootstrap_build_jobs_source=$bbj_source
+  bootstrap_build_jobs_desired=$bbj_desired
+  bootstrap_build_jobs_effective=$bbj_effective
+  bootstrap_build_jobs_host_cpus=$bbj_host
+  bootstrap_build_jobs_configured_max=$bbj_ceiling
+}
+
+bootstrap_build_jobs_write_receipt() {
+  bbj_receipt=$1
+  bbj_owner=$2
+  bbj_tmp="${bbj_receipt}.tmp.$$"
+  [ ! -e "$bbj_receipt" ] && [ ! -L "$bbj_receipt" ] || {
+    echo "error: effective build jobs receipt collision: $bbj_receipt" >&2
+    return 1
+  }
+  umask 077
+  {
+    echo schema=simple-bootstrap-effective-build-jobs-v1
+    echo owner="$bbj_owner"
+    echo source="$bootstrap_build_jobs_source"
+    echo requested="$bootstrap_build_jobs_requested"
+    echo desired="$bootstrap_build_jobs_desired"
+    echo effective="$bootstrap_build_jobs_effective"
+    echo host_cpus="$bootstrap_build_jobs_host_cpus"
+    echo configured_max="$bootstrap_build_jobs_configured_max"
+    echo hard_max="$BOOTSTRAP_BUILD_JOBS_HARD_MAX"
+    echo cache_writer_policy=single-native-build-owner
+    echo parallel_cache_writers=false
+    echo memory_budget_policy=external-not-derived-from-jobs
+  } >"$bbj_tmp" || { rm -f "$bbj_tmp"; return 1; }
+  chmod 0444 "$bbj_tmp" || { rm -f "$bbj_tmp"; return 1; }
+  ln "$bbj_tmp" "$bbj_receipt" 2>/dev/null || {
+    rm -f "$bbj_tmp"
+    echo "error: effective build jobs receipt collision: $bbj_receipt" >&2
+    return 1
+  }
+  rm -f "$bbj_tmp"
+}
+
+bootstrap_build_jobs_receipt_value() {
+  bbj_key=$1 bbj_file=$2
+  awk -F= -v key="$bbj_key" '
+    $1 == key { count++; value=substr($0, length(key) + 2) }
+    END { if (count != 1) exit 1; print value }
+  ' "$bbj_file"
+}
+
+bootstrap_build_jobs_verify_receipt() {
+  bbj_file=$1 bbj_expected=${2:-}
+  [ -f "$bbj_file" ] && [ ! -L "$bbj_file" ] || return 1
+  [ "$(bootstrap_build_jobs_receipt_value schema "$bbj_file")" = \
+    simple-bootstrap-effective-build-jobs-v1 ] || return 1
+  bbj_receipt_owner=$(bootstrap_build_jobs_receipt_value owner "$bbj_file") || return 1
+  case "$bbj_receipt_owner" in bootstrap-from-scratch|resume-stage3-from-admitted|contract-test) ;; *) return 1 ;; esac
+  bbj_receipt_source=$(bootstrap_build_jobs_receipt_value source "$bbj_file") || return 1
+  case "$bbj_receipt_source" in default|env|cli) ;; *) return 1 ;; esac
+  bbj_receipt_desired=$(bootstrap_build_jobs_receipt_value desired "$bbj_file") || return 1
+  bbj_receipt_effective=$(bootstrap_build_jobs_receipt_value effective "$bbj_file") || return 1
+  bbj_receipt_host=$(bootstrap_build_jobs_receipt_value host_cpus "$bbj_file") || return 1
+  bbj_receipt_max=$(bootstrap_build_jobs_receipt_value configured_max "$bbj_file") || return 1
+  bootstrap_build_jobs_validate_uint "$bbj_receipt_desired" 6 receipt-desired || return 1
+  bootstrap_build_jobs_validate_uint "$bbj_receipt_effective" 2 receipt-effective || return 1
+  bootstrap_build_jobs_validate_uint "$bbj_receipt_host" 6 receipt-host-cpus || return 1
+  bootstrap_build_jobs_validate_uint "$bbj_receipt_max" 2 receipt-configured-max || return 1
+  [ "$bbj_receipt_effective" -le "$BOOTSTRAP_BUILD_JOBS_HARD_MAX" ] &&
+    [ "$bbj_receipt_effective" -le "$bbj_receipt_host" ] &&
+    [ "$bbj_receipt_effective" -le "$bbj_receipt_max" ] || return 1
+  [ -z "$bbj_expected" ] || [ "$bbj_receipt_effective" = "$bbj_expected" ] || return 1
+  [ "$(bootstrap_build_jobs_receipt_value hard_max "$bbj_file")" = \
+    "$BOOTSTRAP_BUILD_JOBS_HARD_MAX" ] || return 1
+  [ "$(bootstrap_build_jobs_receipt_value cache_writer_policy "$bbj_file")" = \
+    single-native-build-owner ] || return 1
+  [ "$(bootstrap_build_jobs_receipt_value parallel_cache_writers "$bbj_file")" = false ] || return 1
+  [ "$(bootstrap_build_jobs_receipt_value memory_budget_policy "$bbj_file")" = \
+    external-not-derived-from-jobs ] || return 1
+}
+
+# Clamp a CPU-derived worker count by the memory actually available.
+#
+# The counts above are derived from CPU count alone. Each native-build worker
+# is a whole interpreted compiler graph and plateaus around 3.2 GiB of private
+# anonymous heap (measured 2026-09-06 on aarch64: 738 module loads, parse
+# 454 MB + eval 1406 MB retained, flat from t=15s). CPU-derived counts
+# therefore authorize a memory footprint nobody checked: on a 20-CPU/121 GB
+# host the incremental profile asks for 10 workers (~32 GB, sampled 31.6 GB)
+# and clean-release asks for 20 (~65 GB). With any sibling lane running, that
+# is the 2026-09-06 global OOM, which killed the user systemd manager and with
+# it every session on the box.
+#
+# Reads MemAvailable (not MemFree: page cache is reclaimable and counting it
+# as used would clamp to 1 on any warm host). Missing or unparsable meminfo
+# leaves the count untouched -- this bounds a known overshoot, it is not an
+# admission gate, and it must never make a bootstrap unrunnable.
+BOOTSTRAP_WORKER_MEM_MIB_DEFAULT=3300
+
+bootstrap_build_jobs_memory_clamp() {
+  bbj_want=$1
+  bootstrap_build_jobs_memory_sample
+  [ -n "$bbj_avail_kb" ] || { printf '%s\n' "$bbj_want"; return 0; }
+  bbj_fit=$(( bbj_avail_kb / 1024 / bbj_budget ))
+  [ "$bbj_fit" -ge 1 ] || bbj_fit=1
+  if [ "$bbj_want" -gt "$bbj_fit" ]; then
+    printf '%s\n' "$bbj_fit"
+  else
+    printf '%s\n' "$bbj_want"
+  fi
+}
+
+# Sampling is shared so both selected worker counts use the same observation.
+# This scheduling budget is independent of process RSS limits.
+bootstrap_build_jobs_memory_sample() {
+  bbj_budget=${SIMPLE_BOOTSTRAP_WORKER_MEM_MIB:-$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT}
+  bbj_meminfo=${BOOTSTRAP_MEMINFO_PATH:-/proc/meminfo}
+  # Length-bounded as well as digit-checked: an all-digits value wider than
+  # the shell's arithmetic (e.g. 30 digits) passes a `*[!0-9]*` test and then
+  # overflows inside `$(( ))`, which on some shells wraps NEGATIVE and would
+  # turn this clamp into an inflator. 7 digits caps the budget at ~9.5 TiB per
+  # worker, far past any real setting.
+  case "$bbj_budget" in ''|*[!0-9]*|0) bbj_budget=$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT ;; esac
+  [ "${#bbj_budget}" -le 7 ] || bbj_budget=$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT
+
+  bbj_avail_kb=""
+  if [ -r "$bbj_meminfo" ]; then
+    bbj_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' "$bbj_meminfo" 2>/dev/null)
+    case "$bbj_avail_kb" in ''|*[!0-9]*) bbj_avail_kb="" ;; esac
+  fi
+  # /proc/meminfo (or its BOOTSTRAP_MEMINFO_PATH fixture override) covers
+  # Linux and MSYS/Windows, which emulates it. It does not exist on macOS or
+  # FreeBSD, and a non-MSYS Windows POSIX layer may lack it too -- those
+  # hosts fell through to "leave the count untouched" with no clamp at all,
+  # which is the same unbounded-worker-count OOM risk this function exists
+  # to bound. Try an OS-specific probe before giving up.
+  if [ -z "$bbj_avail_kb" ]; then
+    bbj_avail_kb=$(bootstrap_build_jobs_available_kib_fallback)
+    case "$bbj_avail_kb" in ''|*[!0-9]*) bbj_avail_kb="" ;; esac
+  fi
+  return 0
+}
+
+bootstrap_startup_jobs_policy_validate() {
+  case "$1" in
+    auto) ;;
+    explicit-count)
+      case "$2" in
+        full|auto|half|min|minimal|minimum) ;;
+        *) bootstrap_build_jobs_validate_uint "$2" 2 --jobs || return 1 ;;
+      esac
+      ;;
+    *) echo 'error: --jobs-memory-policy requires auto or explicit-count' >&2; return 1 ;;
+  esac
+}
+
+# Called after bootstrap_select_jobs. Keep legacy auto selection unchanged;
+# the opt-in uses the existing strict CPU/ceiling resolver before skipping RAM.
+bootstrap_startup_jobs_apply_policy() {
+  jobs_memory_policy=$1
+  jobs_requested=${2:-default}
+  bootstrap_startup_jobs_policy_validate "$jobs_memory_policy" "${2:-}" || return 1
+  if [ "$jobs_memory_policy" = explicit-count ]; then
+    jobs_bound_request=$2
+    # Startup's established auto token means all CPUs; the recovery resolver
+    # uses auto for one worker. Preserve startup token semantics here.
+    [ "$jobs_bound_request" != auto ] || jobs_bound_request=full
+    bootstrap_build_jobs_resolve "$jobs_bound_request" cli "$host_cpus" || return 1
+    jobs=$bootstrap_build_jobs_effective
+    selfhost_jobs=$jobs
+  fi
+  jobs_resolved=$jobs
+  selfhost_jobs_resolved=$selfhost_jobs
+  bootstrap_build_jobs_memory_sample
+  jobs_available_kib=${bbj_avail_kb:-unavailable}
+  jobs_worker_mem_mib=$bbj_budget
+  jobs_memory_reason=explicit-count-requested
+  if [ "$jobs_memory_policy" = auto ]; then
+    jobs_memory_reason=memory-probe-unavailable
+    if [ -n "$bbj_avail_kb" ]; then
+      jobs_memory_fit=$((bbj_avail_kb / 1024 / bbj_budget))
+      [ "$jobs_memory_fit" -ge 1 ] || jobs_memory_fit=1
+      jobs_memory_reason=within-memory-budget
+      if [ "$jobs" -gt "$jobs_memory_fit" ]; then
+        jobs=$jobs_memory_fit
+        jobs_memory_reason=memory-clamped
+      fi
+      if [ "$selfhost_jobs" -gt "$jobs_memory_fit" ]; then
+        selfhost_jobs=$jobs_memory_fit
+        jobs_memory_reason=memory-clamped
+      fi
+      [ "$jobs_memory_reason" != memory-clamped ] || job_source="${job_source}+memory"
+    fi
+  fi
+}
+
+bootstrap_startup_jobs_receipt_fields() {
+  printf 'requested=%s\nresolved=%s\neffective=%s\n' "$jobs_requested" "$jobs_resolved" "$jobs"
+  printf 'selfhost_resolved=%s\nselfhost_effective=%s\n' "$selfhost_jobs_resolved" "$selfhost_jobs"
+  printf 'jobs_memory_policy=%s\navailable_memory_kib=%s\nworker_memory_mib=%s\nmemory_reason=%s\n' \
+    "$jobs_memory_policy" "$jobs_available_kib" "$jobs_worker_mem_mib" "$jobs_memory_reason"
+  printf 'rss_limit_policy=independent\n'
+}
+
+# Available-memory probe for hosts without /proc/meminfo (or its
+# BOOTSTRAP_MEMINFO_PATH fixture override): macOS via hw.pagesize + vm_stat,
+# FreeBSD via hw.pagesize + vm.stats.vm.v_free_count/v_inactive_count, and a
+# non-MSYS Windows POSIX layer via PowerShell's Win32_OperatingSystem
+# .FreePhysicalMemory (already KiB). Same tool choice per OS as the Stage-2
+# free-memory probe in bootstrap-from-scratch.sh (not shared code -- that one
+# is scoped to Stage-2 test-thread sizing -- but there is no reason to
+# reinvent the per-OS tool selection here). Prints available KiB on success
+# and nothing on any failure; an empty result is not an error, matching this
+# function's existing "leave the count untouched" contract for unreadable
+# meminfo. BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE is a fixture hook (parallel to
+# BOOTSTRAP_MEMINFO_PATH) for exercising one branch without faking `uname`.
+bootstrap_build_jobs_available_kib_fallback() {
+  case "${BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE:-$(uname -s 2>/dev/null || :)}" in
+    Darwin)
+      bbj_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+      bbj_vmstat=$(vm_stat 2>/dev/null || :)
+      bbj_free_pages=$(printf '%s\n' "$bbj_vmstat" | awk '
+        /^Pages free:/ { gsub(/\./, "", $3); sum += $3 }
+        /^Pages inactive:/ { gsub(/\./, "", $3); sum += $3 }
+        /^Pages purgeable:/ { gsub(/\./, "", $3); sum += $3 }
+        /^Pages speculative:/ { gsub(/\./, "", $3); sum += $3 }
+        END { print sum + 0 }
+      ')
+      case "$bbj_page_size" in ''|*[!0-9]*) bbj_page_size="" ;; esac
+      case "$bbj_free_pages" in ''|*[!0-9]*) bbj_free_pages="" ;; esac
+      if [ -n "$bbj_page_size" ] && [ -n "$bbj_free_pages" ]; then
+        printf '%s\n' "$(( bbj_page_size * bbj_free_pages / 1024 ))"
+      fi
+      ;;
+    FreeBSD)
+      bbj_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+      bbj_free_count=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || :)
+      bbj_inactive_count=$(sysctl -n vm.stats.vm.v_inactive_count 2>/dev/null || :)
+      case "$bbj_page_size" in ''|*[!0-9]*) bbj_page_size="" ;; esac
+      case "$bbj_free_count" in ''|*[!0-9]*) bbj_free_count="" ;; esac
+      case "$bbj_inactive_count" in ''|*[!0-9]*) bbj_inactive_count="" ;; esac
+      if [ -n "$bbj_page_size" ] && [ -n "$bbj_free_count" ]; then
+        bbj_free_pages=$(( bbj_free_count + ${bbj_inactive_count:-0} ))
+        printf '%s\n' "$(( bbj_page_size * bbj_free_pages / 1024 ))"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v powershell.exe >/dev/null 2>&1; then
+        if command -v timeout >/dev/null 2>&1; then
+          bbj_kib=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
+            "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" \
+            </dev/null 2>/dev/null | tr -d '\r\n ') || :
+        else
+          bbj_kib=$(powershell.exe -NoProfile -NonInteractive -Command \
+            "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" \
+            </dev/null 2>/dev/null | tr -d '\r\n ') || :
+        fi
+        case "$bbj_kib" in ''|*[!0-9]*) bbj_kib="" ;; esac
+        [ -z "$bbj_kib" ] || printf '%s\n' "$bbj_kib"
+      fi
+      ;;
+  esac
+}

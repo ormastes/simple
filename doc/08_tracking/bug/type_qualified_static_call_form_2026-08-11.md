@@ -1,4 +1,8 @@
 # `Type.method(arg)` static-call form: claimed silent-nothing NOT reproduced — already errors correctly (VERIFIED, closed as false positive)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Claim under investigation
 
@@ -131,3 +135,4 @@ CLOSED — false positive, not reproduced on a fresh build. Current behavior
 (hard semantic error in both interpreter and native lanes) is the correct,
 intended semantics per repo-wide `Type.method()` usage evidence. No source
 changed. Landed: this bug doc + the reusable check script only.
+

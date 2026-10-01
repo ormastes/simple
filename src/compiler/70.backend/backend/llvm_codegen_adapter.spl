@@ -4,19 +4,22 @@
 # Delegates to existing LLVM IR generation and llc compilation pipeline.
 
 use compiler.mir.mir_instructions.{MirModule}
-use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BackendCompileOptions, CompileError, CompiledModule, compileerror_backend_error}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget,
+    BackendCompileOptions, CompileError, CompiledModule,
+    compileerror_backend_error}
 use compiler.backend.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
-use compiler.backend.backend.llvm_backend_tools.{LlvmObjectCode, compile_ir_to_object}
-use compiler.backend.llvm_ir_builder.{llvm_ir_builder_set_simpleos_header}
+use compiler.backend.backend.llvm_backend_tools.{LlvmObjectCode,
+    compile_ir_to_object, compile_ir_to_object_path}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, llvm_ir_builder_set_simpleos_header}
 use compiler.common.mir_target_context.{mir_target_context_os_from}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 fn llvm_codegen_trace_enabled() -> bool:
     (env_get_opt("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
-fn llvm_codegen_bare_metal_requested() -> bool:
+pub fn llvm_codegen_bare_metal_requested() -> bool:
     val requested_target = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     mir_target_context_os_from(requested_target, "") == "baremetal"
 
@@ -30,6 +33,17 @@ fn llvm_codegen_translator_for(module_name: text, target: CodegenTarget, bare_me
         return MirToLlvm.create_baremetal(module_name, target, nil)
     MirToLlvm.create(module_name, target, nil)
 
+fn llvm_codegen_retained_translator_for(
+    module_name: text, target: CodegenTarget, config: LlvmTargetConfig,
+    bare_metal: bool
+) -> MirToLlvm:
+    # Preserve non-target codegen policy; the retained header never rereads
+    # SIMPLE_NATIVE_BUILD_TARGET or the legacy global header override.
+    val builder = LlvmIRBuilder.create_with_header_policy(module_name, config.triple, false)
+    MirToLlvm.create_with_builder(target, builder,
+        config.triple.arch, config.triple.os, bare_metal, true,
+        if bare_metal: "baremetal" else: "hosted")
+
 # ============================================================================
 # LLVM Codegen Adapter
 # ============================================================================
@@ -38,25 +52,40 @@ class LlvmCodegenAdapter:
     """Adapts MirToLlvm translator to the Codegen trait interface."""
     options: BackendCompileOptions
 
-fn llvm_translate_module_direct_ir_for(options: BackendCompileOptions, module: MirModule, bare_metal: bool) -> text:
+fn llvm_translate_module_direct_ir_for(options: BackendCompileOptions, module: MirModule, bare_metal: bool,
+    retained_config: LlvmTargetConfig? = nil) -> text:
     val simpleos_header = match options.target:
         case CodegenTarget.SimpleOS_X86_64: true
         case _: false
-    llvm_ir_builder_set_simpleos_header(simpleos_header)
-    var translator = llvm_codegen_translator_for(module.name, options.target, bare_metal)
+    if retained_config == nil:
+        llvm_ir_builder_set_simpleos_header(simpleos_header)
+    var translator = if val config = retained_config:
+        llvm_codegen_retained_translator_for(module.name, options.target, config, bare_metal)
+    else:
+        llvm_codegen_translator_for(module.name, options.target, bare_metal)
     if options.debug_info:
         translator.enable_debug_info()
     val ir = translator.translate_module(module)
-    llvm_ir_builder_set_simpleos_header(false)
+    if retained_config == nil:
+        llvm_ir_builder_set_simpleos_header(false)
     ir
 
-pub fn llvm_translate_module_direct_ir(options: BackendCompileOptions, module: MirModule) -> text:
+pub fn llvm_translate_module_direct_ir(options: BackendCompileOptions, module: MirModule,
+    retained_config: LlvmTargetConfig? = nil) -> text:
+    val bare_metal = if val config = retained_config:
+        config.triple.os == "none" or config.triple.os == "simpleos"
+    else:
+        llvm_codegen_bare_metal_requested()
     llvm_translate_module_direct_ir_for(
-        options, module, llvm_codegen_bare_metal_requested())
+        options, module, bare_metal, retained_config)
 
-pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirModule) -> Result<CodegenOutput, CompileError>:
+pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirModule,
+    retained_config: LlvmTargetConfig? = nil) -> Result<CodegenOutput, CompileError>:
     val trace_enabled = llvm_codegen_trace_enabled()
-    val bare_metal = llvm_codegen_bare_metal_requested()
+    val bare_metal = if val config = retained_config:
+        config.triple.os == "none" or config.triple.os == "simpleos"
+    else:
+        llvm_codegen_bare_metal_requested()
     if trace_enabled:
         print "[llvm-direct] start"
         print "[llvm-direct] module-name {module.name}"
@@ -66,17 +95,17 @@ pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirMod
     # Translate MIR to LLVM IR
     if trace_enabled:
         print "[llvm-direct] config"
-    val config = llvm_codegen_target_config_for(options, bare_metal)
+    val config = retained_config ?? llvm_codegen_target_config_for(options, bare_metal)
     if trace_enabled:
         print "[llvm-direct] translator"
     if trace_enabled:
         print "[llvm-direct] translate"
-    val llvm_ir = llvm_translate_module_direct_ir_for(options, module, bare_metal)
+    val llvm_ir = llvm_translate_module_direct_ir_for(options, module, bare_metal, retained_config)
 
     # Compile IR to object code via llc
     if trace_enabled:
         print "[llvm-direct] llc"
-    val result = compile_ir_to_object(llvm_ir, config, options.opt_level)
+    val result = compile_ir_to_object(llvm_ir, config, options.opt_level, retained_config != nil)
     if trace_enabled:
         print "[llvm-direct] result"
     match result:
@@ -90,18 +119,39 @@ pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirMod
         Err(err_msg):
             Err(compileerror_backend_error(BackendKind.Llvm, err_msg))
 
-pub fn llvm_compile_module_direct_compiled(options: BackendCompileOptions, module: MirModule) -> Result<CompiledModule, CompileError>:
+pub fn llvm_compile_module_direct_to_path(
+    options: BackendCompileOptions, module: MirModule, object_path: text,
+    diagnostic_path: text, retained_config: LlvmTargetConfig? = nil
+) -> i64:
+    val bare_metal = if val config = retained_config:
+        config.triple.os == "none" or config.triple.os == "simpleos"
+    else:
+        llvm_codegen_bare_metal_requested()
+    val config = retained_config ?? llvm_codegen_target_config_for(options, bare_metal)
+    val llvm_ir = llvm_translate_module_direct_ir_for(
+        options, module, bare_metal, retained_config)
+    compile_ir_to_object_path(
+        llvm_ir, config, options.opt_level, object_path, diagnostic_path, retained_config != nil)
+
+pub fn llvm_compile_module_direct_compiled(options: BackendCompileOptions, module: MirModule,
+    retained_config: LlvmTargetConfig? = nil) -> Result<CompiledModule, CompileError>:
     val trace_enabled = llvm_codegen_trace_enabled()
-    val bare_metal = llvm_codegen_bare_metal_requested()
+    val bare_metal = if val config = retained_config:
+        config.triple.os == "none" or config.triple.os == "simpleos"
+    else:
+        llvm_codegen_bare_metal_requested()
     if trace_enabled:
         print "[llvm-direct] compiled:start"
-    val config = llvm_codegen_target_config_for(options, bare_metal)
-    var translator = llvm_codegen_translator_for(
-        "app.cli.bootstrap_main", options.target, bare_metal)
+    val config = retained_config ?? llvm_codegen_target_config_for(options, bare_metal)
+    var translator = if val retained = retained_config:
+        llvm_codegen_retained_translator_for(
+            "app.cli.bootstrap_main", options.target, retained, bare_metal)
+    else:
+        llvm_codegen_translator_for("app.cli.bootstrap_main", options.target, bare_metal)
     if options.debug_info:
         translator.enable_debug_info()
     val llvm_ir = translator.translate_module(module)
-    val result = compile_ir_to_object(llvm_ir, config, options.opt_level)
+    val result = compile_ir_to_object(llvm_ir, config, options.opt_level, retained_config != nil)
     match result:
         Ok(object_code):
             if trace_enabled:

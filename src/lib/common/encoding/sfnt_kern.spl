@@ -1,0 +1,196 @@
+# Pure-Simple `kern` table reader (round 13, 2026-09-14).
+#
+# WHY THIS EXISTS
+#
+# The unmanaged / selected-blob text lane measures runs from the face's own
+# `hmtx` advances (`sfnt_glyph_advance_into`). It applied NO kerning at all:
+# `FontRenderer.horizontal_kern` answers a foreign `rt_fonts_horizontal_kern`
+# address, which only the SFFI-dylib lane owns, so on the macOS system faces it
+# returned 0 for every pair. Chrome kerns by default (`font-kerning: auto` is
+# `normal` for horizontal text), so every run containing a kerned pair measured
+# WIDER in Simple than in Chrome.
+#
+# WHICH FORMAT, MEASURED NOT ASSUMED
+#
+# Probed on this host's `/System/Library/Fonts/Helvetica.ttc`, face 0, repacked
+# by `sfnt_ttc_extract_face` (which copies every table verbatim, `kern`
+# included):
+#
+#   kern table: offset 369224, length 656
+#   header:     version 0x00010000, nTables 1          <- APPLE (32-bit) header
+#   subtable 0: length 648, coverage 0x0000            <- horizontal, format 0
+#   format 0:   nPairs 105, then 105 x (left u16, right u16, value i16)
+#
+# Helvetica ships NO `GPOS`, so `kern` is the whole story for it and PairPos is
+# not needed to kern this face. Both header shapes are read here anyway, because
+# the two are trivially distinguished and a Windows-built face on another host
+# would otherwise silently fall back to zero:
+#
+#   version 0x0000 (u16)      -> MS:    u16 version, u16 nTables; subtable
+#                                       header u16 version, u16 length,
+#                                       u16 coverage (format in the HIGH byte)
+#   version 0x00010000 (u32)  -> Apple: u32 version, u32 nTables; subtable
+#                                       header u32 length, u16 coverage
+#                                       (format in the LOW byte), u16 tupleIndex
+#
+# Only horizontal, non-cross-stream, non-variation format-0 subtables are
+# applied. Anything else (format 1/2/3, vertical, cross-stream, a variation
+# tuple) is SKIPPED rather than guessed at, so an unsupported subtable answers
+# the honest 0 this lane already answered instead of a wrong number.
+#
+# Values accumulate across subtables, which is what both specs say: a face may
+# split its pairs over several tables and the applied kern is their sum.
+
+use std.common.encoding.sfnt.{read_u16_be, read_i16_be, read_u32_be, parse_offset_table, find_table}
+
+# 'kern', 'head' as big-endian u32 tags.
+val SFNT_KERN_TAG: u32 = 0x6B65726Eu32
+val SFNT_KERN_HEAD_TAG: u32 = 0x68656164u32
+
+# Every `kern` subtable this reader understands, as a flat triple list:
+# [subtable_pairs_offset, n_pairs, _reserved] per entry. Flat i64 lists rather
+# than a struct array: this is read once per (face, pair) on a hot measuring
+# path and the flat form avoids an aggregate copy per lookup.
+fn _kern_format0_ranges(blob: [u8], table_offset: i64, table_length: i64) -> [i64]:
+    var out: [i64] = []
+    if table_offset < 0 or table_length < 4: return out
+    if table_offset + table_length > blob.len(): return out
+    val version32 = read_u32_be(blob, table_offset) as i64
+    var apple = false
+    var n_tables: i64 = 0
+    var cursor: i64 = 0
+    if version32 == 65536:
+        apple = true
+        if table_length < 8: return out
+        n_tables = read_u32_be(blob, table_offset + 4) as i64
+        cursor = table_offset + 8
+    else:
+        if (read_u16_be(blob, table_offset) as i64) != 0: return out
+        n_tables = read_u16_be(blob, table_offset + 2) as i64
+        cursor = table_offset + 4
+    # A face declaring an absurd subtable count is malformed, not a reason to
+    # scan the rest of the font: bound it before the walk.
+    if n_tables <= 0 or n_tables > 64: return out
+    val table_end = table_offset + table_length
+    var i: i64 = 0
+    while i < n_tables:
+        if cursor + 6 > table_end: return out
+        var sub_length: i64 = 0
+        var coverage: i64 = 0
+        var data_at: i64 = 0
+        if apple:
+            if cursor + 8 > table_end: return out
+            sub_length = read_u32_be(blob, cursor) as i64
+            coverage = read_u16_be(blob, cursor + 4) as i64
+            # tupleIndex at cursor + 6; a variation tuple is not applied.
+            data_at = cursor + 8
+        else:
+            sub_length = read_u16_be(blob, cursor + 2) as i64
+            coverage = read_u16_be(blob, cursor + 4) as i64
+            data_at = cursor + 6
+        if sub_length < 6 or cursor + sub_length > table_end: return out
+        var format: i64 = 0
+        var horizontal = false
+        var cross_stream = false
+        var variation = false
+        if apple:
+            format = coverage & 255
+            # Apple coverage: bit 15 vertical, bit 14 cross-stream, bit 13 variation.
+            horizontal = (coverage & 32768) == 0
+            cross_stream = (coverage & 16384) != 0
+            variation = (coverage & 8192) != 0
+        else:
+            format = (coverage >> 8) & 255
+            # MS coverage: bit 0 horizontal, bit 2 cross-stream.
+            horizontal = (coverage & 1) != 0
+            cross_stream = (coverage & 4) != 0
+            variation = false
+        if format == 0 and horizontal and not cross_stream and not variation:
+            if data_at + 2 <= table_end:
+                val n_pairs = read_u16_be(blob, data_at) as i64
+                val pairs_at = data_at + 8
+                if n_pairs > 0 and pairs_at + n_pairs * 6 <= table_end:
+                    out.push(pairs_at)
+                    out.push(n_pairs)
+                    out.push(0)
+        cursor = cursor + sub_length
+        i = i + 1
+    out
+
+# Binary search one format-0 pair list. The spec REQUIRES the pairs to be sorted
+# by the 32-bit key `(left << 16) | right`, and Helvetica's searchRange /
+# entrySelector / rangeShift header exists precisely so a reader can binary
+# search; a linear scan here would cost 105 reads per pair on every character.
+fn _kern_lookup_range(blob: [u8], pairs_at: i64, n_pairs: i64, key: i64) -> i64:
+    var lo: i64 = 0
+    var hi: i64 = n_pairs - 1
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        val at = pairs_at + mid * 6
+        val mid_key = ((read_u16_be(blob, at) as i64) << 16) | (read_u16_be(blob, at + 2) as i64)
+        if mid_key == key:
+            return read_i16_be(blob, at + 4) as i64
+        if mid_key < key:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    0
+
+# Kerning for one ordered glyph pair, in FONT DESIGN UNITS. 0 when the face has
+# no `kern` table, no format-0 horizontal subtable, or no entry for the pair --
+# all three are "no kerning", which is the correct answer, not an error.
+pub fn sfnt_blob_kern_pair_units(blob: [u8], left_glyph_id: i64, right_glyph_id: i64) -> i64:
+    if left_glyph_id <= 0 or right_glyph_id <= 0: return 0
+    if left_glyph_id > 65535 or right_glyph_id > 65535: return 0
+    val font_opt = parse_offset_table(blob)
+    if val Some(font) = font_opt:
+        val table_opt = find_table(font, SFNT_KERN_TAG)
+        if val Some(table) = table_opt:
+            val ranges = _kern_format0_ranges(blob, table.offset as i64, table.length as i64)
+            if ranges.len() == 0: return 0
+            val key = (left_glyph_id << 16) | right_glyph_id
+            var total: i64 = 0
+            var i: i64 = 0
+            while i + 2 < ranges.len():
+                total = total + _kern_lookup_range(blob, ranges[i], ranges[i + 1], key)
+                i = i + 3
+            return total
+    0
+
+# Units per em, from `head`. 0 when the face has no usable `head`, which the
+# callers treat as "cannot scale, so no kerning".
+pub fn sfnt_units_per_em(blob: [u8]) -> i64:
+    val font_opt = parse_offset_table(blob)
+    if val Some(font) = font_opt:
+        val head_opt = find_table(font, SFNT_KERN_HEAD_TAG)
+        if val Some(head) = head_opt:
+            val at = (head.offset as i64) + 18
+            if at + 2 <= blob.len():
+                val upem = read_u16_be(blob, at) as i64
+                if upem >= 16 and upem <= 16384:
+                    return upem
+    0
+
+# Kerning for one ordered glyph pair, in MILLI-PIXELS at `size_px`.
+#
+# Milli-pixels, not pixels, and deliberately: round 12 made the run pen a
+# milli-pixel cumulative so that a run's width is `round(sum of exact)` rather
+# than `sum of round(exact)`. A kern rounded to a whole pixel HERE would
+# reintroduce exactly the per-item rounding that change removed -- Helvetica's
+# "AV" pair is -80/2048 em = -0.625 px at 16, which rounds to -1 on its own but
+# must contribute -0.625 to the cumulative. The rounding stays at the single
+# boundary-difference step in `measure_text_advances`.
+pub fn sfnt_blob_kern_pair_milli_px(blob: [u8], left_glyph_id: i64, right_glyph_id: i64, size_px: i64) -> i64:
+    if size_px <= 0 or size_px > 512: return 0
+    val units = sfnt_blob_kern_pair_units(blob, left_glyph_id, right_glyph_id)
+    if units == 0: return 0
+    val upem = sfnt_units_per_em(blob)
+    if upem <= 0: return 0
+    # Symmetric rounding about zero: kern values are predominantly negative and
+    # a floor-toward-negative-infinity division would bias every pair one
+    # milli-pixel tighter than its mirror.
+    val scaled = units * size_px * 1000
+    if scaled >= 0:
+        (scaled + upem / 2) / upem
+    else:
+        -((-scaled + upem / 2) / upem)

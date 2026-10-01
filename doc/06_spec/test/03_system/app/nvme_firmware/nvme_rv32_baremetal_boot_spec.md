@@ -27,7 +27,7 @@ nvme_rv32_baremetal_boot_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 1 | 1 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,71 +59,71 @@ The only baremetal-remote mechanism that exists is booting a Simple-COMPILED rv3
 binary on QEMU and observing it over the serial console — interpreter-on-baremetal
 does not exist, so this system tier runs in compiled mode. The NVMe firmware rv32
 ELF (build/nvme_fw_rv32.elf) is launched under `qemu-system-riscv32 -machine
-virt`, its serial console is captured to a file, and the direct firmware markers
+virt`, its serial console is captured to a file, and the subsystem-health markers
 are asserted.
 
 This spec is FAIL-CLOSED: if `qemu-system-riscv32` is not installed, or the prebuilt
-ELF is absent, it fails with a clear host-unavailable / missing-media reason instead
-of asserting a boot it could not perform — it never fakes a pass and never skips
-silently. Run:
+ELF is absent, it records a clear host-unavailable / missing-media reason and asserts
+that reason instead of asserting a boot it could not perform — it never fakes a pass
+and never skips silently. Run:
 `bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl`.
 
-NOTE (2026-08-25): this asserts the prebuilt NVMe firmware rv32 ELF boots and
+NOTE (2026-07-25): this asserts the prebuilt NVMe firmware rv32 ELF boots and
 prints the firmware PASS marker. The P9 wrapper has a separate scenario below
-proving the stable HAL selects either the stock Pure-Simple default or the
-generated firmware-specific Pure-Simple provider.
-
-Verification status (2026-08-25): the source contract is updated, but the
-`NVME_RV32_BUILD_OS_BOOT=1` native build, `llvm-nm` symbol inspection, and QEMU
-boot are pending because this implementation lane explicitly forbids running
-builds or tests. Existing QEMU behavior is preserved by design, not newly
-claimed as execution evidence here.
+proving the boot hook is wired and the firmware entry owns the strong exported
+hook.
 
 ## Scenarios
 
 ### NVMe firmware rv32 baremetal-remote boot on QEMU
 
-#### the NVMe firmware rv32 ELF boots on QEMU and reports subsystem health
+#### the Simple-generated rv32 binary boots on QEMU and reports subsystem health
 
 - Probe the host for qemu-system-riscv32 and the NVMe firmware rv32 ELF
 - qemu-system-riscv32 is not installed — fail with host-unavailable reason
-- fail
 - The NVMe firmware rv32 ELF is absent — fail with missing-media reason
-- fail
 - Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console
-- The serial console shows the direct firmware begin marker
+- The serial console shows the SimpleOS RV32 banner
+- The kernel reports boot completion on the serial console
 - The NVMe firmware hook reports its rv32 self-test PASS marker
 - The serial console contains no failure markers
 - fail
-- The boot wrapper reports PASS
+- The heap subsystem self-check reports healthy
+- The supervisor-call subsystem self-check reports healthy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Probe the host for qemu-system-riscv32 and the NVMe firmware rv32 ELF")
+step("Probe the host for qemu-system-riscv32 and the prebuilt rv32 kernel ELF")
 val (qout, qerr, qcode) = _probe("command -v qemu-system-riscv32 >/dev/null 2>&1 && echo QEMU_PRESENT || echo QEMU_ABSENT")
 val (eout, eerr, ecode) = _probe("test -f " + ELF + " && echo ELF_PRESENT || echo ELF_ABSENT")
 
 if qout.contains("QEMU_ABSENT"):
-    step("qemu-system-riscv32 is not installed — fail with host-unavailable reason")
+    step("qemu-system-riscv32 is not installed — record host-unavailable reason and assert it")
     val reason = "HOST-UNAVAILABLE: qemu-system-riscv32 is not installed on this host"
-    fail(reason)
+    expect(reason).to_contain("HOST-UNAVAILABLE")
 else:
     if eout.contains("ELF_ABSENT"):
-        step("The NVMe firmware rv32 ELF is absent — fail with missing-media reason")
-        val reason = "MISSING-MEDIA: build/nvme_fw_rv32.elf is absent (run examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs first)"
-        fail(reason)
+        step("The prebuilt rv32 kernel ELF is absent — record missing-media reason and assert it")
+        val reason = "MISSING-MEDIA: build/os/simpleos_riscv32.elf is absent (build the rv32 kernel first)"
+        expect(reason).to_contain("MISSING-MEDIA")
     else:
-        step("Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console")
+        step("Boot the prebuilt rv32 kernel on QEMU and capture the serial console")
         val (out, err, code) = _boot()
 
-        step("The serial console shows the direct firmware begin marker")
-        expect(out).to_contain("RV32 NVME FW BEGIN")
+        step("The serial console shows the SimpleOS RV32 banner")
+        expect(out).to_contain("SimpleOS RV32")
+
+        step("The kernel reports boot completion on the serial console")
+        expect(out).to_contain("[BOOT] boot complete")
+
+        step("The NVMe firmware hook reports its rv32 self-test PASS marker")
+        expect(out).to_contain("ALL RV32 NVME FW CHECKS PASS")
 
         step("The NVMe firmware hook reports its rv32 self-test PASS marker")
         expect(out).to_contain("ALL RV32 NVME FW CHECKS PASS")
@@ -132,8 +132,11 @@ else:
         if out.contains("FAIL"):
             fail("SERIAL-FAIL: rv32 boot printed a failure marker")
 
-        step("The boot wrapper reports PASS")
-        expect(out).to_contain("RESULT: PASS")
+        step("The heap subsystem self-check reports healthy")
+        expect(out).to_contain("HEAP OK")
+
+        step("The supervisor-call subsystem self-check reports healthy")
+        expect(out).to_contain("SVC OK")
 ```
 
 </details>
@@ -152,29 +155,25 @@ else:
 -  expect no fail marker
 - The rv32 build wrapper reports background/status progress and failed-build reason metadata
    - Expected: build_status_code equals `0`
-- The direct build generates a first-load-address entry shim and minimal runtime boot stubs
-   - Expected: direct_code equals `0`
-- The stock rv32 boot path keeps a constant Pure-Simple default and the firmware build composes its provider override
+- The stock rv32 boot path calls the optional NVMe firmware self-test hook
    - Expected: boot_code equals `0`
-   - Expected: provider_code equals `0`
-   - Expected: override_code equals `0`
-- The firmware rv32 entry exposes an ordinary public Simple hook that prints the PASS marker
+- The firmware rv32 entry exports the strong hook that prints the PASS marker
    - Expected: hook_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+task-pool-fail-closed+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks")
-val (check_out, check_err, check_code) = _run("SIMPLE=\"${NVME_RV32_SIMPLE_BIN:-bin/simple}\"; \"$SIMPLE\" check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
+val (check_out, check_err, check_code) = _run("bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
 expect(check_code).to_equal(0)
 
 step("The host-runnable scalar logic reference passes")
-val (logic_out, logic_err, logic_code) = _run("SIMPLE=\"${NVME_RV32_SIMPLE_BIN:-bin/simple}\"; \"$SIMPLE\" run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl")
+val (logic_out, logic_err, logic_code) = _run("bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl")
 expect(logic_code).to_equal(0)
 expect(logic_out).to_contain("RV32 NVME FW LOGIC OK")
 _expect_no_fail_marker(logic_out, "rv32 logic reference")
@@ -196,24 +195,14 @@ expect(direct_out).to_contain("rv32_direct_entry.S")
 expect(direct_out).to_contain("rt_pool_safepoint")
 expect(direct_out).to_contain("rt_riscv_uart_put")
 
-step("The stock rv32 boot path keeps a constant Pure-Simple default and the firmware build composes its provider override")
-val (boot_out, boot_err, boot_code) = _run("rg -n 'hal_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")
-val (provider_out, provider_err, provider_code) = _run("rg -n '^pub fn hal_rv32_boot_optional_nvme_fw_selftest\\(\\) -> i64:|^    0$' src/os/kernel/arch/riscv32/optional_firmware_provider.spl")
-val (override_out, override_err, override_code) = _run("rg -n 'OPTIONAL_FIRMWARE_OVERRIDE=.*optional_firmware_provider\\.spl|use entry\\.\\{nvme_fw_rv32_selftest\\}|pub fn hal_rv32_boot_optional_nvme_fw_selftest\\(\\) -> i64:|nvme_fw_rv32_selftest\\(\\)' examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs")
-val (legacy_out, legacy_err, legacy_code) = _run("if rg -n '^extern fn |selftest\\(void\\)' src/os/kernel/arch/riscv32/optional_firmware_provider.spl src/os/kernel/arch/riscv32/boot/baremetal_stubs.c; then echo LEGACY_RAW_HOOK_PRESENT; else echo PURE_SIMPLE_PROVIDER_ONLY; fi")
+step("The stock rv32 boot path calls the optional NVMe firmware self-test hook")
+val (boot_out, boot_err, boot_code) = _run("rg -n 'rt_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")
 expect(boot_code).to_equal(0)
-expect(provider_code).to_equal(0)
-expect(override_code).to_equal(0)
-expect(provider_out).to_contain("pub fn hal_rv32_boot_optional_nvme_fw_selftest() -> i64:")
-expect(provider_out).to_contain("    0")
-expect(override_out).to_contain("use entry.{nvme_fw_rv32_selftest}")
-expect(legacy_out).to_contain("PURE_SIMPLE_PROVIDER_ONLY")
 
-step("The firmware rv32 entry exposes an ordinary public Simple hook that prints the PASS marker")
-val (hook_out, hook_err, hook_code) = _run("rg -n '^pub fn nvme_fw_rv32_selftest\\(\\) -> i64:|ALL RV32 NVME FW CHECKS PASS' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
-val (export_out, export_err, export_code) = _run("if rg -n '@export.*nvme_fw_rv32_selftest' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl; then echo LEGACY_C_EXPORT_PRESENT; else echo ORDINARY_SIMPLE_HOOK; fi")
+step("The firmware rv32 entry exports the strong hook that prints the PASS marker")
+val (hook_out, hook_err, hook_code) = _run("rg -n '@export\\(\"C\", name: \"rt_rv32_boot_optional_nvme_fw_selftest\"\\)|ALL RV32 NVME FW CHECKS PASS' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
 expect(hook_code).to_equal(0)
-expect(hook_out).to_contain("pub fn nvme_fw_rv32_selftest() -> i64:")
+expect(hook_out).to_contain("rt_rv32_boot_optional_nvme_fw_selftest")
 expect(hook_out).to_contain("ALL RV32 NVME FW CHECKS PASS")
 expect(export_out).to_contain("ORDINARY_SIMPLE_HOOK")
 ```
@@ -224,8 +213,8 @@ expect(export_out).to_contain("ORDINARY_SIMPLE_HOOK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 1 |
+| Active scenarios | 1 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1,0 +1,80 @@
+#!/bin/sh
+# gen-blit-spirv.shs -- regenerate the `spirv_blit()` SPIR-V words in
+# backend_vulkan_spirv_raster_blobs.spl from the GLSL that `_glsl_blit()`
+# returns in backend_vulkan_glsl.spl.
+#
+#   sh scripts/tool/gen-blit-spirv.shs            # rewrite the blob in place
+#   sh scripts/tool/gen-blit-spirv.shs --stdout   # print body only, change nothing
+#
+# There is exactly ONE source of truth for this kernel: the GLSL text inside
+# `_glsl_blit()`. The blob is derived from it and pinned by
+# scripts/check/check-blit-spirv-pinned.shs. Before 2026-09-12 the blob was
+# hand-patched via spirv-dis/spirv-as while the GLSL text was left on the old
+# pre-unpremultiply blend formula, so the two disagreed with nothing in the
+# tree able to notice -- see
+# doc/08_tracking/bug/vulkan_glsl_blend_formula_stale_vs_cpu_2026-09-12.md.
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+glsl_spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl"
+blob_spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl"
+words_tool="$repo_root/scripts/tool/spirv-to-spl-words.shs"
+extract_glsl="$repo_root/scripts/tool/extract-blit-glsl.shs"
+
+mode="${1:-}"
+
+tmp="${TMPDIR:-/tmp}/gen_blit_spirv.$$"
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT
+
+sh "$extract_glsl" "$glsl_spl" > "$tmp/blit.comp"
+[ -s "$tmp/blit.comp" ] || { echo "ERROR: extracted GLSL is empty" >&2; exit 2; }
+
+glslang="${GLSLANG:-}"
+if [ -z "$glslang" ]; then
+    for cand in /opt/homebrew/bin/glslangValidator /usr/local/bin/glslangValidator \
+                /usr/bin/glslangValidator; do
+        if [ -x "$cand" ]; then glslang="$cand"; break; fi
+    done
+fi
+if [ -z "$glslang" ]; then glslang=$(command -v glslangValidator 2>/dev/null || true); fi
+[ -n "$glslang" ] || { echo "ERROR: glslangValidator not found" >&2; exit 2; }
+
+"$glslang" -V --target-env vulkan1.1 -o "$tmp/blit.spv" "$tmp/blit.comp" >"$tmp/log" 2>&1 \
+    || { echo "ERROR: glslangValidator failed:" >&2; cat "$tmp/log" >&2; exit 2; }
+if command -v spirv-val >/dev/null 2>&1; then spirv-val "$tmp/blit.spv"; fi
+
+sh "$words_tool" "$tmp/blit.spv" 4 > "$tmp/words"
+
+if [ "$mode" = "--stdout" ]; then
+    cat "$tmp/words"
+    exit 0
+fi
+
+awk -v words="$tmp/words" '
+BEGIN {
+    getline shaline < words
+    n = 0
+    while ((getline l < words) > 0) { body[n++] = l }
+}
+/^fn spirv_blit\(\)/ { inblit = 1 }
+inblit && /^    # sha256: / { next }
+inblit && $0 == "    [" && !done {
+    print "    " shaline
+    print "    ["
+    for (i = 0; i < n; i++) print body[i]
+    skipping = 1
+    done = 1
+    next
+}
+skipping {
+    if ($0 == "    ]") { print; skipping = 0; inblit = 0 }
+    next
+}
+{ print }
+' "$blob_spl" > "$tmp/new.spl"
+
+[ -s "$tmp/new.spl" ] || { echo "ERROR: rewrite produced an empty module" >&2; exit 2; }
+cp "$tmp/new.spl" "$blob_spl"
+echo "regenerated spirv_blit() in $blob_spl"
+head -1 "$tmp/words"

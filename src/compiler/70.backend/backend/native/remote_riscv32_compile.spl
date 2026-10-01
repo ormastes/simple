@@ -1,0 +1,56 @@
+# Compiler-owned Simple source to raw RV32 image composition.
+#
+# The remote execution library intentionally does not import compiler layers.
+# Callers compile here, then hand the resulting instruction image to the
+# remote executor for placement at base_addr.
+
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.backend.backend.native.mod.{compile_native_riscv32_raw}
+
+fn first_hir_error(lowering: HirLowering) -> text:
+    if lowering.errors.len() == 0:
+        return ""
+    lowering.errors[0].message
+
+fn first_mir_error(lowering: MirLowering) -> text:
+    if lowering.errors.len() == 0:
+        return ""
+    lowering.errors[0].message
+
+pub fn compile_remote_riscv32_binary(source: text, base_addr: i64) -> Result<[i32], text>:
+    if source.trim() == "":
+        return Err("remote riscv32 source must not be empty")
+    if base_addr < 0 or base_addr % 4 != 0:
+        return Err("remote riscv32 base address must be non-negative and 4-byte aligned")
+
+    val path = "remote_riscv32_payload.spl"
+    val parsed = parse_full_frontend(source, path, "remote_riscv32_payload", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    val hir_error = first_hir_error(hir_lowering)
+    if hir_error != "":
+        return Err("remote riscv32 HIR lowering failed: " + hir_error)
+
+    val target = mir_target_context_from(
+        "riscv32-unknown-none-elf", "riscv32", "baremetal", "native", -1)
+    var mir_lowering = MirLowering.new_for_target(hir.symbols, target)
+    val mir = mir_lowering.lower_module(hir)
+    val mir_error = first_mir_error(mir_lowering)
+    if mir_error != "":
+        return Err("remote riscv32 MIR lowering failed: " + mir_error)
+
+    val native_bytes = compile_native_riscv32_raw(mir, base_addr)?
+    if native_bytes.len() == 0:
+        return Err("remote riscv32 backend emitted an empty image")
+
+    var image: [i32] = []
+    for byte in native_bytes:
+        if byte < 0 or byte > 255:
+            return Err("remote riscv32 backend emitted a non-byte value")
+        image.push(byte.to_i32())
+    Ok(image)

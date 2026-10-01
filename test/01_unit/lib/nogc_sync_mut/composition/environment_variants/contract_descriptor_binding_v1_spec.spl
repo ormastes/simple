@@ -1,0 +1,114 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn descriptor_v1() -> VariantDescriptorV1:
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+        provider_identity: d(1u64), variant_identity: d(2u64),
+        contract_identity: d(3u64), contract_major: 1u16, contract_minor: 0u16,
+        abi_digest: d(4u64), semantic_identity: d(5u64),
+        grammar_identity: d(6u64), program_identity: d(7u64),
+        artifact_digest: d(8u64),
+        artifact_location: EnvironmentArenaRangeV1(offset: 0u32, count: 12u32),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32,
+        required_object_format_id: 1u32, required_endian_id: 1u16,
+        required_pointer_width_bits: 64u16, required_loader_permission_bits: 1u64,
+        required_cpu_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32)),
+        required_os_state_words: EnvironmentArenaRangeV1(offset: 1u32, count: 1u32),
+        required_vector_state_mode: ENV_VECTOR_FIXED_V1, required_vector_length_bits: 256u32,
+        required_device_api: 0u32, minimum_device_api_version: 0u32,
+        required_device_features: EnvironmentArenaRangeV1(offset: 2u32, count: 0u32),
+        required_memory_domain_bits: 0u64, required_effect_bits: 1u64,
+        minimum_device_buffer_bytes: 0u64, minimum_workgroup_invocations: 0u32,
+        minimum_queue_family_count: 0u32,
+        numerical_contract_id: 1u32, resource_layout_digest: d(9u64),
+        dependencies: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        assurance_receipt_digest: d(10u64), startup_budget_us: 25000u64,
+        max_session_bytes: 1048576u64, max_inflight_operations: 64u32)
+
+fn dependency_v1() -> VariantDependencyV1:
+    VariantDependencyV1(
+        provider_identity: d(11u64), contract_identity: d(12u64),
+        minimum_contract_major: 1u16, minimum_contract_minor: 0u16,
+        artifact_digest: d(13u64))
+
+fn binding_plan_v1() -> BindingPlanV1:
+    BindingPlanV1(
+        descriptor_size: 224u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        plan_digest: d(20u64), environment_identity: d(21u64),
+        environment_generation: 2u64, catalog_digest: d(22u64),
+        catalog_generation: 3u64, policy_digest: d(23u64),
+        dependency_lock_digest: d(24u64), publication_generation: 4u64,
+        facet_bindings: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        selected_variant_identities: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        rejections: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))
+
+fn binding_v1() -> VariantFacetBindingV1:
+    VariantFacetBindingV1(
+        facet_id: ENV_FACET_FRONTEND_V1, interface_major: 1u16,
+        interface_minor: 0u16, slot_index: 0u32,
+        provider_identity: d(1u64), variant_identity: d(2u64),
+        provider_generation: 5u64, interface_handle: 100u64,
+        provider_context: 0u64)
+
+fn rejection_v1() -> VariantRejectionV1:
+    VariantRejectionV1(
+        provider_identity: d(30u64), variant_identity: d(31u64),
+        reason_code: 1u32, phase_code: 1u16)
+
+describe "VariantDescriptorV1 contract":
+    it "admits a bounded native parser descriptor and dependency closure":
+        expect(variant_descriptor_validate_v1(
+            descriptor_v1(), 12u32, 2u32, 1u32, [dependency_v1()])).to_equal(Ok(()))
+
+    it "rejects cross-architecture feature requirements and corrupt dependencies":
+        var descriptor = descriptor_v1()
+        descriptor.required_cpu_features.architecture = ENV_ARCH_AARCH64_V1
+        expect(variant_descriptor_validate_v1(descriptor, 12u32, 2u32, 1u32, [dependency_v1()])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidFeatureSet))
+        descriptor = descriptor_v1()
+        var dependency = dependency_v1()
+        dependency.artifact_digest = d(0u64)
+        expect(variant_descriptor_validate_v1(descriptor, 12u32, 2u32, 1u32, [dependency])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidDependency))
+
+    it "rejects unbounded artifact and session resource declarations":
+        var descriptor = descriptor_v1()
+        descriptor.artifact_location.count = 13u32
+        expect(variant_descriptor_validate_v1(descriptor, 12u32, 2u32, 1u32, [dependency_v1()])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidArtifact))
+        descriptor = descriptor_v1()
+        descriptor.max_inflight_operations = 0u32
+        expect(variant_descriptor_validate_v1(descriptor, 12u32, 2u32, 1u32, [dependency_v1()])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidResourceBounds))
+
+describe "BindingPlanV1 contract":
+    it "admits generation-pinned dense facet bindings and rejection evidence":
+        expect(binding_plan_validate_v1(binding_plan_v1(), [binding_v1()], 1u32, [rejection_v1()])).to_equal(Ok(()))
+
+    it "rejects a sparse slot and a missing provider generation":
+        var binding = binding_v1()
+        binding.slot_index = 1u32
+        expect(binding_plan_validate_v1(binding_plan_v1(), [binding], 1u32, [rejection_v1()])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidFacet))
+        binding = binding_v1()
+        binding.provider_generation = 0u64
+        expect(binding_plan_validate_v1(binding_plan_v1(), [binding], 1u32, [rejection_v1()])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidFacet))
+
+    it "rejects unreasoned rejection evidence and zero plan generations":
+        var rejection = rejection_v1()
+        rejection.reason_code = 0u32
+        expect(binding_plan_validate_v1(binding_plan_v1(), [binding_v1()], 1u32, [rejection])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidRejection))
+        var plan = binding_plan_v1()
+        plan.publication_generation = 0u64
+        expect(binding_plan_validate_v1(plan, [binding_v1()], 1u32, [rejection_v1()])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidGeneration))

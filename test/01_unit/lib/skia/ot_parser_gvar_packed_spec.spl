@@ -1,0 +1,129 @@
+# @cover src/lib/skia/feature/glyph/ot_parser_gvar.spl 60%
+# Packed delta stream decoding for the gvar TupleVariation store.
+# Every expectation is an exact numeric delta, so an all-zero (unimplemented)
+# accumulator fails rather than passing vacuously.
+
+use std.spipe.*
+use std.skia.feature.glyph.ot_parser_gvar.{gvar_accumulate_point_deltas}
+
+# --- Synthetic glyph variation data blobs (data_base = 0 in every fixture) ---
+
+# One tuple, embedded peak = 1.0 on a single axis, three points.
+# x deltas packed as an i8 run of 3: 10, -5, 0. y deltas packed as a zero run of 3.
+fn fixture_single_tuple() -> [u8]:
+    [
+        0x00, 0x01,        # tupleVariationCount = 1
+        0x00, 0x0A,        # dataOffset = 10
+        0x00, 0x05,        # variationDataSize = 5
+        0x80, 0x00,        # flags: EMBEDDED_PEAK_TUPLE
+        0x40, 0x00,        # peak F2DOT14 = 1.0
+        0x02, 0x0A, 0xFB, 0x00,  # x: i8 run of 3 -> 10, -5, 0
+        0x82               # y: zero run of 3
+    ]
+
+# One tuple carrying PRIVATE_POINT_NUMBERS selecting point 1 only.
+fn fixture_private_points() -> [u8]:
+    [
+        0x00, 0x01,        # tupleVariationCount = 1
+        0x00, 0x0A,        # dataOffset = 10
+        0x00, 0x07,        # variationDataSize = 7
+        0xA0, 0x00,        # flags: EMBEDDED_PEAK_TUPLE | PRIVATE_POINT_NUMBERS
+        0x40, 0x00,        # peak F2DOT14 = 1.0
+        0x01, 0x00, 0x01,  # private points: count 1, i8 run of 1 -> point 1
+        0x00, 0x07,        # x: i8 run of 1 -> 7
+        0x00, 0xFE         # y: i8 run of 1 -> -2
+    ]
+
+# Two tuples with DIFFERENT serialized data. Proves serial_pos advances by each
+# header's variationDataSize instead of every tuple re-reading the first block.
+fn fixture_two_tuples() -> [u8]:
+    [
+        0x00, 0x02,        # tupleVariationCount = 2
+        0x00, 0x10,        # dataOffset = 16
+        0x00, 0x05,        # tuple 0: variationDataSize = 5
+        0x80, 0x00,        # tuple 0 flags: EMBEDDED_PEAK_TUPLE
+        0x40, 0x00,        # tuple 0 peak = +1.0
+        0x00, 0x05,        # tuple 1: variationDataSize = 5
+        0x80, 0x00,        # tuple 1 flags: EMBEDDED_PEAK_TUPLE
+        0xC0, 0x00,        # tuple 1 peak = -1.0
+        0x02, 0x01, 0x02, 0x03,  # tuple 0 x: 1, 2, 3
+        0x82,                    # tuple 0 y: zero run of 3
+        0x02, 0x64, 0x64, 0x64,  # tuple 1 x: 100, 100, 100
+        0x82                     # tuple 1 y: zero run of 3
+    ]
+
+# SHARED_POINT_NUMBERS (bit 0x8000 of tupleVariationCount) selecting points 0 and 2.
+fn fixture_shared_points() -> [u8]:
+    [
+        0x80, 0x01,        # tupleVariationCount = 1 | SHARED_POINT_NUMBERS
+        0x00, 0x0A,        # dataOffset = 10
+        0x00, 0x04,        # variationDataSize = 4
+        0x80, 0x00,        # flags: EMBEDDED_PEAK_TUPLE
+        0x40, 0x00,        # peak F2DOT14 = 1.0
+        0x02, 0x01, 0x00, 0x02,  # shared points: count 2, i8 run of 2 -> 0, 2
+        0x01, 0x09, 0x0B,        # x: i8 run of 2 -> 9, 11
+        0x81                     # y: zero run of 2
+    ]
+
+describe "gvar_accumulate_point_deltas — packed delta stream":
+    it "decodes a packed i8 run and a zero run at full axis weight":
+        val blob = fixture_single_tuple()
+        val out = gvar_accumulate_point_deltas(blob, 0, 1, 0, [1.0], 3)
+        expect(out.len()).to_equal(6)
+        expect(out[0]).to_equal(10.0)
+        expect(out[1]).to_equal(-5.0)
+        expect(out[2]).to_equal(0.0)
+        expect(out[3]).to_equal(0.0)
+        expect(out[4]).to_equal(0.0)
+        expect(out[5]).to_equal(0.0)
+
+    it "scales packed deltas by the piecewise-linear tuple scalar":
+        val blob = fixture_single_tuple()
+        val out = gvar_accumulate_point_deltas(blob, 0, 1, 0, [0.5], 3)
+        expect(out.len()).to_equal(6)
+        expect(out[0]).to_equal(5.0)
+        expect(out[1]).to_equal(-2.5)
+        expect(out[2]).to_equal(0.0)
+
+    it "contributes nothing when the coordinate falls outside the peak region":
+        val blob = fixture_single_tuple()
+        val out = gvar_accumulate_point_deltas(blob, 0, 1, 0, [-1.0], 3)
+        expect(out.len()).to_equal(6)
+        expect(out[0]).to_equal(0.0)
+        expect(out[1]).to_equal(0.0)
+        expect(out[2]).to_equal(0.0)
+
+    it "applies private point numbers to the selected point only":
+        val blob = fixture_private_points()
+        val out = gvar_accumulate_point_deltas(blob, 0, 1, 0, [1.0], 3)
+        expect(out.len()).to_equal(6)
+        expect(out[0]).to_equal(0.0)
+        expect(out[1]).to_equal(7.0)
+        expect(out[2]).to_equal(0.0)
+        expect(out[4]).to_equal(-2.0)
+
+    it "applies shared point numbers to the selected points only":
+        val blob = fixture_shared_points()
+        val out = gvar_accumulate_point_deltas(blob, 0, 1, 0, [1.0], 3)
+        expect(out.len()).to_equal(6)
+        expect(out[0]).to_equal(9.0)
+        expect(out[1]).to_equal(0.0)
+        expect(out[2]).to_equal(11.0)
+
+    it "advances the serialized cursor by each tuple's variationDataSize":
+        val blob = fixture_two_tuples()
+        val at_plus = gvar_accumulate_point_deltas(blob, 0, 1, 0, [1.0], 3)
+        expect(at_plus[0]).to_equal(1.0)
+        expect(at_plus[1]).to_equal(2.0)
+        expect(at_plus[2]).to_equal(3.0)
+        val at_minus = gvar_accumulate_point_deltas(blob, 0, 1, 0, [-1.0], 3)
+        expect(at_minus[0]).to_equal(100.0)
+        expect(at_minus[1]).to_equal(100.0)
+        expect(at_minus[2]).to_equal(100.0)
+
+    it "returns a zeroed accumulator for a truncated blob without crashing":
+        val blob: [u8] = [0x00, 0x01]
+        val out = gvar_accumulate_point_deltas(blob, 0, 1, 0, [1.0], 3)
+        expect(out.len()).to_equal(6)
+        expect(out[0]).to_equal(0.0)
+        expect(out[5]).to_equal(0.0)

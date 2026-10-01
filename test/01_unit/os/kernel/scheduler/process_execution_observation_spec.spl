@@ -1,15 +1,29 @@
 use std.spec.*
 use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_validate
+}
 use os.kernel.scheduler.process_execution_observation.{
     scheduler_execution_observe_adoption_v1, scheduler_execution_observe_exit_v1,
     scheduler_execution_observe_reap_v1, scheduler_execution_take_reaped_token_v1,
-    scheduler_execution_evidence_consume_once_v1
+    scheduler_execution_evidence_consume_once_v1,
+    scheduler_execution_evidence_consume_once_v2,
+    scheduler_execution_observe_adoption_handle_with_launch_v1,
+    scheduler_execution_observe_exit_handle_v1,
+    scheduler_execution_observe_reap_handle_v1,
+    scheduler_execution_deliver_reaped_handle_v1,
+    scheduler_execution_attach_argv_file_bindings_v1,
+    SchedulerArgvFileBindingV1, SchedulerArgvFileRoleV1,
+    scheduler_execution_observe_adoption_handle_v1,
+    scheduler_execution_cancel_adoption_handle_status_v1,
+    SchedulerExecutionCancellationStatusV1
 }
 
 fn _handle() -> ExecutableImageHandleV1:
     ExecutableImageHandleV1(
         schema_version: 1, open_handle_id: 11u64, mount_id: 2u64,
+        filesystem_name: "ramfs", canonical_source_path: "/bin/simple",
         mount_generation: 3u64, file_id: 11u64, file_generation: 4u64,
         size_bytes: 4096u64, role: "main-image",
         target: ManifestTarget(os: "simpleos", arch: "riscv64", abi: "lp64d"),
@@ -17,6 +31,76 @@ fn _handle() -> ExecutableImageHandleV1:
         image_hash: "1111111111111111111111111111111111111111111111111111111111111111",
         admission_id: "observation-capacity", trust_epoch: 5u64,
         read_count: 0u64, read_bytes: 0u64, consumed: false)
+
+fn _binding(path: text, index: i64) -> SchedulerArgvFileBindingV1:
+    SchedulerArgvFileBindingV1(
+        role: SchedulerArgvFileRoleV1.SourceInput,
+        argv_index: index, canonical_path: path,
+        content_sha256: "2222222222222222222222222222222222222222222222222222222222222222",
+        mount_id: 2u64, mount_generation: 3u64,
+        namespace_generation: 5u64, file_generation: 4u64, size: 12u64)
+
+describe "scheduler execution provenance":
+    it "preserves admitted image identity and accepts only the exact one-shot argv binding":
+        val launch = executable_launch_arguments_v1_validate(
+            "/bin/simple", ["/src/main.spl"], []).unwrap()
+        val handle = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            8001u64, 0u64, _handle(), launch).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+        val token = scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/other/main.spl", 0)])).to_equal(false)
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/src/main.spl", 1)])).to_equal(false)
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/src/main.spl", 0),
+                    _binding("/src/main.spl", 0)])).to_equal(false)
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/src/main.spl", 0)])).to_equal(true)
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/src/main.spl", 0)])).to_equal(false)
+        val reused = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            8004u64, 0u64, _handle(), launch).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(reused, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(reused)).to_equal(true)
+        val replacement_token = scheduler_execution_deliver_reaped_handle_v1(reused).unwrap()
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/src/main.spl", 0)])).to_equal(false)
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            replacement_token, [_binding("/src/main.spl", 0)])).to_equal(true)
+        expect(scheduler_execution_evidence_consume_once_v2(
+            replacement_token).is_some()).to_equal(true)
+        val evidence = scheduler_execution_evidence_consume_once_v2(token).unwrap()
+        expect(evidence.mount_id).to_equal(2u64)
+        expect(evidence.filesystem_name).to_equal("ramfs")
+        expect(evidence.canonical_source_path).to_equal("/bin/simple")
+        expect(evidence.target_os).to_equal("simpleos")
+        expect(evidence.target_arch).to_equal("riscv64")
+        expect(evidence.target_abi).to_equal("lp64d")
+        expect(evidence.argv_file_bindings.len()).to_equal(1)
+        expect(evidence.argv_file_bindings[0].canonical_path).to_equal("/src/main.spl")
+        expect(scheduler_execution_evidence_consume_once_v2(token).is_some()).to_equal(false)
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/src/main.spl", 0)])).to_equal(false)
+
+    it "rejects bindings for commandless observations and cancels only unpublished adoption":
+        val handle = scheduler_execution_observe_adoption_handle_v1(
+            8002u64, 0u64, _handle()).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(scheduler_execution_cancel_adoption_handle_status_v1(handle)).to_equal(
+            SchedulerExecutionCancellationStatusV1.NotCancelable)
+        expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+        val token = scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()
+        expect(scheduler_execution_attach_argv_file_bindings_v1(
+            token, [_binding("/src/main.spl", 0)])).to_equal(false)
+        expect(scheduler_execution_evidence_consume_once_v1(token).is_some()).to_equal(true)
+        val cancelable = scheduler_execution_observe_adoption_handle_v1(
+            8003u64, 0u64, _handle()).unwrap()
+        expect(scheduler_execution_cancel_adoption_handle_status_v1(cancelable)).to_equal(
+            SchedulerExecutionCancellationStatusV1.Cancelled)
+        expect(scheduler_execution_cancel_adoption_handle_status_v1(cancelable)).to_equal(
+            SchedulerExecutionCancellationStatusV1.AlreadyAbsent)
 
 describe "scheduler execution observation capacity":
     it "reuses generation-safe slots for more than 256 sequential executions":

@@ -1,0 +1,199 @@
+# Admitted collection profile hints embedded into attributed source initializers.
+# The CLI installs a target-specific catalog before parsing, then clears it.
+
+use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
+use std.io_runtime.{cwd_process}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
+use compiler.core.ast.{expr_method_call, expr_ident, expr_string_lit, expr_int_lit}
+use compiler.core.ast.{expr_get_tag, expr_get_left, expr_get_str, expr_get_args, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_STRING_LIT}
+
+struct ParserCollectionFeedbackCatalog:
+    target_profile_id: text
+    positions: HashMap
+    profiles: [AdaptiveSetWorkloadProfile]
+
+var _parser_collection_feedback: ParserCollectionFeedbackCatalog? = nil
+var _parser_collection_site_ordinals: HashMap? = nil
+var _parser_collection_site_owner: text = ""
+
+fn parser_collection_site_reset():
+    # Parser state is process-global, so a second parse must start at ordinal 0.
+    _parser_collection_site_ordinals = nil
+    _parser_collection_site_owner = ""
+
+fn parser_collection_site_owner_push(name: text) -> text:
+    """Enter a lexical declaration owner and return the prior owner."""
+    val previous = _parser_collection_site_owner
+    _parser_collection_site_owner = if previous == "": name else: "{previous}/{name}"
+    previous
+
+fn parser_collection_site_owner_restore(previous: text):
+    _parser_collection_site_owner = previous
+
+fn collection_project_relative_path(path: text) -> text:
+    """Normalize source paths for collection site and profile identity."""
+    val normalized = path.replace("\\", "/")
+    val root = cwd_process().replace("\\", "/")
+    if root != "" and root != ".":
+        val prefix = if root.ends_with("/"): root else: "{root}/"
+        if normalized.starts_with(prefix):
+            return normalized.substring(prefix.len())
+    normalized
+
+fn parser_collection_module_key(path: text) -> text:
+    collection_project_relative_path(path).replace(";", "_").replace("\n", "_").replace("\r", "_")
+
+fn parser_collection_local_site_id(module_key: text, name: text, source_hash: i64) -> text:
+    """Name identical local declarations without depending on byte positions."""
+    val owner = _parser_collection_site_owner
+    val stem = if owner == "":
+        "ast://{module_key}/local/{name}#{source_hash}"
+    else:
+        "ast://{module_key}/{owner}/local/{name}#{source_hash}"
+    var ordinals = if val existing = _parser_collection_site_ordinals:
+        existing
+    else:
+        HashMap.new()
+    val ordinal = (ordinals.get(stem) ?? "0").to_i64() ?? 0
+    ordinals.insert(stem, "{ordinal + 1}")
+    _parser_collection_site_ordinals = Some(ordinals)
+    if ordinal == 0:
+        return stem
+    "{stem}:{ordinal}"
+
+fn parser_collection_field_site_id(module_key: text, name: text, source_hash: i64) -> text:
+    """Use the complete lexical class/struct owner, matching bootstrap parsing."""
+    val owner = _parser_collection_site_owner
+    if owner == "":
+        return "ast://{module_key}/{name}#{source_hash}"
+    "ast://{module_key}/{owner}/{name}#{source_hash}"
+
+fn parser_collection_feedback_clear():
+    _parser_collection_feedback = nil
+
+fn parser_collection_feedback_active() -> bool:
+    _parser_collection_feedback != nil
+
+fn parser_collection_feedback_install(
+    target_profile_id: text, profiles: [AdaptiveSetWorkloadProfile]
+) -> bool:
+    """Publish one admitted target slice for parsing this compilation."""
+    if target_profile_id == "" or target_profile_id.contains(";") or
+            target_profile_id.contains("\n") or target_profile_id.contains("\r") or
+            profiles.len() > 100000:
+        return false
+    var positions = HashMap.with_capacity(profiles.len() * 2 + 1)
+    for i in 0..profiles.len():
+        val profile = profiles[i]
+        if not profile.site_id.starts_with("ast://") or
+                profile.site_id.contains(";") or profile.site_id.contains("\n") or
+                profile.site_id.contains("\r") or
+                profile.target_profile_id != target_profile_id or
+                profile.sample_count < 1 or profile.size_p95 < 0 or
+                profile.lookup_count_p95 < 0 or profile.hit_count_p95 < 0 or
+                profile.miss_count_p95 < 0 or
+                profile.hit_count_p95 > profile.lookup_count_p95 or
+                profile.miss_count_p95 > profile.lookup_count_p95:
+            return false
+        if profile.hash_probe_count_p95 < -1 or profile.hash_collision_count_p95 < -1 or
+                (profile.hash_probe_count_p95 < 0) != (profile.hash_collision_count_p95 < 0) or
+                (profile.hash_probe_count_p95 >= 0 and
+                    profile.hash_collision_count_p95 > profile.hash_probe_count_p95):
+            return false
+        if profile.sample_count == 1 and
+                profile.hit_count_p95 != profile.lookup_count_p95 - profile.miss_count_p95:
+            return false
+        if not positions.insert_if_absent(profile.site_id, "{i}"):
+            return false
+    _parser_collection_feedback = Some(ParserCollectionFeedbackCatalog(
+        target_profile_id: target_profile_id, positions: positions, profiles: profiles
+    ))
+    true
+
+fn parser_collection_feedback_for_site(site_id: text) -> AdaptiveSetWorkloadProfile?:
+    match _parser_collection_feedback:
+        case Some(catalog):
+            val raw_position = catalog.positions.get(site_id) ?? ""
+            val position = raw_position.to_i64() ?? -1
+            if position >= 0 and position < catalog.profiles.len():
+                return Some(catalog.profiles[position])
+        case None: ()
+    nil
+
+fn parser_collection_attributed_expr(
+    source_expr: i64, algorithm_name: text, site_id: text,
+    declared_family: text
+) -> i64:
+    """Rewrite an attributed initializer with an exact admitted hint, if any."""
+    var collection_type = ""
+    var effective_site = site_id
+    if expr_get_tag(source_expr) == EXPR_METHOD_CALL:
+        val source_receiver = expr_get_left(source_expr)
+        if expr_get_tag(source_receiver) == EXPR_IDENT:
+            val receiver_name = expr_get_str(source_receiver)
+            val constructor = expr_get_str(source_expr)
+            val text_family = receiver_name == "AdaptiveTextSet" or receiver_name == "AdaptiveTextMap"
+            val generic_family = receiver_name == "AdaptiveSet" or receiver_name == "AdaptiveMap"
+            val common_constructor = constructor == "new" or constructor == "with_profile" or
+                constructor == "with_site_and_target"
+            val text_constructor = constructor == "with_site" or constructor == "with_attribute"
+            if (text_family or generic_family) and
+                    (common_constructor or (text_family and text_constructor)):
+                collection_type = receiver_name
+                if constructor == "with_site" or constructor == "with_site_and_target" or
+                        constructor == "with_attribute":
+                    val constructor_args = expr_get_args(source_expr)
+                    if constructor_args.len() < 2:
+                        return -1
+                    val explicit_site = constructor_args[1]
+                    if expr_get_tag(explicit_site) == EXPR_STRING_LIT:
+                        effective_site = expr_get_str(explicit_site)
+                        if not effective_site.starts_with("ast://"):
+                            return -1
+                    else:
+                        return -1
+                    if constructor == "with_site_and_target" or constructor == "with_attribute":
+                        if val catalog = _parser_collection_feedback:
+                            if constructor_args.len() < 3 or
+                                    expr_get_tag(constructor_args[2]) != EXPR_STRING_LIT:
+                                return -1
+                            val explicit_target = expr_get_str(constructor_args[2])
+                            if explicit_target != "" and explicit_target != catalog.target_profile_id:
+                                return -1
+            elif (text_family or generic_family) and declared_family != receiver_name:
+                # Unknown methods need a written type: the typed wrapper then
+                # checks that the method really returns this collection.
+                return -1
+    if declared_family == "AdaptiveTextSet" or declared_family == "AdaptiveTextMap" or
+            declared_family == "AdaptiveSet" or declared_family == "AdaptiveMap":
+        if collection_type != "" and collection_type != declared_family:
+            return -1
+        collection_type = declared_family
+    if collection_type == "":
+        return -1
+    val receiver = expr_ident(collection_type, 0)
+    match parser_collection_feedback_for_site(effective_site):
+        case Some(prior):
+            return expr_method_call(receiver, "attributed_with_prior_at_site", [
+                source_expr, expr_string_lit(algorithm_name, 0),
+                expr_string_lit(effective_site, 0), expr_string_lit(prior.target_profile_id, 0),
+                expr_int_lit(prior.sample_count, 0), expr_int_lit(prior.size_p95, 0),
+                expr_int_lit(prior.lookup_count_p95, 0),
+                expr_int_lit(prior.hit_count_p95, 0),
+                expr_int_lit(prior.miss_count_p95, 0),
+                expr_int_lit(prior.hash_probe_count_p95, 0),
+                expr_int_lit(prior.hash_collision_count_p95, 0)
+            ], 0)
+        case None: ()
+    expr_method_call(receiver, "attributed_at_site", [
+        source_expr, expr_string_lit(algorithm_name, 0), expr_string_lit(effective_site, 0)
+    ], 0)
+
+export parser_collection_feedback_clear, parser_collection_feedback_active
+export parser_collection_feedback_install, parser_collection_feedback_for_site
+export parser_collection_attributed_expr
+export parser_collection_site_reset, parser_collection_local_site_id
+export parser_collection_field_site_id
+export parser_collection_site_owner_push, parser_collection_site_owner_restore
+export parser_collection_module_key
+export collection_project_relative_path

@@ -1,0 +1,89 @@
+#!/bin/sh
+# Classify one Phase 3 repository-test result without reading mutable runner
+# state. The caller supplies the terminal JSON counters after strict validation.
+
+set -u
+
+self=phase3-test-skip-policy
+
+fail() {
+  status=$1
+  shift
+  printf '%s: %s\n' "$self" "$*" >&2
+  return "$status"
+}
+
+phase3_test_skip_policy_classify() {
+  policy_spec=$1
+  policy_skipped=$2
+  policy_executed=${3:-0}
+
+  case "$policy_skipped" in
+    ''|*[!0-9]*) fail 64 "observed skipped count is not a nonnegative integer"; return $? ;;
+  esac
+  case "$policy_executed" in
+    ''|*[!0-9]*) fail 64 "observed executed count is not a nonnegative integer"; return $? ;;
+  esac
+  [ -f "$policy_spec" ] && [ ! -L "$policy_spec" ] || {
+    fail 65 "spec is not a regular non-symlink file: $policy_spec"
+    return $?
+  }
+
+  if [ "$policy_skipped" = 0 ]; then
+    printf '%s\n' 'execute|-'
+    return 0
+  fi
+
+  # A mixed executed/skipped row can conceal runnable examples behind a file
+  # category. Development-only admission therefore applies only to a wholly
+  # skipped spec. The two-argument form defaults executed to zero for callers
+  # that have already enforced this invariant.
+  if [ "$policy_executed" != 0 ]; then
+    fail 69 "partial execution with skips is not admissible"
+    return $?
+  fi
+
+  policy_tag_shape=$(awk '
+    BEGIN { directives = 0; canonical = 0 }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /^[[:space:]]*(#[[:space:]]*)?@tag[[:space:]]*:/) {
+        directives++
+        if (line ~ /^[[:space:]]*#[[:space:]]*@tag[[:space:]]*:[[:space:]]*in-development[[:space:]]*$/) {
+          canonical++
+        }
+      }
+    }
+    END { printf "%d|%d\n", directives, canonical }
+  ' "$policy_spec") || {
+    fail 65 "cannot inspect spec tags: $policy_spec"
+    return $?
+  }
+
+  if [ "$policy_tag_shape" = '1|1' ]; then
+    printf '%s\n' 'skip|in-development'
+    return 0
+  fi
+
+  case "$policy_tag_shape" in
+    '0|0') fail 66 "nonzero skipped count has no explicit category" ;;
+    *'|0') fail 67 "nonzero skipped count has an unknown or noncanonical category" ;;
+    *) fail 68 "development category must be the spec's sole tag directive" ;;
+  esac
+  return $?
+}
+
+case "${1:-}" in
+  classify)
+    [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || {
+      printf 'usage: %s classify SPEC OBSERVED_SKIPPED [OBSERVED_EXECUTED]\n' "$self" >&2
+      exit 64
+    }
+    phase3_test_skip_policy_classify "$2" "$3" "${4:-0}"
+    ;;
+  *)
+    printf 'usage: %s classify SPEC OBSERVED_SKIPPED [OBSERVED_EXECUTED]\n' "$self" >&2
+    exit 64
+    ;;
+esac

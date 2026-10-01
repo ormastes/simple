@@ -39,3 +39,25 @@ simpleos_current_cs:
     mov     x0, #3
     ret
 .size simpleos_current_cs, . - simpleos_current_cs
+
+.global simpleos_guest_arch_id
+.type simpleos_guest_arch_id, %function
+simpleos_guest_arch_id:
+    mov     x0, #2
+    ret
+.size simpleos_guest_arch_id, . - simpleos_guest_arch_id
+
+.global simpleos_user_context_ok
+.type simpleos_user_context_ok, %function
+simpleos_user_context_ok:
+    mrs     x0, CurrentEL
+    cmp     x0, #0
+    cset    x0, eq
+    ret
+.size simpleos_user_context_ok, . - simpleos_user_context_ok
+
+.global __clear_cache
+.type __clear_cache, %function
+__clear_cache:
+    ret
+.size __clear_cache, . - __clear_cache

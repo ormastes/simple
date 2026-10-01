@@ -6,8 +6,10 @@ unsigned template and the already-published artifact, validates the lane's
 producer class, scenario set, artifact schema, `live` mode, release eligibility,
 artifact name, and SHA-256, then writes the aggregate's canonical field order.
 Tooling archives are admitted through their bounded `./manifest.env` member
-using the producer's `manifest_schema`/`mode` vocabulary; archive member count
-and extracted-header size are capped. Stress templates keep expiry as a signer
+using the producer's `manifest_schema`/`mode` vocabulary. The signer validates
+the exact 17 child IDs, fixed budgets, per-row scan policy, warm metric and
+baseline fields, canonical raw member paths, and each raw SHA-256 binding;
+archive member count and extracted-header size are capped. Stress templates keep expiry as a signer
 placeholder, so that lane additionally requires `--valid-until-utc-ns NS`.
 It sets `attestation=signed-v1`, the operator-supplied key ID, the flat
 `<lane>.sig` path, and the canonical receipt hash before detached signing.

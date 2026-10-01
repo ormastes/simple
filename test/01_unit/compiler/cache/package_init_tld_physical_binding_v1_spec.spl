@@ -1,0 +1,164 @@
+# Purpose: bounded PIT1-to-physical-TLD binding RED contract.
+# @req REQ-CSM-003 REQ-CSM-024 REQ-CSM-027
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.package_init_tld_v1.{
+    PackageInitTldV1, package_init_tld_encode_v1, package_init_tld_decode_v1}
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, TldSectionRefV1, PhysicalTldHeaderV1, PhysicalTldObjectV1,
+    physical_tld_object_encode_v1, physical_tld_section_table_digest_v1,
+    physical_tld_object_valid_v1}
+use compiler.common.cache_contract.package_init_tld_v1.{
+    package_init_tld_physical_binding_valid_v1}
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn build_package_init_binding_fixture_v1() -> PhysicalTldObjectV1:
+    val package = PackageInitTldV1(package_id: "demo.pkg",
+        parent_scope_digest: Some(digest("parent")),
+        membership_root_digest: digest("members"),
+        ordered_member_ids: ["demo.pkg.alpha", "demo.pkg.beta"],
+        aspect_root_digest: digest("aspects"), trait_root_digest: digest("traits"),
+        macro_root_digest: digest("macros"), extension_root_digest: digest("extensions"),
+        template_root_digest: digest("templates"),
+        initializer_contract_digest: digest("initializers"),
+        ordered_initializer_refs: ["init.first", "init.second"])
+    val record = package_init_tld_encode_v1(package)
+    val body = text_to_bytes("embedded-body")
+    val record_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+        section_index: 1, kind: "package_init_v1", semantic_object_digest: digest_bytes(record),
+        offset: body.len(), stored_bytes: record.len(), decoded_bytes: record.len(),
+        encoding_profile: "raw-v1")
+    val body_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+        section_index: 0, kind: "body", semantic_object_digest: digest_bytes(body),
+        offset: 0, stored_bytes: body.len(), decoded_bytes: body.len(),
+        encoding_profile: "raw-v1")
+    PhysicalTldObjectV1(header: PhysicalTldHeaderV1(schema: 1,
+        role: TldPayloadRoleV1.PackageInitTld,
+        semantic_record_digest: digest_bytes(record),
+        section_table_digest: physical_tld_section_table_digest_v1([body_section, record_section]),
+        payload_bytes: body.len() + record.len(),
+        sections: [body_section, record_section]), canonical_sections: [body, record])
+
+fn digest_bytes(value: [u8]) -> text:
+    sha256_u8_hex(value)
+
+fn check_package_init_binding_v1(object: PhysicalTldObjectV1) -> bool:
+    package_init_tld_physical_binding_valid_v1(object)
+
+fn check_package_init_binding_rejected_v1(object: PhysicalTldObjectV1) -> bool:
+    not package_init_tld_physical_binding_valid_v1(object)
+
+fn decoded_package(object: PhysicalTldObjectV1) -> PackageInitTldV1:
+    val decoded = package_init_tld_decode_v1(object.canonical_sections[1])
+    match decoded.value:
+        case Some(value): value
+        case nil: PackageInitTldV1(package_id: "", parent_scope_digest: nil,
+            membership_root_digest: digest("invalid"), ordered_member_ids: [],
+            aspect_root_digest: digest("invalid"), trait_root_digest: digest("invalid"),
+            macro_root_digest: digest("invalid"), extension_root_digest: digest("invalid"),
+            template_root_digest: digest("invalid"), initializer_contract_digest: digest("invalid"),
+            ordered_initializer_refs: [])
+
+describe "PIT1 physical package initializer binding":
+    it "should bind canonical initializer bytes at a nonzero physical section index":
+        step("Bind canonical initializer bytes to their physical record")
+        val fixture = build_package_init_binding_fixture_v1()
+        expect(physical_tld_object_valid_v1(fixture)).to_equal(true)
+        expect(check_package_init_binding_v1(fixture)).to_equal(true)
+        val decoded = package_init_tld_decode_v1(fixture.canonical_sections[1])
+        expect(decoded.ok).to_equal(true)
+        expect(decoded_package(fixture).ordered_member_ids).to_equal(["demo.pkg.alpha", "demo.pkg.beta"])
+
+    it "should reject a header naming different initializer bytes":
+        step("Reject a header naming different initializer bytes")
+        var fixture = build_package_init_binding_fixture_v1()
+        fixture.header.semantic_record_digest = digest("different-record")
+        expect(physical_tld_object_valid_v1(fixture)).to_equal(true)
+        expect(check_package_init_binding_rejected_v1(fixture)).to_equal(true)
+
+    it "should reject missing and duplicate initializer record sections":
+        step("Reject missing and duplicate initializer record sections")
+        val fixture = build_package_init_binding_fixture_v1()
+        var missing = fixture
+        missing.header.sections = [fixture.header.sections[0]]
+        missing.header.payload_bytes = fixture.canonical_sections[0].len()
+        missing.canonical_sections = [fixture.canonical_sections[0]]
+        missing.header.section_table_digest = physical_tld_section_table_digest_v1(missing.header.sections)
+        expect(check_package_init_binding_rejected_v1(missing)).to_equal(true)
+        var duplicate = fixture
+        var duplicate_refs = duplicate.header.sections
+        var duplicate_ref = duplicate_refs[1]
+        duplicate_ref.section_index = 2
+        duplicate_ref.offset = fixture.header.payload_bytes
+        duplicate_refs.push(duplicate_ref)
+        duplicate.header.sections = duplicate_refs
+        duplicate.header.payload_bytes = fixture.header.payload_bytes + fixture.canonical_sections[1].len()
+        var duplicate_bodies = duplicate.canonical_sections
+        duplicate_bodies.push(fixture.canonical_sections[1])
+        duplicate.canonical_sections = duplicate_bodies
+        duplicate.header.section_table_digest = physical_tld_section_table_digest_v1(duplicate.header.sections)
+        expect(check_package_init_binding_rejected_v1(duplicate)).to_equal(true)
+
+    it "should reject initializer role and raw identity substitution":
+        step("Reject initializer role and raw identity substitution")
+        var fixture = build_package_init_binding_fixture_v1()
+        fixture.header.role = TldPayloadRoleV1.PriorModuleTld
+        fixture.header.section_table_digest = physical_tld_section_table_digest_v1(fixture.header.sections)
+        expect(check_package_init_binding_rejected_v1(fixture)).to_equal(true)
+        var tampered = build_package_init_binding_fixture_v1()
+        var tampered_sections = tampered.header.sections
+        var tampered_record_section = tampered_sections[1]
+        tampered_record_section.semantic_object_digest = digest("raw-substitution")
+        tampered_sections[1] = tampered_record_section
+        tampered.header.sections = tampered_sections
+        tampered.header.section_table_digest = physical_tld_section_table_digest_v1(tampered.header.sections)
+        expect(check_package_init_binding_rejected_v1(tampered)).to_equal(true)
+
+    it "should reject malformed or noncanonical initializer record bytes":
+        step("Reject malformed or noncanonical initializer record bytes")
+        var fixture = build_package_init_binding_fixture_v1()
+        var malformed_sections = fixture.canonical_sections
+        var malformed_record = malformed_sections[1]
+        malformed_record.push(0.to_u8())
+        malformed_sections[1] = malformed_record
+        fixture.canonical_sections = malformed_sections
+        var malformed_refs = fixture.header.sections
+        var malformed_ref = malformed_refs[1]
+        malformed_ref.stored_bytes = malformed_record.len()
+        malformed_ref.decoded_bytes = malformed_record.len()
+        malformed_ref.semantic_object_digest = digest_bytes(malformed_record)
+        malformed_refs[1] = malformed_ref
+        fixture.header.sections = malformed_refs
+        fixture.header.payload_bytes = malformed_sections[0].len() + malformed_record.len()
+        fixture.header.section_table_digest = physical_tld_section_table_digest_v1(fixture.header.sections)
+        expect(check_package_init_binding_rejected_v1(fixture)).to_equal(true)
+
+    it "should preserve initializer order and independent scope roots":
+        step("Preserve initializer order and independent scope roots")
+        val fixture = build_package_init_binding_fixture_v1()
+        val decoded = decoded_package(fixture)
+        expect(decoded.ordered_initializer_refs).to_equal(["init.first", "init.second"])
+        expect(decoded.aspect_root_digest).to_equal(digest("aspects"))
+        expect(decoded.trait_root_digest).to_equal(digest("traits"))
+        expect(decoded.macro_root_digest).to_equal(digest("macros"))
+
+    it "should keep embedded semantic sections independently identified":
+        step("Keep embedded semantic sections independently identified")
+        val fixture = build_package_init_binding_fixture_v1()
+        expect(fixture.header.sections[0].kind).to_equal("body")
+        expect(fixture.header.sections[1].kind).to_equal("package_init_v1")
+        expect(check_package_init_binding_v1(fixture)).to_equal(true)
+
+    it "should keep initializer producer identity independent of reverse readers":
+        step("Keep initializer producer identity independent of reverse readers")
+        val first = build_package_init_binding_fixture_v1()
+        val second = build_package_init_binding_fixture_v1()
+        expect(first.header.semantic_record_digest).to_equal(second.header.semantic_record_digest)
+        expect(first.header.sections[1].semantic_object_digest).to_equal(
+            second.header.sections[1].semantic_object_digest)
+        expect(check_package_init_binding_v1(first)).to_equal(true)
+        expect(check_package_init_binding_v1(second)).to_equal(true)

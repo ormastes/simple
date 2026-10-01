@@ -239,8 +239,10 @@ fn native_build_cpu_for_target(target: simple_common::target::Target) -> TargetC
     match std::env::var("SIMPLE_NATIVE_CPU") {
         Ok(raw) if !raw.trim().is_empty() => raw
             .parse::<TargetCpu>()
-            .unwrap_or_else(|_| TargetCpu::builtin_default_for_arch(target.arch)),
-        _ => TargetCpu::builtin_default_for_arch(target.arch),
+            .unwrap_or_else(|_| TargetCpu::host_aware_default_for(target)),
+        // Host-aware: the builtin default is v3 (AVX2), which capped LLVM's
+        // vectorizers at 256 bits for every natively built binary.
+        _ => TargetCpu::host_aware_default_for(target),
     }
 }
 
@@ -436,7 +438,7 @@ impl NativeProjectBuilder {
     /// setup is needed here.
     pub(crate) fn compile_entries_parallel(
         &self,
-        entries: &[(usize, PathBuf, String, Option<PathBuf>)],
+        entries: &[(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)],
         temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
@@ -454,8 +456,27 @@ impl NativeProjectBuilder {
         let opt_level = self.config.opt_level;
         let canonical_entry = canonical_entry.clone();
         let imports = imports.clone();
+        // Whole-graph suffix index: identical for every module, so build it
+        // once per compile phase instead of once per compiled module.
+        let global_suffix_index = shared_suffix_index(&imports, &backend, no_mangle);
 
-        entries
+        // Large public aggregation facades spend most of their time resolving
+        // hundreds of re-exports.  Running one beside every LLVM worker made
+        // its bounded wall-clock timeout measure scheduler/memory-bandwidth
+        // starvation instead of compiler progress (compiler.core reproducibly
+        // finishes in 146s alone but exceeded 300s in a 32-way build). Admit
+        // these rare units before broad fanout; cached units never reach here.
+        let (contention_sensitive, regular): (Vec<_>, Vec<_>) = entries
+            .iter()
+            .cloned()
+            .partition(|(_, _, source, _)| is_contention_sensitive_entry(source));
+        let mut results = if contention_sensitive.is_empty() {
+            Vec::new()
+        } else {
+            self.compile_entries_sequential(&contention_sensitive, &temp_dir, &canonical_entry, &imports)
+        };
+
+        let mut parallel_results: Vec<_> = regular
             .par_iter()
             .enumerate()
             .map(|(progress_i, (idx, path, source, cache_path))| {
@@ -464,7 +485,7 @@ impl NativeProjectBuilder {
                     eprintln!("  [entry] {}", path.display());
                 }
                 match compile_file_safe(
-                    source.clone(),
+                    std::sync::Arc::clone(source),
                     path.clone(),
                     project_root.clone(),
                     source_dirs.clone(),
@@ -476,6 +497,7 @@ impl NativeProjectBuilder {
                     opt_level,
                     is_entry,
                     imports.clone(),
+                    global_suffix_index.clone(),
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -494,18 +516,24 @@ impl NativeProjectBuilder {
                     }
                 }
             })
-            .collect()
+            .collect();
+        results.append(&mut parallel_results);
+        results
     }
 
     /// Compile entries sequentially (fallback).
     pub(crate) fn compile_entries_sequential(
         &self,
-        entries: &[(usize, PathBuf, String, Option<PathBuf>)],
+        entries: &[(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)],
         temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         let total = entries.len();
+        // Same hoist as `compile_entries_parallel`: one whole-graph index for
+        // the whole phase, not one per module.
+        let global_suffix_index =
+            shared_suffix_index(imports, &self.config.backend, self.config.no_mangle);
         entries
             .iter()
             .enumerate()
@@ -515,7 +543,7 @@ impl NativeProjectBuilder {
                     eprintln!("  [entry] {}", path.display());
                 }
                 match compile_file_safe(
-                    source.clone(),
+                    std::sync::Arc::clone(source),
                     path.clone(),
                     self.project_root.clone(),
                     self.source_dirs.clone(),
@@ -527,6 +555,7 @@ impl NativeProjectBuilder {
                     self.config.opt_level,
                     is_entry,
                     imports.clone(),
+                    global_suffix_index.clone(),
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -549,6 +578,32 @@ impl NativeProjectBuilder {
     }
 }
 
+/// True for a source facade whose export-resolution cost is large enough that
+/// competing LLVM workers can consume its entire wall-clock timeout budget.
+/// This is deliberately structural rather than path-based so renamed/new
+/// aggregation modules receive the same admission policy.
+fn is_contention_sensitive_entry(source: &str) -> bool {
+    source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("export "))
+        .count()
+        >= 256
+}
+
+/// The whole-graph suffix index shared by every module in the closure.
+/// `None` when the compile will not consult it (mangling off, or the
+/// non-LLVM backend), so non-LLVM phases pay nothing for the hoist.
+fn shared_suffix_index(
+    imports: &ModuleImports,
+    backend: &str,
+    no_mangle: bool,
+) -> Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>> {
+    if no_mangle || backend != "llvm" {
+        return None;
+    }
+    Some(std::sync::Arc::new(build_suffix_index(imports.all_mangled.as_ref())))
+}
+
 /// Compile a single .spl file to object code.
 #[allow(clippy::too_many_arguments)] // reason: native compilation requires all project context
 pub(crate) fn compile_file_to_object(
@@ -563,6 +618,7 @@ pub(crate) fn compile_file_to_object(
     opt_level: crate::optimizations::NativeOptimizationLevel,
     is_entry: bool,
     imports: &ModuleImports,
+    global_suffix_index: &Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
 ) -> Result<Vec<u8>, String> {
     // Bootstrap hack: normalize optional types that older lenient type resolver misses
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
@@ -605,6 +661,11 @@ pub(crate) fn compile_file_to_object(
     // first-wins pick in codegen (bug
     // x64_freestanding_cfg_multivariant_misdispatch).
     super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
+    // Same rule as the module loader: a nested fn / lambda must not assign a
+    // captured enclosing local (closures are read-only by value).
+    if let Some(write) = simple_parser::capture_write_check::find_captured_local_writes(&ast).into_iter().next() {
+        return Err(format!("{}: semantic: {}", file_path.display(), write.message()));
+    }
     let is_freestanding = matches!(
         target.os,
         simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
@@ -676,10 +737,13 @@ pub(crate) fn compile_file_to_object(
             .into_iter()
             .filter_map(|(name, indices)| if indices.len() > 1 { Some(name) } else { None })
             .collect();
-        lowerer.set_global_struct_defs(std::sync::Arc::new((*imports.struct_defs).clone()));
-        lowerer.set_unique_global_struct_owners(std::sync::Arc::new((*imports.unique_struct_owners).clone()));
-        lowerer.set_struct_module_owners(std::sync::Arc::new((*imports.struct_module_owners).clone()));
-        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new((*imports.duplicate_struct_defs).clone()));
+        // These maps are read-only during per-module lowering; share the Arc
+        // instead of deep-cloning the whole graph's maps for every module
+        // (O(graph^2) copies on wide closures).
+        lowerer.set_global_struct_defs(std::sync::Arc::clone(&imports.struct_defs));
+        lowerer.set_unique_global_struct_owners(std::sync::Arc::clone(&imports.unique_struct_owners));
+        lowerer.set_struct_module_owners(std::sync::Arc::clone(&imports.struct_module_owners));
+        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::clone(&imports.duplicate_struct_defs));
         lowerer.set_ambiguous_field_names(std::sync::Arc::new(ambiguous));
     } else {
         lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
@@ -704,7 +768,7 @@ pub(crate) fn compile_file_to_object(
     // `expr/access.rs::lower_field_access` was emitting
     // `Global(EnumName)` with `ty=ANY`).
     if imports.populate_global_enum_defs {
-        lowerer.set_global_enum_defs(std::sync::Arc::new((*imports.enum_defs).clone()));
+        lowerer.set_global_enum_defs(std::sync::Arc::clone(&imports.enum_defs));
         lowerer.register_global_enums();
     }
     let mut hir = lowerer
@@ -717,8 +781,12 @@ pub(crate) fn compile_file_to_object(
     pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
-    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
-        .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(
+        &hir,
+        imports.trait_impls.as_ref(),
+        target.array_push_returns_header(),
+    )
+    .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
     qualify_native_struct_layouts(
         &mut mir,
         &module_prefix,
@@ -858,7 +926,12 @@ pub(crate) fn compile_file_to_object(
 
             if !no_mangle {
                 let prefix = module_prefix.clone();
-                let global_suffix_index = build_suffix_index(imports.all_mangled.as_ref());
+                // Fall back to building the index only when the caller did not
+                // hoist one (keeps this function correct for any caller).
+                let global_suffix_index = match global_suffix_index {
+                    Some(index) => std::borrow::Cow::Borrowed(index.as_ref()),
+                    None => std::borrow::Cow::Owned(build_suffix_index(imports.all_mangled.as_ref())),
+                };
                 let unresolved = mangle_mir(
                     &mut mir,
                     &prefix,
@@ -963,7 +1036,7 @@ pub(crate) fn compile_file_to_object(
 /// Compile a file with panic catching and timeout.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn compile_file_safe(
-    source: String,
+    source: std::sync::Arc<str>,
     file_path: PathBuf,
     project_root: PathBuf,
     source_dirs: Vec<PathBuf>,
@@ -975,6 +1048,7 @@ pub(crate) fn compile_file_safe(
     opt_level: crate::optimizations::NativeOptimizationLevel,
     is_entry: bool,
     imports: ModuleImports,
+    global_suffix_index: Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
 ) -> Result<Vec<u8>, String> {
     use std::sync::mpsc;
 
@@ -986,6 +1060,12 @@ pub(crate) fn compile_file_safe(
         ))
         .stack_size(stack_size)
         .spawn(move || {
+            // Bound this worker's parsed-source memo. The cache is
+            // thread-local, so the phase-wide default (4096) would otherwise
+            // let one worker retain a whole-graph source+AST copy; entries
+            // are pure recomputable memos, so eviction only costs a re-read
+            // and re-parse on a later miss within this worker.
+            crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
             let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
             let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
                 compile_file_to_object(
@@ -1000,6 +1080,7 @@ pub(crate) fn compile_file_safe(
                     opt_level,
                     is_entry,
                     &imports,
+                    &global_suffix_index,
                 )
             } else {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1015,6 +1096,7 @@ pub(crate) fn compile_file_safe(
                         opt_level,
                         is_entry,
                         &imports,
+                        &global_suffix_index,
                     )
                 })) {
                     Ok(r) => r,
@@ -1060,7 +1142,7 @@ fn wait_for_compiler_thread(
 
 #[cfg(test)]
 mod native_compile_timeout_tests {
-    use super::wait_for_compiler_thread;
+    use super::{is_contention_sensitive_entry, wait_for_compiler_thread};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1086,6 +1168,19 @@ mod native_compile_timeout_tests {
         });
 
         assert_eq!(wait_for_compiler_thread(rx, handle, 1), Err("timeout (1s)".to_string()));
+    }
+
+    #[test]
+    fn export_heavy_facades_are_admitted_before_parallel_fanout() {
+        let below = "export value\n".repeat(255);
+        let boundary = "export value\n".repeat(256);
+        assert!(!is_contention_sensitive_entry(&below));
+        assert!(is_contention_sensitive_entry(&boundary));
+        assert!(!is_contention_sensitive_entry(&format!(
+            "{}{}",
+            "# export comment\n".repeat(300),
+            "fn main(): 0\n"
+        )));
     }
 }
 

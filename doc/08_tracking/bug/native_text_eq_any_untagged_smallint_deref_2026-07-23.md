@@ -1,4 +1,9 @@
 # native: rt_text_eq_any derefs untagged small-int as char* (SIGSEGV)
+## Closed 2026-09-16 — ## Fix section: rt_interp_cstr/rt_text_eq_any hardened; SOURCE-FIXED status
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found:** 2026-07-23, MCP entry-closure rebuild campaign (repro W42).
 **Status:** SOURCE-FIXED — focused hosted-runtime check added; bootstrap replay pending.
@@ -40,3 +45,4 @@ positive and negative boxed small integers before any C-string dereference.
 `rt_text_eq_any` validates both normalized operands before pointer equality.
 The focused native-runtime test checks the original `41 << 3` case in both
 operand orders.
+

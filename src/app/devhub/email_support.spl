@@ -1,0 +1,464 @@
+# Shared email config, rows, credentials and process boundary.
+use app.io.mod.{file_exists, file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{time_now_unix_micros}
+use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_object_keys, json_to_string, json_get_type, json_serialize, json_object, json_string, json_array, json_boolean, json_pretty}
+use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
+use app.devhub.output.{print_error, print_success, print_warning, wants_json, print_table_dynamic}
+use app.devhub.email_translate.{
+    parse_gmail_query, GmailQueryTerm,
+    imap_date_from_gmail, format_imap_date, relative_window_days,
+    imap_label_to_folder, imap_star_flag_term,
+    is_archive_equivalent_label_removal, is_system_label_starred,
+    graph_well_known_folder_for_label, graph_archive_folder_id,
+    graph_flag_status,
+}
+use app.devhub.adapter_outlook.{
+    OutlookClient,
+    outlook_client_acquire,
+    outlook_list_messages,
+    outlook_get_message,
+    outlook_move_message,
+}
+
+
+# ============================================================================
+# Config — ~/.config/devhub/email.sdn (dedicated to this facade; distinct
+# from ~/.config/devhub/auth.sdn, per doc §7)
+# ============================================================================
+
+class EmailAccount:
+    """One `accounts.<name>` block from email.sdn."""
+    name: text
+    provider: text            # "gmail" | "outlook" | "outlook_imap"
+    email: text
+    password_cmd: text
+    password_command_override: text = ""
+    config_file: text = ""  # shared mail account file
+    password_file: text = ""  # per invocation only
+    non_interactive: bool = false
+    tenant_id: text
+    client_id: text
+    client_secret_env: text
+    shared_mailbox: text
+
+    static fn empty() -> EmailAccount:
+        EmailAccount(
+            name: "", provider: "", email: "", password_cmd: "",
+            tenant_id: "", client_id: "", client_secret_env: "", shared_mailbox: "",
+        )
+
+
+class EmailConfig:
+    default_account: text
+    accounts: [EmailAccount]
+
+    static fn default() -> EmailConfig:
+        EmailConfig(default_account: "", accounts: [])
+
+
+fn email_config_dir() -> text:
+    """Shared DevHub configuration directory under ~/.config/devhub.
+
+    Reads through env_get_opt, not env_get: env_get has co-compiled
+    Optional/text variants on this seed and a wrong dispatch turns the home
+    path into garbage, which makes the config file unreadable."""
+    val home = env_get_opt("HOME") ?? ""
+    if home == "":
+        val userprofile = env_get_opt("USERPROFILE") ?? ""
+        if userprofile != "":
+            return "{userprofile}/.config/devhub"
+    "{home}/.config/devhub"
+
+
+fn email_shared_config_path() -> text:
+    "{email_config_dir()}/email.sdn"
+
+fn email_config_path() -> text:
+    val shared = email_shared_config_path()
+    if file_exists(shared):
+        return shared
+    "{email_config_dir()}/email.json"
+
+fn email_expand_path(path: text) -> text:
+    """Expand the literal home placeholder without invoking a shell."""
+    # Assemble the marker to avoid Simple's own source-string interpolation.
+    val marker = "{" + "home" + "}"
+    if path == marker or path.starts_with(marker + "/"):
+        var home = env_get_opt("HOME") ?? ""
+        if home == "":
+            home = env_get_opt("USERPROFILE") ?? ""
+        if home == "":
+            return ""
+        return home + path[marker.len():]
+    path
+
+fn _email_json_text(obj: any, key: text) -> text:
+    val value = json_object_get(obj, key)
+    if value == nil or json_get_type(value) != "string":
+        return ""
+    json_to_string(value) ?? ""
+
+fn parse_email_shared_config(content: text, path: text) -> EmailConfig:
+    val root = json_parse(content)
+    if root == nil or json_get_type(root) != "object":
+        return EmailConfig.default()
+    val entries = json_object_get(root, "accounts")
+    if entries == nil or json_get_type(entries) != "object":
+        return EmailConfig.default()
+    var accounts: [EmailAccount] = []
+    for name in json_object_keys(entries):
+        val entry = json_object_get(entries, name)
+        if entry != nil and json_get_type(entry) == "object":
+            val protocol = _email_json_text(entry, "protocol")
+            val configured_provider = _email_json_text(entry, "provider")
+            var provider = "outlook_imap"
+            if protocol == "pop3":
+                provider = "pop3"
+            elif protocol == "graph":
+                provider = "outlook"
+            elif protocol == "" or protocol == "imap":
+                if configured_provider == "gmail":
+                    provider = "gmail"
+            else:
+                provider = "unsupported"
+            accounts = accounts + [EmailAccount(
+                name: name, provider: provider, email: _email_json_text(entry, "email"),
+                password_cmd: "", config_file: path,
+                tenant_id: _email_json_text(entry, "tenant_id"),
+                client_id: _email_json_text(entry, "client_id"),
+                client_secret_env: _email_json_text(entry, "client_secret_env"),
+                shared_mailbox: _email_json_text(entry, "shared_mailbox"),
+            )]
+    EmailConfig(default_account: _email_json_text(root, "default_account"), accounts: accounts)
+
+
+fn _email_cfg_leading_spaces(line: text) -> i64:
+    var i = 0
+    while i < line.len() and line[i:i + 1] == " ":
+        i = i + 1
+    i
+
+
+fn _email_cfg_strip_value(raw: text) -> text:
+    val v = raw.trim()
+    if v.starts_with("\"") and v.ends_with("\"") and v.len() >= 2:
+        return v[1:v.len() - 1]
+    v
+
+
+fn _apply_account_field(acc: EmailAccount, key: text, value: text) -> EmailAccount:
+    match key:
+        "protocol":
+            if value == "pop3":
+                return EmailAccount(name: acc.name, provider: "pop3", email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+            acc
+        "provider":
+            EmailAccount(name: acc.name, provider: if acc.provider == "pop3": "pop3" else: value, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "email":
+            EmailAccount(name: acc.name, provider: acc.provider, email: value, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "password_cmd":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: value, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "tenant_id":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: value, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "client_id":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: value, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
+        "client_secret_env":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: value, shared_mailbox: acc.shared_mailbox)
+        "shared_mailbox":
+            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: value)
+        _:
+            acc
+
+
+fn load_email_config() -> EmailConfig:
+    """Parse `~/.config/devhub/email.sdn` (see doc §7 for the schema):
+
+        default_account: "work-gmail"
+
+        accounts:
+          work-gmail:
+            provider: gmail
+            email: "me@company.com"
+            password_cmd: "pass show mail/work-gmail"
+
+    Two indentation levels under `accounts:` — an account-name line
+    (`  name:`, no value) followed by its `    key: value` fields. Returns
+    EmailConfig.default() (no accounts) if the file is absent/unreadable."""
+    load_email_config_from(email_config_path())
+
+fn load_email_config_from(path: text) -> EmailConfig:
+    if not file_exists(path):
+        return EmailConfig.default()
+    # file_read, not file_read_text: file_read_text has co-compiled
+    # Optional/text variants on this seed and a wide-closure dispatch can land
+    # on a raw rt_* reader that yields nil for a normal existing file. The
+    # facade below returns "" on error, never nil.
+    val content = file_read(path)
+    if content == "":
+        return EmailConfig.default()
+    if content.trim().starts_with("{"):
+        return parse_email_shared_config(content, path)
+    _parse_email_config_content(content)
+
+fn _parse_email_config_content(content: text) -> EmailConfig:
+    """Loop body of load_email_config, kept in its own function so the
+    file-read indirection (and its seed-dispatch caveats) stays in one
+    place."""
+    var default_account = ""
+    var accounts: [EmailAccount] = []
+    var current = EmailAccount.empty()
+    var have_current = false
+
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            # `pass`, not `pass_dn`: in this wide module the seed mis-dispatches
+            # `pass_dn` and aborts the loop at the first blank line, so no
+            # account block is ever parsed (config-parsing spec evidence).
+            pass
+        else:
+            val indent = _email_cfg_leading_spaces(line)
+            if indent == 0 and trimmed.contains(":"):
+                val parts = trimmed.split(":", 2)
+                val key = parts[0].trim()
+                if key == "default_account":
+                    default_account = _email_cfg_strip_value(parts[1])
+            else if indent > 0 and trimmed.ends_with(":") and not trimmed.contains(" "):
+                if have_current:
+                    accounts = accounts + [current]
+                current = EmailAccount(name: trimmed[0:trimmed.len() - 1], provider: "", email: "", password_cmd: "", tenant_id: "", client_id: "", client_secret_env: "", shared_mailbox: "")
+                have_current = true
+            else if indent > 0 and have_current and trimmed.contains(":"):
+                val parts = trimmed.split(":", 2)
+                val key = parts[0].trim()
+                current = _apply_account_field(current, key, _email_cfg_strip_value(parts[1]))
+
+    if have_current:
+        accounts = accounts + [current]
+
+    EmailConfig(default_account: default_account, accounts: accounts)
+
+
+fn resolve_email_account(config: EmailConfig, requested_name: text) -> (bool, EmailAccount):
+    """Pick `requested_name` if given, else config.default_account. False
+    when no accounts are configured or the name doesn't match any."""
+    val name = if requested_name != "": requested_name else: config.default_account
+    if name == "":
+        return (false, EmailAccount.empty())
+    for acc in config.accounts:
+        if acc.name == name:
+            return (true, acc)
+    (false, EmailAccount.empty())
+
+
+# ============================================================================
+# Shared row model + rendering (identical columns across both backends)
+# ============================================================================
+
+class EmailRow:
+    id: text
+    from_addr: text
+    subject: text
+    date: text
+    labels: [text]
+    starred: bool
+    unread: bool
+
+
+fn _email_row_json(r: EmailRow) -> any:
+    var label_vals: [any] = []
+    for l in r.labels:
+        label_vals = label_vals + [json_string(l)]
+    json_object([
+        ("id", json_string(r.id)),
+        ("from", json_string(r.from_addr)),
+        ("subject", json_string(r.subject)),
+        ("date", json_string(r.date)),
+        ("labels", json_array(label_vals)),
+        ("starred", json_boolean(r.starred)),
+        ("unread", json_boolean(r.unread)),
+    ])
+
+
+fn _render_email_rows(rows: [EmailRow], as_json: bool):
+    """Renders the doc §4 column set (id/from/subject/date/labels/star)
+    identically regardless of which backend produced `rows`. Star/labels
+    render empty when the backend doesn't expose flag/category data yet
+    (mail-cli's --json today, and adapter_outlook.spl's OutlookMessage,
+    both lack it — see the module doc comment) — an honest empty cell, per
+    doc §4's "empty LABELS cell, not a placeholder dash" rule, not a
+    fabricated value."""
+    if as_json:
+        var items: [any] = []
+        for r in rows:
+            items = items + [_email_row_json(r)]
+        print json_pretty(json_array(items))
+        return
+    if rows.len() == 0:
+        print "No messages. Try a broader search, --limit, or check --account / your provider config."
+        return
+    val headers = ["ID", "*", "FROM", "SUBJECT", "DATE", "LABELS"]
+    var table_rows: [[text]] = []
+    for r in rows:
+        val star = if r.starred: "*" else: ""
+        table_rows.push([r.id, star, r.from_addr, r.subject, r.date, r.labels.join(", ")])
+    print_table_dynamic(headers, table_rows)
+
+
+fn _mjson_str(obj: any, key: text) -> text:
+    if obj == nil:
+        return ""
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return ""
+    val s = json_serialize(v)
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _parse_mailcli_json_rows(json_text: text) -> [EmailRow]:
+    """mail-cli's --json output (inbox/search) is an array of
+    {from,to,subject,date,message_id,in_reply_to,references,uid[,folder]}
+    objects (see tools/mail-cli/lib/format.shs mail_format_parse_headers).
+    It carries no flags/labels today (doc §3's documented pre-existing
+    bug) — labels/starred/unread are always empty/false here, honestly."""
+    val parsed = json_parse(json_text)
+    if parsed == nil:
+        return []
+    if json_get_type(parsed) != "array":
+        return []
+    var rows: [EmailRow] = []
+    val n = json_array_length(parsed)
+    var i = 0
+    while i < n:
+        val item = json_array_get(parsed, i)
+        rows = rows + [EmailRow(
+            id: _mjson_str(item, "uid"),
+            from_addr: _mjson_str(item, "from"),
+            subject: _mjson_str(item, "subject"),
+            date: _mjson_str(item, "date"),
+            labels: [],
+            starred: false,
+            unread: false,
+        )]
+        i = i + 1
+    rows
+
+
+fn _parse_i64_default(s: text, default_val: i64) -> i64:
+    var n: i64 = 0
+    var any_digit = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+            any_digit = true
+        else:
+            return default_val
+    if any_digit: n else: default_val
+
+
+# ============================================================================
+# mail-cli subprocess boundary (gmail / outlook_imap providers)
+# ============================================================================
+
+val MAIL_TIMEOUT_MS: i64 = 30000
+val MAIL_MAX_OUTPUT_BYTES: i64 = 4194304
+
+fn _resolve_mail_bin() -> text:
+    """Default target: tools/mail-cli/bin/mail (doc §4 - "shells to
+    tools/mail-cli/bin/mail"), resolved relative to cwd like every other
+    itf-adapter binary path (acli_path/mc_path). DEVHUB_MAIL_BIN overrides
+    it — used by specs to point at a fake script instead of PATH-prepend
+    trickery, and by real deployments that install mail-cli elsewhere."""
+    val override_bin = env_get_opt("DEVHUB_MAIL_BIN") ?? ""
+    if override_bin != "":
+        return email_expand_path(override_bin)
+    "tools/mail-cli/bin/mail"
+
+
+fn email_mail_process_args(argv: [text]) -> [text]:
+    # An executable plus an optional script prefix works on every host without
+    # relying on Unix shebang handling or Windows .cmd association.
+    val script = env_get_opt("DEVHUB_MAIL_SCRIPT") ?? ""
+    if script != "":
+        return [email_expand_path(script)] + argv
+    argv
+
+fn _mail_bin_available(bin: text) -> bool:
+    val (_stdout, _stderr, code) = process_run_bounded(bin, email_mail_process_args(["version"]), MAIL_TIMEOUT_MS, MAIL_MAX_OUTPUT_BYTES)
+    code == 0
+
+
+fn _mail_error_message(bin: text, stderr: text, code: i64) -> text:
+    if not _mail_bin_available(bin):
+        return "mail-cli binary not found or not runnable at '{bin}'. Set DEVHUB_MAIL_BIN to override, or check that tools/mail-cli/bin/mail is executable."
+    val trimmed = stderr.trim()
+    if trimmed != "":
+        return "mail-cli error: {trimmed}"
+    "mail-cli exited with code {code}"
+
+
+fn email_credential_args(account: EmailAccount) -> [text]:
+    var args: [text] = ["--account", account.name]
+    if account.password_file != "":
+        args = args + ["--password-file", account.password_file]
+    elif account.password_command_override != "":
+        args = args + ["--password-cmd", account.password_command_override]
+    if account.config_file != "":
+        args = args + ["--config-file", account.config_file]
+    if account.non_interactive:
+        args = args + ["--non-interactive"]
+    args
+
+fn _run_mail(account: EmailAccount, argv: [text]) -> (text, text, i64):
+    # mail-cli prompts on its controlling terminal, never captured JSON stdout.
+    val timeout = if account.non_interactive: MAIL_TIMEOUT_MS else: 300000
+    process_run_bounded(_resolve_mail_bin(), email_mail_process_args(argv + email_credential_args(account)), timeout, MAIL_MAX_OUTPUT_BYTES)
+
+
+fn _mail_result(stdout: text, stderr: text, code: i64) -> i64:
+    """Common success/failure handling for verbs that just print mail-cli's
+    own text and pass its exit code through (send/reply/forward/star/
+    archive/draft — the ones that aren't re-rendered through EmailRow)."""
+    if code != 0:
+        print_error(_mail_error_message(_resolve_mail_bin(), stderr, code))
+        return if code > 0: code else: 1
+    if stdout.trim() != "":
+        print stdout.trim()
+    0
+
+
+# ============================================================================
+# Outlook/Graph adapter boundary (outlook provider)
+# ============================================================================
+
+fn _acquire_outlook_client(account: EmailAccount) -> (bool, OutlookClient):
+    """Builds a Graph client straight from this account's email.sdn fields —
+    NOT cmd_outlook.spl's _acquire_client (that reads ~/.config/devhub/auth.sdn,
+    a different config file for a different command)."""
+    if account.tenant_id == "" or account.client_id == "" or account.shared_mailbox == "":
+        print_error("outlook account '{account.name}' is missing tenant_id/client_id/shared_mailbox in ~/.config/devhub/email.sdn")
+        return (false, OutlookClient(access_token: "", mailbox_upn: "", base_url: ""))
+    val secret_env = if account.client_secret_env != "": account.client_secret_env else: "GRAPH_CLIENT_SECRET"
+    val cache_path = "{email_config_dir()}/outlook_token_cache_{account.name}.sdn"
+    val (ok, client) = outlook_client_acquire(account.tenant_id, account.client_id, secret_env, account.shared_mailbox, cache_path)
+    if not ok:
+        print_error("failed to acquire Graph access token for account '{account.name}' (env var {secret_env} missing or token endpoint failed)")
+    (ok, client)
+
+
+fn _outlook_gap_error(feature: text, needed_fn: text) -> i64:
+    """The doc §8 gap checklist's defined format — specs assert on this
+    verbatim, so keep it exact."""
+    print_error("not yet supported on outlook backend: {feature} (needs adapter fn {needed_fn})")
+    1
+
+
+fn _outlook_folder_for_label(label: text) -> text:
+    if label == "":
+        return "inbox"
+    val wk = graph_well_known_folder_for_label(label)
+    if wk != "": wk else: label

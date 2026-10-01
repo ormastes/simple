@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+For the Engine2D/text-layout maintainer closing
+`doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`.
+
+`ResolvedFontMetrics.advances` and `measure_text_advances` carry ONE entry per
+CODEPOINT. The advance re-layout used to pair them with a table built from
+`for ch in content` byte offsets, while the staged quads carry a CODEPOINT
+index in their `byte_offset` field (both `LayoutGlyph` producers in
+`font_renderer.spl` increment it by 1 per glyph). On ASCII the two spaces
+coincide and everything worked; one em dash (`U+2014`, 3 bytes / 1 codepoint)
+made every lookup after it miss, `font_batch_apply_advances` returned false,
+the batch was marked invalid and the whole page's Draw IR drew nothing.
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ <simple> run \
+ test/01_unit/lib/nogc_sync_mut/text_layout/font_advance_codepoint_arity_spec.spl`
+
+No font, no GPU: the re-layout is a pure function of the advance arrays and the
+quads' indices, so the oracle is the resulting `dst_x` values, which are exact
+integers rather than a tolerance.
+
+## Compatibility and limitations
+This pins the INDEX SPACE and the accepted arities. It does not prove the
+rasterizer emits a quad per codepoint, nor anything about pixels; the em-dash
+pixel oracle is the Draw IR spec named in the bug record.
+
+## Verification guidance and troubleshooting
+Sabotage: index `byte_offsets` by byte again (drop the `codepoint_space`
+branch in `font_advance_layout.spl`). The em-dash examples go red -- the quads
+after the dash keep their unshifted `dst_x` or the call returns false -- while
+every pure-ASCII example stays green, which is exactly why this shipped.
+"""
+# Lifecycle: doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md
+# @manual_section: font_advance_codepoint_arity
+# @cover src/lib/nogc_sync_mut/text_layout/font_advance_layout.spl 80%
+# @tag: unit, text_layout, font, engine2d
+
+use std.spec.*
+use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances,
+    font_advances_codepoint_arity, font_codepoint_utf8_len}
+use std.nogc_sync_mut.text_layout.font_types.{FontRenderQuad}
+use std.common.encoding.utf8.{text_codepoints}
+
+# One quad per codepoint, positioned at the natural pen x, carrying the
+# CODEPOINT index in `byte_offset` -- exactly what the staging loop produces.
+fn cp_quad(index: i64, x: i32) -> FontRenderQuad:
+    FontRenderQuad(codepoint: 65, byte_offset: index, dst_x: x, dst_y: 0i32,
+        width: 4i32, height: 8i32, atlas_x: 0i32, atlas_y: 0i32,
+        color: 0xFFFFFFFFu32, cluster: 0)
+
+describe "Advance re-layout consumes per-codepoint advances":
+
+    it "collapses a byte-expanded array back to codepoint arity":
+        # Round 5's producer guard puts the advance on the UTF-8 lead byte and
+        # 0 on each continuation byte. Collapsing must be lossless.
+        val cps = text_codepoints("a\u{2014}b")
+        val collapsed = font_advances_codepoint_arity(cps, [7i32, 0i32, 0i32, 0i32, 9i32])
+        expect(collapsed.len() == 3 and collapsed[0] == 7 and collapsed[1] == 0 and collapsed[2] == 9).to_equal(true)
+
+    it "returns a per-codepoint array unchanged":
+        val cps = text_codepoints("a\u{2014}b")
+        val same = font_advances_codepoint_arity(cps, [7i32, 11i32, 9i32])
+        expect(same.len() == 3 and same[1] == 11).to_equal(true)
+
+    it "rejects an arity that is neither codepoints nor bytes":
+        # The caller must be able to take the flat fallback instead of being
+        # handed a silently reinterpreted array.
+        val cps = text_codepoints("a\u{2014}b")
+        expect(font_advances_codepoint_arity(cps, [1i32, 2i32]).len()).to_equal(0)
+
+    it "measures UTF-8 lengths by codepoint range":
+        expect(font_codepoint_utf8_len(97) == 1 and font_codepoint_utf8_len(0x2014) == 3 and
+            font_codepoint_utf8_len(0x1F600) == 4).to_equal(true)
+
+    it "shifts the quads AFTER an em dash, which byte indexing never did":
+        # THE LOAD-BEARING EXAMPLE and the sabotage target. Natural advances
+        # 5/5/5; the producer asks for 10 on the first codepoint, so every
+        # later quad slides by +5. With byte offsets the lookup for the quad at
+        # codepoint index 2 missed and the whole call returned false.
+        var quads = [cp_quad(0, 0i32), cp_quad(1, 5i32), cp_quad(2, 10i32)]
+        val ok = font_batch_apply_advances("a\u{2014}b", [5i32, 5i32, 5i32], [10i32, 5i32, 5i32], quads)
+        expect(ok).to_equal(true)
+        expect(quads[0].dst_x == 0 and quads[1].dst_x == 10 and quads[2].dst_x == 15).to_equal(true)
+
+    it "accepts the byte-expanded advance array on the same run":
+        var quads = [cp_quad(0, 0i32), cp_quad(1, 5i32), cp_quad(2, 10i32)]
+        val ok = font_batch_apply_advances("a\u{2014}b", [5i32, 5i32, 5i32],
+            [10i32, 5i32, 0i32, 0i32, 5i32], quads)
+        expect(ok).to_equal(true)
+        expect(quads[2].dst_x).to_equal(15)
+
+    it "refuses a byte array whose length matches NEITHER space":
+        # 6 entries for a 3-codepoint / 5-byte run: unresolvable, and the run
+        # must fall back rather than be reinterpreted.
+        var quads = [cp_quad(0, 0i32), cp_quad(1, 5i32), cp_quad(2, 10i32)]
+        val ok = font_batch_apply_advances("a\u{2014}b", [5i32, 5i32, 5i32],
+            [10i32, 0i32, 0i32, 0i32, 5i32, 5i32], quads)
+        expect(ok).to_equal(false)
+        expect(quads[2].dst_x).to_equal(10)
+
+    it "is unchanged on pure ASCII":
+        # Regression fence: the fix must be a no-op where bytes and codepoints
+        # coincide, which is the overwhelming majority of every page.
+        var quads = [cp_quad(0, 0i32), cp_quad(1, 5i32)]
+        val ok = font_batch_apply_advances("ab", [5i32, 5i32], [8i32, 5i32], quads)
+        expect(ok and quads[1].dst_x == 8).to_equal(true)
+
+    it "leaves the quads untouched when the arity cannot be resolved":
+        var quads = [cp_quad(0, 0i32), cp_quad(1, 5i32)]
+        val ok = font_batch_apply_advances("ab", [5i32, 5i32], [8i32], quads)
+        expect(ok).to_equal(false)
+        expect(quads[1].dst_x).to_equal(5)

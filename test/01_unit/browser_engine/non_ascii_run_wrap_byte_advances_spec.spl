@@ -1,0 +1,97 @@
+"""
+A text run carrying ONE non-ASCII codepoint must wrap from the measured font
+advances, exactly like its ASCII twin.
+
+`resolved_font_advances` carries one advance per CODEPOINT; every wrap offset
+in this renderer is a BYTE index. Two separate defects followed from that, and
+this spec pins both:
+
+  1. `_lay_compute_style_wrap_ranges_inner` gated the measured-advance path on
+     `resolved_font_advances.len() != txt.len()` — a codepoint count against a
+     byte count. One `&mdash;` (3 bytes, 1 codepoint) made the two disagree, so
+     the whole wrap fell back to `compute_wrap_ranges`, the flat cells-per-line
+     estimate (`style_char_w` = 12 px at font-size 16, against a real ~7.8 px
+     average for this face). Being ~50 % too wide, the estimate wrapped such a
+     run one line early, and every box after it inherited the 24 px step.
+
+  2. `style_run_byte_advances` — the byte-indexed table that exists to answer
+     exactly this — was itself dead on non-ASCII. It expanded codepoints to
+     bytes by classifying `char_code_at(i)` as a UTF-8 lead or continuation
+     byte, but `char_code_at` DECODES: it never returns a value in 128..191, so
+     no continuation byte was ever recognised, `ci` over-ran the advance array
+     on the first multi-byte codepoint, and the function returned an EMPTY
+     table. Both layout and paint then fell back together and silently.
+
+Measured against headless Chrome (`--headless=new --window-size=900,20000`) on
+the fixture below, a 300 px block, 16px/1.5 sans-serif:
+
+| run                                   | Chrome | Simple before | Simple after |
+|---------------------------------------|--------|---------------|--------------|
+| `alpha — beta gamma … tau` (em dash)   | 72     | 120           | 72           |
+| `alpha xx beta gamma … tau` (ASCII)    | 72     | 72            | 72 (control) |
+
+The ASCII row is the control that must NOT move: it already took the measured
+path, and a fix that changed it would mean the byte table disagrees with the
+codepoint table on the runs where they must agree.
+
+Not asserted here, still open and recorded rather than guessed at: a mixed
+inline run (`<code>` + text) inside a NARROW block still measures one line tall
+too many — an inline-packing question, not a measurement one, and untouched by
+this change.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TEXT-WRAP-004 — a text run containing non-ASCII codepoints wraps from the measured per-glyph advances, not the flat cell-width estimate.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.{
+    utf8_encoded_len, next_codepoint_start
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}#x{width:300px}</style></head><body>"
+
+val EM_DASH_RUN: text = "alpha — beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau"
+val ASCII_RUN: text = "alpha xx beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+fn block_height(body_text: text) -> text:
+    probe("<div id=\"x\">" + body_text + "</div>", "x", "h")
+
+describe "non-ASCII text runs wrap from measured advances":
+    it "AC-1: an em-dash run is Chrome's 3 lines, not the 5 the flat estimate gave":
+        step("one U+2014 in a 300 px block; Chrome measures 72 px")
+        expect(block_height(EM_DASH_RUN)).to_equal("72")
+
+    it "AC-2 (control): the ASCII twin is unchanged at 72":
+        step("same token structure, no non-ASCII codepoint — already correct")
+        expect(block_height(ASCII_RUN)).to_equal("72")
+
+    it "AC-3: the two runs agree, which is the property the defect broke":
+        step("a single em dash must not cost two extra line boxes")
+        expect(block_height(EM_DASH_RUN)).to_equal(block_height(ASCII_RUN))
+
+    it "AC-4: a bare em dash still occupies exactly one line":
+        step("the round-14 regression shape: one glyph must not wrap per byte")
+        expect(block_height("—")).to_equal("24")
+
+    it "AC-5: utf8_encoded_len covers every UTF-8 width":
+        step("the expansion table the byte-advance array is built from")
+        expect(utf8_encoded_len(65)).to_equal(1)
+        expect(utf8_encoded_len(0xE9)).to_equal(2)
+        expect(utf8_encoded_len(0x2014)).to_equal(3)
+        expect(utf8_encoded_len(0x1F600)).to_equal(4)
+
+    it "AC-6: next_codepoint_start never stops inside a codepoint":
+        step("the forced-progress step of the wrap loop")
+        expect(next_codepoint_start("a—b", 0)).to_equal(1)
+        expect(next_codepoint_start("a—b", 1)).to_equal(4)
+        expect(next_codepoint_start("a—b", 4)).to_equal(5)

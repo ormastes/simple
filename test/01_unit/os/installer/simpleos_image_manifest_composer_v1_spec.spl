@@ -1,0 +1,254 @@
+# Executable contract for deterministic x86_64 image-manifest composition.
+# @codex-impl
+# @req REQ-SIMPLEOS-IMAGE-MANIFEST-COMPOSER-V1
+
+use std.spec.*
+use std.spec.step
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_X86_64_FIRMWARE
+}
+use std.common.contracts.execution.simpleos_image_manifest_v1.*
+use os.installer.simpleos_image_manifest_composer_v1.*
+use os.port.nvfs_image.{
+    NvfsImageMaterializationReceiptV1,
+    NVFS_IMAGE_CARRIER_FORMAT_V1, NVFS_IMAGE_PROVIDER
+}
+
+fn digest(marker: text) -> text:
+    "000000000000000000000000000000000000000000000000000000000000000" + marker
+
+fn artifact(
+    id: text, role: SimpleOsImageArtifactRoleV1, path: text,
+    marker: text, required: bool, baseline: bool
+) -> SimpleOsImageArtifactV1:
+    SimpleOsImageArtifactV1(
+        artifact_id: id, role: role, image_path: path, digest: digest(marker),
+        required: required, baseline: baseline)
+
+fn verified(value: SimpleOsImageArtifactV1) -> SimpleOsVerifiedArtifactInputV1:
+    SimpleOsVerifiedArtifactInputV1(
+        artifact: value, source_path: "build/artifacts/" + value.artifact_id,
+        source_digest: value.digest, source_byte_length: 4096u64,
+        identity_verified: true, included_in_materialized_root: true,
+        materialized_root_digest: digest("a"))
+
+fn provider_input() -> SimpleOsVerifiedProviderInputV1:
+    val value = SimpleOsImageProviderV1(
+        artifact: artifact("provider.parser.avx2",
+            SimpleOsImageArtifactRoleV1.Provider,
+            "/system/providers/parser/avx2.smf", "6", false, false),
+        interface_id: "parser.v2", tier: SimpleOsImageProviderTierV1.Optimized)
+    SimpleOsVerifiedProviderInputV1(
+        provider: value, source_path: "build/artifacts/parser-avx2.smf",
+        source_digest: value.artifact.digest, source_byte_length: 4096u64,
+        identity_verified: true, included_in_materialized_root: true,
+        materialized_root_digest: digest("a"))
+
+fn materialization() -> NvfsImageMaterializationReceiptV1:
+    NvfsImageMaterializationReceiptV1(
+        output_path: "build/simpleos-x86_64.img",
+        provider_id: NVFS_IMAGE_PROVIDER,
+        carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+        carrier_digest: digest("a"), carrier_byte_length: 16384u64,
+        root_digest: digest("a"), root_byte_length: 16384u64,
+        bytes_verified_before_write: true, write_completed: true)
+
+fn candidate(
+    profile: text, compiler: [SimpleOsVerifiedArtifactInputV1],
+    providers: [SimpleOsVerifiedProviderInputV1]
+) -> SimpleOsImageManifestV1:
+    val kernel = artifact("kernel.simpleos", SimpleOsImageArtifactRoleV1.Kernel,
+        "/boot/kernel.elf", "1", true, true)
+    val init = artifact("service.init", SimpleOsImageArtifactRoleV1.Service,
+        "/system/init.smf", "2", true, true)
+    val loader = artifact("runtime.loader", SimpleOsImageArtifactRoleV1.Runtime,
+        "/system/loader.smf", "3", true, true)
+    val selector = artifact("runtime.selector", SimpleOsImageArtifactRoleV1.Runtime,
+        "/system/selector.smf", "4", true, true)
+    var compiler_artifacts: [SimpleOsImageArtifactV1] = []
+    for item in compiler: compiler_artifacts.push(item.artifact)
+    var provider_artifacts: [SimpleOsImageProviderV1] = []
+    for item in providers: provider_artifacts.push(item.provider)
+    SimpleOsImageManifestV1(
+        schema_version: SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA,
+        target_id: SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+        profile_id: profile, build_id: "build-composer-v1",
+        source_id: "source-composer-v1", kernel: kernel,
+        services: [init], runtime: [loader, selector],
+        compiler: compiler_artifacts, providers: provider_artifacts, symbols: [],
+        carrier: SimpleOsImageCarrierV1(
+            kind: SimpleOsImageCarrierKindV1.RawDiskImage,
+            format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+            digest: digest("a"), byte_length: 16384u64),
+        root: SimpleOsImageRootV1(
+            volume_id: "volume.system", filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            mount_point: "/", snapshot_id: "", overlay_id: ""),
+        volumes: [SimpleOsImageVolumeV1(
+            volume_id: "volume.system", role: SimpleOsImageVolumeRoleV1.System,
+            filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            digest: digest("a"), byte_length: 16384u64, writable: false)],
+        snapshot: SimpleOsImageSnapshotV1(
+            present: false, snapshot_id: "", volume_id: "", digest: ""),
+        overlay: SimpleOsImageOverlayV1(
+            present: false, overlay_id: "", base_snapshot_id: "",
+            upper_volume_id: "", digest: ""),
+        firmware_profile: SIMPLEOS_TARGET_V1_X86_64_FIRMWARE,
+        sosix_version: "sosix-v1",
+        entry: SimpleOsImageEntryV1(
+            artifact_id: "service.init", symbol: "simpleos-init"),
+        baseline: SimpleOsImageBaselineV1(
+            kernel_artifact_id: "kernel.simpleos",
+            init_artifact_id: "service.init",
+            loader_artifact_id: "runtime.loader",
+            selector_artifact_id: "runtime.selector"))
+
+fn composition(
+    profile: text, compiler: [SimpleOsVerifiedArtifactInputV1],
+    providers: [SimpleOsVerifiedProviderInputV1]
+) -> SimpleOsX8664ImageCompositionV1:
+    SimpleOsX8664ImageCompositionV1(
+        candidate: candidate(profile, compiler, providers),
+        profile_id: profile, build_id: "build-composer-v1",
+        source_id: "source-composer-v1", sosix_version: "sosix-v1",
+        kernel_target_triple: SIMPLEOS_IMAGE_COMPOSER_V1_X86_64_KERNEL_TARGET,
+        kernel: verified(artifact("kernel.simpleos",
+            SimpleOsImageArtifactRoleV1.Kernel, "/boot/kernel.elf", "1", true, true)),
+        init: verified(artifact("service.init",
+            SimpleOsImageArtifactRoleV1.Service, "/system/init.smf", "2", true, true)),
+        loader: verified(artifact("runtime.loader",
+            SimpleOsImageArtifactRoleV1.Runtime, "/system/loader.smf", "3", true, true)),
+        selector: verified(artifact("runtime.selector",
+            SimpleOsImageArtifactRoleV1.Runtime, "/system/selector.smf", "4", true, true)),
+        compiler: compiler, providers: providers,
+        materialization: materialization(), root_volume_id: "volume.system")
+
+fn compiler_input() -> SimpleOsVerifiedArtifactInputV1:
+    verified(artifact("compiler.simple", SimpleOsImageArtifactRoleV1.Compiler,
+        "/system/compiler/simple.smf", "5", false, false))
+
+describe "SimpleOS x86_64 image manifest composer v1":
+    it "accepts deterministic minimal runtime and dev projections":
+        step("admit minimal and runtime images with only baseline boot artifacts")
+        expect(simpleos_x86_64_image_manifest_compose_v1(
+            composition("minimal", [], [])).accepted).to_equal(true)
+        expect(simpleos_x86_64_image_manifest_compose_v1(
+            composition("runtime", [], [provider_input()])).accepted).to_equal(true)
+
+        step("admit a dev image with an optional compiler and optimized provider")
+        val receipt = simpleos_x86_64_image_manifest_compose_v1(
+            composition("dev", [compiler_input()], [provider_input()]))
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.error).to_equal(SimpleOsImageCompositionErrorV1.None)
+
+    it "keeps kernel and userland triples distinct":
+        step("reject the SimpleOS userland triple when supplied as kernel target")
+        var input = composition("runtime", [], [])
+        input.kernel_target_triple = SIMPLEOS_TARGET_V1_X86_64_TRIPLE
+        expect(simpleos_x86_64_image_manifest_compose_v1(input).error).to_equal(
+            SimpleOsImageCompositionErrorV1.InvalidKernelTarget)
+
+        step("reject a candidate that advertises the bare-metal kernel triple")
+        var candidate_target = composition("runtime", [], [])
+        candidate_target.candidate.target_id =
+            SIMPLEOS_IMAGE_COMPOSER_V1_X86_64_KERNEL_TARGET
+        expect(simpleos_x86_64_image_manifest_compose_v1(candidate_target).error).to_equal(
+            SimpleOsImageCompositionErrorV1.CandidateMismatch)
+
+    it "requires independently verified artifact identities":
+        step("reject an unverified core artifact")
+        var core = composition("runtime", [], [])
+        core.kernel.identity_verified = false
+        expect(simpleos_x86_64_image_manifest_compose_v1(core).error).to_equal(
+            SimpleOsImageCompositionErrorV1.InvalidArtifactEvidence)
+
+        step("reject artifact evidence issued for a different materialized root")
+        var unrelated = composition("runtime", [], [])
+        unrelated.loader.materialized_root_digest = digest("b")
+        expect(simpleos_x86_64_image_manifest_compose_v1(unrelated).error).to_equal(
+            SimpleOsImageCompositionErrorV1.InvalidArtifactEvidence)
+
+        step("reject a source digest that differs from the manifest artifact")
+        var provider = provider_input()
+        provider.source_digest = digest("7")
+        expect(simpleos_x86_64_image_manifest_compose_v1(
+            composition("runtime", [], [provider])).error).to_equal(
+                SimpleOsImageCompositionErrorV1.InvalidArtifactEvidence)
+
+        step("reject optional provider evidence issued for another root")
+        var unrelated_provider = provider_input()
+        unrelated_provider.materialized_root_digest = digest("c")
+        expect(simpleos_x86_64_image_manifest_compose_v1(
+            composition("runtime", [], [unrelated_provider])).error).to_equal(
+                SimpleOsImageCompositionErrorV1.InvalidArtifactEvidence)
+
+    it "enforces profile contents and exact baseline order":
+        step("reject compiler payload outside the dev profile")
+        expect(simpleos_x86_64_image_manifest_compose_v1(
+            composition("runtime", [compiler_input()], [])).error).to_equal(
+                SimpleOsImageCompositionErrorV1.InvalidProfileContents)
+
+        step("reject a candidate whose loader and selector order was changed")
+        var order = composition("runtime", [], [])
+        val first = order.candidate.runtime[0]
+        order.candidate.runtime[0] = order.candidate.runtime[1]
+        order.candidate.runtime[1] = first
+        expect(simpleos_x86_64_image_manifest_compose_v1(order).error).to_equal(
+            SimpleOsImageCompositionErrorV1.CandidateMismatch)
+
+        step("reject a section beyond the manifest contract bound")
+        var providers: [SimpleOsVerifiedProviderInputV1] = []
+        var i = 0
+        while i < SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS + 1:
+            providers.push(provider_input())
+            i = i + 1
+        expect(simpleos_x86_64_image_manifest_compose_v1(
+            composition("runtime", [], providers)).error).to_equal(
+                SimpleOsImageCompositionErrorV1.InvalidProfileContents)
+
+    it "requires completed NVFS materialization and exact storage truth":
+        step("reject a materialization that did not complete")
+        var incomplete = composition("minimal", [], [])
+        incomplete.materialization.write_completed = false
+        expect(simpleos_x86_64_image_manifest_compose_v1(incomplete).error).to_equal(
+            SimpleOsImageCompositionErrorV1.InvalidMaterialization)
+
+        step("reject bytes that were not verified before writing")
+        var unverified = composition("minimal", [], [])
+        unverified.materialization.bytes_verified_before_write = false
+        expect(simpleos_x86_64_image_manifest_compose_v1(unverified).error).to_equal(
+            SimpleOsImageCompositionErrorV1.InvalidMaterialization)
+
+        step("reject unequal carrier and root identities")
+        var unequal = composition("minimal", [], [])
+        unequal.materialization.root_byte_length = 8192u64
+        expect(simpleos_x86_64_image_manifest_compose_v1(unequal).error).to_equal(
+            SimpleOsImageCompositionErrorV1.InvalidMaterialization)
+
+        step("reject fabricated snapshot or overlay claims for the single-volume receipt")
+        var snapshot = composition("dev", [], [])
+        snapshot.candidate.snapshot.present = true
+        snapshot.candidate.snapshot.snapshot_id = "snapshot.system"
+        snapshot.candidate.snapshot.volume_id = "volume.system"
+        snapshot.candidate.snapshot.digest = digest("b")
+        snapshot.candidate.root.snapshot_id = "snapshot.system"
+        expect(simpleos_x86_64_image_manifest_compose_v1(snapshot).error).to_equal(
+            SimpleOsImageCompositionErrorV1.CandidateMismatch)
+
+        step("reject a writable overlay unsupported by the single-volume receipt")
+        var overlay = composition("dev", [], [])
+        overlay.candidate.overlay.present = true
+        overlay.candidate.overlay.overlay_id = "overlay.user"
+        overlay.candidate.overlay.base_snapshot_id = "snapshot.system"
+        overlay.candidate.overlay.upper_volume_id = "volume.mutable"
+        overlay.candidate.overlay.digest = digest("c")
+        overlay.candidate.root.overlay_id = "overlay.user"
+        expect(simpleos_x86_64_image_manifest_compose_v1(overlay).error).to_equal(
+            SimpleOsImageCompositionErrorV1.CandidateMismatch)
+
+    it "returns only the bounded composition decision used by callers":
+        step("inspect the accepted flag and typed composition error")
+        val receipt = simpleos_x86_64_image_manifest_compose_v1(
+            composition("runtime", [], []))
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.error).to_equal(SimpleOsImageCompositionErrorV1.None)

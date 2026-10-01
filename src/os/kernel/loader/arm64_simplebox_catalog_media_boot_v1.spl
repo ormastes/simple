@@ -1,6 +1,9 @@
 """ARM64 production policy adapter for filesystem-backed SCR1 ingestion."""
 
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.authenticated_media_parser.{authenticated_media_hex_bytes_v1}
+use os.kernel.loader.executable_crypto_authority.{ExecutableTrustedSignerV1, executable_loader_trust_roots_boot_initialize_v1}
 use os.kernel.loader.simplebox_catalog_media_boot_v1.{
     SimpleboxCatalogMediaLayoutV1, SimpleboxCatalogMediaBootPolicyV1,
     SimpleboxCatalogMediaBootResultV1,
@@ -44,10 +47,18 @@ pub fn arm64_catalog_media_boot_ingest_canonical_v1() -> bool:
             pinned_public_key_sha256: arm64_authenticated_pinned_public_key_hash_v1()))
     val restored = vfs_state_mount_table_lease_restore_v1(lease)
     if not restored or not clang.ok: return false
-    simplebox_catalog_media_boot_ingest_v1(SimpleboxCatalogMediaBootPolicyV1(
+    val ingested = simplebox_catalog_media_boot_ingest_v1(SimpleboxCatalogMediaBootPolicyV1(
         target: ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos"),
         layouts: [simplebox_catalog_media_canonical_layout_v1()],
         pinned_key_id: arm64_authenticated_pinned_key_id_v1(),
         pinned_public_key_hex: arm64_authenticated_pinned_public_key_hex_v1(),
         pinned_public_key_sha256: arm64_authenticated_pinned_public_key_hash_v1()),
-        Some(clang.bundle)).ok
+        Some(clang.bundle))
+    if not ingested.ok: return false
+    val key = authenticated_media_hex_bytes_v1(
+        arm64_authenticated_pinned_public_key_hex_v1())
+    if key.len() != 32 or sha256_u8_hex(key) !=
+        arm64_authenticated_pinned_public_key_hash_v1(): return false
+    executable_loader_trust_roots_boot_initialize_v1([
+        ExecutableTrustedSignerV1(
+            key_id: arm64_authenticated_pinned_key_id_v1(), public_key: key)])

@@ -1,0 +1,115 @@
+# Production Engine2D CPU operation evidence. This measures one 7680-pixel
+# scanline through SoftwareBackend; the 8K figure is a linear row projection,
+# not a full-frame timing or an 8K/80 admission receipt.
+# @tag: perf, graphics_2d, simd, operation_matrix
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_software.SoftwareBackend
+use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+use std.gpu.engine2d.simd_kernels.{
+    active_arch_text, active_feature_text, native_pixel_rows_enabled
+}
+
+extern fn rt_time_now_nanos() -> i64
+
+val ROW_WIDTH: i32 = 7680
+val SAMPLE_COUNT: i32 = 31
+val FRAME_ROWS_8K: i64 = 4320
+
+class OperationEvidence:
+    samples: [i64]
+    checksum: i64
+
+fn checksum(pixels: [u32]) -> i64:
+    var value: i64 = 1469598103934665603
+    var i = 0
+    while i < pixels.len():
+        value = (value ^ pixels[i].to_i64()) * 1099511628211
+        i = i + 1
+    value
+
+fn percentile(mut samples: [i64], numerator: i32) -> i64:
+    var i = 1
+    while i < samples.len():
+        val item = samples[i]
+        var j = i
+        while j > 0 and samples[j - 1] > item:
+            samples[j] = samples[j - 1]
+            j = j - 1
+        samples[j] = item
+        i = i + 1
+    samples[((samples.len() - 1) * numerator / 100)]
+
+fn measure(backend: SoftwareBackend, operation: i32,
+           source: [u32]) -> OperationEvidence:
+    var samples: [i64] = [0; SAMPLE_COUNT]
+    var sample = 0
+    while sample < SAMPLE_COUNT:
+        backend.clear(0x80402010u32)
+        val started = rt_time_now_nanos()
+        if operation == 0:
+            backend.clear(0xFF123456u32)
+        elif operation == 1:
+            backend.blit_image(0, 0, ROW_WIDTH, 1, source)
+        elif operation == 2:
+            backend.draw_rect_filled(0, 0, ROW_WIDTH, 1, 0x802060A0u32)
+        else:
+            backend.draw_image_blend(0, 0, ROW_WIDTH, 1, source)
+        samples[sample] = rt_time_now_nanos() - started
+        sample = sample + 1
+    OperationEvidence(samples: samples, checksum: checksum(backend.buf))
+
+fn operation_name(operation: i32) -> text:
+    if operation == 0: return "fill"
+    if operation == 1: return "copy"
+    if operation == 2: return "src_over_const"
+    "src_over_image"
+
+describe "production CPU SIMD operation matrix":
+    it "measures real backend operations with scalar parity and honest receipts":
+        var source: [u32] = [0u32; ROW_WIDTH]
+        var i = 0
+        while i < ROW_WIDTH:
+            source[i] = (0x40000000u32 |
+                         (((i as i64) * 2654435761) as u32 & 0x00FFFFFFu32))
+            i = i + 1
+
+        var scalar = SoftwareBackend.create()
+        var simd = SoftwareBackend.create_cpu_simd()
+        expect(scalar.init(ROW_WIDTH, 1)).to_equal(true)
+        expect(simd.init(ROW_WIDTH, 1)).to_equal(true)
+
+        var operation = 0
+        while operation < 4:
+            val scalar_result = measure(scalar, operation, source)
+            reset_simd_hits()
+            val simd_result = measure(simd, operation, source)
+            val hits = simd_hit_counts()
+            val scalar_p50 = percentile(scalar_result.samples, 50)
+            val scalar_p95 = percentile(scalar_result.samples, 95)
+            val simd_p50 = percentile(simd_result.samples, 50)
+            val simd_p95 = percentile(simd_result.samples, 95)
+            val projected_8k_p95 = simd_p95 * FRAME_ROWS_8K
+            expect(simd_result.checksum).to_equal(scalar_result.checksum)
+            expect(scalar_p50).to_be_greater_than(0)
+            expect(simd_p50).to_be_greater_than(0)
+            var operation_hits: i64 = hits.alpha_hits
+            if operation == 0:
+                operation_hits = hits.fill_hits
+            elif operation == 1:
+                operation_hits = hits.copy_hits
+            print("CPU_SIMD_OPERATION operation=" + operation_name(operation) +
+                  " arch=" + active_arch_text() +
+                  " feature=" + active_feature_text() +
+                  " native_rows=" + native_pixel_rows_enabled().to_string() +
+                  " width=7680 samples=31 scalar_p50_ns=" + scalar_p50.to_string() +
+                  " scalar_p95_ns=" + scalar_p95.to_string() +
+                  " simd_p50_ns=" + simd_p50.to_string() +
+                  " simd_p95_ns=" + simd_p95.to_string() +
+                  " provider_hits=" + operation_hits.to_string() +
+                  " checksum=" + simd_result.checksum.to_string() +
+                  " projected_8k_p95_ns=" + projected_8k_p95.to_string() +
+                  " projection_only=true full_frame_measured=false")
+            operation = operation + 1
+        scalar.shutdown()
+        simd.shutdown()

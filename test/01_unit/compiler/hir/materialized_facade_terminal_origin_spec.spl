@@ -1,0 +1,65 @@
+"""
+# Materialized facade terminal-origin regression
+
+Stage-3 surfaces may retain a re-exported callable payload in the facade's
+ordinary declaration arrays. Import registration must still bind the physical
+terminal recorded by the frozen export-origin index.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn terminal_origin_logger() -> Logger:
+    Logger(level: 0)
+
+describe "materialized facade import registration":
+    it "prefers the frozen terminal origin over a facade declaration payload":
+        val logger = terminal_origin_logger()
+        val owner_source = "pub fn item() -> i64:\n    42"
+        val facade_source = "use origin.owner.\{item\}\nexport item"
+        val consumer_source = "use origin.facade.\{item\}\nfn main() -> i64:\n    item()"
+
+        var modules: Dict<text, Module> = {}
+        modules["origin.owner"] = parse_full_frontend(
+            owner_source, "origin.owner", "origin/owner.spl", logger)
+        modules["origin.facade"] = parse_full_frontend(
+            facade_source, "origin.facade", "origin/facade.spl", logger)
+        modules["origin.consumer"] = parse_full_frontend(
+            consumer_source, "origin.consumer", "origin/consumer.spl", logger)
+
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "origin/owner.spl", content: owner_source,
+                       module_name: "origin.owner"),
+            SourceFile(path: "origin/facade.spl", content: facade_source,
+                       module_name: "origin.facade")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        if result.is_ok():
+            var surfaces = result.unwrap()
+            val owner_index = surfaces.index_by_name["origin.owner"]
+            val facade_index = surfaces.index_by_name["origin.facade"]
+            val owner = surfaces.surfaces[owner_index]
+            var facade = surfaces.surfaces[facade_index]
+            # Reproduce the full-closure materialized-facade shape directly:
+            # the facade carries a declaration payload but its origin remains
+            # the physical owner.
+            facade.callable_names = owner.callable_names.copy()
+            facade.callable_values = owner.callable_values.copy()
+            surfaces.surfaces[facade_index] = facade
+
+            var lowering = hirlowering_for_module("origin.consumer", surfaces)
+            val hir = lowering.lower_module(modules["origin.consumer"])
+            expect(lowering.errors.len()).to_equal(0)
+            val item_id = hir.symbols.lookup_or_invalid("item")
+            expect(item_id.is_valid()).to_equal(true)
+            if val item_symbol = hir.symbols.get_symbol_raw(item_id.id):
+                expect(item_symbol.defining_module.unwrap()).to_equal(
+                    "origin.owner")
+            else:
+                expect(false).to_equal(true)

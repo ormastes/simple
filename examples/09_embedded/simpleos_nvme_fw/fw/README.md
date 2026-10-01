@@ -79,11 +79,31 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 > (`doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md`). That contract's Layer Rules
 > reserve the ECS business layer for **userland services/apps** and keep **kernel and drivers
 > MDSOC-only** (ECS forbidden — "drivers are IO-bound state machines, not entity graphs"). Both
-> senses hold here without conflict: this firmware is a **driver**, so it is correctly
-> **MDSOC-only** — pure composition (no inheritance), strictly downward-only domain layering
-> (HIL → FTL → FIL; every cross-domain import points down), no shared mutable global, and **no
-> ECS** (`grep -r "use std.ecs" fw/` returns nothing). It realizes the research's multi-domain
-> decomposition *with* MDSOC structure — exactly what the contract asks of a driver.
+> senses hold here without conflict, but the contract's rule applies **per dimension, not to the
+> tree as a whole**. An SSD is not uniformly driver-class: its host and FTL dimensions are
+> userland-class services that happen to be compiled into firmware, while only the media
+> dimension is a driver. So:
+>
+> | Dimension | Modules | Class | Target | `use std.ecs` |
+> |---|---|---|---|---|
+> | **HOST** | `hil`, `hil_queue`, `hil_command`, `fw_pool`, `dram`, `power_thermal`, `openssd_config`, `nvme_main`, `nvme_qset`, `nvme_admin`, `nvme_admin_types`, `nvme_controller` | service | **MDSOC+ (MDSOC outer + ECS inner)** | permitted |
+> | **FTL** | `ftl`, `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `rain`, `rel_*`, `hooks`, `sandbox` | service | **MDSOC+** | permitted |
+> | **NAND/FIL** | `fil`, `fil_fmc`, `fil_nand`, `fil_nand_device`, `fil_nand_emu`, `fil_ecc`, `fil_scheduler`, `fil_badblock`, `nd_types` | driver | **MDSOC-only** | **forbidden** — "drivers are IO-bound state machines, not entity graphs" |
+> | shared / root / harness | `nvme_types` (frozen interface); `firmware` (composition root, the only module allowed to name more than one dimension); `sim_main`, `test_fw`, `fw_layer_smoke`, `nand_migration_capture_main` (harness-tier, outside all dimensions) | — | — | — |
+>
+> What holds unchanged across all of them: pure composition (no inheritance), strictly
+> downward-only domain layering (HIL → FTL → FIL; every cross-domain import points down), and no
+> shared mutable global.
+>
+> **Current state: pre-migration.** The table is the *target*. Today the whole tree is plain
+> MDSOC — `grep -r "use std.ecs" fw/` still returns nothing, no ECS entity model is built, and
+> several cross-dimension imports still violate the downward rule (`rain.spl:15` and
+> `openssd_config.spl:9` reach into `fil_scheduler` for channel geometry; `fil.spl:14-16` holds
+> FTL-class `rel_*` policy inside the driver layer). Those are tracked as S3/S4/S5 in
+> `doc/03_plan/hardware/nvme_mdsoc_plus_layer_architecture.md`, whose phases 0-8 carry out the
+> migration, and are ratcheted by `scripts/check/check-nvme-layer-dependencies.shs`. The `rel_*`
+> ownership split (FTL policy vs NAND-owned retry ladder) is an open question decided before
+> Phase 3, not settled here.
 
 ## Module map
 

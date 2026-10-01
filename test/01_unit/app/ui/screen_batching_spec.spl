@@ -1,0 +1,200 @@
+# @cover src/app/ui.tui/screen.spl 80%
+"""
+## Purpose and audience
+Documents how the TUI `Screen` draws a horizontal line. A `Screen` is an
+immutable value: every write publishes a brand-new `Screen` and leaves the
+one you already hold untouched. Drawing a line used to publish one new
+`Screen` per cell, so a 40-cell rule copied the whole row table 40 times.
+This manual is for UI and performance engineers who need to know that the
+batched line drawer produces byte-identical output to the cell-by-cell
+writer for every kind of character, and that it copies the row table once.
+Feature IDs: UI-SLIM-010, UI-SLIM-011. Category: Runtime.
+
+## Operator workflow
+src/compiler_rust/target/bootstrap/simple run test/01_unit/app/ui/screen_batching_spec.spl
+
+## Compatibility and limitations
+Runs on the interpreter/seed diagnostic lane. It asserts observable buffer
+contents and a row-copy counter; it makes no wall-clock performance claim.
+The counter is process-global module state, so each scenario resets it
+before measuring.
+
+## Verification guidance and troubleshooting
+The retained evidence is, for each scenario, the drawn row rendered as a
+terminal grid line plus the row-copy tally. A RED on a parity scenario means
+the batched path changed observable output and must be narrowed; a RED on the
+tally means the batched path was not taken (or was taken and still copied per
+cell).
+"""
+# Lifecycle: doc/01_research/ui/slim_kernel_plugin/simple_slim_ui_parallel_agent_briefs_2026-09-05.md ;
+# doc/03_plan/ui/slim_kernel_plugin/plan.md ;
+# doc/05_design/ui/slim_kernel_plugin/design.md
+# @manual_section: Screen batching
+
+use std.spec
+use app.ui.tui.screen.{Screen, screen_row_copy_count, screen_row_copy_reset}
+
+# ============================================================================
+# Step Helpers
+# ============================================================================
+
+# @step: Draw the same line one cell at a time
+fn draw_hline_cell_by_cell(base: Screen, row: i32, col: i32, length: i32, ch: text) -> Screen:
+    """Reference implementation: the historical per-cell writer."""
+    var s = base
+    var i = 0
+    while i < length:
+        val c = col + i
+        if c < base.width:
+            s = s.put_text(row, c, ch)
+        i = i + 1
+    return s
+
+# @step: Paint a styled background so the row is not blank
+fn styled_row(width: i32) -> Screen:
+    var s = Screen.new(width, 1)
+    s = s.put_styled(0, 0, "AB", "\u{001b}[1m")
+    s = s.put_styled(0, 4, "CD", "\u{001b}[36m")
+    return s
+
+
+describe "Screen batching":
+
+    it "draws an ASCII rule exactly as the cell-by-cell writer would":
+        # @req REQ-UI-SLIM-010
+        step("Start from a blank 40-column screen")
+        val blank = Screen.new(40, 2)
+        step("Draw a 40-cell ASCII rule with the line drawer")
+        val batched = blank.draw_hline(0, 0, 40, "-")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(blank, 0, 0, 40, "-")
+        # @capture(tui_grid): the drawn row from both routes
+        step("Verify both routes produced the identical row")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "draws over an already-styled row without changing a single byte":
+        # @req REQ-UI-SLIM-010
+        step("Start from a row carrying a bold block and a cyan block")
+        val base = styled_row(20)
+        step("Draw a short rule across the boundary between the two blocks")
+        val batched = base.draw_hline(0, 1, 5, "-")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(base, 0, 1, 5, "-")
+        # @capture(tui_grid): the spliced row from both routes
+        step("Verify the ANSI splice result is identical")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "draws a wide Korean character exactly as the cell-by-cell writer would":
+        # @req REQ-UI-SLIM-010
+        step("Start from a blank screen")
+        val blank = Screen.new(20, 1)
+        step("Draw a rule made of the Korean syllable GA")
+        val batched = blank.draw_hline(0, 2, 6, "\u{ac00}")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(blank, 0, 2, 6, "\u{ac00}")
+        # @capture(tui_grid): the Korean rule from both routes
+        step("Verify both routes produced the identical row")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "draws a combining sequence exactly as the cell-by-cell writer would":
+        # @req REQ-UI-SLIM-010
+        step("Start from a blank screen")
+        val blank = Screen.new(20, 1)
+        step("Draw a rule made of e followed by a combining acute accent")
+        val batched = blank.draw_hline(0, 0, 5, "e\u{0301}")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(blank, 0, 0, 5, "e\u{0301}")
+        # @capture(tui_grid): the combining-sequence rule from both routes
+        step("Verify the multi-token character still takes the historical route")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "draws an ANSI-styled character exactly as the cell-by-cell writer would":
+        # @req REQ-UI-SLIM-010
+        step("Start from a blank screen")
+        val blank = Screen.new(20, 1)
+        step("Draw a rule whose character carries its own bold escape")
+        val batched = blank.draw_hline(0, 3, 6, "\u{001b}[1m#")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(blank, 0, 3, 6, "\u{001b}[1m#")
+        # @capture(tui_grid): the styled rule from both routes
+        step("Verify style handling is unchanged")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "draws a multi-character brick exactly as the cell-by-cell writer would":
+        # @req REQ-UI-SLIM-010
+        step("Start from a blank screen")
+        val blank = Screen.new(20, 1)
+        step("Draw a rule whose character is two visible columns wide")
+        val batched = blank.draw_hline(0, 0, 4, "<>")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(blank, 0, 0, 4, "<>")
+        # @capture(tui_grid): the two-column brick rule from both routes
+        step("Verify the overlapping writes still produce the identical row")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "rejects a rule that starts left of the screen by drawing only the visible part":
+        # @req REQ-UI-SLIM-010
+        step("Start from a blank screen")
+        val blank = Screen.new(20, 1)
+        step("Draw a rule whose start column is negative")
+        val batched = blank.draw_hline(0, -3, 8, "-")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(blank, 0, -3, 8, "-")
+        # @capture(tui_grid): the clipped-left row from both routes
+        step("Verify the off-screen cells are dropped identically")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "leaves the screen untouched when the rule has zero length":
+        # @req REQ-UI-SLIM-010
+        step("Start from a styled screen")
+        val base = styled_row(20)
+        step("Draw a rule of zero length")
+        val batched = base.draw_hline(0, 4, 0, "-")
+        # @capture(tui_grid): the untouched row
+        step("Verify the row is byte-identical to the row we started from")
+        expect(batched.buffer[0]).to_equal(base.buffer[0])
+
+    it "clips a rule that runs past the right edge":
+        # @req REQ-UI-SLIM-010
+        step("Start from a blank ten-column screen")
+        val blank = Screen.new(10, 1)
+        step("Draw a rule starting at column 7 that asks for eight cells")
+        val batched = blank.draw_hline(0, 7, 8, "-")
+        step("Draw the same rule one cell at a time")
+        val reference = draw_hline_cell_by_cell(blank, 0, 7, 8, "-")
+        # @capture(tui_grid): the right-clipped row from both routes
+        step("Verify both routes clipped at the same column")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])
+
+    it "leaves a Screen you already hold completely unchanged":
+        # @req REQ-UI-SLIM-010
+        step("Start from a styled screen and keep a snapshot of it")
+        val snapshot = styled_row(20)
+        val row_before = snapshot.buffer[0]
+        step("Draw a rule over the snapshot, publishing a new Screen")
+        val drawn = snapshot.draw_hline(0, 0, 20, "-")
+        # @capture(tui_grid): the snapshot row after the draw
+        step("Verify the snapshot still renders what it rendered before")
+        expect(snapshot.buffer[0]).to_equal(row_before)
+        step("Verify the newly published Screen really did change")
+        assert_true(drawn.buffer[0] != row_before)
+
+    it "copies the row table once for a forty-cell rule instead of once per cell":
+        # @req REQ-UI-SLIM-011
+        step("Start from a blank forty-column screen")
+        val blank = Screen.new(40, 2)
+        step("Measure the historical route: forty single-cell writes")
+        screen_row_copy_reset()
+        val reference = draw_hline_cell_by_cell(blank, 0, 0, 40, "-")
+        val loop_copies = screen_row_copy_count()
+        step("Measure the line drawer over the same forty cells")
+        screen_row_copy_reset()
+        val batched = blank.draw_hline(0, 0, 40, "-")
+        val batched_copies = screen_row_copy_count()
+        # @capture(statistics): row-table copies per route
+        step("Verify the historical route copied the row table once per cell")
+        expect(loop_copies).to_equal(40)  # oracle: one _screen_replace_row per cell, 40 cells requested
+        step("Verify the line drawer copied the row table at most once")
+        assert_true(batched_copies <= 1)  # oracle: design.md P01/P02 — publish ONE Screen snapshot
+        step("Verify the two routes still agree on the drawn row")
+        expect(batched.buffer[0]).to_equal(reference.buffer[0])

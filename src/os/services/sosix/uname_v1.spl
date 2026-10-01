@@ -1,0 +1,61 @@
+"""SOSIX uname (syscall 92) kernel handler, v1.
+
+Fills the caller's struct utsname (5 fields x 65 bytes, NUL-padded — parity
+with src/os/libc/include/sys/utsname.h) through the architecture-selected
+user-copy facade (os.kernel.memory.user_copy; on arm64 the C owner behind
+rt_arm64_user_copyout). Identity contract, roadmap point 3:
+
+    sysname  = "SimpleOS"            (SOSIX_UTSNAME_SYSNAME, MUST NOT change)
+    nodename = "simpleos"            (FreeBSD-like node name)
+    release  = os_version().to_text()   (os.packages.os_packages)
+    version  = "SimpleOS <release> sosix-1"
+    machine  = "aarch64" on arm64 lanes
+
+arg0 = user VA of the 325-byte buffer; returns 0, -EINVAL (null), or the
+copy-out status (-EFAULT family) unchanged. Dispatch: syscall.spl case 92 and
+the spl_handle_uname optional shim (kernel/abi/syscall_shim_sosix.spl).
+"""
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.memory.user_copy.{user_copyout_bytes}
+use os.kernel.errno.{EINVAL}
+use os.packages.os_packages.{os_version}
+use os.services.sosix.interface_v1.{
+    SOSIX_UTSNAME_BUF_LEN, SOSIX_UTSNAME_FIELD_LEN,
+    SOSIX_UTSNAME_SYSNAME, SOSIX_UTSNAME_NODENAME, SOSIX_UTSNAME_MACHINE,
+    SOSIX_UTSNAME_SYSNAME_OFF, SOSIX_UTSNAME_NODENAME_OFF,
+    SOSIX_UTSNAME_RELEASE_OFF, SOSIX_UTSNAME_VERSION_OFF,
+    SOSIX_UTSNAME_MACHINE_OFF
+}
+
+fn _sosix_utsname_put_v1(buf: [u8], off: u64, field: text):
+    """Write one NUL-padded 65-byte field; truncation is impossible by
+    construction because every identity string is shorter than the field."""
+    val bytes = field.bytes()
+    var i: u64 = 0
+    while i < bytes.len() and i < SOSIX_UTSNAME_FIELD_LEN - 1:
+        buf[off + i] = bytes[i]
+        i = i + 1
+
+fn _sosix_utsname_bytes_v1() -> [u8]:
+    val release = os_version().to_text()
+    val version = "SimpleOS {release} sosix-1"
+    var buf = [0u8; SOSIX_UTSNAME_BUF_LEN]
+    _sosix_utsname_put_v1(buf, SOSIX_UTSNAME_SYSNAME_OFF, SOSIX_UTSNAME_SYSNAME)
+    _sosix_utsname_put_v1(buf, SOSIX_UTSNAME_NODENAME_OFF, SOSIX_UTSNAME_NODENAME)
+    _sosix_utsname_put_v1(buf, SOSIX_UTSNAME_RELEASE_OFF, release)
+    _sosix_utsname_put_v1(buf, SOSIX_UTSNAME_VERSION_OFF, version)
+    _sosix_utsname_put_v1(buf, SOSIX_UTSNAME_MACHINE_OFF, SOSIX_UTSNAME_MACHINE)
+    buf
+
+pub fn sosix_uname_handle_v1(args: SyscallArgs) -> SyscallResult:
+    """SOSIX syscall 92: uname(struct utsname *buf)."""
+    if args.arg0 == 0:
+        return SyscallResult(value: -(EINVAL as i64))
+    val bytes = _sosix_utsname_bytes_v1()
+    val copied = user_copyout_bytes(args.arg0, bytes)
+    if copied < 0:
+        return SyscallResult(value: copied)
+    SyscallResult(value: 0)
+
+export sosix_uname_handle_v1

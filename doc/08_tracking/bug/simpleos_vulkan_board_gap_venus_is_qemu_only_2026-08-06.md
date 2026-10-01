@@ -1,4 +1,8 @@
 # SimpleOS Vulkan backend: venus/virtio-gpu is QEMU-only, no board path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-06
 **Source:** lane G0, `doc/04_architecture/os/vulkan/simpleos_vulkan_render_backend_plan.md`
@@ -49,3 +53,4 @@ Original tracked pointers: `doc/03_plan/os/simpleos/screens_showcase_2d_opt_plan
 and `.spipe/simpleos-screens-render-lane/state.md:178` already acknowledge a
 board gap in general terms; this file makes the Vulkan-specific instance
 explicit per the board-runnable rule's "say so and file it" requirement.
+

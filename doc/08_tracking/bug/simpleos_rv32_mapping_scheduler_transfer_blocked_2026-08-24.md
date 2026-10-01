@@ -1,4 +1,8 @@
 # RV32 mapper-to-scheduler ownership transfer is blocked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -54,3 +58,4 @@ generation. It must not activate SATP, authorize SRET, or make the task ready.
    owners.
 4. Wire canonical blocked-task adoption, exit terminal marking, and reap.
 5. Add failure-injection acceptance coverage before enabling SATP or readiness.
+

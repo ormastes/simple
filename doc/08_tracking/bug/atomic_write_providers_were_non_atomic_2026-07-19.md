@@ -1,7 +1,10 @@
 # atomic-write providers were non-atomic
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** PROVIDER REGRESSIONS PASS / STAGE 4 INTEGRATION PENDING
 **Severity:** P1 — interrupted lint, formatter, runner, or doc writes could lose data
 
 ## Root cause
@@ -31,3 +34,4 @@ before the atomic rename, so formatting a source file does not silently chmod it
 - formatter `--write` routes through the canonical atomic provider in source:
   PASS
 - admitted Stage 4 lint/formatter integration: pending
+

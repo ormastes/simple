@@ -24,7 +24,7 @@ This executable scenario promotes one historically partial HTML row: `hr`. It pr
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl` |
-| Updated | 2026-07-30 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -157,6 +157,8 @@ Engine2D failure. A corpus hash mismatch requires review rather than repinning.
 
 #### should render hr defaults and author CSS through Engine2D
 
+- should render hr defaults and author CSS through Engine2D
+   - GUI capture: after_step (HTML preferred when available)
 - Retain hr as one void Web semantic node
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 4 expected checks
@@ -178,8 +180,6 @@ Engine2D failure. A corpus hash mismatch requires review rather than repinning.
    - Expected: authored_style.margin_t equals `0`
    - Expected: authored_style.margin_b equals `0`
    - Expected: authored_command.color equals `0xFFEF4444u32`
-- "<style>html,body{margin:0}#rule{border:0 url
-   - GUI capture: after_step (HTML preferred when available)
 - Render discriminating hr pixels through Engine2D
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 4 expected checks
@@ -192,16 +192,18 @@ Engine2D failure. A corpus hash mismatch requires review rather than repinning.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 150 lines folded for reproduction.
+Runnable source: 152 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render hr defaults and author CSS through Engine2D")
 step("Retain hr as one void Web semantic node")
 expect(sha256_text(HR_CORPUS_ROW)).to_equal(HR_CORPUS_SHA256)
 val forged_hash = sha256_text(HR_CORPUS_ROW + "|forged")
 expect(forged_hash == HR_CORPUS_SHA256).to_equal(false)
 val default_html = (
-    "<style>html,body{margin:0}</style>" +
+    "<style>html,body{{margin:0}}</style>" +
     "<body id='body'><hr id='rule'>after</body>"
 )
 val defaults = simple_web_layout_render_html_draw_ir_result(
@@ -252,7 +254,7 @@ expect([
 ]).to_equal([0, 0, 32, 4])
 expect(authored_command.color).to_equal(0xFFEF4444u32)
 val none = simple_web_layout_render_html_draw_ir_result(
-    "<style>html,body{margin:0}#rule{border:none}</style>" +
+    "<style>html,body{{margin:0}}#rule{{border:none}}</style>" +
     "<body><hr id='rule'></body>",
     HR_WIDTH, HR_HEIGHT
 )
@@ -264,7 +266,7 @@ expect([
     none.hit_index.styles[none_index].border_b
 ]).to_equal([0, 0, 0, 0])
 val zero_px = simple_web_layout_render_html_draw_ir_result(
-    "<style>html,body{margin:0}#rule{border:0px}</style>" +
+    "<style>html,body{{margin:0}}#rule{border:0px}</style>" +
     "<body><hr id='rule'></body>",
     HR_WIDTH, HR_HEIGHT
 )
@@ -276,7 +278,7 @@ expect([
     zero_px.hit_index.styles[zero_px_index].border_b
 ]).to_equal([0, 0, 0, 0])
 val hidden = simple_web_layout_render_html_draw_ir_result(
-    "<style>html,body{margin:0}#rule{border:hidden}</style>" +
+    "<style>html,body{{margin:0}}#rule{border:hidden}</style>" +
     "<body><hr id='rule'></body>",
     HR_WIDTH, HR_HEIGHT
 )
@@ -288,7 +290,7 @@ expect([
     hidden.hit_index.styles[hidden_index].border_b
 ]).to_equal([0, 0, 0, 0])
 val invalid_digit = simple_web_layout_render_html_draw_ir_result(
-    "<style>html,body{margin:0}#rule{border:0 1bogus}</style>" +
+    "<style>html,body{{margin:0}}#rule{border:0 1bogus}</style>" +
     "<body><hr id='rule'></body>",
     HR_WIDTH, HR_HEIGHT
 )
@@ -300,7 +302,7 @@ expect([
     invalid_digit.hit_index.styles[invalid_digit_index].border_b
 ]).to_equal([1, 1, 1, 1])
 val invalid_url = simple_web_layout_render_html_draw_ir_result(
-    "<style>html,body{margin:0}#rule{border:0 url(1)}</style>" +
+    "<style>html,body{{margin:0}}#rule{border:0 url(1)}</style>" +
     "<body><hr id='rule'></body>",
     HR_WIDTH, HR_HEIGHT
 )
@@ -312,7 +314,7 @@ expect([
     invalid_url.hit_index.styles[invalid_url_index].border_b
 ]).to_equal([1, 1, 1, 1])
 val missing = simple_web_layout_render_html_draw_ir_result(
-    "<style>html,body{margin:0}</style>" +
+    "<style>html,body{{margin:0}}</style>" +
     "<body><hr id='rule'></body>",
     HR_WIDTH, HR_HEIGHT
 )
@@ -370,3 +372,56 @@ expect(_hr_pixels_equal(
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+- `REQ-WEB-BROWSER-019`
+- `REQ-WEB-BROWSER-021`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b69f48dd741701662f8488ca2b4a5579fd133eec82f08f6d112800edac594a9f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b69f48dd741701662f8488ca2b4a5579fd133eec82f08f6d112800edac594a9f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b69f48dd741701662f8488ca2b4a5579fd133eec82f08f6d112800edac594a9f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/html/hr_element_wpt_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=95 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/html/hr_element_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/html/hr_element_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl:251:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should render hr defaults and author CSS through Engine2D' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl:251:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should render hr defaults and author CSS through Engine2D' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

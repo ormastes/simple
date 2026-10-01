@@ -1,0 +1,68 @@
+use std.common.build_manager.contracts.{BuildInputV1, BuildTaskV1, BUILDER_MAX_INPUTS_V1,
+    builder_validate_task_v1, builder_task_identity_v1}
+use std.common.build_manager.codec.{builder_encode_task_v1, builder_decode_task_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.args_ops.{get_args}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn capacity_task(inputs: [BuildInputV1], outputs: [text]) -> BuildTaskV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    BuildTaskV1("module_a", 1, "codegen", digest, digest, digest, [], "bin/llc",
+        ["", "a b", "$(never-execute)", "%0A", "x\ty\nz"], inputs, outputs, digest, 0)
+
+fn capacity_overlap(left: text, right: text) -> bool:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    builder_validate_task_v1(capacity_task([BuildInputV1(left, digest), BuildInputV1(right, digest)],
+        ["out/result.o"])) == "overlapping inputs"
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 2: return 2
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val small = capacity_task([BuildInputV1("input.ll", digest)], ["output.o"])
+    if sha256_text(builder_encode_task_v1(small)) != "2379556081553704976228bf583f785b87c2d1864841c729c6c632b962dcf2ac": return 3
+    if builder_task_identity_v1(small) != "8b621ca652c7fb2109d2a4a0228864e04679959bc95509d97386f4caf9e19a27": return 4
+    for pair in [("src/A.spl", "SRC/a.spl"), ("root", "ROOT/child.spl"),
+            ("root/child.spl", "ROOT"), ("a/b", "A/B/c"), ("a/b/c", "A/B")]:
+        if not capacity_overlap(pair.0, pair.1): return 5
+    if builder_validate_task_v1(capacity_task([BuildInputV1("a/b", digest), BuildInputV1("a/c", digest)], ["out.o"])) != "": return 6
+    for pair in [("root", "ROOT/child"), ("root/child", "ROOT"), ("same", "SAME")]:
+        if builder_validate_task_v1(capacity_task([BuildInputV1(pair.0, digest)], [pair.1])) != "input/output overlap": return 7
+        if builder_validate_task_v1(capacity_task([BuildInputV1("input.spl", digest)], [pair.0, pair.1])) != "overlapping outputs": return 8
+    var boundary_inputs: [BuildInputV1] = []
+    for index in 0..BUILDER_MAX_INPUTS_V1:
+        boundary_inputs.push(BuildInputV1("boundary/file-{index}.spl", digest))
+    if builder_validate_task_v1(capacity_task(boundary_inputs, ["out.o"])) != "": return 9
+    val boundary_wire = builder_encode_task_v1(capacity_task(boundary_inputs, ["out.o"]))
+    if boundary_wire == "": return 100
+    val overlimit_wire = boundary_wire.replace("\n{BUILDER_MAX_INPUTS_V1}\n", "\n{BUILDER_MAX_INPUTS_V1 + 1}\n")
+    match builder_decode_task_v1(overlimit_wire):
+        case Ok(_): return 101
+        case Err(reason):
+            if reason != "wire integer exceeds bound": return 102
+    boundary_inputs.push(BuildInputV1("boundary/over-limit.spl", digest))
+    if builder_validate_task_v1(capacity_task(boundary_inputs, ["out.o"])) != "task exceeds collection bounds or declares no outputs": return 10
+    val raw = match file_read_regular_no_follow_bounded(args[1], 16777216):
+        case Ok(value): value
+        case Err(reason):
+            print "FAIL actual inventory input: {reason}"
+            return 11
+    val started = current_time_ms()
+    val actual = match builder_decode_task_v1(raw):
+        case Ok(value): value
+        case Err(reason):
+            print "FAIL actual inventory task: {reason}"
+            return 12
+    val decoded_ms = current_time_ms() - started
+    if actual.inputs.len() < 14000 or actual.inputs.len() > BUILDER_MAX_INPUTS_V1: return 13
+    val encode_started = current_time_ms()
+    val encoded = builder_encode_task_v1(actual)
+    val encoded_ms = current_time_ms() - encode_started
+    if encoded != raw: return 14
+    val identity_started = current_time_ms()
+    val identity = builder_task_identity_v1(actual)
+    val identity_ms = current_time_ms() - identity_started
+    if identity.len() != 64: return 15
+    print "PASS input capacity={BUILDER_MAX_INPUTS_V1} actual_inputs={actual.inputs.len()} wire_bytes={encoded.len()} decode_ms={decoded_ms} encode_ms={encoded_ms} identity_ms={identity_ms} identity={identity}"
+    0

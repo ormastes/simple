@@ -27,6 +27,11 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::codegen::runtime_sffi;
 use crate::plugin_manifest;
 use crate::value::Value;
+
+/// Facade-level refusal codes, negated on return so they cannot be mistaken for
+/// a provider status. Mirrors `wsffi_native.rs`.
+const WFFI_INVALID_ARGUMENT: i64 = 1;
+const WFFI_UNSUPPORTED_SIGNATURE: i64 = 3;
 use simple_simd::{active_simd_tier, SimdTier};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -393,7 +398,8 @@ fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Opt
                 addr
             }
             None => {
-                sat.symbols.insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                sat.symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                 return None;
             }
         }
@@ -611,7 +617,9 @@ fn try_call_manifest_library(
                 addr
             }
             None => {
-                state.symbols.insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                state
+                    .symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                 // Symbol not found as a flat function — try class dispatch before failing
                 drop(libraries);
                 if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
@@ -706,11 +714,11 @@ fn dlsym_lookup(handle: usize, name: &str) -> Option<usize> {
 /// the narrow integer ABI supported by this legacy path. Other values must use
 /// a typed interpreter adapter.
 /// - Int -> direct i64
-fn value_to_i64(val: &Value) -> Result<i64, CompileError> {
+fn value_to_i64(val: &Value, name: &str, argument_index: usize) -> Result<i64, CompileError> {
     match val {
         Value::Int(n) => Ok(*n),
         other => Err(unsupported_conversion(format!(
-            "dynamic SFFI dispatch does not admit argument type '{}' without a typed ABI contract",
+            "dynamic SFFI dispatch for function '{name}' argument {argument_index} does not admit argument type '{}' without a typed ABI contract",
             other.type_name()
         ))),
     }
@@ -796,6 +804,93 @@ pub fn rt_provider_query_v1_call_fn(args: &[Value]) -> Result<Value, CompileErro
     }
     let status = simple_runtime::rt_provider_query_v1_call(args[0].as_int()?, args[1].as_int()?, args[2].as_int()?);
     Ok(Value::Int(i64::from(status)))
+}
+
+/// Interpreter owner for the bounded OUT-byte-buffer dynlib ABI.
+///
+/// The sibling `spl_wffi_call_i64_with_bytes_fn` copies the Simple bytes into
+/// a frame-local buffer and throws the buffer away, so a provider following the
+/// `(buf, cap, out_len)` idiom had no way to return data. Here the same copy is
+/// made writable, handed to the callee together with a runtime-owned
+/// `*out_len` slot, and published back into the caller's array afterwards.
+///
+/// `out_bytes` and `out_len` must both arrive as `&mut` borrows: the
+/// interpreter's byte storage is shared behind an `Arc`, so an unborrowed
+/// argument could only be mutated copy-on-write, which the caller would never
+/// observe. Refusing is the honest answer -- a silently-dropped writeback is
+/// exactly the `frame_source=stub-pattern` failure this facade exists to end.
+pub fn spl_wffi_call_i64_into_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 7 {
+        return Err(CompileError::semantic(
+            "spl_wffi_call_i64_into_bytes expects 7 arguments".to_string(),
+        ));
+    }
+    let Value::BorrowMut(out_bytes) = &args[2] else {
+        return Err(CompileError::semantic(
+            "spl_wffi_call_i64_into_bytes requires a `&mut [u8]` out buffer".to_string(),
+        ));
+    };
+    let Value::BorrowMut(out_len) = &args[5] else {
+        return Err(CompileError::semantic(
+            "spl_wffi_call_i64_into_bytes requires a `&mut i64` out_len slot".to_string(),
+        ));
+    };
+    *out_len.inner_mut() = Value::Int(0);
+    let fptr = args[0].as_int()?;
+    if fptr == 0 {
+        return Err(null_function_pointer("spl_wffi_call_i64_into_bytes"));
+    }
+    let mut raw_args = strict_i64_array(&args[1], "spl_wffi_call_i64_into_bytes prefix")?;
+    // Snapshot the borrow, then release it: `call_fptr` may re-enter the
+    // interpreter, and holding the cell borrowed across that would panic.
+    let (mut owner, packed) = {
+        let borrowed = out_bytes.inner();
+        let borrowed: &Value = &borrowed;
+        let packed = borrowed.byte_array_view().is_some();
+        (
+            strict_owned_bytes(borrowed, "spl_wffi_call_i64_into_bytes")?.into_vec(),
+            packed,
+        )
+    };
+    // A window the caller's allocation cannot hold is a RUNTIME refusal, not a
+    // type error: it is returned as the same negative facade status the native
+    // implementation returns, so both lanes answer a bad window identically and
+    // a caller can branch on it instead of unwinding.
+    let (Ok(offset), Ok(capacity)) = (usize::try_from(args[3].as_int()?), usize::try_from(args[4].as_int()?)) else {
+        return Ok(Value::Int(-WFFI_INVALID_ARGUMENT));
+    };
+    let Some(end) = offset.checked_add(capacity).filter(|end| *end <= owner.len()) else {
+        return Ok(Value::Int(-WFFI_INVALID_ARGUMENT));
+    };
+    let suffix = strict_i64_array(&args[6], "spl_wffi_call_i64_into_bytes suffix")?;
+    if raw_args.len() + suffix.len() + 3 > 8 {
+        return Ok(Value::Int(-WFFI_UNSUPPORTED_SIGNATURE));
+    }
+    let mut reported: i64 = 0;
+    // A zero CAPACITY is not a null buffer. The `(buf, cap, out_len)` idiom lets
+    // a caller ask "how much would you need?" by offering room for nothing, and
+    // a provider answers that by filling `out_len` -- but only if `buf` is a
+    // real address, since a NULL buffer is an invalid request to most of them.
+    // (The IN-only sibling passes 0 for an empty payload, which is right there:
+    // there is no data to point at. Here there is an allocation, just no room.)
+    let ptr = if owner.is_empty() {
+        0
+    } else {
+        owner[offset..end].as_mut_ptr() as i64
+    };
+    raw_args.push(ptr);
+    raw_args.push(capacity as i64);
+    raw_args.push(&mut reported as *mut i64 as i64);
+    raw_args.extend(suffix);
+    let values: Vec<Value> = raw_args.into_iter().map(Value::Int).collect();
+    let rc = call_fptr(fptr as usize, "spl_wffi_call_i64_into_bytes", &values)?;
+    *out_bytes.inner_mut() = if packed {
+        Value::byte_array(owner)
+    } else {
+        Value::array(Value::byte_array_values(&owner))
+    };
+    *out_len.inner_mut() = Value::Int(reported.max(0));
+    Ok(rc)
 }
 
 /// Interpreter owner for the one-call dynamic byte descriptor ABI.
@@ -934,8 +1029,8 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
     if nargs > MAX_DYNAMIC_SFFI_ARGS {
         // Preserve the pre-existing error precedence: an inadmissible argument
         // type was reported before the arity error, so keep marshalling first.
-        for value in evaluated_args {
-            value_to_i64(value)?;
+        for (index, value) in evaluated_args.iter().enumerate() {
+            value_to_i64(value, name, index)?;
         }
         return Err(CompileError::runtime(format!(
             "dynamic SFFI dispatch: function '{}' has {} arguments (max {} supported)",
@@ -943,8 +1038,8 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
         )));
     }
     let mut args = [0i64; MAX_DYNAMIC_SFFI_ARGS];
-    for (slot, value) in args.iter_mut().zip(evaluated_args.iter()) {
-        *slot = value_to_i64(value)?;
+    for (index, (slot, value)) in args.iter_mut().zip(evaluated_args.iter()).enumerate() {
+        *slot = value_to_i64(value, name, index)?;
     }
 
     // Call the function pointer with the appropriate number of arguments.
@@ -1114,7 +1209,8 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
                         Some(addr)
                     }
                     None => {
-                        rt.symbols.insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                        rt.symbols
+                            .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                         None
                     }
                 }
@@ -1137,6 +1233,7 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::BorrowMutValue;
 
     unsafe extern "C" fn sum13(
         a0: i64,
@@ -1189,6 +1286,7 @@ mod tests {
             error.to_string().contains("does not admit argument type"),
             "expected the conversion error to take precedence, got: {error}"
         );
+        assert!(error.to_string().contains("function 'sum13' argument 13"));
     }
 
     unsafe extern "C" fn inspect_bytes(tag: i64, ptr: i64, len: i64, suffix: i64) -> i64 {
@@ -1235,6 +1333,123 @@ mod tests {
         assert!(error.to_string().contains("out of bounds"));
     }
 
+    /// Writes `min(cap, 4096)` bytes of `k -> (k * 7) & 0xff` and reports the
+    /// UNTRUNCATED length, so a caller can tell "filled" from "would not fit".
+    unsafe extern "C" fn fill_pattern(tag: i64, ptr: i64, cap: i64, out_len: i64, suffix: i64) -> i64 {
+        if tag != 7 || suffix != 9 || out_len == 0 {
+            return -1;
+        }
+        let want: i64 = 4096;
+        unsafe { (out_len as *mut i64).write(want) };
+        if cap == 0 {
+            return 0;
+        }
+        if ptr == 0 {
+            return -1;
+        }
+        let n = cap.min(want) as usize;
+        let slot = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, n) };
+        for (k, byte) in slot.iter_mut().enumerate() {
+            *byte = ((k * 7) & 0xff) as u8;
+        }
+        0
+    }
+
+    fn into_bytes_case(buffer: Value, offset: i64, cap: i64) -> (Value, Value, Value) {
+        let out = BorrowMutValue::new(buffer);
+        let len = BorrowMutValue::new(Value::Int(-1));
+        let rc = spl_wffi_call_i64_into_bytes_fn(&[
+            Value::Int(fill_pattern as usize as i64),
+            ints(&[7]),
+            Value::BorrowMut(out.clone()),
+            Value::Int(offset),
+            Value::Int(cap),
+            Value::BorrowMut(len.clone()),
+            ints(&[9]),
+        ])
+        .expect("bounded out-buffer dispatch should succeed");
+        let bytes = out.inner().clone();
+        let reported = len.inner().clone();
+        (rc, bytes, reported)
+    }
+
+    #[test]
+    fn bounded_out_buffer_fills_the_caller_allocation() {
+        let (rc, bytes, len) = into_bytes_case(Value::byte_array(vec![0xAA; 8]), 0, 8);
+        assert_eq!(rc, Value::Int(0));
+        assert_eq!(
+            len,
+            Value::Int(4096),
+            "the callee's untruncated length is reported verbatim"
+        );
+        assert_eq!(
+            bytes.byte_array_view().expect("packed storage is preserved"),
+            &[0, 7, 14, 21, 28, 35, 42, 49]
+        );
+    }
+
+    #[test]
+    fn bounded_out_buffer_never_writes_past_the_capacity() {
+        // cap is 4 inside an 8-byte allocation: the tail sentinel must survive.
+        let (rc, bytes, _) = into_bytes_case(Value::byte_array(vec![0xAA; 8]), 0, 4);
+        assert_eq!(rc, Value::Int(0));
+        assert_eq!(
+            bytes.byte_array_view().expect("packed storage"),
+            &[0, 7, 14, 21, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
+    }
+
+    #[test]
+    fn bounded_out_buffer_zero_capacity_writes_nothing_but_still_reports() {
+        let (rc, bytes, len) = into_bytes_case(Value::byte_array(vec![0xAA; 8]), 0, 0);
+        assert_eq!(rc, Value::Int(0));
+        assert_eq!(len, Value::Int(4096));
+        assert_eq!(bytes.byte_array_view().expect("packed storage"), &[0xAA; 8]);
+    }
+
+    #[test]
+    fn bounded_out_buffer_honours_the_offset() {
+        let (_, bytes, _) = into_bytes_case(Value::byte_array(vec![0xAA; 8]), 2, 3);
+        assert_eq!(
+            bytes.byte_array_view().expect("packed storage"),
+            &[0xAA, 0xAA, 0, 7, 14, 0xAA, 0xAA, 0xAA]
+        );
+    }
+
+    #[test]
+    fn bounded_out_buffer_requires_mutable_borrows() {
+        let error = spl_wffi_call_i64_into_bytes_fn(&[
+            Value::Int(fill_pattern as usize as i64),
+            ints(&[7]),
+            Value::byte_array(vec![0; 8]),
+            Value::Int(0),
+            Value::Int(8),
+            Value::BorrowMut(BorrowMutValue::new(Value::Int(0))),
+            ints(&[9]),
+        ])
+        .expect_err("an unborrowed out buffer could not be written back");
+        assert!(error.to_string().contains("`&mut [u8]` out buffer"));
+    }
+
+    #[test]
+    fn bounded_out_buffer_rejects_a_window_past_the_allocation() {
+        let error = spl_wffi_call_i64_into_bytes_fn(&[
+            Value::Int(fill_pattern as usize as i64),
+            ints(&[7]),
+            Value::BorrowMut(BorrowMutValue::new(Value::byte_array(vec![0; 4]))),
+            Value::Int(2),
+            Value::Int(4),
+            Value::BorrowMut(BorrowMutValue::new(Value::Int(0))),
+            ints(&[9]),
+        ])
+        .expect("an out-of-bounds window is refused, not unwound");
+        assert_eq!(
+            error,
+            Value::Int(-1),
+            "the native lane's WFFI_INVALID_ARGUMENT, negated"
+        );
+    }
+
     #[test]
     fn generic_dispatch_rejects_values_without_typed_contracts() {
         for unsupported in [
@@ -1246,6 +1461,7 @@ mod tests {
             let error = call_fptr(echo_i64 as usize, "echo_i64", &[unsupported])
                 .expect_err("untyped dynamic values must fail closed");
             assert!(error.to_string().contains("does not admit argument type"));
+            assert!(error.to_string().contains("function 'echo_i64' argument 0"));
             assert_eq!(
                 error.context().and_then(|context| context.code.as_deref()),
                 Some(codes::SFFI_UNSUPPORTED_CONVERSION)

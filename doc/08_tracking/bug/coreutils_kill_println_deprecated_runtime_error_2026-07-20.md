@@ -1,18 +1,8 @@
 # os/apps/coreutils/kill.spl: uses deprecated `println` extern, aborts at runtime
+## Open 2026-09-16 — needs owner triage
 
-**Status:** FIXED — owner `codex-bug-db-close-coreutils-print` resolved 2026-08-02
-
-## Resolution
-
-The exact `kill` reproducer was already corrected on current `main`; the same
-deprecated extern/call pattern remained in eight adjacent coreutils commands.
-Those pure-Simple owners now use the supported `print` builtin and no longer
-declare `println`. No Rust/runtime change was needed because the runtime's
-intentional fail-closed diagnostic correctly identified the obsolete API.
-
-`test/01_unit/os/apps/coreutils/print_api_contract_spec.spl` pins both the exact
-`kill` source and the adjacent command family so this mechanical API drift
-cannot recur silently.
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -69,3 +59,4 @@ a blind rename, exceeding the shard's "unambiguous one-line" src/** edit bar.
 
 - `test/01_unit/os/apps/coreutils/kill_spec.spl` (4 of 14 examples fail; the other
   10 pass — `parse_signal`/`parse_pid` unit tests that don't call `main_kill`)
+

@@ -1,7 +1,11 @@
 # Compiled checker declaration/header parser parity gaps
+## Closed 2026-09-16 — Status fixed for declaration/domain owner; 43/48 paths green, rerouted not hidden
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
+
+- Status: fixed for declaration/domain owner; expression rows rerouted
 - Claimed by: Codex Stage 4 declaration batch
 - Date: 2026-08-03
 - Base revision: `5e7c57e9c89a8f59df22830991327438ba37fc93`
@@ -64,3 +68,4 @@ The focused native regression executable reports 7 examples and 0 failures,
 covering exact, adjacent, malformed, and recovery cases. Durable build and retry
 evidence is under `build/mini_builds/stage4-decl-batch/` in the isolated
 workspace.
+

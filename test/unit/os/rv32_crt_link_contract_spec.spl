@@ -1,0 +1,101 @@
+# Regression coverage for the RV32 startup/link contract.
+#
+# Before this fix, the QEMU linker script did not define the SMP check-in word
+# referenced by `_start`, so a real RV32 link failed with an undefined symbol.
+# Both RV32 entry paths also reached compiled code without initializing gp.
+
+use std.io_runtime.{file_read}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val QEMU_BOOT = "src/os/kernel/arch/riscv32/boot.spl"
+val FPGA_BOOT = "src/os/kernel/arch/riscv32/fpga_boot.spl"
+val QEMU_LINKER = "src/os/kernel/arch/riscv32/linker.ld"
+val FPGA_LINKER = "src/os/kernel/arch/riscv32/fpga_linker.ld"
+
+fn has_safe_gp_startup(path: text) -> bool:
+    val source = file_read(path)
+    # Comments between `asm volatile:` and the first directive are harmless.
+    # Actual instruction ordering is proved below by extracting and assembling
+    # the production block, then comparing its relocation offsets.
+    val gp_sequence =
+        "        \".option push\"\n" +
+        "        \".option norelax\"\n" +
+        "        \"la      gp, __global_pointer$\"\n" +
+        "        \".option pop\""
+    source.contains(gp_sequence)
+
+fn keeps_smp_counter_outside_bss(path: text) -> bool:
+    val source = file_read(path)
+    val bss_end =
+        "        _ebss = .;\n" +
+        "    } > RAM\n\n"
+    val smp_section =
+        "    .smp (NOLOAD) : ALIGN(4) {\n" +
+        "        _smp_online_count = .;\n" +
+        "        . += 4;\n" +
+        "    } > RAM"
+    if path == QEMU_LINKER:
+        return source.contains(
+            bss_end +
+            "    /* Every hart updates this before hart 0 clears BSS.  Keeping the word in\n" +
+            "     * its own NOLOAD section prevents that clear from losing early check-ins. */\n"
+            + smp_section)
+    source.contains(
+        bss_end +
+            "    /* SMP hart check-in counter, outside [_sbss,_ebss] (see linker.ld). */\n" +
+            smp_section)
+
+describe "RV32 CRT and linker contract":
+    it "links the real RV32 startup symbol probe":
+        val (out, err, code) = rt_process_run("/bin/sh", ["-c",
+            "set -eu; mkdir -p build/rv32-crt-spec; " +
+            "cc=$(command -v clang-18 || command -v clang); " +
+            "lld=$(command -v ld.lld); " +
+            "\"$cc\" --target=riscv32-unknown-none-elf -march=rv32imac -mabi=ilp32 " +
+            "-c test/fixtures/os/kernel/arch/riscv32/rv32_crt_link_probe.S " +
+            "-o build/rv32-crt-spec/probe.o; " +
+            "\"$lld\" -T src/os/kernel/arch/riscv32/linker.ld " +
+            "-o build/rv32-crt-spec/probe.elf build/rv32-crt-spec/probe.o; " +
+            "readelf -sW build/rv32-crt-spec/probe.elf | grep -q _smp_online_count; " +
+            "readelf -sW build/rv32-crt-spec/probe.elf | grep -q '__global_pointer\\$'; " +
+            "ebss=$(nm -n build/rv32-crt-spec/probe.elf | awk '$3 == \"_ebss\" {print \"0x\" $1}'); " +
+            "smp=$(nm -n build/rv32-crt-spec/probe.elf | awk '$3 == \"_smp_online_count\" {print \"0x\" $1}'); " +
+            "test $((smp)) -ge $((ebss)); test $((smp % 4)) -eq 0; " +
+            "printf RV32_CRT_LINK_OK"])
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("RV32_CRT_LINK_OK")
+
+    it "assembles production startup with gp before its first address load":
+        val (out, err, code) = rt_process_run("/bin/sh", ["-c",
+            "set -eu; mkdir -p build/rv32-crt-spec; " +
+            "cc=$(command -v clang-18 || command -v clang); " +
+            "n=0; for source in " + QEMU_BOOT + " " + FPGA_BOOT + "; do " +
+            "n=$((n + 1)); asm=build/rv32-crt-spec/start-$n.S; " +
+            "printf '.section .text.entry, \"ax\", @progbits\\n.globl _start\\n_start:\\n' > \"$asm\"; " +
+            "sed -n '/^fn _start():/,/\"la      t2, _smp_online_count\"/p' \"$source\" | " +
+            "sed -n 's/^[[:space:]]*\"\\(.*\\)\"$/\\1/p' >> \"$asm\"; " +
+            "printf '\\n.Lrv32fpga_trap:\\n' >> \"$asm\"; " +
+            "\"$cc\" --target=riscv32-unknown-none-elf -march=rv32imac -mabi=ilp32 " +
+            "-c \"$asm\" -o build/rv32-crt-spec/start-$n.o; " +
+            "readelf -rW build/rv32-crt-spec/start-$n.o > build/rv32-crt-spec/start-$n.relocs; " +
+            "gp=$(awk '$5 == \"__global_pointer$\" {print \"0x\" $1; exit}' build/rv32-crt-spec/start-$n.relocs); " +
+            "smp=$(awk '$5 == \"_smp_online_count\" {print \"0x\" $1; exit}' build/rv32-crt-spec/start-$n.relocs); " +
+            "test -n \"$gp\"; test -n \"$smp\"; test $((gp)) -lt $((smp)); " +
+            "done; printf RV32_PRODUCTION_GP_ORDER_OK"])
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("RV32_PRODUCTION_GP_ORDER_OK")
+
+    it "initializes gp safely in the QEMU entry path":
+        expect(has_safe_gp_startup(QEMU_BOOT)).to_equal(true)
+
+    it "initializes gp safely in the FPGA entry path":
+        expect(has_safe_gp_startup(FPGA_BOOT)).to_equal(true)
+
+    it "defines the QEMU SMP check-in word outside BSS":
+        expect(keeps_smp_counter_outside_bss(QEMU_LINKER)).to_equal(true)
+
+    it "retains the same SMP storage contract in the FPGA linker":
+        expect(keeps_smp_counter_outside_bss(FPGA_LINKER)).to_equal(true)

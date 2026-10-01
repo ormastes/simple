@@ -151,6 +151,60 @@ fn unused_u64_array_push_result_is_discarded() {
 }
 
 #[test]
+fn typed_array_push_tail_preserves_receiver_return() {
+    for (element, runtime) in [
+        ("u8", "rt_typed_bytes_u8_push"),
+        ("u32", "rt_typed_words_u32_push"),
+        ("u64", "rt_typed_words_u64_push"),
+    ] {
+        for method in ["push", "append"] {
+            for annotation in [String::new(), format!(" -> [{element}]")] {
+                let source = format!(
+                    "fn test(out: [{element}], value: {element}){annotation}:\n    out.{method}(value)\n"
+                );
+                let mir = compile_to_mir(&source).unwrap();
+                let function = &mir.functions[0];
+                let receiver = function.blocks.iter().flat_map(|block| &block.instructions).find_map(|inst| {
+                    match inst {
+                        MirInst::Call { dest: None, target, args } if target == &CallTarget::from_name(runtime) => Some(args[0]),
+                        _ => None,
+                    }
+                }).expect("typed push must retain its result-discarding runtime fast path");
+                assert!(function.blocks.iter().any(|block| {
+                    matches!(block.terminator, Terminator::Return(Some(value)) if value == receiver)
+                }), "typed {element}.{method} tail lost its receiver return: {annotation}");
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_array_push_procedure_retains_void_return() {
+    let mir = compile_to_mir("fn test(out: [u8], value: u8) -> ():\n    out.push(value)\n").unwrap();
+    assert!(mir.functions[0].blocks.iter().any(|block| matches!(block.terminator, Terminator::Return(None))));
+    assert!(has_inst(&mir, |inst| matches!(inst,
+        MirInst::Call { dest: None, target, .. } if target == &CallTarget::from_name("rt_typed_bytes_u8_push"))));
+}
+
+#[test]
+fn typed_array_push_tail_capacity_receiver_is_not_dead() {
+    for tail in [
+        "    arr.push(value)\n",
+        "    if choose:\n        arr.push(value)\n    else:\n        arr.push(value)\n",
+    ] {
+        let source = format!(
+            "extern fn rt_array_new_with_cap(cap: u64) -> [u64]\n\nfn test(choose: bool, value: u64) -> [u64]:\n    val cap: u64 = 4u64\n    var arr: [u64] = rt_array_new_with_cap(cap)\n{tail}"
+        );
+        let mir = compile_to_mir(&source).unwrap();
+        assert!(has_inst(&mir, |inst| matches!(inst,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_new_with_cap_u64"))));
+        assert!(has_inst(&mir, |inst| matches!(inst,
+            MirInst::Call { dest: None, target, .. } if target == &CallTarget::from_name("rt_typed_words_u64_push"))));
+        assert!(mir.functions[0].blocks.iter().any(|block| matches!(block.terminator, Terminator::Return(Some(_)))));
+    }
+}
+
+#[test]
 fn struct_array_parameter_push_uses_array_runtime() {
     let mir = compile_to_mir(
         "struct Item:\n    value: i64\n\nfn append(items: [Item], item: Item) -> [Item]:\n    items.push(item)\n    return items\n",

@@ -3,7 +3,6 @@
 
 **Status:** Selected baseline
 **Date:** 2026-08-12
-**Recovered:** 2026-08-14
 
 - **NFR-FV2-001 Reproducibility:** A clean build with pinned sources and tools reproduces semantic hashes, certificates, and receipts.
 - **NFR-FV2-002 Sound failure:** Unsupported, stale, contradictory, timed-out, missing-tool, and unknown states fail closed.
@@ -16,4 +15,3 @@
 - **NFR-FV2-009 Independence:** High-assurance release replay uses a fresh Lean environment and at least one independent checker where supported; RISC-V uses an oracle not generated from the implementation under test.
 - **NFR-FV2-010 Scalability:** Proof scheduling is DAG-based and parallelizable across independent SCCs, pass certificates, OS subsystems, ISA families, and mutation jobs.
 
-These targets remain acceptance requirements, not measurements already achieved. Current-main MIR evidence work is fail closed but does not yet establish reproducibility, incremental performance, independent replay, or end-artifact assurance for the complete FV2 chain.

@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 <an505|stm32u585|ra4m1> <policy-object>" >&2
+    exit 2
+fi
+
+BOARD="$1"
+OBJECT="$2"
+
+case "$BOARD" in
+    an505)
+        CORE="cortex-m33"
+        TARGET="thumbv8m.main-none-eabi"
+        ;;
+    stm32u585)
+        CORE="cortex-m33"
+        TARGET="thumbv8m.main-none-eabi"
+        ;;
+    ra4m1)
+        CORE="cortex-m4"
+        TARGET="thumbv7em-none-eabi"
+        ;;
+    *)
+        echo "ERROR unknown Cortex-M policy board: $BOARD" >&2
+        exit 2
+        ;;
+esac
+
+if [ ! -s "$OBJECT" ]; then
+    echo "ERROR missing or empty policy object: $OBJECT" >&2
+    exit 1
+fi
+
+for tool in llvm-readobj llvm-nm llvm-objdump; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "ERROR required object admission tool is unavailable: $tool" >&2
+        exit 1
+    fi
+done
+
+HEADER=$(llvm-readobj --file-headers "$OBJECT")
+printf '%s\n' "$HEADER" | grep -Fq 'Format: elf32-littlearm' || {
+    echo "ERROR policy object is not ELF32 little-endian ARM: $OBJECT" >&2
+    exit 1
+}
+printf '%s\n' "$HEADER" | grep -Fq 'Machine: EM_ARM' || {
+    echo "ERROR policy object does not declare EM_ARM: $OBJECT" >&2
+    exit 1
+}
+printf '%s\n' "$HEADER" | grep -Fq 'Flags [ (0x5000000)' || {
+    echo "ERROR policy object does not declare ARM EABI version 5: $OBJECT" >&2
+    exit 1
+}
+
+EXPECTED_OBJECT_GLOBALS='_cortex_m_in_region
+_cortex_m_policy_receipt
+cortex_m_policy_read_receipt
+cortex_m_policy_receipt_decision_mask
+cortex_m_policy_receipt_outcome
+cortex_m_policy_write_receipt'
+DEFINED_SYMBOLS=$(llvm-nm --defined-only --extern-only --format=posix "$OBJECT" \
+    | awk '{print $1}' \
+    | LC_ALL=C sort)
+if [ "$DEFINED_SYMBOLS" != "$EXPECTED_OBJECT_GLOBALS" ]; then
+    echo "ERROR policy object global symbol set is not admitted" >&2
+    echo "expected:" >&2
+    printf '%s\n' "$EXPECTED_OBJECT_GLOBALS" >&2
+    echo "actual:" >&2
+    printf '%s\n' "$DEFINED_SYMBOLS" >&2
+    exit 1
+fi
+
+UNDEFINED_SYMBOLS=$(llvm-nm --undefined-only --format=posix "$OBJECT" \
+    | awk '{print $1}' \
+    | LC_ALL=C sort)
+if [ -n "$UNDEFINED_SYMBOLS" ]; then
+    echo "ERROR policy object has unadmitted undefined symbols:" >&2
+    printf '%s\n' "$UNDEFINED_SYMBOLS" >&2
+    exit 1
+fi
+
+# The current emitter does not retain ARM CPU attributes.  Disassembly under
+# the board-pinned target catches malformed objects, while the exact board to
+# core/target tuple above keeps RA4M1 on Cortex-M4/thumbv7em rather than M33.
+llvm-objdump --disassemble --triple="$TARGET" "$OBJECT" >/dev/null
+
+echo "PASS cortex-m-policy-object board=$BOARD core=$CORE requested_target=$TARGET abi=elf32-littlearm-eabi5 c_abi_exports=2 object_globals=6 undefined=0"

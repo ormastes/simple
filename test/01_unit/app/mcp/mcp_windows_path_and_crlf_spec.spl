@@ -1,0 +1,148 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+"""
+# MCP JSON helpers — Windows path payloads, CRLF and malformed JSON
+
+## Overview
+
+MCP tool arguments arrive as JSON string values inside a single JSON-RPC
+request line. On Windows those values routinely carry drive-letter paths
+(`C:\Users\...`), UNC paths (`\\server\share\...`), spaces, non-ASCII
+segments and embedded escaped CR/LF. This spec pins the pure-function JSON
+value extraction (`extract_field`/`extract_field_raw` in
+`app.mcp.main_lazy_json`) and the ctx-tool unescape/argument helpers
+(`app.mcp.main_lazy_ctx_tools`) against those payload shapes, plus a set of
+malformed/partial/huge inputs that must fail closed (return an empty/`null`
+value) rather than throw or read out of bounds.
+"""
+
+use std.spec.{describe, it, expect}
+use app.mcp.main_lazy_json.{extract_field, extract_field_raw, extract_id}
+use app.mcp.main_lazy_ctx_tools.{ctx_unescape_json, ctx_unescape_cell, ctx_escape_cell, ctx_parse_string_array}
+
+describe "extract_field — Windows path payloads":
+    it "decodes a drive-letter backslash path escaped once per JSON rules":
+        # Wire bytes for {"path":"C:\\Users\\me\\file.spl"} — each real
+        # backslash is doubled in the JSON string body.
+        val body = "{\"path\":\"C:\\\\Users\\\\me\\\\file.spl\"}"
+        val raw = extract_field(body, "path")
+        expect(ctx_unescape_json(raw)).to_equal("C:\\Users\\me\\file.spl")
+
+    it "decodes a UNC path (\\\\server\\share)":
+        val body = "{\"path\":\"\\\\\\\\server\\\\share\\\\dir\\\\f.txt\"}"
+        val raw = extract_field(body, "path")
+        expect(ctx_unescape_json(raw)).to_equal("\\\\server\\share\\dir\\f.txt")
+
+    it "decodes a forward-slash (MSYS-style) path unchanged":
+        val body = "{\"path\":\"/c/a/b/file.spl\"}"
+        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("/c/a/b/file.spl")
+
+    it "decodes a \\\\?\\ extended-length path prefix":
+        val body = "{\"path\":\"\\\\\\\\?\\\\C:\\\\Users\\\\me\\\\f.txt\"}"
+        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("\\\\?\\C:\\Users\\me\\f.txt")
+
+    it "decodes a path containing spaces":
+        val body = "{\"path\":\"C:\\\\Program Files\\\\Simple\\\\bin\\\\simple.exe\"}"
+        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\Program Files\\Simple\\bin\\simple.exe")
+
+    it "decodes a path containing non-ASCII (Korean) segments":
+        val body = "{\"path\":\"C:\\\\Users\\\\\uD55C\uAE00\\\\f.txt\"}"
+        val decoded = ctx_unescape_json(extract_field(body, "path"))
+        expect(decoded.contains("\\Users\\")).to_equal(true)
+        expect(decoded.ends_with("\\f.txt")).to_equal(true)
+
+    it "preserves a trailing separator rather than dropping it":
+        val body = "{\"path\":\"C:\\\\a\\\\b\\\\\"}"
+        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\a\\b\\")
+
+    it "leaves a drive-relative path (no separator after the colon) untouched":
+        val body = "{\"path\":\"C:foo\\\\bar.txt\"}"
+        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:foo\\bar.txt")
+
+describe "extract_field / extract_field_raw — embedded CRLF and control text":
+    it "extracts a string value containing an escaped CRLF pair intact":
+        val body = "{\"code\":\"line1\\r\\nline2\"}"
+        val raw = extract_field(body, "code")
+        expect(raw).to_equal("line1\\r\\nline2")
+        expect(ctx_unescape_json(raw)).to_equal("line1\r\nline2")
+
+    it "does not stop at a literal CR/LF byte pasted raw inside the request line":
+        # Some clients send genuinely malformed JSON with a raw CR inside the
+        # string body instead of the escape sequence. The scanner must not
+        # crash; it just includes the raw byte until the closing quote.
+        val body = "{\"code\":\"a\rb\"}"
+        val raw = extract_field(body, "code")
+        expect(raw.contains("a")).to_equal(true)
+        expect(raw.contains("b")).to_equal(true)
+
+    it "extract_field_raw round-trips a nested object value containing escaped quotes":
+        val body = "{\"params\":{\"path\":\"C:\\\\a\\\\\\\"b\\\"\\\\c\"}}"
+        val nested = extract_field_raw(body, "params")
+        expect(nested.starts_with("{")).to_equal(true)
+        expect(nested.ends_with("}")).to_equal(true)
+
+describe "extract_field — malformed / partial / huge input, fail closed":
+    it "returns empty string for a key that is not present":
+        expect(extract_field("{\"other\":1}", "path")).to_equal("")
+
+    it "returns empty string on an empty body":
+        expect(extract_field("", "path")).to_equal("")
+
+    it "does not read past the end of a truncated (unterminated) string value":
+        val body = "{\"path\":\"C:\\\\Users\\\\unterminated"
+        expect(extract_field(body, "path")).to_equal("")
+
+    it "does not crash on a lone unmatched brace":
+        expect(extract_field("{", "path")).to_equal("")
+        expect(extract_field("}", "path")).to_equal("")
+
+    it "ignores a UTF-8 BOM prefix ahead of the JSON object":
+        val body = "\uFEFF{\"path\":\"C:\\\\a\\\\b\"}"
+        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\a\\b")
+
+    it "extracts the correct value even inside a very long line (huge sibling field)":
+        var pad = ""
+        var i = 0
+        while i < 2000:
+            pad = pad + "x"
+            i = i + 1
+        val body = "{\"filler\":\"" + pad + "\",\"path\":\"C:\\\\a\\\\b.txt\"}"
+        expect(ctx_unescape_json(extract_field(body, "path"))).to_equal("C:\\a\\b.txt")
+
+    it "extract_id falls back to the null literal on a missing id":
+        expect(extract_id("{\"method\":\"tools/list\"}")).to_equal("null")
+
+    it "extract_id reads a quoted string id untouched (numeric or string ids both allowed)":
+        expect(extract_id("{\"id\":\"7\",\"method\":\"x\"}")).to_equal("\"7\"")
+        expect(extract_id("{\"id\":7,\"method\":\"x\"}")).to_equal("7")
+
+describe "ctx_parse_string_array — argv-shaped Windows path lists":
+    it "parses a JSON array of two backslash paths":
+        val raw = "[\"C:\\\\a\\\\b.txt\", \"C:\\\\c\\\\d.txt\"]"
+        val out = ctx_parse_string_array(raw)
+        expect(out.len()).to_equal(2)
+        expect(out[0]).to_equal("C:\\a\\b.txt")
+        expect(out[1]).to_equal("C:\\c\\d.txt")
+
+    it "accepts a bare string as a one-element list":
+        val out = ctx_parse_string_array("\"C:\\\\a\\\\b.txt\"")
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal("C:\\a\\b.txt")
+
+    it "returns an empty list for null/empty/non-array input rather than crashing":
+        expect(ctx_parse_string_array("null").len()).to_equal(0)
+        expect(ctx_parse_string_array("").len()).to_equal(0)
+        expect(ctx_parse_string_array("42").len()).to_equal(0)
+
+describe "ctx_escape_cell / ctx_unescape_cell — SDN store round trip for Windows text":
+    it "round-trips a Windows path with backslashes and no data loss":
+        val original = "C:\\Users\\me\\file.txt"
+        expect(ctx_unescape_cell(ctx_escape_cell(original))).to_equal(original)
+
+    it "round-trips CRLF content used as a chunk body":
+        val original = "line1\r\nline2\r\nline3"
+        expect(ctx_unescape_cell(ctx_escape_cell(original))).to_equal(original)
+
+    it "round-trips a lone trailing backslash without losing or duplicating it":
+        val original = "C:\\a\\b\\"
+        expect(ctx_unescape_cell(ctx_escape_cell(original))).to_equal(original)

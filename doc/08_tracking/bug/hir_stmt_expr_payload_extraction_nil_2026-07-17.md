@@ -1,9 +1,13 @@
 # rt_enum_payload landmine on StmtKind.Expr (worked around); StmtKind.Expr stage2-gate misroute is FIXED
+## Closed 2026-09-16 — primary misroute + Wall 2 fixed in seed; 3 fail->10 pass before/after
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Scope:** `src/compiler/20.hir/hir_lowering/statements.spl` (`lower_hir_stmt`)
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** Primary bug (stage2-gate misroute) FIXED and verified. One landmine
 found+documented+avoided (not blocking). One separate, unrelated downstream
 issue observed and flagged (not investigated — out of this bug's scope).
 
@@ -855,3 +859,4 @@ doc's 2026-07-17 follow-up for the full correction trail).
 evidence), `build/bootstrap/logs/x86_64-unknown-linux-gnu/rust-seed-build.log`
 and `rust-native-all-build.log` (clean seed rebuild evidence, both plain
 text, small).
+

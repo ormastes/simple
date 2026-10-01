@@ -1,0 +1,325 @@
+#!/bin/sh
+# check-nvme-layer-dependencies.shs
+#
+# Interim layer gate for examples/09_embedded/simpleos_nvme_fw/fw/.
+#
+# Workstream B of doc/03_plan/hardware/nvme_mdsoc_plus_layer_architecture.md.
+# Full AOP enforcement is impossible today: the `call(...)` pointcut does not
+# exist (aop.md exposes only `execution(`, `import(`, `depend(`, `within(`), so
+# the caller-side rules of hardening plan §13.2 are inexpressible. The
+# substitute implemented here is a fail-closed `use`-graph gate:
+#
+#   1. Classify every fw/*.spl module into a dimension
+#      (HOST / CONFIG / FTL / FIL / NAND / SHARED / ROOT / HARNESS).
+#      Classification is fail-closed: an unclassified module is a FAIL naming
+#      the file, never a skip, so a new module cannot dodge the gate.
+#   2. Forbid UPWARD edges. Ranks: SHARED 0 < HOST/CONFIG 1 < FTL 2 < FIL/NAND 3.
+#      rank(importer) > rank(imported) is upward and forbidden.
+#   3. Forbid importing `fil_scheduler` (NAND channel topology) from outside
+#      the FIL/NAND dimensions. A rank-order rule alone cannot catch this: an
+#      FTL->FIL edge is nominally downward, yet S4 is a real leak.
+#
+# Known pre-migration offenders are baselined INSIDE this script (see
+# BASELINE below). New violations FAIL; a baselined edge that no longer exists
+# also FAILs as a stale baseline, per this repo's ratchet convention.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> module(s) checked, <k> edge(s), 0 violations   exit 0
+#   FAIL — ...                                                exit 1
+#   ERROR — nothing was checked                               exit 2
+# 0 modules checked is ERROR, never PASS.
+#
+# --selftest runs first, unconditionally, and is fatal.
+
+set -u
+
+FW_DIR_DEFAULT="examples/09_embedded/simpleos_nvme_fw/fw"
+
+# --- Baselined pre-migration offenders (subject:imported). Plan S3/S4/S5, plus
+# integration *_check.spl modules that legitimately reach across today. --------
+BASELINE='rain:fil_scheduler
+openssd_config:fil_scheduler
+fil:rel_types
+fil:rel_vref
+fil:rel_ladder
+rain_ftl:fil_scheduler
+nd_types:rain
+fil_nand_emu_e2e:ftl
+nvme_emu_media:nvme_controller
+nvme_emu_media:ftl'
+
+# --- Dimension classification --------------------------------------------
+# Echoes one of: SHARED HOST CONFIG FTL FIL NAND ROOT HARNESS UNKNOWN
+classify() {
+    case "$1" in
+    nvme_types) echo SHARED ;;
+    firmware) echo ROOT ;;
+    sim_main|test_fw|fw_layer_smoke|nand_migration_capture_main) echo HARNESS ;;
+    openssd_config) echo CONFIG ;;
+    hil|hil_command|hil_queue|hil_queue_backpressure|queue_tail_backpressure) echo HOST ;;
+    fw_pool|task_pool_fail_closed|dram|dram_buffer|power_thermal|thermal) echo HOST ;;
+    nvme_main|nvme_qset|qset_delete|nvme_admin|nvme_admin_types) echo HOST ;;
+    nvme_controller|nvme_controller_gc|host_transport|format|nvme_payload) echo HOST ;;
+    nvme_reg_defs|nvme_reg_file|nvme_registers) echo HOST ;;
+    ftl|ftl_band|ftl_gc|ftl_journal|ftl_map|rain|rain_ftl) echo FTL ;;
+    hooks|policy_hooks|sandbox|gc_safety|wear_scrub|durability) echo FTL ;;
+    rel_*) echo FTL ;;
+    fil|fil_badblock|fil_ecc|fil_fmc|fil_scheduler|ecc|parallelism) echo FIL ;;
+    fil_nand|fil_nand_device|fil_nand_emu|fil_nand_emu_e2e) echo NAND ;;
+    nvme_emu_media|nd_types) echo NAND ;;
+    *) echo UNKNOWN ;;
+    esac
+}
+
+rank_of() {
+    case "$1" in
+    SHARED) echo 0 ;;
+    HOST|CONFIG) echo 1 ;;
+    FTL) echo 2 ;;
+    # FIL and NAND are reported separately for diagnosis but share one rank:
+    # the controlling plan (§2.3) treats all fil_*/nd_types as the single NAND
+    # driver dimension, so fil_nand -> fil_ecc is intra-dimension, not upward.
+    FIL|NAND) echo 3 ;;
+    *) echo -1 ;;
+    esac
+}
+
+# --- `use` extraction ------------------------------------------------------
+# Strips """ docstrings (state machine) and leading-# comments, then emits the
+# bare module name of each `use <name>...` line.
+extract_uses() {
+    awk '
+        {
+            line = $0
+            # count """ occurrences on this line
+            n = gsub(/"""/, "\"\"\"", line)
+            tmp = $0
+            cnt = 0
+            while (match(tmp, /"""/)) { cnt++; tmp = substr(tmp, RSTART + 3) }
+            if (indoc) { if (cnt % 2 == 1) indoc = 0; next }
+            if (cnt % 2 == 1) { indoc = 1; next }
+            if (cnt >= 2) next
+            s = $0
+            sub(/^[ \t]+/, "", s)
+            if (s ~ /^#/) next
+            if (s !~ /^use[ \t]+/) next
+            sub(/^use[ \t]+/, "", s)
+            sub(/[ \t#].*$/, "", s)
+            sub(/\..*$/, "", s)
+            sub(/;.*$/, "", s)
+            if (s != "") print s
+        }
+    ' "$1"
+}
+
+# --- Core scan -------------------------------------------------------------
+# Sets: EV_MODULES EV_EDGES EV_VIOL (newline list) EV_UNCLASS (list)
+scan_tree() {
+    _dir="$1"
+    EV_MODULES=0
+    EV_EDGES=0
+    EV_VIOL=""
+    EV_UNCLASS=""
+    EV_SEEN=""
+
+    for _f in "$_dir"/*.spl; do
+        [ -f "$_f" ] || continue
+        _base=$(basename "$_f" .spl)
+        EV_MODULES=$((EV_MODULES + 1))
+        # *_check.spl inherits its subject module's dimension
+        _subj=$(printf '%s' "$_base" | sed 's/_check$//')
+        _dim=$(classify "$_subj")
+        if [ "$_dim" = UNKNOWN ]; then
+            EV_UNCLASS="$EV_UNCLASS $_base"
+            continue
+        fi
+        [ "$_dim" = ROOT ] && continue
+        [ "$_dim" = HARNESS ] && continue
+        _r=$(rank_of "$_dim")
+
+        for _u in $(extract_uses "$_f"); do
+            _udim=$(classify "$_u")
+            # external / stdlib imports are out of scope
+            [ "$_udim" = UNKNOWN ] && continue
+            [ "$_udim" = HARNESS ] && continue
+            [ "$_udim" = ROOT ] && continue
+            EV_EDGES=$((EV_EDGES + 1))
+            # SHARED (nvme_types) is the frozen interface: legal from any dimension
+            [ "$_udim" = SHARED ] && continue
+            _ur=$(rank_of "$_udim")
+            _bad=""
+            if [ "$_r" -gt "$_ur" ]; then
+                _bad="upward($_dim->$_udim)"
+            elif [ "$_u" = fil_scheduler ] && [ "$_dim" != FIL ] && [ "$_dim" != NAND ]; then
+                _bad="nand-geometry-leak($_dim->FIL)"
+            fi
+            if [ -n "$_bad" ]; then
+                EV_SEEN="$EV_SEEN
+$_subj:$_u"
+                if ! printf '%s\n' "$BASELINE" | grep -qx "$_subj:$_u"; then
+                    EV_VIOL="$EV_VIOL
+$_base:$_u [$_bad]"
+                fi
+            fi
+        done
+    done
+}
+
+# --- Selftest --------------------------------------------------------------
+selftest() {
+    _t=$(mktemp -d "${TMPDIR:-/tmp}/nvme-layer-selftest.XXXXXX") || return 1
+    _fail=0
+
+    # fixture 1: clean downward-only tree must produce 0 violations
+    mkdir -p "$_t/clean"
+    printf 'use nvme_types.*\nuse ftl.*\n' > "$_t/clean/hil.spl"
+    printf 'use nvme_types.*\nuse fil.*\n' > "$_t/clean/ftl.spl"
+    printf 'use nvme_types.*\nuse fil_nand.*\n' > "$_t/clean/fil.spl"
+    printf 'val X: i64 = 1\n' > "$_t/clean/nvme_types.spl"
+    printf 'val Y: i64 = 1\n' > "$_t/clean/fil_nand.spl"
+    scan_tree "$_t/clean"
+    if [ -n "$EV_VIOL" ] || [ -n "$EV_UNCLASS" ] || [ "$EV_MODULES" -ne 5 ]; then
+        echo "selftest FAIL: clean fixture flagged: viol=[$EV_VIOL] unclass=[$EV_UNCLASS] mods=$EV_MODULES"
+        _fail=1
+    fi
+
+    # fixture 2: deliberate UPWARD import must turn the gate red
+    mkdir -p "$_t/upward"
+    printf 'use nvme_types.*\nuse ftl_map.*\n' > "$_t/upward/fil_ecc.spl"
+    printf 'val X: i64 = 1\n' > "$_t/upward/nvme_types.spl"
+    printf 'val X: i64 = 1\n' > "$_t/upward/ftl_map.spl"
+    scan_tree "$_t/upward"
+    case "$EV_VIOL" in
+    *"fil_ecc:ftl_map"*) : ;;
+    *) echo "selftest FAIL: upward import fil_ecc->ftl_map was not flagged"; _fail=1 ;;
+    esac
+
+    # fixture 3: commented-out `use` must NOT false-positive
+    mkdir -p "$_t/comment"
+    printf 'use nvme_types.*\n# use ftl_map.*\n   # use ftl.*\n' > "$_t/comment/fil_ecc.spl"
+    printf 'val X: i64 = 1\n' > "$_t/comment/nvme_types.spl"
+    scan_tree "$_t/comment"
+    if [ -n "$EV_VIOL" ]; then
+        echo "selftest FAIL: commented-out use flagged: [$EV_VIOL]"
+        _fail=1
+    fi
+
+    # fixture 4: `use` inside a docstring must NOT false-positive
+    mkdir -p "$_t/doc"
+    printf '"""\nfil_ecc -- notes.\nuse ftl_map.* would be illegal here.\n"""\nuse nvme_types.*\n' > "$_t/doc/fil_ecc.spl"
+    printf 'val X: i64 = 1\n' > "$_t/doc/nvme_types.spl"
+    scan_tree "$_t/doc"
+    if [ -n "$EV_VIOL" ]; then
+        echo "selftest FAIL: docstring use flagged: [$EV_VIOL]"
+        _fail=1
+    fi
+
+    # fixture 5: fil_scheduler reached from FTL is a leak even though downward
+    mkdir -p "$_t/leak"
+    printf 'use nvme_types.*\nuse fil_scheduler.*\n' > "$_t/leak/ftl_band.spl"
+    printf 'val X: i64 = 1\n' > "$_t/leak/nvme_types.spl"
+    printf 'val X: i64 = 1\n' > "$_t/leak/fil_scheduler.spl"
+    scan_tree "$_t/leak"
+    case "$EV_VIOL" in
+    *"ftl_band:fil_scheduler"*) : ;;
+    *) echo "selftest FAIL: FTL->fil_scheduler leak was not flagged"; _fail=1 ;;
+    esac
+
+    # fixture 6: an unclassified module must be reported, never skipped
+    mkdir -p "$_t/unk"
+    printf 'use nvme_types.*\n' > "$_t/unk/totally_new_module.spl"
+    printf 'val X: i64 = 1\n' > "$_t/unk/nvme_types.spl"
+    scan_tree "$_t/unk"
+    case "$EV_UNCLASS" in
+    *totally_new_module*) : ;;
+    *) echo "selftest FAIL: unclassified module was silently skipped"; _fail=1 ;;
+    esac
+
+    # fixture 7: empty tree must yield 0 modules so the caller ERRORs
+    mkdir -p "$_t/empty"
+    scan_tree "$_t/empty"
+    if [ "$EV_MODULES" -ne 0 ]; then
+        echo "selftest FAIL: empty tree reported $EV_MODULES modules"
+        _fail=1
+    fi
+
+    rm -rf "$_t"
+    return "$_fail"
+}
+
+# --- Main ------------------------------------------------------------------
+FW_DIR="$FW_DIR_DEFAULT"
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --selftest) SELFTEST_ONLY=1 ;;
+    --dir) shift; FW_DIR="${1:-}" ;;
+    *) echo "unknown argument: $1"; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+    shift
+done
+
+selftest
+st_rc=$?
+if [ "$st_rc" -ne 0 ]; then
+    echo "FAIL — selftest failed; no scan performed"
+    exit 1
+fi
+echo "selftest: 7 fixture(s) passed"
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 7 fixture(s) checked, 0 edge(s), 0 violations"
+    exit 0
+fi
+
+if [ ! -d "$FW_DIR" ]; then
+    echo "ERROR — nothing was checked (no such directory: $FW_DIR)"
+    exit 2
+fi
+
+scan_tree "$FW_DIR"
+if [ "$EV_MODULES" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 modules found under $FW_DIR)"
+    exit 2
+fi
+
+# stale-baseline detection
+stale=""
+for b in $(printf '%s\n' "$BASELINE"); do
+    if ! printf '%s' "$EV_SEEN" | grep -qx "$b"; then
+        stale="$stale $b"
+    fi
+done
+
+n_viol=0
+if [ -n "$EV_VIOL" ]; then
+    n_viol=$(printf '%s' "$EV_VIOL" | grep -c . )
+fi
+n_base=$(printf '%s\n' "$BASELINE" | grep -c .)
+
+echo "dimensions: SHARED(0) < HOST/CONFIG(1) < FTL(2) < FIL/NAND(3); upward edges forbidden"
+if [ -n "$EV_VIOL" ]; then
+    echo "new violations:"
+    printf '%s\n' "$EV_VIOL" | grep . | sed 's/^/  /'
+fi
+if [ -n "$EV_UNCLASS" ]; then
+    echo "unclassified modules:$EV_UNCLASS"
+fi
+if [ -n "$stale" ]; then
+    echo "stale baseline entries (no longer present):$stale"
+fi
+
+if [ -n "$EV_UNCLASS" ]; then
+    echo "FAIL — $EV_MODULES module(s) checked, $EV_EDGES edge(s), unclassified module(s):$EV_UNCLASS"
+    exit 1
+fi
+if [ -n "$stale" ]; then
+    echo "FAIL — $EV_MODULES module(s) checked, $EV_EDGES edge(s), stale baseline:$stale"
+    exit 1
+fi
+if [ "$n_viol" -ne 0 ]; then
+    names=$(printf '%s' "$EV_VIOL" | grep . | tr '\n' ' ')
+    echo "FAIL — $EV_MODULES module(s) checked, $EV_EDGES edge(s), $n_viol new violation(s): $names"
+    exit 1
+fi
+echo "PASS — $EV_MODULES module(s) checked, $EV_EDGES edge(s), 0 violations ($n_base baselined pre-migration offender(s): S3/S4/S5)"
+exit 0

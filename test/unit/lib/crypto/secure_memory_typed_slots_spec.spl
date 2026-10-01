@@ -1,0 +1,47 @@
+"""Typed compiler-resistant secret-slot zeroization contracts.
+
+These checks poison the actual arrays, invoke the typed volatile owner, and
+then inspect the same allocations. They intentionally make no claim about
+stack/register copies or allocations that are no longer owner-reachable.
+"""
+
+use std.spec.*
+use std.common.crypto.secure_memory.{
+    secure_zero_u32_slots, secure_zero_u64_slots}
+
+describe "typed secure-memory slot owners":
+    it "volatile-clears and verifies poisoned u32 slots in place":
+        var words: [u32] = [0xDEADBEEFu32, 1u32, 0xFFFFFFFFu32, 7u32]
+        val report = secure_zero_u32_slots(words)
+        expect(report.slot_count).to_equal(4u64)
+        expect(report.overwritten_slots).to_equal(4u64)
+        expect(report.residual_nonzero_slots).to_equal(0u64)
+        expect(report.verified()).to_equal(true)
+        expect(words).to_equal([0u32, 0u32, 0u32, 0u32])
+
+    it "volatile-clears and verifies poisoned u64 slots in place":
+        var words: [u64] = [0xDEADBEEFCAFEBABEu64, 1u64, 0xFFFFFFFFFFFFFFFFu64]
+        val report = secure_zero_u64_slots(words)
+        expect(report.slot_count).to_equal(3u64)
+        expect(report.overwritten_slots).to_equal(3u64)
+        expect(report.residual_nonzero_slots).to_equal(0u64)
+        expect(report.verified()).to_equal(true)
+        expect(words).to_equal([0u64, 0u64, 0u64])
+
+    it "reuses a previously cleared allocation without retaining poison":
+        var words: [u64] = [9u64, 8u64, 7u64, 6u64]
+        expect(secure_zero_u64_slots(words).verified()).to_equal(true)
+        words[0] = 11u64
+        words[3] = 22u64
+        expect(words).to_equal([11u64, 0u64, 0u64, 22u64])
+        expect(secure_zero_u64_slots(words).verified()).to_equal(true)
+        expect(words).to_equal([0u64, 0u64, 0u64, 0u64])
+
+    it "reuses a cleared u32 allocation without retaining tail poison":
+        var words: [u32] = [3u32, 4u32, 5u32, 6u32]
+        expect(secure_zero_u32_slots(words).verified()).to_equal(true)
+        words[1] = 0xA5A5A5A5u32
+        words[3] = 0x5A5A5A5Au32
+        expect(words).to_equal([0u32, 0xA5A5A5A5u32, 0u32, 0x5A5A5A5Au32])
+        expect(secure_zero_u32_slots(words).verified()).to_equal(true)
+        expect(words).to_equal([0u32, 0u32, 0u32, 0u32])

@@ -1,0 +1,161 @@
+#!/bin/sh
+# check-sdn-crc32-sealed.shs — every sealed SDN file in the committed tree must
+# verify: its `#sdn-crc32:` header must equal the CRC-32 of its body.
+#
+# WHY THIS EXISTS
+# ---------------
+# src/lib/nogc_sync_mut/database/core.spl verifies the header fail-CLOSED: a body
+# whose crc32 does not match the header makes the whole file load as nil,
+# silently. On 2026-09-23 a merge landed doc/08_tracking/bug/bug_db.sdn with a
+# stale header and the entire bug database disappeared for every consumer;
+# doc/08_tracking/test/test_db.sdn had the same defect on 2026-09-05. Every
+# other push gate passed: the file is well-formed text, non-conflicted, inside
+# the file-count band and touches no rt_* symbol. Until this guard, NO gate
+# looked at `#sdn-crc32` headers at all.
+#
+# MECHANISM
+# ---------
+# Committed content only (`git grep` / `git show` at --rev), never the working
+# checkout. Every `*.sdn` blob at the revision whose first line starts with
+# `#sdn-crc32:` is copied to a temp file and handed to
+# scripts/check/reseal-sdn-crc32.shs — the ONE CRC implementation in the repo —
+# and the copy must come back "already sealed". A file the resealer would
+# rewrite (stale or malformed header) is an offender. "Reseal-on-copy is a
+# no-op" is exactly the property the loader relies on.
+#
+# Verdict, always the last line of stdout:
+#   PASS  — <n> sealed .sdn file(s) checked at <rev>, 0 stale    exit 0
+#   FAIL  — <n> sealed .sdn file(s) checked at <rev>, <k> stale: <paths>  exit 1
+#   ERROR — nothing was checked (<reason>)                       exit 2
+# Non-vacuous: n is always > 0. A revision with no sealed .sdn at all is ERROR,
+# never a pass — absence of anything to verify is absence of evidence.
+# --selftest runs before every scan and is fatal (5 fixtures: stale header must
+# FAIL, malformed header must FAIL, resealed tree must PASS, unsealed .sdn is
+# not an offender, no sealed file must ERROR).
+#
+# Usage:
+#   sh scripts/check/check-sdn-crc32-sealed.shs --rev <sha> [--root <repo>]
+#   sh scripts/check/check-sdn-crc32-sealed.shs --selftest
+
+set -u
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+RESEAL="$SELF_DIR/reseal-sdn-crc32.shs"
+
+REV=""
+ROOT=""
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV=${2:-}; shift 2 ;;
+        --root) ROOT=${2:-}; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+# scan <root> <rev> -> prints the verdict, returns 0/1/2
+scan() {
+    _root=$1; _rev=$2
+    _work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    git -C "$_root" rev-parse --verify --quiet "$_rev^{commit}" >/dev/null 2>&1 ||
+        { rm -rf "$_work"; echo "ERROR — nothing was checked ($_rev is not a commit in $_root)"; return 2; }
+    git -C "$_root" grep -l '^#sdn-crc32:' "$_rev" -- '*.sdn' 2>/dev/null | sed "s/^[^:]*://" > "$_work/sealed.txt"
+    _n=0; _k=0; _stale=""
+    while IFS= read -r _path; do
+        [ -n "$_path" ] || continue
+        # Only a header on LINE 1 seals a file; a later mention is body text.
+        git -C "$_root" show "$_rev:$_path" > "$_work/copy.sdn" 2>/dev/null ||
+            { rm -rf "$_work"; echo "ERROR — nothing was checked (cannot read $_rev:$_path)"; return 2; }
+        case "$(head -1 "$_work/copy.sdn")" in '#sdn-crc32:'*) ;; *) continue ;; esac
+        _n=$((_n + 1))
+        _res=$(sh "$RESEAL" "$_work/copy.sdn" 2>/dev/null | tail -1)
+        case "$_res" in
+            'PASS — '*' already sealed, crc32 '*) ;;
+            'PASS — '*' resealed, crc32 '*) _k=$((_k + 1)); _stale="$_stale $_path" ;;
+            *) rm -rf "$_work"; echo "ERROR — nothing was checked (resealer gave no verdict for $_path: $_res)"; return 2 ;;
+        esac
+    done < "$_work/sealed.txt"
+    rm -rf "$_work"
+    if [ "$_n" -eq 0 ]; then
+        echo "ERROR — nothing was checked (no sealed .sdn file at $_rev)"
+        return 2
+    fi
+    if [ "$_k" -ne 0 ]; then
+        echo "stale #sdn-crc32 header (the loader will read this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit):"
+        printf '%s\n' "$_stale" | tr ' ' '\n' | grep -v '^$' | sed 's/^/  /'
+        echo "FAIL — $_n sealed .sdn file(s) checked at $_rev, $_k stale:$_stale"
+        return 1
+    fi
+    echo "PASS — $_n sealed .sdn file(s) checked at $_rev, 0 stale"
+    return 0
+}
+
+# Fixtures are real git repositories scanned by the real scan(), never a mock.
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _fails=0
+    _mk() { # dir -> init repo
+        mkdir -p "$1" && git -C "$1" init -q && git -C "$1" config user.email s@t && git -C "$1" config user.name selftest
+    }
+    _commit() { git -C "$1" add -A && git -C "$1" commit -q -m fixture; }
+
+    # fixture repo: one good sealed, one stale, one malformed, one unsealed
+    _mk "$_t/r1"; mkdir -p "$_t/r1/doc"
+    printf '#sdn-crc32:0\nbugs |id, status|\n    a, open\n' > "$_t/r1/doc/good.sdn"
+    sh "$RESEAL" "$_t/r1/doc/good.sdn" >/dev/null 2>&1
+    printf '#sdn-crc32:12345\nbugs |id, status|\n    b, open\n' > "$_t/r1/doc/stale.sdn"
+    printf '#sdn-crc32:garbage\nbugs |id, status|\n    c, open\n' > "$_t/r1/doc/bad.sdn"
+    printf 'bugs |id, status|\n    d, open\n' > "$_t/r1/doc/unsealed.sdn"
+    _commit "$_t/r1"
+    _out=$(scan "$_t/r1" HEAD); _rc=$?
+    case "$_rc:$_out" in
+        1:*"FAIL — 3 sealed .sdn file(s) checked at HEAD, 2 stale:"*doc/bad.sdn*) ;;
+        *) echo "selftest FAIL 1: stale+malformed headers not rejected (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+    case "$_out" in *doc/stale.sdn*) ;; *) echo "selftest FAIL 1b: stale.sdn not named"; _fails=$((_fails + 1)) ;; esac
+    case "$_out" in *doc/unsealed.sdn*) echo "selftest FAIL 1c: unsealed file wrongly reported"; _fails=$((_fails + 1)) ;; esac
+
+    # after resealing both offenders the same tree must PASS with 3 checked
+    sh "$RESEAL" "$_t/r1/doc/stale.sdn" >/dev/null 2>&1
+    sh "$RESEAL" "$_t/r1/doc/bad.sdn" >/dev/null 2>&1
+    _commit "$_t/r1"
+    _out=$(scan "$_t/r1" HEAD); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        "0:PASS — 3 sealed .sdn file(s) checked at HEAD, 0 stale") ;;
+        *) echo "selftest FAIL 2: resealed tree not accepted (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # the working copy must not decide: a stale edit that is NOT committed
+    printf '#sdn-crc32:1\nbugs |id, status|\n    z, open\n' > "$_t/r1/doc/good.sdn"
+    _out=$(scan "$_t/r1" HEAD); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 3: uncommitted working-copy edit changed the verdict"; _fails=$((_fails + 1)); }
+
+    # no sealed file at all is ERROR, never a pass
+    _mk "$_t/r2"; printf 'bugs |id|\n    a\n' > "$_t/r2/plain.sdn"; _commit "$_t/r2"
+    _out=$(scan "$_t/r2" HEAD); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 4: repo without sealed files did not ERROR (rc=$_rc)"; _fails=$((_fails + 1)); }
+
+    # a header that is not on line 1 does not seal the file
+    _mk "$_t/r3"; printf 'bugs |id|\n#sdn-crc32:5\n    a\n' > "$_t/r3/later.sdn"; _commit "$_t/r3"
+    _out=$(scan "$_t/r3" HEAD); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 5: body-line header treated as a seal (rc=$_rc)"; _fails=$((_fails + 1)); }
+
+    rm -rf "$_t"
+    [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
+    echo "selftest: 5 fixtures passed"
+}
+
+[ -f "$RESEAL" ] || { echo "ERROR — nothing was checked (missing $RESEAL)"; exit 2; }
+selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 5 fixture(s) checked, selftest only"
+    exit 0
+fi
+[ -n "$REV" ] || { echo "ERROR — nothing was checked (--rev <sha> is required)"; exit 2; }
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+    [ -n "$ROOT" ] || { echo "ERROR — nothing was checked (not inside a git repository and no --root)"; exit 2; }
+fi
+scan "$ROOT" "$REV"
+exit $?

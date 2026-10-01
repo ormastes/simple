@@ -1,0 +1,179 @@
+# Purpose: diagnostic semantic-facet DTO/diff behavior; no source authority.
+# @req REQ-CSM-003 REQ-CSM-005 REQ-CSM-008 REQ-CSM-012 REQ-CSM-029
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.semantic_facet_manifest_v1.{
+    SemanticCallableFacetV1, SemanticFieldLayoutFacetV1,
+    SemanticAspectFacetV1, SemanticMacroFacetV1, SemanticTraitFacetV1,
+    SemanticFacetManifestV1, semantic_facet_manifest_digest_v1,
+    semantic_facet_manifest_valid_v1, semantic_facet_changes_v1,
+}
+
+fn digest(label: text) -> text: sha256_text(label)
+
+fn manifest(field_layout: text, aspect_signature: text, macro_body: text,
+        trait_candidates: text, trait_absence: text) -> SemanticFacetManifestV1:
+    SemanticFacetManifestV1(schema: 1, producer_id: "fixture.module",
+        semantic_profile_digest: digest("profile"),
+        callable_coverage_digest: digest("callable-coverage"),
+        field_layout_coverage_digest: digest("field-layout-coverage"),
+        aspect_coverage_digest: digest("aspect-coverage"),
+        macro_coverage_digest: digest("macro-coverage"),
+        trait_coverage_digest: digest("trait-coverage"),
+        callable_facets: [SemanticCallableFacetV1(stable_entity_id: "fixture.call",
+            callable_signature_digest: digest("call-signature"),
+            effect_digest: digest("call-effects"))],
+        field_layout_facets: [SemanticFieldLayoutFacetV1(stable_type_id: "fixture.Record",
+            ordered_fields_digest: digest("fields:x:i64,y:i64"),
+            layout_digest: field_layout)],
+        aspect_facets: [SemanticAspectFacetV1(stable_aspect_id: "fixture.before",
+            call_signature_digest: aspect_signature,
+            advice_body_digest: digest("advice-body"),
+            candidate_set_digest: digest("aspect-candidates"),
+            absence_witness_digest: digest("aspect-absence"))],
+        macro_facets: [SemanticMacroFacetV1(stable_macro_id: "fixture.expand",
+            call_signature_digest: digest("macro-signature"),
+            macro_body_digest: macro_body,
+            expansion_input_digest: digest("macro-input"))],
+        trait_facets: [SemanticTraitFacetV1(stable_trait_id: "fixture.Trait",
+            call_signature_digest: digest("trait-signature"),
+            candidate_set_digest: trait_candidates,
+            absence_witness_digest: trait_absence)])
+
+describe "Semantic facet manifest V1 [importance=critical; importance_weight=3]":
+    it "invalidates field layout aspect signature macro body and trait domain mutations [importance=critical; importance_weight=3]":
+        step("Fingerprint every consumed semantic facet independently")
+        val baseline = manifest(digest("layout-v1"), digest("aspect-signature-v1"),
+            digest("macro-body-v1"), digest("trait-candidates-v1"),
+            digest("trait-absence-v1"))
+        val baseline_digest = semantic_facet_manifest_digest_v1(baseline)
+        expect(semantic_facet_manifest_valid_v1(baseline)).to_be(true)
+        expect(baseline_digest.len()).to_equal(64)
+        expect(semantic_facet_manifest_digest_v1(manifest(digest("layout-v2"),
+            digest("aspect-signature-v1"), digest("macro-body-v1"),
+            digest("trait-candidates-v1"), digest("trait-absence-v1"))) !=
+            baseline_digest).to_be(true)
+        expect(semantic_facet_manifest_digest_v1(manifest(digest("layout-v1"),
+            digest("aspect-signature-v2"), digest("macro-body-v1"),
+            digest("trait-candidates-v1"), digest("trait-absence-v1"))) !=
+            baseline_digest).to_be(true)
+        expect(semantic_facet_manifest_digest_v1(manifest(digest("layout-v1"),
+            digest("aspect-signature-v1"), digest("macro-body-v2"),
+            digest("trait-candidates-v1"), digest("trait-absence-v1"))) !=
+            baseline_digest).to_be(true)
+        expect(semantic_facet_manifest_digest_v1(manifest(digest("layout-v1"),
+            digest("aspect-signature-v1"), digest("macro-body-v1"),
+            digest("trait-candidates-v2"), digest("trait-absence-v1"))) !=
+            baseline_digest).to_be(true)
+        expect(semantic_facet_manifest_digest_v1(manifest(digest("layout-v1"),
+            digest("aspect-signature-v1"), digest("macro-body-v1"),
+            digest("trait-candidates-v1"), digest("trait-absence-v2"))) !=
+            baseline_digest).to_be(true)
+        val combined = manifest(digest("layout-v2"), digest("aspect-signature-v2"),
+            digest("macro-body-v2"), digest("trait-candidates-v2"),
+            digest("trait-absence-v2"))
+        val changed = semantic_facet_changes_v1(baseline, combined).unwrap()
+        val facets = changed.map(_.facet)
+        expect(changed.len()).to_equal(5)
+        expect(facets).to_equal(["field_layout", "aspect_call_signature",
+            "macro_body", "trait_candidate_set", "trait_absence_witness"])
+        for change in changed:
+            expect(change.old_fingerprint.is_some()).to_be(true)
+            expect(change.new_fingerprint.is_some()).to_be(true)
+        expect(facets.contains("field_layout")).to_be(true)
+        expect(facets.contains("aspect_call_signature")).to_be(true)
+        expect(facets.contains("macro_body")).to_be(true)
+        expect(facets.contains("trait_candidate_set")).to_be(true)
+        expect(facets.contains("trait_absence_witness")).to_be(true)
+
+    it "rejects empty candidate and absence digest fields [importance=critical; importance_weight=3]":
+        step("Keep empty diagnostic fields distinct from well-shaped DTOs")
+        val missing_candidate = manifest(digest("layout"), digest("aspect"),
+            digest("macro"), "", digest("absence"))
+        val missing_absence = manifest(digest("layout"), digest("aspect"),
+            digest("macro"), digest("candidates"), "")
+        expect(semantic_facet_manifest_valid_v1(missing_candidate)).to_be(false)
+        expect(semantic_facet_manifest_digest_v1(missing_candidate)).to_equal("")
+        expect(semantic_facet_manifest_valid_v1(missing_absence)).to_be(false)
+        expect(semantic_facet_manifest_digest_v1(missing_absence)).to_equal("")
+
+    it "handles unchanged insert delete coverage and invalid ordering boundaries [importance=critical; importance_weight=3]":
+        step("Compare only canonical diagnostic manifests")
+        val baseline = manifest(digest("layout"), digest("aspect"),
+            digest("macro"), digest("candidates"), digest("absence"))
+        expect(semantic_facet_changes_v1(baseline, baseline).unwrap().len()).to_equal(0)
+
+        var empty = baseline
+        empty.callable_facets = []
+        empty.field_layout_facets = []
+        empty.aspect_facets = []
+        empty.macro_facets = []
+        empty.trait_facets = []
+        expect(semantic_facet_changes_v1(empty, baseline).unwrap().len()).to_equal(14)
+        expect(semantic_facet_changes_v1(baseline, empty).unwrap().len()).to_equal(14)
+
+        var coverage_changed = baseline
+        coverage_changed.trait_coverage_digest = digest("trait-coverage-v2")
+        val coverage = semantic_facet_changes_v1(baseline, coverage_changed).unwrap()
+        expect(coverage.len()).to_equal(1)
+        expect(coverage[0].facet).to_equal("trait_coverage")
+
+        var duplicate = baseline
+        duplicate.trait_facets.push(duplicate.trait_facets[0])
+        expect(semantic_facet_manifest_valid_v1(duplicate)).to_be(false)
+        var wrong_profile = baseline
+        wrong_profile.semantic_profile_digest = digest("other-profile")
+        expect(semantic_facet_changes_v1(baseline, wrong_profile).is_err()).to_be(true)
+
+        var wrong_producer = baseline
+        wrong_producer.producer_id = "other.module"
+        expect(semantic_facet_changes_v1(baseline, wrong_producer).is_err()).to_be(true)
+        var unsorted = baseline
+        unsorted.trait_facets.push(SemanticTraitFacetV1(
+            stable_trait_id: "A.Trait", call_signature_digest: digest("sig"),
+            candidate_set_digest: digest("set"), absence_witness_digest: digest("none")))
+        expect(semantic_facet_manifest_valid_v1(unsorted)).to_be(false)
+
+    it "names independent ordered-field effect and aspect invalidations [importance=critical; importance_weight=3]":
+        val baseline = manifest(digest("layout"), digest("aspect"),
+            digest("macro"), digest("candidates"), digest("absence"))
+        var callable_effect = baseline
+        var callables = callable_effect.callable_facets
+        var callable = callables[0]
+        callable.effect_digest = digest("effect-v2")
+        callables[0] = callable
+        callable_effect.callable_facets = callables
+        expect(semantic_facet_changes_v1(baseline, callable_effect).unwrap()[0].facet
+        ).to_equal("callable_effect")
+
+        var fields_changed = baseline
+        var fields = fields_changed.field_layout_facets
+        var field = fields[0]
+        field.ordered_fields_digest = digest("fields-v2")
+        fields[0] = field
+        fields_changed.field_layout_facets = fields
+        expect(semantic_facet_changes_v1(baseline, fields_changed).unwrap()[0].facet
+        ).to_equal("ordered_fields")
+
+        var advice_changed = baseline
+        var aspects = advice_changed.aspect_facets
+        var aspect = aspects[0]
+        aspect.advice_body_digest = digest("advice-v2")
+        aspects[0] = aspect
+        advice_changed.aspect_facets = aspects
+        expect(semantic_facet_changes_v1(baseline, advice_changed).unwrap()[0].facet
+        ).to_equal("aspect_advice_body")
+        aspect.advice_body_digest = baseline.aspect_facets[0].advice_body_digest
+        aspect.candidate_set_digest = digest("aspect-candidates-v2")
+        aspects[0] = aspect
+        advice_changed.aspect_facets = aspects
+        expect(semantic_facet_changes_v1(baseline, advice_changed).unwrap()[0].facet
+        ).to_equal("aspect_candidate_set")
+        aspect.candidate_set_digest = baseline.aspect_facets[0].candidate_set_digest
+        aspect.absence_witness_digest = digest("aspect-absence-v2")
+        aspects[0] = aspect
+        advice_changed.aspect_facets = aspects
+        expect(semantic_facet_changes_v1(baseline, advice_changed).unwrap()[0].facet
+        ).to_equal("aspect_absence_witness")

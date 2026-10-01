@@ -1,0 +1,53 @@
+#!/bin/sh
+# Build one browser QEMU fixture using an explicitly admitted self-hosted runtime.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+plan=0
+if [ "${1:-}" = --print-plan ]; then plan=1; shift; fi
+[ "$#" -eq 1 ] || { echo 'usage: build-simpleos-browser-qemu.shs [--print-plan] browser-probe|desktop-probe|browser-soft|desktop-e2e' >&2; exit 2; }
+lane=$1
+case "$lane" in
+    browser-probe) entry=browser_probe_entry; artifact=simpleos_browser_probe_32 ;;
+    desktop-probe) entry=desktop_probe_entry; artifact=simpleos_desktop_probe_32 ;;
+    browser-soft) entry=browser_soft_entry; artifact=simpleos_browser_soft_32 ;;
+    desktop-e2e) entry=desktop_e2e_entry; artifact=simpleos_desktop_e2e_32 ;;
+    *) echo "unknown browser QEMU fixture: $lane" >&2; exit 2 ;;
+esac
+entry=examples/09_embedded/simple_os/arch/x86_64/$entry.spl
+output=build/os/$artifact.elf
+if [ "$plan" -eq 1 ]; then
+    printf 'lane=%s\nentry=%s\noutput=%s\nthreads=12\n' "$lane" "$entry" "$output"
+    exit 0
+fi
+fail() { echo "build-simpleos-browser-qemu: $*" >&2; exit 1; }
+runtime=${SIMPLE_RUNTIME_PATH:-}
+provenance=${SIMPLE_STAGE4_PROVENANCE:-}
+receipt=${SIMPLE_RUNTIME_RECEIPT:-}
+[ -n "$runtime" ] && [ -n "$provenance" ] && [ -n "$receipt" ] ||
+    fail 'SIMPLE_RUNTIME_PATH, SIMPLE_STAGE4_PROVENANCE, and SIMPLE_RUNTIME_RECEIPT are required'
+command -v timeout >/dev/null 2>&1 || fail timeout-required
+command -v flock >/dev/null 2>&1 || fail flock-required
+cd "$root"
+# SSpec may schedule different cases concurrently. Serialize these native
+# builds before runtime admission or compiler launch so four cases cannot
+# multiply the 12-worker budget.
+mkdir -p build/os
+exec 9>build/os/browser-qemu-build.lock
+flock -n 9 || fail another-browser-fixture-build-is-active
+stage4=$(sh scripts/check/check-post-bootstrap-stage4-sspec.shs \
+    "$runtime" "$provenance") || fail stage4-admission-failed
+printf '%s\n' "$stage4" | grep -Fxq post_bootstrap_stage4_acceptance=true ||
+    fail stage4-acceptance-marker-missing
+identity=$(sh scripts/check/check-sosix-qemu-runtime-admission.shs \
+    --verify "$runtime" "$receipt") || fail runtime-admission-failed
+runtime_path=$(printf '%s\n' "$identity" | sed -n 's/^runtime_path=//p')
+[ -n "$runtime_path" ] && [ -x "$runtime_path" ] || fail runtime-identity-missing
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_LIB="$root/src" \
+    timeout -k 5s 900s "$runtime_path" native-build \
+    --source src/os --source src/lib --source examples/09_embedded/simple_os \
+    --cache-dir "build/os/browser-$lane-native-cache" --threads 12 \
+    --backend cranelift --entry-closure --entry "$entry" \
+    --target x86_64-unknown-none --output "$output" --timeout 900 \
+    --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
+[ -s "$output" ] || fail missing-built-elf
+printf 'browser_qemu_fixture=%s\noutput=%s\n' "$lane" "$output"

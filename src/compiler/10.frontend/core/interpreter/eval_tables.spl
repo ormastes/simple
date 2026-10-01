@@ -24,6 +24,22 @@ var ft_vals: [i64] = []
 var ft_buckets: [i64] = []
 var ft_nexts: [i64] = []
 
+# Caller-aware function ownership.  The historical flat table remains for
+# compatibility, but cannot distinguish two modules which define the same
+# bare name.  Keep the authoritative owner and selective-import routes in
+# parallel arrays; these tables are small during interpretation and lookup is
+# off the parser hot path.
+var fto_owners: [text] = []
+var fto_names: [text] = []
+var fto_vals: [i64] = []
+var fib_callers: [text] = []
+var fib_names: [text] = []
+var fib_source_names: [text] = []
+var fib_owners: [text] = []
+var fmn_callers: [text] = []
+var fmn_aliases: [text] = []
+var fmn_owners: [text] = []
+
 # ===== Function Return Types (Hash Map) =====
 var frt_keys: [text] = []
 var frt_vals: [i64] = []
@@ -141,6 +157,10 @@ fn func_table_reset():
     ft_vals = []
     ft_buckets = hm_make_global_buckets()
     ft_nexts = []
+    fto_owners = []
+    fto_names = []
+    fto_vals = []
+    func_import_binding_reset()
     frt_keys = []
     frt_vals = []
     frt_buckets = hm_make_global_buckets()
@@ -275,6 +295,137 @@ fn func_table_lookup(name: text) -> i64:
             return ft_vals[idx]
         idx = ft_nexts[idx]
     -1
+
+fn func_table_register_owned(owner: text, name: text, decl_id: i64):
+    var i = 0
+    while i < fto_names.len():
+        if fto_owners[i] == owner and fto_names[i] == name:
+            fto_vals[i] = decl_id
+            return
+        i = i + 1
+    fto_owners.push(owner)
+    fto_names.push(name)
+    fto_vals.push(decl_id)
+
+fn func_table_lookup_owned(owner: text, name: text) -> i64:
+    var i = fto_names.len()
+    while i > 0:
+        i = i - 1
+        if fto_owners[i] == owner and fto_names[i] == name:
+            return fto_vals[i]
+    -1
+
+fn func_import_binding_reset():
+    fib_callers = []
+    fib_names = []
+    fib_source_names = []
+    fib_owners = []
+    fmn_callers = []
+    fmn_aliases = []
+    fmn_owners = []
+
+fn func_module_namespace_register(caller: text, alias: text, owner: text):
+    if alias == "" or owner == "":
+        return
+    var i = 0
+    while i < fmn_aliases.len():
+        if fmn_callers[i] == caller and fmn_aliases[i] == alias:
+            fmn_owners[i] = owner
+            return
+        i = i + 1
+    fmn_callers.push(caller)
+    fmn_aliases.push(alias)
+    fmn_owners.push(owner)
+
+fn func_module_namespace_lookup(caller: text, alias: text) -> text:
+    var i = fmn_aliases.len()
+    while i > 0:
+        i = i - 1
+        if fmn_callers[i] == caller and fmn_aliases[i] == alias:
+            return fmn_owners[i]
+    ""
+
+fn func_resolve_module_member_for_caller(
+    caller: text, alias: text, member: text
+) -> i64:
+    val owner = func_module_namespace_lookup(caller, alias)
+    if owner == "":
+        return -1
+    func_resolve_for_caller_depth(owner, member, 0)
+
+fn func_flat_lookup_for_caller(caller: text, name: text) -> i64:
+    val candidate = func_table_lookup(name)
+    if candidate < 0:
+        return -1
+    var i = 0
+    while i < fmn_aliases.len():
+        if fmn_callers[i] == caller and
+           func_resolve_for_caller_depth(fmn_owners[i], name, 0) == candidate:
+            return -1
+        i = i + 1
+    candidate
+
+fn func_import_binding_names(name: text) -> (text, text):
+    # Selective imports encode `source:local` in the parser's use-decl list.
+    # Decode once at registration, not on every call through the alias.
+    val parts = name.split(":")
+    if parts.len() == 2 and parts[0] != "" and parts[1] != "":
+        return (parts[0], parts[1])
+    (name, name)
+
+fn func_import_binding_register(caller: text, name: text, owner: text):
+    val binding_names = func_import_binding_names(name)
+    val source_name = binding_names.0
+    val local_name = binding_names.1
+    var i = 0
+    while i < fib_names.len():
+        if fib_callers[i] == caller and fib_names[i] == local_name:
+            fib_source_names[i] = source_name
+            fib_owners[i] = owner
+            return
+        i = i + 1
+    fib_callers.push(caller)
+    fib_names.push(local_name)
+    fib_source_names.push(source_name)
+    fib_owners.push(owner)
+
+fn func_import_binding_route(caller: text, name: text) -> (text, text):
+    var i = fib_names.len()
+    while i > 0:
+        i = i - 1
+        if fib_callers[i] == caller and fib_names[i] == name:
+            return (fib_owners[i], fib_source_names[i])
+    ("", "")
+
+fn func_import_binding_lookup(caller: text, name: text) -> text:
+    func_import_binding_route(caller, name).0
+
+fn func_resolve_for_caller_depth(caller: text, name: text, depth: i64) -> i64:
+    if depth > 8: return -1
+    val own = func_table_lookup_owned(caller, name)
+    if own >= 0:
+        return own
+    val route = func_import_binding_route(caller, name)
+    val imported_owner = route.0
+    val imported_name = route.1
+    if imported_owner != "" and imported_owner != caller:
+        val did = func_table_lookup_owned(imported_owner, imported_name)
+        if did >= 0:
+            return did
+        # Re-export chain: the imported module (typically a facade that did
+        # `export use owner.{source as local}`) does not define the local name
+        # itself, but it registered its own source binding for the real owner.
+        # Follow that chain. Returning -1 here would let the call evaluator's
+        # legacy flat-table fallback silently dispatch to an unrelated
+        # same-named fn (last-write-wins) — the env_get hijack behind
+        # doc/08_tracking/bug/interp_env_get_name_collision_nil_root_2026-07-26.md
+        return func_resolve_for_caller_depth(imported_owner, imported_name, depth + 1)
+    # No caller route is safer than silently selecting an unrelated module's
+    # last-write-wins entry.  The call evaluator may apply its legacy fallback.
+    -1
+
+fn func_resolve_for_caller(caller: text, name: text) -> i64:
+    func_resolve_for_caller_depth(caller, name, 0)
 
 fn func_table_remove(name: text) -> bool:
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -422,23 +573,33 @@ class MustUseSourceScanState:
         while trim_start < line.len() and (line[trim_start] == " " or line[trim_start] == "\t"):
             trim_start = trim_start + 1
         val trimmed = line[trim_start:]
+        # Annotation lines may add one pending action while preserving another
+        # (for example, @must_use followed by @cfg).  Keep annotation
+        # consumption separate from the generic intervening-code cancellation
+        # below so a non-comment annotation never cancels itself.
+        var annotation_consumed: bool = false
         # Check for @profile(critical)
         if trimmed.starts_with("# @profile(critical)"):
+            annotation_consumed = true
             must_use_critical_mode = true
         # Check for @tailrec annotation — marks function for tail-call optimization
         if trimmed.starts_with("# @tailrec"):
+            annotation_consumed = true
             self.pending_init = false  # @tailrec isn't @init
             self.pending_teardown = false
             # Simply note the next fn as tailrec-annotated for warning purposes
 
         # Check for @init annotation
         if trimmed.starts_with("# @init"):
+            annotation_consumed = true
             self.pending_init = true
         # Check for @teardown annotation
         if trimmed.starts_with("# @teardown"):
+            annotation_consumed = true
             self.pending_teardown = true
         # Check for @when(condition) conditional compilation (comment form: backward compat)
         if trimmed.starts_with("# @when("):
+            annotation_consumed = true
             # Extract condition: "# @when(condition)"
             var when_cond_chars: [text] = []
             var wci: i64 = 8
@@ -452,6 +613,7 @@ class MustUseSourceScanState:
             self.pending_when = when_cond
         # Check for @cfg(condition) — new proper syntax (no # prefix)
         if trimmed.starts_with("@cfg("):
+            annotation_consumed = true
             var cfg_chars: [text] = []
             var cci: i64 = 5
             var cfg_depth: i64 = 1
@@ -481,6 +643,7 @@ class MustUseSourceScanState:
             self.pending_when = cfg_cond
         # Check for @must_use
         if trimmed.starts_with("# @must_use"):
+            annotation_consumed = true
             self.pending_must_use = true
             # Extract reason from @must_use("reason")
             self.pending_reason = ""
@@ -522,7 +685,7 @@ class MustUseSourceScanState:
                     must_use_register(fname, self.pending_reason)
                 self.pending_must_use = false
                 self.pending_reason = ""
-            elif trimmed.starts_with("# ") == false and trimmed != "":
+            elif annotation_consumed == false and trimmed.starts_with("# ") == false and trimmed != "":
                 # Non-comment, non-empty line without fn => cancel pending
                 self.pending_must_use = false
                 self.pending_reason = ""
@@ -553,7 +716,7 @@ class MustUseSourceScanState:
                 self.pending_init = false
                 self.pending_teardown = false
                 self.pending_when = ""
-            elif trimmed.starts_with("# ") == false and trimmed != "":
+            elif annotation_consumed == false and trimmed.starts_with("# ") == false and trimmed != "":
                 self.pending_init = false
                 self.pending_teardown = false
                 self.pending_when = ""

@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+source_root="$work/source"
+mkdir -p "$source_root/bin" "$source_root/scripts/setup" "$source_root/config/mcp"
+printf '%s\n' '# pre-fix obsolete source/SMF startup library' \
+  > "$source_root/config/mcp/mcp_startup_lib.shs"
+
+red_log="$work/pre-fix-red.log"
+if MCP_WRAPPER_CONTRACT_SOURCE_ROOT="$source_root" \
+  sh "$root/scripts/check/check-mcp-wrapper-contract.shs" >"$red_log" 2>&1; then
+  echo "pre-fix fixture unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq 'obsolete MCP startup library must remain deleted' "$red_log"
+printf '%s\n' 'mcp_startup_lib_pre_fix=red'
+
+rm "$source_root/config/mcp/mcp_startup_lib.shs"
+green_log="$work/post-fix-green.log"
+MCP_WRAPPER_CONTRACT_SOURCE_ROOT="$source_root" \
+  sh "$root/scripts/check/check-mcp-wrapper-contract.shs" >"$green_log" 2>&1
+grep -Fq 'mcp_wrapper_source_contract=pass' "$green_log"
+grep -Fq 't32_wrapper_native_contract=pass' "$green_log"
+printf '%s\n' 'mcp_startup_lib_post_fix=green'
+printf '%s\n' 'PASS: obsolete MCP startup library deletion contract'

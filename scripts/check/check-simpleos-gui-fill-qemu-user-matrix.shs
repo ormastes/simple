@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Execute production bare framebuffer kernels for x86, ARM64, and RV64.
+# This is kernel correctness evidence, not a booted guest/display benchmark.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+probe="$root/test/09_baselines/engine2d_simd/simpleos_gui_fill_live_probe.c"
+arm_runtime="$root/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+x86_runtime="$root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/simpleos-gui-fill-matrix.XXXXXX")"
+trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+
+for tool in clang ld.lld qemu-aarch64; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "simpleos_gui_fill_qemu_user_matrix=blocked reason=missing-$tool" >&2
+        exit 2
+    }
+done
+
+arm_common=(
+    -target aarch64-unknown-linux-gnu -O2 -ffreestanding -fno-pie
+    -ffunction-sections -fdata-sections
+)
+clang "${arm_common[@]}" -D_start=bare_runtime_start -c "$arm_runtime" \
+    -o "$work_dir/arm-runtime.o"
+clang "${arm_common[@]}" -c "$probe" -o "$work_dir/arm-probe.o"
+ld.lld -m aarch64elf --gc-sections -static -e _start \
+    "$work_dir/arm-probe.o" "$work_dir/arm-runtime.o" \
+    -o "$work_dir/arm-probe"
+qemu-aarch64 -cpu max "$work_dir/arm-probe"
+echo "simpleos_bare_gui_fill_arm64=pass isa=neon execution=qemu-user"
+
+x86_common=(
+    -target x86_64-unknown-linux-gnu -O2 -ffreestanding -fno-pie
+    -mno-red-zone -ffunction-sections -fdata-sections
+)
+clang "${x86_common[@]}" -D_start=bare_runtime_start -DSIMPLEOS_GUI_FILL_PROBE=1 -c "$x86_runtime" \
+    -o "$work_dir/x86-runtime.o"
+clang "${x86_common[@]}" -c "$probe" -o "$work_dir/x86-probe.o"
+ld.lld -m elf_x86_64 --gc-sections -static -e _start \
+    "$work_dir/x86-probe.o" "$work_dir/x86-runtime.o" \
+    -o "$work_dir/x86-probe"
+"$work_dir/x86-probe"
+echo "simpleos_bare_gui_fill_x86_64=pass isa=sse2 execution=host-user"
+
+"$root/scripts/check/check-simpleos-rv64-gui-fill-qemu-user.shs"
+echo "simpleos_gui_fill_qemu_user_matrix=pass pixels=exact parity=true"

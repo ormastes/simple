@@ -1,0 +1,178 @@
+# codex-system-test
+use std.spec.*
+use compiler.common.cache.reverse_reference_key.{
+    ReverseReferenceKeyV1,
+    reverse_reference_key_validate_v1,
+    reverse_reference_key_encode_v1,
+    reverse_reference_key_digest_v1,
+    reverse_reference_key_decode_v1,
+}
+
+fn digest_a() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn sample_reverse_reference_key() -> ReverseReferenceKeyV1:
+    ReverseReferenceKeyV1(
+        registry_kind: "semantic",
+        owner_generation: "module:owner-generation-17",
+        root_generation: "workspace:root-generation-4",
+        subject_identity: "pkg.example::Widget.render",
+        projection_kind: "direct-import-export",
+        projection_digest: digest_a(),
+        schema_version: 1,
+    )
+
+fn golden_encoded_v1() -> text:
+    "F31:simple/reverse-reference-key/v1Q7:F12:registryKindS8:semanticF15:ownerGenerationS26:module:owner-generation-17F14:rootGenerationS27:workspace:root-generation-4F15:subjectIdentityS26:pkg.example::Widget.renderF14:projectionKindS20:direct-import-exportF16:projectionDigestS64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaF13:schemaVersionN1;"
+
+fn expect_invalid_frame_v1(frame: text, reason: text):
+    val decoded = reverse_reference_key_decode_v1(frame)
+    expect(decoded.valid).to_equal(false)
+    expect(decoded.reason).to_equal(reason)
+    expect(decoded.key == nil).to_equal(true)
+    expect(decoded.digest).to_equal("")
+
+describe "ReverseReferenceKeyV1 framed identity":
+    it "should validate and produce a stable framed digest":
+        step("Validate a complete V1 reverse-reference key")
+        val key = sample_reverse_reference_key()
+        val validation = reverse_reference_key_validate_v1(key)
+        expect(validation.valid).to_equal(true)
+        expect(validation.reason).to_equal("ok")
+        val encoded_once = reverse_reference_key_encode_v1(key)
+        expect(encoded_once).to_equal(golden_encoded_v1())
+        expect(reverse_reference_key_encode_v1(key)).to_equal(encoded_once)
+        val digest_once = reverse_reference_key_digest_v1(key)
+        expect(digest_once).to_equal("17651326a7059fa2f64c5f3109408b76afe682635469a18ea6c208c3da4ddf8d")
+        expect(reverse_reference_key_digest_v1(key)).to_equal(digest_once)
+        val decoded = reverse_reference_key_decode_v1(encoded_once)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.reason).to_equal("ok")
+        expect(decoded.key == nil).to_equal(false)
+        expect(decoded.digest).to_equal(digest_once)
+
+    it "should bind every contract field into the digest":
+        step("Change each framed identity component independently")
+        val base = reverse_reference_key_digest_v1(sample_reverse_reference_key())
+        var registry = sample_reverse_reference_key()
+        registry.registry_kind = "native"
+        expect(reverse_reference_key_digest_v1(registry) == base).to_equal(false)
+        var owner = sample_reverse_reference_key()
+        owner.owner_generation = "module:owner-generation-18"
+        expect(reverse_reference_key_digest_v1(owner) == base).to_equal(false)
+        var root = sample_reverse_reference_key()
+        root.root_generation = "workspace:root-generation-5"
+        expect(reverse_reference_key_digest_v1(root) == base).to_equal(false)
+        var subject = sample_reverse_reference_key()
+        subject.subject_identity = "pkg.example::Widget.paint"
+        expect(reverse_reference_key_digest_v1(subject) == base).to_equal(false)
+        var projection = sample_reverse_reference_key()
+        projection.projection_kind = "module-scc-artifact"
+        expect(reverse_reference_key_digest_v1(projection) == base).to_equal(false)
+        var content = sample_reverse_reference_key()
+        content.projection_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(reverse_reference_key_digest_v1(content) == base).to_equal(false)
+
+    it "should keep delimiter-bearing identities unambiguous at boundaries":
+        step("Frame empty-looking delimiters inside non-empty identity values")
+        var left = sample_reverse_reference_key()
+        left.owner_generation = "a:b|c"
+        left.subject_identity = "d"
+        var right = sample_reverse_reference_key()
+        right.owner_generation = "a"
+        right.subject_identity = "b|c:d"
+        expect(reverse_reference_key_encode_v1(left) == reverse_reference_key_encode_v1(right)).to_equal(false)
+        expect(reverse_reference_key_digest_v1(left) == reverse_reference_key_digest_v1(right)).to_equal(false)
+
+    it "should preserve non-ASCII text under canonical text-length framing":
+        step("Round-trip UTF-8 identities using the canonical Simple text length contract")
+        var key = sample_reverse_reference_key()
+        key.owner_generation = "세대:17"
+        key.subject_identity = "패키지::위젯.렌더"
+        val encoded = reverse_reference_key_encode_v1(key)
+        expect(encoded).to_contain("S5:세대:17")
+        expect(encoded).to_contain("S10:패키지::위젯.렌더")
+        val decoded = reverse_reference_key_decode_v1(encoded)
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.digest).to_equal(reverse_reference_key_digest_v1(key))
+
+describe "ReverseReferenceKeyV1 fail-closed validation":
+    it "should reject unknown registry and projection kinds":
+        step("Present identities from unrecognized registry namespaces")
+        var registry = sample_reverse_reference_key()
+        registry.registry_kind = "global"
+        expect(reverse_reference_key_validate_v1(registry).reason).to_equal("unknown-registry-kind")
+        expect(reverse_reference_key_digest_v1(registry)).to_equal("")
+        var projection = sample_reverse_reference_key()
+        projection.projection_kind = "unknown-change"
+        expect(reverse_reference_key_validate_v1(projection).reason).to_equal("unknown-projection-kind")
+        expect(reverse_reference_key_encode_v1(projection)).to_equal("")
+
+    it "should reject missing generations and subject identity":
+        step("Remove each required generation and identity field")
+        var owner = sample_reverse_reference_key()
+        owner.owner_generation = ""
+        expect(reverse_reference_key_validate_v1(owner).reason).to_equal("missing-owner-generation")
+        var root = sample_reverse_reference_key()
+        root.root_generation = ""
+        expect(reverse_reference_key_validate_v1(root).reason).to_equal("missing-root-generation")
+        var subject = sample_reverse_reference_key()
+        subject.subject_identity = ""
+        expect(reverse_reference_key_validate_v1(subject).reason).to_equal("missing-subject-identity")
+
+    it "should reject unsupported schema versions and corrupted digests":
+        step("Corrupt version and digest framing inputs")
+        var schema = sample_reverse_reference_key()
+        schema.schema_version = 2
+        expect(reverse_reference_key_validate_v1(schema).reason).to_equal("unsupported-schema-version")
+        expect(reverse_reference_key_digest_v1(schema)).to_equal("")
+        var short_digest = sample_reverse_reference_key()
+        short_digest.projection_digest = "abc"
+        expect(reverse_reference_key_validate_v1(short_digest).reason).to_equal("invalid-projection-digest")
+        var uppercase_digest = sample_reverse_reference_key()
+        uppercase_digest.projection_digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        expect(reverse_reference_key_validate_v1(uppercase_digest).reason).to_equal("invalid-projection-digest")
+        var zero_schema = sample_reverse_reference_key()
+        zero_schema.schema_version = 0
+        expect(reverse_reference_key_validate_v1(zero_schema).reason).to_equal("unsupported-schema-version")
+        var invalid_char_digest = sample_reverse_reference_key()
+        invalid_char_digest.projection_digest = "gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(reverse_reference_key_validate_v1(invalid_char_digest).reason).to_equal("invalid-projection-digest")
+
+    it "should reject corrupt persisted framing without yielding a key or digest":
+        step("Decode truncation, altered lengths and counts, and trailing bytes fail closed")
+        val golden = golden_encoded_v1()
+        expect_invalid_frame_v1(golden.substring(0, golden.len() - 1), "invalid-schema-token")
+        expect_invalid_frame_v1(golden.replace("Q7:", "Q6:"), "invalid-domain-or-field-count")
+        expect_invalid_frame_v1(golden.replace("S8:semantic", "S9:semantic"), "invalid-field-order-or-name")
+        expect_invalid_frame_v1(golden + "x", "trailing-data")
+
+    it "should reject missing, reordered, or duplicated fields":
+        step("Require the exact seven canonical fields in their declared order")
+        val golden = golden_encoded_v1()
+        expect_invalid_frame_v1(
+            golden.replace("F12:registryKindS8:semantic", ""),
+            "invalid-field-order-or-name")
+        expect_invalid_frame_v1(
+            golden.replace("F12:registryKindS8:semanticF15:ownerGenerationS26:module:owner-generation-17",
+                "F15:ownerGenerationS26:module:owner-generation-17F12:registryKindS8:semantic"),
+            "invalid-field-order-or-name")
+        expect_invalid_frame_v1(
+            golden.replace("F15:ownerGenerationS26:module:owner-generation-17",
+                "F12:registryKindS8:semanticF15:ownerGenerationS26:module:owner-generation-17"),
+            "invalid-field-order-or-name")
+
+    it "should reject invalid schema tokens and versions from persisted frames":
+        step("Reject negative, zero, malformed, and unsupported schema encodings")
+        val golden = golden_encoded_v1()
+        expect_invalid_frame_v1(golden.replace("N1;", "N-1;"), "invalid-schema-token")
+        expect_invalid_frame_v1(golden.replace("N1;", "N01;"), "invalid-schema-token")
+        expect_invalid_frame_v1(golden.replace("N1;", "N0;"), "unsupported-schema-version")
+        expect_invalid_frame_v1(golden.replace("N1;", "N2;"), "unsupported-schema-version")
+
+    it "should reject invalid persisted digest content at the exact boundary":
+        step("Reject a 64-character non-hex digest after successful frame parsing")
+        val corrupted = golden_encoded_v1().replace(
+            "S64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "S64:gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        expect_invalid_frame_v1(corrupted, "invalid-projection-digest")

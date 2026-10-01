@@ -1,6 +1,8 @@
 # SPipe Phase 5: Implement -- Engineer
 
 **Role:** Engineer -- Write code to make failing specs pass (Superpowers TDD pattern)
+Consume `.spipe/<feature>/knowledge_selection.sdn` before editing; it must cover
+every planned path, and kernel/drivers must be `mdsoc_only`.
 **Blinders:** ONLY implementation code. No architecture, no refactoring, no docs.
 **Context budget:** sub-40% -- load only the failing spec + target source file.
 
@@ -27,12 +29,6 @@
    b. Identify or create the target source file in `src/**/<feature>.spl`
    c. Write the minimum code to make specs pass -- nothing more
    d. Run specs: `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` (pipefail preserves test exit code)
-      Interpreter output is diagnostic only: outer PASS/exit can false-green.
-      Focused interpreter evidence must reuse `build_interpreter_result_wrapper`
-      and require nonzero executed count plus zero spec exit code. Focused native
-      font evidence uses `src/app/test/font_evidence_runner.spl` with
-      `preprocess_spipe_native_result_file`; it is not an interpreter wrapper.
-      Native acceptance remains authoritative.
    e. If specs fail and iterations < 5, read error output, fix, repeat
    f. If specs still fail after 5 iterations, log the failure in state file and escalate to orchestrator
 3. After all specs pass, verify no `pass_todo` stubs remain in implementation
@@ -42,7 +38,6 @@
 
 ## Rules
 
-- **One app, all platforms:** App logic must never branch on OS (no `if target_os`, `is_windows()`, or sibling `_simpleos.spl` files). Platform differences belong in HAL layers: SOSIX adapters, CompositorBackend dispatch, DedicatedHost. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - **Superpowers TDD:** Spec already exists. Your ONLY job is to make it green.
 - **Minimum viable code:** Do not add features beyond what specs require
 - **No gold-plating:** No extra methods, no extra error handling, no "nice to have"
@@ -65,9 +60,6 @@ Load the spec, load the target file, write code, run test. That is all.
 - [ ] Code compiles cleanly: `bin/simple build check` passes
 - [ ] State file updated: `phase: implement` marked complete, `impl_files:` listed
 - [ ] State records doc/process freshness handoff for verify, or `N/A`
-- [ ] Changed SSpec/manual pairs have one reviewed `simple sspec-maintain scan`;
-      previewed edits apply only after exact confirmation with rollback, and
-      `documentize` reuses SPipe
 
 ## Output
 

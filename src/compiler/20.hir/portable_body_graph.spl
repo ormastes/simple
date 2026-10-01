@@ -1,0 +1,284 @@
+# Deterministic unique dependency graph for the portable Base profile.
+# Kahn traversal and longest-path propagation are logically O(V+E) after
+# canonical O(E log E) key sorting. Simple can detach a dictionary-held
+# adjacency array on each append, so the ledger also charges the resulting
+# per-node COW copies before retrieving or mutating those arrays.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use compiler.hir.portable_body_profile_types.{PortableBodyDependencyEdgeV1,
+    PortableBodyGraphFactsV1, PortableBodyErrorV1}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1,
+    portable_body_sort_work_v1}
+use compiler.hir.hir_codec_key_order.{hc_order_i64_keys_v1,
+    hc_order_text_keys_v1}
+
+fn _frame_graph_component_v1(value: text) -> text:
+    text_byte_len(value).to_string() + ":" + value
+
+fn _edge_key_v1(value: PortableBodyDependencyEdgeV1) -> text:
+    _frame_graph_component_v1(value.caller_symbol_id.to_string()) +
+        _frame_graph_component_v1(value.caller_name) +
+        _frame_graph_component_v1(value.callee_symbol_id.to_string()) +
+        _frame_graph_component_v1(value.callee_name)
+
+fn _graph_digest_v1(keys: [text]) -> text:
+    var parts: [text] = ["simple.portable-hir.dependencies.v2\u0000",
+        keys.len().to_string(), ":"]
+    for key in keys: parts.push(_frame_graph_component_v1(key))
+    sha256_text(parts.join(""))
+
+fn _decimal_bytes_v1(value: i64) -> i64:
+    if value == 0: return 1
+    var remaining = value
+    var digits: i64 = 0
+    while remaining > 0:
+        remaining = remaining / 10
+        digits = digits + 1
+    digits
+
+fn _framed_bytes_v1(payload_bytes: i64) -> i64:
+    _decimal_bytes_v1(payload_bytes) + 1 + payload_bytes
+
+fn _charge_i64_order_v1(count: i64, ledger: PortableBodyLedgerV1) -> bool:
+    val compare_work = portable_body_sort_work_v1(count)
+    if compare_work < 0:
+        return ledger.charge_work(-1)
+    # The typed merge owner builds two index arrays and one projected result.
+    # Each merge comparison also performs one scratch write and one copy-back.
+    ledger.charge_work(compare_work) and
+        ledger.charge_work_product(compare_work, 2) and
+        ledger.charge_work_product(count, 2) and
+        ledger.charge_retained_product(count, 32)
+
+fn _charge_text_order_v1(count: i64, total_key_bytes: i64,
+                         max_key_bytes: i64,
+                         ledger: PortableBodyLedgerV1) -> bool:
+    val compare_work = portable_body_sort_work_v1(count)
+    if compare_work < 0:
+        return ledger.charge_work(-1)
+    # UTF-8 images, presence/index/scratch arrays and the projected text array
+    # are all materialized by the typed ordering owner. Long common prefixes
+    # make every comparison scan the longest key in the conservative bound.
+    ledger.charge_work(total_key_bytes) and
+        ledger.charge_work_product(compare_work, 3) and
+        ledger.charge_work_product(compare_work, max_key_bytes) and
+        ledger.charge_work_product(count, 2) and
+        ledger.charge_retained_product(count, 96) and
+        ledger.charge_retained_product(total_key_bytes, 2)
+
+fn _charge_edge_key_v1(edge: PortableBodyDependencyEdgeV1,
+                       ledger: PortableBodyLedgerV1) -> Result<(i64, i64, i64),
+                           PortableBodyErrorV1>:
+    if (edge.caller_name == nil or edge.callee_name == nil or
+            edge.caller_name == "" or edge.callee_name == ""):
+        return Err(PortableBodyErrorV1.UnsupportedSemantics(
+            "dependency edge has an empty function name"))
+    # Four UTF-8 bytes per code point is the scan bound. Charge it before the
+    # exact byte-length pass, then precharge every allocation before key join.
+    if (not ledger.charge_work_product(edge.caller_name.len(), 4) or
+            not ledger.charge_work_product(edge.callee_name.len(), 4)):
+        return Err(ledger.error())
+    val caller_name_bytes = text_byte_len(edge.caller_name)
+    val callee_name_bytes = text_byte_len(edge.callee_name)
+    val caller_id_bytes = _decimal_bytes_v1(edge.caller_symbol_id)
+    val callee_id_bytes = _decimal_bytes_v1(edge.callee_symbol_id)
+    val key_bytes = _framed_bytes_v1(caller_id_bytes) +
+        _framed_bytes_v1(caller_name_bytes) +
+        _framed_bytes_v1(callee_id_bytes) +
+        _framed_bytes_v1(callee_name_bytes)
+    # The conservative factor covers four component frames, their incremental
+    # concatenations, the final edge-key concatenation, and dictionary hashing.
+    # All are charged before `_edge_key_v1` materializes its first string.
+    if (not ledger.charge_text_bytes(key_bytes) or
+            not ledger.charge_work_product(key_bytes, 8) or
+            not ledger.charge_retained_product(key_bytes, 8) or
+            not ledger.charge_retained_bytes(512)):
+        return Err(ledger.error())
+    Ok((key_bytes, caller_name_bytes, callee_name_bytes))
+
+fn _charge_graph_digest_v1(key_count: i64, digest_key_frame_bytes: i64,
+                           ledger: PortableBodyLedgerV1) -> bool:
+    val domain_bytes = "simple.portable-hir.dependencies.v2\u0000".len()
+    val digest_bytes = domain_bytes + _decimal_bytes_v1(key_count) + 1 +
+        digest_key_frame_bytes
+    # Frame construction, parts growth, final join and SHA traversal each have
+    # a full-preimage pass/allocation allowance. This executes before
+    # `_graph_digest_v1` creates the parts array.
+    ledger.charge_work_product(digest_bytes, 6) and
+        ledger.charge_retained_product(digest_bytes, 6) and
+        ledger.charge_retained_product(key_count + 3, 64)
+
+fn _portable_body_graph_analyze_v1(
+    node_ids: [i64],
+    occurrences: [PortableBodyDependencyEdgeV1],
+    ledger: PortableBodyLedgerV1,
+    occurrence_base: i64,
+    occurrences_precharged: bool,
+) -> Result<PortableBodyGraphFactsV1, PortableBodyErrorV1>:
+    if occurrences_precharged:
+        if (occurrence_base < 0 or
+                occurrences.len() >
+                    ledger.limits.max_call_occurrences - occurrence_base or
+                ledger.snapshot().call_occurrences !=
+                    occurrence_base + occurrences.len()):
+            return Err(PortableBodyErrorV1.BoundsExceeded(
+                "call occurrence reservation mismatch"))
+    elif not ledger.charge_call_occurrences(occurrences.len()):
+        return Err(ledger.error())
+    if (not ledger.charge_graph_nodes(node_ids.len()) or
+            not _charge_i64_order_v1(node_ids.len(), ledger) or
+            not ledger.charge_retained_product(node_ids.len(), 192)):
+        return Err(ledger.error())
+    val sorted_nodes = hc_order_i64_keys_v1(node_ids)
+    var node_set: Dict<i64, bool> = {}
+    var prior: i64 = -1
+    for node in sorted_nodes:
+        if node == nil or node < 0 or node == prior:
+            return Err(PortableBodyErrorV1.UnsupportedSemantics(
+                "duplicate or negative graph node"))
+        node_set[node] = true
+        prior = node
+        if not ledger.charge_work(1): return Err(ledger.error())
+
+    var edge_by_key: Dict<text, PortableBodyDependencyEdgeV1> = {}
+    var node_name_by_id: Dict<i64, text> = {}
+    var unique_edge_count: i64 = 0
+    var total_unique_key_bytes: i64 = 0
+    var max_unique_key_bytes: i64 = 0
+    var digest_key_frame_bytes: i64 = 0
+    for edge in occurrences:
+        if (edge.caller_symbol_id == nil or edge.callee_symbol_id == nil or
+                edge.caller_symbol_id < 0 or edge.callee_symbol_id < 0 or
+                not node_set.has(edge.caller_symbol_id) or
+                not node_set.has(edge.callee_symbol_id)):
+            return Err(PortableBodyErrorV1.UnsupportedSemantics(
+                "dependency edge names a foreign function"))
+        val key_charge = _charge_edge_key_v1(edge, ledger)?
+        val (key_bytes, caller_name_bytes, callee_name_bytes) = key_charge
+        if node_name_by_id.has(edge.caller_symbol_id):
+            if node_name_by_id[edge.caller_symbol_id] != edge.caller_name:
+                return Err(PortableBodyErrorV1.UnsupportedSemantics(
+                    "dependency graph node name mismatch"))
+        else:
+            if not ledger.charge_retained_bytes(caller_name_bytes + 64):
+                return Err(ledger.error())
+            node_name_by_id[edge.caller_symbol_id] = edge.caller_name
+        if node_name_by_id.has(edge.callee_symbol_id):
+            if node_name_by_id[edge.callee_symbol_id] != edge.callee_name:
+                return Err(PortableBodyErrorV1.UnsupportedSemantics(
+                    "dependency graph node name mismatch"))
+        else:
+            if not ledger.charge_retained_bytes(callee_name_bytes + 64):
+                return Err(ledger.error())
+            node_name_by_id[edge.callee_symbol_id] = edge.callee_name
+        val key = _edge_key_v1(edge)
+        if text_byte_len(key) != key_bytes:
+            return Err(PortableBodyErrorV1.UnsupportedSemantics(
+                "dependency key framing mismatch"))
+        if not ledger.charge_work(1):
+            return Err(ledger.error())
+        if not edge_by_key.has(key):
+            if (not ledger.charge_dependency_edges(1) or
+                    not ledger.charge_retained_bytes(128 + key_bytes +
+                        caller_name_bytes + callee_name_bytes)):
+                return Err(ledger.error())
+            edge_by_key[key] = edge
+            unique_edge_count = unique_edge_count + 1
+            total_unique_key_bytes = total_unique_key_bytes + key_bytes
+            if key_bytes > max_unique_key_bytes:
+                max_unique_key_bytes = key_bytes
+            digest_key_frame_bytes = digest_key_frame_bytes +
+                _framed_bytes_v1(key_bytes)
+
+    # Dict.keys(), typed UTF-8 ordering and its COW arenas are all charged
+    # before the first snapshot or comparison allocation occurs.
+    if (not ledger.charge_work(unique_edge_count) or
+            not ledger.charge_retained_product(unique_edge_count, 32)):
+        return Err(ledger.error())
+    val edge_snapshot = edge_by_key.keys()
+    if not _charge_text_order_v1(unique_edge_count, total_unique_key_bytes,
+            max_unique_key_bytes, ledger):
+        return Err(ledger.error())
+    val edge_keys = hc_order_text_keys_v1(edge_snapshot)
+    if (not ledger.charge_retained_product(unique_edge_count, 128) or
+            not ledger.charge_retained_product(node_ids.len(), 256) or
+            not ledger.charge_work_product(node_ids.len(), 4)):
+        return Err(ledger.error())
+    var edges: [PortableBodyDependencyEdgeV1] = []
+    var adjacency: Dict<i64, [i64]> = {}
+    var outdegree: Dict<i64, i64> = {}
+    var indegree: Dict<i64, i64> = {}
+    var distance: Dict<i64, i64> = {}
+    for node in sorted_nodes:
+        adjacency[node] = []
+        outdegree[node] = 0
+        indegree[node] = 0
+        distance[node] = 1
+    for key in edge_keys:
+        val edge = edge_by_key[key]
+        val prior_callees = outdegree[edge.caller_symbol_id]
+        val copied_callees = prior_callees + 1
+        # Retrieving and mutating a dictionary-held array may detach its COW
+        # value. Charge the complete copied value before the retrieval/push.
+        if (not ledger.charge_work(copied_callees) or
+                not ledger.charge_retained_product(copied_callees, 16) or
+                not ledger.charge_retained_bytes(32)):
+            return Err(ledger.error())
+        edges.push(edge)
+        var callees = adjacency[edge.caller_symbol_id]
+        callees.push(edge.callee_symbol_id)
+        adjacency[edge.caller_symbol_id] = callees
+        outdegree[edge.caller_symbol_id] = copied_callees
+        indegree[edge.callee_symbol_id] = indegree[edge.callee_symbol_id] + 1
+        if not ledger.charge_work(1): return Err(ledger.error())
+
+    if not ledger.charge_retained_product(node_ids.len(), 32):
+        return Err(ledger.error())
+    var queue: [i64] = []
+    for node in sorted_nodes:
+        if indegree[node] == 0: queue.push(node)
+    var cursor: i64 = 0
+    var processed: i64 = 0
+    var longest: i64 = 0
+    while cursor < queue.len():
+        val node = queue[cursor]
+        cursor = cursor + 1
+        processed = processed + 1
+        if distance[node] > longest: longest = distance[node]
+        if not ledger.charge_work(1): return Err(ledger.error())
+        for callee in adjacency[node]:
+            val candidate = distance[node] + 1
+            if candidate > distance[callee]: distance[callee] = candidate
+            indegree[callee] = indegree[callee] - 1
+            if indegree[callee] == 0: queue.push(callee)
+            if not ledger.charge_work(1): return Err(ledger.error())
+    if processed != sorted_nodes.len():
+        return Err(PortableBodyErrorV1.UnsupportedSemantics(
+            "recursive dependency graph"))
+    if longest > ledger.limits.max_call_chain_depth:
+        return Err(PortableBodyErrorV1.BoundsExceeded("call chain depth budget"))
+    if not _charge_graph_digest_v1(unique_edge_count,
+            digest_key_frame_bytes, ledger):
+        return Err(ledger.error())
+    Ok(PortableBodyGraphFactsV1(dependency_edges: edges,
+        dependency_digest: _graph_digest_v1(edge_keys),
+        call_occurrences: occurrences.len(), longest_call_chain: longest))
+
+pub fn portable_body_graph_analyze_v1(
+    node_ids: [i64],
+    occurrences: [PortableBodyDependencyEdgeV1],
+    ledger: PortableBodyLedgerV1,
+) -> Result<PortableBodyGraphFactsV1, PortableBodyErrorV1>:
+    _portable_body_graph_analyze_v1(node_ids, occurrences, ledger, 0, false)
+
+# Cross-module owner seam: the HIR verifier reserves every occurrence before
+# retaining it, then supplies the exact starting counter to prevent bypass.
+pub fn portable_body_graph_analyze_precharged_v1(
+    node_ids: [i64],
+    occurrences: [PortableBodyDependencyEdgeV1],
+    ledger: PortableBodyLedgerV1,
+    occurrence_base: i64,
+) -> Result<PortableBodyGraphFactsV1, PortableBodyErrorV1>:
+    _portable_body_graph_analyze_v1(node_ids, occurrences, ledger,
+        occurrence_base, true)

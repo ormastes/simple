@@ -1,4 +1,8 @@
 # `window_record_encode` is imported by the SPM client but defined nowhere; its spec only length-compares two self-generated encodings
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — architectural/out-of-scope for a measurement lane (needs SPM
 wire-format investigation before an encoder can be written; re-confirmed
@@ -79,3 +83,4 @@ Closing this properly needs the SpmService side of the wire format identified
 the spec's length-only assertions replaced with byte-level assertions against a
 recorded reference encoding. That is an SPM/transport lane, not a compositor
 measurement lane.
+

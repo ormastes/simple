@@ -1,0 +1,203 @@
+#!/bin/sh
+# Fail-closed uniqueness gate over the tracking DB `.sdn` files.
+#
+# Incident: doc/08_tracking/bug/todo_db_duplicate_ids_2026-09-13.md (and its
+# sibling in the same tree) — a whole-working-copy "chore(sync)" commit
+# (13ca132a222) appended a stale local `todo-scan` re-numbering starting back
+# at id 0 onto the existing todo_db.sdn table, producing 263 duplicate ids
+# (0-262 each twice, 559 rows total) that PR #850 claimed to have repaired but
+# did not touch the DB file at all. No guard existed to catch a table whose
+# ids are not unique, so the duplication sat on `main` undetected.
+#
+# This checks bug_db.sdn (`bugs` and `bugs_active` tables) and todo_db.sdn
+# (`todos` table): every row's leading `id` column must be unique WITHIN its
+# table. A table is identified by its header line `<name> |id, ...|`; rows
+# are the non-empty, non-header lines that follow up to the next header or
+# EOF. Quoted commas inside a description field are respected so a
+# description containing a comma does not shift the id column.
+#
+# Verdict convention matches the sibling push guards in this directory:
+#   PASS  — "PASS — <n> row(s) checked across <k> table(s), 0 duplicate ids"  exit 0
+#   FAIL  — "FAIL — <n> row(s) checked, <m> duplicate id(s): <table>:<id> (x<count>) ..."  exit 1
+#   ERROR — "ERROR — nothing was checked (<reason>)"  exit 2
+# A 0-row scan is always ERROR, never a vacuous PASS.
+#
+# Usage:
+#   sh scripts/check/check-tracking-db-unique-ids.shs [file ...]
+#   sh scripts/check/check-tracking-db-unique-ids.shs --selftest
+#
+# With no file argument, scans the two canonical DBs:
+#   doc/08_tracking/bug/bug_db.sdn
+#   doc/08_tracking/todo/todo_db.sdn
+
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+
+# ---------------------------------------------------------------------------
+# Core: scan_file <path> -> writes "<table>\t<id>" lines to stdout for every
+# data row found, split into one or more tables per header line.
+# ---------------------------------------------------------------------------
+scan_file() {
+    path="$1"
+    [ -f "$path" ] || { echo "ERR_MISSING $path" >&2; return 2; }
+    awk '
+        BEGIN { table = "" }
+        {
+            line = $0
+            # Header line: "<name> |id, ...|" — first non-space token, then a
+            # literal " |" introducing the column spec.
+            if (line ~ /^[A-Za-z_][A-Za-z0-9_]* \|/) {
+                split(line, parts, " ")
+                table = parts[1]
+                next
+            }
+            if (table == "") next
+            # Skip blank lines
+            tmp = line
+            gsub(/^[ \t]+/, "", tmp)
+            if (tmp == "") next
+            # Extract the id: leading token up to the first UNQUOTED comma.
+            id = ""
+            in_quotes = 0
+            n = length(tmp)
+            for (i = 1; i <= n; i++) {
+                c = substr(tmp, i, 1)
+                if (c == "\"") { in_quotes = !in_quotes; continue }
+                if (c == "," && !in_quotes) { break }
+                id = id c
+            }
+            gsub(/^[ \t]+|[ \t]+$/, "", id)
+            if (id == "") next
+            print table "\t" id
+        }
+    ' "$path"
+}
+
+run_selftest() {
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    # Fixture 1: clean table, must PASS.
+    cat > "$tmp/clean.sdn" <<'EOF'
+todos |id, keyword, description|
+    0, TODO, "first"
+    1, TODO, "second"
+    2, TODO, "has, a comma", extra
+EOF
+    out=$(sh "$0" "$tmp/clean.sdn") || { echo "SELFTEST FAIL: fixture 1 (clean) unexpectedly failed: $out" >&2; exit 1; }
+    case "$out" in
+        "PASS —"*) ;;
+        *) echo "SELFTEST FAIL: fixture 1 expected PASS, got: $out" >&2; exit 1 ;;
+    esac
+
+    # Fixture 2: duplicate id within one table, must FAIL naming it.
+    cat > "$tmp/dup.sdn" <<'EOF'
+todos |id, keyword, description|
+    0, TODO, "first"
+    1, TODO, "second"
+    0, TODO, "duplicate of first"
+EOF
+    set +e
+    out=$(sh "$0" "$tmp/dup.sdn" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -eq 1 ] || { echo "SELFTEST FAIL: fixture 2 (dup) expected exit 1, got $rc: $out" >&2; exit 1; }
+    case "$out" in
+        *"FAIL —"*"todos:0"*) ;;
+        *) echo "SELFTEST FAIL: fixture 2 expected FAIL naming todos:0, got: $out" >&2; exit 1 ;;
+    esac
+
+    # Fixture 3: two tables in one file, duplicate ids across tables are
+    # NOT an offense (ids are scoped per-table) — must PASS.
+    cat > "$tmp/twotables.sdn" <<'EOF'
+bugs |id, title|
+    0, "bug zero"
+    1, "bug one"
+bugs_active |id, title|
+    0, "active zero (same id, different table — allowed)"
+EOF
+    out=$(sh "$0" "$tmp/twotables.sdn") || { echo "SELFTEST FAIL: fixture 3 (cross-table) unexpectedly failed: $out" >&2; exit 1; }
+    case "$out" in
+        "PASS —"*) ;;
+        *) echo "SELFTEST FAIL: fixture 3 expected PASS, got: $out" >&2; exit 1 ;;
+    esac
+
+    # Fixture 4: empty scan must ERROR, never a vacuous pass.
+    cat > "$tmp/empty.sdn" <<'EOF'
+todos |id, keyword, description|
+EOF
+    set +e
+    out=$(sh "$0" "$tmp/empty.sdn" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || { echo "SELFTEST FAIL: fixture 4 (empty) expected exit 2, got $rc: $out" >&2; exit 1; }
+    case "$out" in
+        *"ERROR —"*) ;;
+        *) echo "SELFTEST FAIL: fixture 4 expected ERROR, got: $out" >&2; exit 1 ;;
+    esac
+
+    echo "SELFTEST PASS: 4/4 fixtures"
+    trap - EXIT
+    rm -rf "$tmp"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    export TRACKING_DB_UNIQUE_IDS_NO_SELFTEST=1
+    run_selftest
+    exit 0
+fi
+
+# Selftest recurses into `sh "$0" <fixture>` invocations; guard against those
+# nested invocations re-running the selftest themselves (which would recurse
+# without bound).
+if [ "${TRACKING_DB_UNIQUE_IDS_NO_SELFTEST:-}" != "1" ]; then
+    export TRACKING_DB_UNIQUE_IDS_NO_SELFTEST=1
+    run_selftest > /dev/null
+fi
+
+if [ "$#" -gt 0 ]; then
+    files="$*"
+else
+    files="$repo_root/doc/08_tracking/bug/bug_db.sdn $repo_root/doc/08_tracking/todo/todo_db.sdn"
+fi
+
+rows_file=$(mktemp)
+trap 'rm -f "$rows_file"' EXIT
+
+checked_files=0
+for f in $files; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR — nothing was checked (file not found: $f)"
+        exit 2
+    fi
+    scan_file "$f" >> "$rows_file"
+    checked_files=$((checked_files + 1))
+done
+
+total_rows=$(wc -l < "$rows_file" | tr -d ' ')
+
+if [ "$total_rows" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 rows found across $checked_files file(s): $files)"
+    exit 2
+fi
+
+# uniq -c output fields (default whitespace FS, tab counts as whitespace):
+#   $1 = count, $2 = table, $3 = id
+dup_lines=$(sort "$rows_file" | uniq -c | awk '$1 > 1')
+
+dup_count=0
+dup_names=""
+if [ -n "$dup_lines" ]; then
+    dup_count=$(printf '%s\n' "$dup_lines" | wc -l | tr -d ' ')
+    dup_names=$(printf '%s\n' "$dup_lines" | awk '{ printf " %s:%s (x%s)", $2, $3, $1 }')
+fi
+
+if [ "$dup_count" -gt 0 ]; then
+    echo "FAIL — $total_rows row(s) checked across $checked_files table file(s), $dup_count duplicate id(s):$dup_names"
+    exit 1
+fi
+
+table_count=$(awk -F'\t' '{print $1}' "$rows_file" | sort -u | wc -l | tr -d ' ')
+echo "PASS — $total_rows row(s) checked across $table_count table(s), 0 duplicate ids"
+exit 0

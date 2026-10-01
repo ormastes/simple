@@ -1,4 +1,8 @@
 # The `p1_unassigned.tsv` `file` column names the wrapper, not the implementation
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-17. Affects the 121-row unassigned-P1 worklist
 (`scratchpad/triage/p1_unassigned.tsv`).
@@ -47,3 +51,4 @@ function restored (see
 2026-08-16 22:59:37 — it predates the fix and will reproduce the bug from a
 stale binary, yielding a false RED. A `.spl` source change needs no build, but
 this fix is in the Rust seed and does.
+

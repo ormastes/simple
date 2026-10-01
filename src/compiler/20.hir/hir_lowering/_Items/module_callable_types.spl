@@ -1,5 +1,9 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
+# `ReturnScan` is used in DECLARATION position here (return type of
+# scan_ast_block_for_returns :359, scan_ast_stmt_for_returns :365,
+# scan_ast_expr_for_returns :417) with NO import of it at all.
+use compiler.hir.hir_lowering._Items.lowering_helpers.{ReturnScan, return_scan_empty, merge_return_scan, hir_type_simple_name, hir_type_kind_from_simple_name, hir_simple_type_name_is_known, ast_binop_is_comparison, ast_binop_is_arith}   # ReturnScan declared: src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl:444
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -13,6 +17,8 @@ use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.type_aliases.*
+use compiler.hir.hir_lowering.types.{hir_type_env_get}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
@@ -33,6 +39,7 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.sffi_identity.{sffi_raw_callable_effects}
 
 impl HirLowering:
     me prescan_composite_field_types(name: text, fields: [ParserField]):
@@ -44,6 +51,34 @@ impl HirLowering:
             field_order = field_order.push(field.name)
         self.struct_field_types_by_name[name] = field_types
         self.struct_field_order_by_name[name] = field_order
+        # MODULE-QUALIFIED KEY (2026-08-24). The bare name is NOT a unique key:
+        # two modules may declare the same composite name, and the second
+        # registration silently overwrites the first, so every field read
+        # against the loser resolves through the winner's field set and the
+        # WHOLE field set reads as invisible. Measured in the stage-3 self-host
+        # run: `JitInstantiator` is declared by both
+        # `src/compiler/99.loader/jit_instantiator.spl` and
+        # `src/compiler/99.loader/loader/jit_instantiator.spl` (drifted copies,
+        # same field NAMES, different field TYPES), producing 83 of the 405 HIR
+        # lowering fatals.
+        #
+        # The consumer side already prefers a module-qualified key --
+        # `field_type_for_owner_raw` (expression_support.spl) builds
+        # `defining_module + "." + name` and only falls back to the bare name
+        # when that key is absent -- and the IMPORT path already registers one
+        # (`module_import_registration.spl`, `canonical_composite_name`). Local
+        # declarations were the only writer that never registered it, so the
+        # lookup always fell back to the colliding bare key.
+        #
+        # `declare_module_symbols` passes `self.module_filename` as the symbol's
+        # `defining_module`, so that is the spelling the reader reconstructs;
+        # it must be used verbatim here or the key will not be found.
+        # Purely ADDITIVE: the bare key above is still written, so any consumer
+        # that has no owner symbol (and therefore cannot build the qualified
+        # key) keeps resolving exactly as before.
+        if self.module_filename != "":
+            self.struct_field_types_by_name[self.module_filename + "." + name] = field_types
+            self.struct_field_order_by_name[self.module_filename + "." + name] = field_order
 
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
@@ -58,6 +93,11 @@ impl HirLowering:
         for f in hir_struct.fields:
             field_types[f.name] = f.type_
         self.struct_field_types_by_name[hir_struct.name] = field_types
+        # Module-qualified key -- see the rationale on the twin write in
+        # `prescan_composite_field_types` above. Same reason, same spelling,
+        # same additive stance: the bare key is still written.
+        if self.module_filename != "":
+            self.struct_field_types_by_name[self.module_filename + "." + hir_struct.name] = field_types
 
     # Untyped-return inference (native --entry path) -- see the `ReturnScan`
     # doc comment in lowering_helpers.spl for the full rationale. Runs over
@@ -135,13 +175,33 @@ impl HirLowering:
         else:
             self.infer_untyped_return_type(fn_decl)
         val callable_type = HirType(
-            kind: HirTypeKind.Function(param_types, return_type, []),
+            kind: HirTypeKind.Function(
+                param_types,
+                return_type,
+                sffi_raw_callable_effects(fn_decl.is_extern, fn_decl.span)),
             span: fn_decl.span
         )
-        Some(callable_type)
+        # Bare-lift: an explicit `Some(...)` tail in a `-> HirType?` function
+        # allocates a heap Option BOX on the native lane instead of lifting the
+        # bare value into the optional slot (same defect the 2026-07-23
+        # bare-lift notes describe in module_declarations_bootstrap.spl:433).
+        # The box then lands in `HirSymbol.type_`, and every consumer that
+        # reads it AS a HirType -- notably the generated HIR-cache encoder
+        # `hc_enc_hir_type` -- reads the box header as `.kind` and the box's
+        # second word as `.span`, untags that non-pointer and dereferences it:
+        # deterministic SIGSEGV on `native-build` of any program (bug
+        # hir_cache_encode_segv_some_box_in_symbol_type_2026-08-23).
+        # The sibling `declared_surface_callable_type` below already returns the
+        # bare value from its `-> HirType?` tail; match it.
+        callable_type
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
-        if callable.type_params.len() > 0 or not callable.has_return_type:
+        if callable.type_params.len() > 0:
+            return nil
+        # A bodyless extern with no arrow has a complete Unit return contract;
+        # retaining its callable type is required for imported alias authority.
+        # Ordinary untyped functions keep the existing inference path.
+        if not callable.has_return_type and not callable.is_extern:
             return nil
         if self.registering_import_symbols:
             return nil
@@ -162,16 +222,38 @@ impl HirLowering:
                 return nil
             param_types = param_types.push(self.lower_type(callable.params[param_idx].type_))
             param_idx = param_idx + 1
-        HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span)
+        val return_type = if callable.has_return_type:
+            self.lower_type(callable.return_type)
+        else:
+            HirType(kind: HirTypeKind.Unit, span: callable.span)
+        HirType(
+            kind: HirTypeKind.Function(
+                param_types,
+                return_type,
+                sffi_raw_callable_effects(callable.is_extern, callable.span)),
+            span: callable.span)
 
     me imported_surface_type(type_: Type, imported_module_name: text) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
         if source_name != "":
+            var arguments: [HirType] = []
+            for argument in parser_type_kind_named_args(type_.kind):
+                arguments = arguments.push(self.imported_surface_type(argument, imported_module_name))
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, source_name)
             if raw_symbol_id >= 0:
-                return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
-            return self.lower_type(type_)
+                return HirType(kind: self.lower_named_symbol_kind(SymbolId(id: raw_symbol_id), arguments, type_.span), span: type_.span)
+            # Level-gated OWNER probe (default off). This fall-through hands the
+            # type to `lower_type`, which resolves in the IMPORTER's scope; the
+            # resulting `unresolved type: X` carries a SYNTHESIZED span
+            # (span_file empty, line 0) and is attributed to the importer, so
+            # nothing in the diagnostic names the owner whose surface asked for
+            # it. `[ist-proj-miss]` does not cover this path -- it fires only in
+            # `imported_surface_type_projected` -- which is why HirModule and
+            # LocalId produced zero probe lines of any kind.
+            if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
+                eprint("[ist-scalar-fallthrough] name={source_name} owner={imported_module_name} lowering={self.module_filename}")
+            return HirType(kind: self.lower_named_kind(source_name, arguments, type_.span), span: type_.span)
         # COMPOSITE shapes must be projected ELEMENTWISE.
         #
         # Only a TOP-LEVEL Named type used to be projected through the
@@ -202,6 +284,15 @@ impl HirLowering:
                 lowered_elements = lowered_elements.push(
                     self.imported_surface_type(element, imported_module_name))
             return HirType(kind: HirTypeKind.Tuple(lowered_elements), span: type_.span)
+        # Pointer / Union / Function are composite shapes the MATERIALIZATION
+        # walk (`parser_type_named_dependencies`, 10.frontend/parser_types_expr.spl)
+        # binds dependencies for and this projection walk used to drop. Each
+        # dropped shape fell through to `lower_type`, which resolves in the
+        # IMPORTER's scope, and died as a hard `unresolved type: X` blamed on an
+        # innocent importer. The arms landed once and were lost with the
+        # src/compiler restore in fcbec1c3b62; restored elementwise here, next
+        # to the current name-based Array arm rather than replacing it.
+        # Ratcheted by scripts/check/check-type-walk-constructor-parity.shs.
         if parser_type_kind_is_pointer(type_.kind):
             val pointee = parser_type_kind_pointer_inner(type_.kind, type_)
             return HirType(
@@ -216,6 +307,20 @@ impl HirLowering:
                 projected_members = projected_members.push(
                     self.imported_surface_type(member, imported_module_name))
             return HirType(kind: HirTypeKind.Union(projected_members), span: type_.span)
+        val array_element_name = parser_type_kind_array_element_name(type_.kind)
+        if array_element_name != "":
+            val source_element = parser_type_kind_array_element(type_.kind, type_)
+            val element = self.imported_surface_type(source_element, imported_module_name)
+            return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
+        # ARRAY WHOSE ELEMENT IS NOT A PLAIN NAMED TYPE must still be projected
+        # ELEMENTWISE. The branch above is keyed on
+        # `parser_type_kind_array_element_name`, which answers "" for BOTH "not
+        # an array" and "an array of something that is not a bare Named" --
+        # `[(text, MirType)]`, `[[T]]`, `[T?]`. So an array-of-TUPLE fell past
+        # it to `lower_type`, which resolves names in the IMPORTER's scope,
+        # where a cross-module signature dependency is bound only as
+        # `{owner}::{name}`.
+        # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
         if parser_type_kind_is_array(type_.kind):
             val nested_element = parser_type_kind_array_element(type_.kind, type_)
             return HirType(
@@ -236,6 +341,12 @@ impl HirLowering:
                         imported_module_name),
                     []),
                 span: type_.span)
+        # Level-gated OWNER probe (default off) on the CATCH-ALL fall-through --
+        # the shape that matched none of the projected constructors. Same
+        # rationale as the scalar probe above: without it the importer-scope
+        # failure is anonymous.
+        if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
+            eprint("[ist-catchall-fallthrough] owner={imported_module_name} lowering={self.module_filename}")
         self.lower_type(type_)
 
     me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:
@@ -243,10 +354,13 @@ impl HirLowering:
         # nested Dict/array boundary.  The retained Type remains the complete
         # fallback for shapes not yet affected by the staged-native ABI bug.
         if type_name != "":
+            var arguments: [HirType] = []
+            for argument in parser_type_kind_named_args(type_.kind):
+                arguments = arguments.push(self.imported_surface_type(argument, imported_module_name))
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
-                return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+                return HirType(kind: self.lower_named_symbol_kind(SymbolId(id: raw_symbol_id), arguments, type_.span), span: type_.span)
             # `has_X` is the optional sugar for `X?`; the surface records it
             # verbatim. Project the BASE through the owner's qualified scope
             # before falling back, otherwise lower_named_kind strips the
@@ -258,25 +372,22 @@ impl HirLowering:
                 val has_symbol_id = self.symbols.lookup_qualified_type_raw(
                     imported_module_name, type_name[4:])
                 if has_symbol_id >= 0:
-                    return HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Named(SymbolId(id: has_symbol_id), []), span: type_.span)), span: type_.span)
-            return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
+                    return HirType(kind: HirTypeKind.Optional(HirType(kind: self.lower_named_symbol_kind(SymbolId(id: has_symbol_id), [], type_.span), span: type_.span)), span: type_.span)
+            if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
+                eprint("[ist-proj-miss] name={type_name} owner={imported_module_name} lowering={self.module_filename}")
+            return HirType(kind: self.lower_named_kind(type_name, arguments, type_.span), span: type_.span)
         if array_element_name != "":
-            val raw_element_id = self.symbols.lookup_qualified_type_raw(
-                imported_module_name, array_element_name)
-            var element: HirType = HirType(kind: HirTypeKind.Error, span: type_.span)
-            if raw_element_id >= 0:
-                element = HirType(
-                    kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []),
-                    span: type_.span)
-            else:
-                element = HirType(
-                    kind: self.lower_named_kind(array_element_name, [], type_.span),
-                    span: type_.span)
+            val source_element = parser_type_kind_array_element(type_.kind, type_)
+            val element = self.imported_surface_type(source_element, imported_module_name)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         self.imported_surface_type(type_, imported_module_name)
 
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
-        if callable.type_params.len() > 0 or not callable.has_return_type:
+        if callable.type_params.len() > 0:
+            return nil
+        # A bodyless extern with no arrow has a complete Unit return contract;
+        # retaining its callable type is required for imported alias authority.
+        if not callable.has_return_type and not callable.is_extern:
             return nil
         var param_types: [HirType] = []
         var param_idx = 0
@@ -294,15 +405,19 @@ impl HirLowering:
             param_types = param_types.push(self.imported_surface_type_projected(
                 param.type_, param.type_name, param.array_element_name, imported_module_name))
             param_idx = param_idx + 1
+        val return_type = if callable.has_return_type:
+            self.imported_surface_type_projected(
+                callable.return_type,
+                callable.return_type_name,
+                callable.return_array_element_name,
+                imported_module_name)
+        else:
+            HirType(kind: HirTypeKind.Unit, span: callable.span)
         HirType(
             kind: HirTypeKind.Function(
                 param_types,
-                self.imported_surface_type_projected(
-                    callable.return_type,
-                    callable.return_type_name,
-                    callable.return_array_element_name,
-                    imported_module_name),
-                []),
+                return_type,
+                sffi_raw_callable_effects(callable.is_extern, callable.span)),
             span: callable.span)
 
     me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:

@@ -1,0 +1,185 @@
+# Auto-Vectorization Alias Oracle
+#
+# The gate on making `PassKind.AutoVectorize` an `Active` pass.
+#
+# `check_array_aliasing` (auto_vectorize_analysis.spl) only compares accesses
+# that share a `base_array.id`, and `are_indices_independent` admits a pair
+# only when BOTH indices are the induction variable. That is conservative
+# *within* one base array. What it cannot do is decide whether two DIFFERENT
+# base locals point at the same allocation:
+#
+#     out[i] = a[i] + b[i]     # out and a are distinct locals...
+#                              # ...that may be one buffer at two offsets
+#
+# Scalar order is: read a[i], write out[i], i ascending. A vector body reads
+# a[i..i+VF] BEFORE writing out[i..i+VF]. If `out` is `buf` and `a` is `buf+1`,
+# the scalar loop sees each write before the read that follows it and the
+# vector loop does not - different results, silently. That is a
+# miscompilation, not a missed optimization, which is why the pass status must
+# not flip without deciding this question.
+#
+# Two facts make the decision tractable without full points-to analysis:
+#
+#   1. Every admitted recipe indexes every access by the induction variable
+#      directly (enforced upstream). Two accesses through the SAME base
+#      therefore always touch the SAME element - an exact alias, which is safe.
+#   2. So the only hazard is two DIFFERENT bases whose ranges overlap at a
+#      non-zero offset.
+#
+# The safety predicate for one (output, input) pair is therefore
+#
+#     safe  <=>  same base  OR  ranges disjoint
+#
+# and the unsafe window is exactly  0 < |out - in| < span_bytes.
+
+use compiler.mir.mir_data.{LocalId}
+
+# ============================================================================
+# Verdict
+# ============================================================================
+
+enum AliasVerdict:
+    """How a recipe base-pointer set was decided."""
+    ProvenDisjoint      # statically distinct allocations - vectorize directly
+    ExactAliasOnly      # every pair is the same base - safe at identical indices
+    NeedsRuntimeGuard   # undecidable statically - emit the range check
+    Unsafe              # provably overlapping at an unknown offset - refuse
+
+struct AliasDecision:
+    verdict: AliasVerdict
+    reason:  text
+
+# ============================================================================
+# What the caller knows about a base
+# ============================================================================
+
+struct AliasBase:
+    """One base pointer as the oracle sees it.
+
+    local_id:      the MIR local holding the base.
+    origin_id:     identity of the allocation the base provably comes from, or
+                   -1 when unknown. Two bases with different non-negative
+                   origins are DIFFERENT allocations; -1 proves nothing.
+    is_parameter:  the base arrived as a function parameter. Two parameters can
+                   always alias - nothing in the signature forbids it - so this
+                   is the case that forces a runtime guard, not a static answer.
+    """
+    local_id:     i64
+    origin_id:    i64
+    is_parameter: bool
+
+fn alias_base(local_id: i64, origin_id: i64, is_parameter: bool) -> AliasBase:
+    AliasBase(local_id: local_id, origin_id: origin_id, is_parameter: is_parameter)
+
+# ============================================================================
+# Pairwise decision - pure, exhaustively testable
+# ============================================================================
+
+fn alias_pair_decision(out_base: AliasBase, in_base: AliasBase) -> AliasVerdict:
+    """Decide one (output, input) pair.
+
+    Same local: an exact alias. Every access is at the induction index, so both
+    sides touch the same element in the same iteration and vectorizing
+    preserves order.
+
+    Different locals with different PROVEN origins: distinct allocations, so
+    the ranges cannot overlap however they are indexed.
+
+    Same proven origin through two different locals: the bases differ by an
+    offset the oracle cannot see. This is the hazard, and the one case where a
+    static refusal is both available and correct.
+
+    Anything else - an unproven origin, or two parameters - is undecidable
+    statically. It is NOT unsafe, and answering Unsafe would throw away almost
+    every real loop; it needs the runtime range check.
+    """
+    if out_base.local_id == in_base.local_id:
+        return AliasVerdict.ExactAliasOnly
+    if out_base.origin_id >= 0 and in_base.origin_id >= 0:
+        if out_base.origin_id != in_base.origin_id:
+            return AliasVerdict.ProvenDisjoint
+        return AliasVerdict.Unsafe
+    AliasVerdict.NeedsRuntimeGuard
+
+fn _rank(v: AliasVerdict) -> i64:
+    """Severity order: the weakest outcome across all pairs is the answer."""
+    match v:
+        case ProvenDisjoint:    0
+        case ExactAliasOnly:    1
+        case NeedsRuntimeGuard: 2
+        case Unsafe:            3
+
+fn _unrank(r: i64) -> AliasVerdict:
+    if r == 0:
+        return AliasVerdict.ProvenDisjoint
+    if r == 1:
+        return AliasVerdict.ExactAliasOnly
+    if r == 2:
+        return AliasVerdict.NeedsRuntimeGuard
+    AliasVerdict.Unsafe
+
+fn decide_recipe_aliasing(out_base: AliasBase, in_bases: [AliasBase]) -> AliasDecision:
+    """Fold every (output, input) pair into one verdict for the recipe.
+
+    A loop with no inputs cannot alias its output against anything. Otherwise
+    the WEAKEST pair decides: one undecidable pair forces the guard, one unsafe
+    pair refuses the whole loop.
+    """
+    if in_bases.len() == 0:
+        return AliasDecision(
+            verdict: AliasVerdict.ProvenDisjoint,
+            reason: "no input bases to alias against")
+    var worst = 0
+    for b in in_bases:
+        val r = _rank(alias_pair_decision(out_base, b))
+        if r > worst:
+            worst = r
+    val v = _unrank(worst)
+    var why = "all input bases are provably distinct allocations"
+    if worst == 1:
+        why = "every input base is the output base at the same index"
+    elif worst == 2:
+        why = "at least one base pair is statically undecidable"
+    elif worst == 3:
+        why = "an input base shares an allocation with the output at an unknown offset"
+    AliasDecision(verdict: v, reason: why)
+
+fn alias_decision_permits_vectorization(d: AliasDecision) -> bool:
+    """True when the recipe may be vectorized, possibly behind a guard."""
+    d.verdict != AliasVerdict.Unsafe
+
+fn alias_decision_requires_guard(d: AliasDecision) -> bool:
+    """True when a runtime range check must precede the vector loop."""
+    d.verdict == AliasVerdict.NeedsRuntimeGuard
+
+# ============================================================================
+# The runtime range check this oracle asks for
+# ============================================================================
+
+fn alias_guard_safe_at_runtime(out_addr: i64, in_addr: i64, span_bytes: i64) -> bool:
+    """The predicate the emitted guard computes.
+
+    Safe when the bases are identical (exact alias, same element each
+    iteration) or when the two spans do not overlap at all. The unsafe window
+    is exactly  0 < |out - in| < span_bytes: a partial overlap at a non-zero
+    offset, the only arrangement where vector order differs from scalar order.
+
+    Kept as a pure function so the emitted MIR can be checked against it
+    directly, rather than the predicate existing only inside block-building
+    code where it cannot be tested.
+    """
+    if span_bytes <= 0:
+        return true
+    val diff = out_addr - in_addr
+    if diff == 0:
+        return true
+    if diff >= span_bytes:
+        return true
+    if diff <= (0 - span_bytes):
+        return true
+    false
+
+export AliasVerdict, AliasDecision, AliasBase
+export alias_base, alias_pair_decision, decide_recipe_aliasing
+export alias_decision_permits_vectorization, alias_decision_requires_guard
+export alias_guard_safe_at_runtime

@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # No VHDL testbench may configure its DUT from a constant it asserts on
 # — SIMILAR-PROBLEM DETECTION spec (defect CLASS)
 #
@@ -27,10 +31,13 @@
 # The scan runs in a subprocess (awk) rather than in the spec body, so it reads
 # the real files on disk and cannot be faded out by an interpreter-only path.
 
+use std.spec.step
+
 use std.spec.*
 use std.io_runtime.{process_run}
 
-val SCAN: text = "
+
+val SCAN: text = """
 set -e
 found_any=0
 offenders=''
@@ -38,36 +45,39 @@ for f in $(find src/lib/hardware -name 'tb_*.vhd' 2>/dev/null | sort); do
   found_any=1
   # Constants asserted on: uppercase, underscore-bearing identifiers that
   # appear on an `assert` line.
-  asserted=$(grep -h '^[[:space:]]*assert' \"$f\" 2>/dev/null \\
+  asserted=$(grep -h '^[[:space:]]*assert' "$f" 2>/dev/null \
     | grep -oE '[A-Z][A-Z0-9_]*_[A-Z0-9_]*' | sort -u)
   # Constants handed to a DUT as the VALUE side of `generic map (X => VALUE)`,
   # ignoring commented-out lines.
-  mapped=$(grep -h '=>' \"$f\" 2>/dev/null | grep -v '^[[:space:]]*--' \\
+  mapped=$(grep -h '=>' "$f" 2>/dev/null | grep -v '^[[:space:]]*--' \
     | sed 's/.*=>//' | grep -oE '[A-Z][A-Z0-9_]*_[A-Z0-9_]*' | sort -u)
   for c in $asserted; do
     for m in $mapped; do
-      if [ \"$c\" = \"$m\" ]; then
-        offenders=\"$offenders $(basename $f):$c\"
+      if [ "$c" = "$m" ]; then
+        offenders="$offenders $(basename $f):$c"
       fi
     done
   done
 done
-if [ \"$found_any\" -eq 0 ]; then
+if [ "$found_any" -eq 0 ]; then
   echo 'SELFREF SCAN: ERROR no testbenches scanned'
-elif [ -z \"$offenders\" ]; then
-  echo \"SELFREF SCAN: SCANNED_OK CLEAN 0 offenders\"
+elif [ -z "$offenders" ]; then
+  echo "SELFREF SCAN: SCANNED_OK CLEAN 0 offenders"
 else
-  echo \"SELFREF SCAN: SCANNED_OK OFFENDERS$offenders\"
+  echo "SELFREF SCAN: SCANNED_OK OFFENDERS$offenders"
 fi
-"
+"""
 
 fn scan() -> text:
     val out = process_run("sh", ["-c", SCAN])
     out.0
 
 describe "VHDL testbench self-referential generic detection":
+    # @manual scenario evidence
 
     it "actually scanned some testbenches (a vacuous sweep is not a pass)":
+        # @req REQ-SSPEC-UNIT
+        step("actually scanned some testbenches (a vacuous sweep is not a pass)")
         step("Run the class scan over src/lib/hardware/**/tb_*.vhd")
         val s = scan()
 
@@ -75,6 +85,8 @@ describe "VHDL testbench self-referential generic detection":
         expect(s).to_contain("SELFREF SCAN: SCANNED_OK")
 
     it "no testbench asserts on a constant it also feeds the DUT as a generic":
+        # @req REQ-SSPEC-UNIT
+        step("no testbench asserts on a constant it also feeds the DUT as a generic")
         step("Any offender here is a hardware gate that CANNOT FAIL, whatever the DUT does")
         val s = scan()
 

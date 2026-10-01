@@ -71,18 +71,36 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([0])
         case "rt_package_copy_file" | "rt_package_create_symlink" | "rt_package_create_tarball" | "rt_package_extract_tarball":
             return Some([0, 1])
-        case "rt_crc32_text" | "rt_file_exists" | "rt_file_is_regular_no_follow" | "rt_file_is_char_device" | "rt_file_canonicalize" | "rt_file_read_text" | "rt_file_read_regular_no_follow_bounded" | "rt_file_size" | "rt_file_hash_sha256" | "rt_file_fsync" | "rt_file_fsync_cached" | "rt_file_sync" | "rt_file_delete" | "rt_file_remove" | "rt_file_read_lines" | "rt_file_read_bytes" | "rt_file_mmap_read_text" | "rt_file_mmap_len" | "rt_file_mmap_read_bytes":
+        case "rt_crc32_text" | "rt_file_exists" | "rt_file_is_regular_no_follow" | "rt_file_is_char_device" | "rt_file_canonicalize" | "rt_file_read_text" | "rt_file_read_regular_no_follow_bounded" | "rt_file_read_regular_no_follow_bounded_bytes" | "rt_file_size" | "rt_file_hash_sha256" | "rt_file_fsync" | "rt_file_fsync_cached" | "rt_file_sync" | "rt_file_delete" | "rt_file_remove" | "rt_file_read_lines" | "rt_file_read_bytes" | "rt_file_mmap_read_text" | "rt_file_mmap_len" | "rt_file_mmap_read_bytes":
             return Some([0])
-        case "rt_file_write_text" | "rt_file_append_text" | "rt_file_copy" | "rt_file_rename" | "rt_file_move" | "rt_file_wrap_smf_dynlib" | "rt_file_extract_smf_dynlib" | "rt_file_create_excl":
+        case "rt_file_write_text" | "rt_file_append_text" | "rt_file_copy" | "rt_file_rename" | "rt_file_move" | "rt_file_wrap_smf_dynlib" | "rt_file_extract_smf_dynlib" | "rt_file_create_excl" | "rt_file_copy_create_excl_no_follow" | "rt_file_link_create_excl_no_follow" | "rt_secure_temp_dir" | "rt_file_publish_noreplace":
             return Some([0, 1])
+        # Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*), raw
+        # (ptr, len) C ABI. Twin of the calls.rs entries.
+        case "rt_mem_snapshot_open":
+            return Some([0])
+        case "rt_mem_snapshot_record":
+            return Some([2, 3, 5])
         # rt_file_open is (path_ptr, path_len, mode: i32) -- descriptor.rs:19.
         # rt_process_run_with_limits: cmd is (ptr, len) -- env_process.rs:1269.
         case "rt_process_run_with_limits":
             return Some([0])
         case "rt_file_open":
             return Some([0])
+        # rt_file_lock is (path_ptr, path_len, timeout_secs) --
+        # runtime/src/value/sffi/file_io/file_ops.rs:679, and
+        # runtime_sffi.rs:323 registers it as [I64,I64,I64] -> [I64].
+        # The Rust twin has had this row since calls.rs:2672; this table
+        # was missing it, so pure-Simple codegen emitted TWO words for a
+        # THREE-word C function (lockstep drift, found 2026-09-02).
+        case "rt_file_lock":
+            return Some([0])
         case "rt_file_write_bytes":
             return Some([0])
+        case "rt_hosted_safe_artifact_root_open_v1":
+            return Some([0])
+        case "rt_hosted_safe_artifact_read_v1" | "rt_hosted_safe_artifact_publish_v1":
+            return Some([1])
         case "rt_hosted_safe_artifact_bundle_begin_v1":
             return Some([0, 1, 2, 3, 4])
         case "rt_hosted_safe_artifact_bundle_stage_scr1_v1":
@@ -149,6 +167,19 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([0])
         case _("every other extern name is either non-text or already uses the boxed/tagged single-word convention that the generic one-word-per-operand Call lowering already handles correctly"):
             return nil
+
+# Exact facade arity for symbols that are also invoked through raw machine-word
+# bridges. The symbol name and split indices alone cannot distinguish
+# rt_env_set(text, text), which must expand 2 -> 4, from the already-lowered
+# rt_env_set(i64, i64, i64, i64), which must remain unchanged.
+fn text_extern_semantic_arity(func_name: text) -> i64?:
+    match func_name:
+        case "rt_env_get" | "rt_get_env" | "rt_env_exists" | "rt_env_remove":
+            Some(1)
+        case "rt_env_get_i64" | "rt_env_set" | "rt_set_env":
+            Some(2)
+        case _:
+            nil
 
 fn boxed_text_arg_indices(func_name: text) -> [i64]?:
     match func_name:

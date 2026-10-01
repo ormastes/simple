@@ -7,6 +7,45 @@ bootstrap_cache_hash_file() {
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
   else return 1; fi
 }
+# Windows chmod records sealing with native ReadOnly attributes. MSYS still
+# reports directories as mode 0755: their ReadOnly bit is a seal marker, not
+# an ACL immutability guarantee. Validate that marker without weakening the
+# Unix permission check, and reject reparse points before descending into them.
+bootstrap_cache_sealed_tree_validate() (
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  bc_seal_platform=$(uname -s) || return 1
+  case "$bc_seal_platform" in
+    MINGW*|MSYS*|CYGWIN*)
+      command -v cygpath >/dev/null 2>&1 || return 1
+      command -v powershell.exe >/dev/null 2>&1 || return 1
+      bc_seal_native=$(cygpath -w -- "$1") || return 1
+      SIMPLE_BOOTSTRAP_SEAL_PATH="$bc_seal_native" powershell.exe -NoLogo -NoProfile -NonInteractive -Command '
+        $ErrorActionPreference = "Stop"
+        try {
+          $root = Get-Item -LiteralPath $env:SIMPLE_BOOTSTRAP_SEAL_PATH -Force
+          if (-not $root.PSIsContainer) { exit 1 }
+          $pending = [Collections.Generic.Stack[object]]::new()
+          $pending.Push($root)
+          while ($pending.Count -gt 0) {
+            $node = $pending.Pop()
+            if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                ($node.Attributes -band [IO.FileAttributes]::ReadOnly) -eq 0) { exit 1 }
+            if ($node.PSIsContainer) {
+              foreach ($child in Get-ChildItem -LiteralPath $node.FullName -Force) {
+                $pending.Push($child)
+              }
+            }
+          }
+          exit 0
+        } catch { exit 1 }
+      ' || return 1
+      ;;
+    *)
+      bc_seal_unsealed=$(find "$1" \( -type l -o -perm -200 -o -perm -020 -o -perm -002 \) -print) || return 1
+      [ -z "$bc_seal_unsealed" ] || return 1
+      ;;
+  esac
+)
 # Historical directories stay beside their original path: Linux needs write
 # permission on a directory to change its '..' entry during cross-parent rename.
 # Bind their names into the attempt instead of thawing sealed runtime authority.
@@ -55,8 +94,7 @@ bootstrap_cache_archive_directory() (
   [ ! -e "$bc_retained" ] && [ ! -L "$bc_retained" ] || return 1
   # Reject partial mutable authority before any mapping or expensive rebuild,
   # not only when the terminal attempt receipt is finally frozen.
-  bc_unsealed=$(find "$bc_prior" \( -type l -o -perm -200 -o -perm -020 -o -perm -002 \) -print) || return 1
-  [ -z "$bc_unsealed" ] || bootstrap_cache_error 'prior directory is not sealed nonsymlink evidence' || return 1
+  bootstrap_cache_sealed_tree_validate "$bc_prior" || bootstrap_cache_error 'prior directory is not sealed nonsymlink evidence' || return 1
   bootstrap_cache_attempt_directory_list "$bc_archive" >/dev/null || return 1
   bc_map="$bc_archive/attempt-directories.tsv"
   bc_pending="$bc_map.pending.$$"
@@ -107,8 +145,7 @@ bootstrap_cache_freeze_attempt() (
     [ ! -s "$bc_list.links" ] || return 1
     # These are frozen historical directories, not mutable cache. Never thaw
     # or silently seal an untrusted mapped tree during receipt generation.
-    find "$bc_retained" \( -perm -200 -o -perm -020 -o -perm -002 \) -print > "$bc_list.writable" || return 1
-    [ ! -s "$bc_list.writable" ] || return 1
+    bootstrap_cache_sealed_tree_validate "$bc_retained" || return 1
     find "$bc_retained" -type f >> "$bc_list" || return 1
   done < "$bc_list.directories"
   LC_ALL=C sort "$bc_list" > "$bc_list.sorted" || return 1
@@ -118,7 +155,8 @@ bootstrap_cache_freeze_attempt() (
     printf '%s  %s\n' "$bc_evidence_sha" "$bc_evidence"
   done < "$bc_list.sorted" > attempt-files.sha256.tmp || return 1
   mv attempt-files.sha256.tmp attempt-files.sha256 || return 1
-  chmod -R a-w .
+  chmod -R a-w . || return 1
+  bootstrap_cache_sealed_tree_validate .
 )
 bootstrap_cache_digest() {
   [ "${#1}" -eq 64 ] || return 1

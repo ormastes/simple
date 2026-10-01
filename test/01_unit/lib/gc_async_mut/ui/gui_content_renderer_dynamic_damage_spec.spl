@@ -1,0 +1,81 @@
+# @tag: unit, ui, gui, retained, damage
+
+use std.spec
+use std.gc_async_mut.ui.gui_content_renderer.{
+    gui_content_frame_cache_clear,
+    gui_content_frame_damage_mode,
+    gui_content_frame_damage_rects,
+    gui_content_frame_local_replay_count,
+    gui_content_frame_render_count,
+    gui_session_content_frame
+}
+use common.ui.builder.{build_tree_with_title, column, text_widget}
+use common.ui.render_opt.damage_plan.{DAMAGE_PLAN_LOCAL}
+use nogc_sync_mut.ui.session.{UISession}
+
+fn damage_gui_session(label: text) -> UISession:
+    UISession.new(build_tree_with_title(
+        column("root", [text_widget("label", label)]),
+        "Retained", "default"))
+
+fn damage_gui_pair(first: text, second: text) -> UISession:
+    UISession.new(build_tree_with_title(
+        column("root", [
+            text_widget("first", first), text_widget("second", second)
+        ]),
+        "Retained", "default"))
+
+describe "GUI persistent-target dynamic damage":
+    it "replays a changed widget through exact local DrawIR damage with full-frame parity":
+        gui_content_frame_cache_clear()
+        val first = gui_session_content_frame(
+            damage_gui_session("before"), "window-local", "", 0, 0,
+            96, 64, 1, 1, [])
+        val changed = gui_session_content_frame(
+            damage_gui_session("after"), "window-local", "", 0, 0,
+            96, 64, 2, 2, [])
+        expect(first.pixels.len()).to_equal(96 * 64)
+        expect(changed.pixels.len()).to_equal(96 * 64)
+        expect(changed.pixels == first.pixels).to_equal(false)
+        expect(gui_content_frame_render_count()).to_equal(2)
+        expect(gui_content_frame_damage_mode()).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(gui_content_frame_damage_rects().len()).to_be_greater_than(0)
+        expect(gui_content_frame_local_replay_count()).to_equal(1)
+        # A different surface has no retained target and therefore takes the
+        # canonical full route. Its pixels are the independent oracle for the
+        # seeded LOCAL replay above.
+        val full = gui_session_content_frame(
+            damage_gui_session("after"), "window-full-oracle", "", 0, 0,
+            96, 64, 3, 1, [])
+        expect(changed.pixels).to_equal(full.pixels)
+        gui_content_frame_cache_clear()
+
+    it "matches a fresh full oracle after a retained widget is removed":
+        gui_content_frame_cache_clear()
+        val before = gui_session_content_frame(
+            damage_gui_pair("removed", "kept"), "window-remove", "", 0, 0,
+            96, 64, 1, 1, [])
+        val removed = gui_session_content_frame(
+            damage_gui_session("kept"), "window-remove", "", 0, 0,
+            96, 64, 2, 2, [])
+        val full = gui_session_content_frame(
+            damage_gui_session("kept"), "window-remove-oracle", "", 0, 0,
+            96, 64, 3, 1, [])
+        expect(before.pixels.len()).to_equal(96 * 64)
+        expect(removed.pixels).to_equal(full.pixels)
+        gui_content_frame_cache_clear()
+
+    it "matches a fresh full oracle after retained widgets move":
+        gui_content_frame_cache_clear()
+        val before = gui_session_content_frame(
+            damage_gui_pair("top", "bottom"), "window-move", "", 0, 0,
+            96, 64, 1, 1, [])
+        val moved = gui_session_content_frame(
+            damage_gui_pair("bottom", "top"), "window-move", "", 0, 0,
+            96, 64, 2, 2, [])
+        val full = gui_session_content_frame(
+            damage_gui_pair("bottom", "top"), "window-move-oracle", "", 0, 0,
+            96, 64, 3, 1, [])
+        expect(before.pixels.len()).to_equal(96 * 64)
+        expect(moved.pixels).to_equal(full.pixels)
+        gui_content_frame_cache_clear()

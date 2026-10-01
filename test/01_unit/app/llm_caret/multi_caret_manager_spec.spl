@@ -1,11 +1,12 @@
 use std.spec.{describe, it, expect, step}
-use app.io.mod.{process_spawn_async}
+use app.io.mod.{process_spawn_async, process_kill}
 use app.llm_caret.agent_plan.{AgentLaunchRequest}
 use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
 use app.llm_caret.agent_tmux.{build_agent_tmux_embed}
 use app.llm_caret.multi_caret_manager.{MultiCaretManager,
     launch_multi_caret_manager, poll_multi_caret_manager,
-    stop_multi_caret_manager}
+    stop_multi_caret_manager, list_multi_caret_agents,
+    render_multi_caret_agents}
 
 fn _request(provider: text) -> AgentLaunchRequest:
     AgentLaunchRequest(provider: provider, agent_md_path: "agents/a.md",
@@ -67,12 +68,100 @@ describe "LLM Caret multi-process manager reports process truth":
         step("With the survivor gone the team is fully exited, not degraded")
         expect(poll_multi_caret_manager(mixed).status).to_equal("exited")
 
+    it "keeps reconciling a degraded team until every survivor is terminal (CARET-H001)":
+        step("Spawn one real survivor alongside a slot that never spawned")
+        val pid = process_spawn_async("/bin/sleep", ["30"])
+        expect(pid > 0).to_equal(true)
+        val running = _manager_over([
+            AgentProcess(agent_id: "alive", status: "started",
+                reason: "process_spawned", pid: pid),
+            AgentProcess(agent_id: "dead", status: "started",
+                reason: "process_spawned", pid: -1)])
+
+        step("First poll: the team is degraded, not terminal")
+        val degraded = poll_multi_caret_manager(running)
+        expect(degraded.status).to_equal("degraded")
+
+        step("The survivor dies without going through stop_multi_caret_manager")
+        expect(process_kill(pid)).to_equal(true)
+
+        step("Polling the DEGRADED manager (not a 'running' one) must still " +
+            "reconcile the now-dead survivor instead of freezing")
+        val reconciled = poll_multi_caret_manager(degraded)
+        expect(reconciled.status).to_equal("exited")
+
+        step("No duplicate launch happened: the roster is still the same 2 " +
+            "processes, never re-spawned")
+        expect(list_multi_caret_agents(reconciled).len()).to_equal(2)
+
     it "leaves a manager that is not running untouched by a poll":
+        step("Poll an admission failure that never owned a process")
         val idle = launch_multi_caret_manager("", [_request("bogus")], 2,
             "", "", "", "", "")
         expect(poll_multi_caret_manager(idle).status).to_equal("not_started")
+
+    it "continues polling a degraded manager until its children are terminal":
+        step("Represent a previously degraded team whose last child has exited")
+        val team = summarize_agent_team("m-degraded", [
+            AgentProcess(agent_id: "former-survivor", status: "not_running",
+                reason: "process_exited", pid: -1)])
+        val degraded = MultiCaretManager(manager_id: "m-degraded",
+            status: "degraded", reason: "processes_polled", capacity: 2,
+            team: team, terminal_view: build_agent_tmux_embed(team, []))
+
+        step("Poll again and publish the fully terminal state")
+        val terminal = poll_multi_caret_manager(degraded)
+        expect(terminal.status).to_equal("exited")
+        expect(terminal.reason).to_equal("processes_polled")
 
     it "stops an empty team without claiming it killed anything":
         val idle = launch_multi_caret_manager("", [_request("bogus")], 2,
             "", "", "", "", "")
         expect(stop_multi_caret_manager(idle).reason).to_equal("no_processes")
+
+describe "listing the agents a manager currently owns":
+    # The roster must be derived from the parent-owned process table, never
+    # from a side registry that can drift out of step with the real children.
+    # @manual scenario evidence
+    it "reports one row per owned child with its real pid":
+        step("List a team holding one live child and one that never spawned")
+        val m = _manager_over([
+            AgentProcess(agent_id: "claude", status: "started",
+                reason: "process_spawned", pid: 4242),
+            AgentProcess(agent_id: "codex", status: "error",
+                reason: "spawn_failed", pid: -1)])
+        val agents = list_multi_caret_agents(m)
+        expect(agents.len()).to_equal(2)  # oracle: 2 — one row per process
+        expect(agents[0].agent_id).to_equal("claude")
+        expect(agents[0].pid).to_equal(4242)
+        expect(agents[0].alive).to_equal(true)
+
+    it "does not call a child that never spawned alive":
+        step("A pid <= 0 was never spawned, so it cannot be running")
+        val m = _manager_over([AgentProcess(agent_id: "codex",
+            status: "error", reason: "spawn_failed", pid: -1)])
+        expect(list_multi_caret_agents(m)[0].alive).to_equal(false)
+
+    it "does not call a stopped child alive":
+        step("A child that was killed is no longer running")
+        val m = _manager_over([AgentProcess(agent_id: "claude",
+            status: "stopped", reason: "process_stopped", pid: 4242)])
+        expect(list_multi_caret_agents(m)[0].alive).to_equal(false)
+
+    it "renders an empty roster without inventing rows":
+        step("Render a manager that owns nothing")
+        val empty = launch_multi_caret_manager("", [_request("bogus")], 2,
+            "", "", "", "", "")
+        expect(render_multi_caret_agents(empty)).to_contain("(no agents)")
+
+    it "renders every owned agent id in the table":
+        step("Render a two-agent roster")
+        val m = _manager_over([
+            AgentProcess(agent_id: "claude", status: "started",
+                reason: "process_spawned", pid: 4242),
+            AgentProcess(agent_id: "codex", status: "started",
+                reason: "process_spawned", pid: 4243)])
+        val out = render_multi_caret_agents(m)
+        expect(out).to_contain("claude")
+        expect(out).to_contain("codex")
+        expect(out).to_contain("4243")

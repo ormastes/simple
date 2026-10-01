@@ -102,6 +102,13 @@ impl CapabilityManager:
                 return false
         rec.caps.has(required)
 
+    fn capabilities_for_task(task: TaskId) -> CapabilitySet?:
+        """Return the authoritative copy for kernel handoff verification."""
+        val record = self._find_record(task)
+        if record == nil:
+            return nil
+        Some(record.unwrap().caps)
+
     fn check_file_access(task: TaskId, path: text, perm: text) -> bool:
         """Check if a task can access a file path with given permissions.
 
@@ -359,7 +366,7 @@ impl CapabilityManager:
 
     # -- Task Lifecycle ------------------------------------------------------
 
-    me init_task_record(task: TaskId, full: bool):
+    pub me init_task_record(task: TaskId, full: bool):
         """Initialize capability record for a new task at spawn time.
 
         Idempotent: if a record already exists for `task`, returns without
@@ -414,6 +421,45 @@ impl CapabilityManager:
             session_epoch: 0u64
         )
         self.records.push(record)
+
+    me install_scheduler_task_capabilities_v1(
+        task: TaskId, caps: CapabilitySet
+    ) -> bool:
+        """Install the exact pledged pouch published in a scheduler TCB.
+
+        This is the IPC half of the boot/adoption publication transaction.
+        It accepts only finite, owner-bound tokens and refuses replacement or
+        duplicate records; callers must install it before making the task
+        runnable.  It never creates root authority and never accepts the
+        ambient `CapabilitySet.full()` representation.
+        """
+        if task.id == 0u64 or not caps.is_pledged or caps.caps.len() == 0:
+            return false
+        var copied: [CapabilityToken] = []
+        var index: i64 = 0
+        while index < caps.caps.len():
+            val cap = caps.caps[index]
+            if cap.owner != task.id or cap.generation == 0u64 or
+               cap.token_id == 0u64 or cap.depth < 0:
+                return false
+            var prior: i64 = 0
+            while prior < index:
+                if caps.caps[prior].token_id == cap.token_id:
+                    return false
+                prior = prior + 1
+            copied.push(CapabilityToken(
+                kind: cap.kind, generation: cap.generation, owner: cap.owner,
+                token_id: cap.token_id, parent_token_id: cap.parent_token_id,
+                depth: cap.depth))
+            index = index + 1
+        if self._find_record(task) != nil:
+            return false
+        self.records.push(TaskCapRecord(
+            task_id: task,
+            caps: CapabilitySet(caps: copied, is_pledged: true),
+            unveil_paths: [], is_unveiled: false,
+            session_id: 0u64, session_epoch: 0u64))
+        true
 
     me install_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> bool:
         """Install lowered sandbox capabilities for a task.
@@ -914,19 +960,20 @@ fn capability_set_from_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text
     """
     var caps: [CapabilityToken] = []
     var generation = 1u64
+    # Local token-id counter described by the docstring above. It was used at
+    # the NetworkEndpoint grant below but never declared, so this body failed
+    # codegen with "unresolved identifier 'local_tid'" and was silently replaced
+    # by an empty stub — a capability function returning an empty set.
     var local_tid = 1u64
     if sandbox_lowering_sdn.contains("ReadFile") or sandbox_lowering_sdn.contains("ReadDir"):
-        caps.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
+        caps.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: generation, owner: task.id))
         generation = generation + 1
-        local_tid = local_tid + 1
     if sandbox_lowering_sdn.contains("WriteFile") or sandbox_lowering_sdn.contains("WriteDir"):
-        caps.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: "/"), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
+        caps.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: "/"), generation: generation, owner: task.id))
         generation = generation + 1
-        local_tid = local_tid + 1
     if sandbox_lowering_sdn.contains("ProcessSpawner") or sandbox_lowering_sdn.contains("ProcessSpawn"):
-        caps.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
+        caps.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: generation, owner: task.id))
         generation = generation + 1
-        local_tid = local_tid + 1
     if sandbox_lowering_sdn.contains("NetworkEndpoint"):
         caps.push(CapabilityToken(kind: CapabilityKind.NetConnect(port: 0u16), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
         generation = generation + 1

@@ -1,0 +1,310 @@
+# SimpleOS libc — pure-Simple floating-point parsing core.
+#
+# This is a decimal-only staging parser for a future C strtod/strtof port.  The
+# returned byte index carries endptr without introducing a raw-pointer
+# dependency.  Hex floats, inf/nan, locale, errno, and guaranteed correct
+# rounding remain with the C implementation until parity is proven.
+
+use std.math.bignum.bignat.{
+    add, bit_length, bn_from_i64, bn_one, cmp, div_mod, mul, mul_i64,
+    shift_left_one,
+}
+use std.common.binary_io.{f32_from_bits, f64_from_bits}
+
+val MAX_DECIMAL_SIGNIFICAND_DIGITS = 1200
+
+struct DecimalToken:
+    source: [u8]
+    significand_start: i64
+    significand_end: i64
+    nonzero: bool
+    decimal_exponent: i64
+    small_mantissa: i64
+    small_valid: bool
+    retained_digits: i64
+    end_index: i64
+    converted: bool
+    negative: bool
+    sticky: bool
+
+struct FastDecimal:
+    value: f64
+    exact: bool
+
+struct FloatParseResult:
+    value: f64
+    end_index: i64
+    converted: bool
+
+fn libc_strtod(s: [u8]) -> FloatParseResult:
+    """Parse a decimal floating-point prefix and report the first unused byte.
+
+    Leading ASCII whitespace, an optional sign, a decimal point, and an
+    optional signed exponent are accepted.  A malformed exponent is not
+    consumed, matching C strtod's endptr rule.  Exponents are accumulated with
+    saturation so hostile input cannot overflow an integer or cause an
+    unbounded scaling loop.
+    """
+    val token = _parse_decimal_token(s)
+    if not token.converted:
+        return FloatParseResult(value: 0.0, end_index: 0, converted: false)
+    val fast = _exact_small_decimal(
+        token.small_mantissa, token.small_valid, token.decimal_exponent)
+    var value = if fast.exact:
+        fast.value
+    else:
+        val bits = _decimal_to_ieee_bits(token, 52, -1022, 1023, 1023, -324, 308)
+        f64_from_bits(bits as u64)
+    if token.negative: value = -value
+    FloatParseResult(value: value, end_index: token.end_index, converted: true)
+
+fn libc_strtof(s: [u8]) -> FloatParseResult:
+    """Parse the decimal subset with one exact round to binary32."""
+    val token = _parse_decimal_token(s)
+    if not token.converted:
+        return FloatParseResult(value: 0.0, end_index: 0, converted: false)
+    val bits = _decimal_to_ieee_bits(token, 23, -126, 127, 127, -46, 38)
+    var value = f32_from_bits(bits as u32) as f64
+    if token.negative: value = -value
+    FloatParseResult(
+        value: value,
+        end_index: token.end_index,
+        converted: true,
+    )
+
+fn _float_space(ch: u8) -> bool:
+    ch == 32 or ch == 9 or ch == 10 or ch == 13 or ch == 11 or ch == 12
+
+fn _decimal_digit(ch: u8) -> bool:
+    ch >= 48 and ch <= 57
+
+fn _parse_decimal_token(s: [u8]) -> DecimalToken:
+    val n = s.len()
+    var i = 0
+    while i < n and _float_space(s[i]): i = i + 1
+    var negative = false
+    if i < n and (s[i] == 43 or s[i] == 45):
+        negative = s[i] == 45
+        i = i + 1
+
+    val significand_start = i
+    var small_mantissa = 0
+    var small_valid = true
+    var digits = 0
+    var retained = 0
+    var significant_digits = 0
+    var fractional_digits = 0
+    var significant = false
+    var sticky = false
+    while i < n and _decimal_digit(s[i]):
+        val digit = (s[i] - 48) as i64
+        if digit != 0 or significant:
+            significant = true
+            significant_digits = significant_digits + 1
+            if retained < MAX_DECIMAL_SIGNIFICAND_DIGITS:
+                if small_valid:
+                    if small_mantissa > (9007199254740992 - digit) / 10:
+                        small_valid = false
+                    else:
+                        small_mantissa = small_mantissa * 10 + digit
+                retained = retained + 1
+            elif digit != 0:
+                sticky = true
+        digits = digits + 1
+        i = i + 1
+
+    if i < n and s[i] == 46:
+        i = i + 1
+        while i < n and _decimal_digit(s[i]):
+            val digit = (s[i] - 48) as i64
+            fractional_digits = fractional_digits + 1
+            if digit != 0 or significant:
+                significant = true
+                significant_digits = significant_digits + 1
+                if retained < MAX_DECIMAL_SIGNIFICAND_DIGITS:
+                    if small_valid:
+                        if small_mantissa > (9007199254740992 - digit) / 10:
+                            small_valid = false
+                        else:
+                            small_mantissa = small_mantissa * 10 + digit
+                    retained = retained + 1
+                elif digit != 0:
+                    sticky = true
+            digits = digits + 1
+            i = i + 1
+
+    if digits == 0:
+        return DecimalToken(source: s, significand_start: 0, significand_end: 0,
+            nonzero: false, decimal_exponent: 0,
+            small_mantissa: 0, small_valid: true, retained_digits: 0,
+            end_index: 0, converted: false, negative: false, sticky: false)
+
+    val significand_end = i
+    var explicit_exponent = 0
+    if i < n and (s[i] == 101 or s[i] == 69):
+        val marker = i
+        i = i + 1
+        var exponent_negative = false
+        if i < n and (s[i] == 43 or s[i] == 45):
+            exponent_negative = s[i] == 45
+            i = i + 1
+        val start = i
+        val limit = n + 2000
+        while i < n and _decimal_digit(s[i]):
+            if explicit_exponent < limit:
+                explicit_exponent = explicit_exponent * 10 + (s[i] - 48)
+                if explicit_exponent > limit: explicit_exponent = limit
+            i = i + 1
+        if i == start:
+            i = marker
+            explicit_exponent = 0
+        elif exponent_negative:
+            explicit_exponent = -explicit_exponent
+
+    val dropped = significant_digits - retained
+    DecimalToken(
+        source: s,
+        significand_start: significand_start,
+        significand_end: significand_end,
+        nonzero: significant,
+        decimal_exponent: explicit_exponent - fractional_digits + dropped,
+        small_mantissa: small_mantissa,
+        small_valid: small_valid,
+        retained_digits: retained,
+        end_index: i,
+        converted: true,
+        negative: negative,
+        sticky: sticky,
+    )
+
+fn _shift_left(value: [i64], amount: i64) -> [i64]:
+    var out = value
+    var i = 0
+    while i < amount:
+        out = shift_left_one(out)
+        i = i + 1
+    out
+
+fn _pow5(amount: i64) -> [i64]:
+    var out = bn_one()
+    var i = 0
+    while i < amount:
+        out = mul_i64(out, 5)
+        i = i + 1
+    out
+
+fn _big_to_i64(value: [i64]) -> i64:
+    var out = 0
+    var i = value.len() - 1
+    while i >= 0:
+        out = (out << 30) | value[i]
+        i = i - 1
+    out
+
+fn _exact_small_decimal(mantissa: i64, valid: bool, exponent: i64) -> FastDecimal:
+    if not valid:
+        return FastDecimal(value: 0.0, exact: false)
+    var integer = mantissa
+    if exponent >= 0:
+        var i = 0
+        while i < exponent:
+            if integer > 9007199254740992 / 10:
+                return FastDecimal(value: 0.0, exact: false)
+            integer = integer * 10
+            i = i + 1
+        return FastDecimal(value: integer as f64, exact: true)
+    var remaining = -exponent
+    if remaining <= 15:
+        var divisor = 1
+        var j = 0
+        while j < remaining:
+            divisor = divisor * 10
+            j = j + 1
+        return FastDecimal(value: (integer as f64) / (divisor as f64), exact: true)
+    while remaining > 0 and integer % 5 == 0:
+        integer = integer / 5
+        remaining = remaining - 1
+    if remaining != 0:
+        return FastDecimal(value: 0.0, exact: false)
+    var value = integer as f64
+    remaining = -exponent
+    while remaining > 0:
+        value = value * 0.5
+        remaining = remaining - 1
+    FastDecimal(value: value, exact: true)
+
+fn _ratio_binary_exponent(numerator: [i64], denominator: [i64]) -> i64:
+    var exponent = bit_length(numerator) - bit_length(denominator)
+    if exponent >= 0:
+        if cmp(numerator, _shift_left(denominator, exponent)) < 0:
+            exponent = exponent - 1
+    elif cmp(_shift_left(numerator, -exponent), denominator) < 0:
+        exponent = exponent - 1
+    exponent
+
+fn _rounded_quotient(numerator: [i64], denominator: [i64], scale: i64,
+                     sticky: bool) -> i64:
+    val scaled_numerator = if scale >= 0: _shift_left(numerator, scale) else: numerator
+    val scaled_denominator = if scale < 0: _shift_left(denominator, -scale) else: denominator
+    val pair = div_mod(scaled_numerator, scaled_denominator)
+    var quotient = _big_to_i64(pair[0])
+    val twice_remainder = shift_left_one(pair[1])
+    val relation = cmp(twice_remainder, scaled_denominator)
+    if relation > 0 or (relation == 0 and (sticky or (quotient & 1) != 0)):
+        quotient = quotient + 1
+    quotient
+
+fn _token_mantissa(token: DecimalToken) -> [i64]:
+    var mantissa = bn_from_i64(0)
+    var retained = 0
+    var significant = false
+    var i = token.significand_start
+    while i < token.significand_end and retained < MAX_DECIMAL_SIGNIFICAND_DIGITS:
+        val ch = token.source[i]
+        if _decimal_digit(ch):
+            val digit = (ch - 48) as i64
+            if digit != 0 or significant:
+                significant = true
+                mantissa = add(mul_i64(mantissa, 10), bn_from_i64(digit))
+                retained = retained + 1
+        i = i + 1
+    mantissa
+
+fn _decimal_to_ieee_bits(token: DecimalToken, fraction_bits: i64,
+                         minimum_exponent: i64, maximum_exponent: i64,
+                         exponent_bias: i64, minimum_decimal: i64,
+                         maximum_decimal: i64) -> i64:
+    if not token.nonzero: return 0
+    val decimal_magnitude = token.retained_digits + token.decimal_exponent - 1
+    if decimal_magnitude < minimum_decimal: return 0
+    if decimal_magnitude > maximum_decimal:
+        return (maximum_exponent + exponent_bias + 1) << fraction_bits
+
+    var numerator = _token_mantissa(token)
+    var denominator = bn_one()
+    if token.decimal_exponent >= 0:
+        numerator = _shift_left(mul(numerator, _pow5(token.decimal_exponent)),
+                                token.decimal_exponent)
+    else:
+        val magnitude = -token.decimal_exponent
+        denominator = _shift_left(_pow5(magnitude), magnitude)
+
+    var exponent = _ratio_binary_exponent(numerator, denominator)
+    var significand = 0
+    if exponent < minimum_exponent:
+        significand = _rounded_quotient(
+            numerator, denominator, fraction_bits - minimum_exponent, token.sticky)
+        if significand == 0: return 0
+        if significand >= (1 << fraction_bits):
+            return 1 << fraction_bits
+        return significand
+
+    significand = _rounded_quotient(
+        numerator, denominator, fraction_bits - exponent, token.sticky)
+    if significand == (1 << (fraction_bits + 1)):
+        significand = significand >> 1
+        exponent = exponent + 1
+    if exponent > maximum_exponent:
+        return (maximum_exponent + exponent_bias + 1) << fraction_bits
+    ((exponent + exponent_bias) << fraction_bits) |
+        (significand - (1 << fraction_bits))

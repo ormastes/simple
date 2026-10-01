@@ -2,28 +2,6 @@
 
 Status: open, release-blocking for REQ-014 and REQ-016
 
-## 2026-08-21 filesystem-launch production wiring
-
-The filesystem payload no longer constructs the parallel `DbServerCapsule`.
-It is a thin HTTP plus canonical DBD transport adapter: owned boot files feed
-`DbdServer.provision_service`, credential/certificate/private-key source
-buffers are zeroed with exact readback on every exit, and no credential enters
-argv or immutable text. `DbdDbfsAdapter` now accepts a least-authority
-filesystem-process VFS projection only when DBFS-root, durable-sync, and
-transactional-replace facts all originate from the mount owner. Recovery,
-TLS AUTH, mutation commit, and post-restart reads remain in `DbdServer`.
-
-The initial adapter incorrectly derived invented DBFS bits 32/64 from the
-FAT32 atomic-capability mask, which canonically stops at 31. It now consumes a
-typed mount-owner state cleared before every root mount and published only by
-a durability-ready mounted `DbFsDriver`, through read-only syscall 79. Staging
-is exclusive and generation-owned, commit syncs the namespace after rename,
-and whole-owner close wipes retained provisioning on every later exit.
-
-The record stays open until target runtimes execute that capability path and
-x86_64/AArch64/RISC-V receipts prove the authenticated commit and fresh-boot
-readback. This source closure does not fabricate those receipts.
-
 The bounded `dbd` safety slice validates and replays its whole journal before
 mutation, rejects malformed commands before journaling, and verifies exact
 write/readback bytes. It has a configured digest-only credential provider and
@@ -122,14 +100,8 @@ the private auth/TLS/DBFS startup facts.
 
 DBFS owner discovery is now typed rather than boolean. `DbdServer` resolves the
 actual root `DriverInstance`; only the `DbFs` variant can construct its adapter.
-The adapter supports an exact, bounded recovery read of the canonical
-`/srv/data/db/DBD.LOG`, tracks open handles and generations, and quarantines
-short-read/close failures. The journal, generation-owned temporary file,
-quarantine evidence, and namespace-directory sync are all fixed beneath the
-scheduler-admitted `/srv/data/db` namespace; DBD no longer stores mutable
-database state at filesystem root. Protected managed-path open still fails
-closed while the generic VFS fd transaction described in
-`server_data_vfs_fd_binding_blocked_2026-08-24.md` remains unresolved.
+The adapter supports an exact, bounded recovery read of an existing `/DBD.LOG`,
+tracks open handles and generations, and quarantines short-read/close failures.
 Restart releases its old driver reference but preserves quarantine state and the
 non-secret failure reason; a restart cannot silently reset durable-recovery
 evidence.
@@ -162,20 +134,6 @@ Required closure evidence:
 
 Performance/durability blocker:
 
-- the canonical Redis engine mutates through `SET`, `DEL`, `INCR`, `EXPIRE`,
-  and `FLUSHALL`, while the current J1 journal defines exact restart semantics
-  only for `SET` and single-key `DEL`. DBD now classifies all five as mutations
-  and rejects `INCR`, `EXPIRE`, and `FLUSHALL` before engine dispatch with a
-  stable durable-command error. It no longer acknowledges memory-only changes
-  that disappear after filesystem restart. Supporting those commands remains
-  open until their time, ordering, and destructive replay semantics are
-  specified and journaled;
-- a proposed credential-provider generation snapshot was rejected in static
-  review because public value-semantic provider copies can be restored or
-  reconstructed. Exact rotation/revocation authority requires an opaque
-  canonical owner or a non-rollback service epoch; snapshot comparison must
-  not be advertised as hardened session authority;
-
 - the post-auth fragmented-command copying blocker is closed structurally:
   `DbdAuthenticatedRespIngressV1` owns a 64 KiB fixed ring and head offset,
   performs one write plus one incremental framing step per accepted byte, and
@@ -195,6 +153,71 @@ Performance/durability blocker:
 
 Until all evidence exists, `DBD_CAPABILITY_STATE` must remain blocked and the
 daemon must fail closed instead of accepting network clients.
+
+## Durable DBFS authority integrated at source scope (2026-09-23)
+
+DBD no longer accepts root/durable-sync/transactional-replace booleans from its
+launcher. The filesystem-process descriptors currently route through the
+FAT32 syscall registration, while the mount capability describes a different
+in-kernel DBFS driver. Because those authorities are disconnected, the
+filesystem-launched constructor now fails closed with
+`filesystem-vfs-dbfs-operation-authority-unavailable`; it cannot mint a false
+receipt from a capability snapshot.
+
+The directly device-backed `DbFsDriver` path returns
+`DbdDbfsCommitReceiptV1` only after serialized staging, complete write,
+backing-device flush, atomic namespace replacement, a second namespace flush,
+and exact bounded readback of the published bytes. Its staging name is
+generation-scoped under the DBFS transaction owner; it is not claimed to use
+the filesystem syscall path's exclusive-open operation. Post-publication
+close or readback failures quarantine the adapter and report an uncertain
+outcome; they cannot be acknowledged as an abort or success.
+
+The underlying `DbFsDriver` path remains admitted only when its serialized
+device owner is registered. Its `fsync` advances the durable checkpoint only
+after the same stored `BlockDevice.flush()` returns success. The deterministic
+`dbfs_durable_commit_spec.spl` crash device separates volatile from durable
+media and covers acknowledged recovery, flush failure retaining the prior
+checkpoint, torn checkpoint rejection, and corrupt-slot failure. The DBD unit
+contract covers removal of caller claims, generation pinning, receipt issuance,
+exact readback, and fail-closed quarantine. Runtime/native/QEMU execution is
+deferred until the admitted phase environment is ready.
+
+TODO(environment/baseline): compilation is not claimed by this source-only
+slice. The inherited
+`src/lib/nogc_sync_mut/db/dbfs_driver/namespace_io.spl` currently initializes
+`content_generation` twice in existing inode constructors; that unrelated
+baseline compiler blocker was intentionally not edited in this isolated DBD
+authority change. Once the baseline is repaired and an admitted Phase-2
+runtime exists, execute the focused DBD adapter and DBFS crash/recovery specs.
+
+## Boot credential owner closed at source scope (2026-09-23)
+
+The canonical `/SERVERS.ELF` launch path now feeds the bounded credential file
+into `DbdBootCredentialOwnerV1.admit_source`. Hashing and compiler-resistant
+wipe/readback occur in one owner operation over the same authoritative mutable
+source; no independent or replayable wipe receipt is accepted. The owner retains only an
+incremental SHA-256 state, admits its digest-only provider only after exact
+volatile wipe/readback of the sole source buffer, and volatile-wipes the hash
+state and schedule before admission. Overflow, short input, mismatched wipe
+evidence, hash failure, reload, and revocation all fail closed. The previous
+public `DbdServer.provision_service(principal, credential, ...)` raw-array
+bypass is removed; TLS admission accepts only the admitted digest owner.
+
+This closes only the boot credential item. Production startup remains blocked
+at `tls-owner-unavailable`, followed by durable DBFS commit authority. Streaming
+adds constant memory and at most 128 boot-only byte updates; it does not change
+the authenticated request hot path.
+
+TODO(environment): once an admitted Phase-2 test-capable Simple runtime is
+available, run `test/01_unit/os/apps/dbd/dbd_boot_credential_owner_spec.spl`,
+`dbd_provisioning_spec.spl`, `dbd_protocol_hardening_spec.spl`,
+`dbd_launch_spec.spl`, and
+`test/01_unit/os/apps/servers_user/dbd_filesystem_provisioning_spec.spl`; then
+run the SimpleOS QEMU `/SERVERS.ELF` negative boot matrix with missing, short,
+oversized, and revoked `/SYS/SRVDB.KEY`. Optimized-native disassembly must also
+retain volatile source/workspace wipe calls before this deferred target gate is
+closed.
 
 ## tls13_accept entropy bypass closed 2026-08-21 (record stays open)
 
@@ -246,16 +269,3 @@ record already demands.
 the certificate/private-key owner, the boot credential source, the DBFS durable
 commit owner, and the wipe/native receipts in the closure list above are all
 untouched by this change.
-
-### 2026-08-21 capability correction
-
-The daemon's bounded provisioning, digest-only verifier, mutable-byte AUTH
-framing, authenticated-record ingress, and filesystem J1 write/readback path
-are implemented and wired in `src/os/apps/dbd/`.  The capability receipt now
-names the narrower code fact as
-`auth=DigestVerifierImplementedUnprovisionedV1`; it deliberately does not
-claim that boot material was provisioned. The existing
-`journal=ChecksummedBase64V1` continues to describe the J1 path. This does
-**not** promote production startup: `tls=Blocked` and
-`live_dbfs_durability=Blocked` remain explicit, and the first startup blocker
-continues to be `boot-mutable-credential-owner-unavailable`.

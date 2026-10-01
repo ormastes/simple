@@ -1,4 +1,9 @@
 # Fourth tree wipe (`6f86ff32a7d`) — every guard was sound, none was invoked
+## Closed 2026-09-16 — Status FIXED, re-verified; hook-wiring guard landed and fixture-verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-11
 - **Severity:** BLOCKER (repo integrity; whole-tree loss)
@@ -160,3 +165,4 @@ Implemented:
   given four wipes to date.
 - `setup.shs` installs the hook symlink but never asserts `core.hooksPath` is
   clean; it should call the new guard at the end.
+

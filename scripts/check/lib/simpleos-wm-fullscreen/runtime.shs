@@ -156,6 +156,21 @@ else
     scanout_stride="$(marker_field "$scanout_marker" stride)"
     scanout_pixel_format="$(marker_field "$scanout_marker" pixel_format)"
     scanout_generation="$(marker_field "$scanout_marker" generation)"
+    render_receipt_boot_status=unavailable
+    if [ -n "$RENDER_BOOT_NONCE" ]; then
+        # Bind the captured guest's wire header to this launch. This identity
+        # check alone does not claim the still-pending W/A/K pixel hold gate.
+        if awk -v nonce="$RENDER_BOOT_NONCE" '
+            $1 == "BRR1" && $2 == "H" {
+                count++; if (NF != 17 || ("x" $11) != ("x" nonce)) bad = 1
+            }
+            END { exit !(count == 1 && !bad) }
+        ' "$SERIAL_LOG"; then
+            render_receipt_boot_status=pass
+        else
+            render_receipt_boot_status=mismatch-or-missing
+        fi
+    fi
     case "$font_marker" in
         *"[font-evidence] guest_path=$FONT_GUEST_PATH asset_bytes=$FONT_ASSET_EXPECTED_BYTES family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256"*)
             font_marker_valid=true
@@ -173,6 +188,8 @@ else
     esac
     if [ "$reason" = "guest-serial-fault-storm" ] || [ "$reason" = "guest-render-fault" ]; then
         :
+    elif [ "$render_receipt_boot_status" = mismatch-or-missing ]; then
+        reason="render-receipt-boot-nonce-mismatch-or-missing"
     elif [ -z "$scanout_marker" ] || [ -z "${ready_marker:-}" ]; then
         reason="dynamic-scanout-or-desktop-readiness-missing"
     elif [ -n "$font_unavailable_marker" ] && \
@@ -629,4 +646,3 @@ PY
         fi
     fi
 fi
-

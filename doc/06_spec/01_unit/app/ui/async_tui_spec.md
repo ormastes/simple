@@ -227,17 +227,18 @@ expect(is_quit_event(event)).to_equal(true)
 
 #### empty line produces KeyPress enter
 
-1. ch send
-   - Expected: received != nil is true
+- empty line produces KeyPress enter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty line produces KeyPress enter")
 val event = parse_input_line("")
 # parse_input_line("") returns KeyPress(key: "enter")
 val ch = channel_new()

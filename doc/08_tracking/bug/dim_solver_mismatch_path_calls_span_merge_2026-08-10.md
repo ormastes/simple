@@ -1,4 +1,9 @@
 # DimSolver dimension-mismatch error path aborts: `Span` has no `merge`
+## Closed 2026-09-16 — Status FIXED; re-verified 2026-08-17 by source inspection
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -56,3 +61,4 @@ of the dimension solver — cannot report.
 Replace the six `e1.span.merge(e2.span)` calls with the lexer module's free
 function `span_merge(e1.span, e2.span)` (`lexer_types.spl:20`), then re-run the
 spec; the example must go green with `solve()` returning `Err`.
+

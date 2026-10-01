@@ -1,0 +1,68 @@
+# @gc — module uses GC runtime
+#
+# Model discovery for the OpenAI-compatible surface — phase A6.
+#
+# The list served by GET /v1/models is derived ONLY from what the phase-A1
+# loader can actually read off disk: a directory under the model root is a
+# model iff it holds a manifest.sdn that `parse_manifest` accepts. Nothing is
+# invented, and a root with no packs yields an empty list rather than an error.
+
+use std.gc_async_mut.slang.model_executor.model_loader.manifest.{parse_manifest}
+use std.io_runtime.{file_exists, read_file, dir_list}
+
+# A model the loader can see. `id` is the manifest's own model_id, so what the
+# API advertises is exactly what the loader would be asked to load.
+struct SlangModelEntry:
+    id: text
+    pack_root: text
+    revision: text
+    tensor_count: i64
+    chunk_count: i64
+
+fn _join(root: text, name: text) -> text:
+    if root.ends_with("/"):
+        return root + name
+    root + "/" + name
+
+# Read one candidate directory. Returns nil when it is not a valid pack.
+fn read_model_entry(pack_root: text) -> SlangModelEntry?:
+    val manifest_path = _join(pack_root, "manifest.sdn")
+    if not file_exists(manifest_path):
+        return nil
+    match parse_manifest(read_file(manifest_path)):
+        Err(_):
+            nil
+        Ok(m):
+            SlangModelEntry(
+                id: m.model_id,
+                pack_root: pack_root,
+                revision: m.revision,
+                tensor_count: m.tensor_count,
+                chunk_count: m.chunk_count
+            )
+
+# Every valid pack directly under `model_root`. An unreadable or missing root
+# yields an empty list.
+fn discover_models(model_root: text) -> [SlangModelEntry]:
+    var out: [SlangModelEntry] = []
+    if model_root.trim() == "":
+        return out
+    for name in dir_list(model_root):
+        val entry = read_model_entry(_join(model_root, name))
+        if entry != nil:
+            out.push(entry!)
+    out
+
+fn model_ids(entries: [SlangModelEntry]) -> [text]:
+    var out: [text] = []
+    for e in entries:
+        out.push(e.id)
+    out
+
+fn find_model(entries: [SlangModelEntry], id: text) -> SlangModelEntry?:
+    for e in entries:
+        if e.id == id:
+            return e
+    nil
+
+export SlangModelEntry, read_model_entry, discover_models, model_ids, find_model

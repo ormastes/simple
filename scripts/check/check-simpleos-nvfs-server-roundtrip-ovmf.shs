@@ -1,0 +1,470 @@
+#!/bin/sh
+# check-simpleos-nvfs-server-roundtrip-ovmf.shs
+#
+# The NVFS analogue of check-simpleos-vfs-server-roundtrip-ovmf.shs (FAT32,
+# green at 8/8). Proves the SimpleOS VFS FILESYSTEM SERVER is genuinely RUNNING
+# in-guest ON AN NVFS VOLUME, by a DATA round-trip verified through a
+# FILESYSTEM CHECK.
+#
+# Boot is OVMF pflash -> GRUB-EFI (a real EFI application) -> multiboot1 kernel.
+# NEVER QEMU `-kernel`, NEVER isa-debug-exit — the assembled argv is
+# self-checked for both forbidden flags before the VM is started, so the same
+# artifact could boot on hardware (.claude/rules/board-runnable.md).
+#
+# COMPILER: the RUST BOOTSTRAP SEED, on purpose and stated in the verdict.
+# `--timeout 1200` is passed to native-build deliberately: the 300s default
+# makes modules that compile fine "fail". A timeout is not a compile error.
+#
+# WHAT "NVFS" MEANS HERE, STATED HONESTLY. In this tree `NvfsDriver` is a thin
+# wrapper over `DbFsDriver` — the repo names that boundary itself, as
+# `provider=nvfs-dbfs-backed-v1`. An NVFS volume is: NVFS superblock replicas at
+# LBA 0-1, DBFS backing superblock replicas at LBA 2-3, DBFS arena from LBA 4
+# (NVFS_BOOT_ARENA_BASE_LBA_V1 = DBFS_BOOT_ARENA_BASE_LBA_V1 = 4). Those exact
+# constants are shared by the image builder (src/os/port/nvfs_image.spl) and by
+# the in-guest canonical mount
+# (src/os/kernel/boot/nvfs_root_mount_transaction.spl), which is what makes the
+# host-staged volume and the guest mount agree. This gate does not claim a
+# native NVFS storage engine; it claims the NVFS-selected, DBFS-backed root
+# that SimpleOS actually boots.
+#
+# WHY THIS IS THE LIVE SERVER AND NOT A PROBE-PRIVATE COPY: the guest mounts
+# through `boot_fs_mount_freestanding_production()`, the same production entry
+# `os_main` uses. That routes NVFS -> DBFS -> FAT32 in order and publishes the
+# root through `vfs_nvfs_root_mount_commit_v1` into the VFS MountTable. The
+# round-trip below is then issued as ordinary `g_vfs_write_file_text` /
+# `g_vfs_read_file_text` hub requests. Nothing here opens a driver handle of
+# its own.
+#
+# WHY A BANNER IS NOT ACCEPTED, AND A PATH EXISTING IS NOT ACCEPTED:
+# the payload is a PER-RUN NONCE minted into the lane private generated dir by THIS run.
+# The gate greps for that exact nonce in the serial transcript, and verifies it
+# host-side in the raw NVMe image. A stale kernel, a stale disk image, or a
+# probe that printed a banner without moving data all carry the wrong nonce (or
+# none) and FAIL. The freshly staged volume is asserted, BEFORE boot, to contain
+# neither this run's nonce nor the target path — so every nonce byte read back
+# afterwards is a byte this run's guest wrote.
+#
+# WHY THERE IS AN fs-IDENTITY RUNG: `boot_fs_mount_pure_nvme_from_lease_device`
+# falls back NVFS -> DBFS -> FAT32. Without L5 a DBFS-fallback boot would green
+# an NVFS lane. L5 requires the mount to have been taken by NVFS specifically.
+#
+# REQUIRED RUNGS (serial log) — all must be present:
+#   L1  "[grub-uefi] multiboot loading"          OVMF -> GRUB-EFI app ran
+#   L2  "[nvfsrt] probe begin nonce=<NONCE>"     guest entered, carrying THIS nonce
+#   L3  "[nvfsrt] nvme bring-up ok=true"         pure-Simple NVMe lease is up
+#   L4  "[nvfsrt] production mount ok=true"      boot_fs_mount production entry took a root
+#   L5  "[nvfsrt] fs-type=nvfs"                  the root was taken by NVFS, not a fallback
+#   L6  "[nvfsrt] fs-server up ready=true"       the VFS hub is serving
+#   L7  "[nvfsrt] server write path=/NVFSRT.TXT ok=true"   hub ACCEPTED a write
+#   L8  "[nvfsrt] server read-back=nvfsrt-nonce:<NONCE>"   hub RETURNED the data
+#   L9  "[nvfsrt] ROUNDTRIP_OK nonce=<NONCE>"    write and read-back are identical
+# REQUIRED HOST-SIDE FILESYSTEM CHECK:
+#   L10 the nonce bytes are physically present in the raw NVMe image — an
+#       independent check outside the guest that the data reached the disk.
+#       DBFS stores blob bytes unencoded in its arena, so a byte grep is a
+#       valid check here; it is verified by selftest fixtures F5-F7 and, at
+#       staging time, by the pre-boot absence assertions.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> check(s) checked, ...   exit 0
+#   FAIL  — ...                         exit 1
+#   ERROR — nothing was checked: ...    exit 2
+# 0 checks executed is an ERROR, never a PASS. A missing tool, missing OVMF
+# firmware, a missing seed, a failed volume staging, or no serial transcript is
+# an ERROR, never a PASS.
+#
+# `--selftest` runs, fatally, before every real scan. Its fixtures include a
+# BANNER-ONLY must-FAIL (a guest that boots and prints nothing useful), a
+# stale-artifact must-FAIL, and a DBFS-FALLBACK must-FAIL.
+#
+# Env: SEED, SKIP_KERNEL=1 (reuse existing kernel), QEMU_MEM (2G), BOOT_WAIT,
+#      OVMF_CODE, OVMF_VARS_SRC, NVFSRT_NONCE (selftest only),
+#      NVFSRT_VOLUME_SECTORS (default 8192 = 4 MiB at 512 B/sector; see the
+#      cost note at the staging step before raising it).
+
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/nvfs_server_roundtrip_entry.spl"
+LINKER="examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld"
+OUT="build/os/nvfsrt"
+KERNEL="build/os/simpleos_nvfsrt_uefi.elf"
+IMG="$OUT/nvfs-nvfsrt.img"
+SERIAL="$OUT/nvfs_server_roundtrip_ovmf.serial.log"
+CACHE="$OUT/cache"
+BUILD="$OUT/uefi"
+ESP="$BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+# PRIVATE generated dir, deliberately NOT the shared build/os/generated. Both
+# this lane and the FAT32 lane pass their generated dir to `--source`, so a
+# shared dir means each kernel ingests the other lane's files and a concurrent
+# run of one can rewrite files mid-scan of the other. It also means any stray
+# .spl a human or a diagnostic left there enters the freestanding closure.
+GEN="$OUT/generated"
+NONCE_SPL="$GEN/nvfs_roundtrip_nonce.spl"
+STAGE_SPL="$GEN/nvfs_stage_volume.spl"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS="$BUILD/OVMF_VARS_4M.fd"
+QEMU_MEM="${QEMU_MEM:-2G}"
+BOOT_WAIT="${BOOT_WAIT:-180}"
+NVFSRT_PATH="/NVFSRT.TXT"
+
+fail()    { echo "FAIL — $1"; exit 1; }
+nothing() { echo "ERROR — nothing was checked: $1"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# scan_serial <log> <nonce> — 0 when every REQUIRED serial rung is present.
+# Anchored on the nonce-bearing rungs and on the fs-type identity rung,
+# deliberately not on line counts and not on the firmware banner: a complete
+# boot transcript with the server silent, one that fell back to DBFS/FAT32, or
+# one carrying a DIFFERENT nonce, must all FAIL.
+# ---------------------------------------------------------------------------
+scan_serial() {
+    _log=$1; _n=$2; _miss=""
+    grep -qF '[grub-uefi] multiboot loading'                    "$_log" || _miss="$_miss L1"
+    grep -qF "[nvfsrt] probe begin nonce=$_n"                   "$_log" || _miss="$_miss L2"
+    grep -qF '[nvfsrt] nvme bring-up ok=true'                   "$_log" || _miss="$_miss L3"
+    grep -qF '[nvfsrt] production mount ok=true'                "$_log" || _miss="$_miss L4"
+    grep -qF '[nvfsrt] fs-type=nvfs'                            "$_log" || _miss="$_miss L5"
+    grep -qF '[nvfsrt] fs-server up ready=true'                 "$_log" || _miss="$_miss L6"
+    grep -qF "[nvfsrt] server write path=$NVFSRT_PATH ok=true"  "$_log" || _miss="$_miss L7"
+    grep -qF "[nvfsrt] server read-back=nvfsrt-nonce:$_n"       "$_log" || _miss="$_miss L8"
+    grep -qF "[nvfsrt] ROUNDTRIP_OK nonce=$_n"                  "$_log" || _miss="$_miss L9"
+    SCAN_MISSING=$_miss
+    [ -z "$_miss" ]
+}
+
+# ---------------------------------------------------------------------------
+# scan_image <img> <nonce> — 0 when the nonce bytes are physically in the raw
+# NVMe image. THE filesystem check: independent of anything the guest printed.
+# ---------------------------------------------------------------------------
+scan_image() {
+    [ -f "$1" ] || return 1
+    grep -qa "nvfsrt-nonce:$2" "$1"
+}
+
+# ---------------------------------------------------------------------------
+# argv self-check. Needles are assembled from fragments so this check can
+# neither be defeated by, nor accidentally fire on, the surrounding prose.
+# ---------------------------------------------------------------------------
+assert_real_firmware_argv() {
+    _k="-""kernel"
+    _d="isa""-debug-exit"
+    for _a in "$@"; do
+        case "$_a" in
+            "$_k"|*"$_d"*) echo "FAIL — forbidden QEMU flag in argv: $_a"; exit 1 ;;
+        esac
+    done
+    case " $* " in
+        *" $_k "*) echo "FAIL — forbidden QEMU flag in argv: $_k"; exit 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# --selftest — fatal, runs before every real scan.
+# ---------------------------------------------------------------------------
+selftest() {
+    _t=$(mktemp -d); _rc=0
+    _ok_n="AAAA1111"; _stale_n="BBBB2222"
+
+    # F1 must-PASS: a complete, honest transcript at the current nonce.
+    cat > "$_t/ok.log" <<EOF
+[grub-uefi] multiboot loading /boot/kernel.elf ...
+[nvfsrt] probe begin nonce=$_ok_n
+[nvfsrt] nvme bring-up ok=true
+[nvfsrt] production mount ok=true
+[nvfsrt] fs-type=nvfs
+[nvfsrt] fs-server up ready=true
+[nvfsrt] server write path=$NVFSRT_PATH ok=true
+[nvfsrt] server read-back=nvfsrt-nonce:$_ok_n
+[nvfsrt] ROUNDTRIP_OK nonce=$_ok_n
+EOF
+    scan_serial "$_t/ok.log" "$_ok_n" || { echo "  selftest F1 FAILED (honest transcript rejected)"; _rc=1; }
+
+    # F2 must-FAIL — THE banner-only fixture. Firmware booted, the guest
+    # entered at the RIGHT nonce, NVMe came up, and it printed a plausible
+    # banner. It never mounted and never moved data. A gate that keyed on
+    # "the guest is alive and talking" would pass this.
+    cat > "$_t/banner.log" <<EOF
+[grub-uefi] multiboot loading /boot/kernel.elf ...
+[nvfsrt] probe begin nonce=$_ok_n
+[nvfsrt] nvme bring-up ok=true
+=== SimpleOS NVFS filesystem-server round-trip probe ===
+EOF
+    if scan_serial "$_t/banner.log" "$_ok_n"; then
+        echo "  selftest F2 FAILED (banner-only transcript accepted)"; _rc=1
+    fi
+
+    # F3 must-FAIL — the stale-artifact fixture. The path EXISTS and the
+    # transcript is complete, but every nonce in it is from a PREVIOUS run.
+    cat > "$_t/stale.log" <<EOF
+[grub-uefi] multiboot loading /boot/kernel.elf ...
+[nvfsrt] probe begin nonce=$_stale_n
+[nvfsrt] nvme bring-up ok=true
+[nvfsrt] production mount ok=true
+[nvfsrt] fs-type=nvfs
+[nvfsrt] fs-server up ready=true
+[nvfsrt] server stat exists=true
+[nvfsrt] server write path=$NVFSRT_PATH ok=true
+[nvfsrt] server read-back=nvfsrt-nonce:$_stale_n
+[nvfsrt] ROUNDTRIP_OK nonce=$_stale_n
+EOF
+    if scan_serial "$_t/stale.log" "$_ok_n"; then
+        echo "  selftest F3 FAILED (stale artifact with existing path accepted)"; _rc=1
+    fi
+
+    # F4 must-FAIL — THE fs-identity fixture. A complete, honest, current-nonce
+    # round-trip that actually moved data — but the root was taken by the DBFS
+    # fallback, not by NVFS. This lane must not go green on it.
+    cat > "$_t/dbfs.log" <<EOF
+[grub-uefi] multiboot loading /boot/kernel.elf ...
+[nvfsrt] probe begin nonce=$_ok_n
+[nvfsrt] nvme bring-up ok=true
+[nvfsrt] production mount ok=true
+[nvfsrt] fs-type=dbfs
+[nvfsrt] fs-server up ready=true
+[nvfsrt] server write path=$NVFSRT_PATH ok=true
+[nvfsrt] server read-back=nvfsrt-nonce:$_ok_n
+[nvfsrt] ROUNDTRIP_OK nonce=$_ok_n
+EOF
+    if scan_serial "$_t/dbfs.log" "$_ok_n"; then
+        echo "  selftest F4 FAILED (DBFS-fallback mount accepted by the NVFS lane)"; _rc=1
+    fi
+
+    # F5 must-FAIL: an empty transcript.
+    : > "$_t/empty.log"
+    if scan_serial "$_t/empty.log" "$_ok_n"; then
+        echo "  selftest F5 FAILED (empty transcript accepted)"; _rc=1
+    fi
+
+    # F6 image check must-PASS: nonce bytes physically present.
+    printf 'junk\0\0nvfsrt-nonce:%s\0\0junk' "$_ok_n" > "$_t/ok.img"
+    scan_image "$_t/ok.img" "$_ok_n" || { echo "  selftest F6 FAILED (nonce in image not found)"; _rc=1; }
+
+    # F7 image check must-FAIL: an image carrying only the STALE nonce.
+    printf 'junk\0\0nvfsrt-nonce:%s\0\0junk' "$_stale_n" > "$_t/stale.img"
+    if scan_image "$_t/stale.img" "$_ok_n"; then
+        echo "  selftest F7 FAILED (stale image accepted)"; _rc=1
+    fi
+
+    # F8 image check must-FAIL: a missing image is not a pass.
+    if scan_image "$_t/nope.img" "$_ok_n"; then
+        echo "  selftest F8 FAILED (missing image accepted)"; _rc=1
+    fi
+
+    # F9 argv guard must-FAIL on each forbidden flag, in a subshell so the
+    # guard's own exit does not kill the selftest.
+    for _bad in "-kernel" "-device isa-debug-exit,iobase=0xf4"; do
+        # shellcheck disable=SC2086
+        if ( assert_real_firmware_argv qemu-system-x86_64 -m 2G $_bad >/dev/null 2>&1 ); then
+            echo "  selftest F9 FAILED (argv guard missed: $_bad)"; _rc=1
+        fi
+    done
+
+    # F10 argv guard must-PASS on the real, compliant argv.
+    if ! ( assert_real_firmware_argv qemu-system-x86_64 -machine q35 \
+            -drive "if=pflash,format=raw,file=OVMF_CODE.fd" >/dev/null 2>&1 ); then
+        echo "  selftest F10 FAILED (argv guard rejected a compliant argv)"; _rc=1
+    fi
+
+    rm -rf "$_t"
+    [ "$_rc" -eq 0 ] || { echo "ERROR — nothing was checked: selftest failed"; exit 2; }
+    echo "[nvfsrt] selftest: 11 fixture(s) OK"
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 11 check(s) checked, selftest fixtures only (no VM was booted)"; exit 0; }
+
+# ---------------------------------------------------------------------------
+# Preconditions — every one of these is ERROR, never a pass.
+# ---------------------------------------------------------------------------
+command -v qemu-system-x86_64 >/dev/null 2>&1 || nothing "qemu-system-x86_64 missing"
+command -v grub-mkstandalone  >/dev/null 2>&1 || nothing "grub-mkstandalone missing"
+[ -f "$OVMF_CODE" ]     || nothing "OVMF_CODE missing at $OVMF_CODE"
+[ -f "$OVMF_VARS_SRC" ] || nothing "OVMF_VARS missing at $OVMF_VARS_SRC"
+[ -f "$SEED" ]          || nothing "seed missing at $SEED (build it: cd src/compiler_rust && cargo build --release --bin simple)"
+# A gate that writes logs under a directory must mkdir -p it first.
+mkdir -p "$OUT" "$GEN"
+
+# ---- 1. Mint THIS run's nonce ---------------------------------------------
+NONCE="${NVFSRT_NONCE:-$(date -u +%Y%m%d%H%M%S)$$}"
+printf 'pub fn nvfs_roundtrip_nonce() -> text:\n    "%s"\n' "$NONCE" > "$NONCE_SPL"
+echo "[nvfsrt] nonce=$NONCE -> $NONCE_SPL"
+
+# ---- 2. Stage a fresh NVFS volume -----------------------------------------
+# Recreated EVERY run: a previous run's file must never satisfy this one.
+#
+# The volume is built by src/os/port/nvfs_image.spl (NVFS superblock replicas at
+# LBA 0-1, DBFS backing superblock at LBA 2-3, DBFS arena from LBA 4) — the same
+# constants boot_nvfs_root_mount_transaction_v1 reads in-guest. It is NOT blank:
+# a blank disk has no NVFS superblock and the production mount fails closed on
+# it, which is correct and is NOT relaxed to make this gate pass. The volume was
+# brought up to the production contract instead, exactly as the FAT32 lane did.
+#
+# The seed file below is deliberately unrelated to the nonce and to the target
+# path: both pre-boot absence assertions must hold on the FRESH volume.
+# 8192 sectors = 4 MiB. Deliberately small: image staging runs the pure-Simple
+# builder under the SEED INTERPRETER (the JIT drops the module over an
+# unresolved `rt_typed_bytes_u8_unchecked`), and its cost grows faster than
+# linearly in sector count — measured on this host, 8192 sectors staged in
+# ~6 min while 16384 had not finished in 28. Raise NVFSRT_VOLUME_SECTORS only
+# with that cost in mind; 4 MiB satisfies every bound the mount checks
+# (arena >= 4 blocks, plus the two namespace checkpoint blocks).
+VOLUME_SECTORS="${NVFSRT_VOLUME_SECTORS:-8192}"
+cat > "$STAGE_SPL" <<STAGEEOF
+# Generated by scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs.
+# Stages the fresh NVFS volume this run boots. Never carries the run nonce.
+use os.port.nvfs_image.{
+    NvfsImageConfig, NvfsImageSeed, build_nvfs_rootfs_image, NVFS_IMAGE_PROVIDER
+}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn main():
+    val cfg = NvfsImageConfig(
+        size_sectors: ${VOLUME_SECTORS}u64,
+        seeds: [
+            NvfsImageSeed(
+                name: "/etc/motd",
+                data: rt_text_to_bytes("SimpleOS NVFS root ({NVFS_IMAGE_PROVIDER})\n")
+            )
+        ]
+    )
+    match build_nvfs_rootfs_image(cfg, "$IMG"):
+        case Ok(_):
+            print "NVFS_STAGE_OK provider={NVFS_IMAGE_PROVIDER}"
+        case Err(e):
+            print "NVFS_STAGE_FAIL {e}"
+    return ()
+STAGEEOF
+
+rm -f "$IMG"
+# Capture the exit code DIRECTLY into a variable on the next line — never
+# through a pipe. A pipeline's \$? is the last command's status, and that has
+# masked a real failure as a pass in this project.
+# `if ...; then/else` rather than a bare call: `set -e` aborts the whole script
+# on a failing bare command, which killed a run of this gate BEFORE it could
+# print any verdict line at all (exit 1, no output) — the exact silent-failure
+# mode the verdict convention exists to prevent.
+if SIMPLE_LIB="$ROOT/src" "$SEED" run "$STAGE_SPL" > "$OUT/stage.log" 2>&1; then
+    STAGE_RC=0
+else
+    STAGE_RC=$?
+fi
+if [ "$STAGE_RC" -ne 0 ] || ! grep -qF 'NVFS_STAGE_OK' "$OUT/stage.log"; then
+    STAGE_ERR=$(grep -m1 'NVFS_STAGE_FAIL\|error:' "$OUT/stage.log" 2>/dev/null || true)
+    nothing "NVFS volume staging failed (rc=$STAGE_RC): ${STAGE_ERR:-see $OUT/stage.log}"
+fi
+[ -f "$IMG" ] || nothing "NVFS volume staging produced no $IMG"
+
+# Both anchors, asserted on the FRESH volume before anything boots.
+scan_image "$IMG" "$NONCE" && nothing "fresh image already contains the nonce (impossible; refusing)"
+grep -qaF "$NVFSRT_PATH" "$IMG" && nothing "fresh image already carries a $NVFSRT_PATH entry (refusing)"
+echo "[nvfsrt] volume=$IMG ($(stat -c%s "$IMG") bytes, ${VOLUME_SECTORS} sectors; nonce and $NVFSRT_PATH both absent)"
+
+# ---- 3. Kernel (RUST SEED; --timeout 1200 deliberate) ----------------------
+if [ "${SKIP_KERNEL:-0}" != "1" ] || [ ! -f "$KERNEL" ]; then
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-23/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    rm -rf "$CACHE"; mkdir -p "$CACHE"; rm -f "$KERNEL"
+    echo "[nvfsrt] building kernel -> $KERNEL (rust seed: $SEED)"
+    # SIMPLE_ALLOW_STUB_FALLBACK and SIMPLE_ALLOW_UNRESOLVED_RUNTIME are
+    # deliberately NOT set: a round-trip "proved" by a silently-stubbed binary
+    # is exactly the fabricated evidence this lane exists to rule out.
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build --source "$GEN" --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
+        --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
+        --timeout 1200 \
+        --entry "$ENTRY" --target x86_64-unknown-none -o "$KERNEL" \
+        --linker-script "$LINKER" > "$OUT/kernel-build.log" 2>&1 || true
+    if [ ! -f "$KERNEL" ]; then
+        # Surface the actual first error, not just "no kernel" — a bare
+        # "build produced nothing" identifies no layer and wastes iterations.
+        FIRSTERR=$(grep -m1 "symbol not found\|Build failed\|failed to compile" "$OUT/kernel-build.log" 2>/dev/null || true)
+        nothing "kernel build produced no $KERNEL: ${FIRSTERR:-see $OUT/kernel-build.log}"
+    fi
+fi
+echo "[nvfsrt] kernel=$KERNEL ($(stat -c%s "$KERNEL") bytes)"
+
+# ---- 4. ESP: self-contained BOOTX64.EFI with the kernel in its memdisk -----
+rm -rf "$BUILD"; mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS NVFS server round-trip probe (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$BUILD/grub.cfg" "boot/kernel.elf=$KERNEL" \
+    >/dev/null 2>&1 || nothing "grub-mkstandalone failed"
+[ -f "$EFIAPP" ] || nothing "grub-mkstandalone produced no $EFIAPP"
+
+# ---- 5. Assemble the argv FIRST, self-check it, then boot -----------------
+rm -f "$SERIAL"
+set -- qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL" \
+    -drive "file=$IMG,if=none,id=nvm,format=raw" \
+    -device nvme,serial=deadbeef,drive=nvm
+assert_real_firmware_argv "$@"
+
+"$@" >/dev/null 2>&1 &
+QEMU_PID=$!
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+
+i=0
+while [ "$i" -lt "$BOOT_WAIT" ]; do
+    if [ -f "$SERIAL" ] && { grep -qF '[nvfsrt] probe complete' "$SERIAL" 2>/dev/null \
+                          || grep -qF '[nvfsrt] PROBE FAILED'  "$SERIAL" 2>/dev/null; }; then
+        break
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+sleep 2
+kill "$QEMU_PID" 2>/dev/null || true
+wait "$QEMU_PID" 2>/dev/null || true
+
+[ -f "$SERIAL" ] || nothing "no serial transcript was produced"
+
+# ---- 6. Verdict ------------------------------------------------------------
+echo "[nvfsrt] serial transcript: $SERIAL"
+
+CHECKED=0
+MISSING=""
+
+scan_serial "$SERIAL" "$NONCE" || MISSING="$MISSING$SCAN_MISSING"
+CHECKED=$((CHECKED + 9))
+
+if scan_image "$IMG" "$NONCE"; then
+    echo "  [OK]   L10 nonce bytes found in the raw NVMe image (host-side filesystem check)"
+else
+    MISSING="$MISSING L10"
+fi
+CHECKED=$((CHECKED + 1))
+
+[ "$CHECKED" -gt 0 ] || nothing "0 checks executed"
+
+if [ -n "$MISSING" ]; then
+    fail "$CHECKED check(s) checked, missing:$MISSING (nonce=$NONCE, transcript: $SERIAL, image: $IMG)"
+fi
+
+echo "PASS — $CHECKED check(s) checked, the SimpleOS VFS filesystem service served a write and a read-back of this run's nonce $NONCE in-guest on an NVFS volume (NVFS-selected, DBFS-backed provider nvfs-dbfs-backed-v1, mounted through the production boot_fs_mount entry and the canonical NVFS root transaction) under OVMF real firmware, and the nonce bytes are physically present in the NVMe image (kernel built by the RUST SEED $SEED, not the self-hosted compiler; transcript: $SERIAL)"

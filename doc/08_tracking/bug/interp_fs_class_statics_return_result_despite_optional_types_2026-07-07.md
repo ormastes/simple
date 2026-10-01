@@ -1,4 +1,9 @@
 # Interpreter: `fs` class-static methods typed `Optional`/`bool` actually return runtime `Result::Ok`/`Err`
+## Closed 2026-09-16 — Status ALREADY-FIXED (superseded), re-verified 2026-08-09: buggy fs.spl unreachable, symptom unreproducible
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-07
 **Severity:** medium — silently defeats truthiness checks on file-existence/IO
@@ -89,3 +94,4 @@ boundary (unwrap `Result` into the declared shape before returning to
 `.spl` code), or (b) fix the declared signatures to `-> Result<[u8], text>`
 etc. so callers `match` instead of `if`. Also fix the `.path`-on-`String`
 crash in the `delete` unwrap path regardless of which option is chosen.
+

@@ -10,16 +10,18 @@ an `i64` address is a receipt or that a bulk mapper cleanup proves release.
 
 | Type | Owner / boundary | Mutability |
 | --- | --- | --- |
-| `ExecutableMappingReceiptV1` | `common/structural/parallel_commit` | Frozen, pointer-free copy record |
+| `ExecutableMappingReceiptV1` | physical mapper / common vocabulary | Frozen, pointer-free producer coordinate |
 | `ExecutableMappingCandidateV1` | loader-private producer-to-owner result | Scoped loan; no public address |
 | `ModuleAspectExecutableMappingOwnerV1` | `_ModuleAspectOwnerV1` | Canonical registry, limits, issuer, terminal ring |
 | `ExecutableMappingRegistryRowV1` | loader-private | Exact producer delegate plus private coordinates |
 | `ApkFinalUnpinLeaseV2` | `std.common.aspect_pack` | Generation-bound, single transition lease |
 | `ExecutableMappingReleaseResultV1` | common receipt contract | Frozen pointer-free outcome |
 
-The registry key is `(facet_key, facet_generation, receipt_id)`; the direct
-facet index is `facet_key + NUL + facet_generation`. A receipt validates exact
-`owner_identity`, artifact digest, producer kind, mapping generation and ID.
+The future registry key is `(facet_key, facet_generation, mapping_key,
+mapping_generation)`; the direct facet index is `facet_key + NUL +
+facet_generation`. A receipt validates exact mapper `owner_id`, producer kind,
+mapping key, and mapping generation; the loader registry separately binds its
+artifact digest and aspect-owner identity.
 No `address`, function pointer, `SegmentMapper`, `SharedExecMapper`, closure,
 or arbitrary dynamic payload crosses a common/aspect boundary.
 
@@ -38,9 +40,11 @@ or `NotFound`; it can never release a newer mapping.
 
 ## Required API sequencing
 
-1. Extend each mapper with an internal materialize/rollback/release port.
-   Existing `map_segment`/`map_symbol` compatibility functions remain and may
-   adapt only after they produce an internally registered candidate.
+1. **Done (mapper prerequisite):** each mapper has a receipt-returning map
+   entrypoint alongside its compatibility address API.  The receipt is issued
+   only after a live native record exists and has no raw address.  The common
+   `ExecutableMappingReleasePortV1` is intentionally a contract only; no
+   mapper exposes receipt-driven release before final-unpin exists.
 2. Add the common receipt data types and well-formedness checks, without native
    imports.
 3. Add the bounded owner registry and deterministic parent commit.
@@ -67,19 +71,22 @@ test/SPipe execution and the APIs they require do not yet exist.
 | AMR-STALE-008 | Old receipt is replayed after unload then reload. | No release of new generation: generation/ID mismatch or bounded terminal `AlreadyReleased`. |
 | AMR-ORDER-009 | Two workers materialize same digest in different completion order. | Parent commits by documented tuple order; loser is rejected/rolled back independent of completion timing. |
 
-## Static review record (cycle 1 of at most 3)
+## Static review record (cycle 2 of at most 3)
 
 PASS, design-only:
 
-- Canonical mutable state has one named owner; mapper state is private producer
-  state, never an alternative registry.
+- Canonical mutable state has one named owner.  Each mapper issues a coordinate
+  only for its just-committed native record; it creates no second registry.
 - All cross-layer records are copies/frozen coordinates or a generation-bound
   lease; raw addresses and raw callback transports are excluded.
 - Parent validates then deterministically commits/rolls back child-produced
   candidates. Unknown overlap/conflict rejects.
 - Registry, bytes, ID issuance, and terminal history are bounded; no release
   path scans all mappings.
-- No executable unmap is asserted against current v1 APIs.
+- Existing address APIs, W^X transitions, and code-cache behavior are unchanged.
+  Receipt mapping adds one O(1) record lookup and no payload copy/syscall.
+- No executable unmap is asserted against current v1 APIs; in particular there
+  is no `unmap_receipt` entrypoint before final-unpin v2 exists.
 
 Implementation remains blocked pending the five prerequisite contracts named in
 the architecture decision. No tests, builds, benchmarks, optimizer passes, or

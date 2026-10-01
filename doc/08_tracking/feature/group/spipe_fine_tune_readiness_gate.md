@@ -1,5 +1,7 @@
-# Feature Group: spipe_fine-tune_readiness_gate
+# spipe_fine-tune_readiness_gate
 
-| ID | Status | Device | Component | Priority | Title | Pipeline Evidence |
-|----|--------|--------|-----------|----------|-------|-------------------|
-| FR-SPIPE-LLM-0002 | request | spipe_fine-tune_readiness_gate | SPipe fine-tune readiness gate | P1 | Require target-reaching eval before acceptance | req research plan arch design system_spec spec_doc impl integration guide |
+## Features
+
+| ID | Feature | Description | Modes | Platforms | Spec |
+|----|---------|-------------|-------|-----------|------|
+| <a id="feature-FR-SPIPE-LLM-0002"></a>FR-SPIPE-LLM-0002 | Require target-reaching eval before acceptance | Do not accept the MedGemma artifact until recorded | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | - |

@@ -1,0 +1,108 @@
+# Test-side HAL evidence contract. This spec does not modify or impersonate a
+# HAL owner and does not claim live physical-board execution.
+
+use std.spec.*
+use os.kernel.arch.x86_64.mod.{create_x86_64_hal}
+use test.helpers.hal_coverage_parity.{
+    HalEvidenceScope,
+    HalFixture,
+    HalRun,
+    prepare_hal_fixture,
+    run_c_hal_case,
+    run_simple_hal_case,
+    assert_hal_parity,
+    assert_hal_branch_coverage
+}
+
+fn x86_metadata_branches() -> [text]:
+    ["cpu-id-zero", "address-width-64", "page-size-4096", "paging-levels-4"]
+
+fn x86_metadata_payload(cpu_id: i64, width: i64, page_size: i64, levels: i64) -> text:
+    "cpu_id=" + cpu_id.to_text() + ";width=" + width.to_text() + ";page_size=" + page_size.to_text() + ";levels=" + levels.to_text()
+
+fn host_fixture(required_branches: [text]) -> HalFixture:
+    val expected = x86_metadata_payload(0, 64, 4096, 4)
+    prepare_hal_fixture(
+        "x86-safe-metadata",
+        "x86-safe-metadata-v1",
+        HalEvidenceScope.HostExecutable,
+        "create_x86_64_hal",
+        expected,
+        required_branches
+    )
+
+fn board_fixture() -> HalFixture:
+    val expected = x86_metadata_payload(0, 64, 4096, 4)
+    prepare_hal_fixture(
+        "x86-safe-metadata",
+        "x86-safe-metadata-v1",
+        HalEvidenceScope.PhysicalBoard,
+        "identified-board-run-required",
+        expected,
+        x86_metadata_branches()
+    )
+
+fn complete_c_run() -> HalRun:
+    val fixture = host_fixture(x86_metadata_branches())
+    val output = x86_metadata_payload(0, 64, 4096, 4)
+    run_c_hal_case(fixture, x86_metadata_branches(), output, false)
+
+fn complete_simple_run() -> HalRun:
+    val fixture = host_fixture(x86_metadata_branches())
+    val hal = create_x86_64_hal()
+    val output = x86_metadata_payload(
+        hal.cpu.cpu_id() as i64,
+        hal.cpu.cpu_address_width() as i64,
+        hal.paging.page_size() as i64,
+        hal.paging.address_levels() as i64
+    )
+    run_simple_hal_case(fixture, x86_metadata_branches(), output, false)
+
+describe "bounded SimpleOS HAL coverage and parity evidence":
+    it "accepts parity for the existing safe x86_64 metadata surface":
+        match assert_hal_parity(complete_c_run(), complete_simple_run()):
+            case Ok(run):
+                # Full only for x86-safe-metadata-v1, not for the whole HAL.
+                expect(run.coverage_basis_points).to_equal(10000)
+                expect(run.branch_denominator).to_equal(4)
+            case Err(err): fail("Expected bounded HAL parity, got {err.code} at {err.path}")
+
+    it "rejects a zero branch denominator":
+        val fixture = host_fixture([])
+        val run = run_simple_hal_case(fixture, [], x86_metadata_payload(0, 64, 4096, 4), false)
+        match assert_hal_branch_coverage(run):
+            case Err(err): expect(err.code).to_equal("zero-denominator")
+            case Ok(_valid): fail("Zero-denominator HAL coverage must fail")
+
+    it "rejects a missing required branch without claiming full coverage":
+        val fixture = host_fixture(x86_metadata_branches())
+        val partial = ["cpu-id-zero", "address-width-64", "page-size-4096"]
+        val run = run_simple_hal_case(fixture, partial, x86_metadata_payload(0, 64, 4096, 4), false)
+        expect(run.coverage_basis_points).to_be_less_than(10000)
+        match assert_hal_branch_coverage(run):
+            case Err(err): expect(err.code).to_equal("missing-branch")
+            case Ok(_valid): fail("Missing manifest branch must fail")
+
+    it "rejects blended host-executable and physical-board claims":
+        val host_run = complete_c_run()
+        val board = board_fixture()
+        val board_run = run_simple_hal_case(board, x86_metadata_branches(), x86_metadata_payload(0, 64, 4096, 4), false)
+        match assert_hal_parity(host_run, board_run):
+            case Err(err): expect(err.code).to_equal("blended-evidence")
+            case Ok(_valid): fail("Host and board evidence must remain separate")
+
+    it "rejects a Simple HAL output checksum mismatch":
+        val fixture = host_fixture(x86_metadata_branches())
+        val wrong = x86_metadata_payload(0, 48, 4096, 4)
+        val simple_run = run_simple_hal_case(fixture, x86_metadata_branches(), wrong, false)
+        match assert_hal_parity(complete_c_run(), simple_run):
+            case Err(err): expect(err.code).to_equal("checksum-mismatch")
+            case Ok(_valid): fail("Mismatched HAL output checksum must fail")
+
+    it "rejects fallback execution as parity evidence":
+        val fixture = host_fixture(x86_metadata_branches())
+        val output = x86_metadata_payload(0, 64, 4096, 4)
+        val fallback_run = run_simple_hal_case(fixture, x86_metadata_branches(), output, true)
+        match assert_hal_parity(complete_c_run(), fallback_run):
+            case Err(err): expect(err.code).to_equal("fallback-used")
+            case Ok(_valid): fail("Fallback HAL execution must not satisfy parity")

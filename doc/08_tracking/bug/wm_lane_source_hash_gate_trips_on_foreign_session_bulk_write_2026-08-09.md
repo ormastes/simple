@@ -1,4 +1,8 @@
 # WM evidence lane: source-hash gate trips on a foreign session's bulk `src/lib` write
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -166,3 +170,4 @@ is the very defect under repair.
 Of the six foreign-written files named in the Evidence section above, the two
 under `gpu/engine2d/` and `gpu/browser_engine/` are exactly the class the new set
 excludes; none of the six is reachable from the WM entry's import closure.
+

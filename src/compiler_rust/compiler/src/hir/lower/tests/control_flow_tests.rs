@@ -14,6 +14,107 @@ fn test_lower_if_statement() {
 }
 
 #[test]
+fn match_arm_local_does_not_shadow_later_function_call() {
+    let module = parse_and_lower(
+        "fn mean(values: [f64]) -> f64:\n    return values[0]\n\nfn test(values: [f64]) -> f64:\n    match 1:\n        1:\n            val mean = 2.0\n        _:\n            val fallback = 0.0\n    return mean(values)\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
+    let HirStmt::Return(Some(expr)) = func.body.last().expect("test return") else {
+        panic!("expected return after match: {:?}", func.body)
+    };
+    assert!(
+        matches!(
+            &expr.kind,
+            HirExprKind::Call { func, .. } if matches!(&func.kind, HirExprKind::Global(name) if name == "mean")
+        ),
+        "match-arm local leaked into later function call: {expr:?}"
+    );
+}
+
+fn assert_returns_outer_local(source: &str, function_name: &str, local_name: &str) -> HirFunction {
+    let module = parse_and_lower(source).unwrap();
+    let func = module
+        .functions
+        .iter()
+        .find(|f| f.name == function_name)
+        .expect("test function");
+    let outer_index = func.params.len()
+        + func
+            .locals
+            .iter()
+            .position(|local| local.name == local_name)
+            .expect("outer local slot");
+    let HirStmt::Return(Some(expr)) = func.body.last().expect("return statement") else {
+        panic!("expected final return: {:?}", func.body)
+    };
+    assert!(
+        matches!(expr.kind, HirExprKind::Local(index) if index == outer_index),
+        "final reference did not resolve to outer slot {outer_index}: {expr:?}"
+    );
+    func.clone()
+}
+
+#[test]
+fn nested_block_restores_outer_binding_but_retains_slots_and_assignments() {
+    let func = assert_returns_outer_local(
+        "fn probe() -> i64:\n    var value = 1\n    if true:\n        val value = 2\n    if true:\n        value = 3\n    return value\n",
+        "probe",
+        "value",
+    );
+    assert_eq!(
+        func.locals.iter().filter(|local| local.name == "value").count(),
+        2,
+        "shadow slot must remain allocated: {:?}",
+        func.locals
+    );
+    let repr = format!("{:?}", func.body);
+    assert!(repr.contains("Assign { target: HirExpr { kind: Local(0)"), "{repr}");
+}
+
+#[test]
+fn if_elif_and_while_pattern_bindings_restore_shadowed_outer_local() {
+    assert_returns_outer_local(
+        "fn probe(value: i64?) -> i64:\n    val item = 10\n    if val item = value:\n        pass\n    return item\n",
+        "probe",
+        "item",
+    );
+    assert_returns_outer_local(
+        "fn probe(value: i64?) -> i64:\n    val item = 10\n    if false:\n        pass\n    elif val item = value:\n        pass\n    return item\n",
+        "probe",
+        "item",
+    );
+    assert_returns_outer_local(
+        "fn probe(value: i64?) -> i64:\n    val item = 10\n    while val item = value:\n        break\n    return item\n",
+        "probe",
+        "item",
+    );
+}
+
+#[test]
+fn nested_block_lambda_keeps_outer_capture_slot_after_scope_restore() {
+    let module = parse_and_lower(
+        "fn probe() -> i64:\n    val outer = 7\n    if true:\n        val thunk = \\: outer\n        thunk()\n    return outer\n",
+    )
+    .unwrap();
+    let func = &module.functions[0];
+    let repr = format!("{:?}", func.body);
+    assert!(repr.contains("captures: [0]"), "lambda lost outer capture slot: {repr}");
+    assert!(
+        func.locals.iter().any(|local| local.name == "thunk"),
+        "block slot was truncated"
+    );
+    assert!(matches!(
+        &func.body.last().unwrap(),
+        HirStmt::Return(Some(HirExpr {
+            kind: HirExprKind::Local(0),
+            ..
+        }))
+    ));
+}
+
+#[test]
 fn test_lower_while_loop() {
     let module =
         parse_and_lower("fn count() -> i64:\n    let x: i64 = 0\n    while x < 10:\n        x = x + 1\n    return x\n")
@@ -39,7 +140,7 @@ fn test_exists_check_uses_presence_predicate_without_nil_equality() {
     let repr = format!("{:?}", module.functions[0].body);
 
     assert!(
-        repr.contains("BuiltinCall") && repr.contains("rt_is_some"),
+        repr.contains("BuiltinCall") && repr.contains("rt_is_present"),
         "existence check did not use presence predicate: {repr}"
     );
     assert!(
@@ -77,7 +178,7 @@ fn test_exists_check_in_condition_position_stays_bool() {
     assert!(
         matches!(
             &condition.kind,
-            HirExprKind::BuiltinCall { name, .. } if name == "rt_is_some"
+            HirExprKind::BuiltinCall { name, .. } if name == "rt_is_present"
         ),
         "if-condition `.?` did not lower to the bare presence predicate: {condition:?}"
     );
@@ -97,7 +198,7 @@ fn test_implicit_exists_check_in_bool_method_stays_bool() {
     let repr = format!("{:?}", func.body);
     assert_eq!(func.return_type, TypeId::BOOL);
     assert!(
-        repr.contains("rt_is_some") && !repr.contains("Nil"),
+        repr.contains("rt_is_present") && !repr.contains("Nil"),
         "implicit bool method return retained optional value form: {repr}"
     );
 }
@@ -178,6 +279,45 @@ fn test_optional_struct_pattern_binding_preserves_inner_type() {
     assert!(
         owner_body.contains("rt_enum_payload"),
         "Some-binding must extract the materialized Option payload: {owner_body}"
+    );
+}
+
+#[test]
+fn test_result_scalar_pattern_binding_patches_local_slot_type() {
+    let module = parse_and_lower(
+        "fn load() -> Result<i64, text>:\n    Ok(6)\n\nfn read() -> i64:\n    val result = load()\n    match result:\n        Ok(value):\n            return value\n        Err(_):\n            return 0\n",
+    )
+    .unwrap();
+
+    let read = module
+        .functions
+        .iter()
+        .find(|function| function.name == "read")
+        .unwrap();
+    let value = read.locals.iter().find(|local| local.name == "value").unwrap();
+    assert_eq!(
+        value.ty,
+        TypeId::I64,
+        "Result<i64> payload local must be raw i64, not an ANY tagged slot"
+    );
+}
+
+#[test]
+fn test_returning_error_arm_does_not_degrade_match_value_type() {
+    let module = parse_and_lower(
+        "fn load() -> Result<i64, text>:\n    Ok(6)\n\nfn read() -> Result<i64, text>:\n    val result = load()\n    val value = match result:\n        Err(error): return Err(error)\n        Ok(found): found\n    Ok(value)\n",
+    )
+    .unwrap();
+    let read = module
+        .functions
+        .iter()
+        .find(|function| function.name == "read")
+        .unwrap();
+    let value = read.locals.iter().find(|local| local.name == "value").unwrap();
+    assert_eq!(
+        value.ty,
+        TypeId::I64,
+        "diverging Err arm must not force an ANY match join"
     );
 }
 
@@ -289,16 +429,16 @@ fn test_positional_class_pattern_match_lowering() {
     );
 }
 
-/// Enum variant positional patterns must still use rt_enum_check_discriminant
+/// Enum variant positional patterns must validate runtime enum identity
 /// (regression guard: class-pattern fix must not affect enum matching).
 #[test]
-fn test_enum_variant_pattern_condition_still_uses_discriminant() {
+fn test_enum_variant_pattern_condition_uses_identity_and_discriminant() {
     let source = "enum Color:\n    Red\n    Green\n    Blue\n\nfn is_red(c: Color) -> i64:\n    match c:\n        case Color.Red:\n            return 1\n        case _:\n            return 0\n";
     let module = parse_and_lower(source).unwrap();
 
     let func = &module.functions[0];
 
-    // Find the first HirStmt::If whose condition uses rt_enum_check_discriminant.
+    // Find the first HirStmt::If whose condition uses rt_enum_check_variant.
     let match_if = func
         .body
         .iter()
@@ -311,8 +451,8 @@ fn test_enum_variant_pattern_condition_still_uses_discriminant() {
 
     let repr = format!("{:?}", condition.kind);
     assert!(
-        repr.contains("rt_enum_check_discriminant") || repr.contains("rt_is_none") || repr.contains("rt_is_some"),
-        "enum variant pattern condition should use rt_enum_check_discriminant; got: {repr}"
+        repr.contains("rt_enum_check_variant") || repr.contains("rt_is_none") || repr.contains("rt_is_some"),
+        "enum variant pattern condition should use rt_enum_check_variant; got: {repr}"
     );
 }
 
@@ -360,7 +500,7 @@ fn test_subject_enum_const_variant_beats_unrelated_const_struct() {
         Some(HirType::Struct { .. })
     ));
     assert!(
-        repr.contains("rt_enum_check_discriminant"),
+        repr.contains("rt_enum_check_variant"),
         "subject-owned Const variant must remain refutable despite unrelated Const struct: {repr}"
     );
     assert!(
@@ -422,7 +562,7 @@ fn test_standalone_match_subject_enum_const_variant_beats_unrelated_const_struct
         Some(HirType::Struct { .. })
     ));
     assert!(
-        repr.contains("rt_enum_check_discriminant"),
+        repr.contains("rt_enum_check_variant"),
         "standalone match must discriminate its subject-owned Const variant: {repr}"
     );
     assert!(
@@ -475,7 +615,7 @@ fn test_expression_match_bare_enum_variants_check_discriminants() {
     let function = module.functions.iter().find(|f| f.name.ends_with("render")).unwrap();
     let hir_repr = format!("{:?}", function.body);
 
-    assert_eq!(hir_repr.matches("rt_enum_check_discriminant").count(), 2, "{hir_repr}");
+    assert_eq!(hir_repr.matches("rt_enum_check_variant").count(), 2, "{hir_repr}");
     assert!(!hir_repr.contains("Global(\"Shared\")"), "{hir_repr}");
     assert!(!hir_repr.contains("Global(\"Mutable\")"), "{hir_repr}");
     assert!(!function
@@ -487,6 +627,24 @@ fn test_expression_match_bare_enum_variants_check_discriminants() {
     let mir_repr = format!("{mir:?}");
     assert!(!mir_repr.contains("global_name: \"Shared\""), "{mir_repr}");
     assert!(!mir_repr.contains("global_name: \"Mutable\""), "{mir_repr}");
+}
+
+#[test]
+fn test_scalar_and_vec16i_same_tag_route_by_enum_identity() {
+    let source = "enum HirTypeKind:\n    Vec16i\n\nenum MirTypeKind:\n    Vec16i\n\nfn hir_route(kind: HirTypeKind) -> i64:\n    match kind:\n        case HirTypeKind.Vec16i:\n            return 1\n        case _:\n            return 0\n\nfn mir_route(kind: MirTypeKind) -> i64:\n    match kind:\n        case MirTypeKind.Vec16i:\n            return 2\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let repr = format!("{:?}", module.functions);
+    let hir_id = crate::codegen::shared::enum_runtime_type_id("HirTypeKind");
+    let mir_id = crate::codegen::shared::enum_runtime_type_id("MirTypeKind");
+
+    assert_ne!(hir_id, mir_id);
+    assert_eq!(repr.matches("rt_enum_check_variant").count(), 2, "{repr}");
+    assert!(repr.contains(&format!("Integer({hir_id})")), "{repr}");
+    assert!(repr.contains(&format!("Integer({mir_id})")), "{repr}");
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert_eq!(mir_repr.matches("rt_enum_check_variant").count(), 2, "{mir_repr}");
 }
 
 #[test]
@@ -529,7 +687,7 @@ fn test_imported_same_named_unit_variants_follow_typed_subject() {
     let module = lowerer.lower_module(&parsed).expect("HIR lowering should succeed");
     let function = module.functions.iter().find(|f| f.name.ends_with("render")).unwrap();
     let hir_repr = format!("{:?}", function.body);
-    assert_eq!(hir_repr.matches("rt_enum_check_discriminant").count(), 2, "{hir_repr}");
+    assert_eq!(hir_repr.matches("rt_enum_check_variant").count(), 2, "{hir_repr}");
     assert!(!hir_repr.contains("Global(\"Shared\")"), "{hir_repr}");
     assert!(
         !function.locals.iter().any(|local| local.name == "Shared"),
@@ -680,8 +838,14 @@ fn test_unwrap_or_return_lowers_to_native_branch_and_real_return() {
     let hir_repr = format!("{:?}", function.body);
 
     assert!(hir_repr.contains("LetIn"), "subject was not bound once: {hir_repr}");
-    assert!(hir_repr.contains("rt_is_none"), "optional absence was not tested: {hir_repr}");
-    assert!(hir_repr.contains("rt_unwrap_or_value"), "present optional was not unwrapped: {hir_repr}");
+    assert!(
+        hir_repr.contains("rt_is_none"),
+        "optional absence was not tested: {hir_repr}"
+    );
+    assert!(
+        hir_repr.contains("rt_unwrap_or_value"),
+        "present optional was not unwrapped: {hir_repr}"
+    );
     assert!(
         hir_repr.contains("Return(Some") && hir_repr.contains("fallback_code"),
         "fallback was not preserved as a real early return: {hir_repr}"
@@ -689,7 +853,10 @@ fn test_unwrap_or_return_lowers_to_native_branch_and_real_return() {
 
     let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
     let mir_repr = format!("{mir:?}");
-    assert!(mir_repr.contains("rt_is_none"), "absence check did not reach MIR: {mir_repr}");
+    assert!(
+        mir_repr.contains("rt_is_none"),
+        "absence check did not reach MIR: {mir_repr}"
+    );
     assert!(
         mir_repr.contains("Return(Some(") && mir_repr.contains("fallback_code"),
         "fallback return did not reach MIR: {mir_repr}"
@@ -728,7 +895,7 @@ fn test_exists_check_in_nested_match_tail_of_bool_fn_stays_bool() {
          so the caller branches on the non-zero nil sentinel: {repr}"
     );
     assert!(
-        repr.contains("rt_is_some"),
+        repr.contains("rt_is_present"),
         "`.?` in a nested match arm lost its presence predicate: {repr}"
     );
 }
@@ -831,5 +998,248 @@ fn test_coalesce_on_declared_optional_keeps_nil_check() {
     assert!(
         repr.contains("rt_unwrap_or_self"),
         "`??` on a declared `i64?` must keep the presence check: {repr}"
+    );
+}
+
+/// `Some(x)` boxes a real Option enum (`lower_builtin_call("Some", ..)`), but a
+/// `T?` STATIC type made `lower_try`'s flat-nullable branch assume the runtime
+/// word was already bare and return it unchanged — so `b!` handed the Option
+/// WRAPPER to the next consumer: `b!.len()` answered -1 and `"[" + b! + "]"`
+/// answered "". Silent wrong answers under JIT/native only; the tree-walk
+/// interpreter (`interpreter/expr.rs`, `try_unwrap_option_or_result`) was
+/// always correct, which is why no `.spl` spec caught it. `rt_unwrap_or_self`
+/// is the identity on a bare word and on every non-Option enum, and yields the
+/// payload only for the reserved OPTION_ENUM_ID.
+#[test]
+fn test_force_unwrap_of_flat_nullable_normalizes_a_boxed_some() {
+    for source in [
+        "fn probe(v: text?) -> i64:\n    v!.len()\n",
+        "fn probe(v: i64?) -> i64:\n    v!\n",
+        // Struct/class pointee: the same hazard one layer up — `tooling_paths.spl`
+        // memoizes `_tooling_roots = Some(roots)` as a `StorageRoots?` and then
+        // hands out `Ok(_tooling_roots!)`, so the cached read returned the Option
+        // wrapper typed as the struct.
+        "class Roots:\n    n: i64\n\nfn probe(v: Roots?) -> i64:\n    v!.n\n",
+    ] {
+        let module = parse_and_lower(source).unwrap();
+        let repr = format!("{:?}", module.functions[0].body);
+        assert!(
+            repr.contains("rt_unwrap_or_self"),
+            "force unwrap of a flat nullable must normalize a boxed Some: {repr}"
+        );
+    }
+}
+
+#[test]
+fn test_try_on_optional_branches_and_propagates_none() {
+    let module = parse_and_lower(
+        "fn inner(bad: bool) -> text?:\n    if bad:\n        return None\n    return Some(\"v\")\n\nfn outer(bad: bool) -> text?:\n    val value = inner(bad)?\n    return Some(value)\n",
+    )
+    .unwrap();
+    let outer = module.functions.iter().find(|f| f.name == "outer").unwrap();
+    let repr = format!("{:?}", outer.body);
+
+    assert!(
+        repr.contains("rt_is_none"),
+        "Option `?` omitted its absence test: {repr}"
+    );
+    assert!(
+        repr.contains("Return(Some"),
+        "Option `?` omitted its early return: {repr}"
+    );
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "Option `?` omitted Some/flat payload normalization: {repr}"
+    );
+}
+
+#[test]
+fn test_force_unwrap_on_optional_does_not_gain_try_early_return() {
+    let module = parse_and_lower("fn outer(value: text?) -> text:\n    return value!\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "force unwrap lost payload normalization: {repr}"
+    );
+    assert!(
+        !repr.contains("rt_is_none"),
+        "force unwrap incorrectly gained `?` propagation: {repr}"
+    );
+}
+
+/// Package C, class 5: `if c: make() else: nil` must report the sibling's
+/// real type, not `Nil`, even though `lower_if`'s base rule takes the
+/// then-branch's type. Regression for the join always taking `then_hir.ty`
+/// unconditionally.
+#[test]
+fn test_if_value_with_nil_else_arm_joins_to_then_type() {
+    let module = parse_and_lower(
+        "class Widget:\n    id: i64\n\nfn make() -> Widget:\n    Widget(id: 1)\n\nfn pick(c: bool) -> Widget?:\n    val x = if c: make() else: nil\n    return x\n",
+    )
+    .unwrap();
+    let pick = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let x = pick.locals.iter().find(|local| local.name == "x").unwrap();
+    assert!(
+        matches!(module.types.get(x.ty), Some(HirType::Struct { name, .. }) if name == "Widget"),
+        "`if`-value with a `nil` else-arm degraded to a non-Widget type: {:?}",
+        module.types.get(x.ty)
+    );
+}
+
+/// The mirror direction: `if c: nil else: make()` must also join to the
+/// non-bottom (else) arm's type, not `Nil`.
+#[test]
+fn test_if_value_with_nil_then_arm_joins_to_else_type() {
+    let module = parse_and_lower(
+        "class Widget:\n    id: i64\n\nfn make() -> Widget:\n    Widget(id: 1)\n\nfn pick(c: bool) -> Widget?:\n    val x = if c: nil else: make()\n    return x\n",
+    )
+    .unwrap();
+    let pick = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let x = pick.locals.iter().find(|local| local.name == "x").unwrap();
+    assert!(
+        matches!(module.types.get(x.ty), Some(HirType::Struct { name, .. }) if name == "Widget"),
+        "`if`-value with a `nil` then-arm degraded to a non-Widget type: {:?}",
+        module.types.get(x.ty)
+    );
+}
+
+/// Package C, class 5 (match): a `panic(...)` arm lowers to `rt_panic` typed
+/// `TypeId::NIL`, and must not degrade the match's value type the same way a
+/// `return`-only arm was already fixed to not degrade it.
+#[test]
+fn test_panic_arm_does_not_degrade_match_value_type() {
+    let module = parse_and_lower(
+        "fn load() -> Result<i64, text>:\n    Ok(6)\n\nfn read() -> i64:\n    val result = load()\n    val value = match result:\n        Err(error): panic(error)\n        Ok(found): found\n    return value\n",
+    )
+    .unwrap();
+    let read = module.functions.iter().find(|f| f.name == "read").unwrap();
+    let value = read.locals.iter().find(|local| local.name == "value").unwrap();
+    assert_eq!(
+        value.ty,
+        TypeId::I64,
+        "a panic arm must not force an ANY/Nil match join"
+    );
+}
+
+/// Package C, class 2: `f(x!)` where `x`'s static type is ANY (a leaked/
+/// unresolved annotation, not a declared Result/Option) must dynamically
+/// unwrap via `rt_unwrap_or_self`, never take the propagate-style
+/// `rt_enum_check_variant` + early-`Return` + `rt_enum_payload` path, since a
+/// non-enum ANY value would then silently unwrap to `nil` through
+/// `rt_enum_payload`.
+#[test]
+fn test_bare_force_unwrap_on_any_subject_uses_dynamic_unwrap_not_early_return() {
+    let module = parse_and_lower("fn f(x: any) -> any:\n    return x!\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "bare `!` on an ANY subject must use the dynamic tag-aware unwrap: {repr}"
+    );
+    assert!(
+        !repr.contains("rt_enum_check_variant"),
+        "bare `!` on an ANY subject must not take the propagate-style Err check: {repr}"
+    );
+    assert!(
+        !repr.contains("rt_enum_payload"),
+        "bare `!` on an ANY subject must not call rt_enum_payload (nils on non-enum): {repr}"
+    );
+}
+
+/// `?` (propagate_absence = true) on the same kind of untyped/ANY subject
+/// must keep its existing propagate behavior — this fix is scoped to bare
+/// `!` only.
+#[test]
+fn test_try_operator_on_any_subject_keeps_propagate_behavior() {
+    let module = parse_and_lower("fn f(x: any) -> any:\n    return x?\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_enum_check_variant"),
+        "`?` on an ANY subject must keep testing for the Err-tagged variant: {repr}"
+    );
+    assert!(
+        repr.contains("Return(Some"),
+        "`?` on an ANY subject must keep its early-return propagation: {repr}"
+    );
+}
+
+/// Find the params of the first `HirExprKind::Lambda` reachable from a
+/// function body (lambda-local params are truncated out of `ctx.locals`
+/// once the lambda body is lowered, so `function.locals` never carries
+/// them — the params must be read off the `Lambda` node itself). Only
+/// covers the node shapes these tests' fixtures actually produce
+/// (`val f = <lambda-or-call>`, `<receiver>.method(<lambda>)`,
+/// `return <expr>`).
+fn find_lambda_params(body: &[HirStmt]) -> Vec<(String, TypeId)> {
+    fn walk_expr(expr: &HirExpr) -> Option<Vec<(String, TypeId)>> {
+        match &expr.kind {
+            HirExprKind::Lambda { params, .. } => Some(params.clone()),
+            HirExprKind::Call { func, args } => walk_expr(func).or_else(|| args.iter().find_map(walk_expr)),
+            HirExprKind::MethodCall { receiver, args, .. } => {
+                walk_expr(receiver).or_else(|| args.iter().find_map(walk_expr))
+            }
+            HirExprKind::Block(stmts) => stmts.iter().find_map(walk_stmt),
+            _ => None,
+        }
+    }
+    fn walk_stmt(stmt: &HirStmt) -> Option<Vec<(String, TypeId)>> {
+        match stmt {
+            HirStmt::Let { value: Some(v), .. } => walk_expr(v),
+            HirStmt::Expr(e) => walk_expr(e),
+            HirStmt::Return(Some(e)) => walk_expr(e),
+            _ => None,
+        }
+    }
+    body.iter().find_map(walk_stmt).expect("no Lambda found in function body")
+}
+
+/// Package C, class 3: `list.filter(_.flag)` — the placeholder lambda's
+/// generated `__p0` param must default to ANY (not I64) when no expected
+/// callee param type is available, so a non-numeric receiver field access
+/// routes dynamically instead of being wrongly "proven scalar".
+#[test]
+fn test_placeholder_lambda_param_defaults_to_any_without_expected_type() {
+    let module = parse_and_lower("fn double(x: any) -> any:\n    val f = _ * 2\n    f(x)\n").unwrap();
+    let function = module.functions.iter().find(|f| f.name == "double").unwrap();
+    let params = find_lambda_params(&function.body);
+    assert_eq!(
+        params,
+        vec![("__p0".to_string(), TypeId::ANY)],
+        "an untyped placeholder-lambda param must default to ANY, not I64: {params:?}"
+    );
+}
+
+/// A NAMED unannotated lambda param is intentionally excluded from the
+/// class-3 fix and must keep its existing I64 default (no behavior change
+/// for already-typed/named code).
+#[test]
+fn test_named_unannotated_lambda_param_keeps_i64_default() {
+    let module = parse_and_lower("fn apply() -> i64:\n    val f = \\x: x * 2\n    f(3)\n").unwrap();
+    let function = module.functions.iter().find(|f| f.name == "apply").unwrap();
+    let params = find_lambda_params(&function.body);
+    assert_eq!(
+        params,
+        vec![("x".to_string(), TypeId::I64)],
+        "a named unannotated lambda param must keep its I64 default: {params:?}"
+    );
+}
+
+/// When an expected callee param type IS available at the call site (e.g.
+/// `.map`), a placeholder param must use it, not ANY — no behavior change
+/// for the existing contextual-typing call sites.
+#[test]
+fn test_placeholder_lambda_param_uses_expected_type_when_available() {
+    let module = parse_and_lower(
+        "class Boxed:\n    value: i64\n\nfn run(items: [Boxed]) -> [i64]:\n    return items.map(_.value)\n",
+    )
+    .unwrap();
+    let function = module.functions.iter().find(|f| f.name == "run").unwrap();
+    let params = find_lambda_params(&function.body);
+    assert_ne!(
+        params.first().map(|(_, ty)| *ty),
+        Some(TypeId::ANY),
+        "a placeholder param with an available expected element type must not fall back to ANY: {params:?}"
     );
 }

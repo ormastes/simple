@@ -1,0 +1,107 @@
+# x86_32 Multiboot framebuffer -> shared portable WM host seam.
+# This lane proves one hardware-backed frame and exact scanout readback. It
+# deliberately makes no input or full-desktop readiness claim.
+
+use nogc_async_mut.wm.host.{wm_host_2d_frame, wm_host_2d_for_backed}
+use std.common.window_protocol.geometry.{Size}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.services.wm.wm_host_2d_simpleos.{wm_host_2d_simpleos}
+use os.kernel.arch.x86_32.wm_scanout_contract.{
+    X86_32WmScanoutFacts, x86_32_wm_scanout_rejection, x86_32_wm_scanout_span
+}
+use os.kernel.boot.mmio.{mmio_disable_test_mode}
+
+extern fn serial_println(msg: text)
+extern fn rt_x86_32_wm_bind_scanout(address: u64, width: u64, height: u64, pitch: u64, span: u64) -> u32
+extern fn rt_x86_32_wm_scanout_read_pixel(x: u64, y: u64) -> u32
+extern fn rt_x86_32_multiboot_fb_present() -> u32
+extern fn rt_x86_32_multiboot_fb_addr_low() -> u32
+extern fn rt_x86_32_multiboot_fb_addr_high() -> u32
+extern fn rt_x86_32_multiboot_fb_width() -> u32
+extern fn rt_x86_32_multiboot_fb_height() -> u32
+extern fn rt_x86_32_multiboot_fb_pitch() -> u32
+extern fn rt_x86_32_multiboot_fb_bpp() -> u32
+extern fn rt_x86_32_multiboot_fb_type() -> u32
+extern fn rt_x86_32_multiboot_fb_red_position() -> u32
+extern fn rt_x86_32_multiboot_fb_red_mask_size() -> u32
+extern fn rt_x86_32_multiboot_fb_green_position() -> u32
+extern fn rt_x86_32_multiboot_fb_green_mask_size() -> u32
+extern fn rt_x86_32_multiboot_fb_blue_position() -> u32
+extern fn rt_x86_32_multiboot_fb_blue_mask_size() -> u32
+
+fn _boot_scanout_facts() -> X86_32WmScanoutFacts:
+    val low = rt_x86_32_multiboot_fb_addr_low().to_u64()
+    val high = rt_x86_32_multiboot_fb_addr_high().to_u64()
+    X86_32WmScanoutFacts(
+        address: (high << 32) | low,
+        width: rt_x86_32_multiboot_fb_width(),
+        height: rt_x86_32_multiboot_fb_height(),
+        pitch: rt_x86_32_multiboot_fb_pitch(),
+        bpp: rt_x86_32_multiboot_fb_bpp(),
+        framebuffer_type: rt_x86_32_multiboot_fb_type(),
+        red_position: rt_x86_32_multiboot_fb_red_position(),
+        red_mask_size: rt_x86_32_multiboot_fb_red_mask_size(),
+        green_position: rt_x86_32_multiboot_fb_green_position(),
+        green_mask_size: rt_x86_32_multiboot_fb_green_mask_size(),
+        blue_position: rt_x86_32_multiboot_fb_blue_position(),
+        blue_mask_size: rt_x86_32_multiboot_fb_blue_mask_size()
+    )
+
+fn spl_start():
+    mmio_disable_test_mode()
+    serial_println("SimpleOS x86_32 WM host-seam evidence")
+    if rt_x86_32_multiboot_fb_present() != 1u32:
+        serial_println("[x86_32 wm] blocked reason=multiboot-framebuffer-absent")
+        return
+
+    val facts = _boot_scanout_facts()
+    val rejection = x86_32_wm_scanout_rejection(facts)
+    if rejection != "":
+        serial_println("[x86_32 wm] blocked reason={rejection}")
+        return
+
+    val framebuffer = FramebufferDriver.from_scanout_raw(
+        facts.address, facts.width, facts.height, facts.pitch, facts.bpp
+    )
+    val bound = rt_x86_32_wm_bind_scanout(
+        facts.address, facts.width.to_u64(), facts.height.to_u64(),
+        facts.pitch.to_u64(), x86_32_wm_scanout_span(facts)
+    )
+    if bound != 1u32:
+        serial_println("[x86_32 wm] blocked reason=scanout-capability-bind-failed")
+        return
+    val host = wm_host_2d_simpleos(framebuffer)
+    if not host.is_backed():
+        serial_println("[x86_32 wm] blocked reason=shared-host-unbacked")
+        return
+
+    val routed = wm_host_2d_for_backed("simpleos", host, host.backing_kind())
+    val frame = wm_host_2d_frame(routed, Size.wh(facts.width.to_i32(), facts.height.to_i32()))
+    var frame_ok = frame.surface_ok
+    if not frame.present_ok:
+        frame_ok = false
+    if not frame.released_ok:
+        frame_ok = false
+    if not frame_ok:
+        serial_println("[x86_32 wm] blocked reason=portable-frame-failed state={frame.surface_state}")
+        return
+
+    val expected = 0xFF2D7DD2u32
+    val top_left = rt_x86_32_wm_scanout_read_pixel(0u64, 0u64)
+    val middle = rt_x86_32_wm_scanout_read_pixel(
+        (facts.width / 2u32).to_u64(), (facts.height / 2u32).to_u64()
+    )
+    val bottom_right = rt_x86_32_wm_scanout_read_pixel(
+        (facts.width - 1u32).to_u64(), (facts.height - 1u32).to_u64()
+    )
+    var pixels_ok = top_left == expected
+    if middle != expected:
+        pixels_ok = false
+    if bottom_right != expected:
+        pixels_ok = false
+    if not pixels_ok:
+        serial_println("[x86_32 wm] blocked reason=scanout-readback-mismatch")
+        return
+    serial_println("[x86_32 wm] input=unclaimed")
+    serial_println("[x86_32 wm] scanout-readback=ok")
+    serial_println("[x86_32 wm] portable-frame=ok")

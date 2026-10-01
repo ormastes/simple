@@ -1,0 +1,79 @@
+use compiler.driver.action_graph.scc_compile_outputs.{SccModuleCompileOutputV1}
+use compiler.driver.cache.cas_store.{cas_get}
+use compiler.driver.cache.dirty_module_record.{DirtyModuleRecordV1}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_find_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+struct SccPublicationOwnershipV1:
+    valid: bool
+    reason: text
+    modules: [SccModuleCompileOutputV1]
+
+fn scc_publication_read_set_digest_v1(record: DirtyModuleRecordV1) -> text:
+    var rows: [text] = []
+    for read in record.read_set:
+        rows = rows.push("{read.source_identity}|{read.offset}|{read.extent}|{read.whole_file}|{read.content_digest}")
+    sha256_text(rows.sorted().join("\n"))
+
+fn scc_publication_prepare_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1,
+    dirty_modules: [DirtyModuleRecordV1], mir_admission_digest: text,
+    baseline_artifact_identity: text, baseline_artifact_digest: text
+) -> SccPublicationOwnershipV1:
+    var modules: [SccModuleCompileOutputV1] = []
+    for dirty in dirty_modules:
+        val entry = package_module_index_find_v1(generation, dirty.module_id)
+        if entry == nil:
+            return SccPublicationOwnershipV1(false, "dirty-index-entry-missing", [])
+        val package_image = cas_get(cache_root, entry!.manifest_digest)
+        val interface_content = cas_get(cache_root, entry!.smf_metadata_digest)
+        val action_content = cas_get(cache_root, entry!.action_digest)
+        if package_image == nil or interface_content == nil or action_content == nil:
+            return SccPublicationOwnershipV1(false, "publication-cas-input-missing", [])
+        var dependency_digests: [text] = []
+        for imported in entry!.direct_imports:
+            val dependency = package_module_index_find_v1(generation, imported)
+            if dependency == nil:
+                return SccPublicationOwnershipV1(false, "publication-dependency-missing", [])
+            dependency_digests = dependency_digests.push(dependency!.smf_metadata_digest)
+        modules = modules.push(SccModuleCompileOutputV1(
+            entry!, package_image!, sha256_text(package_image!),
+            interface_content!, sha256_text(interface_content!),
+            action_content!, sha256_text(action_content!),
+            dependency_digests.sorted(), entry!.manifest_digest,
+            scc_publication_read_set_digest_v1(dirty), mir_admission_digest,
+            baseline_artifact_identity, baseline_artifact_digest, [],
+            "source:{dirty.source_identity}", false, "", ""))
+    SccPublicationOwnershipV1(true, "ok", modules)
+
+fn scc_publication_complete_object_v1(
+    ownership: &mut SccPublicationOwnershipV1,
+    module_identity: text, object_path: text
+) -> bool:
+    if not ownership.valid or object_path == "":
+        return false
+    for index in 0..ownership.modules.len():
+        if ownership.modules[index].entry.module_identity == module_identity:
+            ownership.modules[index].object_path = object_path
+            ownership.modules[index].compiler_action_succeeded = true
+            return true
+    false
+
+fn scc_publication_complete_smf_v1(
+    ownership: &mut SccPublicationOwnershipV1,
+    module_identity: text, smf_path: text
+) -> bool:
+    if not ownership.valid or smf_path == "":
+        return false
+    for index in 0..ownership.modules.len():
+        if ownership.modules[index].entry.module_identity == module_identity:
+            ownership.modules[index].smf_path = smf_path
+            ownership.modules[index].compiler_action_succeeded = true
+            return true
+    false
+
+export SccPublicationOwnershipV1
+export scc_publication_prepare_v1, scc_publication_complete_object_v1
+export scc_publication_complete_smf_v1

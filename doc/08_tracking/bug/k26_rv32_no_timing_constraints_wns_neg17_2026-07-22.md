@@ -1,4 +1,9 @@
 # K26 rv32 flow has no timing constraints; core closes ~36.9 MHz, not 100 MHz
+## Closed 2026-09-16 — RESOLVED 2026-07-22; clock constrained, fail-closed flow; meets timing at 25 MHz
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-07-22 (lane K, during the BRAM-banking re-synth that produced
 the first successful `rv32_fpga.bit`)
@@ -66,3 +71,4 @@ First successful K26 placement after
 banking (rom_a/rom_b + registered single reads, S_FETCH/S_LOAD/S_STORE defer
 states). GHDL gate: 297/297 UART bytes bit-identical vs pre-banking core,
 ending `TEST PASSED` (transcripts in lane artifacts).
+

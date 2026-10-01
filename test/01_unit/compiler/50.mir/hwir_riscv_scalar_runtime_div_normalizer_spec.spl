@@ -1,0 +1,62 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_div_normalizer.{
+    riscv_scalar_runtime_div_normalize_host, strict_riscv_scalar_runtime_div_normalizer}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+fn rv32im() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "rv32-im", isa_profile: "rv32im", compressed_decode_profile: "none")
+
+fn rv64im() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "rv64-im", isa_profile: "rv64im", compressed_decode_profile: "none")
+
+describe "dynamic runtime DIV/REM operand normalizer":
+    it "binds exactly the four RV32 base rows and captures signed magnitude controls":
+        val normalizer = strict_riscv_scalar_runtime_div_normalizer(rv32im(),
+            riscv_scalar_decoder_plan("rv32im").unwrap(), 32).unwrap()
+        expect(normalizer.diagnostic()).to_equal("")
+        expect(normalizer.input_fields.any(_[0] == "decoded_row_index")).to_be(true)
+        expect(normalizer.output_fields.any(_[0] == "select_remainder")).to_be(true)
+        expect(normalizer.comb_ops.any(_.result == "row_matched" and _.op == "passthrough")).to_be(true)
+        expect(normalizer.select_ops.any(_.result == "lhs_sign" and _.condition == "selected_signed")).to_be(true)
+        expect(normalizer.select_ops.any(_.result == "special_code" and _.condition == "selected_any" and
+            _.when_false == "special_none")).to_be(true)
+        val controls = riscv_scalar_runtime_div_normalize_host(normalizer, "rv.m.div",
+            -8, 3).unwrap()
+        expect(controls.operand_width).to_equal(32)
+        expect(controls.lhs_magnitude).to_equal(8)
+        expect(controls.rhs_magnitude).to_equal(3)
+        expect(controls.result_negate).to_be(true)
+        expect(controls.remainder_negate).to_be(true)
+        expect(controls.select_remainder).to_be(false)
+        expect(controls.special_code).to_equal(0)
+
+    it "keeps unsigned remainder unsigned and gives division by zero priority":
+        val normalizer = strict_riscv_scalar_runtime_div_normalizer(rv32im(),
+            riscv_scalar_decoder_plan("rv32im").unwrap(), 32).unwrap()
+        val remu = riscv_scalar_runtime_div_normalize_host(normalizer, "rv.m.remu",
+            -1, 0).unwrap()
+        expect(remu.lhs_magnitude).to_equal(4294967295)
+        expect(remu.select_remainder).to_be(true)
+        expect(remu.result_negate).to_be(false)
+        expect(remu.special_code).to_equal(1)
+
+    it "uses a distinct RV64 W geometry and records signed overflow controls":
+        val normalizer = strict_riscv_scalar_runtime_div_normalizer(rv64im(),
+            riscv_scalar_decoder_plan("rv64im").unwrap(), 32).unwrap()
+        expect(normalizer.operand_width).to_equal(32)
+        expect(normalizer.constants.any(_.name == "minimum_operand" and
+            _.canonical_bits == "10000000000000000000000000000000")).to_be(true)
+        val divw = riscv_scalar_runtime_div_normalize_host(normalizer, "rv64.m.divw",
+            2147483648, -1).unwrap()
+        expect(divw.word_result_mode).to_be(true)
+        expect(divw.special_code).to_equal(2)
+        expect(divw.lhs_magnitude).to_equal(2147483648)
+        expect(divw.rhs_magnitude).to_equal(1)
+        expect(riscv_scalar_runtime_div_normalize_host(normalizer, "rv.m.div", 9, 2).is_err()).to_be(true)
+
+    it "rejects a geometry that cannot be backed by exact admission rows":
+        expect(strict_riscv_scalar_runtime_div_normalizer(rv32im(),
+            riscv_scalar_decoder_plan("rv32im").unwrap(), 64).is_err()).to_be(true)

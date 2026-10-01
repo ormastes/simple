@@ -254,6 +254,7 @@ fn has_suspension_in_expr(expr: &Expr) -> bool {
 
         // Spread
         Expr::Spread(inner) => has_suspension_in_expr(inner),
+        Expr::StructSpread(inner) => has_suspension_in_expr(inner),
 
         // Try expression (?)
         Expr::Try(inner) => has_suspension_in_expr(inner),

@@ -1,4 +1,8 @@
 # UI Browser --shared-wm flag silently drops on real launch path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -19,3 +23,4 @@ Medium-High — flag advertised in --help but silently no-ops for the only case 
 
 ## Next Step
 Wire `shared_wm` parameter through to `run_browser_gui_with_access_store` or remove the flag from CLI parsing.
+

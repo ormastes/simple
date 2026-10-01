@@ -1,9 +1,14 @@
 # Bug: native-build incremental object cache key omits the compiler/seed version
 
-**Status:** Resolved 2026-07-16 — pure-Simple object-cache path verified
-empirically (compiler-executable change ⇒ different scope ⇒ miss); Rust-seed
-`object_cache_key` fix verified at source level only (exercising it needs a
-seed rebuild, out of scope for this pass). See Regression evidence.
+## Closed 2026-09-13 — already fixed: the object cache key folds the compiler fingerprint
+- **measured** — in `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`,
+  `fn compiler_fingerprint()` is defined at `:1494` and
+  `compiler_fingerprint().hash(&mut hasher)` appears inside `object_cache_key` (`:1589`,
+  hash call at `:1607`), plus a second fold at `:1547`.
+- **inferred** — `compiler_fingerprint` hashes the running `current_exe`'s bytes, so a
+  rebuilt seed yields a different key and cannot reuse a stale `.o`. `.claude/rules/commands.md`
+  documents the same mechanism plus a per-lane cache scope layered on top. Not re-executed
+  against a real seed rebuild.
 
 - **ID:** native_object_cache_key_omits_seed_version_2026-06-15
 - **Severity:** P2 (silent: stale `.o` from an older compiler are reused after a
@@ -43,33 +48,3 @@ seed's codegen changes but the source does not, the key is unchanged → stale h
 Any future codegen change to the Rust seed silently no-ops on cached modules
 until the cache is manually cleared — easy to mistake for "my change didn't
 work."
-
-## Resolution (2026-07-15)
-
-The seed object-cache key now includes a cached fingerprint of the running
-compiler executable. Source and build options may remain unchanged, but a
-different compiler executable selects a different object key.
-
-## Regression evidence (2026-07-16)
-
-- Rust seed (source-verified): `compiler_fingerprint()` at
-  `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:1042` hashes
-  the full bytes of `std::env::current_exe()` (cached once) and is folded into
-  `object_cache_key(...)` at `mod.rs:1109`; both object-cache call sites
-  (`mod.rs:598`, `mod.rs:779`) go through it. Running this path requires
-  rebuilding/redeploying the seed, which is forbidden in this verification
-  pass — flagged as the remaining (source-only) leg.
-- Pure-Simple equivalent (run-verified): the incremental `.o` cache under
-  `build/native_cache/` is scoped by
-  `native_build_cache_scope_key(..., native_build_compiler_identity())`
-  (`src/compiler/80.driver/driver_build/incremental.spl:40,49`; consumed at
-  `src/compiler/80.driver/driver_aot_output.spl:86`). Empirically: two copies
-  of the deployed compiler binary (pristine vs 1 byte appended) selected two
-  distinct scope roots whose `compiler=` components equal the respective
-  `sha256sum` of each executable
-  (`561767c66...` vs `23d1dff95...`); the changed binary missed
-  (`[NATIVE] cache: 0 hits, 1 misses`) and recompiled instead of reusing the
-  old `.o` (its mtime unchanged in the old scope). Same-identity hit retention
-  is separately blocked by
-  `native_build_cache_entries_lost_on_reload_2026-07-16.md` (cache reload
-  loses entries cross-process in the interpreted harness; predates this fix).

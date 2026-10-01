@@ -22,16 +22,18 @@ Write requests also produce decisions and receipts so accepted/denied outcomes
 are explicit.
 Readiness evidence aggregates identity, RBAC, validation, ledger, recovery,
 security, and guarded-write gates for release handoff.
-The guarded-write gate is now DURABLE: idempotency keys, the sha256-chained
-audit log, and the transactional outbox live in `std.enterprise_store`
-(SQLite-backed) — each accepted write commits all three in one unit of work,
-replacing the earlier in-memory `used_keys` arrays. Test scenarios open a
-fresh database path per case under `build/test-artifacts/`.
+Durable-store readiness is intentionally blocked until the example has a
+supported durable storage facade.
 
 Run:
 
 ```bash
-bin/simple test test/03_system/app/simple_erp/feature/simple_erp_catalog_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/simple_erp/feature/ --mode=interpreter      # all 4 system specs
 bin/simple examples/12_business/simple_erp/src/catalog.spl easy
 bin/simple examples/12_business/simple_erp/src/catalog.spl pro
+bin/simple test examples/12_business/simple_erp/ubs_test/ --mode=interpreter   # kernel + lane + report specs
+bin/simple examples/12_business/simple_erp/src/business_suite.spl              # suite evidence
+bin/simple examples/12_business/simple_erp/src/dashboard_main.spl              # HTML dashboard to stdout
+bin/simple examples/12_business/simple_erp/src/extension_demo.spl              # 6th business, zero framework edits
+bin/simple examples/12_business/simple_erp/src/bigbiz_demo.spl                 # durability/snapshot/queue/org evidence
 ```

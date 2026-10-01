@@ -35,3 +35,7 @@ The admitted self-hosted compiler must run the resulting RV32/RV64 VHDL/GHDL
 vectors and retain a formal or assertion-based exact-once/ordering receipt.
 
 Owner: RISC-V Gen2 scalar-retirement integration wave
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: development-stage architectural product limitation (RISC-V Gen2 frontend), not a bounded bug fix. No change made.

@@ -386,3 +386,9 @@ names are left as raw symbols for the linker. That story does not hold here:
 promoting an incomplete check to fatal would give false confidence.
 
 **Do not** make the family smaller by weakening the diagnostic.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Already extensively worked (2 members fixed with regression specs, several
+confirmed non-bugs, remainder confirmed Rust-side or out-of-tree). No new
+tractable member found in this pass. Left OPEN as scoped.

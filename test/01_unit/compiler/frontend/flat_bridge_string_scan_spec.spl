@@ -6,8 +6,8 @@ quadratic character-by-character text construction.
 
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.flat_ast_bridge.{
-    flat_bridge_build_string_interps, flat_bridge_decode_brace_escapes,
-    parse_and_build_module}
+    flat_bridge_build_string_interps, flat_bridge_build_string_regions,
+    flat_bridge_decode_brace_escapes, parse_and_build_module}
 use compiler.frontend.parser_types_expr.{ExprKind}
 use std.io_runtime.file_read
 use std.spec.step
@@ -19,15 +19,15 @@ describe "flat bridge string scan":
         expect(flat_bridge_decode_brace_escapes("ordinary")).to_equal("ordinary")
         expect(flat_bridge_decode_brace_escapes("{{")).to_equal("{")
         expect(flat_bridge_decode_brace_escapes("}}")).to_equal("}")
-        expect(flat_bridge_decode_brace_escapes("a{{b}}c")).to_equal("a{b}c")
+        expect(flat_bridge_decode_brace_escapes("a{{b}}c")).to_equal("a{{b}}c")
         expect(flat_bridge_decode_brace_escapes("{{{{")).to_equal("{{")
         expect(flat_bridge_decode_brace_escapes("{{{")).to_equal("{{")
         expect(flat_bridge_decode_brace_escapes("}}}")).to_equal("}}")
         expect(flat_bridge_decode_brace_escapes("{")).to_equal("{")
         expect(flat_bridge_decode_brace_escapes("}")).to_equal("}")
         expect(flat_bridge_decode_brace_escapes("}{")).to_equal("}{")
-        expect(flat_bridge_decode_brace_escapes("{x}")).to_equal("{x}")
-        expect(flat_bridge_decode_brace_escapes("a{b}}c")).to_equal("a{b}c")
+        expect(flat_bridge_decode_brace_escapes("{{x}}")).to_equal("{{x}}")
+        expect(flat_bridge_decode_brace_escapes("a{{b}}}c")).to_equal("a{{b}}c")
 
     it "preserves interpolation payload content order and fallback":
         step("Warm fragment parser state and inspect returned expression order")
@@ -65,6 +65,13 @@ describe "flat bridge string scan":
         expect(flat_bridge_build_string_interps(
             left + "alpha", span).len()).to_equal(0)
 
+        step("Literalize only the invalid region; a valid neighbour still interpolates")
+        val mixed = "before " + left + "alpha" + right + " then " + left + " color: red; " + right
+        val (mixed_text, mixed_interps) = flat_bridge_build_string_regions(mixed, span)
+        expect(mixed_interps.len()).to_equal(1)
+        expect(mixed_text).to_equal(
+            "before " + left + "alpha" + right + " then " + left + left + " color: red; " + right + right)
+
     it "keeps ordinary literals on the allocation-free fast path":
         step("Pin no-brace identity and selective decoder admission")
         val source = file_read(
@@ -78,7 +85,7 @@ describe "flat bridge string scan":
         expect(body).to_contain(
             "if not str_val.contains(\"{{\") and not str_val.contains(\"}}\"):")
         expect(body.index_of("if not str_val.contains(\"{\")")).to_be_less_than(
-            body.index_of("flat_bridge_build_string_interps(str_val, span)"))
+            body.index_of("flat_bridge_build_string_regions(str_val, span)"))
         expect(body.index_of("if str_interps.len() > 0:")).to_be_less_than(
             body.index_of("if not str_val.contains(\"{{\")"))
         expect(body.index_of("if not str_val.contains(\"{{\")")).to_be_less_than(
@@ -95,6 +102,6 @@ describe "flat bridge string scan":
             source.index_of("fn flat_bridge_decode_brace_escapes("),
             source.index_of("fn convert_flat_expr(idx: i64)"))
         expect(build.split("inner_parts.join(\"\")").len()).to_equal(2)
-        expect(build).not.to_contain("inner = inner +")
+        expect(build).to_not_contain("inner = inner +")
         expect(decode.split("parts.join(\"\")").len()).to_equal(2)
-        expect(decode).not.to_contain("result = result +")
+        expect(decode).to_not_contain("result = result +")

@@ -1,6 +1,10 @@
 # Module/lexer arena state slots, module decl registry, ast_reset, and node getters/yield helpers.
-use compiler.frontend.core.ast.*
+# Import declaration arena storage from its owner. Routing back through ast.spl
+# makes the owner pair depend on the facade that re-exports both of them.
+use compiler.frontend.core._Ast.decl_nodes.*
+use compiler.frontend.core._Ast.decl_nodes.{decl_metadata_pools_reset}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_get_i64_process, env_set}
 # Core Simple — Arena-Based AST
 #
 # Shared core library: AST nodes stored in parallel arrays (arena pattern).
@@ -18,11 +22,7 @@ use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 # ===== Import from split modules =====
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
-use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
-
-extern fn rt_env_get(key: text) -> text
-extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
-extern fn rt_env_set(key: text, value: text) -> bool
+use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl, make_core_decl}
 
 var lexer_state_core_col_slot: [text] = ["1"]
 var lexer_state_core_pending_dedents_slot: [text] = ["0"]
@@ -87,10 +87,10 @@ fn ast_gen_harden_enabled() -> bool:
     # ast_reset before the module-array cache has a native owner; inspecting
     # that optional array crashed the self-hosted Stage2 compiler.  This is a
     # cold, once-per-file reset path, so the direct scalar env read is bounded.
-    rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
+    env_get_i64_process("SIMPLE_AST_GEN_HARDEN", 0) == 1
 
 fn _ast_harden_delay_slots() -> i64:
-    val configured = rt_env_get_i64("SIMPLE_MEM_ARENA_DELAY_SLOTS", 4)
+    val configured = env_get_i64_process("SIMPLE_MEM_ARENA_DELAY_SLOTS", 4)
     if configured < 0:
         return 0
     configured
@@ -406,8 +406,8 @@ fn module_add_decl(decl_idx: i64):
     # (grow past the old 128 cap via push). module_decl_at is env-first/array-fallback
     # and only reads index < count, so the array is always the populated truth in
     # compiled stage4. See bug ast_env_var_quadratic_parse_2026-06-13.
-    if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) != 1:
-        rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(count), int_to_str(decl_idx))
+    if env_get_i64_process("SIMPLE_BOOTSTRAP", 0) == 1 and env_get_i64_process("SIMPLE_NATIVE_ARENA_DECLS", 0) != 1:
+        env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(count), int_to_str(decl_idx))
     if count < ast_module_decl_slots_len():
         ast_module_decl_slot_set(count, decl_idx)
     else:
@@ -431,14 +431,32 @@ fn module_decl_count_get() -> i64:
 fn module_decl_at(index: i64) -> i64:
     if index < 0 or index >= ast_module_decl_count_get():
         return -1
-    if rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) == 1:
-        if index >= ast_module_decl_slots_len():
-            return -1
-        return ast_module_decl_slot_get(index)
-    val env_value = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
-    if env_value != "":
+    if env_get_i64_process("SIMPLE_NATIVE_ARENA_DECLS", 0) == 1:
+        return ast_module_decl_slot_checked_get(index)
+    val env_value = env_get_nullable("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
+    # LENGTH test, not `!= ""`. Measured in-guest on riscv64 freestanding under
+    # real OpenSBI fw_payload (2026-09-01): for a MISSING env entry this reads
+    # env_value.len() == 0 and yet `env_value != ""` evaluates TRUE, so every
+    # call took the env arm and returned ast_parse_i64("") == 0 -- i.e.
+    # module_decl_at answered decl 0 for EVERY index, and any module with more
+    # than one top-level declaration converted as N copies of its first one.
+    # That is what made the in-guest build-and-run row report "module has no
+    # main function" while both lowering stages reported zero errors.
+    #
+    # `.len()` is measured CORRECT on the same path in the same boot, so this
+    # asks the question the code actually means and does not depend on text
+    # equality against an empty literal. Semantics are unchanged everywhere the
+    # comparison already worked: a present entry is still non-empty and still
+    # wins over the array, exactly as on the hosted bootstrap path.
+    #
+    # The underlying `text != ""` defect is NOT fixed by this line and is filed
+    # as doc/08_tracking/bug/riscv64_freestanding_text_neq_empty_literal_true_
+    # for_zero_length_2026-09-01.md -- this site is repaired because it is the
+    # one that silently loses declarations; the comparison itself needs a
+    # codegen fix.
+    if env_value.len() > 0:
         return ast_parse_i64(env_value)
-    ast_module_decl_slot_get(index)
+    ast_module_decl_slot_checked_get(index)
 
 # ===== AST Reset =====
 
@@ -453,12 +471,12 @@ fn ast_reset():
     # self-hosted native compiler before the first source parse and performed
     # the same environment read, so it had neither a safety nor a performance
     # advantage.
-    val ast_harden_enabled = rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
+    val ast_harden_enabled = env_get_i64_process("SIMPLE_AST_GEN_HARDEN", 0) == 1
     # DIAGNOSTIC (2026-07-12, flat_bridge_type_index_across_ast_reset): trace
     # every reset with the pre-reset arena sizes so an interleaved reset that
     # clobbers a still-in-flight conversion can be pinpointed. Guarded by an
     # env var so it is inert unless explicitly enabled.
-    if rt_env_get_i64("SIMPLE_TRACE_AST_RESET", 0) == 1:
+    if env_get_i64_process("SIMPLE_TRACE_AST_RESET", 0) == 1:
         ast_reset_seq = ast_reset_seq + 1
         if not frontend_trace_suppressed():
             print "[ast_reset] seq={ast_reset_seq}"
@@ -566,6 +584,7 @@ fn ast_reset():
     # that is about to be cleared BEFORE the live pools are wiped below (see
     # "Arena Harden" section above). No-ops when the gate is off.
     _ast_harden_retire_snapshot(ast_generation() - 1, ast_harden_enabled)
+    decl_metadata_pools_reset()
     decl_tag.clear()
     decl_span.clear()
     decl_name.clear()

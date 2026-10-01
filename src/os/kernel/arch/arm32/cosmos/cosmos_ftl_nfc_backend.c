@@ -1,5 +1,9 @@
 #include "cosmos_ftl_nfc_backend.h"
 
+#if defined(COSMOS_FTL_NFC_BACKEND_PURE_POLICY)
+#include "cosmos_ftl_nfc_backend_policy.h"
+#endif
+
 #include <stdint.h>
 
 #define COSMOS_FTL_NFC_MAGIC 0x43464E31U
@@ -34,6 +38,326 @@ struct checkpoint_location {
     unsigned int segment;
     struct cosmos_ftl_checkpoint checkpoint;
 };
+
+/* The default path preserves the pre-migration C behavior for existing
+ * standalone firmware/test links.  The isolated wiring patch enables the
+ * pure-Simple scalar owner without moving any hardware operation out of C. */
+#if defined(COSMOS_FTL_NFC_BACKEND_PURE_POLICY)
+#define backend_policy_checkpoint_total_bytes \
+    cosmos_ftl_nfc_backend_policy_checkpoint_total_bytes
+#define backend_policy_header_prefix_status \
+    cosmos_ftl_nfc_backend_policy_header_prefix_status
+#define backend_policy_payload_length_status \
+    cosmos_ftl_nfc_backend_policy_payload_length_status
+#define backend_policy_read_io_state \
+    cosmos_ftl_nfc_backend_policy_read_io_state
+#define backend_policy_read_content_state \
+    cosmos_ftl_nfc_backend_policy_read_content_state
+#define backend_policy_write_faults \
+    cosmos_ftl_nfc_backend_policy_write_faults
+#define backend_policy_superblock_status \
+    cosmos_ftl_nfc_backend_policy_superblock_status
+#define backend_policy_mounted_status \
+    cosmos_ftl_nfc_backend_policy_mounted_status
+#define backend_policy_checkpoint_candidate_better \
+    cosmos_ftl_nfc_backend_policy_checkpoint_candidate_better
+#define backend_policy_page_blank_status \
+    cosmos_ftl_nfc_backend_policy_page_blank_status
+#define backend_policy_recycle_status \
+    cosmos_ftl_nfc_backend_policy_recycle_status
+#define backend_policy_next_journal_index \
+    cosmos_ftl_nfc_backend_policy_next_journal_index
+#define backend_policy_first_journal_index \
+    cosmos_ftl_nfc_backend_policy_first_journal_index
+#define backend_policy_journal_pages_normalized \
+    cosmos_ftl_nfc_backend_policy_journal_pages_normalized
+#define backend_policy_journal_pages_valid \
+    cosmos_ftl_nfc_backend_policy_journal_pages_valid
+#define backend_policy_checkpoint_data_pages \
+    cosmos_ftl_nfc_backend_policy_checkpoint_data_pages
+#define backend_policy_checkpoint_slot_pages \
+    cosmos_ftl_nfc_backend_policy_checkpoint_slot_pages
+#define backend_policy_journal_start_page \
+    cosmos_ftl_nfc_backend_policy_journal_start_page
+#define backend_policy_layout_valid \
+    cosmos_ftl_nfc_backend_policy_layout_valid
+#define backend_policy_journal_page \
+    cosmos_ftl_nfc_backend_policy_journal_page
+#define backend_policy_journal_append_admit \
+    cosmos_ftl_nfc_backend_policy_journal_append_admit
+#define backend_policy_journal_append_result \
+    cosmos_ftl_nfc_backend_policy_journal_append_result
+#define backend_policy_journal_read_admit \
+    cosmos_ftl_nfc_backend_policy_journal_read_admit
+#define backend_policy_journal_next_after_read \
+    cosmos_ftl_nfc_backend_policy_journal_next_after_read
+#define backend_policy_journal_record_valid \
+    cosmos_ftl_nfc_backend_policy_journal_record_valid
+#define backend_policy_journal_block_fully_dead \
+    cosmos_ftl_nfc_backend_policy_journal_block_fully_dead
+#define backend_policy_journal_trim_status \
+    cosmos_ftl_nfc_backend_policy_journal_trim_status
+#else
+static unsigned int backend_policy_checkpoint_total_bytes(
+    unsigned int l2p_count, unsigned int block_count) {
+    unsigned long long total = (unsigned long long)l2p_count * 4ULL +
+        (unsigned long long)block_count * 8ULL;
+    return total > 0xFFFFFFFFULL ? 0U : (unsigned int)total;
+}
+
+static int backend_policy_header_prefix_status(
+    unsigned int magic, unsigned int version, unsigned int header_crc,
+    unsigned int expected_header_crc) {
+    return magic == COSMOS_FTL_NFC_MAGIC &&
+        version == COSMOS_FTL_NFC_FORMAT_VERSION &&
+        header_crc == expected_header_crc ? COSMOS_OK : COSMOS_INVALID;
+}
+
+static int backend_policy_payload_length_status(unsigned int payload_length) {
+    return payload_length <= COSMOS_FTL_NFC_METADATA_PAYLOAD_BYTES ?
+        COSMOS_OK : COSMOS_INVALID;
+}
+
+static int backend_policy_read_io_state(int status) {
+    if (status == COSMOS_RETRY) {
+        return METADATA_PAGE_RETRY;
+    }
+    return status == COSMOS_OK ? METADATA_PAGE_VALID : METADATA_PAGE_IO_ERROR;
+}
+
+static int backend_policy_read_content_state(
+    unsigned int all_ff, int header_status, unsigned int spare_header,
+    int payload_status) {
+    if (all_ff != 0U) {
+        return METADATA_PAGE_BLANK;
+    }
+    if (header_status != COSMOS_OK ||
+        (spare_header == 0U && payload_status != COSMOS_OK)) {
+        return METADATA_PAGE_TORN;
+    }
+    return METADATA_PAGE_VALID;
+}
+
+static unsigned int backend_policy_write_faults(int status) {
+    return status == COSMOS_TIMEOUT || status == COSMOS_COMPLETION_UNCERTAIN;
+}
+
+static int backend_policy_superblock_status(
+    int page_state, unsigned int page_type, unsigned long long logical_index,
+    unsigned int payload_length, unsigned int payload_valid) {
+    if (page_state == METADATA_PAGE_RETRY) {
+        return COSMOS_RETRY;
+    }
+    if (page_state != METADATA_PAGE_VALID ||
+        page_type != COSMOS_FTL_NFC_PAGE_SUPERBLOCK || logical_index != 0ULL ||
+        payload_length != COSMOS_FTL_NFC_SUPERBLOCK_BYTES ||
+        payload_valid == 0U) {
+        return page_state == METADATA_PAGE_BLANK ? COSMOS_UNAVAILABLE :
+            COSMOS_HW_ERROR;
+    }
+    return COSMOS_OK;
+}
+
+static int backend_policy_mounted_status(
+    unsigned int backend_present, unsigned int mounted,
+    unsigned int faulted) {
+    return backend_present != 0U && mounted != 0U && faulted == 0U ?
+        COSMOS_OK : COSMOS_UNAVAILABLE;
+}
+
+static unsigned int backend_policy_checkpoint_candidate_better(
+    unsigned int have_latest, unsigned long long candidate_generation,
+    unsigned long long latest_generation, unsigned int candidate_segment,
+    unsigned int latest_segment) {
+    return have_latest == 0U || candidate_generation > latest_generation ||
+        (candidate_generation == latest_generation &&
+         candidate_segment > latest_segment);
+}
+
+static int backend_policy_page_blank_status(int page_state) {
+    if (page_state == METADATA_PAGE_BLANK) {
+        return COSMOS_OK;
+    }
+    if (page_state == METADATA_PAGE_RETRY) {
+        return COSMOS_RETRY;
+    }
+    return page_state == METADATA_PAGE_IO_ERROR ? COSMOS_HW_ERROR :
+        COSMOS_INVALID;
+}
+
+static int backend_policy_recycle_status(
+    unsigned int slot, unsigned int checkpoint_valid_mask) {
+    if (slot >= 2U ||
+        (checkpoint_valid_mask & (1U << (slot ^ 1U))) == 0U) {
+        return COSMOS_UNAVAILABLE;
+    }
+    return COSMOS_OK;
+}
+
+static unsigned long long backend_policy_next_journal_index(
+    unsigned long long current, unsigned long long checkpoint_index) {
+    return checkpoint_index > current ? checkpoint_index : current;
+}
+
+static unsigned long long backend_policy_first_journal_index(
+    unsigned int checkpoint_valid_mask, unsigned long long current,
+    unsigned long long checkpoint_index_0,
+    unsigned long long checkpoint_index_1) {
+    unsigned long long first;
+    if (checkpoint_valid_mask != 3U) {
+        return current;
+    }
+    first = checkpoint_index_0 < checkpoint_index_1 ? checkpoint_index_0 :
+        checkpoint_index_1;
+    return first > current ? first : current;
+}
+
+static unsigned long long backend_policy_journal_pages_normalized(
+    unsigned long long journal_pages) {
+    return journal_pages == 0ULL ? COSMOS_FTL_NFC_DEFAULT_JOURNAL_PAGES :
+        journal_pages;
+}
+
+static unsigned int backend_policy_journal_capacity_valid(
+    unsigned long long capacity) {
+    if (capacity == 0ULL) {
+        return 0U;
+    }
+    return (capacity & (capacity - 1ULL)) == 0ULL;
+}
+
+static unsigned int backend_policy_journal_pages_valid(
+    unsigned long long journal_pages) {
+    return journal_pages - 1ULL < COSMOS_FTL_NFC_MAX_JOURNAL_PAGES &&
+        (journal_pages & (journal_pages - 1ULL)) == 0ULL &&
+        journal_pages % COSMOS_FTL_PAGES_PER_BLOCK == 0ULL;
+}
+
+static unsigned int backend_policy_checkpoint_data_pages(
+    unsigned int total_bytes) {
+    return (unsigned int)(((unsigned long long)total_bytes +
+        COSMOS_FTL_NFC_METADATA_PAYLOAD_BYTES - 1ULL) /
+        COSMOS_FTL_NFC_METADATA_PAYLOAD_BYTES);
+}
+
+static unsigned int backend_policy_checkpoint_slot_pages(
+    unsigned long long journal_pages, unsigned int metadata_page_limit) {
+    unsigned int available;
+    if (metadata_page_limit < COSMOS_FTL_PAGES_PER_BLOCK ||
+        journal_pages > metadata_page_limit - COSMOS_FTL_PAGES_PER_BLOCK) {
+        return 0U;
+    }
+    available = metadata_page_limit - COSMOS_FTL_PAGES_PER_BLOCK;
+    available -= (unsigned int)journal_pages;
+    return (available / 2U / COSMOS_FTL_PAGES_PER_BLOCK) *
+        COSMOS_FTL_PAGES_PER_BLOCK;
+}
+
+static unsigned int backend_policy_journal_start_page(
+    unsigned int checkpoint_slot_pages) {
+    return COSMOS_FTL_PAGES_PER_BLOCK + 2U * checkpoint_slot_pages;
+}
+
+static unsigned int backend_policy_layout_valid(
+    unsigned int journal_start_page, unsigned long long journal_pages,
+    unsigned int checkpoint_slot_pages,
+    unsigned int checkpoint_record_pages, unsigned int metadata_page_limit) {
+    return journal_start_page < metadata_page_limit &&
+        metadata_page_limit - journal_start_page >=
+            journal_pages &&
+        checkpoint_slot_pages >= checkpoint_record_pages;
+}
+
+static unsigned int backend_policy_journal_page(
+    unsigned int journal_start_page, unsigned long long journal_capacity,
+    unsigned long long index) {
+    if (backend_policy_journal_capacity_valid(journal_capacity) == 0U) {
+        return 0U;
+    }
+    return journal_start_page +
+        (unsigned int)(index & (journal_capacity - 1ULL));
+}
+
+static unsigned int backend_policy_journal_append_admit(
+    int mounted_status, unsigned long long index,
+    unsigned long long first_index, unsigned long long capacity,
+    unsigned long long next_index) {
+    return backend_policy_journal_capacity_valid(capacity) != 0U &&
+        mounted_status == COSMOS_OK && index >= first_index &&
+        index - first_index < capacity &&
+        (next_index == 0ULL || index == next_index);
+}
+
+static unsigned int backend_policy_journal_append_result(int status) {
+    if (status == COSMOS_OK) {
+        return COSMOS_FTL_APPEND_COMMITTED;
+    }
+    if (status == COSMOS_TIMEOUT || status == COSMOS_COMPLETION_UNCERTAIN) {
+        return COSMOS_FTL_APPEND_AMBIGUOUS;
+    }
+    return status == COSMOS_UNAVAILABLE || status == COSMOS_RETRY ?
+        COSMOS_FTL_APPEND_NOT_COMMITTED : COSMOS_FTL_APPEND_HARD_FAILED;
+}
+
+static unsigned int backend_policy_journal_read_admit(
+    int mounted_status, unsigned long long index,
+    unsigned long long first_index, unsigned long long capacity) {
+    return backend_policy_journal_capacity_valid(capacity) != 0U &&
+        mounted_status == COSMOS_OK && index >= first_index &&
+        index - first_index < capacity;
+}
+
+static unsigned long long backend_policy_journal_next_after_read(
+    unsigned long long index, unsigned long long current) {
+    if (index != ~0ULL && index + 1ULL > current) {
+        return index + 1ULL;
+    }
+    return current;
+}
+
+static unsigned int backend_policy_journal_record_valid(
+    unsigned long long sequence, unsigned long long expected_sequence,
+    unsigned int magic, unsigned int crc, unsigned int expected_crc) {
+    return sequence == expected_sequence && magic == COSMOS_FTL_MAGIC &&
+        crc == expected_crc;
+}
+
+static unsigned int backend_policy_journal_block_fully_dead(
+    unsigned long long capacity, unsigned long long next_index,
+    unsigned int block, unsigned long long first_live) {
+    unsigned long long candidate;
+    if (backend_policy_journal_capacity_valid(capacity) == 0U) {
+        return 0U;
+    }
+    candidate = (next_index & ~(capacity - 1ULL)) +
+        (unsigned long long)block * COSMOS_FTL_PAGES_PER_BLOCK;
+    if (candidate >= next_index) {
+        if (candidate < capacity) {
+            return 0U;
+        }
+        candidate -= capacity;
+    }
+    return candidate <= ~0ULL - COSMOS_FTL_PAGES_PER_BLOCK &&
+        candidate + COSMOS_FTL_PAGES_PER_BLOCK <= first_live;
+}
+
+static int backend_policy_journal_trim_status(
+    int mounted_status, unsigned int checkpoint_valid_mask,
+    unsigned long long first_live, unsigned long long first_index,
+    unsigned long long capacity, unsigned long long checkpoint_index_0,
+    unsigned long long checkpoint_index_1) {
+    unsigned long long watermark;
+    if (backend_policy_journal_capacity_valid(capacity) == 0U ||
+        mounted_status != COSMOS_OK ||
+        (checkpoint_valid_mask & 3U) != 3U || first_live < first_index ||
+        first_live - first_index > capacity) {
+        return COSMOS_UNAVAILABLE;
+    }
+    watermark = checkpoint_index_0 < checkpoint_index_1 ?
+        checkpoint_index_0 : checkpoint_index_1;
+    return first_live > watermark ? COSMOS_INVALID : COSMOS_OK;
+}
+#endif
 
 static void *nfc_memset(void *destination, unsigned char value,
                         unsigned int bytes) {
@@ -222,10 +546,13 @@ static void encode_header(unsigned char *out, unsigned int type,
 }
 
 static int decode_header(const unsigned char *in, struct media_header *header) {
-    if (in == 0 || header == 0 || get_u32(in + 0U) != COSMOS_FTL_NFC_MAGIC ||
-        get_u16(in + 4U) != COSMOS_FTL_NFC_FORMAT_VERSION ||
-        get_u32(in + 32U) != cosmos_ftl_crc32(
-            in, COSMOS_FTL_NFC_HEADER_CRC_BYTES)) {
+    if (in == 0 || header == 0) {
+        return COSMOS_INVALID;
+    }
+    if (backend_policy_header_prefix_status(
+            get_u32(in + 0U), get_u16(in + 4U), get_u32(in + 32U),
+            cosmos_ftl_crc32(in, COSMOS_FTL_NFC_HEADER_CRC_BYTES)) !=
+            COSMOS_OK) {
         return COSMOS_INVALID;
     }
     header->magic = get_u32(in + 0U);
@@ -235,7 +562,8 @@ static int decode_header(const unsigned char *in, struct media_header *header) {
     header->generation = get_u64(in + 16U);
     header->payload_length = get_u32(in + 24U);
     header->payload_crc = get_u32(in + 28U);
-    if (header->payload_length > COSMOS_FTL_NFC_METADATA_PAYLOAD_BYTES) {
+    if (backend_policy_payload_length_status(header->payload_length) !=
+            COSMOS_OK) {
         return COSMOS_INVALID;
     }
     return COSMOS_OK;
@@ -259,6 +587,8 @@ static int read_page_state(struct cosmos_ftl_nfc_backend *backend,
     unsigned char *spare;
     int status;
     unsigned int index;
+    int io_state;
+    int payload_status = COSMOS_OK;
     int all_ff = 1;
 
     if (needs_refresh != 0) {
@@ -276,11 +606,9 @@ static int read_page_state(struct cosmos_ftl_nfc_backend *backend,
     nfc_memset(spare, 0xFFU, COSMOS_NFC_PAGE_SPARE_BYTES);
     status = backend->nfc.read_page(
         backend->nfc.context, &io, &ecc);
-    if (status == COSMOS_RETRY) {
-        return METADATA_PAGE_RETRY;
-    }
-    if (status != COSMOS_OK) {
-        return METADATA_PAGE_IO_ERROR;
+    io_state = backend_policy_read_io_state(status);
+    if (io_state != METADATA_PAGE_VALID) {
+        return io_state;
     }
     if (needs_refresh != 0) {
         *needs_refresh = ecc.needs_refresh != 0U ? 1U : 0U;
@@ -300,17 +628,16 @@ static int read_page_state(struct cosmos_ftl_nfc_backend *backend,
         }
     }
     if (all_ff) {
-        return METADATA_PAGE_BLANK;
+        return backend_policy_read_content_state(
+            1U, COSMOS_INVALID, spare_header, COSMOS_INVALID);
     }
     status = decode_header(
         spare_header != 0U ? spare : data, header);
-    if (status != COSMOS_OK) {
-        return METADATA_PAGE_TORN;
+    if (status == COSMOS_OK && spare_header == 0U) {
+        payload_status = header_payload_valid(data, header);
     }
-    if (spare_header == 0U && header_payload_valid(data, header) != COSMOS_OK) {
-        return METADATA_PAGE_TORN;
-    }
-    return status == COSMOS_OK ? METADATA_PAGE_VALID : METADATA_PAGE_TORN;
+    return backend_policy_read_content_state(
+        0U, status, spare_header, payload_status);
 }
 
 static int write_page(struct cosmos_ftl_nfc_backend *backend,
@@ -351,7 +678,7 @@ static int write_page(struct cosmos_ftl_nfc_backend *backend,
     }
     status = backend->nfc.program_page(
         backend->nfc.context, &io);
-    if (status == COSMOS_TIMEOUT || status == COSMOS_COMPLETION_UNCERTAIN) {
+    if (backend_policy_write_faults(status) != 0U) {
         backend->faulted = 1U;
     }
     return status;
@@ -369,10 +696,7 @@ static int read_metadata_page(struct cosmos_ftl_nfc_backend *backend,
 
 static unsigned int checkpoint_total_bytes(
     unsigned int l2p_count, unsigned int block_count) {
-    unsigned long long total = (unsigned long long)l2p_count * 4ULL +
-        (unsigned long long)block_count * 8ULL;
-
-    return total > 0xFFFFFFFFULL ? 0U : (unsigned int)total;
+    return backend_policy_checkpoint_total_bytes(l2p_count, block_count);
 }
 
 static unsigned char checkpoint_byte(
@@ -561,31 +885,29 @@ static int superblock_valid(const struct cosmos_ftl_nfc_backend *backend,
 static int read_superblock(struct cosmos_ftl_nfc_backend *backend) {
     struct media_header header;
     unsigned int ppa;
+    unsigned int payload_valid = 0U;
     int state;
 
     if (metadata_ppa(0U, &ppa) != COSMOS_OK) {
         return COSMOS_INVALID;
     }
     state = read_page_state(backend, ppa, 0U, &header, 0);
-    if (state == METADATA_PAGE_RETRY) {
-        return COSMOS_RETRY;
+    if (state == METADATA_PAGE_VALID) {
+        payload_valid = superblock_valid(
+            backend, data_buffer(backend) + COSMOS_FTL_NFC_HEADER_BYTES) ?
+            1U : 0U;
+        return backend_policy_superblock_status(
+            state, header.type, header.logical_index,
+            header.payload_length, payload_valid);
     }
-    if (state != METADATA_PAGE_VALID || header.type !=
-            COSMOS_FTL_NFC_PAGE_SUPERBLOCK || header.logical_index != 0ULL ||
-        header.payload_length != COSMOS_FTL_NFC_SUPERBLOCK_BYTES ||
-        !superblock_valid(backend,
-            data_buffer(backend) + COSMOS_FTL_NFC_HEADER_BYTES)) {
-        return state == METADATA_PAGE_BLANK ? COSMOS_UNAVAILABLE :
-            COSMOS_HW_ERROR;
-    }
-    return COSMOS_OK;
+    return backend_policy_superblock_status(state, 0U, 0ULL, 0U, 0U);
 }
 
 static int require_mounted(struct cosmos_ftl_nfc_backend *backend) {
-    if (backend == 0 || backend->mounted == 0U || backend->faulted != 0U) {
-        return COSMOS_UNAVAILABLE;
-    }
-    return COSMOS_OK;
+    return backend_policy_mounted_status(
+        backend != 0 ? 1U : 0U,
+        backend != 0 ? backend->mounted : 0U,
+        backend != 0 ? backend->faulted : 0U);
 }
 
 static unsigned int checkpoint_segments(
@@ -640,10 +962,10 @@ static int find_checkpoint(
             decode_ftl_checkpoint(
                 data_buffer(backend) + COSMOS_FTL_NFC_HEADER_BYTES,
                 &checkpoint);
-            if (have_latest == 0U ||
-                checkpoint.generation > latest->checkpoint.generation ||
-                (checkpoint.generation == latest->checkpoint.generation &&
-                 segment > latest->segment)) {
+            if (backend_policy_checkpoint_candidate_better(
+                    have_latest, checkpoint.generation,
+                    have_latest != 0U ? latest->checkpoint.generation : 0ULL,
+                    segment, have_latest != 0U ? latest->segment : 0U) != 0U) {
                 latest->segment = segment;
                 latest->checkpoint = checkpoint;
                 have_latest = 1U;
@@ -658,14 +980,7 @@ static int page_blank(struct cosmos_ftl_nfc_backend *backend,
     struct media_header header;
     int state = read_metadata_page(backend, page, &header);
 
-    if (state == METADATA_PAGE_BLANK) {
-        return COSMOS_OK;
-    }
-    if (state == METADATA_PAGE_RETRY) {
-        return COSMOS_RETRY;
-    }
-    return state == METADATA_PAGE_IO_ERROR ? COSMOS_HW_ERROR :
-        COSMOS_INVALID;
+    return backend_policy_page_blank_status(state);
 }
 
 static int checkpoint_header_payload(
@@ -680,18 +995,12 @@ static void update_checkpoint_watermark(
     backend->checkpoint_valid_mask |= 1U << slot;
     backend->checkpoint_generation[slot] = checkpoint->generation;
     backend->checkpoint_journal_index[slot] = checkpoint->journal_index;
-    if (checkpoint->journal_index > backend->journal_next_index) {
-        backend->journal_next_index = checkpoint->journal_index;
-    }
-    if (backend->checkpoint_valid_mask == 3U) {
-        unsigned long long first = backend->checkpoint_journal_index[0] <
-            backend->checkpoint_journal_index[1] ?
-            backend->checkpoint_journal_index[0] :
-            backend->checkpoint_journal_index[1];
-        if (first > backend->journal_first_index) {
-            backend->journal_first_index = first;
-        }
-    }
+    backend->journal_next_index = backend_policy_next_journal_index(
+        backend->journal_next_index, checkpoint->journal_index);
+    backend->journal_first_index = backend_policy_first_journal_index(
+        backend->checkpoint_valid_mask, backend->journal_first_index,
+        backend->checkpoint_journal_index[0],
+        backend->checkpoint_journal_index[1]);
 }
 
 static int checkpoint_header_read(
@@ -780,8 +1089,8 @@ static int recycle_checkpoint_slot(
     struct cosmos_ftl_nfc_backend *backend, unsigned int slot) {
     unsigned int page;
 
-    if (slot >= 2U || (backend->checkpoint_valid_mask & (1U << (slot ^ 1U))) ==
-            0U) {
+    if (backend_policy_recycle_status(
+            slot, backend->checkpoint_valid_mask) != COSMOS_OK) {
         return COSMOS_UNAVAILABLE;
     }
     for (page = 0U; page < backend->checkpoint_slot_pages;
@@ -1006,8 +1315,8 @@ static int ftl_erase_block(void *context, unsigned int block_index) {
 static unsigned int journal_page(
     const struct cosmos_ftl_nfc_backend *backend,
     unsigned long long index) {
-    return backend->journal_start_page +
-        (unsigned int)(index & (backend->journal_capacity - 1ULL));
+    return backend_policy_journal_page(
+        backend->journal_start_page, backend->journal_capacity, index);
 }
 
 static int journal_page_ppa(const struct cosmos_ftl_nfc_backend *backend,
@@ -1026,11 +1335,9 @@ static enum cosmos_ftl_append_result ftl_append_journal(
     int status;
 
     if (backend == 0 || record == 0 ||
-        require_mounted(backend) != COSMOS_OK ||
-        index < backend->journal_first_index ||
-        index - backend->journal_first_index >= backend->journal_capacity ||
-        (backend->journal_next_index != 0ULL &&
-         index != backend->journal_next_index) ||
+        backend_policy_journal_append_admit(
+            require_mounted(backend), index, backend->journal_first_index,
+            backend->journal_capacity, backend->journal_next_index) == 0U ||
         journal_page_ppa(backend, index, &ppa) != COSMOS_OK) {
         return COSMOS_FTL_APPEND_HARD_FAILED;
     }
@@ -1046,7 +1353,8 @@ static enum cosmos_ftl_append_result ftl_append_journal(
     status = write_page(backend, ppa, COSMOS_FTL_NFC_PAGE_JOURNAL,
                         index, record->generation, payload,
                         COSMOS_FTL_NFC_JOURNAL_PAGE_BYTES, 0U);
-    if (status == COSMOS_OK) {
+    if (backend_policy_journal_append_result(status) ==
+            COSMOS_FTL_APPEND_COMMITTED) {
         block = (unsigned int)(
             (index & (backend->journal_capacity - 1ULL)) /
             COSMOS_FTL_PAGES_PER_BLOCK);
@@ -1054,11 +1362,8 @@ static enum cosmos_ftl_append_result ftl_append_journal(
         backend->journal_next_index = index + 1ULL;
         return COSMOS_FTL_APPEND_COMMITTED;
     }
-    if (status == COSMOS_TIMEOUT || status == COSMOS_COMPLETION_UNCERTAIN) {
-        return COSMOS_FTL_APPEND_AMBIGUOUS;
-    }
-    return status == COSMOS_UNAVAILABLE || status == COSMOS_RETRY ?
-        COSMOS_FTL_APPEND_NOT_COMMITTED : COSMOS_FTL_APPEND_HARD_FAILED;
+    return (enum cosmos_ftl_append_result)
+        backend_policy_journal_append_result(status);
 }
 
 static int ftl_read_journal(
@@ -1070,9 +1375,9 @@ static int ftl_read_journal(
     int state;
 
     if (backend == 0 || record == 0 ||
-        require_mounted(backend) != COSMOS_OK ||
-        index < backend->journal_first_index ||
-        index - backend->journal_first_index >= backend->journal_capacity ||
+        backend_policy_journal_read_admit(
+            require_mounted(backend), index, backend->journal_first_index,
+            backend->journal_capacity) == 0U ||
         journal_page_ppa(backend, index, &ppa) != COSMOS_OK) {
         return COSMOS_UNAVAILABLE;
     }
@@ -1086,9 +1391,8 @@ static int ftl_read_journal(
     if (state == METADATA_PAGE_BLANK) {
         return COSMOS_UNAVAILABLE;
     }
-    if (index != ~0ULL && index + 1ULL > backend->journal_next_index) {
-        backend->journal_next_index = index + 1ULL;
-    }
+    backend->journal_next_index = backend_policy_journal_next_after_read(
+        index, backend->journal_next_index);
     if (state != METADATA_PAGE_VALID ||
         header.type != COSMOS_FTL_NFC_PAGE_JOURNAL ||
         header.logical_index != index ||
@@ -1097,8 +1401,9 @@ static int ftl_read_journal(
     }
     decode_journal(
         data_buffer(backend) + COSMOS_FTL_NFC_HEADER_BYTES, record);
-    if (record->sequence != index || record->magic != COSMOS_FTL_MAGIC ||
-        record->crc != cosmos_ftl_journal_record_crc(record)) {
+    if (backend_policy_journal_record_valid(
+            record->sequence, index, record->magic, record->crc,
+            cosmos_ftl_journal_record_crc(record)) == 0U) {
         return COSMOS_INVALID;
     }
     return COSMOS_OK;
@@ -1107,39 +1412,26 @@ static int ftl_read_journal(
 static int journal_block_fully_dead(
     const struct cosmos_ftl_nfc_backend *backend, unsigned int block,
     unsigned long long first_live) {
-    unsigned long long capacity = backend->journal_capacity;
-    unsigned long long candidate =
-        (backend->journal_next_index & ~(capacity - 1ULL)) +
-        (unsigned long long)block * COSMOS_FTL_PAGES_PER_BLOCK;
-
-    if (candidate >= backend->journal_next_index) {
-        if (candidate < capacity) {
-            return 0;
-        }
-        candidate -= capacity;
-    }
-    return candidate <= ~0ULL - COSMOS_FTL_PAGES_PER_BLOCK &&
-        candidate + COSMOS_FTL_PAGES_PER_BLOCK <= first_live;
+    return (int)backend_policy_journal_block_fully_dead(
+        backend->journal_capacity, backend->journal_next_index,
+        block, first_live);
 }
 
 static int ftl_trim_journal(void *context, unsigned long long first_live) {
     struct cosmos_ftl_nfc_backend *backend = context;
     unsigned int block;
-    unsigned long long watermark;
     int status;
 
-    if (backend == 0 || require_mounted(backend) != COSMOS_OK ||
-        (backend->checkpoint_valid_mask & 3U) != 3U ||
-        first_live < backend->journal_first_index ||
-        first_live - backend->journal_first_index > backend->journal_capacity) {
+    if (backend == 0) {
         return COSMOS_UNAVAILABLE;
     }
-    watermark = backend->checkpoint_journal_index[0] <
-        backend->checkpoint_journal_index[1] ?
-        backend->checkpoint_journal_index[0] :
-        backend->checkpoint_journal_index[1];
-    if (first_live > watermark) {
-        return COSMOS_INVALID;
+    status = backend_policy_journal_trim_status(
+        require_mounted(backend), backend->checkpoint_valid_mask,
+        first_live, backend->journal_first_index,
+        backend->journal_capacity, backend->checkpoint_journal_index[0],
+        backend->checkpoint_journal_index[1]);
+    if (status != COSMOS_OK) {
+        return status;
     }
     for (block = 0U; block < backend->journal_blocks; ++block) {
         unsigned int ppa;
@@ -1175,7 +1467,6 @@ int cosmos_ftl_nfc_backend_init(
     const struct cosmos_ftl_nfc_ops *ops,
     unsigned int l2p_count, unsigned int block_count,
     unsigned long long journal_pages) {
-    unsigned int available;
     unsigned int slot_pages;
     unsigned int data_pages;
     unsigned int record_pages;
@@ -1191,27 +1482,19 @@ int cosmos_ftl_nfc_backend_init(
                      ops->erase_block == 0)) {
         return COSMOS_INVALID;
     }
-    if (journal_pages == 0ULL) {
-        journal_pages = COSMOS_FTL_NFC_DEFAULT_JOURNAL_PAGES;
-    }
-    if (journal_pages > COSMOS_FTL_NFC_MAX_JOURNAL_PAGES ||
-        (journal_pages & (journal_pages - 1ULL)) != 0ULL ||
-        journal_pages % COSMOS_FTL_PAGES_PER_BLOCK != 0ULL) {
+    journal_pages = backend_policy_journal_pages_normalized(journal_pages);
+    if (backend_policy_journal_pages_valid(journal_pages) == 0U) {
         return COSMOS_INVALID;
     }
-    data_pages = (checkpoint_total_bytes(l2p_count, block_count) +
-                  COSMOS_FTL_NFC_METADATA_PAYLOAD_BYTES - 1U) /
-        COSMOS_FTL_NFC_METADATA_PAYLOAD_BYTES;
+    data_pages = backend_policy_checkpoint_data_pages(
+        checkpoint_total_bytes(l2p_count, block_count));
     record_pages = data_pages + 1U;
-    available = COSMOS_FTL_NFC_METADATA_PAGE_LIMIT -
-        COSMOS_FTL_PAGES_PER_BLOCK -
-        (unsigned int)journal_pages;
-    slot_pages = (available / 2U / COSMOS_FTL_PAGES_PER_BLOCK) *
-        COSMOS_FTL_PAGES_PER_BLOCK;
-    journal_start = COSMOS_FTL_PAGES_PER_BLOCK + 2U * slot_pages;
-    if (journal_start >= COSMOS_FTL_NFC_METADATA_PAGE_LIMIT ||
-        COSMOS_FTL_NFC_METADATA_PAGE_LIMIT - journal_start < journal_pages ||
-        slot_pages < record_pages) {
+    slot_pages = backend_policy_checkpoint_slot_pages(
+        journal_pages, COSMOS_FTL_NFC_METADATA_PAGE_LIMIT);
+    journal_start = backend_policy_journal_start_page(slot_pages);
+    if (backend_policy_layout_valid(
+            journal_start, journal_pages, slot_pages, record_pages,
+            COSMOS_FTL_NFC_METADATA_PAGE_LIMIT) == 0U) {
         return COSMOS_INVALID;
     }
     nfc_memset(backend, 0U, sizeof(*backend));

@@ -1,0 +1,130 @@
+use compiler.driver.cache.package_index_route.{
+    package_index_route_current_v1, package_index_route_ordered_modules_v1}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_decode_v1, package_module_index_entry_action_digest_v1,
+    package_module_index_publish_v1
+}
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get, env_set}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+
+extern fn rt_getpid() -> i64
+
+fn route_entry(package_identity: text, module_identity: text) -> PackageModuleIndexEntryV1:
+    val digest = sha256_text(module_identity)
+    PackageModuleIndexEntryV1(
+        package_identity, module_identity, "src/{module_identity}.spl",
+        digest, digest, digest, digest, digest, digest, digest, digest,
+        "scc::{module_identity}", [], [])
+
+describe "production package-index routing":
+    it "refuses full and different-entry requests against a scoped graph":
+        val old_cache = env_get("SIMPLE_CACHE") ?? ""
+        val cache_root = "build/test-artifacts/package-index-scope-{rt_getpid()}"
+        dir_remove(cache_root, true)
+        env_set("SIMPLE_CACHE", cache_root)
+        var graph = PackageModuleIndexGenerationV1(
+            3, sha256_text("producer"), "root", "revision", "commit", "tree",
+            sha256_text("inventory"), [route_entry("pkg-a", "a")],
+            sha256_text("variant"), "src/a.spl")
+        var entry = graph.entries[0]
+        entry.action_digest = package_module_index_entry_action_digest_v1(
+            graph, entry)
+        graph.entries = [entry]
+        expect(package_module_index_publish_v1(cache_root, graph)).to_be(true)
+        val full = package_index_route_current_v1(
+            "", "/tmp/package-index-scope-snapshot", "revision", "tree",
+            graph.inventory_digest, graph.producer_digest,
+            graph.root_generation, graph.variant_digest, [], false)
+        expect(full.valid).to_be(false)
+        expect(full.reason).to_equal("index-scope-mismatch")
+        val other = package_index_route_current_v1(
+            "src/b.spl", "/tmp/package-index-scope-snapshot", "revision", "tree",
+            graph.inventory_digest, graph.producer_digest,
+            graph.root_generation, graph.variant_digest, [], false)
+        expect(other.valid).to_be(false)
+        expect(other.reason).to_equal("index-scope-mismatch")
+        env_set("SIMPLE_CACHE", old_cache)
+        dir_remove(cache_root, true)
+
+    it "keeps unchanged selected modules after a dirty-package schedule":
+        val entries = [
+            route_entry("pkg-a", "a"), route_entry("pkg-b", "b"),
+            route_entry("pkg-b", "c"), route_entry("pkg-outside", "z")]
+        var selected: Dict<text, bool> = {}
+        selected["a"] = true
+        selected["b"] = true
+        selected["c"] = true
+        var heads: Dict<text, i64> = {}
+        heads["pkg-a"] = 0
+        heads["pkg-b"] = 1
+        heads["pkg-outside"] = 3
+        val ordered = package_index_route_ordered_modules_v1(
+            entries, ["a", "b", "c"], selected, ["pkg-b"],
+            heads, [-1, 2, -1, -1])
+        expect(ordered.len()).to_equal(3)
+        expect(ordered[0]).to_equal("b")
+        expect(ordered[1]).to_equal("c")
+        expect(ordered[2]).to_equal("a")
+
+    it "rejects a graph requested with a different variant digest":
+        val old_cache = env_get("SIMPLE_CACHE") ?? ""
+        val cache_root = "build/test-artifacts/package-index-variant-{rt_getpid()}"
+        dir_remove(cache_root, true)
+        env_set("SIMPLE_CACHE", cache_root)
+        val graph = PackageModuleIndexGenerationV1(
+            2, sha256_text("producer"), "root", "revision", "commit", "tree",
+            sha256_text("inventory"), [], sha256_text("selected-variant"))
+        expect(package_module_index_publish_v1(cache_root, graph)).to_equal(true)
+        val route = package_index_route_current_v1(
+            "", "/tmp/simple-package-index-variant-snapshot",
+            "revision", "tree", sha256_text("inventory"),
+            graph.producer_digest, graph.root_generation,
+            sha256_text("different-variant"), [], false)
+        expect(route.valid).to_equal(false)
+        expect(route.reason).to_equal("index-variant-mismatch")
+        val empty = package_index_route_current_v1(
+            "", "/tmp/simple-package-index-variant-snapshot",
+            "revision", "tree", sha256_text("inventory"),
+            graph.producer_digest, graph.root_generation,
+            graph.variant_digest, [], false)
+        expect(empty.valid).to_equal(false)
+        expect(empty.reason).to_equal("index-graph-empty")
+        env_set("SIMPLE_CACHE", old_cache)
+        dir_remove(cache_root, true)
+
+    it "fails closed when the persistent index is unavailable":
+        val old_cache = env_get("SIMPLE_CACHE") ?? ""
+        env_set("SIMPLE_CACHE", "/tmp/simple-package-index-route-missing")
+        val route = package_index_route_current_v1(
+            "src/app/main.spl", "/tmp/simple-package-index-route-snapshot",
+            "revision", "tree", "inventory", "producer", "root",
+            "variant", [], false)
+        expect(route.valid).to_equal(false)
+        expect(route.reason).to_start_with("index-")
+        env_set("SIMPLE_CACHE", old_cache)
+
+    it "rejects routing without immutable SCV authority":
+        val route = package_index_route_current_v1(
+            "", "", "", "", "", "", "", "", [], false)
+        expect(route.valid).to_equal(false)
+        expect(route.reason).to_equal("scv-authority-missing")
+
+    it "rejects routing without producer and configuration compatibility":
+        val route = package_index_route_current_v1(
+            "", "/tmp/simple-package-index-route-snapshot",
+            "revision", "tree", "inventory", "", "", "", [], false)
+        expect(route.valid).to_equal(false)
+        expect(route.reason).to_equal("index-compatibility-missing")
+
+    it "rejects corrupt and incompatible persistent index payloads":
+        val corrupt = package_module_index_decode_v1("not-an-index")
+        expect(corrupt.valid).to_equal(false)
+        expect(corrupt.reason).to_equal("corrupt-header")
+        val incompatible = package_module_index_decode_v1(
+            "simple-package-module-index-v1\nschema=2\nproducer=x\nroot=x\n" +
+            "scv-revision=x\nscv-commit=x\nscv-tree=x\ninventory=x\ncount=0")
+        expect(incompatible.valid).to_equal(false)
+        expect(incompatible.reason).to_equal("unsupported-schema")

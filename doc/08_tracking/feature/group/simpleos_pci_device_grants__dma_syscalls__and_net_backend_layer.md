@@ -1,5 +1,7 @@
-# Feature Group: simpleos_pci/device_grants,_dma_syscalls,_and_net_backend_layer
+# simpleos_pci/device_grants,_dma_syscalls,_and_net_backend_layer
 
-| ID | Status | Device | Component | Priority | Title | Pipeline Evidence |
-|----|--------|--------|-----------|----------|-------|-------------------|
-| FR-NET-0009 | current | simpleos_pci/device_grants,_dma_syscalls,_and_net_backend_layer | SimpleOS PCI/device grants, DMA syscalls, and net backend layer | P1 | Gate SR-IOV and DMA on IOMMU-capable isolation | design |
+## Features
+
+| ID | Feature | Description | Modes | Platforms | Spec |
+|----|---------|-------------|-------|-----------|------|
+| <a id="feature-FR-NET-0009"></a>FR-NET-0009 | Gate SR-IOV and DMA on IOMMU-capable isolation | SR-IOV virtual functions and high-throughput DMA paths must only be exposed to user-space or exoskeleton drivers when the device grant includes an isolation domain. No-IOMMU systems may use trusted early-boot drivers, but must not advertise | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | - |

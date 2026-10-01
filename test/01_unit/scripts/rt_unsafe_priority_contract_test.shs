@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+mkdir -p "$work/src/fixture"
+cat >"$work/src/fixture/module.spl" <<'EOF'
+extern fn rt_unchecked_hot() -> i64
+
+@unsafe(reason: "raw status boundary", capabilities: [ffi])
+extern fn rt_checked_once() -> bool
+
+fn exercise() -> i64:
+    val a = rt_unchecked_hot()
+    val b = rt_unchecked_hot()
+    if rt_checked_once():
+        return a + b
+    return 0
+EOF
+cat >"$work/backing.tsv" <<'EOF'
+symbol	class	scoped_callsites	first_declaring_file	source_languages
+rt_unchecked_hot	c_runtime_source_only	2	fixture/module.spl	c
+rt_checked_once	c_runtime_source_only	1	fixture/module.spl	c
+EOF
+printf '%s\n' "$work/src/fixture/module.spl" >"$work/files.txt"
+
+SFFI_SCAN_ROOT="$work" SFFI_CENSUS_INPUT="$work/backing.tsv" SFFI_SOURCE_FILE_LIST="$work/files.txt" \
+    sh "$root/scripts/audit/rt-unsafe-priority.shs" "$work/priority.tsv" \
+    >"$work/priority.stdout" 2>"$work/priority.stderr"
+
+awk -F '\t' 'NR == 1 && $1 == "module" && $2 == "symbol" && $5 == "direct_raw_call_estimate" { found=1 } END { exit !found }' "$work/priority.tsv"
+awk -F '\t' '$2 == "rt_unchecked_hot" && $5 == 2 && $6 == "missing" && $7 == "missing" && $10 == "P0_direct_tag_and_contract" { found=1 } END { exit !found }' "$work/priority.tsv"
+awk -F '\t' '$2 == "rt_checked_once" && $5 == 1 && $6 == "tagged" && $7 == "missing" && $10 == "P1_direct_exact_contract" { found=1 } END { exit !found }' "$work/priority.tsv"
+grep -Fq 'source_only=true admission=absent' "$work/priority.stderr"
+
+module=$(sed '1d' "$work/priority.tsv" | awk -F '\t' '$2 == "rt_unchecked_hot" { print $1; exit }')
+cat >"$work/policy.tsv" <<EOF
+module	symbol	unsafe_tag	contract	state	min_direct_raw_calls
+$module	rt_unchecked_hot	missing	missing	unsafe_tag_and_contract_missing	2
+EOF
+if ! SFFI_SCAN_ROOT="$work" SFFI_SOURCE_FILE_LIST="$work/files.txt" \
+    sh "$root/scripts/audit/rt-unsafe-autofix-contract.shs" "$work/policy.tsv" \
+    >"$work/autofix.stdout" 2>"$work/autofix.stderr"; then
+    cat "$work/autofix.stderr" >&2
+    exit 1
+fi
+grep -Fq 'PASS (exact source-only module+symbol policy)' "$work/autofix.stdout"
+
+sed 's/\t2$/\t3/' "$work/policy.tsv" >"$work/too-many-calls.tsv"
+if SFFI_SCAN_ROOT="$work" SFFI_CENSUS_INPUT="$work/backing.tsv" SFFI_SOURCE_FILE_LIST="$work/files.txt" \
+    sh "$root/scripts/audit/rt-unsafe-autofix-contract.shs" "$work/too-many-calls.tsv" \
+    >"$work/fail.stdout" 2>"$work/fail.stderr"; then
+    echo 'FAIL: exact policy accepted an unavailable direct-call count' >&2
+    exit 1
+fi
+grep -Fq 'exact contract mismatch' "$work/fail.stderr"
+
+echo 'PASS: rt unsafe priority and exact-autofix policy are module+symbol scoped and source-only'

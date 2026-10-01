@@ -10,6 +10,17 @@ enum DockPosition:
     Center
     Float
 
+val DOCK_LEFT: i64 = 1
+val DOCK_RIGHT: i64 = 2
+val DOCK_BOTTOM: i64 = 3
+
+struct DockPanel:
+    id: text
+    label: text
+    zone: i64
+    icon: text
+    visible: bool
+
 struct DockZone:
     id: i64
     position: DockPosition
@@ -26,7 +37,11 @@ class DockLayout:
     left: DockZone
     right: DockZone
     bottom: DockZone
+    panels: [DockPanel]
+    active_left: text
     active_right: text
+    selected_right: text
+    active_bottom: text
     right_visible: bool
 
     static fn new() -> DockLayout:
@@ -34,7 +49,11 @@ class DockLayout:
             left: dock_zone_new(1, DockPosition.Left),
             right: dock_zone_new(2, DockPosition.Right),
             bottom: dock_zone_new(3, DockPosition.Bottom),
+            panels: [DockPanel(id: "file-tree", label: "Explorer", zone: DOCK_LEFT, icon: "folder", visible: true)],
+            active_left: "file-tree",
             active_right: "",
+            selected_right: "",
+            active_bottom: "",
             right_visible: false
         )
 
@@ -45,12 +64,84 @@ class DockLayout:
         me.right.size
 
     me is_right_visible() -> bool:
-        me.right.visible
+        me.visible_panels_in(DOCK_RIGHT).len() > 0
+
+    fn panel_zone(panel_id: text) -> i64:
+        for panel in me.panels:
+            if panel.id == panel_id:
+                return panel.zone
+        -1
+
+    fn visible_panels_in(zone: i64) -> [DockPanel]:
+        if zone == DOCK_LEFT and not me.left.visible:
+            return []
+        if zone == DOCK_RIGHT and not me.right.visible:
+            return []
+        if zone == DOCK_BOTTOM and not me.bottom.visible:
+            return []
+        var result: [DockPanel] = []
+        for panel in me.panels:
+            if panel.zone == zone and panel.visible and (zone != DOCK_RIGHT or panel.id == "file-tree" or me.right_visible):
+                result.push(panel)
+        result
+
+    fn active_in(zone: i64) -> text:
+        if zone == DOCK_LEFT:
+            return me.active_left
+        if zone == DOCK_RIGHT:
+            return me.selected_right
+        if zone == DOCK_BOTTOM:
+            return me.active_bottom
+        ""
+
+    me set_active(zone: i64, panel_id: text):
+        if me.panel_zone(panel_id) != zone:
+            return
+        if zone == DOCK_LEFT:
+            me.active_left = panel_id
+        elif zone == DOCK_RIGHT:
+            me.selected_right = panel_id
+            me.right_visible = true
+        elif zone == DOCK_BOTTOM:
+            me.active_bottom = panel_id
+        if panel_id != "file-tree":
+            me.active_right = panel_id
+
+    me add_panel(panel: DockPanel):
+        me.remove_panel(panel.id)
+        me.panels.push(panel)
+
+    me remove_panel(panel_id: text):
+        var kept: [DockPanel] = []
+        for panel in me.panels:
+            if panel.id != panel_id:
+                kept.push(panel)
+        me.panels = kept
+
+    me move_panel(panel_id: text, zone: i64) -> bool:
+        if zone != DOCK_LEFT and zone != DOCK_RIGHT and zone != DOCK_BOTTOM:
+            return false
+        var moved = false
+        var next: [DockPanel] = []
+        for panel in me.panels:
+            if panel.id == panel_id and panel.visible:
+                next.push(DockPanel(id: panel.id, label: panel.label, zone: zone, icon: panel.icon, visible: true))
+                moved = true
+            else:
+                next.push(panel)
+        if not moved:
+            return false
+        me.panels = next
+        me.set_active(zone, panel_id)
+        true
 
     # --- right-panel switching used by the controller/render layer ---
     me show_right(panel: text):
+        if me.panel_zone(panel) < 0:
+            me.panels.push(DockPanel(id: panel, label: panel, zone: DOCK_RIGHT, icon: "panel", visible: true))
         me.active_right = panel
         me.right_visible = true
+        me.set_active(me.panel_zone(panel), panel)
 
     me hide_right():
         me.right_visible = false
@@ -59,10 +150,35 @@ class DockLayout:
         me.active_right
 
     me toggle_left() -> DockLayout:
-        DockLayout(left: dock_zone_toggle(me.left), right: me.right, bottom: me.bottom)
+        DockLayout(left: dock_zone_toggle(me.left), right: me.right, bottom: me.bottom, panels: me.panels, active_left: me.active_left, active_right: me.active_right, selected_right: me.selected_right, active_bottom: me.active_bottom, right_visible: me.right_visible)
 
     me toggle_right() -> DockLayout:
-        DockLayout(left: me.left, right: dock_zone_toggle(me.right), bottom: me.bottom)
+        DockLayout(left: me.left, right: dock_zone_toggle(me.right), bottom: me.bottom, panels: me.panels, active_left: me.active_left, active_right: me.active_right, selected_right: me.selected_right, active_bottom: me.active_bottom, right_visible: me.right_visible)
 
     me toggle_bottom() -> DockLayout:
-        DockLayout(left: me.left, right: me.right, bottom: dock_zone_toggle(me.bottom))
+        DockLayout(left: me.left, right: me.right, bottom: dock_zone_toggle(me.bottom), panels: me.panels, active_left: me.active_left, active_right: me.active_right, selected_right: me.selected_right, active_bottom: me.active_bottom, right_visible: me.right_visible)
+
+# Percentage-of-viewport tab-hit-box test (size fields here are treated as a
+# 0-100 share of the viewport, distinct from the pixel-valued DockZone.size
+# used directly as CSS px elsewhere in the editor GUI shell — see the caller
+# comment in gui_shell.spl's _drag_hit_zone_tab). Exercised directly by
+# test/01_unit/app/editor/phase2_field_shape_spec.spl.
+fn dock_layout_tab_contains(layout: DockLayout, zone: i64,
+        left_zone: i64, right_zone: i64, bottom_zone: i64,
+        viewport_width: i64, viewport_height: i64, tab_height: i64,
+        x: i64, y: i64) -> bool:
+    var zone_x = 0
+    var zone_y = 0
+    var zone_width = 0
+    if zone == left_zone:
+        zone_width = layout.left_width_value() * viewport_width / 100
+    elif zone == right_zone:
+        zone_width = layout.right_width_value() * viewport_width / 100
+        zone_x = viewport_width - zone_width
+    elif zone == bottom_zone:
+        zone_y = viewport_height - layout.bottom.size * viewport_height / 100
+        zone_width = viewport_width
+    else:
+        return false
+    x >= zone_x and x < zone_x + zone_width and
+        y >= zone_y and y < zone_y + tab_height

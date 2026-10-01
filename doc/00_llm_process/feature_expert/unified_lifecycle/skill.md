@@ -12,6 +12,30 @@ releases are immutable; base behavior is observe-only.
 Never modify the concurrently developed SCV file-entity identity store as a
 shortcut for lifecycle identity. Use `std.scv.lifecycle.*`.
 
+## Research authority
+
+The condensed `doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md`
+(165 lines) is a SUMMARY. The full texts are `..._unified_lifecycle_full_2026-08-25.md`
+(2,869 lines) and `..._unified_release_review_work_item_2026-08-25.md` (1,630 lines)
+in the same directory. The second is the only source for the four SCV tag defects,
+release units / monorepo version sets, authority modes A/B/C, and the R0-R4 review
+risk classes. Prefer the full texts where they disagree with the summary.
+
+## Trap: `use` is eager, and `bin/sj` is the landing path
+
+`bin/sj` execs `src/app/sj/main.spl` FROM SOURCE, and `scripts/check/land.shs`
+invokes `sj`. Simple resolves `use` eagerly, so any import added to `main.spl` is
+opened and parsed on every push. Measured by strace 2026-09-05: an `integrate_plan`
+import there — referenced only from a `plan` arm that pushes never take — opened
+`scv/lifecycle` four times per `bin/sj --help`, putting the entire lifecycle graph
+on the critical path of every push on the machine, where one parse error under
+`src/lib/scv/lifecycle/**` would have broken pushes for every session.
+
+Never add a lifecycle import to `src/app/sj/main.spl`. Route a new large-import
+subcommand to its own entry file and dispatch in `bin/sj` (`plan` ->
+`src/app/sj/plan_main.spl` is the worked example). Equally: never intercept
+`sj git push` to force a dry-run — that spelling belongs to `land.shs`.
+
 ## Current baseline
 
 The observe-only agent base was delivered on public `main` at
@@ -19,6 +43,16 @@ The observe-only agent base was delivered on public `main` at
 verification for that push because the available CLI was a bootstrap seed.
 Represent this as `delivered_unverified`, never as `verified`, `approved`, or a
 gate receipt.
+
+**Measured 2026-09-05: that base was DORMANT.** Real, unstubbed, zero TODO markers —
+and ~20-25% of the 7-stage design, with no producer, no executor, no provider
+implementation, and no mutation path. Do not read "the code exists" as "the stage
+works": check for a non-test caller before believing any capability claim here.
+Stage 0.5 landed items 1, 3 and 4 the same day — `bin/sj plan` reaches the typed
+layer, `devhub lifecycle record-change` persists through `lifecycle_store_write`,
+and `LocalScvProvider` is the first of five `LifecycleProvider` implementers.
+Everything stays diagnostic: 0 of 18 acceptance criteria hold an authoritative
+PASS while `bin/simple` is the seed.
 
 When handling a follow-up:
 

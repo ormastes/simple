@@ -1,0 +1,83 @@
+use lib.common.crypto.x25519_mlkem768.protocol_profile.{
+    X25519MlKem768ProtocolPolicy,
+    X25519_MLKEM768_SSH_KEX_NAME,
+    x25519_mlkem768_tls13_protocol_profile,
+    x25519_mlkem768_ssh2_protocol_profile}
+use os.apps.sshd.ssh_hybrid_negotiation_policy.{
+    ssh_admit_x25519_mlkem768_selection,
+    ssh_admit_x25519_mlkem768_exchange,
+    ssh_reject_retry_after_x25519_mlkem768_failure,
+    ssh_x25519_mlkem768_wire_format_pinned}
+
+fn _ssh_required_policy() -> X25519MlKem768ProtocolPolicy:
+    X25519MlKem768ProtocolPolicy(
+        require_hybrid: true,
+        authentication_enabled: true,
+        aead_enabled: true,
+        allow_classical_retry_after_hybrid_failure: false)
+
+describe "SSH client and sshd required hybrid negotiation policy":
+    it "rejects classical selection in required mode":
+        match ssh_admit_x25519_mlkem768_selection(
+                x25519_mlkem768_ssh2_protocol_profile(),
+                _ssh_required_policy(), "curve25519-sha256", true):
+            case Ok(_): fail("required hybrid admitted classical Curve25519")
+            case Err(reason): expect(reason).to_contain("different KEX")
+
+    it "does not advertise hybrid before real SSH wire crypto exists":
+        match ssh_admit_x25519_mlkem768_selection(
+                x25519_mlkem768_ssh2_protocol_profile(),
+                _ssh_required_policy(), X25519_MLKEM768_SSH_KEX_NAME, false):
+            case Ok(_): fail("unimplemented SSH hybrid wire crypto was advertised")
+            case Err(reason): expect(reason).to_contain("wire format is not pinned")
+
+    it "does not let a caller assertion substitute for an OpenSSH codec pin":
+        expect(ssh_x25519_mlkem768_wire_format_pinned()).to_equal(false)
+        match ssh_admit_x25519_mlkem768_selection(
+                x25519_mlkem768_ssh2_protocol_profile(),
+                _ssh_required_policy(), X25519_MLKEM768_SSH_KEX_NAME, true):
+            case Ok(_): fail("caller assertion bypassed the missing OpenSSH format pin")
+            case Err(reason): expect(reason).to_contain("wire format is not pinned")
+
+    it "does not let the TLS profile cross the SSH admission boundary":
+        match ssh_admit_x25519_mlkem768_selection(
+                x25519_mlkem768_tls13_protocol_profile(),
+                _ssh_required_policy(), "X25519MLKEM768", true):
+            case Ok(_): fail("TLS hybrid profile crossed the SSH admission boundary")
+            case Err(reason): expect(reason).to_contain("requires the pinned SSH-2.0 profile")
+
+    it "makes a selected hybrid failure terminal":
+        match ssh_reject_retry_after_x25519_mlkem768_failure(
+                x25519_mlkem768_ssh2_protocol_profile(),
+                _ssh_required_policy(), "combiner rejected"):
+            case Ok(_): fail("hybrid failure admitted a classical retry")
+            case Err(reason): expect(reason).to_contain("classical retry is forbidden")
+
+    it "still rejects exact-length shares without a pinned OpenSSH codec":
+        val profile = x25519_mlkem768_ssh2_protocol_profile()
+        match ssh_admit_x25519_mlkem768_exchange(
+                profile, _ssh_required_policy(),
+                X25519_MLKEM768_SSH_KEX_NAME, true,
+                profile.client_share_bytes, profile.server_share_bytes):
+            case Ok(_): fail("length metadata admitted an unpinned OpenSSH codec")
+            case Err(reason): expect(reason).to_contain("wire format is not pinned")
+
+    it "rejects a truncated hybrid client share":
+        val profile = x25519_mlkem768_ssh2_protocol_profile()
+        match ssh_admit_x25519_mlkem768_exchange(
+                profile, _ssh_required_policy(),
+                X25519_MLKEM768_SSH_KEX_NAME, true,
+                profile.client_share_bytes - 1,
+                profile.server_share_bytes):
+            case Ok(_): fail("truncated SSH hybrid client share admitted")
+            case Err(reason): expect(reason).to_contain("wire format is not pinned")
+
+    it "rejects an extended hybrid server share":
+        val profile = x25519_mlkem768_ssh2_protocol_profile()
+        match ssh_admit_x25519_mlkem768_exchange(
+                profile, _ssh_required_policy(),
+                X25519_MLKEM768_SSH_KEX_NAME, true,
+                profile.client_share_bytes,
+                profile.server_share_bytes + 1):
+            case Ok(_): fail("extended SSH hybrid server share admitted")
+            case Err(reason): expect(reason).to_contain("wire format is not pinned")

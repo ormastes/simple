@@ -1,4 +1,8 @@
 # Stage 3 stub CLI false admission
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -35,3 +39,4 @@ The Stage 4 lane plan now makes the canonical entry, strict-stub setting, log
 rejection, bootstrap identity, unsupported-command behavior, frontend
 admission, and stable candidate hash mandatory for every manual Stage 3
 refresh. `stage4_manual_stage3_admission_contract_spec.spl` locks those rules.
+

@@ -1,0 +1,28 @@
+use compiler.loader.loader.compiler_sffi.*
+
+fn phase_check(code: [u8]) -> bool:
+    val handle = compiler_create_context()
+    val valid = compiler_check_types(handle, code)
+    compiler_destroy_context(handle)
+    valid
+
+describe "Compiler SFFI bytecode phases":
+    it "rejects unknown and trailing opcodes":
+        expect(phase_check([0x00, 0, 0x00, 0x12, 0x10, 0xFE])).to_equal(false)
+        expect(phase_check([0x00, 0, 0x00, 0x10, 0xFE, 0x12])).to_equal(false)
+
+    it "rejects parameters and duplicate bodies after body start":
+        expect(phase_check([0x00, 0, 0x00, 0x10, 0x01, 0x10, 8, 0xFE])).to_equal(false)
+        expect(phase_check([0x00, 0, 0x00, 0x10, 0x10, 0xFE])).to_equal(false)
+
+    it "requires complete ordered loads before exit":
+        val missing = [0x00u8, 1, 0x00, 0x01, 0x10, 8, 0x10, 0xFE, 0xFF, 0x10]
+        val wrong_index = [0x00u8, 1, 0x00, 0x01, 0x10, 8, 0x10, 0x20, 1, 0x10, 0xFE, 0xFF, 0x10]
+        expect(phase_check(missing)).to_equal(false)
+        expect(phase_check(wrong_index)).to_equal(false)
+
+    it "requires exact metadata cardinality after exit":
+        val missing = [0x00u8, 1, 0x00, 0x01, 0x10, 8, 0x10, 0x20, 0, 0x10, 0xFE]
+        val extra = [0x00u8, 0, 0x00, 0x10, 0xFE, 0xFF, 0x10]
+        expect(phase_check(missing)).to_equal(false)
+        expect(phase_check(extra)).to_equal(false)

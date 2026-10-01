@@ -1,0 +1,746 @@
+# Exhaustive semantic whitelist for Base/Portable embedded concrete functions.
+# It consumes typed HIR only and returns copied facts; byte/CAS/attempt authority
+# remains outside this module.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind,
+    ScopeKind, Effect}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind,
+    HirStmtKind, HirCallArg}
+use compiler.common.attributes.{OptimizationReqLevel, OptimizationBackend}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.portable_body_profile_types.{PortableBodyDependencyEdgeV1,
+    PortableBodyEntryFactV1, PortableBodyGraphFactsV1,
+    PortableBodySemanticFactsV1, PortableBodyErrorV1}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1,
+    portable_body_sort_work_v1}
+use compiler.hir.portable_body_graph.{portable_body_graph_analyze_precharged_v1}
+use compiler.hir.hir_codec_key_order.{hc_order_text_keys_v1}
+use compiler.semantics.portable_body_effects.{portable_body_effect_rules_digest_v1,
+    portable_body_normalized_pure_effect_v1}
+
+pub fn portable_embedded_body_profile_digest_v1() -> text:
+    sha256_text("simple.portable-hir.profile.v1\u0000embedded-pure-closed-functions" +
+        "\u0000base\u0000portable\u0000schema-2")
+
+fn _portable_type_v1(value: HirType) -> bool:
+    match value.kind:
+        case HirTypeKind.Int(bits, signed):
+            signed and (bits == 8 or bits == 16 or bits == 32 or bits == 64)
+        case HirTypeKind.Bool: true
+        case HirTypeKind.Unit: true
+        case _: false
+
+fn _portable_type_same_v1(left: HirType, right: HirType) -> bool:
+    match (left.kind, right.kind):
+        case (HirTypeKind.Int(left_bits, left_signed),
+              HirTypeKind.Int(right_bits, right_signed)):
+            left_bits == right_bits and left_signed == right_signed
+        case (HirTypeKind.Bool, HirTypeKind.Bool): true
+        case (HirTypeKind.Unit, HirTypeKind.Unit): true
+        case _: false
+
+fn _portable_type_text_v1(value: HirType) -> text:
+    match value.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i" + bits.to_string() else: "unsupported"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Unit: "unit"
+        case _: "unsupported"
+
+fn _normalized_effect_v1(effects: [Effect]) -> text:
+    match portable_body_normalized_pure_effect_v1(effects):
+        case Ok(digest): digest
+        case Err(_): ""
+
+# Every function header in the module is validated and charged before this
+# matcher is called. A signature with a different parameter count refuses
+# before traversal; an equal-length signature is bounded by that reservation.
+fn _portable_function_type_same_precharged_v1(
+    value: HirType, function_: HirFunction,
+) -> bool:
+    match value.kind:
+        case HirTypeKind.Function(params, return_type, effects):
+            if (params.len() != function_.params.len() or
+                    not _portable_type_same_v1(return_type, function_.return_type) or
+                    _normalized_effect_v1(effects) == "" or
+                    _normalized_effect_v1(function_.effects) == ""): return false
+            var index = 0
+            while index < params.len():
+                if not _portable_type_same_v1(params[index], function_.params[index].type_):
+                    return false
+                index = index + 1
+            true
+        case _: false
+
+pub fn portable_body_signed_literal_valid_v1(
+    value: i64, suffix: text?, type_: HirType,
+) -> bool:
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed):
+            if not signed: return false
+            val suffix_ok = match suffix:
+                case Some(name): name == "i" + bits.to_string()
+                case nil: bits == 64
+            if not suffix_ok: return false
+            if bits == 8: return value >= -128 and value <= 127
+            if bits == 16: return value >= -32768 and value <= 32767
+            if bits == 32: return value >= -2147483648 and value <= 2147483647
+            bits == 64
+        case _: false
+
+fn _portable_function_attrs_v1(value: HirFunction) -> bool:
+    val attr = value.func_attr
+    not attr.is_entry and not attr.is_naked and not attr.is_noreturn and
+        attr.section.is_none() and not attr.is_interrupt and not attr.is_boot and
+        not attr.is_alloc and not attr.is_no_alloc and not attr.is_gpu_kernel and
+        attr.gpu_target == "" and attr.gpu_backends == "" and not attr.is_simd and
+        not attr.has_fast_math and not attr.simd_enable and not attr.simd_disable and
+        not attr.simd_prefer_scalable and
+        attr.optimization_req.level == OptimizationReqLevel.None_ and
+        attr.optimization_req.backend == OptimizationBackend.Unknown and
+        attr.unroll_factor == 0 and attr.pipeline_ii == 0 and attr.memory_banks == 0 and
+        not attr.is_rt_hal and not attr.rt_hal_compare_c and
+        not attr.rt_hal_compare_rust and attr.rt_hal_error == "" and
+        not attr.is_volatile and not attr.is_no_reorder and attr.align == 0 and
+        not attr.is_global and attr.placement_error == ""
+
+fn _portable_function_header_v1(value: HirFunction,
+                                ledger: PortableBodyLedgerV1) -> bool:
+    if (not ledger.charge_parameters(value.params.len()) or
+            not ledger.charge_work(value.params.len()) or
+            not ledger.charge_work(value.effects.len()) or
+            not ledger.charge_work(1) or
+            not ledger.charge_text_bytes(value.name.len()) or
+            not ledger.charge_text_bytes(value.gpu_target.len()) or
+            not ledger.charge_text_bytes(value.gpu_backend_order.len()) or
+            not ledger.charge_text_bytes(value.doc_comment.len())): return false
+    if (value.symbol.id < 0 or value.name == "" or value.type_params.len() != 0 or
+            value.is_async or value.is_static or value.is_const or value.is_extern or
+            value.is_method or value.is_mutable or value.is_gpu_kernel or
+            value.has_suspension or value.has_export_attr or value.export_attr != nil or
+            value.has_driver_manifest_attr or value.driver_manifest_attr != nil or
+            value.has_vhdl_metadata or value.vhdl_metadata != nil or
+            value.has_doc_comment or value.doc_comment != "" or
+            value.gpu_target != "" or value.gpu_backend_order != "" or
+            value.verification_contract.is_some() or value.is_generic_template or
+            not _portable_type_v1(value.return_type) or
+            not _portable_function_attrs_v1(value) or
+            _normalized_effect_v1(value.effects) == ""): return false
+    for parameter in value.params:
+        if (parameter.symbol.id < 0 or parameter.name == "" or parameter.has_default or
+                parameter.default != nil or parameter.is_mutable or
+                not _portable_type_v1(parameter.type_) or
+                not ledger.charge_text_bytes(parameter.name.len()) or
+                not ledger.charge_retained_bytes(48 + parameter.name.len())): return false
+    true
+
+fn _last_name_segment_v1(value: text) -> text:
+    var cut: i64 = -1
+    var index: i64 = 0
+    while index < value.len():
+        if value.substring(index, index + 1) == ".": cut = index
+        index = index + 1
+    if cut < 0: value else: value.substring(cut + 1)
+
+fn _decimal_length_v1(value: i64) -> i64:
+    if value == 0: return 1
+    var remaining = value
+    var digits: i64 = 0
+    while remaining > 0:
+        digits = digits + 1
+        remaining = remaining / 10
+    digits
+
+fn _framed_bytes_v1(payload_bytes: i64) -> i64:
+    _decimal_length_v1(payload_bytes) + 1 + payload_bytes
+
+fn _portable_type_text_bytes_v1(value: HirType) -> i64:
+    match value.kind:
+        case HirTypeKind.Int(bits, signed):
+            if not signed: return 0
+            if bits == 8: 2 else: 3
+        case HirTypeKind.Bool: 4
+        case HirTypeKind.Unit: 4
+        case _: 0
+
+fn _charge_text_order_v1(count: i64, total_key_bytes: i64,
+                         maximum_key_bytes: i64,
+                         ledger: PortableBodyLedgerV1) -> bool:
+    val compare_work = portable_body_sort_work_v1(count)
+    if compare_work < 0: return ledger.charge_work(-1)
+    # Match the canonical UTF-8 ordering owner's concrete arenas: encoded key
+    # images, presence/index/scratch arrays, and the projected result. The
+    # comparison bound scans the longest key on every merge comparison.
+    ledger.charge_work(total_key_bytes) and
+        ledger.charge_work_product(compare_work, 3) and
+        ledger.charge_work_product(compare_work, maximum_key_bytes) and
+        ledger.charge_work_product(count, 2) and
+        ledger.charge_retained_product(count, 96) and
+        ledger.charge_retained_product(total_key_bytes, 2)
+
+fn _reserve_facts_v1(module: HirModule, function_keys: [SymbolId],
+                     graph: PortableBodyGraphFactsV1,
+                     ledger: PortableBodyLedgerV1) -> Result<i64,
+                         PortableBodyErrorV1>:
+    # This scalar sizing pass is itself bounded and runs before the first
+    # effect row, signature parts array, export dictionary, or sort arena is
+    # constructed. Four UTF-8 bytes per code point is the conservative
+    # materialization allowance used by the graph owner.
+    if (not ledger.charge_work(function_keys.len()) or
+            not ledger.charge_work_product(graph.dependency_digest.len(), 4)):
+        return Err(ledger.error())
+    val dependency_digest_bytes = text_byte_len(graph.dependency_digest)
+    var effect_text_bytes =
+        "simple.portable-hir.transitive-effects.v2\u0000".len() +
+        dependency_digest_bytes
+    var total_effect_row_bytes: i64 = 0
+    var maximum_effect_row_bytes: i64 = 0
+    var total_entry_key_bytes: i64 = 0
+    var maximum_entry_key_bytes: i64 = 0
+    var total_signature_bytes: i64 = 0
+    var signature_part_count: i64 = 0
+    for key in function_keys:
+        val function_ = module.functions[key]
+        if not ledger.charge_work_product(function_.name.len(), 4):
+            return Err(ledger.error())
+        val name_bytes = text_byte_len(function_.name)
+        val symbol_bytes = _decimal_length_v1(function_.symbol.id)
+        val effect_key_bytes = symbol_bytes + 1 + name_bytes
+        # The normalized effect digest is canonical lowercase SHA-256.
+        val effect_row_bytes = _framed_bytes_v1(effect_key_bytes) + 64
+        total_effect_row_bytes = total_effect_row_bytes + effect_row_bytes
+        if effect_row_bytes > maximum_effect_row_bytes:
+            maximum_effect_row_bytes = effect_row_bytes
+        effect_text_bytes = effect_text_bytes + _framed_bytes_v1(effect_row_bytes)
+        if function_.is_public:
+            val entry_key_bytes = _framed_bytes_v1(name_bytes) + symbol_bytes
+            total_entry_key_bytes = total_entry_key_bytes + entry_key_bytes
+            if entry_key_bytes > maximum_entry_key_bytes:
+                maximum_entry_key_bytes = entry_key_bytes
+            var signature_bytes =
+                "simple.portable-hir.signature.v2\u0000".len() +
+                _framed_bytes_v1(symbol_bytes) + _framed_bytes_v1(name_bytes)
+            if not ledger.charge_work(function_.params.len()):
+                return Err(ledger.error())
+            for parameter in function_.params:
+                signature_bytes = signature_bytes +
+                    _framed_bytes_v1(_portable_type_text_bytes_v1(parameter.type_))
+            signature_bytes = signature_bytes +
+                _framed_bytes_v1(_portable_type_text_bytes_v1(function_.return_type)) +
+                _framed_bytes_v1(64)
+            total_signature_bytes = total_signature_bytes + signature_bytes
+            signature_part_count = signature_part_count + function_.params.len() + 9
+
+    # Key construction uses the same conservative eight-pass allowance as the
+    # dependency graph owner. Digest inputs use its six-pass frame/parts/join/
+    # SHA allowance. Every keys(), ordering, descriptor, and result array is
+    # reserved before it can be materialized.
+    if (not ledger.charge_text_bytes(effect_text_bytes) or
+            not ledger.charge_work_product(total_effect_row_bytes, 8) or
+            not ledger.charge_retained_product(total_effect_row_bytes, 8) or
+            not ledger.charge_retained_product(function_keys.len(), 64) or
+            not _charge_text_order_v1(function_keys.len(), total_effect_row_bytes,
+                maximum_effect_row_bytes, ledger) or
+            not ledger.charge_work_product(effect_text_bytes, 6) or
+            not ledger.charge_retained_product(effect_text_bytes, 6) or
+            not ledger.charge_retained_product(function_keys.len() + 2, 64) or
+            not ledger.charge_text_bytes(total_entry_key_bytes) or
+            not ledger.charge_work_product(total_entry_key_bytes, 8) or
+            not ledger.charge_retained_product(total_entry_key_bytes, 8) or
+            not ledger.charge_retained_product(module.exports.len(), 256) or
+            not ledger.charge_work(module.exports.len()) or
+            not ledger.charge_retained_product(module.exports.len(), 32) or
+            not _charge_text_order_v1(module.exports.len(), total_entry_key_bytes,
+                maximum_entry_key_bytes, ledger) or
+            not ledger.charge_work_product(total_signature_bytes, 6) or
+            not ledger.charge_retained_product(total_signature_bytes, 6) or
+            not ledger.charge_retained_product(signature_part_count, 64) or
+            not ledger.charge_retained_product(graph.dependency_edges.len(), 64)):
+        return Err(ledger.error())
+    Ok(effect_text_bytes)
+
+fn _scope_chain_valid_v1(module: HirModule, start: i64,
+                         ledger: PortableBodyLedgerV1) -> bool:
+    var current = start
+    var depth: i64 = 0
+    while true:
+        if current < 0 or not module.symbols.scopes.has(current): return false
+        val scope = module.symbols.scopes[current]
+        if scope.id.id != current: return false
+        depth = depth + 1
+        if not ledger.check_semantic_depth(depth): return false
+        match scope.parent:
+            case Some(parent):
+                if not ledger.charge_work(1): return false
+                current = parent.id
+            case nil: return current == 0 and scope.kind == ScopeKind.Module
+    false
+
+fn _function_scope_of_v1(module: HirModule, start: i64,
+                         ledger: PortableBodyLedgerV1) -> i64:
+    var current = start
+    var depth: i64 = 0
+    while module.symbols.scopes.has(current):
+        val scope = module.symbols.scopes[current]
+        if scope.kind == ScopeKind.Function: return current
+        match scope.parent:
+            case Some(parent):
+                if not ledger.charge_work(1): return -1
+                current = parent.id
+            case nil: return -1
+        depth = depth + 1
+        if not ledger.check_semantic_depth(depth): return -1
+    -1
+
+fn _symbol_indexes_valid_v1(module: HirModule,
+                            ledger: PortableBodyLedgerV1) -> bool:
+    val table = module.symbols
+    if (not ledger.charge_symbols(table.symbols.len()) or
+            not ledger.charge_scopes(table.scopes.len()) or
+            not ledger.charge_work(table.symbols.len()) or
+            not ledger.charge_work(table.scopes.len()) or
+            not ledger.charge_work(table.exact_symbols.len()) or
+            not ledger.charge_work(table.module_callables.len()) or
+            not ledger.charge_work(table.qualified_functions.len())): return false
+    if (table.symbols.len() == 0 or table.symbols.len() != table.exact_symbols.len() or
+            table.qualified_types.len() != 0 or table.gpu_function_targets.len() != 0 or
+            table.gpu_function_backend_orders.len() != 0 or
+            table.structural_union_symbols.len() != 0 or
+            table.structural_union_owners.len() != 0 or
+            not table.scopes.has(0) or table.current_scope.id != 0 or
+            table.qualified_functions.len() != 0): return false
+    val root = table.scopes[0]
+    if root.id.id != 0 or root.parent.is_some() or root.kind != ScopeKind.Module:
+        return false
+    var maximum_symbol: i64 = -1
+    var maximum_scope: i64 = -1
+    var names: Dict<text, bool> = {}
+    var expected_module_callables: Dict<text, i64> = {}
+    for symbol_key in table.symbols.keys():
+        val symbol = table.symbols[symbol_key]
+        val raw_id = symbol.id.id
+        if (raw_id < 0 or symbol_key.to_string() != raw_id.to_string() or symbol.name == "" or
+                symbol.name.contains("\u0000") or names.has(symbol.name) or
+                symbol.builtin_method_tag != 0 or
+                not table.exact_symbols.has(symbol.name) or
+                table.exact_symbols[symbol.name] != raw_id or
+                not table.scopes.has(symbol.scope.id) or
+                not table.scopes[symbol.scope.id].symbols.has(symbol.name) or
+                table.scopes[symbol.scope.id].symbols[symbol.name].to_string() !=
+                    raw_id.to_string() or
+                not _scope_chain_valid_v1(module, symbol.scope.id, ledger)): return false
+        names[symbol.name] = true
+        if raw_id > maximum_symbol: maximum_symbol = raw_id
+        if symbol.scope.id > maximum_scope: maximum_scope = symbol.scope.id
+        if not ledger.charge_text_bytes(symbol.name.len()) or
+                not ledger.charge_retained_bytes(64 + symbol.name.len()): return false
+        match symbol.defining_module:
+            case Some(owner):
+                if owner != module.name: return false
+                if (not ledger.charge_text_bytes(owner.len() + symbol.name.len() + 1) or
+                        not ledger.charge_retained_bytes(128 + owner.len() * 2 +
+                            symbol.name.len() * 2)): return false
+                val full_key = owner + "#" + symbol.name
+                if expected_module_callables.has(full_key) and
+                        expected_module_callables[full_key] != raw_id: return false
+                expected_module_callables[full_key] = raw_id
+                val leaf = _last_name_segment_v1(symbol.name)
+                if leaf != symbol.name:
+                    if (not ledger.charge_text_bytes(owner.len() + leaf.len() + 1) or
+                            not ledger.charge_retained_bytes(64 + owner.len() +
+                                leaf.len())): return false
+                    val leaf_key = owner + "#" + leaf
+                    if expected_module_callables.has(leaf_key) and
+                            expected_module_callables[leaf_key] != raw_id: return false
+                    expected_module_callables[leaf_key] = raw_id
+            case nil: pass
+    if table.next_symbol_id != maximum_symbol + 1 or
+            table.module_callables.len() != expected_module_callables.len(): return false
+    for key in expected_module_callables.keys():
+        if not table.module_callables.has(key) or
+                table.module_callables[key] != expected_module_callables[key]: return false
+    var scoped_count: i64 = 0
+    for scope_key in table.scopes.keys():
+        val scope = table.scopes[scope_key]
+        val scope_id = scope.id.id
+        if scope_id < 0 or scope_key.to_string() != scope_id.to_string() or
+                not _scope_chain_valid_v1(module, scope_id, ledger): return false
+        if scope_id > maximum_scope: maximum_scope = scope_id
+        if scope_id != 0 and scope.symbols.len() == 0: return false
+        if (scope_id != 0 and scope.kind != ScopeKind.Function and
+                scope.kind != ScopeKind.Block): return false
+        scoped_count = scoped_count + scope.symbols.len()
+        for name in scope.symbols.keys():
+            val raw_id = scope.symbols[name]
+            if (not table.symbols.has(raw_id) or table.symbols[raw_id].name != name or
+                    table.symbols[raw_id].scope.id != scope_id): return false
+    if table.next_scope_id != maximum_scope + 1 or
+            scoped_count != table.symbols.len() or
+            table.root_scope_symbols.len() != root.symbols.len(): return false
+    for name in root.symbols.keys():
+        if not table.root_scope_symbols.has(name) or
+                table.root_scope_symbols[name] != root.symbols[name]: return false
+    true
+
+fn _module_shape_valid_v1(module: HirModule, ledger: PortableBodyLedgerV1) -> bool:
+    if (not ledger.charge_body_objects(1) or
+            not ledger.charge_functions(module.functions.len()) or
+            not ledger.charge_exports(module.exports.len()) or
+            not ledger.charge_text_bytes(module.name.len()) or
+            not ledger.charge_text_bytes(module.path.len())): return false
+    if module.name == "" or module.path == "" or module.functions.len() == 0:
+        return false
+    if not ledger.charge_work(module.exports.len() + 1): return false
+    if (module.imports.len() != 0 or module.domain_blocks.len() != 0 or
+            module.gpu_function_targets.len() != 0 or
+            module.gpu_function_backend_orders.len() != 0 or
+            module.classes.len() != 0 or module.structs.len() != 0 or
+            module.enums.len() != 0 or module.bitfields.len() != 0 or
+            module.traits.len() != 0 or module.impls.len() != 0 or
+            module.constants.len() != 0 or module.static_asserts.len() != 0 or
+            module.aop_advices.len() != 0 or module.di_bindings.len() != 0 or
+            module.arch_rules.len() != 0 or module.mock_decls.len() != 0 or
+            module.extend_enums.len() != 0 or module.types.len() != 0): return false
+    _symbol_indexes_valid_v1(module, ledger)
+
+class _PortableBodyVerifierV1:
+    module: HirModule
+    ledger: PortableBodyLedgerV1
+    var active_types: Dict<i64, HirType>
+    var active_names: Dict<text, i64>
+    var seen_declarations: Dict<i64, bool>
+    var claimed_function_scopes: Dict<i64, i64>
+    var edge_occurrences: [PortableBodyDependencyEdgeV1]
+    var current_function: SymbolId
+    var current_function_name: text
+    var current_function_scope: i64
+
+    fn _value_symbol(value: HirExpr) -> SymbolId:
+        match value.kind:
+            case HirExprKind.Var(symbol): symbol
+            case HirExprKind.NamedVar(symbol, _): symbol
+            case _: SymbolId(id: -1)
+
+    fn _symbol_type_matches(symbol: SymbolId, expected: HirType,
+                            expected_kind: SymbolKind, expected_name: text) -> bool:
+        if symbol.id < 0 or not self.module.symbols.symbols.has(symbol.id): return false
+        val entry = self.module.symbols.symbols[symbol.id]
+        if (entry.id.id != symbol.id or entry.name != expected_name or
+                entry.is_mutable or entry.kind != expected_kind): return false
+        match entry.type_:
+            case Some(actual): _portable_type_same_v1(actual, expected)
+            case nil: false
+
+    me _bind_function_scope(symbol: SymbolId, parameter: bool) -> bool:
+        val entry = self.module.symbols.symbols[symbol.id]
+        val function_scope = _function_scope_of_v1(self.module, entry.scope.id,
+            self.ledger)
+        if function_scope < 0 or (parameter and entry.scope.id != function_scope): return false
+        if self.current_function_scope < 0:
+            if self.claimed_function_scopes.has(function_scope): return false
+            self.claimed_function_scopes[function_scope] = self.current_function.id
+            self.current_function_scope = function_scope
+        function_scope == self.current_function_scope
+
+    me _charge_node(depth: i64) -> bool:
+        self.ledger.check_semantic_depth(depth) and
+            self.ledger.charge_nodes(1) and self.ledger.charge_work(1)
+
+    me _verify_value_symbol(value: HirExpr, allow_function: bool) -> bool:
+        val symbol = self._value_symbol(value)
+        if symbol.id < 0 or not self.module.symbols.symbols.has(symbol.id): return false
+        val entry = self.module.symbols.symbols[symbol.id]
+        match value.kind:
+            case HirExprKind.NamedVar(_, name):
+                if name != entry.name: return false
+            case HirExprKind.Var(_): pass
+            case _: return false
+        if allow_function:
+            if not self.module.functions.has(symbol): return false
+            return entry.kind == SymbolKind.Function and value.has_type_ and
+                _portable_function_type_same_precharged_v1(
+                    value.type_, self.module.functions[symbol])
+        if not self.active_types.has(symbol.id) or not value.has_type_: return false
+        _portable_type_same_v1(value.type_, self.active_types[symbol.id])
+
+    me _verify_call(value: HirExpr, callee_expr: HirExpr,
+                    args: [HirCallArg], type_args: [HirType], depth: i64) -> bool:
+        if (not self._charge_node(depth + 1) or type_args.len() != 0 or
+                not self._verify_value_symbol(callee_expr, true)): return false
+        val symbol = self._value_symbol(callee_expr)
+        val callee = self.module.functions[symbol]
+        if args.len() != callee.params.len() or
+                not _portable_type_same_v1(value.type_, callee.return_type): return false
+        var index: i64 = 0
+        while index < args.len():
+            if (args[index].has_name or args[index].name != "" or
+                    not self._verify_expr(args[index].value, depth + 1) or
+                    not _portable_type_same_v1(args[index].value.type_,
+                        callee.params[index].type_)): return false
+            index = index + 1
+        if (not self.ledger.charge_call_occurrences(1) or
+                not self.ledger.charge_retained_bytes(48 +
+                    self.current_function_name.len() + callee.name.len())): return false
+        self.edge_occurrences.push(PortableBodyDependencyEdgeV1(
+            caller_symbol_id: self.current_function.id,
+            caller_name: self.current_function_name,
+            callee_symbol_id: callee.symbol.id, callee_name: callee.name))
+        true
+
+    me _verify_expr(value: HirExpr, depth: i64) -> bool:
+        if not self._charge_node(depth) or not value.has_type_: return false
+        match value.kind:
+            case HirExprKind.IntLit(number, suffix):
+                portable_body_signed_literal_valid_v1(number, suffix, value.type_)
+            case HirExprKind.BoolLit(_):
+                match value.type_.kind:
+                    case HirTypeKind.Bool: true
+                    case _: false
+            case HirExprKind.UnitLit:
+                match value.type_.kind:
+                    case HirTypeKind.Unit: true
+                    case _: false
+            case HirExprKind.Var(_) | HirExprKind.NamedVar(_, _):
+                self._verify_value_symbol(value, false)
+            case HirExprKind.Call(callee, args, type_args):
+                self._verify_call(value, callee, args, type_args, depth)
+            case HirExprKind.If(condition, then_, else_):
+                if not self._verify_expr(condition, depth + 1): return false
+                match condition.type_.kind:
+                    case HirTypeKind.Bool: pass
+                    case _: return false
+                if not self._verify_block(then_, value.type_, depth + 1): return false
+                match else_:
+                    case Some(other): self._verify_block(other, value.type_, depth + 1)
+                    case nil: false
+            case HirExprKind.Block(block):
+                self._verify_block(block, value.type_, depth + 1)
+            case HirExprKind.FloatLit(_, _) | HirExprKind.StringLit(_, _) |
+                  HirExprKind.CharLit(_) | HirExprKind.NilLit |
+                  HirExprKind.ArrayLit(_, _) | HirExprKind.ArrayRepeat(_, _, _) |
+                  HirExprKind.TupleLit(_) | HirExprKind.DictLit(_, _, _) |
+                  HirExprKind.SetLit(_, _) | HirExprKind.Field(_, _, _) |
+                  HirExprKind.Index(_, _) | HirExprKind.TupleIndex(_, _) |
+                  HirExprKind.OptionalChain(_, _) | HirExprKind.NullCoalesce(_, _) |
+                  HirExprKind.ExistsCheck(_) | HirExprKind.Unwrap(_) |
+                  HirExprKind.Binary(_, _, _) | HirExprKind.Unary(_, _) |
+                  HirExprKind.MethodCall(_, _, _, _) | HirExprKind.StaticCall(_, _, _, _) |
+                  HirExprKind.IfChain(_, _) | HirExprKind.MatchCase(_, _) |
+                  HirExprKind.Loop(_, _) | HirExprKind.While(_, _, _) |
+                  HirExprKind.For(_, _, _, _) | HirExprKind.With(_, _) |
+                  HirExprKind.Lambda(_, _, _) | HirExprKind.HostGpuLane(_, _, _, _) |
+                  HirExprKind.Return(_) | HirExprKind.Break(_, _) |
+                  HirExprKind.Continue(_) | HirExprKind.Throw(_) |
+                  HirExprKind.Try(_) | HirExprKind.Await(_) | HirExprKind.Yield(_) |
+                  HirExprKind.StructLit(_, _) | HirExprKind.EnumLit(_, _, _) |
+                  HirExprKind.Cast(_, _) | HirExprKind.As(_, _) |
+                  HirExprKind.Range(_, _, _, _) | HirExprKind.Comprehension(_, _, _) |
+                  HirExprKind.CustomBlock(_, _) | HirExprKind.LossBlock(_) |
+                  HirExprKind.NogradBlock(_) | HirExprKind.UnsafeBlock(_) |
+                  HirExprKind.InlineAsm(_) | HirExprKind.InlineAsmMatch(_) |
+                  HirExprKind.Error | HirExprKind.TypeTest(_, _) |
+                  HirExprKind.TryCatch(_, _, _): false
+
+    me _begin_local(symbol: SymbolId, type_: HirType) -> bool:
+        if (self.seen_declarations.has(symbol.id) or
+                not self.module.symbols.symbols.has(symbol.id)): return false
+        val entry = self.module.symbols.symbols[symbol.id]
+        if (entry.id.id != symbol.id or entry.kind != SymbolKind.Variable or
+                entry.visibility != Visibility.Private or entry.is_public or
+                entry.is_mutable or entry.name == "" or
+                self.active_names.has(entry.name) or
+                not self._bind_function_scope(symbol, false)): return false
+        match entry.type_:
+            case Some(actual):
+                if not _portable_type_same_v1(actual, type_): return false
+            case nil: return false
+        self.seen_declarations[symbol.id] = true
+        self.active_types[symbol.id] = type_
+        self.active_names[entry.name] = symbol.id
+        true
+
+    me _end_local(symbol: SymbolId):
+        val name = self.module.symbols.symbols[symbol.id].name
+        self.active_names = self.active_names.remove(name)
+        self.active_types = self.active_types.remove(symbol.id)
+
+    me _verify_block(value: HirBlock, expected: HirType, depth: i64) -> bool:
+        if not self._charge_node(depth) or value.unsafe_caps.len() != 0 or not value.has:
+            return false
+        var locals: [SymbolId] = []
+        for statement in value.stmts:
+            if not self._charge_node(depth + 1): return false
+            match statement.kind:
+                case HirStmtKind.Let(symbol, type_, init):
+                    if (not _portable_type_v1(type_) or
+                            not self._verify_expr(init, depth + 2) or
+                            not _portable_type_same_v1(init.type_, type_) or
+                            not self._begin_local(symbol, type_)): return false
+                    locals.push(symbol)
+                case HirStmtKind.Expr(expr):
+                    if not self._verify_expr(expr, depth + 2): return false
+                case HirStmtKind.Block(block):
+                    if (not block.has or not self._verify_block(block,
+                            block.value.type_, depth + 2)): return false
+                case HirStmtKind.Assign(_, _, _) | HirStmtKind.AsmAssert(_):
+                    return false
+        if (not self._verify_expr(value.value, depth + 1) or
+                not _portable_type_same_v1(value.value.type_, expected)): return false
+        for symbol in locals: self._end_local(symbol)
+        true
+
+    me _begin_function(value: HirFunction) -> bool:
+        self.active_types = {}
+        self.active_names = {}
+        self.current_function = value.symbol
+        self.current_function_name = value.name
+        self.current_function_scope = -1
+        for parameter in value.params:
+            if (parameter.symbol.id < 0 or
+                    not self.module.symbols.symbols.has(parameter.symbol.id)):
+                return false
+            val entry = self.module.symbols.symbols[parameter.symbol.id]
+            if (self.seen_declarations.has(parameter.symbol.id) or
+                    not self._symbol_type_matches(parameter.symbol, parameter.type_,
+                        SymbolKind.Parameter, parameter.name) or
+                    entry.visibility != Visibility.Private or entry.is_public or
+                    self.active_names.has(parameter.name) or
+                    not self._bind_function_scope(parameter.symbol, true)): return false
+            self.seen_declarations[parameter.symbol.id] = true
+            self.active_types[parameter.symbol.id] = parameter.type_
+            self.active_names[parameter.name] = parameter.symbol.id
+        true
+
+    me verify_function_precharged(value: HirFunction) -> bool:
+        if not self._begin_function(value): return false
+        self._verify_block(value.body, value.return_type, 1)
+
+fn _signature_digest_v1(value: HirFunction, effect_digest: text) -> text:
+    val symbol_text = value.symbol.id.to_string()
+    var parts: [text] = ["simple.portable-hir.signature.v2\u0000",
+        text_byte_len(symbol_text).to_string(), ":", symbol_text,
+        text_byte_len(value.name).to_string(), ":", value.name]
+    for parameter in value.params:
+        val type_name = _portable_type_text_v1(parameter.type_)
+        parts.push(text_byte_len(type_name).to_string() + ":" + type_name)
+    val result_name = _portable_type_text_v1(value.return_type)
+    parts.push(text_byte_len(result_name).to_string() + ":" + result_name)
+    parts.push(text_byte_len(effect_digest).to_string() + ":" + effect_digest)
+    sha256_text(parts.join(""))
+
+fn _facts_v1(module: HirModule, function_keys: [SymbolId],
+             graph: PortableBodyGraphFactsV1,
+             ledger: PortableBodyLedgerV1) -> Result<PortableBodySemanticFactsV1,
+             PortableBodyErrorV1>:
+    val effect_text_bytes = _reserve_facts_v1(module, function_keys, graph, ledger)?
+    var effect_rows: [text] = []
+    var entry_by_key: Dict<text, PortableBodyEntryFactV1> = {}
+    for key in function_keys:
+        val function_ = module.functions[key]
+        val effect_digest = _normalized_effect_v1(function_.effects)
+        val effect_key = function_.symbol.id.to_string() + ":" + function_.name
+        effect_rows.push(text_byte_len(effect_key).to_string() + ":" +
+            effect_key + effect_digest)
+        if function_.is_public:
+            val entry_key = text_byte_len(function_.name).to_string() + ":" +
+                function_.name + function_.symbol.id.to_string()
+            entry_by_key[entry_key] = PortableBodyEntryFactV1(
+                symbol_id: function_.symbol.id, name: function_.name,
+                signature_digest: _signature_digest_v1(function_, effect_digest),
+                normalized_effect_digest: effect_digest)
+    effect_rows = hc_order_text_keys_v1(effect_rows)
+    var effect_parts: [text] = ["simple.portable-hir.transitive-effects.v2\u0000",
+        graph.dependency_digest]
+    for row in effect_rows:
+        effect_parts.push(text_byte_len(row).to_string() + ":" + row)
+    val effect_text = effect_parts.join("")
+    val transitive_effect_digest = sha256_text(effect_text)
+    val entry_snapshot = entry_by_key.keys()
+    val entry_keys = hc_order_text_keys_v1(entry_snapshot)
+    var entries: [PortableBodyEntryFactV1] = []
+    for key in entry_keys: entries.push(entry_by_key[key])
+    if text_byte_len(effect_text) != effect_text_bytes or
+            entries.len() != module.exports.len():
+        return Err(PortableBodyErrorV1.UnsupportedSemantics("semantic fact sizing"))
+    Ok(PortableBodySemanticFactsV1(rules_identity: "embedded-pure-closed-functions",
+        semantic_profile_digest: portable_embedded_body_profile_digest_v1(),
+        module_name: module.name, module_path: module.path,
+        exported_entries: entries, transitive_effect_digest: transitive_effect_digest,
+        graph: graph, budget: ledger.snapshot()))
+
+pub fn portable_hir_semantic_facts_from_typed_v1(
+    module: HirModule,
+    profile_digest: text,
+    ledger: PortableBodyLedgerV1,
+) -> Result<PortableBodySemanticFactsV1, PortableBodyErrorV1>:
+    if profile_digest != portable_embedded_body_profile_digest_v1():
+        return Err(PortableBodyErrorV1.InvalidProfileIdentity)
+    if not _module_shape_valid_v1(module, ledger):
+        if not ledger.ok(): return Err(ledger.error())
+        return Err(PortableBodyErrorV1.UnsupportedSemantics("module or symbol shape"))
+    # Reserve the key snapshot/order and every function parameter header before
+    # any symbol-signature or call-site type matcher can traverse parameter arrays.
+    if (not ledger.charge_work(module.functions.len()) or
+            not ledger.charge_work(
+                portable_body_sort_work_v1(module.functions.len()))):
+        return Err(ledger.error())
+    var function_keys = module.functions.keys()
+    function_keys.sort()
+    for key in function_keys:
+        if not _portable_function_header_v1(module.functions[key], ledger):
+            if not ledger.ok(): return Err(ledger.error())
+            return Err(PortableBodyErrorV1.UnsupportedSemantics("function header"))
+    var verifier = _PortableBodyVerifierV1(module: module, ledger: ledger,
+        active_types: {}, active_names: {}, seen_declarations: {},
+        claimed_function_scopes: {}, edge_occurrences: [],
+        current_function: SymbolId(id: -1), current_function_name: "",
+        current_function_scope: -1)
+    val occurrence_base = ledger.snapshot().call_occurrences
+    var function_ids: [i64] = []
+    var function_names: Dict<text, bool> = {}
+    var exported_names: Dict<text, bool> = {}
+    for exported in module.exports:
+        if exported == "" or exported_names.has(exported):
+            return Err(PortableBodyErrorV1.UnsupportedSemantics("duplicate export"))
+        exported_names[exported] = true
+        if (not ledger.charge_text_bytes(exported.len()) or
+                not ledger.charge_retained_bytes(48 + exported.len())):
+            return Err(ledger.error())
+    for key in function_keys:
+        val function_ = module.functions[key]
+        if (key.id < 0 or key.id != function_.symbol.id or
+                verifier.seen_declarations.has(key.id) or function_names.has(function_.name) or
+                not module.symbols.symbols.has(key.id)): return Err(
+                    PortableBodyErrorV1.UnsupportedSemantics("function identity"))
+        val symbol = module.symbols.symbols[key.id]
+        val exported = exported_names.has(function_.name)
+        if (symbol.scope.id != 0 or symbol.kind != SymbolKind.Function or
+                symbol.name != function_.name or symbol.is_mutable or
+                function_.is_public != exported or symbol.is_public != exported or
+                symbol.visibility != function_.visibility or
+                (exported and function_.visibility != Visibility.Public) or
+                (not exported and function_.visibility != Visibility.Private)):
+            return Err(PortableBodyErrorV1.UnsupportedSemantics("function visibility or scope"))
+        match symbol.type_:
+            case Some(type_):
+                if not _portable_function_type_same_precharged_v1(type_, function_):
+                    return Err(PortableBodyErrorV1.UnsupportedSemantics("function type"))
+            case nil: return Err(PortableBodyErrorV1.UnsupportedSemantics("missing function type"))
+        if not verifier.verify_function_precharged(function_):
+            if not ledger.ok(): return Err(ledger.error())
+            return Err(PortableBodyErrorV1.UnsupportedSemantics("function body"))
+        verifier.seen_declarations[key.id] = true
+        function_names[function_.name] = true
+        if not ledger.charge_retained_bytes(48 + function_.name.len()):
+            return Err(ledger.error())
+        function_ids.push(key.id)
+    for exported in module.exports:
+        if not function_names.has(exported):
+            return Err(PortableBodyErrorV1.UnsupportedSemantics("dangling export"))
+    if verifier.seen_declarations.len() != module.symbols.symbols.len():
+        return Err(PortableBodyErrorV1.UnsupportedSemantics("extra or dangling symbol"))
+    val graph = portable_body_graph_analyze_precharged_v1(function_ids,
+        verifier.edge_occurrences, ledger, occurrence_base)?
+    _facts_v1(module, function_keys, graph, ledger)

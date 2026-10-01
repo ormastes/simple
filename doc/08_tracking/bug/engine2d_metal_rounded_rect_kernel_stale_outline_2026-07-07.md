@@ -1,7 +1,9 @@
 # kernel_draw_rounded_rect (Metal) drew a stale OUTLINE — CPU-vs-Metal parity DIVERGE
+## Closed 2026-09-16 — ...06.md`. When that CPU-side bug was fixed on 2026-07-06 (`SoftwareBackend.draw_rounded_rect
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 Fixed (2026-07-07).
@@ -109,3 +111,4 @@ dispatch state instead of leaving the op unrepresented.
   the one flagged new-vs-baseline entry, `src/app/cli/bootstrap_main.spl`,
   reproduces identically on the unmodified base commit — pre-existing,
   unrelated to this fix).
+

@@ -1,0 +1,130 @@
+# Typed, fail-closed profile for `simple debug doctor <profile.sdn>`.
+
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.schema.{SdnDecodeIssues, sdn_require_text, sdn_get_text, sdn_get_text_array}
+use std.common.debug.capability.{cap_level_is_usable}
+use std.common.debug.contracts_v1.{DebugVerificationV1, debug_verification_name_v1}
+use std.debug_doctor.matrix.{DoctorCapabilityReportV1}
+use std.io_runtime.{file_exists, file_read}
+
+pub struct DebugDoctorProfileV1:
+    program: text
+    required_targets: [text]
+    required_operations: [text]
+    required_verification: text
+    required_privilege: text
+
+pub struct DebugDoctorProfileLoadV1:
+    profile: DebugDoctorProfileV1
+    ok: bool
+    error: text
+
+pub struct DebugDoctorHealthV1:
+    healthy: bool
+    checked: i64
+    failures: [text]
+
+fn _empty_profile_v1() -> DebugDoctorProfileV1:
+    DebugDoctorProfileV1(
+        program: "", required_targets: [], required_operations: ["debug"],
+        required_verification: "live_verified", required_privilege: "debug")
+
+fn _known_target_v1(value: text) -> bool:
+    value == "host" or value == "ref" or value == "cuda" or value == "vulkan" or value == "metal"
+
+fn _known_operation_v1(value: text) -> bool:
+    value == "debug" or value == "profile"
+
+fn _known_verification_v1(value: text) -> bool:
+    value == "live_verified" or value == "fixture_verified" or value == "unverified"
+
+fn _known_privilege_v1(value: text) -> bool:
+    value == "observe" or value == "debug"
+
+pub fn decode_debug_doctor_profile_v1(source: text) -> DebugDoctorProfileLoadV1:
+    val empty = _empty_profile_v1()
+    if source.trim() == "":
+        return DebugDoctorProfileLoadV1(profile: empty, ok: false, error: "debug doctor profile is empty")
+    match parse_with_issues(source):
+        case Err(reason):
+            DebugDoctorProfileLoadV1(profile: empty, ok: false, error: "invalid debug doctor SDN: " + reason)
+        case Ok(parsed):
+            val root = parsed.0
+            if parsed.1.len() > 0:
+                return DebugDoctorProfileLoadV1(profile: empty, ok: false, error: "invalid debug doctor SDN: duplicate keys are forbidden")
+            val issues = SdnDecodeIssues.new()
+            val schema = sdn_require_text(root, "debug_doctor.schema", issues) ?? ""
+            val program = sdn_get_text(root, "debug_doctor.program", issues) ?? ""
+            val targets = sdn_get_text_array(root, "debug_doctor.required_targets", issues) ?? []
+            val operations = sdn_get_text_array(root, "debug_doctor.required_operations", issues) ?? ["debug"]
+            val verification = sdn_get_text(root, "debug_doctor.required_verification", issues) ?? "live_verified"
+            val privilege = sdn_get_text(root, "debug_doctor.required_privilege", issues) ?? "debug"
+            if schema != "simple.debug-doctor-profile/v1":
+                issues.add("debug_doctor.schema", "expected simple.debug-doctor-profile/v1")
+            if targets.len() == 0:
+                issues.add("debug_doctor.required_targets", "must contain at least one target")
+            if operations.len() == 0:
+                issues.add("debug_doctor.required_operations", "must contain at least one operation")
+            for target in targets:
+                if not _known_target_v1(target):
+                    issues.add("debug_doctor.required_targets", "unknown target '" + target + "'")
+            for operation in operations:
+                if not _known_operation_v1(operation):
+                    issues.add("debug_doctor.required_operations", "unknown operation '" + operation + "'")
+            if not _known_verification_v1(verification):
+                issues.add("debug_doctor.required_verification", "expected live_verified, fixture_verified, or unverified")
+            if not _known_privilege_v1(privilege):
+                issues.add("debug_doctor.required_privilege", "expected observe or debug")
+            if issues.count() > 0:
+                var messages: [text] = []
+                for issue in issues.items:
+                    messages.push(issue.path + ": " + issue.message)
+                return DebugDoctorProfileLoadV1(profile: empty, ok: false, error: messages.join("; "))
+            DebugDoctorProfileLoadV1(
+                profile: DebugDoctorProfileV1(program: program, required_targets: targets,
+                    required_operations: operations, required_verification: verification,
+                    required_privilege: privilege),
+                ok: true, error: "")
+
+pub fn load_debug_doctor_profile_v1(path: text) -> DebugDoctorProfileLoadV1:
+    if path == "":
+        return DebugDoctorProfileLoadV1(profile: _empty_profile_v1(), ok: false, error: "debug doctor profile path is empty")
+    if not path.ends_with(".sdn"):
+        return DebugDoctorProfileLoadV1(profile: _empty_profile_v1(), ok: false, error: "debug doctor profile must be an .sdn file")
+    if not file_exists(path):
+        return DebugDoctorProfileLoadV1(profile: _empty_profile_v1(), ok: false, error: "debug doctor profile not found: " + path)
+    val source = file_read(path) ?? ""
+    decode_debug_doctor_profile_v1(source)
+
+fn _verification_rank_v1(value: DebugVerificationV1) -> i64:
+    match value:
+        case DebugVerificationV1.LiveVerified: 3
+        case DebugVerificationV1.FixtureVerified: 2
+        case DebugVerificationV1.Unverified: 1
+        case DebugVerificationV1.Blocked: 0
+
+fn _required_verification_rank_v1(value: text) -> i64:
+    if value == "live_verified": return 3
+    if value == "fixture_verified": return 2
+    1
+
+pub fn evaluate_debug_doctor_profile_v1(profile: DebugDoctorProfileV1, reports: [DoctorCapabilityReportV1]) -> DebugDoctorHealthV1:
+    var failures: [text] = []
+    var checked = 0
+    val minimum = _required_verification_rank_v1(profile.required_verification)
+    for target in profile.required_targets:
+        for operation in profile.required_operations:
+            checked = checked + 1
+            var found = false
+            for report in reports:
+                if report.target == target and report.operation == operation:
+                    found = true
+                    if not cap_level_is_usable(report.support):
+                        failures.push("target=" + target + " operation=" + operation + " support=unavailable")
+                    elif _verification_rank_v1(report.verification) < minimum:
+                        failures.push("target=" + target + " operation=" + operation + " verification=" + debug_verification_name_v1(report.verification) + " required=" + profile.required_verification)
+                    elif report.required_privilege != profile.required_privilege:
+                        failures.push("target=" + target + " operation=" + operation + " privilege=" + report.required_privilege + " required=" + profile.required_privilege)
+            if not found:
+                failures.push("target=" + target + " operation=" + operation + " report=missing")
+    DebugDoctorHealthV1(healthy: failures.len() == 0, checked: checked, failures: failures)

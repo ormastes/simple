@@ -1,0 +1,26 @@
+# @cover src/compiler/50.mir/mir_rt_hal_boundary.spl 70%
+
+use std.spec.*
+use std.fs
+
+describe "Pure-only RT/HAL zero-overhead source contract":
+    it "returns unchanged MIR before constructing boundary storage":
+        val source = fs.read_text("src/compiler/50.mir/mir_rt_hal_boundary.spl")
+        val guard = source.index_of("if not compare_c and not compare_rust: return function")
+        val allocation = source.index_of("var blocks: [MirBlock] = []", guard)
+        expect(guard).to_be_greater_than(-1)
+        expect(allocation).to_be_greater_than(guard)
+
+    it "gates every MIR lowering route on a selected comparator":
+        val legacy = fs.read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        val destination = fs.read_text("src/compiler/50.mir/_MirLowering/hir_destination_function_emit.spl")
+        expect(legacy.split("resolved_function_attr.is_rt_hal and").len() - 1).to_equal(2)
+        expect(destination.contains("HD_ATTR_RT_HAL) and\n            (compare_c or compare_rust))")).to_equal(true)
+
+    it "retains runtime capsules only for foreign comparison":
+        val bridge = fs.read_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        val loading = fs.read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl")
+        expect(bridge.contains("if has_rt_hal_boundary:")).to_equal(false)
+        expect(bridge.contains("if has_rt_hal_comparator:\n        imports.push(ParserImport(\n            module: \"std.nogc_sync_mut.rt_hal.boundary\"")).to_equal(true)
+        expect(loading.contains("if closure_has_rt_hal:")).to_equal(false)
+        expect(loading.contains("if closure_has_rt_hal_foreign:\n                        closure_imports.push(\"std.nogc_sync_mut.rt_hal.boundary\")")).to_equal(true)

@@ -73,6 +73,14 @@ class Database:
         self.is_open = false
         Ok(())
 
+    me _release_statement(stmt: PreparedStatement):
+        # Cached statements belong to StatementCache; uncached statements
+        # belong to this call and must be finalized before closing SQLite.
+        if self.cache.capacity <= 0:
+            stmt.finalize_stmt()
+        else:
+            stmt.reset_stmt()
+
     # ------------------------------------------------------------------
     # Execute SQL with typed parameters.
     # Returns number of affected rows.
@@ -89,10 +97,16 @@ class Database:
             return Ok(sqlite_changes(self.conn))
 
         var stmt = self.cache.get_or_prepare(self.conn, sql)?
-        stmt.bind_all(params)?
-        stmt.execute()?
+        val bound = stmt.bind_all(params)
+        if bound.is_err():
+            self._release_statement(stmt)
+            return Err(bound.unwrap_err())
+        val executed = stmt.execute()
+        if executed.is_err():
+            self._release_statement(stmt)
+            return Err(executed.unwrap_err())
         val changed = sqlite_changes(self.conn)
-        stmt.reset_stmt()
+        self._release_statement(stmt)
         Ok(changed)
 
     # ------------------------------------------------------------------
@@ -107,9 +121,16 @@ class Database:
             return Ok(_convert_rows(raw_rows))
 
         var stmt = self.cache.get_or_prepare(self.conn, sql)?
-        stmt.bind_all(params)?
-        val rows = stmt.query_rows()?
-        stmt.reset_stmt()
+        val bound = stmt.bind_all(params)
+        if bound.is_err():
+            self._release_statement(stmt)
+            return Err(bound.unwrap_err())
+        val queried = stmt.query_rows()
+        if queried.is_err():
+            self._release_statement(stmt)
+            return Err(queried.unwrap_err())
+        val rows = queried.unwrap()
+        self._release_statement(stmt)
         Ok(rows)
 
     # ------------------------------------------------------------------
@@ -127,9 +148,16 @@ class Database:
             return Ok(nil)
 
         var stmt = self.cache.get_or_prepare(self.conn, sql)?
-        stmt.bind_all(params)?
-        val result = stmt.query_one()?
-        stmt.reset_stmt()
+        val bound = stmt.bind_all(params)
+        if bound.is_err():
+            self._release_statement(stmt)
+            return Err(bound.unwrap_err())
+        val queried = stmt.query_one()
+        if queried.is_err():
+            self._release_statement(stmt)
+            return Err(queried.unwrap_err())
+        val result = queried.unwrap()
+        self._release_statement(stmt)
         Ok(result)
 
     # ------------------------------------------------------------------

@@ -1,0 +1,341 @@
+#![allow(primitive_api)]
+
+# Strict V2 closure seal.  V1 bytes and V1 caller-filled counters are never
+# accepted or reinterpreted by this codec.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_magic,
+    wire_put_envelope, wire_put_u8, wire_put_u32, wire_put_u64}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractBudgetV1,
+    ThreePayloadContractReaderV1, three_payload_contract_budget_v1,
+    TldPayloadRoleV1, TldSectionRefV1, three_payload_contract_digest_valid_v1,
+    three_payload_contract_max_items_v1, three_payload_contract_max_payload_bytes_v1,
+    three_payload_contract_put_digest_v1,
+    three_payload_contract_put_optional_digest_v1, three_payload_contract_put_text_v1,
+    three_payload_contract_text_valid_v1, tld_section_ref_budget_v1, tld_section_ref_put_v1,
+    tld_section_ref_read_v1, tld_section_ref_valid_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    semantic_coverage_from_tag_v1, semantic_coverage_tag_v1}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.snapshot_contract_v1.{CacheObjectRefV1}
+
+pub enum ThreePayloadFallbackV1:
+    ExternalFacetRequired
+    ExternalBodyRequired
+    MembershipIncomplete
+    WitnessIncomplete
+    ScopeGenerationMismatch
+    BoundsExceeded
+    UnsupportedSemantics
+    CorruptPayload
+    AuthorityUnavailable
+
+# Nonserialized binding between one physical TLD section identity and the
+# independently verified typed CAS identity used by semantic owners.  This is
+# deliberately absent from the TPV2 codec below: adding it to the wire format
+# requires a separately negotiated schema.
+pub struct ThreePayloadSemanticBinding:
+    stable_entity_id: text
+    semantic_use_kind: ThreePayloadSemanticRefKindV1
+    object_ref: CacheObjectRefV1
+    embedded_role: TldPayloadRoleV1?
+    embedded_section_index: i64?
+    raw_section_digest: text?
+    access_policy_digest: text
+    semantic_profile_digest: text
+    callable_signature_digest: text
+    effect_digest: text
+    selection_contract_digest: text
+
+pub struct ThreePayloadSemanticRefV2:
+    kind: ThreePayloadSemanticRefKindV1
+    stable_entity_id: text
+    callable_signature_digest: text
+    effect_digest: text
+    body_or_object_digest: text
+    embedded: TldSectionRefV1?
+    selection_contract_digest: text
+
+pub struct ClosureCoverageRootV1:
+    dimension: text
+    root_digest: text
+    coverage: SemanticCoverageV1
+
+pub struct ThreePayloadClosureSealV2:
+    schema: i64
+    input_generation_digest: text
+    snapshot_digest: text
+    source_digest: text
+    prior_tld_digest: text?
+    init_tld_digest: text
+    compiler_semantics_digest: text
+    consumed_inputs_digest: text
+    semantic_refs: [ThreePayloadSemanticRefV2]
+    coverage_roots: [ClosureCoverageRootV1]
+    section_count: i64
+    payload_bytes: i64
+    max_decode_bytes: i64
+
+pub struct ThreePayloadClosureSealDecodeV2:
+    ok: bool
+    value: ThreePayloadClosureSealV2?
+    error: text
+
+fn _semantic_kind_tag_v2(kind: ThreePayloadSemanticRefKindV1) -> i64:
+    match kind:
+        case MacroExpansion: 1
+        case GenericBody: 2
+        case TraitDefaultBody: 3
+        case TraitCallable: 4
+        case AspectCallable: 5
+        case ConcreteFunction: 6
+        case CtfeBody: 7
+
+fn _semantic_kind_from_tag_v2(tag: i64) -> ThreePayloadSemanticRefKindV1?:
+    if tag == 1: return Some(ThreePayloadSemanticRefKindV1.MacroExpansion)
+    if tag == 2: return Some(ThreePayloadSemanticRefKindV1.GenericBody)
+    if tag == 3: return Some(ThreePayloadSemanticRefKindV1.TraitDefaultBody)
+    if tag == 4: return Some(ThreePayloadSemanticRefKindV1.TraitCallable)
+    if tag == 5: return Some(ThreePayloadSemanticRefKindV1.AspectCallable)
+    if tag == 6: return Some(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+    if tag == 7: return Some(ThreePayloadSemanticRefKindV1.CtfeBody)
+    nil
+
+fn _semantic_ref_key_v2(value: ThreePayloadSemanticRefV2) -> text:
+    value.stable_entity_id + "\u0000" + _semantic_kind_tag_v2(value.kind).to_string()
+
+pub fn three_payload_semantic_ref_valid_v2(value: ThreePayloadSemanticRefV2,
+        section_count: i64, max_decode_bytes: i64) -> bool:
+    if not three_payload_contract_text_valid_v1(value.stable_entity_id, false) or
+            not three_payload_contract_digest_valid_v1(value.callable_signature_digest) or
+            not three_payload_contract_digest_valid_v1(value.effect_digest) or
+            not three_payload_contract_digest_valid_v1(value.body_or_object_digest) or
+            not three_payload_contract_digest_valid_v1(value.selection_contract_digest): return false
+    match value.kind:
+        case MacroExpansion:
+            match value.embedded:
+                case Some(section):
+                    tld_section_ref_valid_v1(section) and section.section_index < section_count and
+                        section.decoded_bytes <= max_decode_bytes and
+                        section.semantic_object_digest == value.body_or_object_digest
+                case nil: false
+        case GenericBody:
+            match value.embedded:
+                case Some(section):
+                    tld_section_ref_valid_v1(section) and section.section_index < section_count and
+                        section.decoded_bytes <= max_decode_bytes and
+                        section.semantic_object_digest == value.body_or_object_digest
+                case nil: false
+        case TraitDefaultBody:
+            match value.embedded:
+                case Some(section):
+                    tld_section_ref_valid_v1(section) and section.section_index < section_count and
+                        section.decoded_bytes <= max_decode_bytes and
+                        section.semantic_object_digest == value.body_or_object_digest
+                case nil: false
+        case TraitCallable: value.embedded == nil
+        case AspectCallable: value.embedded == nil
+        case ConcreteFunction:
+            match value.embedded:
+                case Some(section):
+                    tld_section_ref_valid_v1(section) and section.section_index < section_count and
+                        section.decoded_bytes <= max_decode_bytes and
+                        section.semantic_object_digest == value.body_or_object_digest
+                case nil: false
+        case CtfeBody:
+            match value.embedded:
+                case Some(section):
+                    tld_section_ref_valid_v1(section) and section.section_index < section_count and
+                        section.decoded_bytes <= max_decode_bytes and
+                        section.semantic_object_digest == value.body_or_object_digest
+                case nil: false
+
+pub fn three_payload_semantic_ref_budget_v2(budget: ThreePayloadContractBudgetV1,
+        value: ThreePayloadSemanticRefV2):
+    budget.add_bytes(1)
+    budget.add_text(value.stable_entity_id, false)
+    budget.add_digest(value.callable_signature_digest)
+    budget.add_digest(value.effect_digest)
+    budget.add_digest(value.body_or_object_digest)
+    budget.add_bytes(1)
+    match value.embedded:
+        case Some(section): tld_section_ref_budget_v1(budget, section)
+        case nil: pass
+    budget.add_digest(value.selection_contract_digest)
+
+pub fn closure_coverage_dimension_v1(index: i64) -> text:
+    if index == 0: return "membership"
+    if index == 1: return "resolution_absence"
+    if index == 2: return "trait_candidates_coherence"
+    if index == 3: return "macro_ctfe_inputs"
+    if index == 4: return "generic_bodies"
+    if index == 5: return "extensions"
+    if index == 6: return "aspects_pointcuts"
+    if index == 7: return "initialization"
+    if index == 8: return "configuration_overlays"
+    ""
+
+pub fn closure_coverage_root_valid_v1(value: ClosureCoverageRootV1) -> bool:
+    three_payload_contract_text_valid_v1(value.dimension, false) and
+        three_payload_contract_digest_valid_v1(value.root_digest) and
+        value.coverage != SemanticCoverageV1.Unknown
+
+pub fn three_payload_closure_seal_valid_v2(value: ThreePayloadClosureSealV2) -> bool:
+    if value.schema != 2 or
+            not three_payload_contract_digest_valid_v1(value.input_generation_digest) or
+            not three_payload_contract_digest_valid_v1(value.snapshot_digest) or
+            not three_payload_contract_digest_valid_v1(value.source_digest) or
+            not three_payload_contract_digest_valid_v1(value.init_tld_digest) or
+            not three_payload_contract_digest_valid_v1(value.compiler_semantics_digest) or
+            not three_payload_contract_digest_valid_v1(value.consumed_inputs_digest) or
+            value.semantic_refs.len() > three_payload_contract_max_items_v1() or
+            value.coverage_roots.len() != 9 or value.section_count < 0 or
+            value.payload_bytes < 0 or value.max_decode_bytes < 0 or
+            value.max_decode_bytes > value.payload_bytes:
+        return false
+    match value.prior_tld_digest:
+        case Some(digest):
+            if not three_payload_contract_digest_valid_v1(digest): return false
+        case nil: pass
+    var prior = ""
+    var first = true
+    for reference in value.semantic_refs:
+        if not three_payload_semantic_ref_valid_v2(reference, value.section_count, value.max_decode_bytes): return false
+        val key = _semantic_ref_key_v2(reference)
+        if not first and key <= prior: return false
+        prior = key
+        first = false
+    var index: i64 = 0
+    for root in value.coverage_roots:
+        if not closure_coverage_root_valid_v1(root) or root.dimension != closure_coverage_dimension_v1(index): return false
+        index = index + 1
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len() + 8)
+    budget.add_digest(value.input_generation_digest)
+    budget.add_digest(value.snapshot_digest)
+    budget.add_digest(value.source_digest)
+    budget.add_optional_digest(value.prior_tld_digest)
+    budget.add_digest(value.init_tld_digest)
+    budget.add_digest(value.compiler_semantics_digest)
+    budget.add_digest(value.consumed_inputs_digest)
+    budget.add_bytes(4)
+    budget.add_items(value.semantic_refs.len())
+    for reference in value.semantic_refs: three_payload_semantic_ref_budget_v2(budget, reference)
+    budget.add_bytes(4)
+    budget.add_items(value.coverage_roots.len())
+    for root in value.coverage_roots:
+        budget.add_text(root.dimension, false)
+        budget.add_digest(root.root_digest)
+        budget.add_bytes(1)
+    budget.add_bytes(8 + 8 + 8)
+    budget.ok
+
+fn _semantic_ref_put_v2(out: [u8], value: ThreePayloadSemanticRefV2) -> [u8]:
+    var bytes = wire_put_u8(out, _semantic_kind_tag_v2(value.kind))
+    bytes = three_payload_contract_put_text_v1(bytes, value.stable_entity_id)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.callable_signature_digest)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.effect_digest)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.body_or_object_digest)
+    match value.embedded:
+        case Some(section): bytes = tld_section_ref_put_v1(wire_put_u8(bytes, 1), section)
+        case nil: bytes = wire_put_u8(bytes, 0)
+    three_payload_contract_put_digest_v1(bytes, value.selection_contract_digest)
+
+fn _semantic_ref_read_v2(reader: ThreePayloadContractReaderV1) -> ThreePayloadSemanticRefV2:
+    val kind = _semantic_kind_from_tag_v2(reader.read_u8())
+    if kind == nil: reader.reject("unknown_v2_semantic_ref_kind")
+    val entity = reader.read_text(false)
+    val signature = reader.read_digest()
+    val effect = reader.read_digest()
+    val body = reader.read_digest()
+    val embedded_tag = reader.read_u8()
+    var embedded: TldSectionRefV1? = nil
+    if embedded_tag == 1:
+        embedded = Some(tld_section_ref_read_v1(reader))
+    else if embedded_tag != 0:
+        reader.reject("invalid_embedded_section_tag")
+    val selection = reader.read_digest()
+    val decoded_kind = match kind:
+        case Some(value): value
+        case nil: ThreePayloadSemanticRefKindV1.MacroExpansion
+    ThreePayloadSemanticRefV2(kind: decoded_kind, stable_entity_id: entity,
+        callable_signature_digest: signature, effect_digest: effect,
+        body_or_object_digest: body, embedded: embedded,
+        selection_contract_digest: selection)
+
+pub fn three_payload_closure_seal_encode_v2(value: ThreePayloadClosureSealV2) -> [u8]:
+    if not three_payload_closure_seal_valid_v2(value): return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("TPV2"), 2)
+    out = wire_put_u64(out, value.schema)
+    out = three_payload_contract_put_digest_v1(out, value.input_generation_digest)
+    out = three_payload_contract_put_digest_v1(out, value.snapshot_digest)
+    out = three_payload_contract_put_digest_v1(out, value.source_digest)
+    out = three_payload_contract_put_optional_digest_v1(out, value.prior_tld_digest)
+    out = three_payload_contract_put_digest_v1(out, value.init_tld_digest)
+    out = three_payload_contract_put_digest_v1(out, value.compiler_semantics_digest)
+    out = three_payload_contract_put_digest_v1(out, value.consumed_inputs_digest)
+    out = wire_put_u32(out, value.semantic_refs.len())
+    for reference in value.semantic_refs: out = _semantic_ref_put_v2(out, reference)
+    out = wire_put_u32(out, value.coverage_roots.len())
+    for root in value.coverage_roots:
+        out = three_payload_contract_put_text_v1(out, root.dimension)
+        out = three_payload_contract_put_digest_v1(out, root.root_digest)
+        out = wire_put_u8(out, semantic_coverage_tag_v1(root.coverage))
+    out = wire_put_u64(out, value.section_count)
+    out = wire_put_u64(out, value.payload_bytes)
+    wire_put_u64(out, value.max_decode_bytes)
+
+fn _failure_v2(error: text) -> ThreePayloadClosureSealDecodeV2:
+    ThreePayloadClosureSealDecodeV2(ok: false, value: nil, error: error)
+
+pub fn three_payload_closure_seal_decode_v2(bytes: [u8]) -> ThreePayloadClosureSealDecodeV2:
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _failure_v2("three_payload_v2_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("TPV2"), 2): return _failure_v2("three_payload_v2_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val schema = reader.read_u64_nonnegative()
+    val generation = reader.read_digest()
+    val snapshot = reader.read_digest()
+    val source = reader.read_digest()
+    val prior_tld = reader.read_optional_digest()
+    val init_tld = reader.read_digest()
+    val semantics = reader.read_digest()
+    val consumed = reader.read_digest()
+    val reference_count = reader.read_count()
+    var references: [ThreePayloadSemanticRefV2] = []
+    var index: i64 = 0
+    while reader.ok and index < reference_count:
+        references.push(_semantic_ref_read_v2(reader))
+        index = index + 1
+    val coverage_count = reader.read_count()
+    var roots: [ClosureCoverageRootV1] = []
+    index = 0
+    while reader.ok and index < coverage_count:
+        val dimension = reader.read_text(false)
+        val digest = reader.read_digest()
+        val coverage = semantic_coverage_from_tag_v1(reader.read_u8())
+        if coverage == nil: reader.reject("unknown_v2_coverage")
+        val decoded_coverage = match coverage:
+            case Some(value): value
+            case nil: SemanticCoverageV1.Unknown
+        roots.push(ClosureCoverageRootV1(dimension: dimension, root_digest: digest,
+            coverage: decoded_coverage))
+        index = index + 1
+    val section_count = reader.read_u64_nonnegative()
+    val payload_bytes = reader.read_u64_nonnegative()
+    val max_decode = reader.read_u64_nonnegative()
+    if not reader.finished(): return _failure_v2(if reader.error == "": "trailing_three_payload_v2_bytes" else: reader.error)
+    val value = ThreePayloadClosureSealV2(schema: schema,
+        input_generation_digest: generation, snapshot_digest: snapshot,
+        source_digest: source, prior_tld_digest: prior_tld, init_tld_digest: init_tld,
+        compiler_semantics_digest: semantics, consumed_inputs_digest: consumed,
+        semantic_refs: references, coverage_roots: roots, section_count: section_count,
+        payload_bytes: payload_bytes, max_decode_bytes: max_decode)
+    if not three_payload_closure_seal_valid_v2(value): return _failure_v2("noncanonical_three_payload_v2_seal")
+    ThreePayloadClosureSealDecodeV2(ok: true, value: Some(value), error: "")
+
+pub fn three_payload_closure_seal_digest_v2(value: ThreePayloadClosureSealV2) -> text:
+    val bytes = three_payload_closure_seal_encode_v2(value)
+    if bytes.len() == 0: return ""
+    sha256_u8_hex(bytes)

@@ -1,4 +1,8 @@
 # Bug: "source content" guard-specs use unescaped `{ident}` in literal
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 substring checks, AND (where verified) the guarded content itself no longer
 matches current product source
 
@@ -192,3 +196,4 @@ both by grep -cF and by an in-language probe reading the file at runtime:
 The rt_dict_keys migration was never applied to the product source. The spec is
 left RED on purpose — it documents a real, open src/ defect and must not be
 weakened. Owner: HIR lane (src/ scope).
+

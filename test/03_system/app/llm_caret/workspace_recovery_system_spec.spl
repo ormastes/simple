@@ -1,16 +1,44 @@
 # @tag: system, llm_caret, tmux, worktree, recovery
-"""Operator re-runs and mis-types workspace commands without breaking the team.
+"""
+## Purpose and audience
 
+Operator re-runs and mis-types workspace commands without breaking the team.
 Real operators repeat commands (a second `attach` for an agent that is already
 attached, `session_ensure` from two shells), leave stale directories behind, and
 address agents that do not exist. Each scenario here drives the real
 infrastructure -- a private tmux socket and a throwaway git repository -- and
 asserts what the operator can observe afterwards: how many windows and
 worktrees exist, whether the session survived, and what the CLI's exit status
-and message were.
-"""
+and message were. Audience: llm_caret workspace maintainers and release
+verification.
 
-use std.spec.{describe, it, expect, step, pending}
+## Operator workflow
+
+Run `simple run test/03_system/app/llm_caret/workspace_recovery_system_spec.spl`
+on a host with `tmux` and `git` on PATH. Every scenario builds its own fixture
+repository under `build/test-artifacts/llm_caret/` and tears it down again.
+
+## Compatibility and limitations
+
+Requires a Unix host with tmux installed; the scenarios drive a real private
+socket, so a tmux-less host fails the environment assertion at the top of the
+affected scenarios rather than silently passing. The CLI scenario shells out
+through `bin/simple run`, so it needs the repo checkout it lives in.
+
+## Verification guidance and troubleshooting
+
+A failure names the observable that moved (window count, worktree list, CLI
+exit status or message). Rerun the single file; leftover sockets or fixture
+directories from a crashed earlier run are removed by each scenario's
+`dir_remove_all` prologue. A red `error no_panes` scenario documents the
+real broadcast-on-dead-session contract gap — keep it red until fixed.
+"""
+# Lifecycle: research doc/01_research/domain/llm_caret_agent_teams.md ;
+# plan doc/03_plan/agent_tasks/llm_caret_agent_teams.md ;
+# architecture doc/04_architecture/app/tools/llm_caret_agent_teams.md ;
+# design doc/05_design/app/llm_caret_embedded_tmux.md
+
+use std.spec.{describe, it, expect, step}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists,
     file_write, file_exists, cwd, current_time_ms}
 use app.llm_caret.agent_workspace.{AgentWorkspace, agent_workspace, tmux_available,
@@ -50,10 +78,13 @@ fn _windows_named(ws: AgentWorkspace, name: text) -> i64:
     n
 
 describe "LLM Caret workspace recovery and idempotency":
+    # @manual_section: llm-caret-workspace-recovery
+
     it "session_ensure twice yields one session and no second window":
-        if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
-            return
+        # @req REQ-LLM-CARET-WS-001
+        # @capture(statistics): pane counts after first ensure, second ensure and kill
+        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
+        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
         val root = _scratch("ensure")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -63,22 +94,23 @@ describe "LLM Caret workspace recovery and idempotency":
         step("First ensure creates the session with a single bootstrap pane")
         expect(session_ensure(ws, repo).status).to_equal("ok")
         expect(session_alive(ws)).to_be(true)
-        expect(list_panes(ws).len()).to_equal(1)
+        expect(list_panes(ws).len()).to_equal(1)  # oracle: one bootstrap pane is the documented shape of a fresh session
 
         step("Second ensure reports the existing session and adds nothing")
         val again = session_ensure(ws, repo)
         expect(again.status).to_equal("ok")
         expect(again.output).to_equal("exists")
-        expect(list_panes(ws).len()).to_equal(1)
+        expect(list_panes(ws).len()).to_equal(1)  # oracle: idempotency means the second ensure must not open a second pane
 
         session_kill(ws)
         expect(session_alive(ws)).to_be(false)
         dir_remove_all(root)
 
     it "attaching the same agent twice keeps one worktree and one window":
-        if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
-            return
+        # @req REQ-LLM-CARET-WS-002
+        # @capture(statistics): worktree/window/pane counts across double attach and double detach
+        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
+        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
         val root = _scratch("double")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -88,22 +120,22 @@ describe "LLM Caret workspace recovery and idempotency":
         step("First attach: one worktree registered, one agent window (+ bootstrap window 0)")
         expect(agent_attach(ws, "agent-a", "").status).to_equal("ok")
         expect(_contains(worktree_list(ws), worktree_path(ws, "agent-a"))).to_be(true)
-        expect(worktree_list(ws).len()).to_equal(2)
-        expect(_windows_named(ws, "agent-a")).to_equal(1)
-        expect(list_panes(ws).len()).to_equal(2)
+        expect(worktree_list(ws).len()).to_equal(2)  # oracle: main repo plus the one agent worktree is the full list
+        expect(_windows_named(ws, "agent-a")).to_equal(1)  # oracle: one attach opens exactly one named agent window
+        expect(list_panes(ws).len()).to_equal(2)  # oracle: bootstrap pane plus the agent pane
 
         step("Second attach of the same agent is idempotent: still one worktree, still one window")
         val again = agent_attach(ws, "agent-a", "")
         expect(again.status).to_equal("ok")
         expect(again.output).to_equal("exists")
-        expect(worktree_list(ws).len()).to_equal(2)
-        expect(_windows_named(ws, "agent-a")).to_equal(1)
-        expect(list_panes(ws).len()).to_equal(2)
+        expect(worktree_list(ws).len()).to_equal(2)  # oracle: the duplicate attach must not register a second worktree
+        expect(_windows_named(ws, "agent-a")).to_equal(1)  # oracle: the duplicate attach must not open a second window
+        expect(list_panes(ws).len()).to_equal(2)  # oracle: pane count is unchanged by the duplicate attach
 
         step("One detach after two attaches leaves zero windows and no worktree for that agent")
         expect(agent_detach(ws, "agent-a").status).to_equal("ok")
-        expect(_windows_named(ws, "agent-a")).to_equal(0)
-        expect(list_panes(ws).len()).to_equal(1)
+        expect(_windows_named(ws, "agent-a")).to_equal(0)  # oracle: detach removes the agent's window entirely
+        expect(list_panes(ws).len()).to_equal(1)  # oracle: only the bootstrap pane remains
         expect(_contains(worktree_list(ws), worktree_path(ws, "agent-a"))).to_be(false)
         expect(dir_exists(worktree_path(ws, "agent-a"))).to_be(false)
 
@@ -115,12 +147,13 @@ describe "LLM Caret workspace recovery and idempotency":
         dir_remove_all(root)
 
     it "reports a hand-made directory at the worktree path honestly: it is not a git worktree":
+        # @req REQ-LLM-CARET-WS-003
+        # @capture(statistics): path_occupied refusal plus untouched intruder-directory contents
+        step("An operator (or a crashed run) left a plain directory where agent-p's worktree would go")
         val root = _scratch("plaindir")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
         val ws = agent_workspace("rec-plaindir-" + current_time_ms().to_text(), repo, root + "/trees")
-
-        step("An operator (or a crashed run) left a plain directory where agent-p's worktree would go")
         val path = worktree_path(ws, "agent-p")
         dir_create_all(path)
         file_write(path + "/stale.txt", "not a worktree\n")
@@ -134,18 +167,19 @@ describe "LLM Caret workspace recovery and idempotency":
 
         step("git still does not know it, and the operator's directory was neither claimed nor deleted")
         expect(_contains(worktree_list(ws), path)).to_be(false)
-        expect(worktree_list(ws).len()).to_equal(1)
+        expect(worktree_list(ws).len()).to_equal(1)  # oracle: only the fixture repo is registered; the intruder was never claimed
         expect(file_exists(path + "/README.md")).to_be(false)
         expect(file_exists(path + "/stale.txt")).to_be(true)
         dir_remove_all(root)
 
     it "reports a plain file at the worktree path as path_occupied and leaves the file alone":
+        # @req REQ-LLM-CARET-WS-004
+        # @capture(statistics): path_occupied refusal plus the surviving plain file
+        step("A regular file sits exactly where agent-f's worktree would be created")
         val root = _scratch("plainfile")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
         val ws = agent_workspace("rec-plainfile-" + current_time_ms().to_text(), repo, root + "/trees")
-
-        step("A regular file sits exactly where agent-f's worktree would be created")
         val path = worktree_path(ws, "agent-f")
         dir_create_all(root + "/trees")
         file_write(path, "not a directory\n")
@@ -157,16 +191,17 @@ describe "LLM Caret workspace recovery and idempotency":
         expect(r.reason).to_equal("path_occupied")
         expect(file_exists(path)).to_be(true)
         expect(_contains(worktree_list(ws), path)).to_be(false)
-        expect(worktree_list(ws).len()).to_equal(1)
+        expect(worktree_list(ws).len()).to_equal(1)  # oracle: only the fixture repo is registered; the file was never claimed
         dir_remove_all(root)
 
     it "a second worktree_add for a REAL worktree is still reported as exists":
+        # @req REQ-LLM-CARET-WS-005
+        # @capture(statistics): ok/exists idempotency for a genuinely git-registered worktree
+        step("First add registers the worktree with git")
         val root = _scratch("realtwice")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
         val ws = agent_workspace("rec-realtwice-" + current_time_ms().to_text(), repo, root + "/trees")
-
-        step("First add registers the worktree with git")
         expect(worktree_add(ws, "agent-r").status).to_equal("ok")
         expect(_contains(worktree_list(ws), worktree_path(ws, "agent-r"))).to_be(true)
 
@@ -174,13 +209,14 @@ describe "LLM Caret workspace recovery and idempotency":
         val again = worktree_add(ws, "agent-r")
         expect(again.status).to_equal("ok")
         expect(again.output).to_equal("exists")
-        expect(worktree_list(ws).len()).to_equal(2)
+        expect(worktree_list(ws).len()).to_equal(2)  # oracle: main repo plus the one real agent worktree
         dir_remove_all(root)
 
     it "detaching an unknown agent is an error and leaves the session and its agents intact":
-        if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
-            return
+        # @req REQ-LLM-CARET-WS-006
+        # @capture(statistics): ghost and prefix detach verdicts plus untouched survivor counts
+        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
+        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
         val root = _scratch("unknown")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -189,7 +225,7 @@ describe "LLM Caret workspace recovery and idempotency":
 
         step("One real agent is attached")
         expect(agent_attach(ws, "agent-real", "").status).to_equal("ok")
-        expect(list_panes(ws).len()).to_equal(2)
+        expect(list_panes(ws).len()).to_equal(2)  # oracle: bootstrap pane plus the real agent's pane
 
         step("Detaching an agent that was never attached reports an error, not success")
         val r = agent_detach(ws, "agent-ghost")
@@ -201,8 +237,8 @@ describe "LLM Caret workspace recovery and idempotency":
 
         step("The session and the real agent's window and worktree are untouched")
         expect(session_alive(ws)).to_be(true)
-        expect(_windows_named(ws, "agent-real")).to_equal(1)
-        expect(list_panes(ws).len()).to_equal(2)
+        expect(_windows_named(ws, "agent-real")).to_equal(1)  # oracle: the ghost detach must not close the real agent's window
+        expect(list_panes(ws).len()).to_equal(2)  # oracle: both original panes survive the failed detaches
         expect(_contains(worktree_list(ws), worktree_path(ws, "agent-real"))).to_be(true)
         expect(dir_exists(worktree_path(ws, "agent-real"))).to_be(true)
 
@@ -211,9 +247,10 @@ describe "LLM Caret workspace recovery and idempotency":
         dir_remove_all(root)
 
     it "broadcast on a dead session reaches no pane and the CLI exits 1 with error no_panes":
-        if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
-            return
+        # @req REQ-LLM-CARET-WS-007
+        # @capture(statistics): zero-delivery library result plus the CLI's exit code and message
+        step("Confirm tmux drives the scenarios; an absent tmux is an environment failure")
+        expect(tmux_available()).to_equal(true)  # oracle: the workspace layer needs a real tmux socket, so a missing binary is a host defect, not a skip
         val root = _scratch("dead")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -223,12 +260,12 @@ describe "LLM Caret workspace recovery and idempotency":
         expect(session_alive(ws)).to_be(false)
 
         step("Library: send_to_each_pane on a session that does not exist reaches zero panes")
-        expect(send_to_each_pane(ws, "echo never").len()).to_equal(0)
+        expect(send_to_each_pane(ws, "echo never").len()).to_equal(0)  # oracle: a dead session has no panes, so zero deliveries is the honest result
 
         step("CLI: `workspace <id> broadcast ...` exits 1 and prints `error no_panes`")
         val (out, err, code) = process_run("bin/simple",
             ["run", CLI, "workspace", id, "broadcast", "echo", "never", "--repo", repo])
-        expect(code).to_equal(1)
+        expect(code).to_equal(1)  # oracle: the CLI contract is exit status 1 on a no-pane broadcast
         expect(out + err).to_contain("error no_panes")
 
         step("The failed broadcast did not create a session as a side effect")

@@ -146,13 +146,25 @@ observable. Matched before/after receipts remain the release authority.
 
 #### records allocation-free UTF-8 validation and counting after corpus setup
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- records allocation-free UTF-8 validation and counting after corpus setup
+   - Expected: live_growth equals `0`
+   - Expected: aux_growth equals `0`
+   - Expected: capacity_growth equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("records allocation-free UTF-8 validation and counting after corpus setup")
 val bytes = memory_ascii_bytes()
 val before = memory_snapshot()
 var checksum: i64 = 0
@@ -177,13 +189,18 @@ print "text_memory operation=utf8_scan counter_status={status} iterations=64 inp
 
 #### bounds scalar-access allocation growth
 
+- bounds scalar-access allocation growth
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("bounds scalar-access allocation growth")
 val value = "abcdefghijklmnopqrstuvwxyz0123456789"
 val before = memory_snapshot()
 var checksum: i64 = 0
@@ -207,13 +224,21 @@ print "text_memory operation=ascii_scalar_access counter_status={status} iterati
 
 #### records the current UTF-16 intermediate-allocation baseline
 
+- records the current UTF-16 intermediate-allocation baseline
+   - Expected: after.live_bytes equals `0`
+   - Expected: after.aux_live_bytes equals `0`
+   - Expected: after.array_capacity_bytes equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("records the current UTF-16 intermediate-allocation baseline")
 val units = memory_utf16_units()
 val before = memory_snapshot()
 val encoded = utf16_to_utf8(units)
@@ -253,3 +278,61 @@ print "text_memory operation=utf16_to_utf8 counter_status={status} input_units={
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-PERF`
+- `REQ-001`
+- `REQ-004`
+- `REQ-014`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `5ddac22b66eff2924a3799e6af929c8530a965ead8408e4b93db93ac3ece21e7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `5ddac22b66eff2924a3799e6af929c8530a965ead8408e4b93db93ac3ece21e7`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `5ddac22b66eff2924a3799e6af929c8530a965ead8408e4b93db93ac3ece21e7`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/05_perf/text_i18n/utf8_internationalized_text_memory_spec.spl
+mirror: doc/06_spec/05_perf/text_i18n/utf8_internationalized_text_memory_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/05_perf/text_i18n/utf8_internationalized_text_memory_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/05_perf/text_i18n/utf8_internationalized_text_memory_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/05_perf/text_i18n/utf8_internationalized_text_memory_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/05_perf/text_i18n/utf8_internationalized_text_memory_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/05_perf/text_i18n/utf8_internationalized_text_memory_spec.spl:183:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records allocation-free UTF-8 validation and counting after corpus setup' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/text_i18n/utf8_internationalized_text_memory_spec.spl:205:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bounds scalar-access allocation growth' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/text_i18n/utf8_internationalized_text_memory_spec.spl:226:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records the current UTF-16 intermediate-allocation baseline' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

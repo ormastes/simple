@@ -1,7 +1,10 @@
 # browser_engine: missing UA defaults (h4/h5/h6, blockquote, pre, form/fieldset/dl/etc.)
+## Open 2026-09-16 — needs owner triage
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+- Status: open
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (senior code review)
 
@@ -53,10 +56,3 @@ None in this session.
 
 PARTIALLY FIXED (haiku fix lane F2, opus-reviewed APPROVE): h4/h5/h6 UA default branches added to tag_defaults (16/13/11px, bold, symmetric margins). The doc's remaining wishlist items are NOT covered by this change.
 
-## Resolution update (2026-07-27)
-
-PARTIALLY FIXED: the shared `tag_defaults` path now gives `blockquote` its
-standard 40px inline and 16px block margins, and gives `pre` monospace,
-preformatted whitespace plus 16px block margins. Pixel-rendering coverage lives
-in `browser_renderer_ua_defaults_spec.spl`. The optional semantic-tag typography
-wishlist remains open; those elements already inherit block display.

@@ -10,9 +10,11 @@ skipped, malformed, failed, timed-out, oversized, or hash-invalid rows block the
 whole manifest. No child can become a second top-level aggregate receipt.
 Each lowercase row binds command and fixture hashes, separate stdout/stderr
 hashes and byte counts (16 MiB maximum per stream), start/end/duration, exit and
-timeout state, scan count, sample count, raw p50/p95, maximum RSS, baseline, and
-regression basis points. A regression above 500 basis points (5%) blocks. MCP
-and LSP warm measurements are distinct commands and distinct rows.
+timeout state, and an explicit per-row scan policy. The 17 owned commands do not
+publish a common enumeration counter, so each row records
+`scan_policy=<id>|not-applicable|command-contract-v1` rather than fabricating a
+scan count. MCP and LSP warm measurements are distinct commands and distinct
+rows.
 
 `--evidence` is always the aggregate evidence root (for example,
 `build/evidence/mci-v2`), never a `tooling/` child directory.
@@ -21,11 +23,18 @@ Live mode requires a clean repository whose SHA-256 of Git's stable recursive
 `HEAD` tree listing equals `--source-hash`, plus a regular executable resolved beneath
 `bin/release/*/simple`. Its digest must match the adjacent admission sidecar and
 its identity must not identify a Rust/bootstrap seed. Every command and bounded
-raw log is hashed. All 17 real commands must pass with zero skips before the
-producer packages the manifest and every raw stream into one deterministic,
+raw log is hashed. Warm CLI, MCP, and LSP startup/request samples are normalized
+into three canonical raw sample members. The producer recomputes sample count,
+p50, p95, p99, and maximum RSS from those members during admission; each warm
+ID requires an explicit p95/RSS baseline and both dimensions must stay within
+5%. All 17 real commands must pass with zero skips before the producer packages
+the manifest and every raw stream into one deterministic,
 self-contained `tooling-generation-v1.tar`, then uses the repository secure
 no-follow, fsyncing, atomic-no-replace publisher to write it and
 `receipts/tooling.unsigned.template`.
+Live warm commands receive those baselines through the operator-supplied
+`MCI_TOOLING_WARM_CLI_BASELINE_*`, `MCI_TOOLING_WARM_MCP_BASELINE_*`, and
+`MCI_TOOLING_WARM_LSP_BASELINE_*` variables; an absent or zero baseline blocks.
 
 The exact aggregate-root layout is `receipts/tooling.unsigned.template` and
 `artifacts/tooling-generation-v1.tar`; this matches the plan and aggregate and
@@ -55,7 +64,10 @@ metadata, status vocabulary, and fail-closed behavior only. Its report always
 says `contract-only` and `blocked`, and it removes both the signed-receipt name
 and unsigned live template. Run its focused contract with:
 
-The negative contract matrix rejects missing, duplicate, or unexpected rows,
+The aggregate and external signer revalidate exact child IDs, command budgets,
+scan-policy rows, warm metric vocabulary, baseline rows, raw member paths, and
+raw SHA-256 bindings; row cardinality alone is not admission. The negative
+contract matrix rejects missing, duplicate, or unexpected rows,
 uppercase/skip-like status, bad hashes or paths, unavailable commands, nonzero
 exits, timeouts, overflow metadata, regressions above 5%, unauthorized fixtures,
 collisions, and incomplete transaction state. A failed child publishes no

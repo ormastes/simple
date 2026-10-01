@@ -1,0 +1,148 @@
+# Fenced-block + inline-code-span byte-range scanner.
+#
+# Byte-offset only (see .claude/rules/commands.md and the S1-A plan §3.5.1):
+# `text.len()` is BYTES while `s[i]` indexes CHARS, so this scanner iterates
+# the raw UTF-8 byte array of the document, never a char-indexed string. Every
+# range returned is [start, end) in BYTES of the exact source text passed in.
+#
+# Used by scan/links.spl to exclude fenced code blocks and inline code spans
+# from link scanning (a link-looking sequence inside a fence or code span is
+# not a real link).
+
+use std.common.string_core.{text_to_bytes}
+
+struct ByteRange:
+    start: i64
+    end: i64
+
+fn _is_backtick(b: u8) -> bool:
+    b == 96
+
+fn _is_newline(b: u8) -> bool:
+    b == 10
+
+# A fence line is a line whose first non-space bytes are >= 3 of the same
+# fence character ('`' = 96 or '~' = 126). Returns the fence char byte and run
+# length, or (0, 0) if `line_start..line_end` is not a fence line.
+fn _fence_run(bytes: [u8], line_start: i64, line_end: i64) -> (u8, i64):
+    var i = line_start
+    while i < line_end and bytes[i] == 32:
+        i = i + 1
+    if i >= line_end:
+        return (0, 0)
+    val ch = bytes[i]
+    if ch != 96 and ch != 126:
+        return (0, 0)
+    var run = 0
+    var j = i
+    while j < line_end and bytes[j] == ch:
+        run = run + 1
+        j = j + 1
+    if run >= 3:
+        return (ch, run)
+    (0, 0)
+
+# Byte ranges of fenced code blocks (``` or ~~~, >=3 chars, closing fence must
+# be the same char with run length >= opening). Each range spans from the
+# start of the opening fence line to the end of the closing fence line
+# (inclusive of the closing fence's own line), or to end-of-document if
+# unterminated.
+fn find_fenced_block_ranges(source: text) -> [ByteRange]:
+    val bytes = text_to_bytes(source)
+    val n = bytes.len()
+    var ranges: [ByteRange] = []
+    var i = 0
+    var line_start = 0
+    var in_fence = false
+    var fence_char: u8 = 0
+    var fence_run = 0
+    var block_start = 0
+    while i <= n:
+        val at_end = i == n
+        val is_nl = not at_end and _is_newline(bytes[i])
+        if at_end or is_nl:
+            val line_end = i
+            if not in_fence:
+                val (ch, run) = _fence_run(bytes, line_start, line_end)
+                if run >= 3:
+                    in_fence = true
+                    fence_char = ch
+                    fence_run = run
+                    block_start = line_start
+            else:
+                val (ch, run) = _fence_run(bytes, line_start, line_end)
+                if ch == fence_char and run >= fence_run:
+                    val close_end = if at_end: line_end else: i + 1
+                    ranges.push(ByteRange(start: block_start, end: close_end))
+                    in_fence = false
+                    fence_char = 0
+                    fence_run = 0
+            line_start = i + 1
+        i = i + 1
+    if in_fence:
+        ranges.push(ByteRange(start: block_start, end: n))
+    ranges
+
+# Byte ranges of inline code spans (`...` / ``...``, matched run length),
+# scanned only outside the fenced-block ranges already found (a fence line's
+# backticks are never inline spans).
+fn find_inline_code_span_ranges(source: text, fenced: [ByteRange]) -> [ByteRange]:
+    val bytes = text_to_bytes(source)
+    val n = bytes.len()
+    var ranges: [ByteRange] = []
+    var i = 0
+    while i < n:
+        if _byte_in_any_range(i, fenced):
+            i = i + 1
+        elif _is_backtick(bytes[i]):
+            var run = 0
+            var j = i
+            while j < n and _is_backtick(bytes[j]):
+                run = run + 1
+                j = j + 1
+            val open_len = run
+            var k = j
+            var found_close = -1
+            while k < n:
+                if _is_newline(bytes[k]):
+                    break
+                if _is_backtick(bytes[k]):
+                    var close_run = 0
+                    var m = k
+                    while m < n and _is_backtick(bytes[m]):
+                        close_run = close_run + 1
+                        m = m + 1
+                    if close_run == open_len:
+                        found_close = m
+                        break
+                    k = m
+                else:
+                    k = k + 1
+            if found_close >= 0:
+                ranges.push(ByteRange(start: i, end: found_close))
+                i = found_close
+            else:
+                i = j
+        else:
+            i = i + 1
+    ranges
+
+fn _byte_in_any_range(pos: i64, ranges: [ByteRange]) -> bool:
+    for r in ranges:
+        if pos >= r.start and pos < r.end:
+            return true
+    false
+
+# All excluded regions (fenced blocks + inline code spans), merged.
+fn excluded_regions(source: text) -> [ByteRange]:
+    val fenced = find_fenced_block_ranges(source)
+    val spans = find_inline_code_span_ranges(source, fenced)
+    var all: [ByteRange] = []
+    for r in fenced:
+        all.push(r)
+    for r in spans:
+        all.push(r)
+    all
+
+fn is_excluded(pos: i64, regions: [ByteRange]) -> bool:
+    _byte_in_any_range(pos, regions)

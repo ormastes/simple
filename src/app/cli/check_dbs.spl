@@ -9,6 +9,8 @@
 #   simple check-dbs bugs features    Check multiple
 #   simple check-dbs --json           JSON output
 #   simple check-dbs --strict         Exit 1 on warnings too
+#   simple check-dbs bugs --bug=<id>  List indexed workarounds for a bug
+#   simple check-dbs --fullscan bugs  Reconcile tracked workaround annotations
 
 use std.database.bug.{load_bug_database}
 use std.database.test.{load_test_database}
@@ -17,6 +19,9 @@ use std.database.todo.{load_todo_database}
 use std.database.task.{load_task_database}
 use std.database.checker.{DbIssue, count_by_severity, format_issue}
 use std.io_runtime.{file_exists}
+use app.bug.workaround_store.{load_workarounds, refresh_workarounds}
+use app.bug.workaround_query.{workaround_issues, workaround_issue}
+use common.text_advanced.{escape_json}
 
 # ============================================================================
 # Database paths
@@ -32,14 +37,24 @@ fn task_db_path() -> text: "doc/08_tracking/task/task_db.sdn"
 # Per-database check functions
 # ============================================================================
 
-fn check_bug_db() -> [DbIssue]:
+fn check_bug_db(bug_filter: text, fullscan: bool) -> [DbIssue]:
     val path = bug_db_path()
     if not file_exists(path):
         return [DbIssue(db_name: "bug", severity: "error", issue_type: "file_missing",
             message: "Database file not found: {path}", auto_fixable: false)]
     val db_opt = load_bug_database(path)
     match db_opt:
-        case Some(db): db.validate()
+        case Some(db):
+            var issues = db.validate()
+            val indexed = if fullscan: refresh_workarounds(true, []) else: load_workarounds()
+            match indexed:
+                case Ok(index):
+                    for issue in workaround_issues(index, db, bug_filter):
+                        issues.push(issue)
+                case Err(reason):
+                    val severity = if fullscan: "error" else: "warning"
+                    issues.push(workaround_issue(severity, "workaround_index_unavailable", reason))
+            issues
         case nil:
             return [DbIssue(db_name: "bug", severity: "error", issue_type: "parse_error",
                 message: "Failed to parse bug database: {path}", auto_fixable: false)]
@@ -124,7 +139,8 @@ fn print_json_output(all_issues: [DbIssue]):
         val comma = if first: "" else: ","
         first = false
         val fixable_str = if issue.auto_fixable: "true" else: "false"
-        print "{comma}  \{\"db\": \"{issue.db_name}\", \"severity\": \"{issue.severity}\", \"type\": \"{issue.issue_type}\", \"message\": \"{issue.message}\", \"auto_fixable\": {fixable_str}\}"
+        val message = escape_json(issue.message)
+        print "{comma}  \{\"db\": \"{issue.db_name}\", \"severity\": \"{issue.severity}\", \"type\": \"{issue.issue_type}\", \"message\": \"{message}\", \"auto_fixable\": {fixable_str}\}"
     print "]"
 
 # ============================================================================
@@ -134,6 +150,8 @@ fn print_json_output(all_issues: [DbIssue]):
 fn run_check_dbs(args: [text]) -> i64:
     var json_mode = false
     var strict_mode = false
+    var fullscan = false
+    var bug_filter = ""
     var db_filters: [text] = []
 
     for arg in args:
@@ -141,6 +159,10 @@ fn run_check_dbs(args: [text]) -> i64:
             json_mode = true
         elif arg == "--strict":
             strict_mode = true
+        elif arg == "--fullscan":
+            fullscan = true
+        elif arg.starts_with("--bug="):
+            bug_filter = arg.substring(6)
         elif not arg.starts_with("--"):
             db_filters.push(arg)
 
@@ -157,7 +179,7 @@ fn run_check_dbs(args: [text]) -> i64:
 
     # Run checks
     if do_bugs:
-        val issues = check_bug_db()
+        val issues = check_bug_db(bug_filter, fullscan)
         for issue in issues:
             all_issues.push(issue)
 

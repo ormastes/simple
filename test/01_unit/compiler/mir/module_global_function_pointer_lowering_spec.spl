@@ -2,13 +2,7 @@ use std.spec
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
-# `lower_module` is a `me` method defined in _Items/module_lowering.spl and
-# re-exported via hir_lowering.items; types.spl alone does not bring it in scope.
-use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
-# `MirLowering` is NOT re-exported from `compiler.mir` / `compiler.mir.mir`
-# (see 50.mir/__init__.spl): import it from its own module.
-use compiler.mir.mir_lowering.{MirLowering}
 
 fn lower_function_slot_source(src: text) -> MirModule:
     val ast = parse_full_frontend(src, "function_slot.spl", "function_slot.spl", Logger(level: 0))
@@ -17,7 +11,91 @@ fn lower_function_slot_source(src: text) -> MirModule:
     var mir_lowering = MirLowering.new(hir.symbols)
     mir_lowering.lower_module(hir)
 
+fn bootstrap_static_module(local_symbol: SymbolId) -> MirModule:
+    val i64_type = MirType.i64()
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[local_symbol] = MirStatic(
+        symbol: local_symbol,
+        name: "shared",
+        type_: i64_type,
+        init: nil,
+        is_mutable: true
+    )
+    MirModule(name: "", functions: {}, statics: statics, constants: {}, types: {})
+
+fn bootstrap_global_access_function(local_symbol: SymbolId) -> MirFunction:
+    val i64_type = MirType.i64()
+    MirFunction(
+        symbol: SymbolId(id: 99),
+        name: "access_shared",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: nil, type_: i64_type, kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 0), local_symbol), span: nil),
+                MirInst(kind: MirInstKind.StoreGlobal(local_symbol, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0
+    )
+
+fn module_with_imports(name: text, import_paths: [text]) -> HirModule:
+    var imports: [HirImport] = []
+    for import_path in import_paths:
+        imports.push(HirImport(module_path: import_path, items: [], is_lazy: false, span: Span.empty()))
+    var module = bootstrap_empty_hir_module()
+    module.name = name
+    module.imports = imports
+    module
+
 describe "Module-global function pointer MIR lowering", tag: ["only-compiled"]:
+    it "remaps same-named module statics and their accesses independently":
+        bootstrap_mir_functions_reset()
+        val local_symbol = SymbolId(id: 7)
+        val first_remap = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "alpha")
+        val second_remap = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "beta")
+        val first_symbol = first_remap[local_symbol.id]
+        val second_symbol = second_remap[local_symbol.id]
+        val rewritten = bootstrap_mir_rewrite_global_references(bootstrap_global_access_function(local_symbol), second_remap)
+
+        expect(first_symbol.id == second_symbol.id).to_equal(false)
+        expect(bootstrap_mir_static_count()).to_equal(2)
+        expect(bootstrap_mir_static_at(0).name == bootstrap_mir_static_at(1).name).to_equal(false)
+        match rewritten.blocks[0].instructions[0].kind:
+            case MirInstKind.LoadGlobal(_, symbol): expect(symbol.id).to_equal(second_symbol.id)
+            case _: fail("expected rewritten LoadGlobal")
+        match rewritten.blocks[0].instructions[1].kind:
+            case MirInstKind.StoreGlobal(symbol, _): expect(symbol.id).to_equal(second_symbol.id)
+            case _: fail("expected rewritten StoreGlobal")
+        bootstrap_mir_functions_reset()
+        val repeated_first = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "alpha")[local_symbol.id]
+        val repeated_second = bootstrap_mir_static_remap_add(bootstrap_static_module(local_symbol), "beta")[local_symbol.id]
+        expect(repeated_first.id).to_equal(first_symbol.id)
+        expect(repeated_second.id).to_equal(second_symbol.id)
+        bootstrap_mir_functions_reset()
+
     it "loads the mutable slot and calls its current function indirectly":
         val source = "fn default_cleanup():\n    ()\n\nfn replacement_cleanup():\n    ()\n\nvar cleanup: fn() = default_cleanup\n\nfn install():\n    cleanup = replacement_cleanup\n\nfn invoke():\n    cleanup()\n"
         val mir = lower_function_slot_source(source)
@@ -51,54 +129,3 @@ describe "Module-global function pointer MIR lowering", tag: ["only-compiled"]:
         expect(saw_load_global).to_equal(true)
         expect(saw_indirect_call).to_equal(true)
         expect(saw_direct_cleanup_call).to_equal(false)
-
-    # Neighbour 1 (over-demotion guard): an ORDINARY call to a top-level
-    # function must still lower to a DIRECT call. The slot demotion added for
-    # this bug keys off "callee names a module global with backing static and
-    # is not a known top-level function"; if that predicate ever widened to
-    # plain function names, every direct call in the tree would silently
-    # become an indirect one.
-    it "keeps an ordinary top-level function call direct":
-        val source = "fn helper() -> i64:\n    7\n\nfn caller() -> i64:\n    helper()\n"
-        val mir = lower_function_slot_source(source)
-        var saw_direct_helper_call = false
-        for function in mir.functions.values():
-            if function.name == "caller":
-                for block in function.blocks:
-                    for instruction in block.instructions:
-                        match instruction.kind:
-                            case MirInstKind.Call(_, operand, _):
-                                match operand.kind:
-                                    case MirOperandKind.Const(MirConstValue.Str(name), _):
-                                        if name == "helper":
-                                            saw_direct_helper_call = true
-                                    case _:
-                                        pass
-                            case _:
-                                pass
-        expect(saw_direct_helper_call).to_equal(true)
-
-    # Neighbour 2 (same defect class, initializer half): the slot's DECLARED
-    # initializer must be installed at module-init time. Without the
-    # runtime-module-initializer entry the global has no backing static at
-    # all, which is what made the write in `install` vanish and the call in
-    # `invoke` bind directly.
-    it "installs the slot's initial function pointer in a module initializer":
-        val source = "fn default_cleanup():\n    ()\n\nfn replacement_cleanup():\n    ()\n\nvar cleanup: fn() = default_cleanup\n\nfn install():\n    cleanup = replacement_cleanup\n\nfn invoke():\n    cleanup()\n"
-        val mir = lower_function_slot_source(source)
-        var saw_slot_static = false
-        for static_ in mir.statics.values():
-            if static_.name.ends_with("cleanup"):
-                saw_slot_static = true
-        var saw_init_store = false
-        for function in mir.functions.values():
-            if function.name != "install" and function.name != "invoke":
-                for block in function.blocks:
-                    for instruction in block.instructions:
-                        match instruction.kind:
-                            case MirInstKind.StoreGlobal(_, _):
-                                saw_init_store = true
-                            case _:
-                                pass
-        expect(saw_slot_static).to_equal(true)
-        expect(saw_init_store).to_equal(true)

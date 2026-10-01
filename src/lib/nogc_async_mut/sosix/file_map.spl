@@ -1,0 +1,68 @@
+"""Host file mapping under the SOSIX vocabulary.
+
+Two DISTINCT operations, never one overloaded call:
+
+- `sosix_file_map` / `sosix_file_unmap` — ACTUAL access: map the bytes of a
+  file region so the caller can read (or, with `readonly: false`, write) them
+  through the returned address. POSIX hosts use `mmap(2)`; Windows uses
+  `CreateFileMapping` + `MapViewOfFile` (unmap: `UnmapViewOfFile`). The
+  runtime owns the bounds contract: 0 on any failure, `size > 0`,
+  `offset >= 0`, `offset + size` must not overflow and must lie inside the
+  file, read-only versus read-write mapping selected by `readonly`.
+- `sosix_file_map_prefetch` — CACHING: a startup warm-up that asks the host to
+  pull a file region into its page cache and releases the mapping again. On
+  POSIX this is `mmap` + `madvise(WILLNEED)` + `munmap`, composed here from the
+  actual-access primitives. On Windows it is a NO-OP that reports success
+  without mapping anything: the page cache there is not steerable through a
+  transient view, and a startup hint must never fail a startup.
+
+This is the only host-mapping path in Simple product code. The raw `rt_mmap`
+family lives in `std.nogc_sync_mut.sffi.fs` and is not to be imported anywhere
+else; `std.nogc_sync_mut.io.file_ops` no longer carries `file_mmap`.
+
+Capability policy: the Rust runtime's `rt_mmap` consults the sandbox
+(`READ_FILE` / `WRITE_FILE` capabilities) and returns 0 when denied. The core-C
+runtime has no sandbox and this facade adds no policy hook; a denied mapping is
+indistinguishable from a failed one at this seam.
+"""
+
+use std.nogc_sync_mut.io_runtime.{platform_name, file_exists}
+use std.nogc_sync_mut.sffi.fs.{file_mmap_raw, file_munmap_raw, file_madvise_raw}
+
+pub val SOSIX_FILE_MAP_ADVICE_WILLNEED: i64 = 3
+
+pub fn sosix_file_map(path: text, size: i64, offset: i64, readonly: bool) -> i64:
+    """ACTUAL access: map `size` bytes of `path` at `offset`; address, or 0 on failure.
+
+    Arguments that can never name a mappable region (empty or missing path,
+    non-positive size, negative offset) are refused here so the 0 contract
+    holds without a raw call; everything else is the runtime's bounds contract.
+    """
+    if path == "" or size <= 0 or offset < 0 or not file_exists(path):
+        return 0
+    file_mmap_raw(path, size, offset, if readonly: 1 else: 0)
+
+pub fn sosix_file_unmap(addr: i64, size: i64) -> bool:
+    """Release a mapping returned by `sosix_file_map`."""
+    if addr <= 0 or size <= 0:
+        return false
+    file_munmap_raw(addr, size)
+
+pub fn sosix_file_map_prefetch(path: text, size: i64, offset: i64) -> bool:
+    """CACHING: warm the host page cache for a file region; true on success.
+
+    Windows: no-op, always true, nothing is mapped. POSIX: read-only map,
+    `madvise(WILLNEED)`, unmap; false when the region cannot be mapped or
+    advised.
+    """
+    if platform_name() == "windows":
+        return true
+    val addr = sosix_file_map(path, size, offset, true)
+    if addr <= 0:
+        return false
+    val advised = file_madvise_raw(addr, size, SOSIX_FILE_MAP_ADVICE_WILLNEED)
+    val released = file_munmap_raw(addr, size)
+    advised and released
+
+export SOSIX_FILE_MAP_ADVICE_WILLNEED
+export sosix_file_map, sosix_file_unmap, sosix_file_map_prefetch

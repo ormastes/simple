@@ -1,10 +1,18 @@
 # Native thread_spawn_with_args ABI segfault
 
+## Closed 2026-09-13 — Recorded fixed and guarded by a regression check
+
+- **inferred** The Status line reads `fixed and guarded by` a named regression guard.
+- **measured** Both referenced paths still exist (path scan: 2 referenced, 0 missing), so the guard was not later deleted.
+- **measured** The native lane cannot be re-run here: `bin/simple compile --native` fails with `ld: cannot find -lsimple_runtime` / `ld: cannot find -lc` on this Windows host.
+- **inferred** Closing on the recorded fix plus surviving guard.
+
+
 Date: 2026-06-06
 
 ## Summary
 
-Status: fixed and guarded by
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 `scripts/check/check-thread-spawn-with-args-native.shs`.
 
 Native binaries that call `thread_spawn_with_args` now compile and run under the

@@ -1,0 +1,73 @@
+# @cover src/lib/common/ui/render_opt/retained_damage_plan.spl 95%
+# @tag: unit, ui, render_perf, render_opt, retained, damage_plan, 8k
+
+use std.spec
+use common.ui.draw_ir.{DrawIrCommand, draw_ir_rect, draw_ir_text}
+use common.ui.render_opt.draw_ir_delta.DrawIrDeltaResult
+use common.ui.render_opt.retained_draw_ir_frame.RetainedDrawIrFrame
+use common.ui.render_opt.damage_tiles.DirtyTilePyramid
+use common.ui.render_opt.damage_plan.{
+    DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL
+}
+use common.ui.render_opt.retained_damage_plan.retained_damage_plan
+
+fn delta(indices: [i64], changed: [DrawIrCommand], total: i64) -> DrawIrDeltaResult:
+    DrawIrDeltaResult(
+        changed_indices: indices, changed_commands: changed,
+        built_count: indices.len(), reused_count: total - indices.len(),
+        total_count: total)
+
+fn pyramid() -> DirtyTilePyramid:
+    DirtyTilePyramid.create(7680, 4320, [256, 64, 32], [256, 64, 32])
+
+describe "retained DrawIR receipt to shared damage plan":
+    it "marks old and new bounds at every scale and emits one exact CPU plan":
+        var frame = RetainedDrawIrFrame.create(7680, 4320)
+        frame.seed([draw_ir_rect("a", 0, 0, 32, 32, 0xFFFFFFFFu32)])
+        val receipt = frame.apply(delta(
+            [0], [draw_ir_rect("a", 128, 64, 32, 32, 0xFFFFFFFFu32)], 1))
+        val tiles = pyramid()
+        val planned = retained_damage_plan(tiles, receipt, 1, 64, 100)
+        assert_true(planned.accepted)
+        expect(planned.source_rect_count).to_equal(2)
+        expect(planned.marked_tile_count).to_equal(2)
+        # Both bounds share one 256px coarse tile, while the 64px CPU and
+        # 32px fine scales retain two distinct tiles.
+        expect(tiles.dirty_count(0)).to_equal(1)
+        expect(tiles.dirty_count(1)).to_equal(2)
+        expect(tiles.dirty_count(2)).to_equal(2)
+        expect(planned.plan.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(planned.plan.rects).to_equal(
+            [0, 0, 64, 64, 128, 64, 64, 64])
+
+    it "turns a settled frame into a zero-work plan in a fresh epoch":
+        var frame = RetainedDrawIrFrame.create(7680, 4320)
+        frame.seed([draw_ir_rect("a", 0, 0, 32, 32, 0xFFFFFFFFu32)])
+        val tiles = pyramid()
+        retained_damage_plan(tiles, frame.apply(delta(
+            [0], [draw_ir_rect("a", 128, 64, 32, 32, 0xFFFFFFFFu32)], 1)),
+            1, 64, 100)
+        val idle = retained_damage_plan(
+            tiles, frame.apply(delta([], [], 1)), 1, 64, 100)
+        expect(idle.plan.mode).to_equal(DAMAGE_PLAN_NONE)
+        expect(idle.marked_tile_count).to_equal(0)
+        expect(idle.source_rect_count).to_equal(0)
+
+    it "fails unbounded commands closed to a full 8K plan":
+        var frame = RetainedDrawIrFrame.create(7680, 4320)
+        frame.seed([draw_ir_rect("a", 0, 0, 32, 32, 0xFFFFFFFFu32)])
+        val receipt = frame.apply(delta(
+            [0], [draw_ir_text("a", 0, 0, "unknown metrics", 0xFFFFFFFFu32)], 1))
+        val planned = retained_damage_plan(pyramid(), receipt, 1, 64, 60)
+        expect(planned.plan.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(planned.plan.rects).to_equal([0, 0, 7680, 4320])
+
+    it "does not mutate tiles or authorize presentation for a rejected delta":
+        var frame = RetainedDrawIrFrame.create(7680, 4320)
+        frame.seed([draw_ir_rect("a", 0, 0, 32, 32, 0xFFFFFFFFu32)])
+        val rejected = frame.apply(delta(
+            [0], [draw_ir_rect("a", 1, 1, 32, 32, 0xFFFFFFFFu32)], 2))
+        val planned = retained_damage_plan(pyramid(), rejected, 1, 64, 100)
+        assert_false(planned.accepted)
+        expect(planned.plan.mode).to_equal(DAMAGE_PLAN_NONE)
+        expect(planned.marked_tile_count).to_equal(0)

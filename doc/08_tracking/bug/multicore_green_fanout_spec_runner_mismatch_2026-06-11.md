@@ -1,6 +1,15 @@
 # Multicore Green Fanout Spec Runner Mismatch - 2026-06-11
 
-Status: RESOLVED
+## Closed 2026-09-13 — already RESOLVED in-entry (spec/runner contract, not a runtime defect)
+
+- **inferred** Entry status: `RESOLVED`. The defect was a mismatch between the fanout spec's
+  expectations and the test runner's reporting contract, both since reworked.
+- **measured** The current pure-Simple runner emits the structured
+  `SPEC FILE VERDICT: ... declared>=1 executed=N passed=N failed=N dropped=N timeout=N`
+  line that this class of mismatch was resolved onto (observed on this host).
+
+
+Status: closed 2026-09-13 (was: Status: RESOLVED)
 
 ## Summary
 

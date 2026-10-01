@@ -1,23 +1,74 @@
 use app.ui.detect.{detect_gui_backend}
-use app.io.cli_ops.{cli_current_exe_path}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.log.{error}
+
+# Bootstrap seed interpreter, used only when nothing better is on disk. Kept in
+# sync with the `SIMPLE_BINARY` -> `bin/simple` -> seed order that
+# `src/app/ui/build.spl:229 _find_simple_binary()` already implements; that one
+# is private to build.spl and importing it here would drag the 875-file
+# src/app/ui/main.spl closure into `simple ui`, so the small order is repeated
+# rather than shared.
+val _SEED_SIMPLE_BINARY = "src/compiler_rust/target/bootstrap/simple"
+
+# Resolve the Simple interpreter used to spawn a UI backend entry script.
+#
+# runtime_need:       read SIMPLE_BINARY, probe candidate interpreter paths
+# facade_checked:     std.nogc_sync_mut.io.env_ops.env_get (already imported),
+#                     std.nogc_sync_mut.io.file_ops.file_exists
+# chosen_path:        reuse-facade
+# rejected_shortcuts: (a) a current-executable accessor — none exists; the
+#                     nearest facade, std.io_runtime.get_args / app.io.cli_ops
+#                     .cli_get_args, yields the SCRIPT path at index 0 under
+#                     `simple run foo.spl ...` (measured 2026-09-06), not the
+#                     interpreter, so argv[0] would spawn a `.spl` file as a
+#                     program. (b) adding a raw `rt_*` extern for the executable
+#                     path — a runtime-boundary change this lane does not own.
+#                     (c) validating a candidate with a `--version` spawn as
+#                     build.spl does — a dead binary still answers --version
+#                     (see .claude/rules/vcs.md, stage-binary guard), so it
+#                     discriminates nothing and costs a process per UI launch.
+# ponytail: once a real current-executable facade lands (std.io_runtime), prefer
+# it over the bin/simple probe so a UI backend is always spawned by the very
+# interpreter that is running this code.
+fn _simple_binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY")
+    if env_bin != "":
+        return env_bin
+    val is_win = file_exists("bin/simple.exe")
+    if is_win:
+        return "bin/simple.exe"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    _SEED_SIMPLE_BINARY
 
 pub fn ui_backend_binary_for_runtime(simple_bin: text) -> text:
-    val slash = simple_bin.last_index_of("/")
-    val backslash = simple_bin.last_index_of("\\")
+    val slash = simple_bin.last_index_of("/") ?? -1
+    val backslash = simple_bin.last_index_of("\\") ?? -1
     val separator = if slash > backslash: slash else: backslash
     val suffix = if simple_bin.ends_with(".exe"): ".exe" else: ""
     if separator < 0:
         return "simple_ui_backend" + suffix
     simple_bin.substring(0, separator + 1) + "simple_ui_backend" + suffix
 
-fn _require_ui_backend_binary() -> text:
-    val current_exe = cli_current_exe_path()
-    if current_exe == "":
-        error("ui.backend", "cannot resolve the installed Simple executable")
-        return ""
-    ui_backend_binary_for_runtime(current_exe)
+fn _backend_entry_path(backend: text) -> text:
+    if backend == "tauri":
+        return "src/app/ui/backend_entry_tauri.spl"
+    if backend == "electron":
+        return "src/app/ui/backend_entry_electron.spl"
+    if backend == "browser":
+        return "src/app/ui/backend_entry_browser.spl"
+    if backend == "web":
+        return "src/app/ui/backend_entry_web.spl"
+    if backend == "tui_web":
+        return "src/app/ui/backend_entry_tui_web.spl"
+    if backend == "headless" or backend == "none":
+        return "src/app/ui/backend_entry_headless.spl"
+    if backend == "cli":
+        return "src/app/ui/backend_entry_cli.spl"
+    if backend == "tui_shared_wm":
+        return "src/app/ui/backend_entry_tui_shared_wm.spl"
+    "src/app/ui/backend_entry_tui.spl"
 
 fn _print_child_output(stdout: text, stderr: text):
     if stdout.len() > 0:
@@ -27,11 +78,11 @@ fn _print_child_output(stdout: text, stderr: text):
 
 pub fn run_ui_backend_dyn(backend: text, file_path: text, port: i32, access_db_path: text) -> i64:
     val resolved = if backend == "gui" or backend == "desktop" or backend == "auto": detect_gui_backend() else: backend
-    val backend_bin = _require_ui_backend_binary()
-    if backend_bin == "": return 1
-    val result = process_run(backend_bin, [
-        resolved,
-        file_path,
+    val simple_bin = _simple_binary()
+    val entry_path = _backend_entry_path(resolved)
+    val result = process_run(simple_bin, [
+        "run", entry_path,
+        "--file", file_path,
         "--port", "{port}",
         "--ui-access-db", access_db_path
     ])
@@ -39,24 +90,25 @@ pub fn run_ui_backend_dyn(backend: text, file_path: text, port: i32, access_db_p
     result.2
 
 pub fn run_ui_cli_backend_dyn(file_path: text, port: i32, access_db_path: text, sub_args: [text]) -> i64:
-    val backend_bin = _require_ui_backend_binary()
-    if backend_bin == "": return 1
+    val simple_bin = _simple_binary()
     var args: [text] = [
-        "cli", file_path,
-        "--ui-access-db", access_db_path
+        "run", "src/app/ui/backend_entry_cli.spl",
+        "--file", file_path,
+        "--port", "{port}",
+        "--ui-access-db", access_db_path,
+        "--"
     ]
     for arg in sub_args:
         args = args.push(arg)
-    val result = process_run(backend_bin, args)
+    val result = process_run(simple_bin, args)
     _print_child_output(result.0, result.1)
     result.2
 
 pub fn run_ui_render_dyn(render_args: [text]) -> i64:
-    val backend_bin = _require_ui_backend_binary()
-    if backend_bin == "": return 1
-    var args: [text] = []
+    val simple_bin = _simple_binary()
+    var args: [text] = ["run", "src/app/ui/backend_entry_render.spl"]
     for arg in render_args:
         args = args.push(arg)
-    val result = process_run(backend_bin, args)
+    val result = process_run(simple_bin, args)
     _print_child_output(result.0, result.1)
     result.2

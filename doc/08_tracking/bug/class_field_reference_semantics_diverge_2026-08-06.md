@@ -1,4 +1,8 @@
 # Class reference semantics diverge: interpreter value-copies class fields; JIT crashes on optional class field
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-06
 - Status: OPEN (P1)
@@ -160,3 +164,4 @@ pure-Simple source without first landing a self-hosted binary (a separate,
 much larger undertaking, and explicitly not attempted here per "no bootstrap
 unless essential"). Leaving Status as blocked/investigated rather than
 claiming a fix.
+

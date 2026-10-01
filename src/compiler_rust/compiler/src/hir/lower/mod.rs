@@ -2,7 +2,7 @@ mod context;
 pub mod deprecation_warning;
 mod error;
 pub(crate) mod expr;
-mod import_loader;
+pub(crate) mod import_loader;
 pub mod lenient_global_diag;
 mod lowerer;
 mod memory_check;
@@ -20,6 +20,7 @@ pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollecto
 pub use lowerer::Lowerer;
 pub use module_lowering::module_with_hoisted_defs;
 pub(crate) use module_lowering::dynamic_module_initializer_name;
+pub(crate) use module_lowering::block_uses_self;
 
 use super::lifetime::LifetimeViolation;
 use super::types::HirModule;
@@ -212,6 +213,14 @@ pub fn lower_with_context_lenient_project_hint_and_duplicate_structs(
     lowerer.set_lenient_types(true);
     lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(duplicate_struct_defs));
     lowerer.lower_module(module)
+}
+
+/// Cached lookup for the `SIMPLE_TRACE_FIELD_GET` debug-trace gate.
+/// Reads the environment variable once per process instead of on every
+/// ANY-typed field access / pattern binding (hot path in HIR lowering).
+pub(crate) fn trace_field_get_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok())
 }
 
 #[cfg(test)]

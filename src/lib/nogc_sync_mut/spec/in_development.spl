@@ -1,0 +1,286 @@
+"""
+# In-development tag — mark a spec as work-in-progress and EXPECTED TO FAIL
+
+@tag:stdlib
+@tag:testing
+
+## What this is
+
+A spec file whose header carries the comment
+
+    # @tag:in-development
+
+is declared WORK IN PROGRESS. It is expected to fail. It is not a passing
+test, and it is emphatically not a silent skip.
+
+## Why the tag spelling is `@tag:in-development`
+
+It reuses the `@tag:<name>` source-comment convention that is already the
+only tag channel in this tree (censused 2026-08-23: 57 distinct names,
+1022 occurrences — `api`, `stdlib`, `system`, `gpu`, ...). Multi-word tag
+names are ALREADY hyphenated in that census (`back-compat`,
+`api-individual`, `api-grouped`, `evidence-source-contract`,
+`linux-hosted-wm`), so `in-development` is the conventional spelling and
+`in_development` would be the deviation.
+
+Deliberately NOT reused, and why:
+
+  - `pending` — `std.spec.pending()` already means "this example is a
+    placeholder that ran nothing". The runner counts it on a SEPARATE
+    channel from skips (`count_real_skips` in test_runner_single.spl) and
+    the zero-executed greenwash guard exists precisely to stop a file of
+    pending() reading as green. In-development is the opposite shape: the
+    test is WRITTEN and RUNS, it just does not pass yet.
+  - `skip` — `skip()`/`skip_it()` mean "this environment cannot run it"
+    (no GPU, wrong OS). That is a capability statement about the HOST.
+    In-development is a statement about the CODE UNDER TEST.
+  - `wip` — no occurrences in the tree; inventing an abbreviation when the
+    census shows the convention is spelled-out lowercase words would be a
+    parallel scheme.
+
+## Semantics (decided explicitly — see the design record)
+
+| invocation | tagged spec FAILS | tagged spec PASSES |
+|---|---|---|
+| whole-suite (`simple test`) | NOT a suite failure. Counted and printed as an in-development skip. | Reported loudly as an UNEXPECTED PASS: it is ready to be promoted. |
+| explicit path (`simple test path/to/x_spec.spl`) | runs and FAILS honestly, normal red, normal exit code | runs and passes, plus an advisory that the tag can now come off |
+
+Two consequences are deliberate and are the whole point:
+
+1. **"Skip" here means skipped from the FAILURE VERDICT, not skipped from
+   EXECUTION.** The file is still run. A file that is never executed can
+   never be observed to have started passing, so a not-run design makes
+   requirement (4) — report the unexpected pass — unimplementable, and
+   in-development tests would rot forever. Running-and-neutralising costs
+   the suite the test's runtime and buys back the promotion signal.
+2. **An in-development skip is never invisible.** It is printed per file
+   and totalled in the summary. An invisible skip is how debt disappears;
+   this module exists to make the debt countable.
+
+## API for other lanes
+
+This module is PURE (text in, verdict out) and declares no externs, so it
+adds no direct `rt_*` call site to the ratchet. Callers that have a path
+rather than a source do their own read and hand the text in.
+
+Statistics / tag-listing tools should call `spec_tags(source)` and
+`source_is_in_development(source)` rather than re-grepping for `@tag:`,
+and should recognise the emitted lines by the `IN_DEVELOPMENT_*_MARKER`
+constants rather than by matching prose.
+
+    use std.spec.in_development.{
+        IN_DEVELOPMENT_TAG, spec_tags, source_has_tag,
+        source_is_in_development, in_development_explicitly_targeted,
+        InDevelopmentOutcome, classify_in_development,
+        IN_DEVELOPMENT_SKIP_MARKER, IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER,
+        in_development_skip_line, in_development_unexpected_pass_line,
+        in_development_explicit_line, in_development_summary_line
+    }
+"""
+
+# The canonical tag name. Every producer and consumer spells it via this
+# constant so the string exists once.
+val IN_DEVELOPMENT_TAG: text = "in-development"
+
+# The annotation prefix shared with every other `@tag:` in the tree.
+val TAG_PREFIX: text = "@tag:"
+
+# Line markers. Machine-readable, stable, and grep-anchorable: the sibling
+# statistics lane keys off these, NOT off the surrounding prose.
+val IN_DEVELOPMENT_SKIP_MARKER: text = "IN-DEVELOPMENT SKIP"
+val IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER: text = "IN-DEVELOPMENT UNEXPECTED PASS"
+val IN_DEVELOPMENT_EXPLICIT_MARKER: text = "IN-DEVELOPMENT EXPLICIT"
+val IN_DEVELOPMENT_SUMMARY_MARKER: text = "In-development:"
+
+# ================================================================
+# TAG EXTRACTION
+# ================================================================
+
+fn _is_tag_char(c: i64) -> bool:
+    """Characters that may appear in a tag name: [A-Za-z0-9_-]."""
+    if c >= 97 and c <= 122:
+        return true
+    if c >= 65 and c <= 90:
+        return true
+    if c >= 48 and c <= 57:
+        return true
+    if c == 95:
+        return true
+    if c == 45:
+        return true
+    false
+
+fn spec_tags(source: text) -> [text]:
+    """Extract every `@tag:<name>` occurring in `source`, in order, with
+    duplicates removed.
+
+    This is the CANONICAL extractor. Tools that want the tag set of a spec
+    call this rather than re-implementing a grep, so that a change to the
+    tag grammar lands in exactly one place.
+
+    Scans raw text on purpose: `@tag:` appears both in `#` line comments
+    and inside `\"\"\"` docstring headers (see engine_probe.spl), and both
+    are legitimate tag sites in this tree.
+    """
+    var out: [text] = []
+    # contains_key + bracket assign only: Dict.len()/.get() are unreliable
+    # under native codegen (doc/07_guide/language/dict_native_pitfalls.md).
+    var seen: dict<text, bool> = {}
+    val n = source.len()
+    val plen = TAG_PREFIX.len()
+    var i = 0
+    while i + plen <= n:
+        if source.char_code_at(i) == 64 and source.slice(i, i + plen) == TAG_PREFIX:
+            var j = i + plen
+            while j < n and _is_tag_char(source.char_code_at(j)):
+                j = j + 1
+            if j > i + plen:
+                val name = source.slice(i + plen, j)
+                if not seen.contains_key(name):
+                    seen[name] = true
+                    out.push(name)
+            i = j
+        else:
+            i = i + 1
+    out
+
+fn source_has_tag(source: text, tag: text) -> bool:
+    """True when `source` carries `@tag:<tag>`.
+
+    Exact-name match, not a substring match: `@tag:in-development-notes`
+    must NOT satisfy a query for `in-development`.
+    """
+    for t in spec_tags(source):
+        if t == tag:
+            return true
+    false
+
+fn source_is_in_development(source: text) -> bool:
+    """True when a spec's SOURCE declares `# @tag:in-development`."""
+    source_has_tag(source, IN_DEVELOPMENT_TAG)
+
+# ================================================================
+# EXPLICIT-PATH TARGETING
+# ================================================================
+
+fn _basename_matches(file_path: text, requested: text) -> bool:
+    if file_path == requested:
+        return true
+    # `test/x_spec.spl` requested as `./test/x_spec.spl`, or the file given
+    # as an absolute path while the request was repo-relative (or vice
+    # versa). Suffix match on a FULL path component only — never a bare
+    # substring, which would make `a/b_spec.spl` match `b_spec.spl` inside
+    # an unrelated directory only by accident of naming.
+    if file_path.ends_with("/" + requested):
+        return true
+    if requested.ends_with("/" + file_path):
+        return true
+    false
+
+fn in_development_explicitly_targeted(
+    file_path: text,
+    path_explicit: bool,
+    requested_paths: [text]
+) -> bool:
+    """True when this exact spec FILE was named on the command line.
+
+    Reuses `TestOptions.path_explicit` + `TestOptions.paths`, which already
+    exist — no new option field, and nothing in a sibling lane's struct had
+    to change.
+
+    A DIRECTORY target does not count as explicit for the files beneath it:
+    `simple test test/01_unit` is a sweep, and a sweep must get the
+    whole-suite (neutralised) semantics. Only naming the file itself opts
+    into the honest red.
+    """
+    if not path_explicit:
+        return false
+    for r in requested_paths:
+        if r != "" and _basename_matches(file_path, r):
+            return true
+    false
+
+# ================================================================
+# OUTCOME CLASSIFICATION
+# ================================================================
+
+enum InDevelopmentOutcome:
+    NotInDevelopment      # no tag — the runner's ordinary rules apply
+    ExpectedFailure       # tagged and failed: neutralised, counted, printed
+    UnexpectedPass        # tagged and passed: reported loudly, ready to promote
+    ExplicitRun           # tagged but named on the command line: honest verdict
+
+fn classify_in_development(
+    is_tagged: bool,
+    explicitly_targeted: bool,
+    failed: i64,
+    passed: i64,
+    errored: bool
+) -> InDevelopmentOutcome:
+    """The single classifier. Both the per-file and the summary surfaces
+    route through this rather than re-deriving the rule, for the same
+    reason `test_file_result_outcome_class` exists in the runner types:
+    two spellings of one rule is how the two surfaces come to disagree.
+
+    `errored` folds in `timed_out` and a non-empty `error`: a WIP spec that
+    crashes or times out is still just failing, and must not escape through
+    the error channel into a suite-level red.
+    """
+    if not is_tagged:
+        return InDevelopmentOutcome.NotInDevelopment
+    if explicitly_targeted:
+        return InDevelopmentOutcome.ExplicitRun
+    if failed > 0 or errored:
+        return InDevelopmentOutcome.ExpectedFailure
+    if passed > 0:
+        return InDevelopmentOutcome.UnexpectedPass
+    # Tagged, nothing failed, nothing passed: the file executed no example
+    # at all. That is NOT a promotion signal — treating it as one would let
+    # an empty WIP file announce itself as ready. It is the expected
+    # not-working-yet state.
+    InDevelopmentOutcome.ExpectedFailure
+
+# ================================================================
+# REPORT LINES
+# ================================================================
+
+fn in_development_skip_line(path: text, expected_failures: i64) -> text:
+    """Per-file line for a tagged spec that failed as expected."""
+    "{IN_DEVELOPMENT_SKIP_MARKER} {path} ({expected_failures} expected failure(s); @tag:{IN_DEVELOPMENT_TAG})"
+
+fn in_development_unexpected_pass_line(path: text, passed: i64) -> text:
+    """Per-file line for a tagged spec that PASSED.
+
+    Loud on purpose. This is good news that must not be silent: the test is
+    ready to be promoted, and the action is concrete (delete the tag), so
+    the line says so rather than leaving the reader to infer it.
+    """
+    "{IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER} {path} ({passed} example(s) passed) — ready to promote: remove `# @tag:{IN_DEVELOPMENT_TAG}`"
+
+fn in_development_explicit_line(path: text) -> text:
+    """Advisory printed when a tagged spec is run by explicit path.
+
+    It runs and reports honestly; this line only explains why a red here is
+    not the same red the suite would have shown.
+    """
+    "{IN_DEVELOPMENT_EXPLICIT_MARKER} {path} — `@tag:{IN_DEVELOPMENT_TAG}`; explicit-path run reports the honest verdict (the suite would neutralise it)"
+
+fn in_development_summary_line(skipped: i64, unexpected_passes: i64) -> text:
+    """The summary row. Printed whenever EITHER count is non-zero.
+
+    Never hidden behind a verbose flag: an in-development test that nobody
+    can see the count of is exactly the invisible debt this feature exists
+    to prevent.
+    """
+    if unexpected_passes > 0:
+        return "{IN_DEVELOPMENT_SUMMARY_MARKER} {skipped} skipped (expected to fail), {unexpected_passes} UNEXPECTED PASS (ready to promote)"
+    "{IN_DEVELOPMENT_SUMMARY_MARKER} {skipped} skipped (expected to fail)"
+
+export IN_DEVELOPMENT_TAG, TAG_PREFIX
+export IN_DEVELOPMENT_SKIP_MARKER, IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER
+export IN_DEVELOPMENT_EXPLICIT_MARKER, IN_DEVELOPMENT_SUMMARY_MARKER
+export spec_tags, source_has_tag, source_is_in_development
+export in_development_explicitly_targeted
+export InDevelopmentOutcome, classify_in_development
+export in_development_skip_line, in_development_unexpected_pass_line
+export in_development_explicit_line, in_development_summary_line
