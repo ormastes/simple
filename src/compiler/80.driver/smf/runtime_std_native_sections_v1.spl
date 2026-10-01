@@ -32,7 +32,8 @@ use std.nogc_sync_mut.io.file_ops.{file_publish_noreplace_raw,
     secure_temp_dir_raw,
     file_read_regular_no_follow_bounded,
     file_read_regular_no_follow_bounded_bytes}
-use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove,
+    dir_is_real_no_follow}
 use std.nogc_sync_mut.io_runtime.{file_write_exact}
 use std.common.crypto.sha256.{sha256_u8_hex}
 
@@ -329,20 +330,68 @@ fn runtime_std_mir_body_matches_module_v1(
     runtime_std_mir_body_validate_v1(payload, module.name,
         source_identity, source_digest, current.digest)
 
+fn _runtime_std_native_ancestors_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//"):
+        return false
+    val parts = normalized.split("/")
+    if parts.len() == 0: return false
+    var current = "."
+    var index = 0
+    if normalized.starts_with("/"):
+        current = "/"
+        index = 1
+    elif parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    if not dir_is_real_no_follow(current): return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
+fn _runtime_std_native_cas_dirs_real_v1(root: text, digest: text) -> bool:
+    if not _runtime_std_native_ancestors_real_v1(root): return false
+    val objects = "{root}/objects"
+    if not dir_create_all(objects) or
+            not _runtime_std_native_ancestors_real_v1(objects): return false
+    val sha_root = "{objects}/sha256"
+    if not dir_create_all(sha_root) or
+            not _runtime_std_native_ancestors_real_v1(sha_root): return false
+    val shard = "{sha_root}/{digest.substring(0, 2)}"
+    if not dir_create_all(shard) or
+            not _runtime_std_native_ancestors_real_v1(shard): return false
+    true
+
 fn _runtime_std_native_publish_text_v1(
     root: text, name: text, content: text, max_bytes: i64
 ) -> Result<text, text>:
     if content == "" or text_byte_len(content) > max_bytes:
         return Err("runtime-std-native-file-size-invalid")
+    if not _runtime_std_native_ancestors_real_v1(root):
+        return Err("runtime-std-native-output-root-not-real")
     val path = "{root}/{name}"
     val stage_dir = secure_temp_dir_raw(root, "simple-runtime-std-section")
-    if stage_dir == "": return Err("runtime-std-native-stage-unavailable")
+    if stage_dir == "" or
+            not _runtime_std_native_ancestors_real_v1(stage_dir):
+        return Err("runtime-std-native-stage-unavailable")
     val staged = "{stage_dir}/payload"
-    if not file_write_exact(staged, content) or
+    if not _runtime_std_native_ancestors_real_v1(root) or
+            not file_write_exact(staged, content) or
             file_publish_noreplace_raw(staged, path) != 1:
         dir_remove(stage_dir, true)
         return Err("runtime-std-native-file-publish-failed:{name}")
     dir_remove(stage_dir, true)
+    if not _runtime_std_native_ancestors_real_v1(root):
+        return Err("runtime-std-native-output-root-changed")
     val readback = file_read_regular_no_follow_bounded(
         path, max_bytes)
     if readback.is_err() or readback.unwrap() != content:
@@ -371,6 +420,12 @@ fn _runtime_std_native_object_row_v1(
     if frozen_body.is_err() or frozen_body.unwrap().digest != member.mir_body.digest or
             frozen_body.unwrap().content != member.mir_body.content:
         return Err("runtime-std-native-mir-body-changed")
+    val object_path = capsule.object_path.replace("\\", "/")
+    val object_slash = object_path.rfind("/")
+    if object_slash < 1 or
+            not _runtime_std_native_ancestors_real_v1(
+                object_path.substring(0, object_slash)):
+        return Err("runtime-std-native-object-parent-not-real")
     val loaded = file_read_regular_no_follow_bounded_bytes(
         capsule.object_path, 128 * 1024 * 1024)
     if loaded.is_err(): return Err("runtime-std-native-object-unreadable")
@@ -384,7 +439,13 @@ fn _runtime_std_native_object_row_v1(
         capsule.object_path + ".capsule-receipt", 4096)
     if receipt.is_err() or receipt.unwrap() != expected_receipt:
         return Err("runtime-std-native-capsule-receipt-invalid")
+    if not _runtime_std_native_ancestors_real_v1(
+            object_path.substring(0, object_slash)):
+        return Err("runtime-std-native-object-parent-changed")
+    if not _runtime_std_native_cas_dirs_real_v1(object_store_root, digest):
+        return Err("runtime-std-native-object-cas-directory-not-real")
     if binary_object_cas_put(object_store_root, bytes) != digest or
+            not _runtime_std_native_cas_dirs_real_v1(object_store_root, digest) or
             not binary_object_cas_verify(object_store_root, digest):
         return Err("runtime-std-native-object-cas-failed")
     Ok(_runtime_std_mir_frame_v1(member.source_identity) +
@@ -414,6 +475,10 @@ fn runtime_std_native_sections_emit_v1(
         source_identities, source_digests)
     val action = runtime_std_build_action_v1(authority, package_identity)
     if artifact_root == "" or object_store_root == "" or closure == "" or
+            (package_identity != "simple.runtime" and
+             package_identity != "simple.std") or
+            not _runtime_std_native_ancestors_real_v1(artifact_root) or
+            not _runtime_std_native_ancestors_real_v1(object_store_root) or
             not builder_digest_valid_v1(source_inventory_digest) or
             members.len() == 0 or members.len() != source_identities.len() or
             semantic_sections.len() != 7 or action == nil:
@@ -437,7 +502,8 @@ fn runtime_std_native_sections_emit_v1(
                 not builder_digest_valid_v1(section.digest):
             return Err("runtime-std-native-semantic-section-invalid")
     val output_root = "{artifact_root}/{package_identity}"
-    if not dir_create_all(output_root):
+    if not dir_create_all(output_root) or
+            not _runtime_std_native_ancestors_real_v1(output_root):
         return Err("runtime-std-native-artifact-root-unavailable")
     var mir_rows: [text] = ["simple-runtime-std-mir-section-v1"]
     var object_rows: [text] = ["simple-runtime-std-object-cas-section-v1"]
