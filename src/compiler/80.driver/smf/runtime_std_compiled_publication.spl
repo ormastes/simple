@@ -9,8 +9,15 @@ use compiler.driver.smf.runtime_std_package_set.{
     RuntimeStdPackageSetV1, RuntimeStdSectionContentV1,
     RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1,
     runtime_std_build_action_v1, runtime_std_action_digest_v1,
-    runtime_std_publish_set_v1
+    runtime_std_build_action_v2, runtime_std_action_digest_v2,
+    runtime_std_publish_set_v1, runtime_std_publish_set_v2
 }
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2}
+use compiler.driver.smf.runtime_std_native_outcomes_v2.{
+    runtime_std_native_outcomes_decode_v2,
+    RuntimeStdNativeOutcomeKindV2}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_verify}
 use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
 export use compiler.driver.smf.runtime_std_section_types_v1.{
     RuntimeStdCompiledSectionReceiptV1
@@ -46,6 +53,7 @@ struct RuntimeStdCompiledPackageReceiptV1:
     action_result: BuildActionResultV1
     action_receipt_path: text
     action_receipt_digest: text
+    native_budget: RuntimeStdNativeActionBudgetV2? = nil
 
 fn runtime_std_compiled_source_closure_digest_v1(
     identities: [text], digests: [text]
@@ -89,10 +97,16 @@ fn runtime_std_compiled_receipts_section_v1(
     receipt: RuntimeStdCompiledPackageReceiptV1,
     source_inventory_digest: text
 ) -> text:
-    val action_digest = runtime_std_action_digest_v1(
-        authority, receipt.package_identity)
+    val action_digest = if receipt.native_budget == nil:
+        runtime_std_action_digest_v1(authority, receipt.package_identity)
+    else:
+        runtime_std_action_digest_v2(authority, receipt.package_identity,
+            receipt.native_budget!)
     if action_digest == "": return ""
-    ["simple-runtime-std-compiled-receipts-v1",
+    val schema = if receipt.native_budget == nil:
+        "simple-runtime-std-compiled-receipts-v1"
+    else: "simple-runtime-std-compiled-receipts-v2"
+    [schema,
      "package={receipt.package_identity}",
      "source-closure={receipt.source_closure_digest}",
      "source-inventory={source_inventory_digest}",
@@ -106,15 +120,21 @@ fn runtime_std_compiled_action_receipt_v1(
     authority: RuntimeStdPackageAuthorityV1,
     receipt: RuntimeStdCompiledPackageReceiptV1
 ) -> text:
-    val action_digest = runtime_std_action_digest_v1(
-        authority, receipt.package_identity)
+    val action_digest = if receipt.native_budget == nil:
+        runtime_std_action_digest_v1(authority, receipt.package_identity)
+    else:
+        runtime_std_action_digest_v2(authority, receipt.package_identity,
+            receipt.native_budget!)
     if action_digest == "" or receipt.sections.len() != 10:
         return ""
     val success = if receipt.action_result.success: "1" else: "0"
     val cancelled = if receipt.action_result.cancelled: "1" else: "0"
     val diagnostics_digest = sha256_text(
         receipt.action_result.diagnostic_frames.join("\n"))
-    var lines = ["simple-runtime-std-native-action-v1",
+    val schema = if receipt.native_budget == nil:
+        "simple-runtime-std-native-action-v1"
+    else: "simple-runtime-std-native-action-v2"
+    var lines = [schema,
         "package={receipt.package_identity}",
         "action={action_digest}",
         "source-closure={receipt.source_closure_digest}",
@@ -128,6 +148,9 @@ fn runtime_std_compiled_action_receipt_v1(
         "restat={receipt.action_result.restat_identity}",
         "memory={receipt.action_result.memory_peak_bytes}",
         "diagnostics={diagnostics_digest}"]
+    if receipt.native_budget != nil:
+        lines = lines.push("manager-request={receipt.native_budget!.manager_request_digest}")
+        lines = lines.push("enforced-memory={receipt.native_budget!.enforced_process_limit_bytes}")
     for section in receipt.sections:
         lines = lines.push(
             "section={section.member_name}|{section.digest}|{section.byte_count}")
@@ -201,8 +224,11 @@ fn runtime_std_compiled_receipt_validate_v1(
                         digest, previous_dependency) <= 0):
             return "runtime-std-compiled-dependency-invalid"
         previous_dependency = digest
-    val action = runtime_std_build_action_v1(
-        authority, receipt.package_identity)
+    val action = if receipt.native_budget == nil:
+        runtime_std_build_action_v1(authority, receipt.package_identity)
+    else:
+        runtime_std_build_action_v2(authority, receipt.package_identity,
+            receipt.native_budget!)
     if action == nil or
             build_action_result_validate_v1(action!, receipt.action_result) != "ok" or
             not receipt.action_result.success or
@@ -299,6 +325,33 @@ fn runtime_std_compiled_package_admit_v1(
     if action_reason != "ok": return Err(action_reason)
     sections
 
+fn _runtime_std_compiled_outcomes_admit_v2(
+    cache_root: text, receipt: RuntimeStdCompiledPackageReceiptV1,
+    sections: [RuntimeStdSectionContentV1]
+) -> text:
+    if receipt.native_budget == nil: return "ok"
+    if sections.len() != 10 or
+            sections[7].member_name != "objects.smf":
+        return "runtime-std-native-v2-objects-missing"
+    val content = sections[7].content
+    val decoded = runtime_std_native_outcomes_decode_v2(content,
+        receipt.backend, receipt.target_triple,
+        receipt.source_identities, receipt.source_digests)
+    if decoded.is_err(): return decoded.unwrap_err()
+    if not receipt.action_result.diagnostic_frames.contains(
+            "verified-native-outcomes-digest=" + sha256_text(content)):
+        return "runtime-std-native-v2-outcomes-not-action-bound"
+    var code_objects = 0
+    for outcome in decoded.unwrap():
+        if outcome.kind == RuntimeStdNativeOutcomeKindV2.code_object:
+            if not binary_object_cas_verify(cache_root,
+                    outcome.object_digest):
+                return "runtime-std-native-v2-object-cas-invalid"
+            code_objects = code_objects + 1
+    if code_objects == 0:
+        return "runtime-std-native-v2-no-code-objects"
+    "ok"
+
 fn runtime_std_compiled_publish_v1(
     cache_root: text,
     artifact_root: text,
@@ -321,6 +374,20 @@ fn runtime_std_compiled_publish_v1(
         artifact_root, authority, expected_variant, source_inventory,
         expected_source_inventory_digest, std_receipt)
     if std_sections.is_err(): return Err(std_sections.unwrap_err())
+    if runtime_receipt.native_budget != nil or std_receipt.native_budget != nil:
+        if runtime_receipt.native_budget == nil or
+                std_receipt.native_budget == nil or
+                runtime_receipt.native_budget!.manager_request_digest !=
+                    std_receipt.native_budget!.manager_request_digest or
+                runtime_receipt.native_budget!.enforced_process_limit_bytes !=
+                    std_receipt.native_budget!.enforced_process_limit_bytes:
+            return Err("runtime-std-native-v2-manager-budget-mismatch")
+        val runtime_outcomes = _runtime_std_compiled_outcomes_admit_v2(
+            cache_root, runtime_receipt, runtime_sections.unwrap())
+        if runtime_outcomes != "ok": return Err(runtime_outcomes)
+        val std_outcomes = _runtime_std_compiled_outcomes_admit_v2(
+            cache_root, std_receipt, std_sections.unwrap())
+        if std_outcomes != "ok": return Err(std_outcomes)
     val runtime_input = RuntimeStdPackageInputV1(
         RUNTIME_PACKAGE_IDENTITY_V1, authority.runtime_abi_digest,
         runtime_receipt.dependency_interface_digests,
@@ -329,9 +396,15 @@ fn runtime_std_compiled_publish_v1(
         STD_PACKAGE_IDENTITY_V1, authority.std_abi_digest,
         std_receipt.dependency_interface_digests,
         std_sections.unwrap())
-    val published = runtime_std_publish_set_v1(
-        cache_root, authority, runtime_input, std_input,
-        runtime_receipt.action_result, std_receipt.action_result)
+    val published = if runtime_receipt.native_budget == nil:
+        runtime_std_publish_set_v1(cache_root, authority,
+            runtime_input, std_input,
+            runtime_receipt.action_result, std_receipt.action_result)
+    else:
+        runtime_std_publish_set_v2(cache_root, authority,
+            runtime_input, std_input,
+            runtime_receipt.action_result, std_receipt.action_result,
+            runtime_receipt.native_budget!)
     if not published.valid:
         return Err("runtime-std-compiled-publication-{published.reason}")
     Ok(published)

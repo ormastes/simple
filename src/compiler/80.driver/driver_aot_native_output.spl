@@ -55,9 +55,20 @@ use compiler.driver.driver_build.native_full_inventory_sources.{
 use compiler.driver.smf.runtime_std_native_sections_v1.{
     RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1,
     runtime_std_native_directory_chain_real_v1,
-    runtime_std_native_observed_output_digest_v1}
+    runtime_std_native_observed_output_digest_v1,
+    RuntimeStdNativeMemberV2,
+    runtime_std_native_observed_output_digest_v2}
 use compiler.driver.smf.runtime_std_package_set.{
-    RuntimeStdPackageAuthorityV1, runtime_std_build_action_v1}
+    RuntimeStdPackageAuthorityV1, runtime_std_build_action_v1,
+    runtime_std_build_action_v2}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2,
+    runtime_std_native_action_peak_admitted_v2}
+use compiler.driver.smf.runtime_std_native_outcomes_v2.{
+    RuntimeStdNativeOutcomeKindV2, RuntimeStdNativeOutcomeReceiptV2,
+    runtime_std_native_semantic_action_key_v2}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{
+    frontend_cfg_receipt_valid_v1}
 use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
 use compiler.driver.action_graph.persisted_graph.{
     PersistedBuildGraphV1, persisted_graph_digest_v1,
@@ -193,7 +204,7 @@ use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutco
     build_outcome_retain_diagnostics, build_outcome_count_diagnostic_lines,
     build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{cpu_count_checked}
@@ -3253,6 +3264,150 @@ pub fn driver_runtime_std_compile_native_action_v1(
         return Err("runtime/std native action was not successful")
     Ok(RuntimeStdNativeActionEmissionV1(members, output_digest, result))
 
+struct RuntimeStdNativeActionEmissionV2:
+    members: [RuntimeStdNativeMemberV2]
+    observed_output_digest: text
+    action_result: BuildActionResultV1
+
+fn _runtime_std_hir_emission_digest_v2(
+    ctx: CompileContext, source_identity: text,
+    source_digest: text, module_identity: text
+) -> text:
+    if not ctx.runtime_std_hir_emissions.has(source_identity): return ""
+    val emission = ctx.runtime_std_hir_emissions[source_identity]
+    if emission.source_identity != source_identity or
+            emission.source_digest != source_digest or
+            emission.module_identity != module_identity or
+            emission.semantic_payloads.len() != 7:
+        return ""
+    val names = ["debug.smf", "exports.smf", "generics.smf",
+        "hir-summaries.smf", "imports.smf", "initialization.smf",
+        "types.smf"]
+    var rows: [text] = ["simple-runtime-std-live-hir/v2",
+        "source={source_identity}", "digest={source_digest}",
+        "module={module_identity}"]
+    var index = 0
+    while index < 7:
+        val payload = emission.semantic_payloads[index]
+        if payload.member_name != names[index] or payload.content == "":
+            return ""
+        rows.push("{payload.member_name}|{sha256_text(payload.content)}")
+        index = index + 1
+    sha256_text(rows.join("\n") + "\n")
+
+# V2 claims the manager-budgeted action. The current producer admits only
+# code_object rows; a source with no emit-bearing MIR still fails closed until
+# live-HIR/cfg objectless classification is wired and qualified.
+pub fn driver_runtime_std_compile_native_action_v2(
+    ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
+    sources: NativeFullInventorySourcesV1, package_identity: text,
+    expected_index_digest: text, artifact_root: text,
+    object_store_root: text, target_cpu: text, expected_target: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> Result<RuntimeStdNativeActionEmissionV2, text>:
+    val expected_policy_digest = sha256_text(
+        "simple/runtime-std-membership-policy/v1\n" +
+        "index={expected_index_digest}\n" +
+        "producer={authority.compiler_digest}\n" +
+        "variant={authority.config_digest}\n" +
+        "snapshot={sources.snapshot_inventory_digest}\n" +
+        "source-inventory={sources.source_inventory_digest}\n" +
+        "membership={policy.membership_digest}")
+    if authority.target_triple != expected_target or
+            policy.policy_digest != expected_policy_digest or
+            not runtime_std_native_directory_chain_real_v1(object_store_root):
+        return Err("runtime/std native v2 target or object store invalid")
+    val action = runtime_std_build_action_v2(
+        authority, package_identity, budget)
+    if action == nil:
+        return Err("runtime/std native v2 package action unavailable")
+    var graph = PersistedBuildGraphV1("pending", "",
+        action!.snapshot_revision, [action!])
+    val generation = persisted_graph_digest_v1(graph)
+    if generation == "":
+        return Err("runtime/std native v2 action graph digest unavailable")
+    graph.generation = generation
+    if persisted_graph_validate_v1(graph) != "ok":
+        return Err("runtime/std native v2 action graph invalid")
+    val pool_budget = BuildPoolBudgetV1(action!.pool, 1,
+        action!.memory_budget_bytes)
+    val owner_token = sha256_text("runtime-std-native-action-owner-v2|" +
+        package_identity + "|" + generation + "|" +
+        getpid().to_text() + "|" + artifact_root)
+    val claim = coordinator_claim_v1(
+        coordinator_new_v1(graph, [pool_budget]), action!.action_id,
+        owner_token)
+    if not claim.claim.valid:
+        return Err("runtime/std native v2 action claim failed: " +
+            claim.claim.reason)
+    val compiled = driver_runtime_std_compile_native_members_v1(
+        ctx, policy, sources, package_identity, expected_index_digest,
+        artifact_root, target_cpu, expected_target)
+    if compiled.is_err(): return Err(compiled.unwrap_err())
+    if compiled.unwrap().len() == 0:
+        return Err("runtime/std native v2 package has no code objects")
+    var members: [RuntimeStdNativeMemberV2] = []
+    var source_identities: [text] = []
+    var source_digests: [text] = []
+    for member in compiled.unwrap():
+        if not ctx.runtime_std_cfg_decisions.has(member.source_identity):
+            return Err("runtime/std native v2 source cfg receipt missing")
+        val cfg = ctx.runtime_std_cfg_decisions[member.source_identity]
+        if not frontend_cfg_receipt_valid_v1(cfg,
+                member.source_identity, member.source_digest,
+                expected_target):
+            return Err("runtime/std native v2 source cfg receipt invalid")
+        val hir_digest = _runtime_std_hir_emission_digest_v2(ctx,
+            member.source_identity, member.source_digest,
+            member.mir_body.module_name)
+        if hir_digest == "":
+            return Err("runtime/std native v2 HIR evidence unavailable")
+        val bytes = file_read_regular_no_follow_bounded_bytes(
+            member.capsule.object_path, 128 * 1024 * 1024)
+        if bytes.is_err() or bytes.unwrap().len() < 4:
+            return Err("runtime/std native v2 object readback unavailable")
+        val key = runtime_std_native_semantic_action_key_v2(
+            RuntimeStdNativeOutcomeKindV2.code_object,
+            member.source_identity, member.source_digest,
+            expected_target, member.capsule.backend_name,
+            hir_digest, member.mir_body.digest, cfg.decision_digest)
+        val outcome = RuntimeStdNativeOutcomeReceiptV2(
+            RuntimeStdNativeOutcomeKindV2.code_object,
+            member.source_identity, member.source_digest,
+            expected_target, hir_digest, member.mir_body.digest,
+            cfg.decision_digest, key, sha256_u8_hex(bytes.unwrap()),
+            bytes.unwrap().len(),
+            sha256_text(member.capsule.capsule_identity))
+        members.push(RuntimeStdNativeMemberV2(outcome,
+            member.mir_body, Some(member.capsule)))
+        source_identities.push(member.source_identity)
+        source_digests.push(member.source_digest)
+    val observed = runtime_std_native_observed_output_digest_v2(
+        members, compiled.unwrap()[0].capsule.backend_name,
+        expected_target, source_identities, source_digests,
+        object_store_root)
+    if observed.is_err(): return Err(observed.unwrap_err())
+    val peak_kb = process_peak_rss_kb()
+    if peak_kb <= 0 or peak_kb > 9223372036854775 or
+            not runtime_std_native_action_peak_admitted_v2(
+                budget, peak_kb * 1024):
+        return Err("runtime/std native v2 measured memory unavailable or over budget")
+    val output_digest = observed.unwrap()
+    val complete = coordinator_complete_v1(claim.coordinator,
+        action!.action_id, owner_token, true, false,
+        action!.restat_identity,
+        ["verified-native-outcomes-digest=" + output_digest],
+        peak_kb * 1024)
+    if not complete.commit.accepted or
+            complete.coordinator.runtime.len() != 1 or
+            complete.coordinator.runtime[0].result == nil:
+        return Err("runtime/std native v2 action completion rejected")
+    val result = complete.coordinator.runtime[0].result!
+    if not result.success or result.cancelled:
+        return Err("runtime/std native v2 action was not successful")
+    Ok(RuntimeStdNativeActionEmissionV2(members, output_digest, result))
+
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
                             output_base: text, name: text, mir_module: MirModule,
                             storage_snapshot: FrozenStorageModuleSnapshotV1,
@@ -3421,5 +3576,7 @@ fn _finish_selected_module_compile(
             _aot_compile_failure(name, "backend result not Ok")
 
 export RuntimeStdNativeActionEmissionV1
+export RuntimeStdNativeActionEmissionV2
 export driver_runtime_std_compile_native_members_v1
 export driver_runtime_std_compile_native_action_v1
+export driver_runtime_std_compile_native_action_v2
