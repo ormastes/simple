@@ -1,0 +1,294 @@
+# Strict, frozen package labels for the complete SCV-selected cold index.
+# The checked-in policy authors labels; source paths only select an explicit
+# rule. This module performs no filesystem reads or project discovery.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1, NATIVE_FULL_INVENTORY_MAX_SOURCES_V1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
+}
+use compiler.driver.smf.runtime_std_package_membership_v1.{
+    RuntimeStdPackageMemberV1, RuntimeStdPackageMembershipV1,
+    runtime_std_package_membership_validate_v1
+}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.common.sdn.parser.{parse}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1,
+    compile_source_inventory_path_valid_v1
+}
+
+val COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1: text =
+    "src/package_ownership/simple.sdn"
+val COLD_PACKAGE_OWNERSHIP_MAX_MANIFEST_BYTES_V1: i64 = 65536
+val COLD_PACKAGE_OWNERSHIP_MAX_RULES_V1: i64 = 64
+val COLD_PACKAGE_OWNERSHIP_MAX_MANIFESTS_V1: i64 = 256
+
+struct ColdPackageOwnershipManifestV1:
+    source_identity: text
+    content: text
+
+struct ColdPackageOwnershipRuleV1:
+    source_root: text
+    package_identity: text
+    manifest_source_identity: text
+    manifest_project_name: text
+
+struct ColdPackageOwnershipMemberV1:
+    source_identity: text
+    source_digest: text
+    package_identity: text
+    manifest_source_identity: text
+    manifest_digest: text
+
+struct ColdPackageOwnershipCaptureV1:
+    policy_digest: text
+    membership: RuntimeStdPackageMembershipV1
+    members: [ColdPackageOwnershipMemberV1]
+    members_by_source: Dict<text, ColdPackageOwnershipMemberV1>
+
+fn _cold_package_identity_valid_v1(value: text) -> bool:
+    if value == "" or value.len() > 128:
+        return false
+    for ch in value:
+        if not ((ch >= "a" and ch <= "z") or
+                (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or
+                ch == "." or ch == "_" or ch == "-"):
+            return false
+    true
+
+fn _cold_package_root_valid_v1(value: text) -> bool:
+    if value == "" or value.len() > 256 or
+            value.starts_with("/") or value.ends_with("/") or
+            value.contains("\\") or value.contains("//") or
+            value.contains("\n") or value.contains("\r"):
+        return false
+    for part in value.split("/"):
+        if part == "" or part == "." or part == "..":
+            return false
+    value.starts_with("src/") or value.starts_with("examples/")
+
+fn _cold_package_project_name_v1(content: text) -> Result<text, text>:
+    match parse(content):
+        case Err(_): return Err("cold-package-manifest-sdn-invalid")
+        case Ok(root):
+            match root.get_path("project.name"):
+                case None: return Err("cold-package-manifest-name-missing")
+                case Some(name):
+                    val value = name.as_str() ?? ""
+                    if not _cold_package_identity_valid_v1(value):
+                        return Err("cold-package-manifest-name-invalid")
+                    return Ok(value)
+
+fn cold_package_ownership_rules_parse_v1(
+    policy_content: text
+) -> Result<[ColdPackageOwnershipRuleV1], text>:
+    if policy_content == "" or text_byte_len(policy_content) >
+            COLD_PACKAGE_OWNERSHIP_MAX_MANIFEST_BYTES_V1:
+        return Err("cold-package-policy-size-invalid")
+    match parse(policy_content):
+        case Err(_): return Err("cold-package-policy-sdn-invalid")
+        case Ok(root):
+            val policy_name = _cold_package_project_name_v1(policy_content)
+            if policy_name.is_err():
+                return Err("cold-package-policy-name-invalid")
+            if policy_name.unwrap() !=
+                    "simple-cold-package-ownership-policy":
+                return Err("cold-package-policy-name-invalid")
+            val schema = root.get_path("ownership_v1.schema")
+            if schema.is_none():
+                return Err("cold-package-policy-schema-invalid")
+            if (schema.unwrap().as_i64() ?? -1) != 1:
+                return Err("cold-package-policy-schema-invalid")
+            val maybe_rules = root.get_path("ownership_v1.rules")
+            if maybe_rules.is_none():
+                return Err("cold-package-policy-rules-missing")
+            val maybe_map = maybe_rules.unwrap().as_dict()
+            if maybe_map.is_none():
+                return Err("cold-package-policy-rules-invalid")
+            val rule_map = maybe_map.unwrap()
+            val keys = canonical_identity_sort_texts(rule_map.keys())
+            if keys.len() < 1 or keys.len() > COLD_PACKAGE_OWNERSHIP_MAX_RULES_V1:
+                return Err("cold-package-policy-rule-count-invalid")
+            var rules: [ColdPackageOwnershipRuleV1] = []
+            var seen_roots: Dict<text, bool> = {}
+            var seen_folded: Dict<text, bool> = {}
+            for key in keys:
+                if not _cold_package_identity_valid_v1(key):
+                    return Err("cold-package-policy-rule-key-invalid")
+                val row = rule_map[key].as_str() ?? ""
+                val fields = row.split("|")
+                if fields.len() != 4:
+                    return Err("cold-package-policy-rule-shape-invalid:{key}")
+                val source_root = fields[0]
+                val package_identity = fields[1]
+                val manifest_identity = fields[2]
+                val manifest_name = fields[3]
+                if not _cold_package_root_valid_v1(source_root) or
+                        not _cold_package_identity_valid_v1(package_identity) or
+                        seen_roots.has(source_root) or
+                        seen_folded.has(source_root.lower()) or
+                        ((manifest_identity == "") != (manifest_name == "")) or
+                        (manifest_identity != "" and
+                            (not compile_source_inventory_path_valid_v1(
+                                manifest_identity) or
+                            not manifest_identity.ends_with("/simple.sdn") or
+                            not _cold_package_identity_valid_v1(manifest_name))):
+                    return Err("cold-package-policy-rule-invalid:{key}")
+                seen_roots[source_root] = true
+                seen_folded[source_root.lower()] = true
+                rules = rules.push(ColdPackageOwnershipRuleV1(
+                    source_root, package_identity, manifest_identity,
+                    manifest_name))
+            Ok(rules)
+
+fn _cold_package_rule_for_source_v1(
+    source_identity: text, rules: [ColdPackageOwnershipRuleV1]
+) -> Result<ColdPackageOwnershipRuleV1, text>:
+    var selected = -1
+    var selected_len = -1
+    var index = 0
+    for rule in rules:
+        if source_identity.starts_with("{rule.source_root}/"):
+            if rule.source_root.len() == selected_len:
+                return Err("cold-package-source-ambiguous:{source_identity}")
+            if rule.source_root.len() > selected_len:
+                selected = index
+                selected_len = rule.source_root.len()
+        index = index + 1
+    if selected < 0:
+        return Err("cold-package-source-unowned:{source_identity}")
+    Ok(rules[selected])
+
+# Every supplied manifest and the policy are exact SCV records. The caller
+# supplies bytes from its admitted frozen snapshot; this owner never reopens a
+# source or consults an ambient project manifest.
+fn cold_package_ownership_capture_v1(
+    inventory: CompileSourceInventoryV1,
+    sources: NativeFullInventorySourcesV1,
+    policy_content: text,
+    manifests: [ColdPackageOwnershipManifestV1]
+) -> Result<ColdPackageOwnershipCaptureV1, text>:
+    if sources.source_count < 1 or
+            sources.source_count > NATIVE_FULL_INVENTORY_MAX_SOURCES_V1 or
+            sources.source_identities.len() != sources.source_count or
+            sources.source_digests.len() != sources.source_count or
+            sources.source_byte_counts.len() != sources.source_count or
+            compile_source_inventory_digest_v1(inventory) !=
+                sources.source_inventory_digest or
+            manifests.len() > COLD_PACKAGE_OWNERSHIP_MAX_MANIFESTS_V1:
+        return Err("cold-package-source-authority-invalid")
+    val parsed_rules = cold_package_ownership_rules_parse_v1(policy_content)
+    if parsed_rules.is_err():
+        return Err(parsed_rules.unwrap_err())
+    val rules = parsed_rules.unwrap()
+    var records: Dict<text, i64> = {}
+    var folded_records: Dict<text, bool> = {}
+    var manifest_paths: [text] = []
+    var spl_count = 0
+    var index = 0
+    for entry in inventory.entries:
+        if not compile_source_inventory_path_valid_v1(entry.source_identity) or
+                records.has(entry.source_identity) or
+                folded_records.has(entry.source_identity.lower()):
+            return Err("cold-package-inventory-path-invalid")
+        records[entry.source_identity] = index
+        folded_records[entry.source_identity.lower()] = true
+        if entry.source_identity.ends_with(".spl"):
+            spl_count = spl_count + 1
+        elif entry.source_identity.ends_with("/simple.sdn"):
+            manifest_paths = manifest_paths.push(entry.source_identity)
+        index = index + 1
+    if spl_count != sources.source_count or manifest_paths.len() >
+            COLD_PACKAGE_OWNERSHIP_MAX_MANIFESTS_V1 or
+            not records.has(COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1):
+        return Err("cold-package-inventory-coverage-invalid")
+    val policy_record = inventory.entries[
+        records[COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1]]
+    val policy_digest = sha256_text(policy_content)
+    if policy_record.content_digest != policy_digest or
+            policy_record.byte_count != text_byte_len(policy_content) or
+            not builder_digest_valid_v1(policy_digest):
+        return Err("cold-package-policy-scv-mismatch")
+    var manifest_content: Dict<text, text> = {}
+    var manifest_name: Dict<text, text> = {}
+    for supplied in manifests:
+        if not records.has(supplied.source_identity) or
+                not supplied.source_identity.ends_with("/simple.sdn") or
+                supplied.source_identity == COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1 or
+                manifest_content.has(supplied.source_identity) or
+                text_byte_len(supplied.content) >
+                    COLD_PACKAGE_OWNERSHIP_MAX_MANIFEST_BYTES_V1:
+            return Err("cold-package-manifest-authority-invalid")
+        val record = inventory.entries[records[supplied.source_identity]]
+        if record.content_digest != sha256_text(supplied.content) or
+                record.byte_count != text_byte_len(supplied.content):
+            return Err("cold-package-manifest-scv-mismatch")
+        val name = _cold_package_project_name_v1(supplied.content)
+        if name.is_err():
+            return Err(name.unwrap_err())
+        manifest_content[supplied.source_identity] = supplied.content
+        manifest_name[supplied.source_identity] = name.unwrap()
+    var members: [ColdPackageOwnershipMemberV1] = []
+    var membership_members: [RuntimeStdPackageMemberV1] = []
+    var by_source: Dict<text, ColdPackageOwnershipMemberV1> = {}
+    var source_index = 0
+    while source_index < sources.source_count:
+        val identity = sources.source_identities[source_index]
+        val digest = sources.source_digests[source_index]
+        if not identity.ends_with(".spl") or not records.has(identity) or
+                by_source.has(identity) or not builder_digest_valid_v1(digest):
+            return Err("cold-package-selected-source-invalid")
+        val record = inventory.entries[records[identity]]
+        if record.content_digest != digest or
+                record.byte_count != sources.source_byte_counts[source_index]:
+            return Err("cold-package-selected-source-scv-mismatch")
+        val selected_rule = _cold_package_rule_for_source_v1(identity, rules)
+        if selected_rule.is_err():
+            return Err(selected_rule.unwrap_err())
+        val rule = selected_rule.unwrap()
+        var nearest_manifest = ""
+        for manifest_path in manifest_paths:
+            val suffix = "/simple.sdn"
+            val root = manifest_path.substring(0,
+                manifest_path.len() - suffix.len())
+            if identity.starts_with("{root}/") and
+                    root.len() > nearest_manifest.len():
+                nearest_manifest = manifest_path
+        if rule.manifest_source_identity != nearest_manifest:
+            return Err("cold-package-nearest-manifest-mismatch:{identity}")
+        var manifest_digest = PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
+        if nearest_manifest != "":
+            if not manifest_content.has(nearest_manifest) or
+                    manifest_name[nearest_manifest] != rule.manifest_project_name:
+                return Err("cold-package-manifest-name-mismatch:{identity}")
+            manifest_digest = sha256_text(manifest_content[nearest_manifest])
+        val member = ColdPackageOwnershipMemberV1(identity, digest,
+            rule.package_identity, nearest_manifest, manifest_digest)
+        members = members.push(member)
+        by_source[identity] = member
+        membership_members = membership_members.push(
+            RuntimeStdPackageMemberV1(identity, digest, rule.package_identity))
+        source_index = source_index + 1
+    val membership = RuntimeStdPackageMembershipV1(
+        sources.snapshot_inventory_digest, sources.source_inventory_digest,
+        sources.scv_receipt_digest, membership_members)
+    val verdict = runtime_std_package_membership_validate_v1(
+        membership, sources)
+    if verdict != "ok":
+        return Err("cold-package-membership-invalid:{verdict}")
+    Ok(ColdPackageOwnershipCaptureV1(
+        policy_digest, membership, members, by_source))
+
+export ColdPackageOwnershipManifestV1
+export ColdPackageOwnershipRuleV1
+export ColdPackageOwnershipMemberV1
+export ColdPackageOwnershipCaptureV1
+export COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1
+export cold_package_ownership_rules_parse_v1
+export cold_package_ownership_capture_v1

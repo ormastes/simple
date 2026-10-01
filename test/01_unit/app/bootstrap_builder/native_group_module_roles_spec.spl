@@ -1,0 +1,78 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.native_group_module_roles.{
+    Phase2ModuleSourceV1, phase2_module_roles_select_v1
+}
+
+fn role_policy_v1() -> text:
+    "schema=SIMPLE-NATIVE-MODULE-ROLES-1\n" +
+    "exclude=src/compiler/10.frontend/testdata/visibility_query_fixture.spl|testdata-source\n" +
+    "exclude=src/test_fixture/smf_dep_entry.spl|fixture-source\n" +
+    "exclude=src/test_fixture/smf_dep_leaf.spl|fixture-source\n"
+
+fn role_sources_v1() -> [Phase2ModuleSourceV1]:
+    [
+        Phase2ModuleSourceV1("src/os/kernel/loader/mod.spl", "1".repeat(64)),
+        Phase2ModuleSourceV1("src/unit/simple-lang/volume/L.spl", "2".repeat(64)),
+        Phase2ModuleSourceV1(
+            "src/compiler/10.frontend/testdata/visibility_query_fixture.spl",
+            "3".repeat(64)),
+        Phase2ModuleSourceV1("src/test_fixture/smf_dep_entry.spl",
+            "4".repeat(64)),
+        Phase2ModuleSourceV1("src/test_fixture/smf_dep_leaf.spl",
+            "5".repeat(64))
+    ]
+
+describe "Phase2 exact module role policy":
+    it "keeps OS and physical units and partitions only explicit fixtures":
+        match phase2_module_roles_select_v1(role_policy_v1(), role_sources_v1()):
+            Ok(selection):
+                expect(selection.included_paths.len()).to_equal(2)
+                expect(selection.included_paths[0]).to_equal(
+                    "src/os/kernel/loader/mod.spl")
+                expect(selection.included_paths[1]).to_equal(
+                    "src/unit/simple-lang/volume/L.spl")
+                expect(selection.excluded_count).to_equal(3)
+                expect(selection.excluded_ledger).to_contain(
+                    "src/test_fixture/smf_dep_leaf.spl\t" +
+                    "5".repeat(64) + "\tfixture-source\n")
+            Err(reason): fail(reason)
+
+    it "rejects undeclared fixtures, duplicate rows, and invented reasons":
+        val undeclared = role_sources_v1().push(
+            Phase2ModuleSourceV1("src/test_fixture/new.spl", "6".repeat(64)))
+        match phase2_module_roles_select_v1(role_policy_v1(), undeclared):
+            Ok(_): fail("undeclared fixture admitted")
+            Err(reason): expect(reason).to_contain("undeclared")
+        val duplicate = role_policy_v1() +
+            "exclude=src/test_fixture/smf_dep_leaf.spl|fixture-source\n"
+        match phase2_module_roles_select_v1(duplicate, role_sources_v1()):
+            Ok(_): fail("duplicate policy row admitted")
+            Err(reason): expect(reason).to_contain("duplicated")
+        val invented = role_policy_v1() +
+            "exclude=src/test_fixture/z_not_in_stage2.spl|fixture-source\n"
+        match phase2_module_roles_select_v1(invented, role_sources_v1()):
+            Ok(_): fail("policy row absent from Stage2 admitted")
+            Err(reason): expect(reason).to_contain("missing from Stage2")
+        match phase2_module_roles_select_v1(
+                role_policy_v1().replace("testdata-source", "other-source"),
+                role_sources_v1()):
+            Ok(_): fail("undeclared reason admitted")
+            Err(reason): expect(reason).to_contain("invalid")
+
+    it "binds excluded ledger digest to exact Stage2 source SHA":
+        val first = phase2_module_roles_select_v1(
+            role_policy_v1(), role_sources_v1())
+        if val Err(reason) = first: fail(reason)
+        var changed = role_sources_v1()
+        changed[4] = Phase2ModuleSourceV1(
+            "src/test_fixture/smf_dep_leaf.spl", "6".repeat(64))
+        val second = phase2_module_roles_select_v1(role_policy_v1(), changed)
+        if val Err(reason) = second: fail(reason)
+        expect(sha256_text(first.unwrap().excluded_ledger) ==
+            sha256_text(second.unwrap().excluded_ledger)).to_equal(false)
+        changed[4] = Phase2ModuleSourceV1(
+            "src/test_fixture/smf_dep_leaf.spl", "invalid-sha")
+        match phase2_module_roles_select_v1(role_policy_v1(), changed):
+            Ok(_): fail("invalid source SHA admitted")
+            Err(reason): expect(reason).to_contain("source invalid")

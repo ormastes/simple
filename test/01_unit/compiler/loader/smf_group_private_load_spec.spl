@@ -1,0 +1,66 @@
+"""Native group SMF local functions stay private and can be relocation targets."""
+# @req: REQ-COMPILER-LINKER-001
+
+use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol,
+    SmfWriterSymbolBinding, SmfWriterSymbolType, SmfRelocation, RelocationType}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.loader.loader.module_loader.{LoadResult,
+    lazymoduleloader_with_defaults, moduleloader_load, moduleloader_unload}
+use compiler.loader.loader.smf_mmap_native.{native_mmap_read_bytes}
+use std.platform.{get_host_os}
+use std.io_runtime.{file_write_bytes, mkdir_p}
+
+fn group_private_symbol(name: text, binding: SmfWriterSymbolBinding,
+        offset: i64) -> SmfWriterSymbol:
+    SmfWriterSymbol(name: name, binding: binding,
+        sym_type: SmfWriterSymbolType.Function, section_index: 0,
+        value: offset, size: 8, layout_phase: 2,
+        is_event_loop_anchor: false, layout_pinned: false)
+
+fn group_private_bytes(input: [i64]) -> [u8]:
+    var out: [u8] = []
+    for byte in input: out.push(byte as u8)
+    out
+
+fn group_private_le(value: i64) -> [u8]:
+    var out: [u8] = []
+    var shift: i64 = 0
+    while shift < 64:
+        out.push(((value >> shift) & 255) as u8)
+        shift = shift + 8
+    out
+
+describe "native group private SMF loader acceptance":
+    it "maps a local target for relocation without publishing it globally":
+        val platform = if get_host_os() == "windows": Platform.Windows
+            else: Platform.Linux
+        var writer = SmfWriter.create_target(platform, Arch.X86_64)
+        writer.add_code_section(".text", [0, 0, 0, 0, 0, 0, 0, 0,
+            195, 0, 0, 0, 0, 0, 0, 0])
+        writer.add_symbol(group_private_symbol("native_group_public",
+            SmfWriterSymbolBinding.Global, 0))
+        writer.add_symbol(group_private_symbol("native_group_local",
+            SmfWriterSymbolBinding.Local, 8))
+        writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 1,
+            reloc_type: RelocationType.Abs64, addend: 0))
+        val image = writer.write()
+        expect(image.is_ok()).to_equal(true)
+        val _ = mkdir_p("build/test")
+        val path = "build/test/native_group_private_load.smf"
+        expect(file_write_bytes(path, group_private_bytes(image.unwrap()))).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        match moduleloader_load(loader, path):
+            case LoadResult.Success(module):
+                expect(module.symbols.has("native_group_public")).to_equal(true)
+                expect(module.symbols.has("native_group_local")).to_equal(true)
+                expect(loader.global_symbols.has("native_group_public")).to_equal(true)
+                expect(loader.global_symbols.has("native_group_local")).to_equal(false)
+                val public_addr = module.symbols["native_group_public"].address
+                val local_addr = module.symbols["native_group_local"].address
+                expect(native_mmap_read_bytes(public_addr, 0, 8)).to_equal(
+                    group_private_le(local_addr))
+            case LoadResult.Error(message):
+                fail("native group private load failed: {message}")
+            case _:
+                fail("native group private load returned unexpected status")
+        moduleloader_unload(loader, path)

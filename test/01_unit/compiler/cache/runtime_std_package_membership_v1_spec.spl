@@ -1,0 +1,121 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1
+}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.driver.smf.runtime_std_hir_sections_v1.{
+    RuntimeStdCompiledSectionPayloadV1
+}
+use compiler.driver.smf.runtime_std_package_membership_v1.{
+    RuntimeStdPackageMemberV1, RuntimeStdPackageMembershipV1,
+    RuntimeStdHirMemberV1, runtime_std_package_membership_validate_v1,
+    runtime_std_package_membership_encode_v1,
+    runtime_std_package_membership_decode_v1,
+    runtime_std_package_membership_read_v1,
+    runtime_std_package_members_v1,
+    runtime_std_package_hir_sections_write_v1
+}
+
+fn runtime_std_membership_test_sources_v1() -> NativeFullInventorySourcesV1:
+    val digest = sha256_text("source")
+    NativeFullInventorySourcesV1(
+        ["/frozen/src/lib/std.spl", "/frozen/src/os/kernel.spl",
+            "/frozen/src/runtime/core.spl"],
+        ["src/lib/std.spl", "src/os/kernel.spl",
+            "src/runtime/core.spl"],
+        [digest, digest, digest], [6, 6, 6], 3,
+        sha256_text("snapshot"), sha256_text("source inventory"),
+        sha256_text("SCV receipt"))
+
+fn runtime_std_membership_test_receipt_v1(
+    sources: NativeFullInventorySourcesV1
+) -> RuntimeStdPackageMembershipV1:
+    RuntimeStdPackageMembershipV1(
+        sources.snapshot_inventory_digest, sources.source_inventory_digest,
+        sources.scv_receipt_digest,
+        [RuntimeStdPackageMemberV1(
+            sources.source_identities[0], sources.source_digests[0],
+            "simple.std"),
+         RuntimeStdPackageMemberV1(
+            sources.source_identities[1], sources.source_digests[1],
+            "simple.os"),
+         RuntimeStdPackageMemberV1(
+            sources.source_identities[2], sources.source_digests[2],
+            "simple.runtime")])
+
+fn runtime_std_membership_test_hir_sections_v1(
+) -> [RuntimeStdCompiledSectionPayloadV1]:
+    [RuntimeStdCompiledSectionPayloadV1(
+        PackageSectionKindV1.debug, "debug.smf", "debug"),
+     RuntimeStdCompiledSectionPayloadV1(
+        PackageSectionKindV1.exports, "exports.smf", "exports"),
+     RuntimeStdCompiledSectionPayloadV1(
+        PackageSectionKindV1.generics, "generics.smf", "generics"),
+     RuntimeStdCompiledSectionPayloadV1(
+        PackageSectionKindV1.hir_summaries, "hir-summaries.smf", "hir"),
+     RuntimeStdCompiledSectionPayloadV1(
+        PackageSectionKindV1.imports, "imports.smf", "imports"),
+     RuntimeStdCompiledSectionPayloadV1(
+        PackageSectionKindV1.initialization, "initialization.smf", "init"),
+     RuntimeStdCompiledSectionPayloadV1(
+        PackageSectionKindV1.types, "types.smf", "types")]
+
+describe "runtime and std explicit SCV package membership":
+    it "requires a pinned canonical row for each source including OS":
+        val sources = runtime_std_membership_test_sources_v1()
+        val membership = runtime_std_membership_test_receipt_v1(sources)
+        expect(runtime_std_package_membership_validate_v1(
+            membership, sources)).to_equal("ok")
+        val encoded = runtime_std_package_membership_encode_v1(
+            membership, sources)
+        expect(encoded.starts_with(
+            "simple-runtime-std-package-membership-v1\n")).to_equal(true)
+        expect(runtime_std_package_membership_decode_v1(
+            encoded, sources).is_ok()).to_equal(true)
+        val root = secure_temp_dir(".", "runtime-std-membership-").unwrap()
+        val path = "{root}/membership.receipt"
+        expect(file_create_exclusive(path, encoded)).to_equal(true)
+        expect(runtime_std_package_membership_read_v1(
+            path, sha256_text(encoded), sources).is_ok()).to_equal(true)
+        expect(runtime_std_package_membership_read_v1(
+            path, sha256_text("wrong"), sources).unwrap_err()).to_equal(
+                "runtime-std-membership-receipt-digest-mismatch")
+        var incomplete = membership
+        incomplete.members = membership.members[0..2]
+        expect(runtime_std_package_membership_validate_v1(
+            incomplete, sources)).to_equal("runtime-std-membership-scv-mismatch")
+        var changed = membership
+        changed.members[1].source_digest = sha256_text("changed")
+        expect(runtime_std_package_membership_validate_v1(
+            changed, sources)).to_equal("runtime-std-membership-member-mismatch")
+        var reversed = membership
+        reversed.members = [membership.members[2], membership.members[1],
+            membership.members[0]]
+        expect(runtime_std_package_membership_validate_v1(
+            reversed, sources)).to_equal("runtime-std-membership-member-mismatch")
+
+    it "aggregates only explicitly labeled members in frozen source order":
+        val sources = runtime_std_membership_test_sources_v1()
+        val membership = runtime_std_membership_test_receipt_v1(sources)
+        val runtime = runtime_std_package_members_v1(
+            membership, sources, "simple.runtime").unwrap()
+        expect(runtime.len()).to_equal(1)
+        expect(runtime[0].source_identity).to_equal("src/runtime/core.spl")
+        val root = secure_temp_dir(".", "runtime-std-hir-aggregate-").unwrap()
+        val hir = RuntimeStdHirMemberV1(runtime[0].source_identity,
+            runtime[0].source_digest,
+            runtime_std_membership_test_hir_sections_v1())
+        val written = runtime_std_package_hir_sections_write_v1(
+            root, membership, sources, "simple.runtime", [hir])
+        expect(written.is_ok()).to_equal(true)
+        val sections = written.unwrap()
+        expect(sections.len()).to_equal(7)
+        expect(sections[0].member_name).to_equal("debug.smf")
+        val wrong = RuntimeStdHirMemberV1("src/os/kernel.spl",
+            runtime[0].source_digest,
+            runtime_std_membership_test_hir_sections_v1())
+        expect(runtime_std_package_hir_sections_write_v1(
+            root, membership, sources, "simple.runtime", [wrong]).unwrap_err()
+            ).to_equal("runtime-std-hir-aggregate-source-mismatch")

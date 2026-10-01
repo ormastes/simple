@@ -1,0 +1,66 @@
+use std.spec.{describe, it, expect, fail}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use app.bootstrap_builder.native_group_provisional_runtime.{
+    native_group_provisional_runtime_from_authority_v1,
+    native_group_provisional_runtime_decode_v1,
+    native_group_provisional_runtime_match_authority_v1
+}
+
+fn _runtime_spec_authority_v1() -> text:
+    val regular = "file-hex:17:7372632f72756e74696d652f612e73706c:0:" +
+        "a".repeat(64)
+    val link = "link-hex:7372632f72756e74696d652f6c696e6b2e73706c:" +
+        "612e73706c:7372632f72756e74696d652f612e73706c:" +
+        "a".repeat(64)
+    val other = "file-hex:13:7372632f6170702f782e73706c:0:" +
+        "b".repeat(64)
+    canonical_identity_sort_texts([regular, link, other]).join("\n") + "\n"
+
+describe "provisional runtime source snapshot":
+    it "keeps exact runtime file and symlink rows but excludes other source":
+        val authority = _runtime_spec_authority_v1()
+        match native_group_provisional_runtime_from_authority_v1(authority):
+            Ok(snapshot):
+                expect(snapshot.count).to_equal(2)
+                expect(snapshot.payload).to_start_with(
+                    "SIMPLE-PROVISIONAL-RUNTIME-1\ncount=2\n")
+                expect(snapshot.payload).to_contain("link-hex:")
+                expect(snapshot.payload).to_contain("file-hex:17:")
+                expect(snapshot.payload.contains("file-hex:13:")).to_equal(false)
+                match native_group_provisional_runtime_decode_v1(
+                        snapshot.payload):
+                    Ok(decoded): expect(decoded.digest).to_equal(
+                        snapshot.digest)
+                    Err(reason): fail(reason)
+            Err(reason): fail(reason)
+
+    it "rejects a missing runtime row even when count is rewritten":
+        val authority = _runtime_spec_authority_v1()
+        match native_group_provisional_runtime_from_authority_v1(authority):
+            Ok(snapshot):
+                val lines = snapshot.payload.split("\n")
+                val missing = "SIMPLE-PROVISIONAL-RUNTIME-1\ncount=1\n" +
+                    lines[2] + "\n"
+                match native_group_provisional_runtime_match_authority_v1(
+                        authority, missing):
+                    Ok(_): fail("missing runtime source row accepted")
+                    Err(reason): expect(reason).to_contain("differs")
+            Err(reason): fail(reason)
+
+    it "rejects a tampered digest and malformed schema":
+        val authority = _runtime_spec_authority_v1()
+        match native_group_provisional_runtime_from_authority_v1(authority):
+            Ok(snapshot):
+                val tampered = snapshot.payload.replace(
+                    "a".repeat(64), "c".repeat(64))
+                match native_group_provisional_runtime_match_authority_v1(
+                        authority, tampered):
+                    Ok(_): fail("tampered runtime source SHA accepted")
+                    Err(reason): expect(reason).to_contain("differs")
+                match native_group_provisional_runtime_decode_v1(
+                        snapshot.payload.replace(
+                            "SIMPLE-PROVISIONAL-RUNTIME-1",
+                            "SIMPLE-PHASE2-NATIVE-AUTHORITY-3")):
+                    Ok(_): fail("canonical schema accepted as runtime source")
+                    Err(reason): expect(reason).to_contain("schema")
+            Err(reason): fail(reason)

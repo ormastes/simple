@@ -1,0 +1,791 @@
+# Compiler-owned, bounded MIR body payload for the cold package index. This
+# runs after HIR-to-MIR lowering and before native object generation. It does
+# not infer bodies from source text or accept a caller-supplied MIR digest.
+
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.mir.mir_types.{MirTypeDef, MirTypeDefKind, MirConstant, MirStatic,
+    LayoutPhase}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
+    serialize_const_value}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_span, hc_enc_hir_type,
+    hc_enc_driver_manifest_attr, hc_enc_vhdl_hardware_metadata,
+    hc_enc_hir_contract_block, hc_enc_visibility}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use compiler.driver.driver_types.{FrozenNativeModuleCapsuleV1}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put,
+    binary_object_cas_verify}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1,
+    build_action_result_validate_v1}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.driver.smf.runtime_std_package_set.{RuntimeStdPackageAuthorityV1,
+    runtime_std_build_action_v1, runtime_std_build_action_v2}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2}
+use compiler.driver.smf.runtime_std_native_outcomes_v2.{
+    RuntimeStdNativeOutcomeKindV2, RuntimeStdNativeOutcomeReceiptV2,
+    runtime_std_native_outcomes_section_v2}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RuntimeStdCompiledSectionReceiptV1, RuntimeStdCompiledPackageReceiptV1,
+    runtime_std_compiled_source_closure_digest_v1,
+    runtime_std_compiled_receipts_section_v1,
+    runtime_std_compiled_action_receipt_v1}
+use std.nogc_sync_mut.io.file_ops.{file_publish_noreplace_raw,
+    secure_temp_dir_raw,
+    file_read_regular_no_follow_bounded,
+    file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove,
+    dir_is_real_no_follow}
+use std.nogc_sync_mut.io_runtime.{file_write_exact}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_identity_cmp_v1}
+
+val RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1: i64 = 16 * 1024 * 1024
+val RUNTIME_STD_MIR_FIELD_SET_V1: text =
+    "MirModule:name,functions,statics,constants,types,external_layout_traces;" +
+    "MirFunction:symbol,name,signature,locals,blocks,entry_block,span," +
+    "generic_params,is_generic_template,specialization_of,type_bindings," +
+    "layout_phase,is_kernel,gpu_target,gpu_backend_order,is_export_c," +
+    "export_name,has_driver_manifest_attr,driver_manifest_attr," +
+    "has_vhdl_metadata,vhdl_metadata,has_fast_math,unroll_factor," +
+    "pipeline_ii,memory_banks,verification_contract,is_naked,section," +
+    "align,is_global,simd_req_level,simd_req_backend,simd_disabled;" +
+    "MirInst:kind,span;MirLocal:id,name,type_,kind,is_ghost;" +
+    "MirConstant:symbol,name,type_,value;" +
+    "MirStatic:symbol,name,type_,init,is_mutable,alignment,visibility;" +
+    "MirTypeDef:symbol,name,kind,is_export_c,export_name;" +
+    "MirFieldDef:name,type_,offset,has_bits_attr,bits_width;" +
+    "MirVariantDef:name,discriminant,payload"
+
+struct RuntimeStdMirBodyPayloadV1:
+    module_name: text
+    source_identity: text
+    source_digest: text
+    content: text
+    digest: text
+    byte_count: i64
+
+struct RuntimeStdNativeMemberV1:
+    source_identity: text
+    source_digest: text
+    mir_body: RuntimeStdMirBodyPayloadV1
+    capsule: FrozenNativeModuleCapsuleV1
+
+struct RuntimeStdNativeMemberV2:
+    outcome: RuntimeStdNativeOutcomeReceiptV2
+    mir_body: RuntimeStdMirBodyPayloadV1
+    capsule: FrozenNativeModuleCapsuleV1?
+
+fn _runtime_std_mir_frame_v1(value: text) -> text:
+    "{text_byte_len(value)}:{value}"
+
+fn _runtime_std_mir_symbols_v1(keys: [SymbolId]) -> [SymbolId]:
+    var result = keys
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].id < result[i].id:
+                val swap = result[i]
+                result[i] = result[j]
+                result[j] = swap
+            j = j + 1
+        i = i + 1
+    result
+
+fn _runtime_std_mir_hir_metadata_v1(function: MirFunction) -> Result<text, text>:
+    # Generated HIR leaf encoders cover the nested typed metadata retained on
+    # MIR functions. The outer dictionary is sorted explicitly below.
+    var writer = HirCodecWriter.create_canonical_bounded(
+        1024 * 1024, 4 * 1024 * 1024, 4 * 1024 * 1024)
+    hc_enc_span(writer, function.span)
+    hc_enc_driver_manifest_attr(writer, function.driver_manifest_attr)
+    hc_enc_vhdl_hardware_metadata(writer, function.vhdl_metadata)
+    var type_rows: [text] = []
+    for name in function.type_bindings.keys().sorted():
+        var type_writer = HirCodecWriter.create_canonical_bounded(
+            1024 * 1024, 4 * 1024 * 1024, 4 * 1024 * 1024)
+        hc_enc_hir_type(type_writer, function.type_bindings[name])
+        val encoded_type = type_writer.finish()
+        if not type_writer.ok or encoded_type == "":
+            return Err("runtime-std-mir-hir-type-unencodable")
+        type_rows.push(_runtime_std_mir_frame_v1(name) +
+            _runtime_std_mir_frame_v1(encoded_type))
+    var contract = "nil"
+    if val retained = function.verification_contract:
+        var contract_writer = HirCodecWriter.create_canonical_bounded(
+            1024 * 1024, 4 * 1024 * 1024, 4 * 1024 * 1024)
+        hc_enc_hir_contract_block(contract_writer, retained)
+        val encoded_contract = contract_writer.finish()
+        if not contract_writer.ok or encoded_contract == "":
+            return Err("runtime-std-mir-contract-unencodable")
+        contract = "some" + _runtime_std_mir_frame_v1(encoded_contract)
+    val hir_leaves = writer.finish()
+    if not writer.ok or hir_leaves == "":
+        return Err("runtime-std-mir-hir-metadata-unencodable")
+    var generic_rows: [text] = []
+    for parameter in function.generic_params:
+        generic_rows.push(_runtime_std_mir_frame_v1(parameter))
+    val specialization = if val value = function.specialization_of:
+        "some" + _runtime_std_mir_frame_v1(value)
+    else:
+        "nil"
+    val layout = if val value = function.layout_phase:
+        match value:
+            LayoutPhase.Startup: "some:startup"
+            LayoutPhase.FirstFrame: "some:first-frame"
+            LayoutPhase.Steady: "some:steady"
+            LayoutPhase.Cold: "some:cold"
+    else:
+        "nil"
+    val scalars = [
+        function.is_generic_template.to_text(), specialization, layout,
+        function.is_kernel.to_text(), function.gpu_target,
+        function.gpu_backend_order, function.is_export_c.to_text(),
+        function.export_name, function.has_driver_manifest_attr.to_text(),
+        function.has_vhdl_metadata.to_text(), function.has_fast_math.to_text(),
+        function.unroll_factor.to_text(), function.pipeline_ii.to_text(),
+        function.memory_banks.to_text(), function.is_naked.to_text(),
+        function.section, function.align.to_text(), function.is_global.to_text(),
+        function.simd_req_level, function.simd_req_backend,
+        function.simd_disabled.to_text(), contract]
+    var rows: [text] = ["hir-leaves" + _runtime_std_mir_frame_v1(hir_leaves),
+        "generics" + _runtime_std_mir_frame_v1(generic_rows.join("")),
+        "bindings" + _runtime_std_mir_frame_v1(type_rows.join(""))]
+    for scalar in scalars:
+        rows.push(_runtime_std_mir_frame_v1(scalar))
+    Ok(rows.join(""))
+
+fn _runtime_std_mir_function_v1(function: MirFunction) -> Result<text, text>:
+    val body = serialize_mir_function(function)
+    if body == "" or body.contains("\"UnsupportedInst\"") or
+            body.contains("\"UnknownTerminator\"") or
+            body.contains("\"UnknownType\"") or
+            body.contains("\"Other\""):
+        return Err("runtime-std-mir-body-serializer-unsupported")
+    val metadata = _runtime_std_mir_hir_metadata_v1(function)
+    if metadata.is_err(): return Err(metadata.unwrap_err())
+    var local_rows: [text] = []
+    for local in function.locals:
+        local_rows.push(_runtime_std_mir_frame_v1(local.id.id.to_text()) +
+            _runtime_std_mir_frame_v1(local.is_ghost.to_text()))
+    var instruction_rows: [text] = []
+    for block in function.blocks:
+        var spans: [text] = []
+        for instruction in block.instructions:
+            if val span = instruction.span:
+                var span_writer = HirCodecWriter.create_canonical_bounded(
+                    1024 * 1024, 4 * 1024 * 1024, 4 * 1024 * 1024)
+                hc_enc_span(span_writer, span)
+                val encoded_span = span_writer.finish()
+                if not span_writer.ok or encoded_span == "":
+                    return Err("runtime-std-mir-instruction-span-unencodable")
+                spans.push("some" + _runtime_std_mir_frame_v1(encoded_span))
+            else:
+                spans.push("nil")
+        instruction_rows.push(_runtime_std_mir_frame_v1(block.id.id.to_text()) +
+            _runtime_std_mir_frame_v1(spans.join("")))
+    Ok(_runtime_std_mir_frame_v1(body) +
+        _runtime_std_mir_frame_v1(metadata.unwrap()) +
+        _runtime_std_mir_frame_v1(local_rows.join("")) +
+        _runtime_std_mir_frame_v1(instruction_rows.join("")))
+
+fn _runtime_std_mir_constant_v1(value: MirConstant) -> text:
+    _runtime_std_mir_frame_v1(value.symbol.id.to_text()) +
+        _runtime_std_mir_frame_v1(value.name) +
+        _runtime_std_mir_frame_v1(serialize_mir_type(value.type_)) +
+        _runtime_std_mir_frame_v1(serialize_const_value(value.value))
+
+fn _runtime_std_mir_static_v1(value: MirStatic) -> Result<text, text>:
+    var writer = HirCodecWriter.create_canonical_bounded(
+        1024 * 1024, 4 * 1024 * 1024, 4 * 1024 * 1024)
+    hc_enc_visibility(writer, value.visibility)
+    val encoded_visibility = writer.finish()
+    if not writer.ok or encoded_visibility == "":
+        return Err("runtime-std-mir-static-visibility-unencodable")
+    val init = if val constant = value.init:
+        "some" + _runtime_std_mir_frame_v1(_runtime_std_mir_constant_v1(constant))
+    else:
+        "nil"
+    Ok(_runtime_std_mir_frame_v1(value.symbol.id.to_text()) +
+        _runtime_std_mir_frame_v1(value.name) +
+        _runtime_std_mir_frame_v1(serialize_mir_type(value.type_)) +
+        _runtime_std_mir_frame_v1(init) +
+        _runtime_std_mir_frame_v1(value.is_mutable.to_text()) +
+        _runtime_std_mir_frame_v1(value.alignment.to_text()) +
+        _runtime_std_mir_frame_v1(encoded_visibility))
+
+fn _runtime_std_mir_type_def_v1(value: MirTypeDef) -> text:
+    var kind = ""
+    match value.kind:
+        case MirTypeDefKind.Struct(fields):
+            var rows: [text] = []
+            for field in fields:
+                rows.push(_runtime_std_mir_frame_v1(field.name) +
+                    _runtime_std_mir_frame_v1(serialize_mir_type(field.type_)) +
+                    _runtime_std_mir_frame_v1(field.offset.to_text()) +
+                    _runtime_std_mir_frame_v1(field.has_bits_attr.to_text()) +
+                    _runtime_std_mir_frame_v1(field.bits_width.to_text()))
+            kind = "struct" + _runtime_std_mir_frame_v1(rows.join(""))
+        case MirTypeDefKind.Enum(variants):
+            var rows: [text] = []
+            for variant in variants:
+                val payload = if val type_ = variant.payload:
+                    "some" + _runtime_std_mir_frame_v1(serialize_mir_type(type_))
+                else:
+                    "nil"
+                rows.push(_runtime_std_mir_frame_v1(variant.name) +
+                    _runtime_std_mir_frame_v1(variant.discriminant.to_text()) +
+                    _runtime_std_mir_frame_v1(payload))
+            kind = "enum" + _runtime_std_mir_frame_v1(rows.join(""))
+        case MirTypeDefKind.Union(variants):
+            var rows: [text] = []
+            for variant in variants:
+                rows.push(_runtime_std_mir_frame_v1(serialize_mir_type(variant)))
+            kind = "union" + _runtime_std_mir_frame_v1(rows.join(""))
+    _runtime_std_mir_frame_v1(value.symbol.id.to_text()) +
+        _runtime_std_mir_frame_v1(value.name) +
+        _runtime_std_mir_frame_v1(kind) +
+        _runtime_std_mir_frame_v1(value.is_export_c.to_text()) +
+        _runtime_std_mir_frame_v1(value.export_name)
+
+fn runtime_std_mir_body_payload_v1(
+    module: MirModule, source_identity: text, source_digest: text
+) -> Result<RuntimeStdMirBodyPayloadV1, text>:
+    if module.name == "" or source_identity == "" or
+            not source_identity.ends_with(".spl") or
+            not builder_digest_valid_v1(source_digest):
+        return Err("runtime-std-mir-source-or-module-invalid")
+    var rows: [text] = ["simple-runtime-std-mir-body-v1",
+        "field-set=" + sha256_text(RUNTIME_STD_MIR_FIELD_SET_V1),
+        "module" + _runtime_std_mir_frame_v1(module.name),
+        "source" + _runtime_std_mir_frame_v1(source_identity) +
+            _runtime_std_mir_frame_v1(source_digest)]
+    for symbol in _runtime_std_mir_symbols_v1(module.functions.keys()):
+        val function = _runtime_std_mir_function_v1(module.functions[symbol])
+        if function.is_err(): return Err(function.unwrap_err())
+        rows.push("function" + _runtime_std_mir_frame_v1(function.unwrap()))
+    for symbol in _runtime_std_mir_symbols_v1(module.constants.keys()):
+        rows.push("constant" + _runtime_std_mir_frame_v1(
+            _runtime_std_mir_constant_v1(module.constants[symbol])))
+    for symbol in _runtime_std_mir_symbols_v1(module.statics.keys()):
+        val static_payload = _runtime_std_mir_static_v1(module.statics[symbol])
+        if static_payload.is_err(): return Err(static_payload.unwrap_err())
+        rows.push("static" + _runtime_std_mir_frame_v1(static_payload.unwrap()))
+    for symbol in _runtime_std_mir_symbols_v1(module.types.keys()):
+        rows.push("type" + _runtime_std_mir_frame_v1(
+            _runtime_std_mir_type_def_v1(module.types[symbol])))
+    var trace_rows: [text] = []
+    for trace in module.external_layout_traces:
+        trace_rows.push(_runtime_std_mir_frame_v1(trace.consumer_module_id) +
+            _runtime_std_mir_frame_v1(trace.owner_module_id) +
+            _runtime_std_mir_frame_v1(trace.type_id) +
+            _runtime_std_mir_frame_v1(trace.layout_digest) +
+            _runtime_std_mir_frame_v1(trace.owner_count.to_text()))
+    for trace in trace_rows.sorted():
+        rows.push("layout" + _runtime_std_mir_frame_v1(trace))
+    val content = rows.join("\n") + "\n"
+    val byte_count = text_byte_len(content)
+    if byte_count <= 0 or byte_count > RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1:
+        return Err("runtime-std-mir-body-size-bound")
+    Ok(RuntimeStdMirBodyPayloadV1(module.name, source_identity,
+        source_digest, content, sha256_text(content), byte_count))
+
+fn runtime_std_mir_body_validate_v1(
+    payload: RuntimeStdMirBodyPayloadV1,
+    expected_module_name: text,
+    expected_source_identity: text,
+    expected_source_digest: text,
+    expected_digest: text
+) -> text:
+    if expected_module_name == "" or expected_source_identity == "" or
+            not builder_digest_valid_v1(expected_source_digest) or
+            not builder_digest_valid_v1(expected_digest):
+        return "runtime-std-mir-expected-identity-invalid"
+    if payload.module_name != expected_module_name or
+            payload.source_identity != expected_source_identity or
+            payload.source_digest != expected_source_digest or
+            payload.digest != expected_digest or
+            payload.byte_count <= 0 or
+            payload.byte_count > RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1 or
+            text_byte_len(payload.content) != payload.byte_count or
+            sha256_text(payload.content) != expected_digest:
+        return "runtime-std-mir-payload-identity-invalid"
+    val expected_header = "simple-runtime-std-mir-body-v1\n" +
+        "field-set=" + sha256_text(RUNTIME_STD_MIR_FIELD_SET_V1) + "\n" +
+        "module" + _runtime_std_mir_frame_v1(expected_module_name) + "\n" +
+        "source" + _runtime_std_mir_frame_v1(expected_source_identity) +
+        _runtime_std_mir_frame_v1(expected_source_digest) + "\n"
+    if not payload.content.starts_with(expected_header) or
+            not payload.content.ends_with("\n") or
+            payload.content.contains("\"UnsupportedInst\"") or
+            payload.content.contains("\"UnknownTerminator\"") or
+            payload.content.contains("\"UnknownType\"") or
+            payload.content.contains("\"Other\""):
+        return "runtime-std-mir-payload-schema-invalid"
+    "ok"
+
+fn runtime_std_mir_body_matches_module_v1(
+    payload: RuntimeStdMirBodyPayloadV1, module: MirModule,
+    source_identity: text, source_digest: text
+) -> text:
+    val rebuilt = runtime_std_mir_body_payload_v1(
+        module, source_identity, source_digest)
+    if rebuilt.is_err(): return rebuilt.unwrap_err()
+    val current = rebuilt.unwrap()
+    if current.content != payload.content or current.digest != payload.digest:
+        return "runtime-std-mir-payload-not-current-module"
+    runtime_std_mir_body_validate_v1(payload, module.name,
+        source_identity, source_digest, current.digest)
+
+fn _runtime_std_native_ancestors_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//"):
+        return false
+    val parts = normalized.split("/")
+    if parts.len() == 0: return false
+    var current = "."
+    var index = 0
+    if normalized.starts_with("/"):
+        current = "/"
+        index = 1
+    elif parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    if not dir_is_real_no_follow(current): return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
+fn runtime_std_native_directory_chain_real_v1(path: text) -> bool:
+    _runtime_std_native_ancestors_real_v1(path)
+
+fn _runtime_std_native_cas_dirs_real_v1(root: text, digest: text) -> bool:
+    if not _runtime_std_native_ancestors_real_v1(root): return false
+    val objects = "{root}/objects"
+    if not dir_create_all(objects) or
+            not _runtime_std_native_ancestors_real_v1(objects): return false
+    val sha_root = "{objects}/sha256"
+    if not dir_create_all(sha_root) or
+            not _runtime_std_native_ancestors_real_v1(sha_root): return false
+    val shard = "{sha_root}/{digest.substring(0, 2)}"
+    if not dir_create_all(shard) or
+            not _runtime_std_native_ancestors_real_v1(shard): return false
+    true
+
+fn _runtime_std_native_publish_text_v1(
+    root: text, name: text, content: text, max_bytes: i64
+) -> Result<text, text>:
+    if content == "" or text_byte_len(content) > max_bytes:
+        return Err("runtime-std-native-file-size-invalid")
+    if not _runtime_std_native_ancestors_real_v1(root):
+        return Err("runtime-std-native-output-root-not-real")
+    val path = "{root}/{name}"
+    val stage_dir = secure_temp_dir_raw(root, "simple-runtime-std-section")
+    if stage_dir == "" or
+            not _runtime_std_native_ancestors_real_v1(stage_dir):
+        return Err("runtime-std-native-stage-unavailable")
+    val staged = "{stage_dir}/payload"
+    if not _runtime_std_native_ancestors_real_v1(root) or
+            not file_write_exact(staged, content) or
+            file_publish_noreplace_raw(staged, path) != 1:
+        dir_remove(stage_dir, true)
+        return Err("runtime-std-native-file-publish-failed:{name}")
+    dir_remove(stage_dir, true)
+    if not _runtime_std_native_ancestors_real_v1(root):
+        return Err("runtime-std-native-output-root-changed")
+    val readback = file_read_regular_no_follow_bounded(
+        path, max_bytes)
+    if readback.is_err() or readback.unwrap() != content:
+        return Err("runtime-std-native-file-readback-failed:{name}")
+    Ok(path)
+
+fn _runtime_std_native_section_v1(
+    root: text, name: text, kind: PackageSectionKindV1, content: text
+) -> Result<RuntimeStdCompiledSectionReceiptV1, text>:
+    val published = _runtime_std_native_publish_text_v1(
+        root, name, content, 128 * 1024 * 1024)
+    if published.is_err(): return Err(published.unwrap_err())
+    Ok(RuntimeStdCompiledSectionReceiptV1(
+        kind, name, published.unwrap(), sha256_text(content), text_byte_len(content)))
+
+fn _runtime_std_native_object_row_v1(
+    member: RuntimeStdNativeMemberV1, object_store_root: text
+) -> Result<text, text>:
+    val capsule = member.capsule
+    if not capsule.identity_valid() or capsule.module_name != member.mir_body.module_name or
+            capsule.source_identity != member.source_digest or
+            capsule.object_path == "" or capsule.provider_receipt_hash == "":
+        return Err("runtime-std-native-capsule-invalid")
+    val frozen_body = runtime_std_mir_body_payload_v1(
+        capsule.mir_module, member.source_identity, member.source_digest)
+    if frozen_body.is_err() or frozen_body.unwrap().digest != member.mir_body.digest or
+            frozen_body.unwrap().content != member.mir_body.content:
+        return Err("runtime-std-native-mir-body-changed")
+    val object_path = capsule.object_path.replace("\\", "/")
+    val object_slash = object_path.rfind("/")
+    if object_slash < 1 or
+            not _runtime_std_native_ancestors_real_v1(
+                object_path.substring(0, object_slash)):
+        return Err("runtime-std-native-object-parent-not-real")
+    val loaded = file_read_regular_no_follow_bounded_bytes(
+        capsule.object_path, 128 * 1024 * 1024)
+    if loaded.is_err(): return Err("runtime-std-native-object-unreadable")
+    val bytes = loaded.unwrap()
+    if bytes.len() < 4: return Err("runtime-std-native-object-empty")
+    val digest = sha256_u8_hex(bytes)
+    val expected_receipt = "native-capsule-result-v1\n" +
+        "{capsule.capsule_identity}\n{capsule.object_path}\n" +
+        "{bytes.len()}\n{digest}\n"
+    val receipt = file_read_regular_no_follow_bounded(
+        capsule.object_path + ".capsule-receipt", 4096)
+    if receipt.is_err() or receipt.unwrap() != expected_receipt:
+        return Err("runtime-std-native-capsule-receipt-invalid")
+    if not _runtime_std_native_ancestors_real_v1(
+            object_path.substring(0, object_slash)):
+        return Err("runtime-std-native-object-parent-changed")
+    if not _runtime_std_native_cas_dirs_real_v1(object_store_root, digest):
+        return Err("runtime-std-native-object-cas-directory-not-real")
+    if binary_object_cas_put(object_store_root, bytes) != digest or
+            not _runtime_std_native_cas_dirs_real_v1(object_store_root, digest) or
+            not binary_object_cas_verify(object_store_root, digest):
+        return Err("runtime-std-native-object-cas-failed")
+    Ok(_runtime_std_mir_frame_v1(member.source_identity) +
+        _runtime_std_mir_frame_v1(capsule.module_name) +
+        _runtime_std_mir_frame_v1(capsule.capsule_identity) +
+        _runtime_std_mir_frame_v1(member.mir_body.digest) +
+        _runtime_std_mir_frame_v1(digest) +
+        _runtime_std_mir_frame_v1(bytes.len().to_text()))
+
+fn runtime_std_native_observed_output_digest_v1(
+    members: [RuntimeStdNativeMemberV1], object_store_root: text
+) -> Result<text, text>:
+    if members.len() == 0:
+        return Err("runtime-std-native-observed-members-empty")
+    var rows: [text] = ["simple-runtime-std-object-cas-section-v1"]
+    for member in members:
+        val row = _runtime_std_native_object_row_v1(member,
+            object_store_root)
+        if row.is_err(): return Err(row.unwrap_err())
+        rows.push(row.unwrap())
+    Ok(sha256_text(rows.join("\n") + "\n"))
+
+fn _runtime_std_native_outcomes_content_v2(
+    members: [RuntimeStdNativeMemberV2], backend: text,
+    target_triple: text, source_identities: [text],
+    source_digests: [text], object_store_root: text
+) -> Result<text, text>:
+    if members.len() == 0 or members.len() != source_identities.len() or
+            members.len() != source_digests.len():
+        return Err("runtime-std-native-v2-source-closure-invalid")
+    var outcomes: [RuntimeStdNativeOutcomeReceiptV2] = []
+    var code_objects = 0
+    var index = 0
+    while index < members.len():
+        val member = members[index]
+        val outcome = member.outcome
+        if outcome.source_identity != source_identities[index] or
+                outcome.source_digest != source_digests[index] or
+                outcome.mir_digest != member.mir_body.digest or
+                member.mir_body.source_identity != outcome.source_identity or
+                member.mir_body.source_digest != outcome.source_digest or
+                runtime_std_mir_body_validate_v1(member.mir_body,
+                    member.mir_body.module_name,
+                    outcome.source_identity, outcome.source_digest,
+                    outcome.mir_digest) != "ok":
+            return Err("runtime-std-native-v2-mir-member-invalid")
+        if outcome.kind == RuntimeStdNativeOutcomeKindV2.code_object:
+            if member.capsule == nil:
+                return Err("runtime-std-native-v2-code-capsule-missing")
+            val capsule = member.capsule!
+            if capsule.backend_name != backend or
+                    capsule.target != target_triple or
+                    sha256_text(capsule.capsule_identity) !=
+                        outcome.capsule_identity_digest:
+                return Err("runtime-std-native-v2-capsule-target-invalid")
+            val verified = _runtime_std_native_object_row_v1(
+                RuntimeStdNativeMemberV1(outcome.source_identity,
+                    outcome.source_digest, member.mir_body, capsule),
+                object_store_root)
+            val expected = _runtime_std_mir_frame_v1(outcome.source_identity) +
+                _runtime_std_mir_frame_v1(capsule.module_name) +
+                _runtime_std_mir_frame_v1(capsule.capsule_identity) +
+                _runtime_std_mir_frame_v1(outcome.mir_digest) +
+                _runtime_std_mir_frame_v1(outcome.object_digest) +
+                _runtime_std_mir_frame_v1(outcome.object_byte_count.to_text())
+            if verified.is_err() or verified.unwrap() != expected:
+                return Err("runtime-std-native-v2-code-object-differs")
+            code_objects = code_objects + 1
+        elif member.capsule != nil:
+            return Err("runtime-std-native-v2-objectless-capsule-present")
+        outcomes.push(outcome)
+        index = index + 1
+    if code_objects == 0:
+        return Err("runtime-std-native-v2-package-has-no-code-object")
+    runtime_std_native_outcomes_section_v2(outcomes, backend,
+        target_triple, source_identities, source_digests)
+
+fn runtime_std_native_observed_output_digest_v2(
+    members: [RuntimeStdNativeMemberV2], backend: text,
+    target_triple: text, source_identities: [text],
+    source_digests: [text], object_store_root: text
+) -> Result<text, text>:
+    val content = _runtime_std_native_outcomes_content_v2(members,
+        backend, target_triple, source_identities, source_digests,
+        object_store_root)
+    if content.is_err(): return Err(content.unwrap_err())
+    Ok(sha256_text(content.unwrap()))
+
+# Seven HIR semantic section receipts are supplied by the typed-HIR owner.
+# This function issues only the actual MIR, native object/CAS, and action
+# sections, then returns the complete ten-section publication receipt.
+fn runtime_std_native_sections_emit_v1(
+    artifact_root: text,
+    object_store_root: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    package_identity: text,
+    source_inventory_digest: text,
+    source_identities: [text],
+    source_digests: [text],
+    members: [RuntimeStdNativeMemberV1],
+    semantic_sections: [RuntimeStdCompiledSectionReceiptV1],
+    dependency_interface_digests: [text],
+    action_result: BuildActionResultV1,
+    observed_output_digest: text
+) -> Result<RuntimeStdCompiledPackageReceiptV1, text>:
+    val closure = runtime_std_compiled_source_closure_digest_v1(
+        source_identities, source_digests)
+    val action = runtime_std_build_action_v1(authority, package_identity)
+    if artifact_root == "" or object_store_root == "" or closure == "" or
+            (package_identity != "simple.runtime" and
+             package_identity != "simple.std") or
+            not _runtime_std_native_ancestors_real_v1(artifact_root) or
+            not _runtime_std_native_ancestors_real_v1(object_store_root) or
+            not builder_digest_valid_v1(source_inventory_digest) or
+            members.len() == 0 or members.len() != source_identities.len() or
+            semantic_sections.len() != 7 or action == nil:
+        return Err("runtime-std-native-section-input-invalid")
+    val backend_name = members[0].capsule.backend_name
+    if backend_name != "llvm" and backend_name != "cranelift":
+        return Err("runtime-std-native-backend-unsupported")
+    if build_action_result_validate_v1(action!, action_result) != "ok" or
+            not action_result.success or action_result.cancelled or
+            action_result.output_identity != action!.restat_identity:
+        return Err("runtime-std-native-action-not-observed")
+    val semantic_names = ["debug.smf", "exports.smf", "generics.smf",
+        "hir-summaries.smf", "imports.smf", "initialization.smf",
+        "types.smf"]
+    val semantic_kinds = [PackageSectionKindV1.debug,
+        PackageSectionKindV1.exports, PackageSectionKindV1.generics,
+        PackageSectionKindV1.hir_summaries, PackageSectionKindV1.imports,
+        PackageSectionKindV1.initialization, PackageSectionKindV1.types]
+    for semantic_index in 0..7:
+        val section = semantic_sections[semantic_index]
+        if section.member_name != semantic_names[semantic_index] or
+                section.kind != semantic_kinds[semantic_index] or
+                section.path == "" or section.byte_count <= 0 or
+                not builder_digest_valid_v1(section.digest):
+            return Err("runtime-std-native-semantic-section-invalid")
+    val output_root = "{artifact_root}/{package_identity}"
+    if not dir_create_all(output_root) or
+            not _runtime_std_native_ancestors_real_v1(output_root):
+        return Err("runtime-std-native-artifact-root-unavailable")
+    var mir_rows: [text] = ["simple-runtime-std-mir-section-v1"]
+    var object_rows: [text] = ["simple-runtime-std-object-cas-section-v1"]
+    var index = 0
+    while index < members.len():
+        val member = members[index]
+        if member.source_identity != source_identities[index] or
+            member.source_digest != source_digests[index] or
+            member.capsule.backend_name != backend_name or
+                member.mir_body.source_identity != member.source_identity or
+                member.mir_body.source_digest != member.source_digest or
+                member.mir_body.content == "" or
+                sha256_text(member.mir_body.content) != member.mir_body.digest or
+                text_byte_len(member.mir_body.content) != member.mir_body.byte_count:
+            return Err("runtime-std-native-source-closure-member-mismatch")
+        val object_row = _runtime_std_native_object_row_v1(
+            member, object_store_root)
+        if object_row.is_err(): return Err(object_row.unwrap_err())
+        mir_rows.push(_runtime_std_mir_frame_v1(member.mir_body.content))
+        object_rows.push(object_row.unwrap())
+        index = index + 1
+    if sha256_text(object_rows.join("\n") + "\n") !=
+            observed_output_digest:
+        return Err("runtime-std-native-observed-object-digest-differs")
+    val mir = _runtime_std_native_section_v1(output_root, "mir.smf",
+        PackageSectionKindV1.mir, mir_rows.join("\n") + "\n")
+    if mir.is_err(): return Err(mir.unwrap_err())
+    val objects = _runtime_std_native_section_v1(output_root, "objects.smf",
+        PackageSectionKindV1.objects, object_rows.join("\n") + "\n")
+    if objects.is_err(): return Err(objects.unwrap_err())
+    val provisional = RuntimeStdCompiledPackageReceiptV1(
+        package_identity, source_identities, source_digests, closure,
+        backend_name, authority.target_triple, authority.compiler_digest,
+        dependency_interface_digests, [], action_result, "", "")
+    val receipts_content = runtime_std_compiled_receipts_section_v1(
+        authority, provisional, source_inventory_digest)
+    val receipts = _runtime_std_native_section_v1(output_root, "receipts.smf",
+        PackageSectionKindV1.receipts, receipts_content)
+    if receipts.is_err(): return Err(receipts.unwrap_err())
+    var all = semantic_sections.push(mir.unwrap())
+    all = all.push(objects.unwrap())
+    all = all.push(receipts.unwrap())
+    var i = 0
+    while i < all.len():
+        var j = i + 1
+        while j < all.len():
+            if compile_source_inventory_identity_cmp_v1(
+                    all[j].member_name, all[i].member_name) < 0:
+                val swap = all[i]
+                all[i] = all[j]
+                all[j] = swap
+            j = j + 1
+        i = i + 1
+    val sidecar_path = "{output_root}/native-action.receipt"
+    var complete = RuntimeStdCompiledPackageReceiptV1(
+        package_identity, source_identities, source_digests, closure,
+        backend_name, authority.target_triple, authority.compiler_digest,
+        dependency_interface_digests, all, action_result, sidecar_path, "")
+    val sidecar = runtime_std_compiled_action_receipt_v1(authority, complete)
+    val action_file = _runtime_std_native_publish_text_v1(
+        output_root, "native-action.receipt", sidecar, 4096)
+    if action_file.is_err(): return Err(action_file.unwrap_err())
+    complete.action_receipt_digest = sha256_text(sidecar)
+    Ok(complete)
+
+# V2 retains every selected source in MIR and outcome sections. Only
+# code_object rows read and pin an actual object in CAS; objectless rows never
+# masquerade as native module completions.
+fn runtime_std_native_sections_emit_v2(
+    artifact_root: text, object_store_root: text,
+    authority: RuntimeStdPackageAuthorityV1,
+    package_identity: text, source_inventory_digest: text,
+    source_identities: [text], source_digests: [text],
+    members: [RuntimeStdNativeMemberV2],
+    semantic_sections: [RuntimeStdCompiledSectionReceiptV1],
+    dependency_interface_digests: [text],
+    action_result: BuildActionResultV1,
+    observed_output_digest: text,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> Result<RuntimeStdCompiledPackageReceiptV1, text>:
+    val closure = runtime_std_compiled_source_closure_digest_v1(
+        source_identities, source_digests)
+    val action = runtime_std_build_action_v2(
+        authority, package_identity, budget)
+    if artifact_root == "" or object_store_root == "" or closure == "" or
+            (package_identity != "simple.runtime" and
+             package_identity != "simple.std") or
+            not _runtime_std_native_ancestors_real_v1(artifact_root) or
+            not _runtime_std_native_ancestors_real_v1(object_store_root) or
+            not builder_digest_valid_v1(source_inventory_digest) or
+            members.len() != source_identities.len() or
+            semantic_sections.len() != 7 or action == nil:
+        return Err("runtime-std-native-v2-section-input-invalid")
+    var backend_name = ""
+    for member in members:
+        if member.capsule != nil:
+            if backend_name != "" and
+                    backend_name != member.capsule!.backend_name:
+                return Err("runtime-std-native-v2-backend-drift")
+            backend_name = member.capsule!.backend_name
+    if backend_name != "llvm" and backend_name != "cranelift":
+        return Err("runtime-std-native-v2-backend-unsupported")
+    if build_action_result_validate_v1(action!, action_result) != "ok" or
+            not action_result.success or action_result.cancelled or
+            action_result.output_identity != action!.restat_identity:
+        return Err("runtime-std-native-v2-action-not-observed")
+    val objects_content = _runtime_std_native_outcomes_content_v2(
+        members, backend_name, authority.target_triple,
+        source_identities, source_digests, object_store_root)
+    if objects_content.is_err(): return Err(objects_content.unwrap_err())
+    if sha256_text(objects_content.unwrap()) != observed_output_digest or
+            not action_result.diagnostic_frames.contains(
+                "verified-native-outcomes-digest=" + observed_output_digest):
+        return Err("runtime-std-native-v2-observed-outcomes-differ")
+    val semantic_names = ["debug.smf", "exports.smf", "generics.smf",
+        "hir-summaries.smf", "imports.smf", "initialization.smf",
+        "types.smf"]
+    val semantic_kinds = [PackageSectionKindV1.debug,
+        PackageSectionKindV1.exports, PackageSectionKindV1.generics,
+        PackageSectionKindV1.hir_summaries, PackageSectionKindV1.imports,
+        PackageSectionKindV1.initialization, PackageSectionKindV1.types]
+    for semantic_index in 0..7:
+        val section = semantic_sections[semantic_index]
+        if section.member_name != semantic_names[semantic_index] or
+                section.kind != semantic_kinds[semantic_index] or
+                section.path == "" or section.byte_count <= 0 or
+                not builder_digest_valid_v1(section.digest):
+            return Err("runtime-std-native-v2-semantic-section-invalid")
+    val output_root = "{artifact_root}/{package_identity}"
+    if not dir_create_all(output_root) or
+            not _runtime_std_native_ancestors_real_v1(output_root):
+        return Err("runtime-std-native-v2-artifact-root-unavailable")
+    var mir_rows: [text] = ["simple-runtime-std-mir-section-v1"]
+    for member in members:
+        mir_rows.push(_runtime_std_mir_frame_v1(member.mir_body.content))
+    val mir = _runtime_std_native_section_v1(output_root, "mir.smf",
+        PackageSectionKindV1.mir, mir_rows.join("\n") + "\n")
+    if mir.is_err(): return Err(mir.unwrap_err())
+    val objects = _runtime_std_native_section_v1(output_root, "objects.smf",
+        PackageSectionKindV1.objects, objects_content.unwrap())
+    if objects.is_err(): return Err(objects.unwrap_err())
+    val provisional = RuntimeStdCompiledPackageReceiptV1(
+        package_identity, source_identities, source_digests, closure,
+        backend_name, authority.target_triple, authority.compiler_digest,
+        dependency_interface_digests, [], action_result, "", "",
+        Some(budget))
+    val receipts_content = runtime_std_compiled_receipts_section_v1(
+        authority, provisional, source_inventory_digest)
+    val receipts = _runtime_std_native_section_v1(output_root, "receipts.smf",
+        PackageSectionKindV1.receipts, receipts_content)
+    if receipts.is_err(): return Err(receipts.unwrap_err())
+    var all = semantic_sections.push(mir.unwrap())
+    all = all.push(objects.unwrap())
+    all = all.push(receipts.unwrap())
+    var i = 0
+    while i < all.len():
+        var j = i + 1
+        while j < all.len():
+            if compile_source_inventory_identity_cmp_v1(
+                    all[j].member_name, all[i].member_name) < 0:
+                val swap = all[i]
+                all[i] = all[j]
+                all[j] = swap
+            j = j + 1
+        i = i + 1
+    val sidecar_path = "{output_root}/native-action.receipt"
+    var complete = RuntimeStdCompiledPackageReceiptV1(
+        package_identity, source_identities, source_digests, closure,
+        backend_name, authority.target_triple, authority.compiler_digest,
+        dependency_interface_digests, all, action_result, sidecar_path, "",
+        Some(budget))
+    val sidecar = runtime_std_compiled_action_receipt_v1(authority, complete)
+    val action_file = _runtime_std_native_publish_text_v1(
+        output_root, "native-action.receipt", sidecar, 4096)
+    if action_file.is_err(): return Err(action_file.unwrap_err())
+    complete.action_receipt_digest = sha256_text(sidecar)
+    Ok(complete)
+
+export RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1
+export RUNTIME_STD_MIR_FIELD_SET_V1
+export RuntimeStdMirBodyPayloadV1, runtime_std_mir_body_payload_v1
+export runtime_std_mir_body_validate_v1, runtime_std_mir_body_matches_module_v1
+export RuntimeStdNativeMemberV1, runtime_std_native_sections_emit_v1
+export RuntimeStdNativeMemberV2, runtime_std_native_sections_emit_v2
+export runtime_std_native_directory_chain_real_v1
+export runtime_std_native_observed_output_digest_v1
+export runtime_std_native_observed_output_digest_v2

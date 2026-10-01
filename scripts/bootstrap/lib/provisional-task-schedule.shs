@@ -1,0 +1,55 @@
+#!/bin/sh
+# Caller provides build_binary/build_index/prepare_backend/run_module_backend.
+# Every independent task gets one terminal scheduling outcome.
+provisional_dispatch_tasks() {
+  attempt_binary() {
+    task_phase=$1 backend=$2 id=$3 entry=$4 output=$5
+    if (build_binary "$id" "$entry" "$output" "$task_phase" "$backend"); then
+      outcome=SUCCEEDED
+    else
+      result=$?
+      if [ "$result" -eq 20 ]; then outcome=BLOCKED; else outcome=FAILED; fi
+    fi
+    printf '%s=%s\n' "${task_phase}_${backend}_${id}_status" "$outcome" >>"$statuses"
+    printf '%s=unproven\n' "${task_phase}_${backend}_${id}_tool_evidence" >>"$statuses"
+  }
+  attempt_modules() {
+    task_phase=$1 backend=$2 config=$3
+    if (build_index "$task_phase" "$backend" "$config"); then
+      index_outcome=SUCCEEDED
+    else
+      result=$?
+      if [ "$result" -eq 20 ]; then index_outcome=BLOCKED; else index_outcome=FAILED; fi
+    fi
+    printf '%s=%s\n' "${task_phase}_${backend}_index_status" "$index_outcome" >>"$statuses"
+    printf '%s=unproven\n' "${task_phase}_${backend}_index_tool_evidence" >>"$statuses"
+    if [ "$index_outcome" = SUCCEEDED ]; then
+      if (prepare_backend "$task_phase" "$backend" && run_module_backend "$task_phase" "$backend"); then
+        group_outcome=SUCCEEDED
+      else
+        result=$?
+        if [ "$result" -eq 20 ]; then group_outcome=BLOCKED; else group_outcome=FAILED; fi
+      fi
+    else
+      group_outcome=BLOCKED
+    fi
+    printf '%s=%s\n' "${task_phase}_${backend}_group_status" "$group_outcome" >>"$statuses"
+    printf '%s=unproven\n' "${task_phase}_${backend}_group_tool_evidence" >>"$statuses"
+  }
+  # LLVM precedes Cranelift within each independent phase. A failed index
+  # blocks only its own group; binary jobs remain independent.
+  for backend in llvm cranelift; do
+    attempt_binary phase4 "$backend" bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix"
+    attempt_binary phase4 "$backend" full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix"
+    attempt_binary phase4 "$backend" mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix"
+    attempt_binary phase4 "$backend" lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix"
+    attempt_binary phase4 "$backend" test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix"
+    case "$backend" in llvm) config=$llvm_index_config ;; cranelift) config=$cranelift_index_config ;; esac
+    attempt_modules phase4 "$backend" "$config"
+  done
+  for backend in llvm cranelift; do
+    attempt_binary phase3 "$backend" phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix"
+    case "$backend" in llvm) config=$phase3_llvm_index_config ;; cranelift) config=$phase3_cranelift_index_config ;; esac
+    attempt_modules phase3 "$backend" "$config"
+  done
+}

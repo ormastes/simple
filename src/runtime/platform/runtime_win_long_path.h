@@ -80,6 +80,41 @@ static inline wchar_t* rt_win_long_path_widen(const char* path) {
     }
 }
 
+/* A private diagnostic sink may only be created under real drive-absolute
+ * directories. This rejects existing junction/symlink ancestors; CREATE_NEW
+ * and OPEN_REPARSE_POINT reject an existing leaf in the caller. */
+static inline int rt_win_profile_path_parents_are_real(wchar_t* path) {
+    size_t start = 0;
+    size_t length = wcslen(path);
+    if (length >= 7 && path[0] == L'\\' && path[1] == L'\\' && path[2] == L'?' &&
+            path[3] == L'\\' && path[5] == L':' && path[6] == L'\\') {
+        start = 7;
+    } else if (length >= 3 && path[1] == L':' &&
+            (path[2] == L'\\' || path[2] == L'/')) {
+        start = 3;
+    } else {
+        return 0;
+    }
+    wchar_t root_tail = path[start];
+    path[start] = L'\0';
+    DWORD root_attrs = GetFileAttributesW(path);
+    path[start] = root_tail;
+    if (root_attrs == INVALID_FILE_ATTRIBUTES ||
+            (root_attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (root_attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return 0;
+    for (size_t i = start; path[i]; ++i) {
+        if (path[i] != L'\\' && path[i] != L'/') continue;
+        wchar_t saved = path[i];
+        path[i] = L'\0';
+        DWORD attrs = GetFileAttributesW(path);
+        path[i] = saved;
+        if (attrs == INVALID_FILE_ATTRIBUTES ||
+                (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return 0;
+    }
+    return 1;
+}
+
 /* Legacy name kept as a macro alias so every existing call site
  * (`rt_widen_long_path_rc(...)`) keeps working without a rename pass. */
 #define rt_widen_long_path_rc(path) rt_win_long_path_widen(path)

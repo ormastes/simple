@@ -1,0 +1,135 @@
+#!/bin/sh
+# Read-only final consistency gate. Compiled managers admitted each ledger before
+# the producer wrote this receipt; this checks all pinned terminal evidence.
+set -eu
+die() { echo "managed-completion: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
+receipt= root= inventory= excluded_inventory= module_role_policy=
+producer_sha= source_root= image_receipt= builder_program= group_program= index_program=
+for arg in "$@"; do
+  case "$arg" in
+    --receipt=*) receipt=${arg#*=} ;;
+    --root=*) root=${arg#*=} ;;
+    --inventory=*) inventory=${arg#*=} ;;
+    --excluded-inventory=*) excluded_inventory=${arg#*=} ;;
+    --module-role-policy=*) module_role_policy=${arg#*=} ;;
+    --producer-sha=*) producer_sha=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --image-receipt=*) image_receipt=${arg#*=} ;;
+    --builder-program=*) builder_program=${arg#*=} ;;
+    --group-program=*) group_program=${arg#*=} ;;
+    --index-program=*) index_program=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+regular "$receipt" && regular "$inventory" && regular "$excluded_inventory" &&
+  regular "$module_role_policy" && regular "$image_receipt" &&
+  regular "$builder_program" && regular "$group_program" && regular "$index_program" &&
+  [ -d "$root" ] && [ ! -L "$root" ] &&
+  [ -d "$source_root" ] && [ ! -L "$source_root" ] \
+  || die "terminal receipt, inventory, manager images or roots unavailable"
+digest "$producer_sha" || die "expected producer digest invalid"
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
+image_field() { bootstrap_stage3_manifest_value "$1" "$image_receipt"; }
+[ "$(image_field format)" = SIMPLE-PHASE2-MANAGER-IMAGES-1 ] \
+  || die "canonical manager image receipt has wrong schema"
+[ "$(image_field builder_program)" = "$builder_program" ] &&
+  [ "$(image_field builder_sha256)" = "$(hash_file "$builder_program")" ] &&
+  [ "$(image_field group_program)" = "$group_program" ] &&
+  [ "$(image_field group_sha256)" = "$(hash_file "$group_program")" ] &&
+  [ "$(image_field index_program)" = "$index_program" ] &&
+  [ "$(image_field index_sha256)" = "$(hash_file "$index_program")" ] \
+  || die "compiled manager images differ from sealed image receipt"
+[ "$(field format)" = SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4 ] &&
+  [ "$(field status)" = PASS ] &&
+  [ "$(field phase3_status)" = PASS ] &&
+  [ "$(field phase4_status)" = PASS ] \
+  || die "both independent phases must report PASS"
+[ "$(field producer_sha256)" = "$producer_sha" ] || die "Phase 2 producer differs"
+inventory_count=$(wc -l <"$inventory" | tr -d ' ')
+case "$inventory_count" in ''|0|0*|*[!0-9]*) die "module inventory count invalid" ;; esac
+[ "$(field module_inventory_sha256)" = "$(hash_file "$inventory")" ] &&
+  [ "$(field module_inventory_count)" = "$inventory_count" ] &&
+  [ "$(field phase3_module_inventory_count)" = "$inventory_count" ] &&
+  [ "$(field phase4_module_inventory_count)" = "$inventory_count" ] \
+  || die "phase module counts or inventory digest differ"
+excluded_count=$(wc -l <"$excluded_inventory" | tr -d ' ')
+case "$excluded_count" in ''|*[!0-9]*|0[0-9]*) die "excluded inventory count invalid" ;; esac
+[ "$(field excluded_inventory_sha256)" = "$(hash_file "$excluded_inventory")" ] &&
+  [ "$(field excluded_inventory_count)" = "$excluded_count" ] &&
+  [ "$(field module_role_policy_sha256)" = "$(hash_file "$module_role_policy")" ] \
+  || die "V3 module role ledger or policy differs"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+for backend in llvm cranelift; do
+  for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+    case "$binary" in
+      bootstrap) task_phase=phase4; output="bin/simple_bootstrap$exe_suffix" ;;
+      full-cli) task_phase=phase4; output="bin/simple$exe_suffix" ;;
+      mcp) task_phase=phase4; output="bin/simple_mcp_server$exe_suffix" ;;
+      lsp) task_phase=phase4; output="bin/simple_lsp_mcp_server$exe_suffix" ;;
+      test-runner) task_phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
+      phase3-bootstrap) task_phase=phase3; output="bin/simple$exe_suffix" ;;
+    esac
+    job_root="$root/$task_phase/binaries/$backend/$binary"
+    published="$job_root/$output"
+    manager_receipt="$job_root/state/receipts/$binary-$backend.sdn"
+    manifest="$job_root/manifest.sdn"
+    key="${task_phase}_${backend}_${binary}"
+    expected=$(field "$key") || die "$key output SHA absent"
+    receipt_expected=$(field "${key}_manager_receipt_sha256") \
+      || die "$key manager receipt SHA absent"
+    digest "$expected" && digest "$receipt_expected" &&
+      regular "$published" && regular "$manager_receipt" && regular "$manifest" &&
+      [ "$(hash_file "$published")" = "$expected" ] &&
+      [ "$(hash_file "$manager_receipt")" = "$receipt_expected" ] \
+      || die "$key published output or terminal manager receipt differs"
+    "$builder_program" verify --manifest "$manifest" --state "$job_root/state" \
+      --source-root "$source_root" --output-root "$job_root" >/dev/null \
+      || die "$key compiled manager verification failed"
+  done
+done
+for task_phase in phase3 phase4; do
+  for backend in llvm cranelift; do
+    index_job="$root/$task_phase/index/$backend"
+    index_receipt="$index_job/output/index-output/receipt.sdn"
+    index_handoff="$index_job/handoff.sdn"
+    index_manager_receipt="$index_job/state/receipts/index-$task_phase-$backend.sdn"
+    group_state="$root/$task_phase/modules/$backend/state"
+    group_manifest="$group_state/manifest.sdn"
+    group_ledger="$group_state/ledger.sdn"
+    group_completion="$group_state/completion.json"
+    for proof in index_receipt index_handoff index_manager_receipt group_manifest group_ledger group_completion; do
+      case "$proof" in
+        index_receipt) path=$index_receipt ;;
+        index_handoff) path=$index_handoff ;;
+        index_manager_receipt) path=$index_manager_receipt ;;
+        group_manifest) path=$group_manifest ;;
+        group_ledger) path=$group_ledger ;;
+        group_completion) path=$group_completion ;;
+      esac
+      regular "$path" || die "$task_phase/$backend $proof missing"
+      expected=$(field "${task_phase}_${backend}_${proof}_sha256") \
+        || die "$task_phase/$backend $proof digest absent"
+      digest "$expected" && [ "$(hash_file "$path")" = "$expected" ] \
+        || die "$task_phase/$backend $proof digest differs"
+    done
+    "$builder_program" verify --manifest "$index_job/manifest.sdn" \
+      --state "$index_job/state" --source-root "$index_job/inputs" \
+      --output-root "$index_job/output" >/dev/null \
+      || die "$task_phase/$backend compiled index manager verification failed"
+    "$index_program" native-groups-index-verify \
+      --config "$index_job/inputs/index.config" --receipt "$index_receipt" \
+      --handoff "$index_handoff" >/dev/null \
+      || die "$task_phase/$backend typed V2 index verification failed"
+    "$group_program" native-groups-verify --manifest "$group_manifest" \
+      --state "$group_state" >/dev/null \
+      || die "$task_phase/$backend compiled grouped verification failed"
+  done
+done
+printf '%s\n' "$receipt"

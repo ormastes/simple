@@ -1,0 +1,56 @@
+# Exact link ownership for a typed build request. The native facade checks the
+# link itself and every ancestor without following a reparse point or symlink.
+use app.bootstrap_builder.contracts.{BuildTaskV1}
+use app.io.file_ops.{file_is_regular_no_follow, file_hash_sha256}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1,
+    snapshot_symlink_match_nofollow_v1}
+
+# Cache only ancestor metadata, never source content. The normal input hash
+# admission still runs exactly once per file at each manager/worker boundary.
+fn builder_regular_input_parents_safe_v1(task: BuildTaskV1, root: text) -> bool:
+    if not dir_is_real_no_follow(root): return false
+    var checked: {text: bool} = {}
+    for input in task.inputs:
+        val parts = input.path.split("/")
+        var prefix = root
+        for index in 0..parts.len() - 1:
+            prefix = prefix + "/" + parts[index]
+            if not checked.contains_key(prefix):
+                if not dir_is_real_no_follow(prefix): return false
+                checked[prefix] = true
+    true
+
+fn builder_link_inputs_match_v1(task: BuildTaskV1, root: text) -> text:
+    for link in task.links:
+        val kind = if link.kind == "file": 1 else: 2
+        if not snapshot_symlink_match_nofollow_v1(root,
+                root + "/" + link.path, link.target, kind):
+            return "link differs or escapes task root: " + link.path
+        val target = root + "/" + link.resolved_path
+        if link.kind == "file":
+            if not file_is_regular_no_follow(target) or
+                    file_hash_sha256(target) != link.target_digest:
+                return "link target digest differs: " + link.path
+        elif not dir_is_real_no_follow(target):
+            return "link directory target is not real: " + link.path
+    ""
+
+fn builder_link_inputs_stage_v1(task: BuildTaskV1, source_root: text,
+        work_root: text) -> text:
+    val source_error = builder_link_inputs_match_v1(task, source_root)
+    if source_error != "": return source_error
+    for link in task.links:
+        val kind = if link.kind == "file": 1 else: 2
+        if not snapshot_symlink_create_nofollow_v1(work_root,
+                work_root + "/" + link.path, link.target, kind):
+            return "cannot stage exact link: " + link.path
+        if not snapshot_symlink_match_nofollow_v1(work_root,
+                work_root + "/" + link.path, link.target, kind):
+            return "staged link readback differs: " + link.path
+    val work_error = builder_link_inputs_match_v1(task, work_root)
+    if work_error != "": return work_error
+    builder_link_inputs_match_v1(task, source_root)
+
+export builder_regular_input_parents_safe_v1
+export builder_link_inputs_match_v1, builder_link_inputs_stage_v1

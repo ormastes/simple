@@ -1,0 +1,108 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1
+}
+use compiler.driver.cache.cold_package_ownership_v1.{
+    ColdPackageOwnershipManifestV1,
+    cold_package_ownership_rules_parse_v1,
+    cold_package_ownership_capture_v1
+}
+
+fn package_policy_test_text() -> text:
+    "project:\n" +
+    "  name: simple-cold-package-ownership-policy\n" +
+    "ownership_v1:\n" +
+    "  schema: 1\n" +
+    "  rules:\n" +
+    "    examples: \"examples/10_tooling|simple.examples.tooling||\"\n" +
+    "    lib: \"src/lib|simple.std|src/lib/simple.sdn|simple-std\"\n" +
+    "    os: \"src/os|simple.os||\"\n" +
+    "    runtime: \"src/runtime|simple.runtime|src/runtime/simple.sdn|simple.runtime\"\n"
+
+fn package_policy_test_entry(path: text, content: text) ->
+        CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest,
+        digest, content.len())
+
+fn package_policy_test_inventory(policy: text) -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 1, [
+        package_policy_test_entry("examples/10_tooling/demo.spl",
+            "example-source"),
+        package_policy_test_entry("src/lib/simple.sdn",
+            "project:\n  name: simple-std\n"),
+        package_policy_test_entry("src/lib/std.spl", "std-source"),
+        package_policy_test_entry("src/os/boot.spl", "os-source"),
+        package_policy_test_entry("src/package_ownership/simple.sdn", policy),
+        package_policy_test_entry("src/runtime/simple.sdn",
+            "project:\n  name: simple.runtime\n"),
+        package_policy_test_entry("src/runtime/startup.spl", "runtime-source")])
+
+fn package_policy_test_sources(inventory: CompileSourceInventoryV1) ->
+        NativeFullInventorySourcesV1:
+    NativeFullInventorySourcesV1(
+        ["/snapshot/examples/10_tooling/demo.spl",
+            "/snapshot/src/lib/std.spl", "/snapshot/src/os/boot.spl",
+            "/snapshot/src/runtime/startup.spl"],
+        ["examples/10_tooling/demo.spl", "src/lib/std.spl",
+            "src/os/boot.spl", "src/runtime/startup.spl"],
+        [sha256_text("example-source"), sha256_text("std-source"),
+            sha256_text("os-source"),
+            sha256_text("runtime-source")],
+        [14, 10, 9, 14], 4, sha256_text("snapshot"),
+        compile_source_inventory_digest_v1(inventory), sha256_text("receipt"))
+
+fn package_policy_test_manifests() -> [ColdPackageOwnershipManifestV1]:
+    [ColdPackageOwnershipManifestV1("src/lib/simple.sdn",
+        "project:\n  name: simple-std\n"),
+     ColdPackageOwnershipManifestV1("src/runtime/simple.sdn",
+        "project:\n  name: simple.runtime\n")]
+
+describe "frozen cold package ownership":
+    it "binds complete SCV sources to checked-in package labels and manifest digests":
+        val policy = package_policy_test_text()
+        val inventory = package_policy_test_inventory(policy)
+        val captured = cold_package_ownership_capture_v1(inventory,
+            package_policy_test_sources(inventory), policy,
+            package_policy_test_manifests())
+        expect(captured.is_ok()).to_equal(true)
+        val result = captured.unwrap()
+        expect(result.members.len()).to_equal(4)
+        expect(result.members_by_source["examples/10_tooling/demo.spl"].package_identity).to_equal("simple.examples.tooling")
+        expect(result.members_by_source["src/lib/std.spl"].package_identity).to_equal("simple.std")
+        expect(result.members_by_source["src/runtime/startup.spl"].package_identity).to_equal("simple.runtime")
+        expect(result.members_by_source["src/os/boot.spl"].manifest_source_identity).to_equal("")
+        expect(result.members_by_source["src/lib/std.spl"].manifest_digest).to_equal(
+            sha256_text("project:\n  name: simple-std\n"))
+
+    it "rejects policy drift, unowned source, and changed manifest bytes":
+        val policy = package_policy_test_text()
+        val inventory = package_policy_test_inventory(policy)
+        val sources = package_policy_test_sources(inventory)
+        expect(cold_package_ownership_capture_v1(inventory, sources,
+            policy + "\n", package_policy_test_manifests()).is_err()).to_equal(true)
+        val unowned = policy.replace("src/os|simple.os||",
+            "src/other|simple.other||")
+        val unowned_inventory = package_policy_test_inventory(unowned)
+        expect(cold_package_ownership_capture_v1(unowned_inventory,
+            package_policy_test_sources(unowned_inventory), unowned,
+            package_policy_test_manifests()).is_err()).to_equal(true)
+        val changed = [ColdPackageOwnershipManifestV1("src/lib/simple.sdn",
+            "project:\n  name: other\n"),
+            package_policy_test_manifests()[1]]
+        expect(cold_package_ownership_capture_v1(inventory, sources,
+            policy, changed).is_err()).to_equal(true)
+
+    it "rejects duplicate and ambiguous roots before source selection":
+        val duplicate = package_policy_test_text() +
+            "    lib_again: \"src/lib|simple.alias||\"\n"
+        expect(cold_package_ownership_rules_parse_v1(duplicate).is_err()).to_equal(true)
+        val malformed = package_policy_test_text().replace(
+            "src/runtime|simple.runtime|src/runtime/simple.sdn|simple.runtime",
+            "src/runtime|simple.runtime|src/runtime/simple.sdn|")
+        expect(cold_package_ownership_rules_parse_v1(malformed).is_err()).to_equal(true)

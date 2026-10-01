@@ -5,13 +5,80 @@
 # Extracted from parser.spl.
 
 use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_detect_cpu, cfg_eval_key_value}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{
+    FrontendCfgDecisionV1, FrontendTargetPreprocessV1}
 
 # ===== Preprocessor State =====
 
 var _pp_tokens: [text] = []
 var _pp_pos: i64 = 0
+var _pp_target_mode: bool = false
+var _pp_target_os: text = ""
+var _pp_target_arch: text = ""
+var _pp_target_error: text = ""
+var _pp_target_decisions: [FrontendCfgDecisionV1] = []
+
+fn _pp_target_os_match(value: text) -> bool:
+    val wanted = if value == "win": "windows"
+        elif value == "mac" or value == "darwin": "macos"
+        else: value
+    if wanted == "unix":
+        return _pp_target_os == "linux" or _pp_target_os == "macos" or
+            _pp_target_os == "freebsd" or _pp_target_os == "openbsd" or
+            _pp_target_os == "netbsd" or _pp_target_os == "android" or
+            _pp_target_os == "simpleos"
+    if wanted != "windows" and wanted != "linux" and wanted != "macos" and
+            wanted != "freebsd" and wanted != "openbsd" and
+            wanted != "netbsd" and wanted != "android" and
+            wanted != "simpleos" and wanted != "none":
+        _pp_target_error = "unsupported target cfg OS: {value}"
+        return false
+    _pp_target_os == wanted
+
+fn _pp_target_arch_match(value: text) -> bool:
+    val wanted = if value == "amd64" or value == "x64": "x86_64"
+        elif value == "arm64": "aarch64"
+        elif value == "i386" or value == "i686": "x86"
+        elif value == "armv6" or value == "armv7": "arm"
+        elif value == "ppc64el" or value == "powerpc64le": "ppc64le"
+        else: value
+    if wanted != "x86_64" and wanted != "x86" and wanted != "aarch64" and
+            wanted != "arm" and wanted != "riscv64" and wanted != "riscv32" and
+            wanted != "ppc64le" and wanted != "thumbv6m" and
+            wanted != "thumbv7m" and wanted != "thumbv7em":
+        _pp_target_error = "unsupported target cfg architecture: {value}"
+        return false
+    _pp_target_arch == wanted
+
+fn _pp_target_eval_atom(token: text) -> bool:
+    val t = cfg_strip_quotes(token).trim()
+    if t == "true" or t == "compiled": return true
+    if t == "false" or t == "interpreter": return false
+    if t == "unix" or t == "win" or t == "windows" or t == "linux" or
+            t == "mac" or t == "macos" or t == "darwin" or t == "freebsd" or
+            t == "openbsd" or t == "netbsd" or t == "android" or
+            t == "simpleos" or t == "none":
+        return _pp_target_os_match(t)
+    if t == "x86_64" or t == "amd64" or t == "x64" or t == "x86" or
+            t == "i386" or t == "i686" or t == "aarch64" or t == "arm64" or
+            t == "arm" or t == "armv6" or t == "armv7" or t == "riscv64" or
+            t == "riscv32" or t == "ppc64le" or t == "ppc64el" or
+            t == "powerpc64le" or t == "thumbv6m" or t == "thumbv7m" or
+            t == "thumbv7em":
+        return _pp_target_arch_match(t)
+    var parts = if t.contains("=="): t.split("==") else: t.split("=")
+    if parts.len() == 2:
+        val key = cfg_strip_quotes(parts[0]).trim()
+        val value = cfg_strip_quotes(parts[1]).trim()
+        if key == "os" or key == "platform": return _pp_target_os_match(value)
+        if key == "arch" or key == "target_arch":
+            return _pp_target_arch_match(value)
+    _pp_target_error = "unsupported target cfg condition atom: {t}"
+    false
 
 fn _pp_eval_atom(token: text) -> bool:
+    if _pp_target_mode:
+        return _pp_target_eval_atom(token)
     val t = cfg_strip_quotes(token).trim()
     if t == "":
         return false
@@ -210,8 +277,13 @@ fn _pp_eval_condition(condition: text) -> bool:
     _pp_tokens = _pp_tokenize_condition(condition)
     _pp_pos = 0
     if _pp_tokens.len() == 0:
+        if _pp_target_mode:
+            _pp_target_error = "empty target cfg condition"
         return false
-    _pp_parse_or()
+    val result = _pp_parse_or()
+    if _pp_target_mode and _pp_pos != _pp_tokens.len():
+        _pp_target_error = "malformed target cfg condition: {condition}"
+    result
 
 fn _pp_extract_paren_condition(line: text) -> text:
     # Extract condition from @when(condition): or @cfg(condition) etc.
@@ -275,6 +347,57 @@ fn _pp_may_have_conditionals(source: text) -> bool:
         source.contains("@else") or source.contains("@end") or
         source.contains("@cfg("))
 
+fn _pp_target_decl_kind(line: text) -> text:
+    val t = line.trim()
+    if t.starts_with("fn ") or t.starts_with("pub fn ") or
+            t.starts_with("me ") or t.starts_with("pub me ") or
+            t.starts_with("extern fn ") or t.starts_with("async fn ") or
+            t.starts_with("pub async fn ") or t.starts_with("static fn "):
+        return "code"
+    if t.starts_with("var ") or t.starts_with("val ") or
+            t.starts_with("const ") or t.starts_with("pub const ") or
+            t.starts_with("static ") or t.starts_with("pub static "):
+        return "data"
+    if t == "@init" or t.starts_with("@init("):
+        return "init"
+    ""
+
+fn _pp_target_indent(line: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < line.len():
+        val ch = line[i]
+        if ch == " ": count = count + 1
+        elif ch == "\t": count = count + 4
+        else: break
+        i = i + 1
+    count
+
+fn _pp_target_decl_end(lines: [text], start: i64) -> i64:
+    if start < 0 or start >= lines.len(): return start + 1
+    val first = lines[start].trim()
+    if not first.ends_with(":"): return start + 1
+    val indent = _pp_target_indent(lines[start])
+    var end = start + 1
+    var i = start + 1
+    while i < lines.len():
+        if lines[i].trim() != "" and _pp_target_indent(lines[i]) <= indent:
+            break
+        end = i + 1
+        i = i + 1
+    end
+
+fn _pp_target_record(line: i64, directive_kind: text, condition: text,
+    parent_active: bool, condition_result: bool, effective_active: bool,
+    excluded_kind: text, excluded_start: i64, excluded_end: i64):
+    if not _pp_target_mode: return
+    _pp_target_decisions.push(FrontendCfgDecisionV1(
+        line: line, directive_kind: directive_kind, condition: condition,
+        parent_active: parent_active, condition_result: condition_result,
+        effective_active: effective_active,
+        excluded_declaration_kind: excluded_kind,
+        excluded_start_line: excluded_start, excluded_end_line: excluded_end))
+
 fn _pp_preprocess_conditionals(source: text) -> text:
     # The compiler closure is overwhelmingly ordinary source. Avoid building
     # three full line arrays when none of the recognized directives can occur.
@@ -290,7 +413,9 @@ fn _pp_preprocess_conditionals(source: text) -> text:
     var depth: i64 = 0
     var active: bool = true
 
+    var source_line: i64 = 0
     for line in lines:
+        source_line = source_line + 1
         val trimmed = line.trim()
 
         val is_when = trimmed.starts_with("@when(")
@@ -310,6 +435,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 stack_branch_active[depth] = current
             depth = depth + 1
             active = current
+            _pp_target_record(source_line, "when", cond, parent, cond_ok,
+                current, "", 0, 0)
             out_lines.push("")
             continue
 
@@ -320,14 +447,22 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 val parent = stack_parent_active[idx]
                 var taken = stack_branch_taken[idx]
                 var current = false
+                val cond = _pp_extract_paren_condition(trimmed)
+                var condition_result = false
                 if parent and not taken:
-                    val cond = _pp_extract_paren_condition(trimmed)
-                    current = _pp_eval_condition(cond)
+                    condition_result = _pp_eval_condition(cond)
+                    current = condition_result
                     if current:
                         taken = true
+                elif _pp_target_mode:
+                    condition_result = _pp_eval_condition(cond)
                 stack_branch_taken[idx] = taken
                 stack_branch_active[idx] = current
                 active = current
+                _pp_target_record(source_line, "elif", cond, parent,
+                    condition_result, current, "", 0, 0)
+            elif _pp_target_mode:
+                _pp_target_error = "@elif without @when at line {source_line}"
             out_lines.push("")
             continue
 
@@ -341,6 +476,10 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 stack_branch_taken[idx] = taken or current
                 stack_branch_active[idx] = current
                 active = current
+                _pp_target_record(source_line, "else", "", parent,
+                    not taken, current, "", 0, 0)
+            elif _pp_target_mode:
+                _pp_target_error = "@else without @when at line {source_line}"
             out_lines.push("")
             continue
 
@@ -348,10 +487,14 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         if is_end:
             if depth > 0:
                 depth = depth - 1
+            elif _pp_target_mode:
+                _pp_target_error = "@end without @when at line {source_line}"
             if depth <= 0:
                 active = true
             else:
                 active = stack_branch_active[depth - 1]
+            _pp_target_record(source_line, "end", "", true, true,
+                active, "", 0, 0)
             out_lines.push("")
             continue
 
@@ -359,7 +502,20 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             out_lines.push(line)
         else:
             # Keep line count stable for diagnostics.
+            if _pp_target_mode and trimmed.starts_with("@cfg("):
+                val inactive_cond = _pp_extract_cfg_condition(trimmed)
+                val inactive_result = _pp_eval_condition(inactive_cond)
+                _pp_target_record(source_line, "cfg", inactive_cond, false,
+                    inactive_result, false, "", 0, 0)
+            val excluded_kind = _pp_target_decl_kind(trimmed)
+            if excluded_kind != "":
+                _pp_target_record(source_line, "excluded", "", false, false,
+                    false, excluded_kind, source_line,
+                    _pp_target_decl_end(lines, source_line - 1))
             out_lines.push("")
+
+    if _pp_target_mode and depth != 0:
+        _pp_target_error = "unclosed @when block"
 
     # Second pass: @cfg(condition) per-declaration conditionals
     var final_lines: [text] = []
@@ -425,17 +581,44 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 skip_indent = -1
 
         if ot.starts_with("@cfg("):
-            val cfg_cond = _pp_extract_cfg_condition(ot)
-            val cfg_ok = _pp_eval_condition(cfg_cond)
+            # In target mode adjacent decorators jointly gate one declaration.
+            # The ambient path retains its existing single-decorator behavior.
+            var declaration_index = i + 1
+            if _pp_target_mode:
+                while declaration_index < out_lines.len() and
+                        out_lines[declaration_index].trim().starts_with("@cfg("):
+                    declaration_index = declaration_index + 1
+            var cfg_ok = true
+            var cfg_index = i
+            while cfg_index < declaration_index:
+                val cfg_cond = _pp_extract_cfg_condition(out_lines[cfg_index].trim())
+                val condition_result = _pp_eval_condition(cfg_cond)
+                val parent = cfg_ok
+                cfg_ok = cfg_ok and condition_result
+                val excluded_start = if not cfg_ok and declaration_index < out_lines.len():
+                    declaration_index + 1
+                else:
+                    0
+                val excluded_end = if excluded_start > 0:
+                    _pp_target_decl_end(out_lines, declaration_index)
+                else:
+                    0
+                val excluded_kind = if excluded_start > 0:
+                    _pp_target_decl_kind(out_lines[declaration_index])
+                else:
+                    ""
+                _pp_target_record(cfg_index + 1, "cfg", cfg_cond, parent,
+                    condition_result, cfg_ok, excluded_kind,
+                    excluded_start, excluded_end)
+                final_lines.push("")
+                cfg_index = cfg_index + 1
             if cfg_ok:
-                # Condition true: blank @cfg line, keep declaration
-                final_lines.push("")
+                # Conditions true: decorators are blank; keep declaration.
+                i = declaration_index
             else:
-                # Condition false: blank @cfg line + following declaration
-                final_lines.push("")
-                # Calculate indent of the next declaration line
-                if i + 1 < out_lines.len():
-                    val next_line = out_lines[i + 1]
+                # Conditions false: blank decorators and their declaration.
+                if declaration_index < out_lines.len():
+                    val next_line = out_lines[declaration_index]
                     val next_trimmed = next_line.trim()
                     var next_indent: i64 = 0
                     var ni: i64 = 0
@@ -450,7 +633,6 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                             break
                         ni = ni + 1
                     # Blank the declaration line
-                    i = i + 1
                     final_lines.push("")
                     # If declaration ends with ':', blank its body too
                     if next_trimmed.ends_with(":"):
@@ -479,13 +661,34 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                         if depth0 > 0:
                             skip_until_close_brace = true
                             brace_depth = depth0
-            i = i + 1
+                i = declaration_index + 1
             continue
 
         final_lines.push(ol)
         i = i + 1
 
     final_lines.join("\n")
+
+pub fn _pp_preprocess_conditionals_target_receipted_v1(
+    source: text, target_os: text, target_arch: text
+) -> Result<FrontendTargetPreprocessV1, text>:
+    if target_os == "" or target_arch == "":
+        return Err("explicit target cfg OS and architecture are required")
+    _pp_target_mode = true
+    _pp_target_os = target_os
+    _pp_target_arch = target_arch
+    _pp_target_error = ""
+    _pp_target_decisions = []
+    val preprocessed = _pp_preprocess_conditionals(source)
+    val error = _pp_target_error
+    val decisions = _pp_target_decisions
+    _pp_target_mode = false
+    _pp_target_os = ""
+    _pp_target_arch = ""
+    _pp_target_error = ""
+    _pp_target_decisions = []
+    if error != "": return Err(error)
+    Ok(FrontendTargetPreprocessV1(source: preprocessed, decisions: decisions))
 
 # ===== Public API =====
 
@@ -495,3 +698,4 @@ fn preprocess_conditionals(source: text) -> text:
 # ===== Exports =====
 
 export _pp_preprocess_conditionals, preprocess_conditionals
+export _pp_preprocess_conditionals_target_receipted_v1

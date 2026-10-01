@@ -1,0 +1,117 @@
+# One manager-owned cold semantic pass over the exact frozen SCV inventory.
+# This returns the live compiler owner so the caller can publish only actual
+# typed HIR/MIR and package artifacts.  It does not publish an index or claim
+# that any native module output has completed.
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_core_modes.{CompileMode, OutputFormat}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.driver_types.{RuntimeStdFullInventorySelectionV1}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    native_full_inventory_source_paths_v1}
+use std.nogc_sync_mut.io_runtime.{env_set_process, env_get_opt}
+
+struct NativeFullIndexSemanticRequestV1:
+    source_root: text
+    snapshot_root: text
+    scv_revision_id: text
+    scv_commit_id: text
+    scv_tree_id: text
+    snapshot_inventory_digest: text
+    source_inventory_digest: text
+    scv_receipt_digest: text
+    expected_spl_count: i64
+    artifact_root: text
+    options: CompileOptions
+
+fn native_full_index_pin_env_v1(key: text, value: text) -> bool:
+    value != "" and env_set_process(key, value) and
+        (env_get_opt(key) ?? "") == value
+
+fn native_full_index_pin_cold_environment_v1(
+    request: NativeFullIndexSemanticRequestV1
+) -> bool:
+    # The manager launches one index worker per attempt.  Every authority key
+    # is replaced from the admitted request before the compiler may read it.
+    # Empty entry/group markers explicitly refuse inherited alternate routes.
+    native_full_index_pin_env_v1("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY", "1") and
+        native_full_index_pin_env_v1(
+            "SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT",
+            str(request.expected_spl_count)) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_PACKAGE_INDEX_SOURCE_ROOT", request.source_root) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_SCV_SNAPSHOT_ROOT", request.snapshot_root) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_SCV_REVISION_ID", request.scv_revision_id) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_SCV_COMMIT_ID", request.scv_commit_id) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_SCV_TREE_ID", request.scv_tree_id) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_SCV_INVENTORY_DIGEST",
+            request.snapshot_inventory_digest) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST",
+            request.source_inventory_digest) and
+        native_full_index_pin_env_v1(
+            "SIMPLE_SCV_RECEIPT_DIGEST", request.scv_receipt_digest) and
+        native_full_index_pin_env_v1("SIMPLE_NATIVE_BUILD_CLEAN", "1") and
+        env_set_process("SIMPLE_NATIVE_BUILD_ENTRY", "") and
+        env_set_process("SIMPLE_NATIVE_GROUP_MANIFEST", "") and
+        env_set_process("SIMPLE_NATIVE_GROUP_SOURCE_ROOT", "") and
+        env_set_process("SIMPLE_BOOTSTRAP_DIRECT_IR", "0") and
+        env_set_process("SIMPLE_BOOTSTRAP", "0")
+
+fn native_full_index_compile_semantics_v1(
+    request: NativeFullIndexSemanticRequestV1
+) -> Result<CompilerDriver, text>:
+    val options = request.options
+    if request.artifact_root == "" or
+            options.mode != CompileMode.Aot or
+            options.cli_mode_text != "aot" or
+            options.output_format != OutputFormat.Native or
+            (options.backend != "llvm" and options.backend != "cranelift") or
+            options.native_target == "" or not options.low_memory or
+            options.no_borrow_check or options.input_files.len() != 0:
+        return Err("full-index-compiler-options-invalid")
+    val admitted = native_full_inventory_source_paths_v1(
+        request.source_root, request.snapshot_root,
+        request.scv_revision_id, request.scv_commit_id, request.scv_tree_id,
+        request.snapshot_inventory_digest, request.source_inventory_digest,
+        request.scv_receipt_digest, request.expected_spl_count)?
+    if admitted.source_count != request.expected_spl_count or
+            admitted.source_paths.len() != request.expected_spl_count:
+        return Err("full-index-compiler-inventory-incomplete")
+    if not native_full_index_pin_cold_environment_v1(request):
+        return Err("full-index-compiler-environment-unavailable")
+    val driver = compiler_driver_create(options)
+    driver.ctx.runtime_std_full_inventory_selection = Some(
+        RuntimeStdFullInventorySelectionV1(
+            request.artifact_root, request.snapshot_inventory_digest,
+            request.source_inventory_digest))
+    val result = compiler_driver_run_compile(driver)
+    if not result.is_success():
+        return Err("full-index-compiler-semantic-pass-failed")
+    if driver.ctx.cold_hir_typed_receipts.len() !=
+            request.expected_spl_count or
+            driver.ctx.runtime_std_hir_emissions.len() !=
+                request.expected_spl_count or
+            driver.ctx.runtime_std_mir_emissions.len() !=
+                request.expected_spl_count:
+        return Err("full-index-compiler-semantic-receipts-incomplete")
+    var seen: Dict<text, bool> = {}
+    for receipt in driver.ctx.cold_hir_typed_receipts:
+        val seed = receipt.seed
+        if seen.has(seed.source_identity) or
+                seed.inventory_digest != request.source_inventory_digest or
+                not driver.ctx.runtime_std_hir_emissions.has(
+                    seed.source_identity) or
+                not driver.ctx.runtime_std_mir_emissions.has(
+                    seed.source_identity):
+            return Err("full-index-compiler-semantic-source-mismatch")
+        seen[seed.source_identity] = true
+    Ok(driver)
+
+export NativeFullIndexSemanticRequestV1
+export native_full_index_compile_semantics_v1

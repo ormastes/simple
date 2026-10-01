@@ -1,0 +1,244 @@
+#!/bin/sh
+# Diagnostic-only hello -> private images -> typed authority -> managed tasks.
+set -eu
+die() { echo "run-provisional-phase3-phase4: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+maximum() { if [ "$1" -ge "$2" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi; }
+minimum() { if [ "$1" -le "$2" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi; }
+producer= source_checkout= output_root= target= shared_parse_cas_root=
+compiler_tool= linker_tool= threads= memory_override= reserve_override=
+for arg in "$@"; do
+  case "$arg" in
+    --producer=*) producer=${arg#*=} ;;
+    --source-checkout=*) source_checkout=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --shared-parse-cas-root=*) shared_parse_cas_root=${arg#*=} ;;
+    --compiler-tool=*) compiler_tool=${arg#*=} ;;
+    --linker-tool=*) linker_tool=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --memory-bytes=*) memory_override=${arg#*=} ;;
+    --reserve-bytes=*) reserve_override=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$producer" "$source_checkout" "$output_root" "$shared_parse_cas_root" "$compiler_tool" "$linker_tool"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+done
+for path in "$producer" "$compiler_tool" "$linker_tool"; do regular "$path" || die "regular executable unavailable: $path"; done
+[ -x "$compiler_tool" ] && [ -x "$linker_tool" ] || die "declared host tools are not executable"
+[ -d "$source_checkout" ] && [ ! -L "$source_checkout" ] || die "source checkout unavailable"
+[ -d "$shared_parse_cas_root" ] && [ ! -L "$shared_parse_cas_root" ] || die "explicit shared parse CAS root unavailable"
+source_checkout=$(CDPATH= cd -- "$source_checkout" && pwd -P) || die "source checkout unavailable"
+shared_parse_cas_root=$(CDPATH= cd -- "$shared_parse_cas_root" && pwd -P) ||
+  die "shared parse CAS root unavailable"
+case "$(uname -s 2>/dev/null):$target" in
+  MINGW*:x86_64-pc-windows-msvc|MSYS*:x86_64-pc-windows-msvc|CYGWIN*:x86_64-pc-windows-msvc) suffix=.exe host=windows ;;
+  Linux*:x86_64-unknown-linux-gnu|Linux*:aarch64-unknown-linux-gnu) suffix= host=linux ;;
+  *) die "diagnostic target must match the current host" ;;
+esac
+if [ -n "$threads" ]; then positive "$threads" || die "thread count invalid"; else threads=1; fi
+for override in "$memory_override" "$reserve_override"; do
+  [ -z "$override" ] || positive "$override" || die "memory override invalid"
+done
+# The pre-ready image builder passes this cap to process-tree-rss-watchdog.pl.
+# Keep the launcher inside that watchdog's admitted KiB range.
+image_watchdog_max_bytes=$((6835937 * 1024))
+[ -z "$memory_override" ] || [ "$memory_override" -le "$image_watchdog_max_bytes" ] \
+  || die "memory override exceeds image watchdog cap"
+output_parent=$(CDPATH= cd -- "$(dirname -- "$output_root")" && pwd -P) || die "output parent must already exist"
+output_leaf=$(basename -- "$output_root")
+case "$output_leaf" in ''|.|..) die "invalid output leaf" ;; esac
+output_root="$output_parent/$output_leaf"
+case "$output_root/" in "$source_checkout/"*) die "diagnostic output overlaps checkout" ;; esac
+case "$source_checkout/" in "$output_root/"*) die "checkout overlaps diagnostic output" ;; esac
+case "$shared_parse_cas_root/" in "$source_checkout/"*|"$output_root/"*) die "shared parse CAS overlaps source or output" ;; esac
+case "$source_checkout/" in "$shared_parse_cas_root/"*) die "source overlaps shared parse CAS" ;; esac
+case "$output_root/" in "$shared_parse_cas_root/"*) die "output overlaps shared parse CAS" ;; esac
+[ ! -L "$output_root" ] || die "diagnostic output root is linked"
+mkdir -p "$output_root/provisional-v1" || die "diagnostic root unavailable"
+root=$(CDPATH= cd -- "$output_root/provisional-v1" && pwd -P) || die "diagnostic root unavailable"
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+case "$host" in
+  windows)
+    set -- $(powershell.exe -NoProfile -Command '$o=Get-CimInstance Win32_OperatingSystem; "{0} {1} {2}" -f ([int64]$o.FreePhysicalMemory*1024),([int64]$o.FreeVirtualMemory*1024),([int64]$o.TotalVisibleMemorySize*1024)' | tr -d '\r') \
+      || die "Windows memory probe failed" ;;
+  linux)
+    set -- $(awk '$1=="MemTotal:" {t=$2*1024} $1=="MemAvailable:" {p=$2*1024} $1=="CommitLimit:" {l=$2*1024} $1=="Committed_AS:" {c=$2*1024} END {if(t>0&&p>0&&l>c) printf "%.0f %.0f %.0f\n",p,l-c,t; else exit 1}' /proc/meminfo) \
+      || die "Linux memory probe failed" ;;
+esac
+[ "$#" -eq 3 ] || die "host memory observation incomplete"
+available_physical=$1 available_commit=$2 total_physical=$3
+for value in "$available_physical" "$available_commit" "$total_physical"; do positive "$value" || die "host memory observation invalid"; done
+reserve_default=$(maximum 8589934592 "$((total_physical / 8))")
+reserve_bytes=${reserve_override:-$reserve_default}
+available_memory=$(minimum "$available_physical" "$available_commit")
+[ "$available_memory" -gt "$reserve_bytes" ] || die "host memory below retained reserve"
+memory_default=$((available_memory - reserve_bytes))
+memory_default=$(minimum "$memory_default" "$image_watchdog_max_bytes")
+memory_bytes=${memory_override:-$memory_default}
+positive "$memory_bytes" && [ "$memory_bytes" -le "$image_watchdog_max_bytes" ] &&
+  [ "$available_memory" -ge "$((memory_bytes + reserve_bytes))" ] \
+  || die "diagnostic hard cap plus reserve exceeds measured host memory"
+set -- $(df -Pk "$root" | awk 'NR==2 { printf "%.0f %.0f\n", $2*1024, $4*1024 }')
+[ "$#" -eq 2 ] || die "host disk observation incomplete"
+total_disk=$1 available_disk=$2
+positive "$total_disk" && positive "$available_disk" || die "host disk observation invalid"
+source_bytes=$(du -sk "$source_checkout/src" "$source_checkout/examples/10_tooling" |
+  awk '{sum+=$1*1024} END {if(sum>0) printf "%.0f\n",sum; else exit 1}') || die "source disk estimate failed"
+estimated_group_disk_bytes=$(maximum 8589934592 "$((3 * source_bytes))")
+minimum_free_disk_bytes=$(maximum 26843545600 "$((available_disk / 4))")
+[ "$available_disk" -ge "$((estimated_group_disk_bytes + minimum_free_disk_bytes))" ] ||
+  die "host disk below estimated task bytes plus 25 GiB retained floor"
+producer_digest=$(hash_file "$producer")
+compiler_tool_digest=$(hash_file "$compiler_tool")
+linker_tool_digest=$(hash_file "$linker_tool")
+snapshot="$root/source.snapshot"
+if [ -e "$snapshot" ]; then
+  regular "$snapshot" || die "existing source snapshot is not regular"
+  observed="$root/source-observed.$$"
+  bootstrap_stage3_source_snapshot "$observed" "$source_checkout" || die "source snapshot replay failed"
+  cmp -s "$observed" "$snapshot" || die "source differs from retained provisional snapshot: $observed"
+  rm -f "$observed"
+else
+  bootstrap_stage3_source_snapshot "$snapshot" "$source_checkout" || die "source snapshot failed"
+fi
+snapshot_digest=$(hash_file "$snapshot")
+hello_source="$source_checkout/test/04_smoke/windows_native_hello.spl"
+regular "$hello_source" || die "hello fixture unavailable"
+hello_source_digest=$(hash_file "$hello_source")
+hello_root="$root/hello"
+hello_receipt="$hello_root/hello.receipt"
+if [ ! -e "$hello_receipt" ]; then
+  sh "$repo_root/scripts/bootstrap/prepare-provisional-hello.shs" \
+    --producer="$producer" --producer-digest="$producer_digest" \
+    --source-checkout="$source_checkout" --source-snapshot="$snapshot" \
+    --source-snapshot-digest="$snapshot_digest" --hello-source="$hello_source" \
+    --hello-source-digest="$hello_source_digest" --output-root="$hello_root" \
+    --target="$target" --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+    || die "provisional hello failed; no manager dispatch"
+fi
+regular "$hello_receipt" || die "successful hello receipt unavailable"
+hello_field() { bootstrap_stage3_manifest_value "$1" "$hello_receipt"; }
+[ "$(hello_field format)" = SIMPLE-PROVISIONAL-HELLO-1 ] &&
+  [ "$(hello_field producer_path)" = "$producer" ] &&
+  [ "$(hello_field producer_digest)" = "$producer_digest" ] &&
+  [ "$(hello_field hello_source_path)" = "$hello_source" ] &&
+  [ "$(hello_field hello_source_digest)" = "$hello_source_digest" ] &&
+  [ "$(hello_field source_snapshot_digest)" = "$snapshot_digest" ] &&
+  [ "$(hello_field compile_exit)" = 0 ] && [ "$(hello_field run_exit)" = 0 ] &&
+  [ "$(hello_field launcher_relation)" = executed_by_provisional_runner ] \
+  || die "retained hello receipt is not bound to this producer and source"
+for pair in 'hello_executable_path hello_executable_digest' \
+    'stdout_path stdout_digest' 'stderr_path stderr_digest' \
+    'compile_command_path compile_command_digest' 'compile_log_path compile_log_digest'; do
+  path_key=${pair%% *} digest_key=${pair#* }
+  evidence=$(hello_field "$path_key") || die "$path_key absent from hello receipt"
+  evidence_sha=$(hello_field "$digest_key") || die "$digest_key absent from hello receipt"
+  regular "$evidence" && [ "$(hash_file "$evidence")" = "$evidence_sha" ] \
+    || die "retained hello evidence changed: $path_key"
+done
+hello_digest=$(hash_file "$hello_receipt")
+authority_images="$root/authority-images"
+sh "$repo_root/scripts/bootstrap/prepare-provisional-manager-images.shs" \
+  --mode=authority --producer="$producer" --producer-digest="$producer_digest" \
+  --source-root="$source_checkout" --source-snapshot="$snapshot" \
+  --source-snapshot-digest="$snapshot_digest" --hello-receipt="$hello_receipt" \
+  --hello-receipt-digest="$hello_digest" --output-root="$authority_images" \
+  --target="$target" --runtime-path="$source_checkout/src/runtime" \
+  --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+  --compiler-tool="$compiler_tool" --compiler-tool-digest="$compiler_tool_digest" \
+  --linker-tool="$linker_tool" --linker-tool-digest="$linker_tool_digest" \
+  || die "provisional authority image build failed"
+authority_program="$authority_images/images/provisional-authority$suffix"
+authority_image_receipt="$authority_images/provisional-authority-images.env"
+authority_root="$root/authority"
+sh "$repo_root/scripts/bootstrap/prepare-provisional-phase3-phase4.shs" \
+  --producer="$producer" --source-checkout="$source_checkout" \
+  --source-snapshot="$snapshot" --source-snapshot-digest="$snapshot_digest" \
+  --hello-receipt="$hello_receipt" --hello-receipt-digest="$hello_digest" \
+  --authority-program="$authority_program" --authority-image-receipt="$authority_image_receipt" \
+  --output-root="$authority_root" --target="$target" \
+  || die "compiled provisional source authority refused hello/source evidence"
+authority_receipt="$authority_root/provisional-authority.receipt"
+authority_digest=$(hash_file "$authority_receipt")
+"$authority_program" native-groups-provisional-authority-verify \
+  --receipt "$authority_receipt" --digest "$authority_digest" \
+  --source-snapshot "$snapshot" --hello-receipt "$hello_receipt" >/dev/null \
+  || die "provisional authority readback failed"
+authority_field() {
+  "$authority_program" native-groups-provisional-authority-field \
+    --receipt "$authority_receipt" --digest "$authority_digest" --field "$1"
+}
+[ "$(authority_field diagnostic_only)" = 1 ] &&
+  [ "$(authority_field producer_digest)" = "$producer_digest" ] &&
+  [ "$(authority_field source_snapshot_path)" = "$snapshot" ] &&
+  [ "$(authority_field source_snapshot_digest)" = "$snapshot_digest" ] \
+  || die "provisional authority does not bind launched producer and snapshot"
+source_root=$(authority_field source_root) || die "private source root absent"
+source_authority=$(authority_field source_authority_path) || die "copied source authority absent"
+source_authority_digest=$(authority_field source_authority_digest) || die "copied source authority digest absent"
+runtime_snapshot=$(authority_field runtime_snapshot_path) || die "private runtime snapshot absent"
+runtime_snapshot_digest=$(authority_field runtime_snapshot_digest) || die "private runtime snapshot digest absent"
+manager_images="$root/manager-images"
+sh "$repo_root/scripts/bootstrap/prepare-provisional-manager-images.shs" \
+  --mode=remaining --producer="$producer" --producer-digest="$producer_digest" \
+  --source-root="$source_root" --source-snapshot="$snapshot" \
+  --source-snapshot-digest="$snapshot_digest" --hello-receipt="$hello_receipt" \
+  --hello-receipt-digest="$hello_digest" --output-root="$manager_images" \
+  --target="$target" --runtime-path="$source_root/src/runtime" \
+  --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+  --authority-program="$authority_program" --authority-receipt="$authority_receipt" \
+  --authority-digest="$authority_digest" --authority-image-receipt="$authority_image_receipt" \
+  --compiler-tool="$compiler_tool" --compiler-tool-digest="$compiler_tool_digest" \
+  --linker-tool="$linker_tool" --linker-tool-digest="$linker_tool_digest" \
+  || die "provisional manager image build failed"
+image_receipt="$manager_images/provisional-manager-images.env"
+image_field() { bootstrap_stage3_manifest_value "$1" "$image_receipt"; }
+[ "$(image_field format)" = SIMPLE-PROVISIONAL-IMAGES-1 ] &&
+  [ "$(image_field stage)" = manager ] && [ "$(image_field diagnostic_only)" = 1 ] \
+  || die "private manager image receipt unavailable"
+run_root="$root/run"
+mkdir -p "$run_root" || die "private manager run root unavailable"
+sh "$repo_root/scripts/bootstrap/bootstrap-provisional-phase3-phase4.shs" \
+  --hello-receipt="$hello_receipt" --original-source-snapshot="$snapshot" \
+  --original-source-snapshot-digest="$snapshot_digest" \
+  --source-authority="$source_authority" --source-authority-digest="$source_authority_digest" \
+  --runtime-snapshot="$runtime_snapshot" --runtime-snapshot-digest="$runtime_snapshot_digest" \
+  --tool-intent="$manager_images/provisional-tool.intent" \
+  --tool-intent-digest="$(hash_file "$manager_images/provisional-tool.intent")" \
+  --scv-receipt="$(authority_field scv_receipt_path)" \
+  --source-root="$source_root" \
+  --source-inventory="$(authority_field full_source_inventory_path)" \
+  --source-links="$(authority_field full_source_links_path)" \
+  --module-inventory="$(authority_field module_inventory_path)" \
+  --excluded-inventory="$(authority_field excluded_inventory_path)" \
+  --excluded-inventory-digest="$(authority_field excluded_inventory_digest)" \
+  --excluded-inventory-count="$(authority_field excluded_inventory_count)" \
+  --module-role-policy="$(authority_field module_role_policy_path)" \
+  --module-role-policy-digest="$(authority_field module_role_policy_digest)" \
+  --shared-parse-cas-root="$shared_parse_cas_root" \
+  --root="$run_root" --template="$(image_field template)" \
+  --manifest-program="$(image_field manifest_program)" \
+  --builder-program="$(image_field builder_program)" \
+  --group-program="$(image_field group_program)" \
+  --group-worker="$(image_field group_worker)" \
+  --group-broker="$(image_field group_broker)" \
+  --index-program="$(image_field index_program)" \
+  --authority-program="$authority_program" --authority-receipt="$authority_receipt" \
+  --authority-digest="$authority_digest" \
+  --authority-image-receipt="$authority_image_receipt" --image-receipt="$image_receipt" \
+  --llvm-index-config="$(authority_field llvm_index_config_path)" \
+  --cranelift-index-config="$(authority_field cranelift_index_config_path)" \
+  --phase3-llvm-index-config="$(authority_field phase3_llvm_index_config_path)" \
+  --phase3-cranelift-index-config="$(authority_field phase3_cranelift_index_config_path)" \
+  --threads="$threads" --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+  --target="$target" --group-size=32 --max-attempts=3 --poll-ms=1000 \
+  --lifetime-ms=21600000 --estimated-group-disk-bytes="$estimated_group_disk_bytes" \
+  --minimum-free-disk-bytes="$minimum_free_disk_bytes"

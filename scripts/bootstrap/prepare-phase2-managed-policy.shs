@@ -1,0 +1,134 @@
+#!/bin/sh
+# Select bounded local manager policy from current host capacity. The receipt
+# freezes policy on resume; every invocation probes capacity again.
+set -eu
+die() { echo "phase2-managed-policy: $*" >&2; exit 1; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
+maximum() { if [ "$1" -ge "$2" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi; }
+minimum() { if [ "$1" -le "$2" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi; }
+choose() { if [ -n "$1" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi; }
+source_estimate_root= output_root= memory_override= reserve_override=
+group_override= attempts_override= poll_override= lifetime_override=
+estimated_disk_override= minimum_disk_override= threads=
+for arg in "$@"; do
+  case "$arg" in
+    --source-estimate-root=*) source_estimate_root=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --memory-bytes=*) memory_override=${arg#*=} ;;
+    --reserve-bytes=*) reserve_override=${arg#*=} ;;
+    --group-size=*) group_override=${arg#*=} ;;
+    --max-attempts=*) attempts_override=${arg#*=} ;;
+    --poll-ms=*) poll_override=${arg#*=} ;;
+    --lifetime-ms=*) lifetime_override=${arg#*=} ;;
+    --estimated-group-disk-bytes=*) estimated_disk_override=${arg#*=} ;;
+    --minimum-free-disk-bytes=*) minimum_disk_override=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+absolute "$source_estimate_root" && absolute "$output_root" || die "absolute roots required"
+[ -d "$source_estimate_root/src" ] && [ ! -L "$source_estimate_root/src" ] \
+  || die "source estimate root lacks src directory"
+[ -d "$source_estimate_root/examples/10_tooling" ] \
+  || die "source estimate root lacks tooling symlink targets"
+positive "$threads" || die "canonical positive thread count required"
+mkdir -p "$output_root" || die "policy output root unavailable"
+case "$output_root/" in "$source_estimate_root/"*) die "policy output overlaps source checkout" ;; esac
+case "$source_estimate_root/" in "$output_root/"*) die "source checkout overlaps policy output" ;; esac
+
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    observed=$(powershell.exe -NoProfile -Command '$o=Get-CimInstance Win32_OperatingSystem; "{0} {1} {2}" -f ([int64]$o.FreePhysicalMemory*1024),([int64]$o.FreeVirtualMemory*1024),([int64]$o.TotalVisibleMemorySize*1024)' | tr -d '\r') \
+      || die "Windows physical/virtual memory probe failed" ;;
+  Linux*)
+    observed=$(awk '$1=="MemTotal:" {t=$2*1024} $1=="MemAvailable:" {p=$2*1024} $1=="CommitLimit:" {l=$2*1024} $1=="Committed_AS:" {c=$2*1024} END {if(t>0&&p>0&&l>c) printf "%.0f %.0f %.0f\n",p,l-c,t; else exit 1}' /proc/meminfo) \
+      || die "Linux physical/commit memory probe failed" ;;
+  *) die "unsupported host memory probe" ;;
+esac
+set -- $observed
+[ "$#" -eq 3 ] || die "host memory probe returned wrong field count"
+available_physical=$1 available_commit=$2 total_physical=$3
+for n in "$available_physical" "$available_commit" "$total_physical"; do
+  positive "$n" || die "host memory probe returned noncanonical bytes"
+done
+available_memory=$(minimum "$available_physical" "$available_commit")
+observed_disk=$(df -Pk "$output_root" | awk 'NR==2 {printf "%.0f %.0f\n",$2*1024,$4*1024}') \
+  || die "host disk probe failed"
+set -- $observed_disk
+[ "$#" -eq 2 ] || die "host disk probe returned wrong field count"
+total_disk=$1 available_disk=$2
+positive "$total_disk" && positive "$available_disk" || die "host disk probe invalid"
+source_bytes=$(du -sk "$source_estimate_root/src" "$source_estimate_root/examples/10_tooling" | awk '{sum+=$1*1024} END {if(sum>0) printf "%.0f\n",sum; else exit 1}') \
+  || die "source size probe failed"
+positive "$source_bytes" || die "source size probe invalid"
+reserve_default=$(maximum 8589934592 "$(((total_physical + 7) / 8))")
+disk_fraction=$(minimum "$(((total_disk + 9) / 10))" "$((available_disk / 4))")
+minimum_disk_default=$(maximum 17179869184 "$disk_fraction")
+estimated_disk_default=$(maximum 8589934592 "$((3 * source_bytes))")
+receipt="$output_root/policy.env"
+if [ -e "$receipt" ]; then
+  regular "$receipt" || die "existing policy receipt is not regular"
+  repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+  . "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  policy_field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
+  [ "$(policy_field format)" = SIMPLE-PHASE2-MANAGED-POLICY-1 ] \
+    || die "existing policy receipt has wrong format"
+  memory_bytes=$(policy_field memory_bytes) reserve_bytes=$(policy_field reserve_bytes)
+  group_size=$(policy_field group_size) max_attempts=$(policy_field max_attempts)
+  poll_ms=$(policy_field poll_ms) lifetime_ms=$(policy_field lifetime_ms)
+  estimated_group_disk_bytes=$(policy_field estimated_group_disk_bytes)
+  minimum_free_disk_bytes=$(policy_field minimum_free_disk_bytes)
+  prior_source_bytes=$(policy_field source_estimate_bytes)
+  [ "$prior_source_bytes" = "$source_bytes" ] || die "source size differs from policy replay"
+  for pair in "memory:$memory_override:$memory_bytes" "reserve:$reserve_override:$reserve_bytes" \
+      "group:$group_override:$group_size" "attempts:$attempts_override:$max_attempts" \
+      "poll:$poll_override:$poll_ms" "lifetime:$lifetime_override:$lifetime_ms" \
+      "estimated-disk:$estimated_disk_override:$estimated_group_disk_bytes" \
+      "minimum-disk:$minimum_disk_override:$minimum_free_disk_bytes"; do
+    label=${pair%%:*} remainder=${pair#*:} override=${remainder%%:*} selected=${remainder#*:}
+    [ -z "$override" ] || [ "$override" = "$selected" ] \
+      || die "$label override differs from sealed policy"
+  done
+else
+  reserve_bytes=$(choose "$reserve_override" "$reserve_default")
+  positive "$reserve_bytes" || die "canonical reserve bytes required"
+  [ "$available_memory" -gt "$reserve_bytes" ] \
+    || die "memory unavailable: available=$available_memory reserve=$reserve_bytes"
+  memory_bytes=$(choose "$memory_override" "$((available_memory - reserve_bytes))")
+  group_size=$(choose "$group_override" 32)
+  max_attempts=$(choose "$attempts_override" 3)
+  poll_ms=$(choose "$poll_override" 1000)
+  lifetime_ms=$(choose "$lifetime_override" 21600000)
+  estimated_group_disk_bytes=$(choose "$estimated_disk_override" "$estimated_disk_default")
+  minimum_free_disk_bytes=$(choose "$minimum_disk_override" "$minimum_disk_default")
+fi
+for n in "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
+    "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+  positive "$n" || die "managed policy requires canonical positive decimals"
+done
+[ "$memory_bytes" -le 1125899906842624 ] && [ "$group_size" -le 4096 ] &&
+  [ "$max_attempts" -le 100 ] && [ "$poll_ms" -le 60000 ] &&
+  [ "$lifetime_ms" -le 604800000 ] && [ "$group_size" -ge "$threads" ] &&
+  [ "$poll_ms" -le "$lifetime_ms" ] || die "managed policy exceeds compiled bounds"
+[ "$available_memory" -ge "$((memory_bytes + reserve_bytes))" ] \
+  || die "memory unavailable: physical=$available_physical commit=$available_commit cap=$memory_bytes reserve=$reserve_bytes"
+echo "phase2-managed-policy: capacity physical=$available_physical commit=$available_commit cap=$memory_bytes reserve=$reserve_bytes disk_free=$available_disk disk_estimate=$estimated_group_disk_bytes disk_reserve=$minimum_free_disk_bytes source=$source_bytes" >&2
+[ "$available_disk" -ge "$((estimated_group_disk_bytes + minimum_free_disk_bytes))" ] \
+  || die "disk unavailable: free=$available_disk estimate=$estimated_group_disk_bytes reserve=$minimum_free_disk_bytes source=$source_bytes"
+if [ ! -e "$receipt" ]; then
+  tmp="$receipt.tmp.$$"
+  umask 077
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+  {
+    printf '%s\n' 'format=SIMPLE-PHASE2-MANAGED-POLICY-1' \
+      "source_estimate_bytes=$source_bytes" "memory_bytes=$memory_bytes" \
+      "reserve_bytes=$reserve_bytes" "group_size=$group_size" \
+      "max_attempts=$max_attempts" "poll_ms=$poll_ms" \
+      "lifetime_ms=$lifetime_ms" "estimated_group_disk_bytes=$estimated_group_disk_bytes" \
+      "minimum_free_disk_bytes=$minimum_free_disk_bytes"
+  } >"$tmp" || die "policy receipt write failed"
+  mv "$tmp" "$receipt" || die "policy receipt publication failed"
+fi
+printf '%s\n' "$receipt"

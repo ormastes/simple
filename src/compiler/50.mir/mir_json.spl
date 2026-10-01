@@ -46,6 +46,14 @@ fn serialize_mir_type(t: MirType) -> text:
         case Char: "\"Char\""
         case Unit: "\"Unit\""
         case Never: "\"Never\""
+        case Vec4f: "\"Vec4f\""
+        case Vec8f: "\"Vec8f\""
+        case Vec4d: "\"Vec4d\""
+        case Vec4i: "\"Vec4i\""
+        case Vec8i: "\"Vec8i\""
+        case Vec16f: "\"Vec16f\""
+        case Vec8d: "\"Vec8d\""
+        case Vec16i: "\"Vec16i\""
 
         # Pointers and references
         case Ptr(pointee, mutable):
@@ -98,6 +106,9 @@ fn serialize_mir_type(t: MirType) -> text:
             val err_json = serialize_mir_type(err_type)
             "{\"Result\":{\"ok\":{ok_json},\"err\":{err_json}}}"
 
+        case Bits(width, signed):
+            "{\"Bits\":{\"width\":{width},\"signed\":{signed}}}"
+
         # Special types
         case Opaque(name):
             "{\"Opaque\":\"{escape_json_string(name)}\"}"
@@ -128,9 +139,8 @@ fn serialize_mir_type(t: MirType) -> text:
             elems = "{elems}]"
             "{\"Union\":{elems}}"
 
-        # Catch-all for any missing types
-        case _:
-            "\"UnknownType\""
+        case ScalableVec(element, min_lanes):
+            "{\"ScalableVec\":{\"element\":{serialize_mir_type(element)},\"min_lanes\":{min_lanes}}}"
 
 # ============================================================================
 # Constant Value Serialization
@@ -147,10 +157,23 @@ fn serialize_const_value(c: MirConstValue) -> text:
             if b: "true" else: "false"
         case Str(s):
             "\"{escape_json_string(s)}\""
+        case Array(elements):
+            var values: [text] = []
+            for element in elements:
+                values.push(serialize_const_value(element))
+            "{\"Array\":[" + values.join(",") + "]}"
+        case Tuple(elements):
+            var values: [text] = []
+            for element in elements:
+                values.push(serialize_const_value(element))
+            "{\"Tuple\":[" + values.join(",") + "]}"
+        case Struct(fields):
+            var values: [text] = []
+            for name in fields.keys().sorted():
+                values.push("\"{escape_json_string(name)}\":{serialize_const_value(fields[name])}")
+            "{\"Struct\":{" + values.join(",") + "}}"
         case Zero:
             "\"Zero\""
-        case _:
-            "null"
 
 # ============================================================================
 # Operation Serialization
@@ -183,7 +206,6 @@ fn serialize_binop(op: MirBinOp) -> text:
         case BroadcastDiv: "\"BroadcastDiv\""
         case BroadcastPow: "\"BroadcastPow\""
         case Offset: "\"Offset\""
-        case _: "\"Other\""
 
 fn serialize_unaryop(op: MirUnaryOp) -> text:
     """Serialize unary operation."""
@@ -192,7 +214,6 @@ fn serialize_unaryop(op: MirUnaryOp) -> text:
         case Not: "\"Not\""
         case BitNot: "\"BitNot\""
         case Transpose: "\"Transpose\""
-        case _: "\"Other\""
 
 fn serialize_aggregate_kind(kind: AggregateKind) -> text:
     """Serialize aggregate kind to JSON."""
@@ -363,6 +384,9 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
                 case nil: "null"
             "{\"CommitUpdates\":{\"dest\":{dest_text},\"base\":{local_id_value(base)},\"updates\":{local_id_value(updates)}}}"
 
+        case Drop(local):
+            "{\"Drop\":{local_id_value(local)}}"
+
         case BinOp(dest, op, left, right):
             val opstr = serialize_binop(op)
             val l = serialize_operand(left)
@@ -389,6 +413,12 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
 
         case GlobalAddr(dest, symbol, mutable):
             "{\"GlobalAddr\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id},\"mutable\":{mutable}}}"
+
+        case LoadGlobal(dest, symbol):
+            "{\"LoadGlobal\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id}}}"
+
+        case StoreGlobal(symbol, value):
+            "{\"StoreGlobal\":{\"symbol\":{symbol.id},\"value\":{serialize_operand(value)}}}"
 
         case Call(maybeDest, func, args):
             val f = serialize_operand(func)

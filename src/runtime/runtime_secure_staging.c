@@ -99,6 +99,74 @@ int rt_file_create_excl(const char* path_ptr, int64_t path_len,
 #endif
 }
 
+/* A bounded, same-handle read for the optional cross-host flat-pool cache.
+ * A caller verifies its immutable key and payload SHA after this read.  The
+ * leaf is opened without following a symlink/reparse point; missing, changed,
+ * nonregular and oversized files all become ordinary cache misses. */
+int64_t rt_shared_parse_cell_read_v1(const uint8_t* path_ptr, uint64_t path_len, int64_t maximum) {
+    char path[RT_SECURE_PATH_MAX];
+    if (maximum <= 0 || maximum > 33554432 ||
+        !secure_copy_path(path_ptr, path_len, path, sizeof(path)))
+        return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    wchar_t wide_path[32768];
+    if (!spl_secure_widen_long_path(path, wide_path)) return rt_string_new(NULL, 0);
+    HANDLE file = CreateFileW(wide_path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (file == INVALID_HANDLE_VALUE) return rt_string_new(NULL, 0);
+    BY_HANDLE_FILE_INFORMATION before, after;
+    LARGE_INTEGER length;
+    int ok = GetFileInformationByHandle(file, &before) &&
+        !(before.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+        GetFileSizeEx(file, &length) && length.QuadPart > 0 &&
+        length.QuadPart <= maximum;
+    uint8_t* bytes = ok ? (uint8_t*)malloc((size_t)length.QuadPart) : NULL;
+    if (!bytes) ok = 0;
+    size_t done = 0;
+    while (ok && done < (size_t)length.QuadPart) {
+        DWORD got = 0;
+        DWORD want = (DWORD)((size_t)length.QuadPart - done);
+        if (!ReadFile(file, bytes + done, want, &got, NULL) || got == 0) ok = 0;
+        else done += got;
+    }
+    if (ok && (!GetFileInformationByHandle(file, &after) ||
+        before.dwVolumeSerialNumber != after.dwVolumeSerialNumber ||
+        before.nFileIndexHigh != after.nFileIndexHigh ||
+        before.nFileIndexLow != after.nFileIndexLow ||
+        before.nFileSizeHigh != after.nFileSizeHigh ||
+        before.nFileSizeLow != after.nFileSizeLow ||
+        CompareFileTime(&before.ftLastWriteTime, &after.ftLastWriteTime) != 0)) ok = 0;
+    CloseHandle(file);
+    int64_t result = ok ? rt_string_new(bytes, (uint64_t)length.QuadPart) :
+        rt_string_new(NULL, 0);
+    free(bytes);
+    return result;
+#else
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return rt_string_new(NULL, 0);
+    struct stat before, after;
+    int ok = !fstat(fd, &before) && S_ISREG(before.st_mode) &&
+        before.st_size > 0 && before.st_size <= maximum;
+    uint8_t* bytes = ok ? (uint8_t*)malloc((size_t)before.st_size) : NULL;
+    if (!bytes) ok = 0;
+    size_t done = 0;
+    while (ok && done < (size_t)before.st_size) {
+        ssize_t got = read(fd, bytes + done, (size_t)before.st_size - done);
+        if (got <= 0) ok = 0;
+        else done += (size_t)got;
+    }
+    if (ok && (fstat(fd, &after) || before.st_dev != after.st_dev ||
+        before.st_ino != after.st_ino || before.st_size != after.st_size ||
+        before.st_mtime != after.st_mtime)) ok = 0;
+    close(fd);
+    int64_t result = ok ? rt_string_new(bytes, (uint64_t)before.st_size) :
+        rt_string_new(NULL, 0);
+    free(bytes);
+    return result;
+#endif
+}
+
 int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_SECURE_PATH_MAX];
     if (!secure_copy_path(path_ptr, path_len, path, sizeof(path))) return 0;

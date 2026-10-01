@@ -1,0 +1,124 @@
+use std.spec.{describe, it, expect, fail}
+use app.bootstrap_builder.native_group_prepare.{native_prepare_config_v1, native_prepare_policy_v1,
+    native_prepare_scc_conflicts_v1, native_prepare_group_boundary_v1,
+    native_prepare_absolute_v1, native_prepare_shared_parse_root_v1}
+
+fn native_prepare_config_fixture_v1() -> text:
+    ["format=SIMPLE-NATIVE-GROUP-PREPARE-1", "run_id=phase4-llvm", "producer_path=D:/p.exe",
+     "producer_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "source_root=D:/snapshot", "full_source_authority_path=D:/source.inputs",
+     "full_source_authority_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "scv_receipt_path=D:/snapshot/build/scv/receipts/rev.receipt",
+     "scv_receipt_digest=3333333333333333333333333333333333333333333333333333333333333333",
+     "variant_receipt_path=D:/cache/package-module-index-v1/index.variant",
+     "variant_receipt_digest=4444444444444444444444444444444444444444444444444444444444444444",
+     "runtime_std_authority_path=D:/cache/runtime-std-authority.receipt",
+     "runtime_std_authority_digest=5555555555555555555555555555555555555555555555555555555555555555",
+     "index_handoff_path=D:/phase4/index/llvm/handoff.sdn",
+     "index_handoff_digest=6666666666666666666666666666666666666666666666666666666666666666",
+     "tool_path=D:/tools.inputs", "tool_digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "runtime_path=D:/runtime.inputs", "runtime_digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     "manager_path=D:/manager.exe", "manager_digest=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+     "worker_path=D:/worker.exe", "worker_digest=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+     "broker_path=D:/broker.exe", "broker_digest=1111111111111111111111111111111111111111111111111111111111111111",
+     "inventory_path=D:/modules.txt", "inventory_digest=2222222222222222222222222222222222222222222222222222222222222222",
+     "inventory_count=15754", "phase=phase4", "backend=llvm", "target=x86_64-pc-windows-msvc",
+     "output_kind=OBJECT", "index_read_root=D:/stage2-index",
+     "output_root=D:/out/llvm", "state_root=D:/state/llvm", "group_size=64",
+     "shared_parse_cas_root=D:/shared-parse-cas",
+     "memory_limit_bytes=8589934592", "max_threads=1", "available_memory_bytes=17179869184",
+     "memory_reserve_bytes=4294967296", "estimated_group_disk_bytes=1073741824",
+     "available_disk_bytes=21474836480", "minimum_free_disk_bytes=8589934592",
+     "max_attempts=2", "poll_ms=100", "lifetime_ms=3600000"].join("\n") + "\n"
+
+describe "native group preparation admission":
+    it "admits Windows drive paths and decimal bytes without tagged text ordering":
+        expect(native_prepare_absolute_v1("D:/private/group")).to_equal(true)
+        expect(native_prepare_absolute_v1("d:/private/group")).to_equal(true)
+        expect(native_prepare_absolute_v1("1:/private/group")).to_equal(false)
+        val bad = native_prepare_config_fixture_v1().replace(
+            "memory_limit_bytes=8589934592", "memory_limit_bytes=8a89934592")
+        match native_prepare_config_v1(bad):
+            Ok(fields):
+                match native_prepare_policy_v1(fields):
+                    Ok(_): fail("nondigit native group memory cap admitted")
+                    Err(reason): expect(reason).to_contain("nondigit")
+            Err(reason): fail(reason)
+
+    it "separates SCCs with a dependency edge so successful peers can be omitted on retry":
+        expect(native_prepare_scc_conflicts_v1(["base", "peer"], ["base"])).to_equal(true)
+        expect(native_prepare_scc_conflicts_v1(["base", "peer"], ["external"])).to_equal(false)
+        expect(native_prepare_scc_conflicts_v1([], ["base"])).to_equal(false)
+        expect(native_prepare_group_boundary_v1(1, 1, 64, ["base"], ["base"])).to_equal(true)
+        expect(native_prepare_group_boundary_v1(63, 2, 64, ["base"], [])).to_equal(true)
+        expect(native_prepare_group_boundary_v1(1, 1, 64, ["base"], ["external"])).to_equal(false)
+
+    it "accepts a complete bounded config and rejects omitted or duplicate pins":
+        val good = native_prepare_config_v1(native_prepare_config_fixture_v1())
+        match good:
+            case Ok(fields):
+                expect(fields.len()).to_equal(47)
+                match native_prepare_shared_parse_root_v1(fields):
+                    case Ok(root): expect(root).to_equal("D:/shared-parse-cas")
+                    case Err(reason): fail(reason)
+                match native_prepare_policy_v1(fields):
+                    case Ok(value): expect(value).to_equal("")
+                    case Err(reason): fail(reason)
+            case Err(reason): fail(reason)
+        val missing = native_prepare_config_fixture_v1().replace("broker_digest=1111111111111111111111111111111111111111111111111111111111111111\n", "")
+        match native_prepare_config_v1(missing):
+            case Ok(_): fail("missing broker pin accepted")
+            case Err(reason): expect(reason).to_contain("incomplete")
+        val no_baseline = native_prepare_config_fixture_v1().replace(
+            "runtime_std_authority_digest=5555555555555555555555555555555555555555555555555555555555555555\n", "")
+        match native_prepare_config_v1(no_baseline):
+            case Ok(_): fail("missing sealed runtime/std authority accepted")
+            case Err(reason): expect(reason).to_contain("incomplete")
+        val no_handoff = native_prepare_config_fixture_v1().replace(
+            "index_handoff_digest=6666666666666666666666666666666666666666666666666666666666666666\n", "")
+        match native_prepare_config_v1(no_handoff):
+            case Ok(_): fail("missing managed index handoff accepted")
+            case Err(reason): expect(reason).to_contain("incomplete")
+        match native_prepare_config_v1(native_prepare_config_fixture_v1() + "max_threads=2\n"):
+            case Ok(_): fail("duplicate thread policy accepted")
+            case Err(reason): expect(reason).to_contain("duplicate")
+
+    it "rejects a shared parse root inside source or mutable group state":
+        val omitted = native_prepare_config_fixture_v1().replace(
+            "shared_parse_cas_root=D:/shared-parse-cas\n", "")
+        match native_prepare_config_v1(omitted):
+            case Ok(_): fail("missing shared parse CAS root accepted")
+            case Err(reason): expect(reason).to_contain("incomplete")
+        val relative = native_prepare_config_fixture_v1().replace(
+            "shared_parse_cas_root=D:/shared-parse-cas", "shared_parse_cas_root=relative/cache")
+        match native_prepare_config_v1(relative):
+            case Ok(fields):
+                match native_prepare_shared_parse_root_v1(fields):
+                    case Ok(_): fail("relative shared parse CAS root accepted")
+                    case Err(reason): expect(reason).to_contain("absolute")
+            case Err(reason): fail(reason)
+        for root in ["D:/snapshot/cache", "D:/state/llvm/shared"]:
+            val payload = native_prepare_config_fixture_v1().replace(
+                "shared_parse_cas_root=D:/shared-parse-cas", "shared_parse_cas_root=" + root)
+            match native_prepare_config_v1(payload):
+                case Ok(fields):
+                    match native_prepare_shared_parse_root_v1(fields):
+                        case Ok(_): fail("overlapping shared parse CAS root accepted")
+                        case Err(reason): expect(reason).to_contain("overlaps")
+                case Err(reason): fail(reason)
+
+    it "rejects memory and disk capacity claims that cannot admit one group":
+        val starved = native_prepare_config_fixture_v1().replace("available_memory_bytes=17179869184", "available_memory_bytes=8589934592")
+        match native_prepare_config_v1(starved):
+            case Ok(fields):
+                match native_prepare_policy_v1(fields):
+                    case Ok(_): fail("group admitted without memory reserve")
+                    case Err(reason): expect(reason).to_contain("capacity")
+            case Err(reason): fail(reason)
+        val full_disk = native_prepare_config_fixture_v1().replace("available_disk_bytes=21474836480", "available_disk_bytes=8589934592")
+        match native_prepare_config_v1(full_disk):
+            case Ok(fields):
+                match native_prepare_policy_v1(fields):
+                    case Ok(_): fail("group admitted without free disk floor")
+                    case Err(reason): expect(reason).to_contain("capacity")
+            case Err(reason): fail(reason)

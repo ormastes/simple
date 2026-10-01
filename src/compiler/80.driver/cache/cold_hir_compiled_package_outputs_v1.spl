@@ -1,0 +1,496 @@
+# Join admitted typed HIR, native objects, and real emitted package files.
+# This owner never invents an action or facet payload. File bodies are read
+# one at a time; only scalar receipts and one package's archive text remain.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
+use compiler.driver.cache.cas_store.{cas_get}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_verify}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirTypedReceiptV1}
+export use compiler.driver.cache.cold_hir_compiled_payload_file_v1.{
+    ColdHirCompiledPayloadFileV1
+}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    ColdHirNativeObjectArtifactV1
+}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{
+    ColdHirPackageOutputV1, cold_hir_package_index_from_outputs_v1
+}
+use compiler.driver.cache.cold_hir_package_publication_v1.{
+    cold_hir_package_publish_verified_v1
+}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, PackageArchivePublishInputV1,
+    package_archive_aggregate_entry_v1, package_archive_load_v1,
+    package_archive_publish_scc_v1
+}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1,
+    PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
+}
+use compiler.hir.archive.interface_action_archive.{
+    interface_action_archive_payloads_decode_v1
+}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    RuntimeStdMirBodyPayloadV1, runtime_std_mir_body_validate_v1
+}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{
+    file_read_regular_no_follow_bounded,
+    file_read_regular_no_follow_bounded_bytes
+}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1
+}
+
+val COLD_COMPILED_PAYLOAD_MAX_BYTES_V1: i64 = 8388608
+val COLD_COMPILED_MIR_MAX_BYTES_V1: i64 = 16777216
+val COLD_COMPILED_ARCHIVE_MAX_BYTES_V1: i64 = 67108864
+
+# Each file is an emitted producer artifact, including an explicitly emitted
+# empty file where a facet has no members. The action file is never optional.
+struct ColdHirCompiledPackageArtifactV1:
+    module_identity: text
+    package_identity: text
+    export_file: ColdHirCompiledPayloadFileV1
+    initializer_file: ColdHirCompiledPayloadFileV1
+    provider_file: ColdHirCompiledPayloadFileV1
+    generated_source_file: ColdHirCompiledPayloadFileV1
+    mir_file: ColdHirCompiledPayloadFileV1
+    action_file: ColdHirCompiledPayloadFileV1
+    manifest_source_identity: text
+
+fn _cold_compiled_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or
+                (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _cold_compiled_file_receipt_valid_v1(
+    file: ColdHirCompiledPayloadFileV1
+) -> bool:
+    if file.path == "" or file.path.contains("\n") or
+            file.path.contains("\r") or
+            file.byte_count < 0 or
+            file.byte_count > COLD_COMPILED_PAYLOAD_MAX_BYTES_V1 or
+            not _cold_compiled_digest_valid_v1(file.digest):
+        return false
+    true
+
+fn _cold_compiled_blob_verify_v1(
+    file: ColdHirCompiledPayloadFileV1
+) -> bool:
+    if not _cold_compiled_file_receipt_valid_v1(file):
+        return false
+    val read = file_read_regular_no_follow_bounded_bytes(
+        file.path, COLD_COMPILED_PAYLOAD_MAX_BYTES_V1)
+    if read.is_err():
+        return false
+    val bytes = read.unwrap()
+    bytes.len() == file.byte_count and sha256_u8_hex(bytes) == file.digest
+
+fn _cold_compiled_payload_read_v1(
+    file: ColdHirCompiledPayloadFileV1
+) -> Result<text, text>:
+    if not _cold_compiled_file_receipt_valid_v1(file):
+        return Err("cold-compiled-file-receipt-invalid")
+    val read = file_read_regular_no_follow_bounded(
+        file.path, COLD_COMPILED_PAYLOAD_MAX_BYTES_V1)
+    if read.is_err():
+        return Err("cold-compiled-file-read-failed")
+    val content = read.unwrap()
+    if content.len() != file.byte_count or
+            sha256_text(content) != file.digest:
+        return Err("cold-compiled-file-content-mismatch")
+    Ok(content)
+
+fn _cold_compiled_mir_read_v1(
+    file: ColdHirCompiledPayloadFileV1,
+    module_identity: text, source_identity: text, source_digest: text
+) -> Result<text, text>:
+    if file.path == "" or file.path.contains("\n") or
+            file.path.contains("\r") or file.byte_count <= 0 or
+            file.byte_count > COLD_COMPILED_MIR_MAX_BYTES_V1 or
+            not _cold_compiled_digest_valid_v1(file.digest):
+        return Err("cold-compiled-mir-receipt-invalid")
+    val read = file_read_regular_no_follow_bounded(
+        file.path, COLD_COMPILED_MIR_MAX_BYTES_V1)
+    if read.is_err():
+        return Err("cold-compiled-mir-read-failed")
+    val content = read.unwrap()
+    val payload = RuntimeStdMirBodyPayloadV1(
+        module_identity, source_identity, source_digest,
+        content, file.digest, file.byte_count)
+    if text_byte_len(content) != file.byte_count or
+            runtime_std_mir_body_validate_v1(payload, module_identity,
+                source_identity, source_digest, file.digest) != "ok":
+        return Err("cold-compiled-mir-schema-invalid")
+    Ok(content)
+
+fn _cold_compiled_source_witness_v1(
+    authority: PackageModuleIndexBuildAuthorityV1,
+    source_identity: text, source_digest: text, byte_count: i64
+) -> text:
+    sha256_text("simple-cold-hir-source-witness-v1|" +
+        "{authority.inventory_digest}|{authority.scv_revision_id}|" +
+        "{authority.scv_commit_id}|{authority.scv_tree_id}|" +
+        "{source_identity.len()}:{source_identity}|" +
+        "{source_digest}|{byte_count}")
+
+fn _cold_compiled_action_valid_v1(
+    receipt: ColdHirTypedReceiptV1,
+    object: ColdHirNativeObjectArtifactV1,
+    source_witness_digest: text, mir_digest: text,
+    action_content: text
+) -> bool:
+    val module_identity = receipt.seed.module_identity
+    val abi_digest = receipt.seed.abi_digest
+    val expected_interface = "symbol|{module_identity}|module|" +
+        "{abi_digest}|{abi_digest}"
+    if receipt.interface_content != expected_interface or
+            sha256_text(receipt.abi_payload) != abi_digest:
+        return false
+    val decoded = interface_action_archive_payloads_decode_v1(
+        receipt.interface_content, action_content)
+    if decoded.is_err():
+        return false
+    val payloads = decoded.unwrap()
+    if payloads.symbols.len() != 1 or payloads.actions.len() != 1:
+        return false
+    val action = payloads.actions[0]
+    if action.target_symbol != module_identity:
+        return false
+    if object.object_format == "none":
+        val semantic_key = sha256_text(
+            "simple-cold-hir-semantic-action-v1|" +
+            "{abi_digest}|{source_witness_digest}|{mir_digest}")
+        return object.object_digest == "" and object.object_byte_count == 0 and
+            object.capsule_identity == "" and
+            object.capsule_receipt_digest == "" and
+            action.kind == "compile-semantic" and
+            action.key == semantic_key and action.action_digest == mir_digest
+    action.kind == "compile-native" and
+        (object.object_format == "elf" or object.object_format == "coff" or
+            object.object_format == "macho") and
+        object.object_byte_count > 0 and
+        _cold_compiled_digest_valid_v1(object.object_digest) and
+        object.capsule_identity != "" and
+        _cold_compiled_digest_valid_v1(object.capsule_receipt_digest) and
+        action.key == object.capsule_receipt_digest and
+        action.action_digest == object.object_digest
+
+# The requested five-argument boundary is intentionally pure with respect to
+# CAS/index publication. It reads only pinned emitted files and returns compact
+# output rows; the separate publisher below owns all mutations.
+fn cold_hir_package_outputs_from_driver_v1(
+    receipts: [ColdHirTypedReceiptV1],
+    object_artifacts: [ColdHirNativeObjectArtifactV1],
+    inventory: CompileSourceInventoryV1,
+    authority: PackageModuleIndexBuildAuthorityV1,
+    compiled_package_artifacts: [ColdHirCompiledPackageArtifactV1]
+) -> Result<[ColdHirPackageOutputV1], text>:
+    if authority.scope_entry_source_identity != "" or receipts.len() == 0 or
+            receipts.len() != object_artifacts.len() or
+            receipts.len() != compiled_package_artifacts.len() or
+            compile_source_inventory_digest_v1(inventory) !=
+                authority.inventory_digest:
+        return Err("cold-compiled-inventory-incomplete")
+    var sources: Dict<text, i64> = {}
+    var source_count = 0
+    var source_index = 0
+    while source_index < inventory.entries.len():
+        val source = inventory.entries[source_index]
+        if sources.has(source.source_identity):
+            return Err("cold-compiled-inventory-duplicate")
+        sources[source.source_identity] = source_index
+        if source.source_identity.ends_with(".spl"):
+            source_count = source_count + 1
+        source_index = source_index + 1
+    if source_count != receipts.len():
+        return Err("cold-compiled-inventory-incomplete")
+    var receipt_by_module: Dict<text, i64> = {}
+    var source_seen: Dict<text, bool> = {}
+    var index = 0
+    while index < receipts.len():
+        val seed = receipts[index].seed
+        if seed.module_identity == "" or
+                receipt_by_module.has(seed.module_identity) or
+                source_seen.has(seed.source_identity) or
+                seed.inventory_digest != authority.inventory_digest or
+                not sources.has(seed.source_identity) or
+                not seed.source_identity.ends_with(".spl"):
+            return Err("cold-compiled-receipt-identity-invalid")
+        val source = inventory.entries[sources[seed.source_identity]]
+        if seed.source_digest != source.content_digest:
+            return Err("cold-compiled-source-digest-mismatch")
+        receipt_by_module[seed.module_identity] = index
+        source_seen[seed.source_identity] = true
+        index = index + 1
+    var object_by_module: Dict<text, i64> = {}
+    index = 0
+    while index < object_artifacts.len():
+        val identity = object_artifacts[index].module_identity
+        if not receipt_by_module.has(identity) or object_by_module.has(identity):
+            return Err("cold-compiled-object-inventory-invalid")
+        object_by_module[identity] = index
+        index = index + 1
+    var artifact_by_module: Dict<text, i64> = {}
+    index = 0
+    while index < compiled_package_artifacts.len():
+        val identity = compiled_package_artifacts[index].module_identity
+        if not receipt_by_module.has(identity) or artifact_by_module.has(identity):
+            return Err("cold-compiled-artifact-inventory-invalid")
+        artifact_by_module[identity] = index
+        index = index + 1
+
+    var outputs: [ColdHirPackageOutputV1] = []
+    var package_modules: Dict<text, [text]> = {}
+    var packages: [text] = []
+    for receipt in receipts:
+        val seed = receipt.seed
+        val identity = seed.module_identity
+        val artifact = compiled_package_artifacts[artifact_by_module[identity]]
+        val object = object_artifacts[object_by_module[identity]]
+        if artifact.package_identity == "" or
+                artifact.package_identity.contains("|") or
+                artifact.package_identity.contains("\n") or
+                artifact.package_identity.contains("\r"):
+            return Err("cold-compiled-package-identity-invalid:{identity}")
+        val facets_valid = _cold_compiled_blob_verify_v1(artifact.export_file) and
+            _cold_compiled_blob_verify_v1(artifact.initializer_file) and
+            _cold_compiled_blob_verify_v1(artifact.provider_file) and
+            _cold_compiled_blob_verify_v1(artifact.generated_source_file)
+        val mir_payload = _cold_compiled_mir_read_v1(artifact.mir_file,
+            identity, seed.source_identity, seed.source_digest)
+        val action_payload = _cold_compiled_payload_read_v1(artifact.action_file)
+        if not facets_valid or action_payload.is_err():
+            return Err("cold-compiled-facet-read-invalid:{identity}")
+        if mir_payload.is_err():
+            return Err("{mir_payload.unwrap_err()}:{identity}")
+        val source = inventory.entries[sources[seed.source_identity]]
+        val source_witness = _cold_compiled_source_witness_v1(authority,
+            seed.source_identity, seed.source_digest, source.byte_count)
+        if not _cold_compiled_action_valid_v1(
+                receipt, object, source_witness,
+                artifact.mir_file.digest, action_payload.unwrap()):
+            return Err("cold-compiled-action-invalid:{identity}")
+        var manifest_digest = PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
+        if artifact.manifest_source_identity != "":
+            if not sources.has(artifact.manifest_source_identity):
+                return Err("cold-compiled-manifest-absent:{identity}")
+            manifest_digest = inventory.entries[
+                sources[artifact.manifest_source_identity]].content_digest
+        outputs.push(ColdHirPackageOutputV1(
+            seed, receipt.abi_payload, artifact.package_identity,
+            source_witness,
+            artifact.export_file.digest, artifact.initializer_file.digest,
+            artifact.provider_file.digest,
+            artifact.generated_source_file.digest,
+            "", "", artifact.manifest_source_identity, manifest_digest))
+        if not package_modules.has(artifact.package_identity):
+            package_modules[artifact.package_identity] = []
+            packages.push(artifact.package_identity)
+        package_modules[artifact.package_identity] =
+            package_modules[artifact.package_identity].push(identity)
+
+    var output_by_module: Dict<text, i64> = {}
+    index = 0
+    while index < outputs.len():
+        output_by_module[outputs[index].seed.module_identity] = index
+        index = index + 1
+    for package_identity in canonical_identity_sort_texts(packages):
+        var interfaces: [text] = []
+        var actions: [text] = []
+        for identity in canonical_identity_sort_texts(
+                package_modules[package_identity]):
+            val receipt = receipts[receipt_by_module[identity]]
+            val artifact = compiled_package_artifacts[
+                artifact_by_module[identity]]
+            val action = _cold_compiled_payload_read_v1(artifact.action_file)
+            if action.is_err():
+                return Err("cold-compiled-action-readback-invalid:{identity}")
+            interfaces.push(receipt.interface_content)
+            actions.push(action.unwrap())
+        val interface_content = cache_text_join_v1(interfaces, "\n")
+        val action_content = cache_text_join_v1(actions, "\n")
+        if interface_content == nil or action_content == nil:
+            return Err("cold-compiled-archive-join-invalid:{package_identity}")
+        val interface_text = interface_content.unwrap()
+        val action_text = action_content.unwrap()
+        if interface_text.len() + action_text.len() >
+                COLD_COMPILED_ARCHIVE_MAX_BYTES_V1 or
+                interface_action_archive_payloads_decode_v1(
+                    interface_text, action_text).is_err():
+            return Err("cold-compiled-archive-decode-invalid:{package_identity}")
+        val interface_digest = sha256_text(interface_text)
+        val action_digest = sha256_text(action_text)
+        for identity in package_modules[package_identity]:
+            val output_index = output_by_module[identity]
+            var output = outputs[output_index]
+            output.interface_archive_digest = interface_digest
+            output.action_archive_digest = action_digest
+            outputs[output_index] = output
+    val built = cold_hir_package_index_from_outputs_v1(
+        authority, inventory, outputs)
+    if built.is_err():
+        return Err("cold-compiled-index-{built.unwrap_err()}")
+    Ok(outputs)
+
+fn _cold_compiled_archive_readback_v1(
+    content: text, receipt: PackageArchiveReceiptV1
+) -> bool:
+    if content.len() == 0 or content.len() >
+            COLD_COMPILED_ARCHIVE_MAX_BYTES_V1 or
+            sha256_text(content) != receipt.archive_digest or
+            receipt.members.len() != 3:
+        return false
+    val names = ["actions.smf", "interface.smf", "manifest.sdn"]
+    var previous_end: u64 = 0
+    var payloads: [text] = []
+    var index = 0
+    while index < 3:
+        val member = receipt.members[index]
+        if member.name != names[index] or
+                member.offset != previous_end or member.extent == 0 or
+                member.offset > content.len().to_u64() or
+                member.extent > content.len().to_u64() - member.offset:
+            return false
+        val end = member.offset + member.extent
+        val payload = content.slice(member.offset.to_i64(), end.to_i64())
+        if payload.len().to_u64() != member.extent or
+                sha256_text(payload) != member.payload_digest:
+            return false
+        payloads.push(payload)
+        previous_end = end
+        index = index + 1
+    if previous_end != content.len().to_u64():
+        return false
+    interface_action_archive_payloads_decode_v1(
+        payloads[1], payloads[0]).is_ok()
+
+# Publish all SCC archives, read every one back through CAS, then allow the
+# existing verified publisher to advance the package-index CURRENT pointer.
+fn cold_hir_package_publish_from_driver_v1(
+    cache_root: text, expected_index_digest: text,
+    receipts: [ColdHirTypedReceiptV1],
+    object_artifacts: [ColdHirNativeObjectArtifactV1],
+    inventory: CompileSourceInventoryV1,
+    authority: PackageModuleIndexBuildAuthorityV1,
+    compiled_package_artifacts: [ColdHirCompiledPackageArtifactV1]
+) -> Result<PackageModuleIndexGenerationV1, text>:
+    if cache_root == "":
+        return Err("cold-compiled-cache-root-empty")
+    val built_outputs = cold_hir_package_outputs_from_driver_v1(
+        receipts, object_artifacts, inventory, authority,
+        compiled_package_artifacts)
+    if built_outputs.is_err():
+        return Err(built_outputs.unwrap_err())
+    val outputs = built_outputs.unwrap()
+    val built_index = cold_hir_package_index_from_outputs_v1(
+        authority, inventory, outputs)
+    if built_index.is_err():
+        return Err(built_index.unwrap_err())
+    val generation = built_index.unwrap()
+    for object in object_artifacts:
+        if object.object_format != "none" and
+                not binary_object_cas_verify(cache_root, object.object_digest):
+            return Err("cold-compiled-native-object-readback-invalid:" +
+                object.module_identity)
+    val archive_authority = PackageArchiveAuthorityV1(
+        generation.producer_digest, generation.root_generation,
+        generation.variant_digest, generation.scv_revision_id,
+        generation.scv_tree_id, generation.inventory_digest)
+    var receipt_by_module: Dict<text, i64> = {}
+    var artifact_by_module: Dict<text, i64> = {}
+    var entry_by_module: Dict<text, i64> = {}
+    var entries_by_package: Dict<text, [i64]> = {}
+    var entries_by_scc: Dict<text, [i64]> = {}
+    var package_ids: [text] = []
+    var scc_ids: [text] = []
+    var index = 0
+    while index < receipts.len():
+        receipt_by_module[receipts[index].seed.module_identity] = index
+        artifact_by_module[compiled_package_artifacts[index].module_identity] = index
+        index = index + 1
+    index = 0
+    while index < generation.entries.len():
+        val entry = generation.entries[index]
+        entry_by_module[entry.module_identity] = index
+        if not entries_by_package.has(entry.package_identity):
+            entries_by_package[entry.package_identity] = []
+            package_ids.push(entry.package_identity)
+        entries_by_package[entry.package_identity] =
+            entries_by_package[entry.package_identity].push(index)
+        if not entries_by_scc.has(entry.scc_identity):
+            entries_by_scc[entry.scc_identity] = []
+            scc_ids.push(entry.scc_identity)
+        entries_by_scc[entry.scc_identity] =
+            entries_by_scc[entry.scc_identity].push(index)
+        index = index + 1
+    for scc_identity in canonical_identity_sort_texts(scc_ids):
+        var inputs: [PackageArchivePublishInputV1] = []
+        var package_dependencies_seen: Dict<text, bool> = {}
+        for entry_index in entries_by_scc[scc_identity]:
+            val entry = generation.entries[entry_index]
+            val artifact = compiled_package_artifacts[
+                artifact_by_module[entry.module_identity]]
+            val action = _cold_compiled_payload_read_v1(artifact.action_file)
+            if action.is_err():
+                return Err("cold-compiled-action-changed:{entry.module_identity}")
+            var dependencies: [text] = []
+            for imported in entry.direct_imports:
+                if not entry_by_module.has(imported):
+                    return Err("cold-compiled-import-missing:{imported}")
+                val digest = generation.entries[
+                    entry_by_module[imported]].smf_metadata_digest
+                val key = "{entry.package_identity}|{digest}"
+                if not package_dependencies_seen.has(key):
+                    package_dependencies_seen[key] = true
+                    dependencies.push(digest)
+            inputs.push(PackageArchivePublishInputV1(
+                entry, dependencies,
+                receipts[receipt_by_module[entry.module_identity]].interface_content,
+                action.unwrap(), true))
+        if not package_archive_publish_scc_v1(
+                cache_root, scc_identity, archive_authority, inputs):
+            return Err("cold-compiled-scc-archive-publish-failed:{scc_identity}")
+    for package_identity in canonical_identity_sort_texts(package_ids):
+        var entries: [PackageModuleIndexEntryV1] = []
+        var dependencies: [text] = []
+        for entry_index in entries_by_package[package_identity]:
+            val entry = generation.entries[entry_index]
+            entries.push(entry)
+            for imported in entry.direct_imports:
+                val digest = generation.entries[
+                    entry_by_module[imported]].smf_metadata_digest
+                if not dependencies.contains(digest):
+                    dependencies.push(digest)
+        val aggregate = package_archive_aggregate_entry_v1(entries)
+        if aggregate == nil:
+            return Err("cold-compiled-archive-aggregate-invalid:{package_identity}")
+        val loaded = package_archive_load_v1(cache_root, aggregate.unwrap(),
+            archive_authority, canonical_identity_sort_texts(dependencies))
+        if not loaded.valid or loaded.receipt == nil:
+            return Err("cold-compiled-archive-readback-invalid:{package_identity}")
+        val receipt = loaded.receipt.unwrap()
+        val content = cas_get(cache_root, receipt.archive_digest)
+        if content == nil or not _cold_compiled_archive_readback_v1(
+                content.unwrap(), receipt):
+            return Err("cold-compiled-archive-readback-invalid:{package_identity}")
+    cold_hir_package_publish_verified_v1(
+        cache_root, authority, inventory, outputs, expected_index_digest)
+
+export ColdHirCompiledPackageArtifactV1
+export cold_hir_package_outputs_from_driver_v1
+export cold_hir_package_publish_from_driver_v1

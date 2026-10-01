@@ -1,0 +1,92 @@
+#!/bin/sh
+# Diagnostic authority only. A provisional producer is never Stage 2 admitted.
+set -eu
+die() { echo "provisional-phase3-phase4: $*" >&2; exit 1; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+producer= source_checkout= source_snapshot= source_snapshot_digest=
+hello_receipt= hello_receipt_digest= authority_program= authority_image_receipt= output_root= target=
+for arg in "$@"; do
+  case "$arg" in
+    --producer=*) producer=${arg#*=} ;;
+    --source-checkout=*) source_checkout=${arg#*=} ;;
+    --source-snapshot=*) source_snapshot=${arg#*=} ;;
+    --source-snapshot-digest=*) source_snapshot_digest=${arg#*=} ;;
+    --hello-receipt=*) hello_receipt=${arg#*=} ;;
+    --hello-receipt-digest=*) hello_receipt_digest=${arg#*=} ;;
+    --authority-program=*) authority_program=${arg#*=} ;;
+    --authority-image-receipt=*) authority_image_receipt=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$producer" "$source_checkout" "$source_snapshot" "$hello_receipt" "$authority_program" "$authority_image_receipt" "$output_root"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+done
+for path in "$producer" "$source_snapshot" "$hello_receipt" "$authority_program" "$authority_image_receipt"; do
+  regular "$path" || die "missing regular pinned input: $path"
+done
+[ -d "$source_checkout" ] && [ ! -L "$source_checkout" ] || die "source checkout unavailable"
+source_checkout=$(CDPATH= cd -- "$source_checkout" && pwd -P) || die "source checkout unavailable"
+digest "$source_snapshot_digest" && digest "$hello_receipt_digest" || die "invalid input digest"
+[ "$(hash_file "$source_snapshot")" = "$source_snapshot_digest" ] &&
+  [ "$(hash_file "$hello_receipt")" = "$hello_receipt_digest" ] ||
+  die "source snapshot or hello receipt changed"
+case "$target" in x86_64-pc-windows-msvc|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) ;; *) die "unsupported diagnostic target" ;; esac
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+image_field() { bootstrap_stage3_manifest_value "$1" "$authority_image_receipt"; }
+[ "$(image_field format)" = SIMPLE-PROVISIONAL-IMAGES-1 ] &&
+  [ "$(image_field stage)" = authority ] &&
+  [ "$(image_field diagnostic_only)" = 1 ] &&
+  [ "$(image_field authority_program)" = "$authority_program" ] &&
+  [ "$(image_field authority_sha256)" = "$(hash_file "$authority_program")" ] &&
+  [ "$(image_field producer_digest)" = "$(hash_file "$producer")" ] &&
+  [ "$(image_field source_snapshot_digest)" = "$source_snapshot_digest" ] &&
+  [ "$(image_field hello_receipt_digest)" = "$hello_receipt_digest" ] &&
+  [ "$(image_field target)" = "$target" ] ||
+  die "provisional authority image differs from pinned diagnostic image receipt"
+output_parent=$(CDPATH= cd -- "$(dirname -- "$output_root")" && pwd -P) ||
+  die "output parent must already exist"
+output_leaf=$(basename -- "$output_root")
+case "$output_leaf" in ''|.|..) die "invalid output leaf" ;; esac
+output_root="$output_parent/$output_leaf"
+case "$output_root/" in "$source_checkout/"*) die "output overlaps source checkout" ;; esac
+case "$source_checkout/" in "$output_root/"*) die "source checkout overlaps output" ;; esac
+[ ! -L "$output_root" ] || die "output root is a symlink"
+mkdir -p "$output_root" || die "diagnostic authority root unavailable"
+output_root=$(CDPATH= cd -- "$output_root" && pwd -P) || die "diagnostic authority root unavailable"
+case "$output_root/" in "$source_checkout/"*) die "output overlaps source checkout" ;; esac
+case "$source_checkout/" in "$output_root/"*) die "source checkout overlaps output" ;; esac
+receipt="$output_root/provisional-authority.receipt"
+# The compiled command must prove an actual successful hello receipt before it
+# can publish this explicitly diagnostic authority. No shell-created admission.
+"$authority_program" native-groups-provisional-authority \
+  --producer "$producer" --source-checkout "$source_checkout" \
+  --source-snapshot "$source_snapshot" --source-snapshot-digest "$source_snapshot_digest" \
+  --hello-receipt "$hello_receipt" --hello-receipt-digest "$hello_receipt_digest" \
+  --output-root "$output_root" --target "$target" --receipt "$receipt" >/dev/null ||
+  die "compiled provisional authority refused producer, source, or hello proof"
+regular "$receipt" || die "compiled provisional authority published no receipt"
+receipt_digest=$(hash_file "$receipt")
+"$authority_program" native-groups-provisional-authority-verify \
+  --receipt "$receipt" --digest "$receipt_digest" \
+  --source-snapshot "$source_snapshot" --hello-receipt "$hello_receipt" >/dev/null ||
+  die "compiled provisional authority readback failed"
+field() {
+  "$authority_program" native-groups-provisional-authority-field \
+    --receipt "$receipt" --digest "$receipt_digest" --field "$1"
+}
+[ "$(field diagnostic_only)" = 1 ] &&
+  [ "$(field producer_digest)" = "$(hash_file "$producer")" ] &&
+  [ "$(field source_authority_digest)" = "$source_snapshot_digest" ] ||
+  die "provisional receipt does not bind diagnostic producer and source"
+# The authority step is useful on its own. Module/binary dispatch requires a
+# separate compiled provisional manager contract; no canonical PASS is emitted.
+printf 'SIMPLE-PROVISIONAL-AUTHORITY-1 receipt=%s sha256=%s diagnostic_only=1\n' \
+  "$receipt" "$receipt_digest"

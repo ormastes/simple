@@ -1,0 +1,62 @@
+"""Shared parser identity is rooted in an admitted Stage2 file-hex snapshot."""
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.crypto.sha256.{sha256_text}
+use common.binary_inspect.{byte_to_hex}
+use std.nogc_sync_mut.io_runtime.{cwd, dir_create_all, file_write_exact,
+    getpid, time_now_unix_micros}
+use compiler.driver.driver_build.incremental.{
+    native_build_frontend_portable_source_digest_v1}
+
+val SCRATCH: text = cwd() + "/build/test/parser-authority-" +
+    getpid().to_text() + "-" + time_now_unix_micros().to_text()
+val PARSER_PATH: text = "src/compiler/10.frontend/core/parser.spl"
+val CODEC_PATH: text = "src/compiler/10.frontend/core/flat_pool_codec.spl"
+
+fn path_hex(path: text) -> text:
+    var out = ""
+    for byte in path.bytes(): out = out + byte_to_hex(byte as i64)
+    out
+
+fn authority_row(path: text, content: text) -> text:
+    "file-hex:{path.bytes().len()}:{path_hex(path)}:0:{sha256_text(content)}"
+
+fn fixture(root: text, parser: text, codec: text) -> text:
+    val _root = dir_create_all(root + "/src/compiler/10.frontend/core")
+    val _parser = file_write_exact(root + "/" + PARSER_PATH, parser)
+    val _codec = file_write_exact(root + "/" + CODEC_PATH, codec)
+    # Stage2 file-hex rows are path-sorted; codec precedes parser.
+    val authority = authority_row(CODEC_PATH, codec) + "\n" +
+        authority_row(PARSER_PATH, parser) + "\n"
+    val _published = file_write_exact(root + "/source-inputs-before.txt", authority)
+    sha256_text(authority)
+
+describe("portable parser source authority", fn():
+    it("gives identical identity for two private source roots with the same pinned bytes", fn():
+        val first = SCRATCH + "/windows"
+        val second = SCRATCH + "/wsl"
+        val digest_a = fixture(first, "fn parser(): 1\n", "codec-v2\n")
+        val digest_b = fixture(second, "fn parser(): 1\n", "codec-v2\n")
+        assert_equal(digest_a, digest_b, "the Stage2 authority is root-independent")
+        val identity_a = native_build_frontend_portable_source_digest_v1(
+            first, first + "/source-inputs-before.txt", digest_a)
+        val identity_b = native_build_frontend_portable_source_digest_v1(
+            second, second + "/source-inputs-before.txt", digest_b)
+        assert_true(identity_a.len() == 64, "authority admits the parser subset")
+        assert_equal(identity_a, identity_b,
+            "private absolute root spellings do not enter the parser key")
+    )
+
+    it("refuses a parser byte or Stage2 authority mismatch", fn():
+        val changed = SCRATCH + "/changed"
+        val digest = fixture(changed, "fn parser(): 2\n", "codec-v2\n")
+        val _tampered = file_write_exact(changed + "/" + PARSER_PATH,
+            "fn parser(): 3\n")
+        assert_equal(native_build_frontend_portable_source_digest_v1(
+            changed, changed + "/source-inputs-before.txt", digest), "",
+            "parser bytes outside the pinned Stage2 snapshot are refused")
+        assert_equal(native_build_frontend_portable_source_digest_v1(
+            changed, changed + "/source-inputs-before.txt", sha256_text("other")), "",
+            "an unmatched authority digest is refused")
+    )
+)

@@ -45,21 +45,31 @@ compiler parent. Task-result reuse and internal compiler cache reuse are distinc
 
 ## Compiler integration and bootstrapping
 
-Scripts advance existing cached bootstrap immediately. The latest user-selected
-ordering uses the permitted genuine Phase 1 seed to compile the standalone
-native manager and exercise sanity, then retains that manager through Phase 4.
-Adopt it once the required compiler and manager artifacts are qualified; it must
-never require itself or the compiler it is currently building as its producer.
-Record producer, frozen source, manager and per-host worker digests. The worker
-may be a separate Windows executable; transport checks its configured digest
-instead of assuming it equals the manager image.
+The canonical post-Stage-2 route uses the exact admitted Phase 2 compiler to
+build and pin manager, worker, index-builder and source-authority images before
+the manager is ready. Source, tool and runtime SHA receipts are reread around
+each image build. Once ready, every Phase 3 and Phase 4 compile is a manager
+task; neither phase depends on the other's result. Each owns distinct mutable
+state, output roots and terminal receipts. Host capacity can schedule these
+independent children serially without changing their producer graph.
 
-LLVM codegen can use immutable `.ll` files as the first module-task boundary.
-MIR capsules and storage snapshots remain in the compiler parent; final object
-collection rechecks their original identities before publishing. Provider
-backends without an admitted process boundary retain their honest serial path.
-This does not certify frontend/HIR/MIR isolation. Full module/SCC integration
-remains a requirement with distinct execution evidence.
+The Phase 2 authority image copies the complete admitted source bytes and
+symlink identities into a private read-only snapshot. The compiler's SCV
+inventory must select logical `.spl` modules from that authority and bind the
+package-ownership policy. A full V2 index task for each phase and backend
+must produce typed HIR/MIR receipts for the exact selected module count.
+The Phase 3 and Phase 4 LLVM routes each finish before their own Cranelift
+routes. Grouped processes share one frontend load per SCC group, receive
+immutable warm index and dependency identities, and return per-module results.
+Only the parent can promote a qualified SMF, and completion requires a compiled
+verifier to match every selected module to a terminal SMF output. An emitted
+`.o` by itself remains diagnostic, not completion.
+
+The current source implementation and shell fixtures are static evidence.
+An admitted self-hosted Phase 2 image, full-inventory runtime index, and both
+backend terminal ledgers have not yet been demonstrated. The Stage 2 byte
+snapshot also requires an explicit fixture-role policy so intentional test
+sources are accounted for without being compiled as production modules.
 
 Remote execution uses only explicitly configured hosts and compiled workers.
 Declared inputs are staged and checked, worker executes there, parent fetches
@@ -71,7 +81,11 @@ later work, with its remaining evidence stated explicitly.
 ## Performance and evidence
 
 Manager startup imports the small common protocol and app facades, not compiler
-frontend/backend modules. Requests use the admitted manifest, with no source-tree
-discovery in a worker hot path. Validate bounds once at admission; record warm
-startup/request latency/RSS and real cache counters. No speedup is claimed from
-slot configuration alone. See [NFRs](../02_requirements/nfr/bootstrap_distributed_builder.md).
+frontend/backend modules. The compiled source authority and full index are
+explicit pre-group work; a group worker reads its admitted manifest and warm
+index rather than rediscovering the whole tree for every member. Process trees
+have hard memory limits, physical/commit headroom and disk checks near spawn;
+the parent commits results in manifest order and retries only failed or
+unattempted groups. Real overlap, full-index peak memory, portable parse-CAS
+reuse and native output parity still require measured evidence. No speedup is
+claimed from slot or thread settings alone. See [NFRs](../02_requirements/nfr/bootstrap_distributed_builder.md).

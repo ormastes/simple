@@ -28,8 +28,9 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
   shift
   bootstrap_argc=$((bootstrap_argc - 1))
   case "${bootstrap_arg}" in
-    --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
+    --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|--produce-managed-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
+    --resume-managed-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
     --progress-interval|--invalidate-cache|--refresh-stage2-source-cache)
       bootstrap_value_missing=1
@@ -70,7 +71,8 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
       --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
       --produce-stage3-receipt=*|\
-      --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|--diagnostic-sweep)
+      --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|\
+      --resume-managed-from-admitted=*|--diagnostic-sweep)
         bootstrap_strategy_bypass=1
         ;;
       --target=simpleos-*|--target=freebsd-*) bootstrap_strategy_bypass=1 ;;
@@ -115,6 +117,19 @@ else
     /bin/sh "$0" "$@"
 fi
 set -eu
+
+# This bounded resume consumes an existing admitted Stage 2 receipt and enters
+# the same manager handoff as a fresh Stage 2. It never enters legacy Stage 3.
+case "${1:-}" in
+  --resume-managed-from-admitted=*)
+    managed_resume_output=${1#*=}
+    shift
+    [ "$#" -eq 1 ] || { echo 'error: managed resume requires one --bootstrap-receipt planner authority' >&2; exit 2; }
+    case "$1" in --bootstrap-receipt=*) managed_resume_planner=${1#*=} ;; *) exit 2 ;; esac
+    exec sh "${bootstrap_entry_dir}/run-managed-from-admitted.shs" \
+      "--output=${managed_resume_output}" "--planner-receipt=${managed_resume_planner}"
+    ;;
+esac
 . "${bootstrap_entry_dir}/lib/host-shared-cache.shs"
 simple_host_cache_configure
 . "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
@@ -223,6 +238,9 @@ Options:
                      yours to type; it is validated by the producer's allow-list
                      and never defaulted. Fail-closed: a producer failure fails
                      the run and no receipt is written.
+  --produce-managed-receipt=<typed-reason>
+                     After admitting the new Stage 2, publish a Stage 4 planner
+                     receipt bound to that exact parent for managed completion.
   --stop-after-stage3
                      Stop after producing and independently verifying the
                      provenance-bound Stage 3 compiler. Requires a planner
@@ -231,7 +249,7 @@ Options:
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
-                     Stage 2 additionally EXERCISES the admitted Stage 2
+                     Every successful Stage 2 additionally EXERCISES the admitted
                      compiler with the phase verification matrix: it builds a
                      phase-bound full CLI and standalone test runner from that
                      compiler and runs the compiler-bootstrap, interpreter and
@@ -258,6 +276,11 @@ Options:
   --resume-stage4-from-admitted=<output>
                      Continue at Stage 4 from OUTPUT's provenance-admitted
                      Stage 3 without rebuilding or mutating Stage 2/3.
+  --resume-managed-from-admitted=<output>
+                     Replay OUTPUT's exact admitted Stage 2 receipt and source,
+                     then resume manager-owned Phase 3 and Phase 4 without
+                     rebuilding Stage 2 or entering legacy Stage 3/4. Requires
+                     --bootstrap-receipt=<typed Stage 4 planner receipt>.
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
@@ -367,6 +390,8 @@ validate_bootstrap_receipt=0
 # trust-root Stage-2 lane. Empty means 'do not produce' -- the reason is NEVER
 # invented here; the operator types it, exactly as the planner policy requires.
 produce_stage3_receipt_reason=''
+produce_managed_receipt_reason=''
+produce_managed_receipt_requested=0
 stop_after_stage3=0
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -390,6 +415,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --produce-stage3-receipt=*)
       produce_stage3_receipt_reason=${1#*=}
+      ;;
+    --produce-managed-receipt=*)
+      produce_managed_receipt_requested=1
+      produce_managed_receipt_reason=${1#*=}
       ;;
     --stop-after-stage3)
       stop_after_stage3=1
@@ -589,6 +618,11 @@ if [ -n "${produce_stage3_receipt_reason}" ] &&
      { [ -n "${bootstrap_receipt_path}" ] && [ -f "${bootstrap_receipt_path}" ]; }; }; then
   echo "bootstrap-policy-error: produce-stage3-receipt-requires-stage2-trust-root-lane" >&2
   exit 64
+fi
+if [ "${produce_managed_receipt_requested}" -eq 1 ]; then
+  sh "${bootstrap_entry_dir}/lib/managed-planner-policy.shs" \
+    "${produce_managed_receipt_reason}" "${stop_after_stage2}" \
+    "${full_bootstrap}" "${bootstrap_receipt_path}" || exit 64
 fi
 bootstrap_stage2_trust_root=0
 bootstrap_stage2_parent_override=
@@ -3130,25 +3164,14 @@ else
 fi
 
 if [ -n "${resume_stage4_output}" ]; then
-  echo "  mode:     admitted Stage 3 → Stage 4 continuation"
-  stage3_provenance_dir="${output_dir}/stage3/${PLATFORM}"
-  stage3_provenance_manifest="${stage3_provenance_dir}/provenance.env"
-  resume_stage4_prepare "${output_dir}" "${repo_root}" "${PLATFORM}" \
-    "${bootstrap_receipt_path}" || exit 1
-  stage2="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
-  stage3="${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}"
-  stage3_ok=1
-elif [ "${can_full_bootstrap}" -eq 1 ]; then
-  # Full CLI available — use high-level staged bootstrap
-  echo "  mode:     full CLI (build bootstrap)"
-  RUST_LOG="${RUST_LOG:-error}" \
-    SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}" \
-    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
-    "${seed_bin}" run src/app/cli/main.spl build bootstrap "--backend=${backend}" "--output=${output_dir}"
-else
-  # Bootstrap-only or missing — manual staged bootstrap via seed
-  echo "  mode:     manual (seed → bootstrap_main → bootstrap_main)"
-  if [ ! -x "${seed_bin}" ]; then
+  echo "error: direct Stage 4 resume bypasses the admitted Phase 2 build manager" >&2
+  exit 1
+fi
+# The manual Phase 2 path exposes its exact admission receipt before any
+# successor starts. The high-level seed bootstrap had hidden direct Stage 3/4
+# compilation, so every full run now takes this manager handoff path.
+echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
+  if [ -z "${bootstrap_stage2_parent_override}" ] && [ ! -x "${seed_bin}" ]; then
     echo "error: Rust seed required for manual bootstrap (${seed_bin})" >&2
     echo "Run: scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap" >&2
     exit 1
@@ -4077,6 +4100,25 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "bootstrap-policy: stage3-planner-receipt=${stage3_planner_receipt}"
             echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=${output_dir} --bootstrap-receipt=${stage3_planner_receipt}"
           fi
+          if [ -n "${produce_managed_receipt_reason}" ]; then
+            managed_stage4_planner_receipt="$(absolute_path "${output_dir}/managed-stage4-planner-admission-v2.env")"
+            if ! env "SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-${output_dir}}" \
+              sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
+              "--target=//bootstrap:stage4" \
+              "--reason=${produce_managed_receipt_reason}" \
+              "--parent-compiler=${stage2_bin}" \
+              "--bootstrap-output=${output_dir}" \
+              "--out=${managed_stage4_planner_receipt}"; then
+              echo "error: could not produce the managed Stage 4 planner admission" >&2
+              exit 1
+            fi
+            [ -f "${managed_stage4_planner_receipt}" ] || {
+              echo "error: managed Stage 4 planner admission producer wrote no receipt" >&2
+              exit 1
+            }
+            echo "bootstrap-policy: managed-stage4-planner-receipt=${managed_stage4_planner_receipt}"
+            echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-managed-from-admitted=${output_dir} --bootstrap-receipt=${managed_stage4_planner_receipt}"
+          fi
         fi
         # Publish the platform's runtime names and bind the exact capsule to
         # this admission before exposing a completed Stage 2 to verification.
@@ -4221,7 +4263,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # refuses the run rather than retracting them — there is no post-admission
   # retraction idiom in this script (stage2-rejected/ is pre-admission only).
   # No existing gate, receipt or admission step is relaxed to make room here.
-  if [ "${full_bootstrap}" -eq 1 ] && [ "${stage2_status}" -eq 0 ]; then
+  if [ "${stage2_status}" -eq 0 ]; then
     stage2_tests_root="${output_dir}/stage2-compiler-tests/${PLATFORM}"
     stage2_tests_work="${stage2_tests_root}/verification"
     stage2_tests_summary="${stage2_tests_work}/summary.env"
@@ -4521,6 +4563,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
         $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
         $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
+        $1 == "test_execution" { executions++; if ($2 != "delegated-seed" && $2 != "in-process") bad = 1 }
         $1 == "task" {
           if ($3 != "result" || $4 != "PASS") bad = 1
           if ($2 == "compiler_cli_build") cli++
@@ -4531,7 +4574,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         }
         END {
           exit (bad || phases != 1 || policies != 1 || expected != 1 ||
-            actual != 1 || failures != 1 || outcomes != 1 ||
+            actual != 1 || failures != 1 || outcomes != 1 || executions != 1 ||
             cli != 1 || runner != 1 || bootstrap_tests != 1 ||
             interpreter_tests != 1 || loader_tests != 1)
         }
@@ -4572,7 +4615,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "verification_summary_sha256=$(bootstrap_stage3_hash_file "${stage2_tests_summary}")"
       echo "verification_log=${stage2_tests_log}"
       # Interim seed delegation must stay visible in the admitted receipt.
-      grep '^test_execution' "${stage2_tests_summary}" || echo "test_execution=unrecorded"
+      grep '^test_execution=' "${stage2_tests_summary}"
     } >"${stage2_tests_evidence}"
     chmod 400 "${stage2_tests_evidence}"
     echo "bootstrap-policy: stage2-compiler-tests=${stage2_tests_evidence}"
@@ -4587,6 +4630,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     bootstrap_verdict "ADMITTED: stage=stage2 exit=0 signal=none reason=stop-after-stage2"
     exit 0
   fi
+
+  [ -n "${managed_stage4_planner_receipt:-}" ] || {
+    echo "error: managed completion requires --produce-managed-receipt from this exact Stage 2" >&2; exit 1;
+  }
+  sh "$repo_root/scripts/bootstrap/run-managed-from-admitted.shs" \
+    "--output=$(absolute_path "$output_dir")" \
+    "--producer-receipt=$stage2_admission_receipt_absolute" \
+    "--planner-receipt=$managed_stage4_planner_receipt" "--threads=$build_threads" || exit 1
+  exit 0
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
   # Note: Stage3 is optional — the stage2 binary may lack features needed for
@@ -5030,8 +5082,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "  warning: Stage 2 native-build capability failed; using seed for stage 4" >&2
     echo "  warning: see ${log_dir}/stage2-capability.log" >&2
   fi
-fi
-
 # Locate stage outputs — check new layout first, fall back to flat
 if [ -x "${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}" ]; then
   stage2="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"

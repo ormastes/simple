@@ -1,0 +1,48 @@
+use std.spec
+use std.common.build_manager.grouped_native_charge_evidence.{NativeGroupChargeSampleV1,
+    NativeGroupChargeTraceV1, native_group_charge_trace_encode_v1,
+    native_group_charge_trace_decode_v1}
+
+fn charge_digest() -> text: "a".repeat(64)
+
+fn complete_trace() -> NativeGroupChargeTraceV1:
+    NativeGroupChargeTraceV1(charge_digest(), true, [
+        NativeGroupChargeSampleV1(10, 11, 100, 100, 2, false),
+        NativeGroupChargeSampleV1(20, 21, 130, 140, 2, false),
+        NativeGroupChargeSampleV1(30, 31, 0, 140, 0, true)])
+
+describe "bounded grouped broker charge evidence":
+    it "round trips bracketed current and lifetime peak separately":
+        val payload = native_group_charge_trace_encode_v1(complete_trace(), 200)
+        expect(payload != "").to_equal(true)
+        match native_group_charge_trace_decode_v1(payload, charge_digest(), 200):
+            case Ok(trace):
+                expect(trace.complete).to_equal(true)
+                expect(trace.samples.len()).to_equal(3)
+                expect(trace.samples[1].current_bytes).to_equal(130)
+                expect(trace.samples[1].peak_bytes).to_equal(140)
+                expect(trace.samples[2].terminal).to_equal(true)
+            case Err(reason): fail(reason)
+
+    it "rejects overlap, falling peak, excess charge, and wrong identity":
+        val overlap = NativeGroupChargeTraceV1(charge_digest(), true, [
+            NativeGroupChargeSampleV1(10, 20, 100, 100, 2, false),
+            NativeGroupChargeSampleV1(19, 21, 0, 100, 0, true)])
+        expect(native_group_charge_trace_encode_v1(overlap, 200)).to_equal("")
+        val falling = NativeGroupChargeTraceV1(charge_digest(), true, [
+            NativeGroupChargeSampleV1(10, 11, 100, 150, 2, false),
+            NativeGroupChargeSampleV1(20, 21, 0, 140, 0, true)])
+        expect(native_group_charge_trace_encode_v1(falling, 200)).to_equal("")
+        expect(native_group_charge_trace_encode_v1(complete_trace(), 120)).to_equal("")
+        val payload = native_group_charge_trace_encode_v1(complete_trace(), 200)
+        expect(native_group_charge_trace_decode_v1(payload, "b".repeat(64), 200).is_err()).to_equal(true)
+
+    it "does not treat a recovered or incomplete sample stream as complete":
+        val partial = NativeGroupChargeTraceV1(charge_digest(), false, [
+            NativeGroupChargeSampleV1(10, 11, 100, 100, 2, false)])
+        val payload = native_group_charge_trace_encode_v1(partial, 200)
+        match native_group_charge_trace_decode_v1(payload, charge_digest(), 200):
+            case Ok(trace): expect(trace.complete).to_equal(false)
+            case Err(reason): fail(reason)
+        expect(native_group_charge_trace_encode_v1(NativeGroupChargeTraceV1(
+            charge_digest(), true, partial.samples), 200)).to_equal("")

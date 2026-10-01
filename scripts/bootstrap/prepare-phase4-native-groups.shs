@@ -1,0 +1,198 @@
+#!/bin/sh
+# Prepare one immutable, backend-specific native group run from an admitted
+# Stage 2 compiler. The compiled preparer owns SCC discovery and wire encoding.
+set -eu
+
+die() { echo "phase4-native-groups: $*" >&2; exit 1; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
+field() { bootstrap_stage3_manifest_value "$1" "$2"; }
+
+producer_receipt= scv_receipt= variant_receipt= runtime_std_authority= index_read_root= source_root= inventory= backend= phase= output_root= manager_program=
+index_program= index_handoff=
+shared_parse_cas_root=
+worker_program= broker_program= threads= memory_bytes= manifest= target=
+reserve_bytes= group_size= max_attempts= poll_ms= lifetime_ms=
+estimated_group_disk_bytes= minimum_free_disk_bytes=
+for arg in "$@"; do
+  case "$arg" in
+    --producer-receipt=*) producer_receipt=${arg#*=} ;;
+    --scv-receipt=*) scv_receipt=${arg#*=} ;;
+    --index-program=*) index_program=${arg#*=} ;;
+    --index-handoff=*) index_handoff=${arg#*=} ;;
+    --shared-parse-cas-root=*) shared_parse_cas_root=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --inventory=*) inventory=${arg#*=} ;;
+    --backend=*) backend=${arg#*=} ;;
+    --phase=*) phase=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --manager-program=*) manager_program=${arg#*=} ;;
+    --worker-program=*) worker_program=${arg#*=} ;;
+    --broker-program=*) broker_program=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --manifest=*) manifest=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    --group-size=*) group_size=${arg#*=} ;;
+    --max-attempts=*) max_attempts=${arg#*=} ;;
+    --poll-ms=*) poll_ms=${arg#*=} ;;
+    --lifetime-ms=*) lifetime_ms=${arg#*=} ;;
+    --estimated-group-disk-bytes=*) estimated_group_disk_bytes=${arg#*=} ;;
+    --minimum-free-disk-bytes=*) minimum_free_disk_bytes=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$producer_receipt" "$scv_receipt" "$index_program" "$index_handoff" "$source_root" "$inventory" "$output_root" "$shared_parse_cas_root" \
+    "$manager_program" "$worker_program" "$broker_program" "$manifest"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+  case "$path" in *'
+'*|*'='*) die "path contains an unsupported config character" ;; esac
+done
+for path in "$producer_receipt" "$scv_receipt" "$index_program" "$index_handoff" "$inventory" "$manager_program" "$worker_program" "$broker_program"; do
+  regular "$path" || die "regular pinned input required: $path"
+done
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root is not a regular directory"
+[ -d "$shared_parse_cas_root" ] && [ ! -L "$shared_parse_cas_root" ] || die "shared parse CAS root is not a real directory"
+index_handoff_digest=$(sha256sum "$index_handoff" | cut -d ' ' -f 1) || die "index handoff hash unavailable"
+handoff_field() {
+  "$index_program" native-groups-index-handoff-field --handoff "$index_handoff" \
+    --digest "$index_handoff_digest" --field "$1"
+}
+index_read_root=$(handoff_field index_read_root) || die "typed index read root unavailable"
+variant_receipt=$(handoff_field variant_receipt_path) || die "typed variant receipt unavailable"
+variant_receipt_digest=$(handoff_field variant_receipt_digest) || die "typed variant digest unavailable"
+runtime_std_authority=$(handoff_field runtime_std_authority_path) || die "typed runtime/std authority unavailable"
+runtime_std_authority_digest=$(handoff_field runtime_std_authority_digest) || die "typed runtime/std digest unavailable"
+for path in "$index_read_root" "$variant_receipt" "$runtime_std_authority"; do
+  absolute "$path" || die "typed index authority path is not absolute"
+  case "$path" in *'
+'*|*'='*) die "typed index authority path contains unsupported characters" ;; esac
+done
+[ -d "$index_read_root" ] && [ ! -L "$index_read_root" ] || die "typed index read root unavailable"
+regular "$variant_receipt" && regular "$runtime_std_authority" \
+  || die "typed index authority receipts unavailable"
+case "$backend" in llvm|cranelift) ;; *) die "backend must be llvm or cranelift" ;; esac
+case "$phase" in phase3|phase4) ;; *) die "phase must be phase3 or phase4" ;; esac
+case "$target" in ''|*' '*|*'='*) die "target is missing or invalid" ;; esac
+for number in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" \
+    "$max_attempts" "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" \
+    "$minimum_free_disk_bytes"; do
+  positive "$number" || die "positive numeric policy required"
+done
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || die "canonical admission verifier unavailable"
+
+candidate=$(field candidate_path "$producer_receipt") || die "candidate absent from admission"
+candidate_digest=$(field candidate_sha256 "$producer_receipt") || die "candidate digest absent"
+source_snapshot=$(field source_snapshot_path "$producer_receipt") || die "source authority absent"
+source_digest=$(field source_snapshot_sha256 "$producer_receipt") || die "source authority digest absent"
+runtime_snapshot=$(field runtime_snapshot_path "$producer_receipt") || die "runtime authority absent"
+runtime_digest=$(field runtime_snapshot_sha256 "$producer_receipt") || die "runtime authority digest absent"
+tool_snapshot=$(field tool_authority_path "$producer_receipt") || die "tool authority absent"
+tool_digest=$(field tool_authority_sha256 "$producer_receipt") || die "tool authority digest absent"
+args_digest=$(field build_args_sha256 "$producer_receipt") || die "build args absent"
+sanity=$(field sanity_evidence_path "$producer_receipt") || die "sanity receipt absent"
+receiver=$(field receiver_evidence_path "$producer_receipt") || die "receiver receipt absent"
+receiver_log=$(field receiver_log_path "$producer_receipt") || die "receiver log absent"
+runtime_authority=$(field runtime_authority_path "$producer_receipt") || die "runtime owner absent"
+for path in "$candidate" "$source_snapshot" "$runtime_snapshot" "$tool_snapshot" "$sanity" "$receiver" "$receiver_log"; do
+  absolute "$path" && regular "$path" || die "admission references missing regular file: $path"
+done
+bootstrap_stage3_verify_stage2_admission_receipt \
+  "$producer_receipt" "$producer_receipt" "$candidate" "$candidate" \
+  "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+  "$runtime_authority" "$runtime_authority" "$tool_snapshot" "$tool_snapshot" \
+  "$args_digest" "$sanity" "$sanity" "$(dirname -- "$sanity")" \
+  "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$repo_root" \
+  || die "canonical Stage 2 admission did not re-verify"
+
+hash_file() { bootstrap_stage3_hash_file "$1"; }
+scv_receipt_digest=$(hash_file "$scv_receipt") || die "SCV receipt hash unavailable"
+[ "$(hash_file "$variant_receipt")" = "$variant_receipt_digest" ] || die "typed variant receipt changed"
+[ "$(hash_file "$runtime_std_authority")" = "$runtime_std_authority_digest" ] || die "typed runtime/std authority changed"
+[ "$(hash_file "$candidate")" = "$candidate_digest" ] || die "candidate changed"
+[ "$(hash_file "$source_snapshot")" = "$source_digest" ] || die "source authority changed"
+[ "$(hash_file "$runtime_snapshot")" = "$runtime_digest" ] || die "runtime authority changed"
+[ "$(hash_file "$tool_snapshot")" = "$tool_digest" ] || die "tool authority changed"
+inventory_digest=$(hash_file "$inventory") || die "inventory hash unavailable"
+inventory_count=$(wc -l <"$inventory" | tr -d ' ') || die "inventory count unavailable"
+positive "$inventory_count" || die "empty inventory"
+awk 'length($0)==0 || index($0,"\r") || $0 !~ /\.spl$/ || $0 ~ /^\// || $0 ~ /(^|\/)\.\.?(\/|$)/ { bad=1 } END { exit bad }' "$inventory" \
+  || die "inventory contains invalid module paths"
+[ "$(LC_ALL=C sort -u "$inventory" | wc -l | tr -d ' ')" = "$inventory_count" ] \
+  || die "inventory contains duplicate modules"
+LC_ALL=C sort "$inventory" | cmp -s - "$inventory" || die "inventory is not in canonical path order"
+
+host_os=$(uname -s 2>/dev/null || true)
+case "$host_os" in
+  MINGW*|MSYS*|CYGWIN*)
+    available_memory_bytes=$(powershell.exe -NoProfile -Command '[int64](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1024' | tr -d '\r[:space:]') || die "Windows memory probe failed" ;;
+  Linux*)
+    available_memory_bytes=$(awk '$1=="MemAvailable:" { printf "%.0f\n", $2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo) || die "Linux memory probe failed" ;;
+  *) die "unsupported host memory probe: $host_os" ;;
+esac
+positive "$available_memory_bytes" || die "host memory probe invalid"
+mkdir -p "$output_root" || die "cannot create backend output root"
+available_disk_bytes=$(df -Pk "$output_root" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') || die "disk probe failed"
+positive "$available_disk_bytes" || die "host disk probe invalid"
+[ "$available_memory_bytes" -ge "$((memory_bytes + reserve_bytes))" ] || die "host memory below configured cap plus reserve"
+[ "$available_disk_bytes" -ge "$((estimated_group_disk_bytes + minimum_free_disk_bytes))" ] || die "host disk below group estimate plus reserve"
+state_root="$output_root/state"
+case "$manifest" in "$state_root"/*) ;; *) die "manifest must be inside backend state root" ;; esac
+mkdir -p "$state_root" || die "cannot create backend state root"
+case "$variant_receipt" in "$index_read_root"/package-module-index-v1/*.variant) ;; *) die "variant receipt is outside admitted index read authority" ;; esac
+case "$runtime_std_authority" in "$index_read_root"/runtime-std-authority-v1/*.receipt) ;; *) die "runtime/std authority is outside admitted index read authority" ;; esac
+run_id="$phase-$backend-$(printf '%s' "$candidate_digest$source_digest$scv_receipt_digest$variant_receipt_digest$runtime_std_authority_digest$inventory_digest" | sha256sum | cut -c1-24)"
+config="$output_root/prepare.env"
+tmp="$config.tmp.$$"
+umask 077
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+# Keep immutable config bytes on resume. The current probes above still gate
+# this invocation, while native spawn performs the final resource admission.
+if [ -e "$config" ]; then
+  regular "$config" || die "existing config is not a regular file"
+  prior_memory=$(field available_memory_bytes "$config") || die "existing memory observation missing"
+  prior_disk=$(field available_disk_bytes "$config") || die "existing disk observation missing"
+  positive "$prior_memory" && positive "$prior_disk" || die "existing resource observations invalid"
+  available_memory_bytes=$prior_memory
+  available_disk_bytes=$prior_disk
+fi
+{
+  printf '%s\n' 'format=SIMPLE-NATIVE-GROUP-PREPARE-1' "run_id=$run_id"
+  printf '%s\n' "producer_path=$candidate" "producer_digest=$candidate_digest"
+  printf '%s\n' "source_root=$source_root" "full_source_authority_path=$source_snapshot" "full_source_authority_digest=$source_digest"
+  printf '%s\n' "scv_receipt_path=$scv_receipt" "scv_receipt_digest=$scv_receipt_digest"
+  printf '%s\n' "variant_receipt_path=$variant_receipt" "variant_receipt_digest=$variant_receipt_digest"
+  printf '%s\n' "runtime_std_authority_path=$runtime_std_authority" "runtime_std_authority_digest=$runtime_std_authority_digest"
+  printf '%s\n' "index_handoff_path=$index_handoff" "index_handoff_digest=$index_handoff_digest"
+  printf '%s\n' "tool_path=$tool_snapshot" "tool_digest=$tool_digest" "runtime_path=$runtime_snapshot" "runtime_digest=$runtime_digest"
+  printf '%s\n' "manager_path=$manager_program" "manager_digest=$(hash_file "$manager_program")"
+  printf '%s\n' "worker_path=$worker_program" "worker_digest=$(hash_file "$worker_program")"
+  printf '%s\n' "broker_path=$broker_program" "broker_digest=$(hash_file "$broker_program")"
+  printf '%s\n' "inventory_path=$inventory" "inventory_digest=$inventory_digest" "inventory_count=$inventory_count"
+  printf '%s\n' "phase=$phase" "backend=$backend" "target=$target" "output_kind=SMF" "output_root=$output_root" "state_root=$state_root" "index_read_root=$index_read_root" "shared_parse_cas_root=$shared_parse_cas_root"
+  printf '%s\n' "group_size=$group_size" "memory_limit_bytes=$memory_bytes" "max_threads=$threads"
+  printf '%s\n' "available_memory_bytes=$available_memory_bytes" "memory_reserve_bytes=$reserve_bytes"
+  printf '%s\n' "estimated_group_disk_bytes=$estimated_group_disk_bytes" "available_disk_bytes=$available_disk_bytes"
+  printf '%s\n' "minimum_free_disk_bytes=$minimum_free_disk_bytes" "max_attempts=$max_attempts"
+  printf '%s\n' "poll_ms=$poll_ms" "lifetime_ms=$lifetime_ms"
+} >"$tmp" || die "cannot write bounded prepare config"
+if [ -e "$config" ]; then
+  cmp -s "$tmp" "$config" || die "existing backend config differs; use a distinct output root"
+  rm -f "$tmp"
+else
+  mv "$tmp" "$config" || die "cannot publish prepare config"
+fi
+if [ -e "$manifest" ]; then
+  regular "$manifest" || die "existing manifest is not a regular file"
+else
+  "$manager_program" native-groups-prepare --config "$config" --manifest "$manifest" \
+    || die "compiled native group preparer rejected config"
+fi
+regular "$manifest" || die "compiled preparer did not write manifest"
+printf '%s %s\n' "$manifest" "$(hash_file "$manifest")"

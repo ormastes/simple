@@ -8,6 +8,8 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, BuildResultV1, builder_validate_task_v1, builder_task_identity_v1, builder_identifier_valid_v1}
 use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
+use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1,
+    builder_regular_input_parents_safe_v1}
 use app.bootstrap_builder.windows_staged_git.{BuilderStagedGitErrorV1, builder_windows_staged_git_v1, builder_windows_control_v1}
 use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessAdmissionV1, windows_process_admit_with_reserve_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
@@ -59,20 +61,21 @@ pub fn builder_windows_setup_failure_v1(task: BuildTaskV1, root: text, host: tex
 fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
     if file_exists(root + "/cancel.request"):
         return Err(builder_windows_reject_before_start_v1(task, root, host, "cancelled before compiler setup"))
+    if not builder_regular_input_parents_safe_v1(task, root + "/work"):
+        return Err(builder_windows_reject_before_start_v1(task, root, host,
+            "staged input parent is a symlink or reparse point"))
+    val initial_links = builder_link_inputs_match_v1(task, root + "/work")
+    if initial_links != "":
+        return Err(builder_windows_reject_before_start_v1(task, root, host, initial_links))
     val _staged_commit = match builder_windows_staged_git_v1(task, root, host):
         Ok(value): value
         Err(failure):
             return Err(builder_windows_setup_failure_v1(task, root, host, failure))
-    val configured_memory = env_get("SIMPLE_BUILD_COMPILER_MEMORY_BYTES") ?? ""
-    var memory_limit: i64 = 0
-    if configured_memory != "":
-        if configured_memory.len() > 13: return Err(builder_windows_reject_before_start_v1(task, root, host, "compiler memory bound invalid"))
-        for index in 0..configured_memory.len():
-            val digit = configured_memory.char_code_at(index) - 48
-            if digit < 0 or digit > 9: return Err(builder_windows_reject_before_start_v1(task, root, host, "compiler memory bound invalid"))
-            memory_limit = memory_limit * 10 + digit
-        if memory_limit <= 0 or memory_limit > 1099511627776:
-            return Err(builder_windows_reject_before_start_v1(task, root, host, "compiler memory bound invalid"))
+    # The immutable task identity owns the hard JobObject cap. An ambient
+    # environment value cannot weaken or silently change it on a retry.
+    val memory_limit = task.memory_limit_bytes
+    if memory_limit < 1 or memory_limit > 1125899906842624:
+        return Err(builder_windows_reject_before_start_v1(task, root, host, "task memory bound invalid"))
     var program = task.program
     if not windows_process_path_valid_v1(program): program = root + "/producer.exe"
     var inputs: [WindowsProcessInputV1] = []
@@ -89,19 +92,25 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
         directory: root + "/work", inputs: inputs, stdout_path: root + "/stdout.log",
         stderr_path: root + "/stderr.log", timeout_ms: task.timeout_ms)
     val identity = builder_task_identity_v1(task)
+    val ready_links = builder_link_inputs_match_v1(task, root + "/work")
+    if ready_links != "":
+        return Err(builder_windows_reject_before_start_v1(task, root, host, ready_links))
     if file_exists(root + "/cancel.request") or builder_windows_control_v1(root, identity, host):
         return Err(builder_windows_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
     # The native owner rechecks after pinning all declared inputs, just before
     # it opens child streams and calls CreateProcessW. Parsing fails closed here.
     val configured_required = env_get("SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES") ?? ""
-    var required_memory: i64 = 0
-    if memory_limit > 0 or configured_required != "":
+    var required_memory = memory_limit
+    if configured_required != "":
         val required = match builder_windows_parse_required_memory_v1(configured_required):
             Ok(value): value
             Err(reason): return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
-        required_memory = required
         if required < memory_limit:
-            return Err(builder_windows_reject_before_start_v1(task, root, host, "pre-spawn requirement below compiler memory bound"))
+            return Err(builder_windows_reject_before_start_v1(task, root, host, "pre-spawn requirement below task memory bound"))
+        required_memory = required
+    val final_links = builder_link_inputs_match_v1(task, root + "/work")
+    if final_links != "":
+        return Err(builder_windows_reject_before_start_v1(task, root, host, final_links))
     val lease = match windows_process_admit_with_reserve_v1(request, memory_limit, required_memory):
         WindowsProcessAdmissionV1.Started(value): value
         WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
@@ -153,6 +162,11 @@ fn builder_windows_execute_v1(request_path: text, root: text, host: text) -> i64
                 status = outcome.0
                 exit_code = outcome.1
             Err(message): diagnostic = message
+    if diagnostic == "":
+        if not builder_regular_input_parents_safe_v1(task, root + "/work"):
+            diagnostic = "staged input parent changed"
+    if diagnostic == "":
+        diagnostic = builder_link_inputs_match_v1(task, root + "/work")
     if diagnostic == "" and status == "OK":
         for output in task.outputs:
             val digest = windows_process_file_digest_v1(root + "/work/" + output)

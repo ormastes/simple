@@ -1,0 +1,287 @@
+"""Native group batch loader resolves SCC imports only after mapping all modules."""
+# @cover src/compiler/99.loader/loader/smf_group_batch_load.spl
+
+use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol,
+    SmfWriterSymbolBinding, SmfWriterSymbolType, SmfRelocation,
+    RelocationType, DataSectionKind}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.backend.linker.obj_taker.{SymbolType, SymbolBinding}
+use compiler.loader.loader.module_loader.{lazymoduleloader_with_defaults,
+    moduleloader_unload, moduleloader_load, LoadResult,
+    moduleloader_any_heavy_service_created}
+use compiler.loader.loader.smf_group_batch_load.{
+    moduleloader_load_native_batch_v1}
+use compiler.loader.loader.smf_mmap_native.{native_mmap_read_bytes,
+    native_exec_memory_count}
+use std.platform.{get_host_os, get_host_arch}
+use std.io_runtime.{file_write_bytes, mkdir_p}
+
+fn batch_test_host_platform() -> Platform:
+    if get_host_os() == "windows": Platform.Windows
+    elif get_host_os() == "freebsd": Platform.FreeBSD
+    else: Platform.Linux
+
+fn batch_test_bytes(input: [i64]) -> [u8]:
+    var result: [u8] = []
+    for byte in input:
+        result.push(byte as u8)
+    result
+
+fn batch_test_le(value: i64) -> [u8]:
+    var result: [u8] = []
+    var shift = 0
+    while shift < 64:
+        result.push(((value >> shift) & 255) as u8)
+        shift = shift + 8
+    result
+
+fn batch_test_symbol(name: text, defined: bool) -> SmfWriterSymbol:
+    SmfWriterSymbol(name: name,
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: if defined: 0 else: -1,
+        value: 0, size: if defined: 8 else: 0,
+        layout_phase: 0, is_event_loop_anchor: false,
+        layout_pinned: false)
+
+fn batch_test_write(path: text, own: text, import_name: text,
+        bad_reloc: bool = false) -> bool:
+    var writer = SmfWriter.create_target(batch_test_host_platform(),
+        Arch.X86_64)
+    writer.add_code_section(".text", [0, 0, 0, 0, 0, 0, 0, 0])
+    writer.add_symbol(batch_test_symbol(own, true))
+    writer.add_symbol(batch_test_symbol(import_name, false))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 1,
+        reloc_type: if bad_reloc: RelocationType.Abs32
+            else: RelocationType.Abs64,
+        addend: if bad_reloc: 4294967296 else: 0))
+    val image = writer.write()
+    if image.is_err():
+        return false
+    file_write_bytes(path, batch_test_bytes(image.unwrap()))
+
+fn batch_test_write_unproven_target(path: text) -> bool:
+    var writer = SmfWriter.create_target(Platform.Any, Arch.X86_64)
+    writer.add_code_section(".text", [195])
+    writer.add_symbol(SmfWriterSymbol(name: "native_batch_unproven",
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0, value: 0, size: 1, layout_phase: 0,
+        is_event_loop_anchor: false, layout_pinned: false))
+    val image = writer.write()
+    if image.is_err():
+        return false
+    file_write_bytes(path, batch_test_bytes(image.unwrap()))
+
+fn batch_test_write_data_cycle(path: text, own_function: text,
+        own_data: text, import_function: text,
+        import_data: text, bad_data_reloc: bool = false) -> bool:
+    var writer = SmfWriter.create_target(batch_test_host_platform(),
+        Arch.X86_64)
+    writer.add_code_section(".text", [0, 0, 0, 0, 0, 0, 0, 0])
+    writer.add_data_section(".data", [0, 0, 0, 0, 0, 0, 0, 0],
+        DataSectionKind.Mutable)
+    writer.add_symbol(batch_test_symbol(own_function, true))
+    writer.add_symbol(SmfWriterSymbol(name: own_data,
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Object,
+        section_index: 1, value: 0, size: 8, layout_phase: 0,
+        is_event_loop_anchor: false, layout_pinned: false))
+    writer.add_symbol(batch_test_symbol(import_function, false))
+    writer.add_symbol(batch_test_symbol(import_data, false))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 3,
+        reloc_type: RelocationType.Abs64, addend: 0))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 2,
+        reloc_type: if bad_data_reloc: RelocationType.Abs32
+            else: RelocationType.Abs64,
+        addend: if bad_data_reloc: 4294967296 else: 0,
+        source_section_index: 1))
+    val image = writer.write()
+    if image.is_err():
+        return false
+    file_write_bytes(path, batch_test_bytes(image.unwrap()))
+
+fn batch_test_write_rodata_anchor(path: text) -> bool:
+    var writer = SmfWriter.create_target(batch_test_host_platform(),
+        Arch.X86_64)
+    writer.add_code_section(".text", [0, 0, 0, 0, 0, 0, 0, 0])
+    writer.add_data_section(".rodata", [0, 0, 0, 0, 0, 0, 0, 0],
+        DataSectionKind.ReadOnly)
+    writer.add_symbol(batch_test_symbol("native_batch_ro_fn", true))
+    writer.add_symbol(SmfWriterSymbol(name: "native_batch_ro_anchor",
+        binding: SmfWriterSymbolBinding.Local,
+        sym_type: SmfWriterSymbolType.Section,
+        section_index: 1, value: 0, size: 0, layout_phase: 0,
+        is_event_loop_anchor: false, layout_pinned: false))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 1,
+        reloc_type: RelocationType.Abs64, addend: 0))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 0,
+        reloc_type: RelocationType.Abs64, addend: 0,
+        source_section_index: 1))
+    val image = writer.write()
+    if image.is_err():
+        return false
+    file_write_bytes(path, batch_test_bytes(image.unwrap()))
+
+fn batch_test_write_v11_data(path: text) -> bool:
+    var writer = SmfWriter.create_target(batch_test_host_platform(),
+        Arch.X86_64)
+    writer.add_code_section(".text", [195])
+    writer.add_data_section(".data", [17, 34, 51, 68],
+        DataSectionKind.Mutable)
+    writer.add_symbol(SmfWriterSymbol(name: "native_batch_v11_fn",
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0, value: 0, size: 1, layout_phase: 0,
+        is_event_loop_anchor: false, layout_pinned: false))
+    writer.add_symbol(SmfWriterSymbol(name: "native_batch_v11_data",
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Object,
+        section_index: 1, value: 0, size: 4, layout_phase: 0,
+        is_event_loop_anchor: false, layout_pinned: false))
+    val image = writer.write()
+    if image.is_err():
+        return false
+    file_write_bytes(path, batch_test_bytes(image.unwrap()))
+
+describe "native group batch loader":
+    it "maps a two-module import cycle before applying either relocation":
+        step("Load both SCC peers, then verify each relocation targets the other")
+        expect(get_host_arch()).to_equal("x86_64")
+        val _ = mkdir_p("build/test")
+        val a = "build/test/native_group_batch_cycle_a.smf"
+        val b = "build/test/native_group_batch_cycle_b.smf"
+        expect(batch_test_write(a, "native_batch_a", "native_batch_b")).to_equal(true)
+        expect(batch_test_write(b, "native_batch_b", "native_batch_a")).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        val loaded = moduleloader_load_native_batch_v1(loader, [a, b], 2)
+        expect(loaded.is_ok()).to_equal(true)
+        expect(loaded.unwrap()).to_equal([a, b])
+        val addr_a = loader.modules[a].symbols["native_batch_a"].address
+        val addr_b = loader.modules[b].symbols["native_batch_b"].address
+        expect(native_mmap_read_bytes(addr_a, 0, 8)).to_equal(batch_test_le(addr_b))
+        expect(native_mmap_read_bytes(addr_b, 0, 8)).to_equal(batch_test_le(addr_a))
+        moduleloader_unload(loader, b)
+        moduleloader_unload(loader, a)
+
+    it "rejects unresolved imports and duplicate exports without mapper effects":
+        step("Preflight the complete batch before creating loader services")
+        val _ = mkdir_p("build/test")
+        val a = "build/test/native_group_batch_preflight_a.smf"
+        val b = "build/test/native_group_batch_preflight_b.smf"
+        val c = "build/test/native_group_batch_unproven_target.smf"
+        expect(batch_test_write(a, "native_batch_only_a",
+            "native_batch_missing")).to_equal(true)
+        expect(batch_test_write(b, "native_batch_only_a",
+            "native_batch_missing")).to_equal(true)
+        expect(batch_test_write_unproven_target(c)).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        expect(moduleloader_load_native_batch_v1(loader, [c], 1).is_err()).to_equal(true)
+        expect(moduleloader_load_native_batch_v1(loader, [a], 1).is_err()).to_equal(true)
+        expect(moduleloader_any_heavy_service_created(loader)).to_equal(false)
+        expect(moduleloader_load_native_batch_v1(loader, [a, b], 2).is_err()).to_equal(true)
+        expect(loader.modules.len()).to_equal(0)
+        expect(loader.global_symbols.len()).to_equal(0)
+
+    it "rolls back both mapped modules when a later relocation fails":
+        step("Force an out-of-range Abs32 patch after both symbols are mapped")
+        val _ = mkdir_p("build/test")
+        val a = "build/test/native_group_batch_rollback_a.smf"
+        val b = "build/test/native_group_batch_rollback_b.smf"
+        expect(batch_test_write(a, "native_batch_roll_a",
+            "native_batch_roll_b")).to_equal(true)
+        expect(batch_test_write(b, "native_batch_roll_b",
+            "native_batch_roll_a", true)).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        val before = native_exec_memory_count()
+        val result = moduleloader_load_native_batch_v1(loader, [a, b], 2)
+        expect(result.is_err()).to_equal(true)
+        expect(loader.modules.has(a)).to_equal(false)
+        expect(loader.modules.has(b)).to_equal(false)
+        expect(loader.global_symbols.has("native_batch_roll_a")).to_equal(false)
+        expect(loader.global_symbols.has("native_batch_roll_b")).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "resolves cyclic Code-to-Data and Data-to-Code relocations":
+        step("Map both sections of both modules before applying v1.2 patches")
+        val _ = mkdir_p("build/test")
+        val a = "build/test/native_group_batch_data_a.smf"
+        val b = "build/test/native_group_batch_data_b.smf"
+        expect(batch_test_write_data_cycle(a, "native_batch_data_fn_a",
+            "native_batch_data_a", "native_batch_data_fn_b",
+            "native_batch_data_b")).to_equal(true)
+        expect(batch_test_write_data_cycle(b, "native_batch_data_fn_b",
+            "native_batch_data_b", "native_batch_data_fn_a",
+            "native_batch_data_a")).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        val before = native_exec_memory_count()
+        val loaded = moduleloader_load_native_batch_v1(loader, [a, b], 2)
+        expect(loaded.is_ok()).to_equal(true)
+        val fn_a = loader.modules[a].symbols["native_batch_data_fn_a"].address
+        val fn_b = loader.modules[b].symbols["native_batch_data_fn_b"].address
+        val data_a = loader.modules[a].symbols["native_batch_data_a"].address
+        val data_b = loader.modules[b].symbols["native_batch_data_b"].address
+        expect(native_mmap_read_bytes(fn_a, 0, 8)).to_equal(batch_test_le(data_b))
+        expect(native_mmap_read_bytes(fn_b, 0, 8)).to_equal(batch_test_le(data_a))
+        expect(native_mmap_read_bytes(data_a, 0, 8)).to_equal(batch_test_le(fn_b))
+        expect(native_mmap_read_bytes(data_b, 0, 8)).to_equal(batch_test_le(fn_a))
+        moduleloader_unload(loader, b)
+        moduleloader_unload(loader, a)
+        expect(loader.native_group_data_sections.len()).to_equal(0)
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "patches a local RoData section anchor and rejects ordinary v1.2 loading":
+        step("Keep local section base private, then seal its mapping read-only")
+        val _ = mkdir_p("build/test")
+        val path = "build/test/native_group_batch_rodata.smf"
+        expect(batch_test_write_rodata_anchor(path)).to_equal(true)
+        var ordinary = lazymoduleloader_with_defaults()
+        match moduleloader_load(ordinary, path):
+            case LoadResult.Error(message):
+                expect(message).to_contain("native batch")
+            case _: fail("ordinary loader accepted a v1.2 data relocation")
+        expect(ordinary.modules.has(path)).to_equal(false)
+        var loader = lazymoduleloader_with_defaults()
+        expect(moduleloader_load_native_batch_v1(loader, [path], 1).is_ok()).to_equal(true)
+        val fn_addr = loader.modules[path].symbols["native_batch_ro_fn"].address
+        val ro_addr = loader.modules[path].symbols["native_batch_ro_anchor"].address
+        val anchor = loader.modules[path].reader.lookup_symbol(
+            "native_batch_ro_anchor").unwrap()
+        expect(anchor.ty).to_equal(SymbolType.Type)
+        expect(anchor.binding).to_equal(SymbolBinding.Local)
+        expect(loader.global_symbols.has("native_batch_ro_anchor")).to_equal(false)
+        expect(native_mmap_read_bytes(fn_addr, 0, 8)).to_equal(batch_test_le(ro_addr))
+        expect(native_mmap_read_bytes(ro_addr, 0, 8)).to_equal(batch_test_le(fn_addr))
+        expect(loader.native_group_data_sections[path][0].readonly).to_equal(true)
+        moduleloader_unload(loader, path)
+
+    it "maps v1.1 Data when no data-source relocation is present":
+        step("Keep the writer's v1.1 wire version while mapping mutable bytes")
+        val _ = mkdir_p("build/test")
+        val path = "build/test/native_group_batch_v11_data.smf"
+        expect(batch_test_write_v11_data(path)).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        expect(moduleloader_load_native_batch_v1(loader, [path], 1).is_ok()).to_equal(true)
+        val data_addr = loader.modules[path].symbols["native_batch_v11_data"].address
+        expect(native_mmap_read_bytes(data_addr, 0, 4)).to_equal(
+            [17 as u8, 34 as u8, 51 as u8, 68 as u8])
+        moduleloader_unload(loader, path)
+
+    it "releases Code, Data, and globals after a v1.2 data patch fails":
+        step("Fail a bounded Data-source patch after the full batch is mapped")
+        val _ = mkdir_p("build/test")
+        val a = "build/test/native_group_batch_data_rollback_a.smf"
+        val b = "build/test/native_group_batch_data_rollback_b.smf"
+        expect(batch_test_write_data_cycle(a, "native_batch_dr_fn_a",
+            "native_batch_dr_data_a", "native_batch_dr_fn_b",
+            "native_batch_dr_data_b")).to_equal(true)
+        expect(batch_test_write_data_cycle(b, "native_batch_dr_fn_b",
+            "native_batch_dr_data_b", "native_batch_dr_fn_a",
+            "native_batch_dr_data_a", true)).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        val before = native_exec_memory_count()
+        expect(moduleloader_load_native_batch_v1(loader, [a, b], 2).is_err()).to_equal(true)
+        expect(loader.modules.len()).to_equal(0)
+        expect(loader.global_symbols.len()).to_equal(0)
+        expect(loader.native_group_data_sections.len()).to_equal(0)
+        expect(native_exec_memory_count()).to_equal(before)

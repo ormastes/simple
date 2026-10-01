@@ -1,0 +1,35 @@
+#!/bin/sh
+# Additional path/byte relation after the canonical typed planner and Stage 2
+# admission verifiers have accepted their full receipts.
+set -eu
+die() { echo "managed-planner-parent: $*" >&2; exit 1; }
+[ "$#" -eq 4 ] || die "output, platform, admission and planner required"
+output=$1 platform=$2 admission=$3 planner=$4
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || die "repository unavailable"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || die "manifest reader unavailable"
+field() { bootstrap_stage3_manifest_value "$1" "$2"; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+candidate=$(field candidate_path "$admission") || die "admitted candidate absent"
+candidate_sha=$(field candidate_sha256 "$admission") || die "admitted candidate SHA absent"
+parent=$(field parent_compiler_path "$planner") || die "planner parent absent"
+case "$candidate:$parent" in
+  "$output/stage3/$platform/stage2-admitted/simple:$output/stage2/$platform/simple"|\
+  "$output/stage3/$platform/stage2-admitted/simple.exe:$output/stage2/$platform/simple.exe") ;;
+  *) die "planner parent and admitted candidate have different canonical lanes" ;;
+esac
+[ -f "$candidate" ] && [ ! -L "$candidate" ] &&
+  [ -f "$parent" ] && [ ! -L "$parent" ] || die "parent or candidate unavailable"
+[ "$(hash_file "$candidate")" = "$candidate_sha" ] &&
+  [ "$(hash_file "$parent")" = "$candidate_sha" ] &&
+  [ "$(field parent_compiler_sha256 "$planner")" = "$candidate_sha" ] ||
+  die "planner parent bytes differ from admitted Stage 2 candidate"
+admission_sha=$(hash_file "$admission")
+for key in parent_stage2_sanity_path parent_stage2_provenance_path; do
+  authority=$(field "$key" "$planner") || die "$key absent"
+  [ -f "$authority" ] && [ ! -L "$authority" ] || die "$key unavailable"
+  [ "$(field admission_receipt_path "$authority")" = "$admission" ] &&
+    [ "$(field admission_receipt_sha256 "$authority")" = "$admission_sha" ] ||
+    die "$key does not bind exact admitted Stage 2 receipt"
+done

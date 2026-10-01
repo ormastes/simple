@@ -1,0 +1,304 @@
+# Admission boundary for the one-time OS-inclusive V2 cold index producer.
+# The manager pins every input before invoking the compiler's full-inventory
+# producer. The compiler returns only readback-verified publication pins.
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1,
+    NativeGroupIndexReceiptV1, native_group_index_config_decode_v1,
+    native_group_index_receipt_encode_v1, native_group_index_receipt_decode_v1,
+    native_group_index_absolute_v1, native_group_index_private_template_v1}
+use app.io.env_ops.{cwd}
+use app.io.file_ops.{path_absolute}
+use app.bootstrap_builder.codec.{
+    builder_decode_task_v1, builder_encode_task_v1
+}
+use app.bootstrap_builder.native_group_index_variant.{
+    native_group_index_variant_admit_v1
+}
+use compiler.driver.driver_cold_full_index_semantics.{
+    NativeFullIndexSemanticRequestV1,
+    native_full_index_compile_semantics_v1
+}
+use compiler.driver.cache.cold_full_index_producer_v1.{
+    cold_full_index_publish_from_driver_v1
+}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2
+}
+use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1,
+    native_full_inventory_source_paths_v1}
+use compiler.driver.cache.package_module_index.{PACKAGE_MODULE_INDEX_SCHEMA_V2,
+    package_module_index_read_current_v1}
+use std.common.build_manager.contracts.{BuildTaskV1,
+    BUILDER_MEMORY_LIMIT_MAX_V2, builder_digest_valid_v1,
+    builder_relative_path_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1,
+    scv_compile_snapshot_open_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1,
+    compile_source_inventory_snapshot_cache_root_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_hash_sha256, file_is_regular_no_follow, file_exists, file_create_exclusive}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, is_dir}
+
+struct NativeGroupIndexAdmissionV1:
+    config: NativeGroupIndexConfigV1
+    sources: NativeFullInventorySourcesV1
+    snapshot: ScvCompileSnapshotV1
+    inventory: CompileSourceInventoryV1
+    prior_index_digest: text
+    artifact_root: text
+    budget: RuntimeStdNativeActionBudgetV2
+
+fn native_group_index_normalize_v1(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    if normalized.starts_with("//?/"): normalized.substring(4) else: normalized
+
+fn native_group_index_work_root_v1() -> Result<text, text>:
+    val observed = native_group_index_normalize_v1(cwd())
+    val canonical = native_group_index_normalize_v1(path_absolute(observed))
+    if not native_group_index_absolute_v1(observed) or
+            not observed.ends_with("/work") or not is_dir(observed) or
+            canonical == "" or canonical.lower() != observed.lower():
+        return Err("index task requires a canonical manager attempt work directory")
+    Ok(canonical)
+
+fn native_group_index_managed_path_v1(work_root: text,
+        template: text) -> Result<text, text>:
+    if not native_group_index_absolute_v1(work_root) or
+            not work_root.ends_with("/work") or
+            not native_group_index_private_template_v1(template):
+        return Err("index attempt-private path template invalid")
+    Ok(work_root + "/" + template.substring(7))
+
+# Every existing directory component must resolve to its own literal path.
+# Manager transport creates work and output parents before invoking the task;
+# cache directories may be created here only inside that pinned work tree.
+fn native_group_index_resolve_private_v1(work_root: text,
+        template: text, directory_leaf: bool) -> Result<text, text>:
+    val expected = native_group_index_managed_path_v1(work_root, template)?
+    val parts = template.substring(7).split("/")
+    var path = work_root
+    for index in 0..parts.len():
+        path = path + "/" + parts[index]
+        if index == parts.len() - 1 and not directory_leaf: break
+        if not file_exists(path) and not dir_create(path, false):
+            return Err("index private directory cannot be created")
+        if not is_dir(path) or
+                native_group_index_normalize_v1(path_absolute(path)).lower() !=
+                    path.lower():
+            return Err("index private directory follows a symlink or leaves work")
+    Ok(expected)
+
+fn native_group_index_manager_task_valid_v1(task: BuildTaskV1,
+        config_relative: text, receipt_template: text,
+        config_digest: text) -> text:
+    if not builder_relative_path_valid_v1(config_relative) or
+            not native_group_index_private_template_v1(receipt_template):
+        return "index manager task path invalid"
+    val expected = ["native-groups-index-build", "--manager-work",
+        "--config", config_relative, "--receipt", receipt_template]
+    if task.args.len() != expected.len() or
+            task.outputs.len() != 1 or
+            task.outputs[0] != receipt_template.substring(7) or
+            task.memory_limit_bytes < 1 or
+            task.memory_limit_bytes > BUILDER_MEMORY_LIMIT_MAX_V2 or
+            not builder_digest_valid_v1(config_digest):
+        return "index manager task argv, memory cap, or sole receipt output differs"
+    for index in 0..expected.len():
+        if task.args[index] != expected[index]:
+            return "index manager task argv differs"
+    var pinned = false
+    for input in task.inputs:
+        if input.path == config_relative and input.digest == config_digest:
+            pinned = true
+    if not pinned: return "index manager task does not pin staged config"
+    ""
+
+fn native_group_index_manager_context_v1(work_root: text,
+        config_relative: text, receipt_template: text,
+        config_path: text) -> Result<RuntimeStdNativeActionBudgetV2, text>:
+    val attempt_root = work_root.substring(0, work_root.len() - 5)
+    val request_path = attempt_root + "/request.sdn"
+    if not file_is_regular_no_follow(request_path):
+        return Err("index generic manager attempt request missing")
+    val request_bytes = file_read_regular_no_follow_bounded(
+        request_path, 16777216)?
+    if not file_is_regular_no_follow(request_path):
+        return Err("index generic manager request changed during read")
+    val task = builder_decode_task_v1(request_bytes)?
+    if builder_encode_task_v1(task) != request_bytes:
+        return Err("index generic manager request is noncanonical")
+    if task.memory_limit_bytes < 1 or
+            task.memory_limit_bytes > BUILDER_MEMORY_LIMIT_MAX_V2:
+        return Err("index generic manager memory cap invalid")
+    val config_digest = file_hash_sha256(config_path)
+    val invalid = native_group_index_manager_task_valid_v1(task,
+        config_relative, receipt_template, config_digest)
+    if invalid != "": return Err(invalid)
+    val staged_image = attempt_root + "/producer.exe"
+    if not file_is_regular_no_follow(staged_image) or
+            file_hash_sha256(staged_image) != task.producer_digest:
+        return Err("index generic manager staged image differs")
+    Ok(RuntimeStdNativeActionBudgetV2(
+        sha256_text(request_bytes), task.memory_limit_bytes))
+
+fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
+        artifact_root: text, budget: RuntimeStdNativeActionBudgetV2
+        ) -> Result<NativeGroupIndexAdmissionV1, text>:
+    if not native_group_index_absolute_v1(config.index_cache_root) or
+            not native_group_index_absolute_v1(config.output_root) or
+            not native_group_index_absolute_v1(artifact_root) or
+            not builder_digest_valid_v1(budget.manager_request_digest) or
+            budget.enforced_process_limit_bytes < 1 or
+            budget.enforced_process_limit_bytes >
+                BUILDER_MEMORY_LIMIT_MAX_V2 or
+            not artifact_root.replace("\\", "/").contains("/work/private/runtime-std-hir-artifacts"):
+        return Err("index private roots were not resolved by manager adapter")
+    if not file_is_regular_no_follow(config.producer_path) or
+            file_hash_sha256(config.producer_path) != config.producer_digest:
+        return Err("index producer image differs from pinned Phase2 executable")
+    if not file_is_regular_no_follow(config.full_source_authority_path) or
+            file_hash_sha256(config.full_source_authority_path) !=
+                config.full_source_authority_digest:
+        return Err("index Stage2 full-source authority differs")
+    if not file_is_regular_no_follow(config.scv_receipt_path) or
+            file_hash_sha256(config.scv_receipt_path) != config.scv_receipt_digest:
+        return Err("index SCV receipt differs")
+    val snapshot = scv_compile_snapshot_open_v1(config.source_root,
+        config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
+        config.scv_tree_id, config.snapshot_inventory_digest)
+    if not snapshot.valid or snapshot.receipt_path.replace("\\", "/").lower() !=
+            config.scv_receipt_path.replace("\\", "/").lower():
+        return Err("index SCV snapshot or receipt ownership differs")
+    val inventory_cache = compile_source_inventory_snapshot_cache_root_v1(
+        config.source_root, config.snapshot_root, config.scv_revision_id)
+    if inventory_cache == "": return Err("index SCV source-inventory cache root invalid")
+    val source_inventory = compile_source_inventory_read_current_v1(inventory_cache)
+    if not source_inventory.valid or source_inventory.inventory == nil or
+            source_inventory.digest != config.source_inventory_digest:
+        return Err("index typed source-inventory generation differs")
+    if source_inventory.inventory!.generation != config.source_inventory_generation:
+        return Err("index typed source-inventory generation differs")
+    val sources = native_full_inventory_source_paths_v1(config.source_root,
+        config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
+        config.scv_tree_id, config.snapshot_inventory_digest,
+        config.source_inventory_digest, config.scv_receipt_digest,
+        config.expected_spl_count)?
+    if sources.source_count != config.expected_spl_count or
+            sources.source_identities.len() != config.expected_spl_count:
+        return Err("index full SCV source selection differs")
+    val pointer = config.index_cache_root + "/package-module-index-v1/CURRENT"
+    val current = package_module_index_read_current_v1(config.index_cache_root)
+    if config.expected_current_digest == "NONE":
+        if file_exists(pointer) or current.valid:
+            return Err("index cache has an unpinned CURRENT generation")
+        return Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
+            source_inventory.inventory!, "", artifact_root, budget))
+    if not builder_digest_valid_v1(config.expected_current_digest) or
+            not current.valid or current.generation == nil or
+            current.digest != config.expected_current_digest:
+        return Err("index expected CURRENT is absent, different, or not V2")
+    if current.generation!.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2:
+        return Err("index expected CURRENT is absent, different, or not V2")
+    Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
+        source_inventory.inventory!, current.digest, artifact_root, budget))
+
+fn native_group_index_compiler_publish_v1(admitted: NativeGroupIndexAdmissionV1
+        ) -> Result<NativeGroupIndexReceiptV1, text>:
+    if admitted.sources.source_count != admitted.config.expected_spl_count:
+        return Err("index producer admission source count differs")
+    val config = admitted.config
+    val typed_variant = native_group_index_variant_admit_v1(config)?
+    if typed_variant.variant.backend != "llvm" and
+            typed_variant.variant.backend != "cranelift":
+        return Err("index runtime/std native object backend unsupported")
+    val driver = native_full_index_compile_semantics_v1(
+        NativeFullIndexSemanticRequestV1(config.source_root,
+            config.snapshot_root, config.scv_revision_id,
+            config.scv_commit_id, config.scv_tree_id,
+            config.snapshot_inventory_digest,
+            config.source_inventory_digest, config.scv_receipt_digest,
+            config.expected_spl_count, admitted.artifact_root,
+            typed_variant.options))?
+    val current = package_module_index_read_current_v1(
+        config.index_cache_root)
+    val pointer = config.index_cache_root +
+        "/package-module-index-v1/CURRENT"
+    if admitted.prior_index_digest == "":
+        if file_exists(pointer) or current.valid:
+            return Err("index CURRENT changed during semantic pass")
+    elif not current.valid or
+            current.digest != admitted.prior_index_digest:
+        return Err("index CURRENT changed during semantic pass")
+    val pins = cold_full_index_publish_from_driver_v1(driver,
+        admitted.sources, admitted.snapshot, admitted.inventory,
+        config.index_cache_root, admitted.artifact_root,
+        config.producer_digest, typed_variant.variant,
+        admitted.budget)?
+    if pins.index_read_root != config.index_cache_root or
+            pins.source_count != config.expected_spl_count or
+            pins.archive_count <= 0 or pins.index_digest == "" or
+            pins.archive_receipts_digest == "" or
+            pins.variant_receipt_digest == "" or
+            pins.runtime_std_authority_digest == "":
+        return Err("index compiler publication pins incomplete")
+    Ok(NativeGroupIndexReceiptV1(config.producer_digest,
+        config.snapshot_inventory_digest, config.source_inventory_digest,
+        config.source_inventory_generation, config.expected_spl_count,
+        config.phase, config.backend, config.target,
+        config.variant_digest, pins.index_digest, pins.archive_count,
+        pins.archive_receipts_digest, pins.variant_receipt_path,
+        pins.variant_receipt_digest, pins.runtime_std_authority_path,
+        pins.runtime_std_authority_digest, pins.index_read_root,
+        config.output_root))
+
+fn native_group_index_build_managed_v1(config_relative: text,
+        receipt_template: text
+        ) -> Result<NativeGroupIndexReceiptV1, text>:
+    if not builder_relative_path_valid_v1(config_relative) or
+            not native_group_index_private_template_v1(receipt_template):
+        return Err("index manager input or output path invalid")
+    val work_root = native_group_index_work_root_v1()?
+    val config_path = native_group_index_resolve_private_v1(work_root,
+        "@WORK@/" + config_relative, false)?
+    if not file_is_regular_no_follow(config_path) or
+            native_group_index_normalize_v1(path_absolute(config_path)).lower() !=
+                config_path.lower():
+        return Err("index staged config is not a canonical regular input")
+    val budget = native_group_index_manager_context_v1(work_root,
+        config_relative, receipt_template, config_path)?
+    val payload = file_read_regular_no_follow_bounded(config_path, 65536)?
+    var config = native_group_index_config_decode_v1(payload)?
+    config.index_cache_root = native_group_index_resolve_private_v1(work_root,
+        config.index_cache_root, true)?
+    config.output_root = native_group_index_resolve_private_v1(work_root,
+        config.output_root, true)?
+    val receipt_path = native_group_index_resolve_private_v1(work_root,
+        receipt_template, false)?
+    if not receipt_path.replace("\\", "/").lower().starts_with(
+            config.output_root.replace("\\", "/").lower() + "/") or
+            file_exists(receipt_path) or config_path.lower() == receipt_path.lower():
+        return Err("index receipt must be new inside isolated output root")
+    val artifact_root = native_group_index_resolve_private_v1(work_root,
+        "@WORK@/private/runtime-std-hir-artifacts", true)?
+    val admitted = native_group_index_admit_v1(config, artifact_root,
+        budget)?
+    val receipt = native_group_index_compiler_publish_v1(admitted)?
+    val encoded = native_group_index_receipt_encode_v1(receipt)
+    if encoded == "" or receipt.index_cache_root != config.index_cache_root or
+            receipt.output_root != config.output_root or
+            receipt.producer_digest != config.producer_digest or
+            receipt.source_count != config.expected_spl_count or
+            receipt.variant_digest != config.variant_digest:
+        return Err("index compiler producer receipt differs from admitted task")
+    if not file_create_exclusive(receipt_path, encoded):
+        return Err("index receipt exclusive publication failed")
+    val readback = file_read_regular_no_follow_bounded(receipt_path, 16384)?
+    if readback != encoded: return Err("index receipt readback differs")
+    native_group_index_receipt_decode_v1(readback)
+
+export NativeGroupIndexAdmissionV1, native_group_index_admit_v1
+export native_group_index_compiler_publish_v1, native_group_index_build_managed_v1
+export native_group_index_managed_path_v1
+export native_group_index_manager_task_valid_v1

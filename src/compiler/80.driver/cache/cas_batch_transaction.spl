@@ -100,6 +100,36 @@ fn cas_batch_mapping_valid_v1(fields: [text]) -> bool:
         cas_batch_digest_valid_v1(fields[1]) and
         cas_batch_digest_valid_v1(fields[2])
 
+# A package may have multiple immutable actions in one cache generation.  A
+# later SCC publication replaces only the exact package/action pair it stages;
+# replacing by package alone loses the runtime/std baseline when a cold V2
+# graph publishes its own action for the same package identity.
+fn cas_batch_inherit_mappings_v1(
+    parent_mappings: [text], staged_mappings: [text]
+) -> Result<[text], CasBatchTransactionErrorV1>:
+    var staged_pairs: Dict<text, bool> = {}
+    for mapping in staged_mappings:
+        val fields = mapping.split("|")
+        if not cas_batch_mapping_valid_v1(fields):
+            return Err(CasBatchTransactionErrorV1.generation_corrupt)
+        val pair = "{fields[0]}|{fields[1]}"
+        if staged_pairs.has(pair):
+            return Err(CasBatchTransactionErrorV1.duplicate_mapping)
+        staged_pairs[pair] = true
+    var parent_pairs: Dict<text, bool> = {}
+    var inherited: [text] = []
+    for mapping in parent_mappings:
+        val fields = mapping.split("|")
+        if not cas_batch_mapping_valid_v1(fields):
+            return Err(CasBatchTransactionErrorV1.generation_corrupt)
+        val pair = "{fields[0]}|{fields[1]}"
+        if parent_pairs.has(pair):
+            return Err(CasBatchTransactionErrorV1.generation_corrupt)
+        parent_pairs[pair] = true
+        if not staged_pairs.has(pair):
+            inherited = inherited.push(mapping)
+    Ok(inherited)
+
 fn cas_batch_lookup_receipt_digest_v1(
     store_root: text, package_key: text, action_digest: text
 ) -> text?:
@@ -237,13 +267,14 @@ fn cas_batch_publish_v1(
         if not cas_batch_generation_header_valid_v1(
                 parent_lines, transaction.expected_current_generation):
             return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
+        var parent_mappings: [text] = []
         for index in 5..parent_lines.len():
-            val line = parent_lines[index]
-            val fields = line.split("|")
-            if not cas_batch_mapping_valid_v1(fields):
-                return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
-            if not transaction.required_package_keys.contains(fields[0]):
-                inherited_mappings = inherited_mappings.push(line)
+            parent_mappings = parent_mappings.push(parent_lines[index])
+        val inherited = cas_batch_inherit_mappings_v1(
+            parent_mappings, mappings)
+        if inherited.is_err():
+            return cas_batch_error_v1(inherited.unwrap_err())
+        inherited_mappings = inherited.unwrap()
     var generation_lines = [CAS_BATCH_SCHEMA_V1,
         "generation={transaction.next_generation}",
         "parent={transaction.expected_current_generation}",
@@ -345,3 +376,4 @@ export CasBatchTransactionV1, CasBatchTransactionErrorV1
 export cas_batch_begin_v1, cas_batch_stage_object_v1
 export cas_batch_publish_v1, cas_batch_abort_v1, cas_batch_recover_v1
 export cas_batch_current_v1, cas_batch_lookup_receipt_digest_v1
+export cas_batch_inherit_mappings_v1

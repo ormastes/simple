@@ -386,6 +386,50 @@ pub fn rt_file_read_text(path_ptr_raw: i64, path_len: i64) -> i64:
     _sffi_core_fs_free(buf)
     return out
 
+# Pure-Simple SimpleOS twin of the native host's bounded parser-cell read.
+# The hosted Windows provider uses CreateFileW/OPEN_REPARSE_POINT instead;
+# this POSIX SimpleOS path uses Linux O_NOFOLLOW on the exact opened leaf.
+pub fn rt_shared_parse_cell_read_v1(path_ptr_raw: i64, path_len: i64,
+        maximum: i64) -> i64:
+    if maximum <= 0 or maximum > 33554432:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    var raw_ptr = path_ptr_raw
+    var raw_len = path_len
+    if raw_len < 1 and (raw_ptr & 7) == 1:
+        raw_len = _sffi_core_fs_rt_string_len(raw_ptr)
+        raw_ptr = _sffi_core_fs_rt_string_data(raw_ptr)
+    val path_ptr = fs_copy_cstr(raw_ptr, raw_len)
+    if path_ptr < 1:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val fd = _sffi_core_fs_open(path_ptr, 131072)
+    _sffi_core_fs_free(path_ptr)
+    if fd < 0:
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val size = _sffi_core_fs_lseek(fd, 0, 2)
+    if size <= 0 or size > maximum or _sffi_core_fs_lseek(fd, 0, 0) != 0:
+        _sffi_core_fs_close(fd)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val bytes = _sffi_core_fs_malloc(size)
+    if bytes < 1:
+        _sffi_core_fs_close(fd)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    var done = 0
+    while done < size:
+        val received = _sffi_core_fs_read(fd, bytes + done, size - done)
+        if received <= 0:
+            _sffi_core_fs_free(bytes)
+            _sffi_core_fs_close(fd)
+            return _sffi_core_fs_rt_string_new(0, 0)
+        done = done + received
+    val final_size = _sffi_core_fs_lseek(fd, 0, 2)
+    _sffi_core_fs_close(fd)
+    if final_size != size:
+        _sffi_core_fs_free(bytes)
+        return _sffi_core_fs_rt_string_new(0, 0)
+    val result = _sffi_core_fs_rt_string_new(bytes, size)
+    _sffi_core_fs_free(bytes)
+    result
+
 pub fn rt_file_read_text_rv(path: i64) -> i64:
     val ptr = _sffi_core_fs_rt_string_data(path)
     val len = _sffi_core_fs_rt_string_len(path)

@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -29,6 +30,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <winioctl.h>
+#include "platform/runtime_win_long_path.h"
 #include <sys/stat.h>
 #ifndef SYMLINK_FLAG_RELATIVE
 /* SymbolicLinkReparseBuffer.Flags bit 0 is the relative-target marker.
@@ -37,6 +40,7 @@
 #endif
 #undef max
 #else
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -260,6 +264,303 @@ static int core_host_text_arg(int64_t value, char* buf, size_t buf_size) {
     if (len != 0) memcpy(buf, data, (size_t)len);
     buf[(size_t)len] = '\0';
     return 1;
+}
+
+/* Snapshot links use tagged text so their extern ABI needs no raw-text MIR
+ * exception. All paths here are private absolute paths emitted by the snapshot
+ * owner; the native boundary still rejects NUL, dot components and escapes. */
+static int core_snapshot_text(int64_t value, char* out, size_t size) {
+    int64_t len = rt_string_len(value);
+    const uint8_t* data = rt_string_data(value);
+    if (len <= 0 || (uint64_t)len >= size || !data ||
+        memchr(data, 0, (size_t)len)) return 0;
+    memcpy(out, data, (size_t)len);
+    out[len] = '\0';
+    return 1;
+}
+
+static int core_snapshot_absolute(const char* path) {
+    size_t len = strlen(path);
+    if (len < 2 || len >= 4096 || path[len - 1] == '/' || strchr(path, '\\')) return 0;
+#if defined(_WIN32)
+    if (!((path[0] >= 'A' && path[0] <= 'Z') ||
+          (path[0] >= 'a' && path[0] <= 'z')) || path[1] != ':' || path[2] != '/') return 0;
+    size_t start = 3;
+#else
+    if (path[0] != '/') return 0;
+    size_t start = 1;
+#endif
+    for (size_t i = start; i < len;) {
+        size_t next = i;
+        while (next < len && path[next] != '/') next++;
+        size_t n = next - i;
+        if (!n || (n == 1 && path[i] == '.') ||
+            (n == 2 && path[i] == '.' && path[i + 1] == '.')) return 0;
+        i = next + 1;
+    }
+    return 1;
+}
+
+/* Resolve the raw relative target lexically, including bounded '..'. A
+ * filesystem walk below checks every resolved component without following a
+ * symlink. Link text is left untouched for exact readback. */
+static int core_snapshot_target(const char* root, const char* link,
+                                const char* target, char resolved[4096]) {
+    size_t root_len = strlen(root), link_len = strlen(link), target_len = strlen(target);
+    if (!core_snapshot_absolute(root) || !core_snapshot_absolute(link) ||
+        link_len <= root_len + 1 || strncmp(link, root, root_len) != 0 ||
+        link[root_len] != '/' || !target_len || target_len >= 4096 ||
+        target[0] == '/' || strchr(target, '\\') || strchr(target, ':') ||
+        target[target_len - 1] == '/') return 0;
+    const char* leaf = strrchr(link, '/');
+    if (!leaf || !leaf[1]) return 0;
+    size_t used = (size_t)(leaf - link);
+    if (used < root_len) return 0;
+    memcpy(resolved, link, used);
+    resolved[used] = '\0';
+    for (size_t i = 0; i < target_len;) {
+        size_t next = i;
+        while (next < target_len && target[next] != '/') next++;
+        size_t n = next - i;
+        if (n == 0) return 0;
+        if (n == 1 && target[i] == '.') {
+            /* no change */
+        } else if (n == 2 && target[i] == '.' && target[i + 1] == '.') {
+            if (used == root_len) return 0;
+            const char* previous = strrchr(resolved, '/');
+            if (!previous || (size_t)(previous - resolved) < root_len) return 0;
+            used = (size_t)(previous - resolved);
+            resolved[used] = '\0';
+        } else {
+            if (used + 1 + n >= 4096) return 0;
+            resolved[used++] = '/';
+            memcpy(resolved + used, target + i, n);
+            used += n;
+            resolved[used] = '\0';
+        }
+        i = next + 1;
+    }
+    return core_snapshot_absolute(resolved);
+}
+
+#if defined(_WIN32)
+static int core_snapshot_windows_target_kind(const char* path, int32_t kind) {
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return 0;
+    int real = rt_win_profile_path_parents_are_real(wide);
+    DWORD attrs = real ? GetFileAttributesW(wide) : INVALID_FILE_ATTRIBUTES;
+    free(wide);
+    return attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+        ((kind == 2 && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) ||
+         (kind == 1 && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+          (attrs & FILE_ATTRIBUTE_DEVICE) == 0));
+}
+
+static wchar_t* core_snapshot_windows_raw_target(const char* target) {
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, NULL, 0);
+    if (count <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, wide, count)) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static int core_snapshot_windows_match(const char* link, const char* target,
+                                       int32_t kind) {
+    wchar_t* wide = rt_win_long_path_widen(link);
+    if (!wide) return 0;
+    if (!rt_win_profile_path_parents_are_real(wide)) { free(wide); return 0; }
+    HANDLE handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    BY_HANDLE_FILE_INFORMATION info;
+    BYTE bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+    DWORD returned = 0;
+    int ok = GetFileInformationByHandle(handle, &info) &&
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+        ((kind == 2 && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) ||
+         (kind == 1 && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)) &&
+        DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, NULL, 0, bytes,
+            (DWORD)sizeof(bytes), &returned, NULL);
+    CloseHandle(handle);
+    /* MinGW does not publish REPARSE_DATA_BUFFER. The symlink wire layout is
+     * 8-byte header, four USHORT offsets/lengths, ULONG flags, UTF-16 path. */
+    if (!ok || returned < 20) return 0;
+    DWORD tag = 0, flags = 0;
+    USHORT wire_length = 0, offset = 0, length = 0;
+    memcpy(&tag, bytes, sizeof(tag));
+    memcpy(&wire_length, bytes + 4, sizeof(wire_length));
+    memcpy(&offset, bytes + 12, sizeof(offset));
+    memcpy(&length, bytes + 14, sizeof(length));
+    memcpy(&flags, bytes + 16, sizeof(flags));
+    if (tag != IO_REPARSE_TAG_SYMLINK || (flags & SYMLINK_FLAG_RELATIVE) == 0 ||
+        (size_t)wire_length + 8 > returned || (offset & 1) || (length & 1) ||
+        20u + (size_t)offset + length > returned ||
+        20u + (size_t)offset + length > (size_t)wire_length + 8 ||
+        length > 8192) return 0;
+    WCHAR raw[4096];
+    memcpy(raw, bytes + 20 + offset, length);
+    char text[4096];
+    int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, raw,
+        length / (USHORT)sizeof(WCHAR), text, (int)sizeof(text), NULL, NULL);
+    return count > 0 && (size_t)count == strlen(target) &&
+        memcmp(text, target, (size_t)count) == 0;
+}
+#else
+static int core_snapshot_posix_parent(const char* path, char leaf[4096]) {
+    if (!core_snapshot_absolute(path)) return -1;
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    const char* part = path + 1;
+    while (*part) {
+        const char* slash = strchr(part, '/');
+        size_t n = slash ? (size_t)(slash - part) : strlen(part);
+        if (!n || n >= 4096) { close(fd); return -1; }
+        memcpy(leaf, part, n);
+        leaf[n] = '\0';
+        if (!slash) return fd;
+        int next = openat(fd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(fd);
+        if (next < 0) return -1;
+        fd = next;
+        part = slash + 1;
+    }
+    close(fd);
+    return -1;
+}
+
+static int core_snapshot_posix_target_kind(const char* path, int32_t kind) {
+    char leaf[4096];
+    int parent = core_snapshot_posix_parent(path, leaf);
+    if (parent < 0) return 0;
+    struct stat info;
+    int ok = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+        ((kind == 1 && S_ISREG(info.st_mode)) || (kind == 2 && S_ISDIR(info.st_mode)));
+    close(parent);
+    return ok;
+}
+
+static int core_snapshot_posix_match(const char* link, const char* target) {
+    char leaf[4096], raw[4096];
+    int parent = core_snapshot_posix_parent(link, leaf);
+    if (parent < 0) return 0;
+    struct stat info;
+    ssize_t length = readlinkat(parent, leaf, raw, sizeof(raw));
+    int ok = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+        S_ISLNK(info.st_mode) && length >= 0 &&
+        (size_t)length == strlen(target) && memcmp(raw, target, (size_t)length) == 0;
+    close(parent);
+    return ok;
+}
+#endif
+
+int32_t rt_snapshot_symlink_match_nofollow_v1(int64_t root_value,
+        int64_t link_value, int64_t target_value, int32_t kind) {
+    char root[4096], link[4096], target[4096], resolved[4096];
+    if ((kind != 1 && kind != 2) ||
+        !core_snapshot_text(root_value, root, sizeof(root)) ||
+        !core_snapshot_text(link_value, link, sizeof(link)) ||
+        !core_snapshot_text(target_value, target, sizeof(target)) ||
+        !core_snapshot_target(root, link, target, resolved)) return -1;
+#if defined(_WIN32)
+    return core_snapshot_windows_target_kind(resolved, kind) &&
+        core_snapshot_windows_match(link, target, kind) ? 0 : -1;
+#else
+    return core_snapshot_posix_target_kind(resolved, kind) &&
+        core_snapshot_posix_match(link, target) ? 0 : -1;
+#endif
+}
+
+int32_t rt_snapshot_symlink_create_nofollow_v1(int64_t root_value,
+        int64_t link_value, int64_t target_value, int32_t kind) {
+    char root[4096], link[4096], target[4096], resolved[4096];
+    if ((kind != 1 && kind != 2) ||
+        !core_snapshot_text(root_value, root, sizeof(root)) ||
+        !core_snapshot_text(link_value, link, sizeof(link)) ||
+        !core_snapshot_text(target_value, target, sizeof(target)) ||
+        !core_snapshot_target(root, link, target, resolved)) return -1;
+#if defined(_WIN32)
+    if (!core_snapshot_windows_target_kind(resolved, kind)) return -1;
+    wchar_t* wide_link = rt_win_long_path_widen(link);
+    wchar_t* wide_target = core_snapshot_windows_raw_target(target);
+    if (!wide_link || !wide_target) { free(wide_link); free(wide_target); return -1; }
+    if (!rt_win_profile_path_parents_are_real(wide_link) ||
+        GetFileAttributesW(wide_link) != INVALID_FILE_ATTRIBUTES) {
+        free(wide_link); free(wide_target); return -1;
+    }
+    DWORD flags = kind == 2 ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0;
+    BOOLEAN created = CreateSymbolicLinkW(wide_link, wide_target, flags | 0x2u);
+    if (!created && GetLastError() == ERROR_INVALID_PARAMETER)
+        created = CreateSymbolicLinkW(wide_link, wide_target, flags);
+    free(wide_link); free(wide_target);
+    if (!created) return -1;
+#else
+    if (!core_snapshot_posix_target_kind(resolved, kind)) return -1;
+    char leaf[4096];
+    int parent = core_snapshot_posix_parent(link, leaf);
+    if (parent < 0) return -1;
+    int created = symlinkat(target, parent, leaf) == 0;
+    close(parent);
+    if (!created) return -1;
+#endif
+    return rt_snapshot_symlink_match_nofollow_v1(root_value, link_value,
+        target_value, kind);
+}
+
+int32_t rt_snapshot_readonly_nofollow_v1(int64_t path_value, int32_t kind) {
+    char path[4096];
+    if ((kind != 1 && kind != 2) ||
+        !core_snapshot_text(path_value, path, sizeof(path)) ||
+        !core_snapshot_absolute(path)) return -1;
+#if defined(_WIN32)
+    /* DIRECTORY READONLY is ignored for child creation by Windows. Returning
+     * success there would invent a physical seal, so only files are supported. */
+    if (kind != 1) return -1;
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return -1;
+    if (!rt_win_profile_path_parents_are_real(wide)) { free(wide); return -1; }
+    HANDLE handle = CreateFileW(wide, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return -1;
+    FILE_BASIC_INFO info;
+    int ok = GetFileInformationByHandleEx(handle, FileBasicInfo, &info, sizeof(info)) &&
+        (info.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                                FILE_ATTRIBUTE_DEVICE)) == 0;
+    if (ok) {
+        info.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+        ok = SetFileInformationByHandle(handle, FileBasicInfo, &info, sizeof(info)) &&
+            GetFileInformationByHandleEx(handle, FileBasicInfo, &info, sizeof(info)) &&
+            (info.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0 &&
+            (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    }
+    CloseHandle(handle);
+    return ok ? 0 : -1;
+#else
+    char leaf[4096];
+    int parent = core_snapshot_posix_parent(path, leaf);
+    if (parent < 0) return -1;
+    int fd = openat(parent, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC |
+        (kind == 2 ? O_DIRECTORY : 0));
+    close(parent);
+    if (fd < 0) return -1;
+    struct stat before, after;
+    int ok = fstat(fd, &before) == 0 &&
+        ((kind == 1 && S_ISREG(before.st_mode)) ||
+         (kind == 2 && S_ISDIR(before.st_mode)));
+    mode_t desired = ok ? before.st_mode & (mode_t)07777 & ~(mode_t)0222 : 0;
+    if (ok) ok = fchmod(fd, desired) == 0 && fstat(fd, &after) == 0 &&
+                 (after.st_mode & 0222) == 0;
+    close(fd);
+    return ok ? 0 : -1;
+#endif
 }
 
 static int64_t core_host_text_result(const char* s) {

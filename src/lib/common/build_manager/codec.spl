@@ -1,8 +1,9 @@
 # Canonical bounded wire records. Encoded payloads contain no process pointers.
 use std.common.build_manager.contracts.{
-    BuildInputV1, BuildTaskV1, BuildHostV1, BuildResultV1, BuildRunV1,
+    BuildInputV1, BuildLinkV1, BuildTaskV1, BuildHostV1, BuildResultV1, BuildRunV1,
     builder_text_valid_v1, builder_validate_task_v1, builder_validate_run_v1,
-    builder_validate_result_shape_v1, BUILDER_MAX_INPUTS_V1
+    builder_validate_result_shape_v1, BUILDER_MAX_INPUTS_V1,
+    BUILDER_MEMORY_LIMIT_MAX_V2
 }
 
 fn builder_wire_escape_v1(value: text) -> text:
@@ -89,11 +90,11 @@ class BuilderWireReaderV1:
             return 0
         var value: i64 = 0
         while pos < field.len():
-            val c = field[pos:pos + 1]
-            if c < "0" or c > "9":
+            val code = field.byte_at(pos) as i64
+            if code < 48 or code > 57:
                 self.reason = "nondigit wire integer"
                 return 0
-            val digit: i64 = builder_wire_digit_v1(c)
+            val digit: i64 = builder_wire_digit_v1(field[pos:pos + 1])
             if digit < 0 or value > (limit - digit) / 10:
                 self.reason = "wire integer exceeds bound"
                 return 0
@@ -118,7 +119,8 @@ fn builder_wire_task_body_v1(task: BuildTaskV1) -> text:
     var pieces: [text] = []
     for field in [task.id, "{task.attempt}", task.phase, task.producer_digest,
             task.source_digest, task.toolchain_digest, task.program,
-            task.cache_key, "{task.timeout_ms}", "{task.dependencies.len()}"]:
+            task.cache_key, "{task.timeout_ms}", "{task.memory_limit_bytes}",
+            "{task.dependencies.len()}"]:
         pieces.push(builder_wire_line_v1(field))
     for dep in task.dependencies:
         pieces.push(builder_wire_line_v1(dep))
@@ -129,6 +131,11 @@ fn builder_wire_task_body_v1(task: BuildTaskV1) -> text:
     for item in task.inputs:
         pieces.push(builder_wire_line_v1(item.path))
         pieces.push(builder_wire_line_v1(item.digest))
+    pieces.push(builder_wire_line_v1("{task.links.len()}"))
+    for link in task.links:
+        for field in [link.kind, link.path, link.target, link.resolved_path,
+                link.target_digest]:
+            pieces.push(builder_wire_line_v1(field))
     pieces.push(builder_wire_line_v1("{task.outputs.len()}"))
     for output in task.outputs:
         pieces.push(builder_wire_line_v1(output))
@@ -144,6 +151,7 @@ fn builder_wire_read_task_v1(reader: BuilderWireReaderV1) -> BuildTaskV1:
     val program = reader.scalar()
     val cache_key = reader.scalar()
     val timeout_ms = reader.number(604800000, false)
+    val memory_limit_bytes = reader.number(BUILDER_MEMORY_LIMIT_MAX_V2, false)
     val dep_count = reader.number(4096, false)
     var dependencies: [text] = []
     var i = 0
@@ -164,6 +172,14 @@ fn builder_wire_read_task_v1(reader: BuilderWireReaderV1) -> BuildTaskV1:
         val digest = reader.scalar()
         inputs = inputs.push(BuildInputV1(path: path, digest: digest))
         i = i + 1
+    val link_count = reader.number(4096, false)
+    var links: [BuildLinkV1] = []
+    i = 0
+    while i < link_count:
+        links = links.push(BuildLinkV1(kind: reader.scalar(), path: reader.scalar(),
+            target: reader.scalar(), resolved_path: reader.scalar(),
+            target_digest: reader.scalar()))
+        i = i + 1
     val output_count = reader.number(4096, false)
     var outputs: [text] = []
     i = 0
@@ -173,18 +189,19 @@ fn builder_wire_read_task_v1(reader: BuilderWireReaderV1) -> BuildTaskV1:
     BuildTaskV1(id: id, attempt: attempt, phase: phase,
         producer_digest: producer_digest, source_digest: source_digest,
         toolchain_digest: toolchain_digest, program: program, cache_key: cache_key,
-        timeout_ms: timeout_ms, dependencies: dependencies, args: args,
-        inputs: inputs, outputs: outputs)
+        timeout_ms: timeout_ms, memory_limit_bytes: memory_limit_bytes,
+        dependencies: dependencies, args: args,
+        inputs: inputs, links: links, outputs: outputs)
 
 fn builder_encode_task_v1(task: BuildTaskV1) -> text:
     if builder_validate_task_v1(task) != "": return ""
-    val payload = "SIMPLE-BUILD-TASK-1\n" + builder_wire_task_body_v1(task)
+    val payload = "SIMPLE-BUILD-TASK-3\n" + builder_wire_task_body_v1(task)
     if payload.len() > 16777216: return ""
     payload
 
 fn builder_decode_task_v1(payload: text) -> Result<BuildTaskV1, text>:
     val reader = BuilderWireReaderV1.create(payload)
-    if reader.scalar() != "SIMPLE-BUILD-TASK-1": return Err("invalid task wire header")
+    if reader.scalar() != "SIMPLE-BUILD-TASK-3": return Err("invalid task wire header (typed links required)")
     val task = builder_wire_read_task_v1(reader)
     val parse_error = reader.complete_error()
     if parse_error != "": return Err(parse_error)
@@ -195,7 +212,7 @@ fn builder_decode_task_v1(payload: text) -> Result<BuildTaskV1, text>:
 fn builder_encode_run_v1(run: BuildRunV1) -> text:
     if builder_validate_run_v1(run) != "": return ""
     val policy = if run.keep_going: "1" else: "0"
-    var pieces: [text] = ["SIMPLE-BUILD-RUN-2\n", builder_wire_line_v1(policy),
+    var pieces: [text] = ["SIMPLE-BUILD-RUN-4\n", builder_wire_line_v1(policy),
         builder_wire_line_v1("{run.max_attempts}"), builder_wire_line_v1("{run.hosts.len()}")]
     var size = pieces.join("").len()
     for host in run.hosts:
@@ -216,7 +233,7 @@ fn builder_encode_run_v1(run: BuildRunV1) -> text:
 
 fn builder_decode_run_v1(payload: text) -> Result<BuildRunV1, text>:
     val reader = BuilderWireReaderV1.create(payload)
-    if reader.scalar() != "SIMPLE-BUILD-RUN-2": return Err("invalid run wire header (compiled worker digest required)")
+    if reader.scalar() != "SIMPLE-BUILD-RUN-4": return Err("invalid run wire header (typed links required)")
     val keep = reader.number(1, false)
     val max_attempts = reader.number(3, false)
     val host_count = reader.number(64, false)

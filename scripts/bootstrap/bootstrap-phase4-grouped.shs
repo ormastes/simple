@@ -1,0 +1,497 @@
+#!/bin/sh
+# Independent Phase 3 and Phase 4 lanes use the admitted Phase 2 compiler.
+# All post-readiness compilation happens inside a compiled manager.
+set -eu
+die() { echo "phase3-phase4-grouped: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+require_current_manifest() {
+  regular "$1" || die "generic task manifest is not a regular file: $1"
+  IFS= read -r manifest_header <"$1" || die "generic task manifest header unreadable"
+  [ "$manifest_header" = SIMPLE-BUILD-RUN-4 ] \
+    || die "generic task manifest uses obsolete wire; preserve it and use a new output root"
+}
+disk_preflight() {
+  available_disk_bytes=$(df -Pk "$1" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') \
+    || die "generic task disk probe failed"
+  positive "$available_disk_bytes" || die "generic task disk probe invalid"
+  [ "$available_disk_bytes" -ge "$((estimated_group_disk_bytes + minimum_free_disk_bytes))" ] \
+    || die "generic task disk below configured estimate plus reserve"
+}
+
+producer_receipt= scv_receipt= source_root= source_inventory= source_links= module_inventory=
+excluded_inventory= excluded_inventory_digest= excluded_inventory_count=
+module_role_policy= module_role_policy_digest=
+shared_parse_cas_root=
+root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
+authority_program= authority_receipt= authority_digest= image_receipt=
+llvm_index_config= cranelift_index_config= phase3_llvm_index_config= phase3_cranelift_index_config=
+threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
+estimated_group_disk_bytes= minimum_free_disk_bytes=
+for arg in "$@"; do
+  case "$arg" in
+    --producer-receipt=*) producer_receipt=${arg#*=} ;;
+    --scv-receipt=*) scv_receipt=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --source-inventory=*) source_inventory=${arg#*=} ;;
+    --source-links=*) source_links=${arg#*=} ;;
+    --module-inventory=*) module_inventory=${arg#*=} ;;
+    --excluded-inventory=*) excluded_inventory=${arg#*=} ;;
+    --excluded-inventory-digest=*) excluded_inventory_digest=${arg#*=} ;;
+    --excluded-inventory-count=*) excluded_inventory_count=${arg#*=} ;;
+    --module-role-policy=*) module_role_policy=${arg#*=} ;;
+    --module-role-policy-digest=*) module_role_policy_digest=${arg#*=} ;;
+    --shared-parse-cas-root=*) shared_parse_cas_root=${arg#*=} ;;
+    --authority-program=*) authority_program=${arg#*=} ;;
+    --authority-receipt=*) authority_receipt=${arg#*=} ;;
+    --authority-digest=*) authority_digest=${arg#*=} ;;
+    --image-receipt=*) image_receipt=${arg#*=} ;;
+    --root=*) root=${arg#*=} ;;
+    --template=*) template=${arg#*=} ;;
+    --manifest-program=*) manifest_program=${arg#*=} ;;
+    --builder-program=*) builder_program=${arg#*=} ;;
+    --group-program=*) group_program=${arg#*=} ;;
+    --group-worker=*) group_worker=${arg#*=} ;;
+    --group-broker=*) group_broker=${arg#*=} ;;
+    --index-program=*) index_program=${arg#*=} ;;
+    --llvm-index-config=*) llvm_index_config=${arg#*=} ;;
+    --cranelift-index-config=*) cranelift_index_config=${arg#*=} ;;
+    --phase3-llvm-index-config=*) phase3_llvm_index_config=${arg#*=} ;;
+    --phase3-cranelift-index-config=*) phase3_cranelift_index_config=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    --target=*) target=${arg#*=} ;;
+    --group-size=*) group_size=${arg#*=} ;;
+    --max-attempts=*) max_attempts=${arg#*=} ;;
+    --poll-ms=*) poll_ms=${arg#*=} ;;
+    --lifetime-ms=*) lifetime_ms=${arg#*=} ;;
+    --estimated-group-disk-bytes=*) estimated_group_disk_bytes=${arg#*=} ;;
+    --minimum-free-disk-bytes=*) minimum_free_disk_bytes=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$producer_receipt" "$scv_receipt" "$source_root" "$source_inventory" "$source_links" \
+    "$module_inventory" "$excluded_inventory" "$module_role_policy" "$shared_parse_cas_root" \
+    "$root" "$template" "$manifest_program" "$builder_program" \
+    "$group_program" "$group_worker" "$group_broker" "$index_program" \
+    "$authority_program" "$authority_receipt" "$image_receipt" \
+    "$llvm_index_config" "$cranelift_index_config" \
+    "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+done
+for path in "$producer_receipt" "$scv_receipt" "$source_inventory" "$source_links" "$module_inventory" \
+    "$excluded_inventory" "$module_role_policy" \
+    "$template" "$manifest_program" "$builder_program" "$group_program" \
+    "$group_worker" "$group_broker" "$index_program" "$authority_program" \
+    "$authority_receipt" "$image_receipt" \
+    "$llvm_index_config" "$cranelift_index_config" \
+    "$phase3_llvm_index_config" "$phase3_cranelift_index_config"; do regular "$path" || die "missing pinned input: $path"; done
+[ "$(hash_file "$authority_receipt")" = "$authority_digest" ] || die "authority receipt changed"
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
+[ -d "$shared_parse_cas_root" ] && [ ! -L "$shared_parse_cas_root" ] || die "shared parse CAS root unavailable"
+case "$source_inventory" in "$source_root"/*) source_inventory_relative=${source_inventory#"$source_root"/} ;; *) die "source inventory must be inside immutable source root" ;; esac
+case "$source_links" in "$source_root"/*) source_links_relative=${source_links#"$source_root"/} ;; *) die "link inventory must be inside immutable source root" ;; esac
+case "$root/" in "$source_root/"*) die "output root overlaps immutable source root" ;; esac
+case "$source_root/" in "$root/"*) die "immutable source root overlaps output root" ;; esac
+for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
+    "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+  positive "$n" || die "positive resource policy required"
+done
+[ "$memory_bytes" -le 1125899906842624 ] \
+  || die "memory cap exceeds manager task limit"
+[ -n "$target" ] || die "target required"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+for inventory in "$source_inventory" "$module_inventory"; do
+  [ -s "$inventory" ] || die "empty inventory: $inventory"
+  [ "$(LC_ALL=C sort -u "$inventory" | wc -l | tr -d ' ')" = "$(wc -l <"$inventory" | tr -d ' ')" ] || die "duplicate inventory row"
+  LC_ALL=C sort "$inventory" | cmp -s - "$inventory" || die "unsorted inventory: $inventory"
+done
+awk 'length($0)==0 || index($0,"\r") || ($0 !~ /^src\// && $0 !~ /^examples\/10_tooling\//) || $0 ~ /(^|\/)\.\.?($|\/)/ { bad=1 } END { exit bad }' "$source_inventory" || die "invalid source inventory"
+module_inventory_count=$(wc -l <"$module_inventory" | tr -d ' ')
+positive "$module_inventory_count" || die "module inventory count invalid"
+case "$excluded_inventory_count" in ''|*[!0-9]*|0[0-9]*) die "excluded inventory count invalid" ;; esac
+case "$excluded_inventory_digest:$module_role_policy_digest" in
+  *[!0-9a-f:]* ) die "module role digest invalid" ;;
+esac
+[ "${#excluded_inventory_digest}" -eq 64 ] && [ "${#module_role_policy_digest}" -eq 64 ] \
+  || die "module role digest invalid"
+[ "$(hash_file "$excluded_inventory")" = "$excluded_inventory_digest" ] &&
+  [ "$(wc -l <"$excluded_inventory" | tr -d ' ')" = "$excluded_inventory_count" ] &&
+  [ "$(hash_file "$module_role_policy")" = "$module_role_policy_digest" ] \
+  || die "module role files differ from compiled authority"
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
+prepare="$repo_root/scripts/bootstrap/prepare-phase4-native-groups.shs"
+shared_parse_root_check="$repo_root/scripts/bootstrap/lib/shared-parse-cas-root.shs"
+shared_parse_source_check="$repo_root/scripts/bootstrap/lib/shared-parse-source-authority.shs"
+regular "$prepare" || die "tracked grouped preparer unavailable"
+regular "$shared_parse_root_check" || die "shared parse root checker unavailable"
+regular "$shared_parse_source_check" || die "shared parse source checker unavailable"
+mkdir -p "$root" || die "managed phase root unavailable"
+receipt="$root/completion.env"
+
+# Preparation replays the canonical Stage 2 admission before any manager task
+# can start. Its SCV check is compiled and refuses absent warm source metadata.
+prepare_backend() {
+  verify_shared_source
+  verify_image_set
+  task_phase=$1 backend=$2
+  case "$task_phase" in phase3|phase4) ;; *) die "unsupported module phase" ;; esac
+  case "$backend" in llvm|cranelift) ;; *) die "unsupported backend" ;; esac
+  index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
+  regular "$index_handoff" || die "$backend typed index handoff unavailable"
+  backend_root="$root/$task_phase/modules/$backend"
+  sh "$prepare" --phase="$task_phase" --producer-receipt="$producer_receipt" \
+    --scv-receipt="$scv_receipt" --index-handoff="$index_handoff" \
+    --index-program="$index_program" --source-root="$source_root" \
+    --inventory="$module_inventory" --backend="$backend" \
+    --shared-parse-cas-root="$shared_parse_cas_root" \
+    --output-root="$backend_root" --manager-program="$group_program" \
+    --worker-program="$group_worker" --broker-program="$group_broker" \
+    --threads="$threads" --memory-bytes="$memory_bytes" \
+    --manifest="$backend_root/state/manifest.sdn" --target="$target" \
+    --reserve-bytes="$reserve_bytes" --group-size="$group_size" \
+    --max-attempts="$max_attempts" --poll-ms="$poll_ms" \
+    --lifetime-ms="$lifetime_ms" \
+    --estimated-group-disk-bytes="$estimated_group_disk_bytes" \
+    --minimum-free-disk-bytes="$minimum_free_disk_bytes" >/dev/null \
+    || die "$backend preparation blocked"
+}
+# The compiled verifier checks complete regular/link inventories and SCV;
+# the canonical emitter additionally preserves Stage 2 executable-bit parity.
+verify_shared_source() {
+  observed="$root/source-canonical.$$.txt"
+  bootstrap_stage3_source_snapshot "$observed" "$source_root" \
+    || die "private source snapshot failed; evidence retained: $observed"
+  cmp -s "$observed" "$source_authority" \
+    || die "private source differs from admitted Stage 2 bytes: $observed"
+  verify_image_set
+  "$authority_program" phase2-native-authority-verify \
+    --receipt "$authority_receipt" --digest "$authority_digest" \
+    --canonical-snapshot "$observed" >/dev/null \
+    || die "compiled full-source authority verification failed: $observed"
+  rm -f "$observed"
+}
+
+verify_image_pin() {
+  path=$1 path_key=$2 digest_key=$3
+  expected_path=$(bootstrap_stage3_manifest_value "$path_key" "$image_receipt") \
+    || die "image receipt lacks $path_key"
+  expected_digest=$(bootstrap_stage3_manifest_value "$digest_key" "$image_receipt") \
+    || die "image receipt lacks $digest_key"
+  [ "$path" = "$expected_path" ] && regular "$path" &&
+    [ "$(hash_file "$path")" = "$expected_digest" ] \
+    || die "manager image/template changed: $path_key"
+}
+verify_image_set() {
+  [ "$(bootstrap_stage3_manifest_value format "$image_receipt")" = SIMPLE-PHASE2-MANAGER-IMAGES-1 ] \
+    || die "canonical manager image receipt has wrong schema"
+  verify_image_pin "$template" template template_sha256
+  verify_image_pin "$manifest_program" manifest_program manifest_sha256
+  verify_image_pin "$builder_program" builder_program builder_sha256
+  worker_path=$(bootstrap_stage3_manifest_value worker_program "$image_receipt") \
+    || die "image receipt lacks worker program"
+  verify_image_pin "$worker_path" worker_program worker_sha256
+  verify_image_pin "$group_program" group_program group_sha256
+  verify_image_pin "$group_worker" group_worker group_worker_sha256
+  verify_image_pin "$group_broker" group_broker group_broker_sha256
+  verify_image_pin "$index_program" index_program index_sha256
+  verify_image_pin "$authority_program" authority_program authority_sha256
+}
+
+# The manager's worker runs in its own work root, so output and cache paths in
+# the compiler argv are relative. Output publication is hash checked by run.
+build_binary() {
+  id=$1 entry=$2 output=$3 task_phase=$4 backend=$5
+  task_id="$id-$backend"
+  job_root="$root/$task_phase/binaries/$backend/$id"
+  mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
+  verify_shared_source
+  disk_preflight "$job_root"
+  if [ ! -f "$job_root/manifest.sdn" ]; then
+    verify_image_set
+    "$manifest_program" --job-from-inventory "$template" "$producer" "$source_root" \
+      "$task_id" "$task_phase" "$output" "$source_inventory_relative" \
+      --memory-limit-bytes "$memory_bytes" --links-inventory "$source_links_relative" \
+      --manifest "$job_root/manifest.sdn" -- \
+      native-build --target "$target" --backend "$backend" \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --entry "$entry" --threads "$threads" \
+      --cache-dir "cache/$task_id" --output "$output" \
+      || die "$id manifest blocked"
+  fi
+  require_current_manifest "$job_root/manifest.sdn"
+  verify_image_set
+  sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \
+    || die "shared parse CAS root changed before $id manager spawn"
+  sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
+    || die "shared parse source authority changed before $id manager spawn"
+  SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
+  SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_ROOT="$source_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH="$source_authority" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
+  "$builder_program" run --manifest "$job_root/manifest.sdn" \
+    --state "$job_root/state" --source-root "$source_root" \
+    --output-root "$job_root" || die "$id manager task failed"
+  verify_shared_source
+  "$builder_program" verify --manifest "$job_root/manifest.sdn" \
+    --state "$job_root/state" --source-root "$source_root" \
+    --output-root "$job_root" || die "$id receipt/output verification failed"
+  regular "$job_root/$output" && regular "$job_root/state/receipts/$task_id.sdn" \
+    || die "$id has no published output and terminal receipt"
+  printf '%s=%s\n' "${task_phase}_${backend}_${id}" "$(hash_file "$job_root/$output")" >>"$root/binary-hashes.tmp.$$"
+  printf '%s=%s\n' "${task_phase}_${backend}_${id}_manager_receipt_sha256" \
+    "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$root/binary-hashes.tmp.$$"
+}
+
+# The complete V2 index is a post-readiness build task. Its only staged input
+# is a pinned config; the compiled CLI admits the absolute frozen source and
+# SCV authority named there. The generic manager owns retries and publication.
+build_index() {
+  task_phase=$1 backend=$2 config=$3
+  case "$task_phase" in phase3|phase4) ;; *) die "unsupported index phase" ;; esac
+  case "$backend" in llvm|cranelift) ;; *) die "unsupported index backend" ;; esac
+  job_root="$root/$task_phase/index/$backend"
+  input_root="$job_root/inputs"
+  output_root="$job_root/output"
+  state_root="$job_root/state"
+  mkdir -p "$input_root" "$output_root" "$state_root" || die "$backend index roots unavailable"
+  verify_shared_source
+  disk_preflight "$job_root"
+  if [ -e "$input_root/index.config" ]; then
+    regular "$input_root/index.config" && cmp -s "$config" "$input_root/index.config" \
+      || die "$backend staged index config differs from replay"
+  else
+    cp "$config" "$input_root/index.config" || die "$backend index config staging failed"
+  fi
+  printf 'index.config\n' >"$input_root/source.inventory.tmp.$$" \
+    || die "$backend index inventory staging failed"
+  if [ -e "$input_root/source.inventory" ]; then
+    cmp -s "$input_root/source.inventory.tmp.$$" "$input_root/source.inventory" \
+      || die "$backend index inventory differs from replay"
+    rm -f "$input_root/source.inventory.tmp.$$"
+  else
+    mv "$input_root/source.inventory.tmp.$$" "$input_root/source.inventory" \
+      || die "$backend index inventory publication failed"
+  fi
+  if [ -e "$input_root/links.inventory" ]; then
+    regular "$input_root/links.inventory" && [ ! -s "$input_root/links.inventory" ] \
+      || die "$backend index link inventory differs from empty policy"
+  else
+    : >"$input_root/links.inventory" || die "$backend empty link inventory unavailable"
+  fi
+  if [ ! -e "$job_root/manifest.sdn" ]; then
+    verify_image_set
+    "$manifest_program" --job-from-inventory "$template" "$index_program" \
+      "$input_root" "index-$task_phase-$backend" "$task_phase" index-output/receipt.sdn \
+      source.inventory --memory-limit-bytes "$memory_bytes" \
+      --links-inventory links.inventory \
+      --manifest "$job_root/manifest.sdn" -- \
+      native-groups-index-build --manager-work --config index.config \
+      --receipt @WORK@/index-output/receipt.sdn \
+      || die "$backend index manifest blocked"
+  fi
+  require_current_manifest "$job_root/manifest.sdn"
+  verify_image_set
+  sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \
+    || die "shared parse CAS root changed before $task_phase/$backend index spawn"
+  sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
+    || die "shared parse source authority changed before $task_phase/$backend index spawn"
+  SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
+  SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_ROOT="$source_root" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH="$source_authority" \
+  SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
+  "$builder_program" run --manifest "$job_root/manifest.sdn" \
+    --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
+    || die "$backend managed index build failed"
+  "$builder_program" verify --manifest "$job_root/manifest.sdn" \
+    --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
+    || die "$backend managed index receipt verification failed"
+  verify_shared_source
+  regular "$output_root/index-output/receipt.sdn" \
+    || die "$backend V2 index receipt unavailable"
+  verify_image_set
+  "$index_program" native-groups-index-verify \
+    --config "$input_root/index.config" \
+    --receipt "$output_root/index-output/receipt.sdn" \
+    --handoff "$job_root/handoff.sdn" \
+    || die "$backend V2 index receipt admission failed"
+  regular "$job_root/handoff.sdn" \
+    || die "$backend typed index handoff unavailable"
+  handoff_digest=$(hash_file "$job_root/handoff.sdn") || die "$backend handoff digest unavailable"
+  handoff_field() {
+    "$index_program" native-groups-index-handoff-field \
+      --handoff "$job_root/handoff.sdn" --digest "$handoff_digest" --field "$1"
+  }
+  [ "$(handoff_field phase)" = "$task_phase" ] &&
+    [ "$(handoff_field backend)" = "$backend" ] &&
+    [ "$(handoff_field source_count)" = "$module_inventory_count" ] \
+    || die "$task_phase/$backend V2 handoff does not cover exact module inventory"
+}
+
+run_module_backend() {
+  task_phase=$1 backend=$2
+  manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
+  regular "$manifest" || die "$task_phase/$backend group manifest unavailable"
+  verify_image_set
+  "$group_program" native-groups-run --manifest "$manifest" \
+    || die "$task_phase/$backend module run failed or produced only diagnostic objects"
+  verify_image_set
+  "$group_program" native-groups-verify --manifest "$manifest" \
+    --state "$root/$task_phase/modules/$backend/state" \
+    || die "$task_phase/$backend ledger is incomplete or lacks qualified SMF outputs"
+}
+
+build_backend_modules() {
+  task_phase=$1 backend=$2 config=$3
+  build_index "$task_phase" "$backend" "$config"
+  prepare_backend "$task_phase" "$backend"
+  run_module_backend "$task_phase" "$backend"
+}
+build_phase4_binaries() {
+  backend=$1
+  build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4 "$backend"
+  build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4 "$backend"
+  build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4 "$backend"
+  build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4 "$backend"
+  build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4 "$backend"
+}
+
+# Read the exact producer from the verified admission receipt; never use the
+# Stage 3 output or ambient `bin/simple` as a Phase 4 producer.
+. "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+producer=$(bootstrap_stage3_manifest_value candidate_path "$producer_receipt") || die "Stage 2 producer absent"
+regular "$producer" || die "Stage 2 producer missing"
+producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "$producer_receipt") || die "Stage 2 producer hash absent"
+[ "$(hash_file "$producer")" = "$producer_sha" ] || die "Stage 2 producer changed"
+source_authority=$(bootstrap_stage3_manifest_value source_snapshot_path "$producer_receipt") || die "Stage 2 source authority absent"
+source_authority_digest=$(bootstrap_stage3_manifest_value source_snapshot_sha256 "$producer_receipt") || die "Stage 2 source authority digest absent"
+regular "$source_authority" || die "Stage 2 source authority missing"
+sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
+  || die "Stage 2 source authority bytes differ before manager dispatch"
+runtime_snapshot=$(bootstrap_stage3_manifest_value runtime_snapshot_path "$producer_receipt") || die "runtime authority absent"
+runtime_authority=$(bootstrap_stage3_manifest_value runtime_authority_path "$producer_receipt") || die "runtime root absent"
+tool_authority=$(bootstrap_stage3_manifest_value tool_authority_path "$producer_receipt") || die "tool authority absent"
+args_digest=$(bootstrap_stage3_manifest_value build_args_sha256 "$producer_receipt") || die "build args absent"
+sanity=$(bootstrap_stage3_manifest_value sanity_evidence_path "$producer_receipt") || die "sanity receipt absent"
+receiver=$(bootstrap_stage3_manifest_value receiver_evidence_path "$producer_receipt") || die "receiver receipt absent"
+receiver_log=$(bootstrap_stage3_manifest_value receiver_log_path "$producer_receipt") || die "receiver log absent"
+bootstrap_stage3_verify_stage2_admission_receipt \
+  "$producer_receipt" "$producer_receipt" "$producer" "$producer" \
+  "$source_authority" "$source_authority" "$runtime_snapshot" "$runtime_snapshot" \
+  "$runtime_authority" "$runtime_authority" "$tool_authority" "$tool_authority" \
+  "$args_digest" "$sanity" "$sanity" "$(dirname -- "$sanity")" \
+  "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$repo_root" \
+  || die "Stage 2 admission replay failed"
+expected_inventory="$root/source-authority-inventory.tmp.$$"
+hashes=
+trap 'rm -f "$expected_inventory" "$hashes"' EXIT HUP INT TERM
+perl -e '
+  use strict; use warnings;
+  my $path = shift @ARGV;
+  open my $input, "<:raw", $path or die "source authority open failed\n";
+  while (my $line = <$input>) {
+    $line =~ s/\n\z//;
+    next if $line =~ /^link-dir-hex:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/;
+    next if $line =~ /^link-hex:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]{64}$/;
+    next if $line =~ /^link-missing-hex:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/;
+    $line =~ /^file-hex:([0-9]+):([0-9a-f]+):[01]:[0-9a-f]{64}$/
+      or die "source authority has unknown row\n";
+    my $relative = pack("H*", $2);
+    length($relative) == $1 or die "source authority path length differs\n";
+    $relative !~ /[\r\n\\]/ or die "source authority path unsafe\n";
+    print "$relative\n" if $relative =~ m{^(?:src/|examples/10_tooling/)};
+  }
+' "$source_authority" | LC_ALL=C sort >"$expected_inventory" \
+  || die "Stage 2 source inventory decode failed"
+cmp -s "$expected_inventory" "$source_inventory" \
+  || die "binary source inventory differs from complete admitted Stage 2 regular paths"
+rm -f "$expected_inventory"
+verify_shared_source
+
+hashes="$root/binary-hashes.tmp.$$"
+trap 'rm -f "$hashes"' EXIT HUP INT TERM
+: >"$hashes"
+phase4_status=0
+(
+  build_phase4_binaries llvm
+  build_backend_modules phase4 llvm "$llvm_index_config"
+  build_phase4_binaries cranelift
+  build_backend_modules phase4 cranelift "$cranelift_index_config"
+) || phase4_status=$?
+
+# Host memory limits make these two independent Phase 2 children serial here.
+# Phase 4 runs first; Phase 3 is attempted even if Phase 4 fails. Each phase
+# owns its index, grouped module ledger, and outputs independently.
+phase3_status=0
+(
+  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3 llvm
+  build_backend_modules phase3 llvm "$phase3_llvm_index_config"
+  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3 cranelift
+  build_backend_modules phase3 cranelift "$phase3_cranelift_index_config"
+) || phase3_status=$?
+[ "$phase4_status" -eq 0 ] && [ "$phase3_status" -eq 0 ] || \
+  die "managed children incomplete: phase4=$phase4_status phase3=$phase3_status"
+verify_shared_source
+[ "$("$authority_program" phase2-native-authority-field --receipt "$authority_receipt" --digest "$authority_digest" --field excluded_inventory_path)" = "$excluded_inventory" ] &&
+  [ "$("$authority_program" phase2-native-authority-field --receipt "$authority_receipt" --digest "$authority_digest" --field excluded_inventory_digest)" = "$excluded_inventory_digest" ] &&
+  [ "$("$authority_program" phase2-native-authority-field --receipt "$authority_receipt" --digest "$authority_digest" --field excluded_inventory_count)" = "$excluded_inventory_count" ] &&
+  [ "$("$authority_program" phase2-native-authority-field --receipt "$authority_receipt" --digest "$authority_digest" --field module_role_policy_path)" = "$module_role_policy" ] &&
+  [ "$("$authority_program" phase2-native-authority-field --receipt "$authority_receipt" --digest "$authority_digest" --field module_role_policy_digest)" = "$module_role_policy_digest" ] \
+  || die "module role files are not bound to compiled V3 authority"
+[ "$(hash_file "$excluded_inventory")" = "$excluded_inventory_digest" ] &&
+  [ "$(wc -l <"$excluded_inventory" | tr -d ' ')" = "$excluded_inventory_count" ] &&
+  [ "$(hash_file "$module_role_policy")" = "$module_role_policy_digest" ] \
+  || die "module role files changed before completion"
+
+tmp="$receipt.tmp.$$"
+{
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4' 'status=PASS' \
+    'phase3_status=PASS' 'phase4_status=PASS' \
+    "producer_sha256=$producer_sha" "authority_receipt_sha256=$authority_digest" \
+    "manager_images_sha256=$(hash_file "$image_receipt")" \
+    "source_inventory_sha256=$(hash_file "$source_inventory")" \
+    "source_links_sha256=$(hash_file "$source_links")" \
+    "module_inventory_sha256=$(hash_file "$module_inventory")" \
+    "module_inventory_count=$module_inventory_count" \
+    "excluded_inventory_sha256=$excluded_inventory_digest" \
+    "excluded_inventory_count=$excluded_inventory_count" \
+    "module_role_policy_sha256=$module_role_policy_digest" \
+    "phase3_module_inventory_count=$module_inventory_count" \
+    "phase4_module_inventory_count=$module_inventory_count"
+  cat "$hashes"
+  for task_phase in phase3 phase4; do
+    for backend in llvm cranelift; do
+      index_receipt="$root/$task_phase/index/$backend/output/index-output/receipt.sdn"
+      index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
+      index_manager_receipt="$root/$task_phase/index/$backend/state/receipts/index-$task_phase-$backend.sdn"
+      group_manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
+      group_ledger="$root/$task_phase/modules/$backend/state/ledger.sdn"
+      group_completion="$root/$task_phase/modules/$backend/state/completion.json"
+      regular "$index_receipt" && regular "$index_handoff" && regular "$index_manager_receipt" && regular "$group_manifest" &&
+        regular "$group_ledger" && regular "$group_completion" \
+        || die "$task_phase/$backend lacks terminal index or group proof"
+      printf '%s\n' \
+        "${task_phase}_${backend}_index_receipt_sha256=$(hash_file "$index_receipt")" \
+        "${task_phase}_${backend}_index_handoff_sha256=$(hash_file "$index_handoff")" \
+        "${task_phase}_${backend}_index_manager_receipt_sha256=$(hash_file "$index_manager_receipt")" \
+        "${task_phase}_${backend}_group_manifest_sha256=$(hash_file "$group_manifest")" \
+        "${task_phase}_${backend}_group_ledger_sha256=$(hash_file "$group_ledger")" \
+        "${task_phase}_${backend}_group_completion_sha256=$(hash_file "$group_completion")"
+    done
+  done
+} >"$tmp" || die "completion receipt write failed"
+if [ -e "$receipt" ]; then
+  regular "$receipt" && cmp -s "$tmp" "$receipt" || die "existing completion receipt differs from replay"
+  rm -f "$tmp"
+else
+  mv "$tmp" "$receipt" || die "completion receipt publish failed"
+fi
+rm -f "$hashes"
+trap - EXIT HUP INT TERM
+printf '%s\n' "$receipt"

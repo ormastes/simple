@@ -1,0 +1,105 @@
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_types.{HirModule, SymbolTable, SymbolId}
+use compiler.hir.hir_definitions.{HirStruct, HirMockDecl}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.types.type_layout.{layoutattr_default_}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.driver.smf.runtime_std_section_types_v1.{
+    RuntimeStdCompiledSectionPayloadV1}
+use compiler.driver.smf.runtime_std_native_emit_witness_v1.{
+    RuntimeStdNativeEmitWitnessV1, runtime_std_live_hir_semantic_digest_v1,
+    runtime_std_native_emit_witness_digest_v1,
+    runtime_std_native_emit_counts_v1,
+    runtime_std_native_emit_witness_valid_v1}
+
+fn native_emit_probe_hir() -> HirModule:
+    HirModule(name: "layout_only", path: "layout_only.spl", imports: [],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn native_emit_plain_struct() -> HirStruct:
+    HirStruct(symbol: SymbolId(id: 1), name: "Plain", type_params: [],
+        fields: [], visibility: Visibility.Public, is_public: true,
+        has_doc_comment: false, doc_comment: "",
+        span: Span(start: 0, end_pos: 0, line: 1, col: 1),
+        has_layout_attr: false, layout_attr: layoutattr_default_(),
+        has_platform_attr: false, platform_has_error: false,
+        platform_has_warning: false, platform_diagnostic_message: "",
+        platform_diagnostic_line: 0, is_generic_template: false,
+        has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+
+describe "live typed HIR native emit witness":
+    it "uses the native V2 seven-member semantic digest framing":
+        step("uses the native V2 seven-member semantic digest framing")
+        val payloads = [
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.debug, "debug.smf", "debug"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.exports, "exports.smf", "exports"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.generics, "generics.smf", "generics"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.hir_summaries, "hir-summaries.smf", "hir"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.imports, "imports.smf", "imports"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.initialization, "initialization.smf", "init"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.types, "types.smf", "types")]
+        val debug_digest = sha256_text("debug")
+        val exports_digest = sha256_text("exports")
+        val generics_digest = sha256_text("generics")
+        val hir_digest = sha256_text("hir")
+        val imports_digest = sha256_text("imports")
+        val init_digest = sha256_text("init")
+        val types_digest = sha256_text("types")
+        val expected = sha256_text("simple-runtime-std-live-hir/v2\n" +
+            "source=scv:test\n" + "digest=source-sha\n" +
+            "module=module-sha\n" +
+            "debug.smf|{debug_digest}\n" +
+            "exports.smf|{exports_digest}\n" +
+            "generics.smf|{generics_digest}\n" +
+            "hir-summaries.smf|{hir_digest}\n" +
+            "imports.smf|{imports_digest}\n" +
+            "initialization.smf|{init_digest}\n" +
+            "types.smf|{types_digest}\n")
+        assert_equal(runtime_std_live_hir_semantic_digest_v1(payloads,
+            "scv:test", "source-sha", "module-sha"), expected)
+
+    it "rejects digest or backend drift in an otherwise valid witness":
+        step("rejects digest or backend drift in an otherwise valid witness")
+        val digest = runtime_std_native_emit_witness_digest_v1(
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha", 0, 0, 0)
+        val witness = RuntimeStdNativeEmitWitnessV1(
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha", 0, 0, 0, digest)
+        assert_true(runtime_std_native_emit_witness_valid_v1(witness,
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha"))
+        assert_false(runtime_std_native_emit_witness_valid_v1(witness,
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "cranelift", "hir-sha"))
+        var altered = witness
+        altered.active_data_count = 1
+        assert_false(runtime_std_native_emit_witness_valid_v1(altered,
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha"))
+
+    it "treats a plain layout declaration as objectless but keeps unknown initializer HIR active":
+        step("treats a plain layout declaration as objectless but keeps unknown initializer HIR active")
+        var hir = native_emit_probe_hir()
+        var structs = hir.structs
+        structs[SymbolId(id: 1)] = native_emit_plain_struct()
+        hir.structs = structs
+        val layout_counts = runtime_std_native_emit_counts_v1(hir)
+        assert_equal(layout_counts.0, 0)
+        assert_equal(layout_counts.1, 0)
+        assert_equal(layout_counts.2, 0)
+        var mocks = hir.mock_decls
+        mocks.push(HirMockDecl(name: "Unknown", trait_name: "T",
+            span: Span(start: 0, end_pos: 0, line: 2, col: 1)))
+        hir.mock_decls = mocks
+        val active_counts = runtime_std_native_emit_counts_v1(hir)
+        assert_equal(active_counts.2, 1)
