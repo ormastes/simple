@@ -4,6 +4,7 @@
 # deliberately refuses to create a success receipt until that owner exists.
 use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1,
     NativeGroupIndexReceiptV1, native_group_index_config_decode_v1,
+    native_group_index_receipt_encode_v1, native_group_index_receipt_decode_v1,
     native_group_index_absolute_v1, native_group_index_private_template_v1}
 use app.io.env_ops.{cwd}
 use app.io.file_ops.{path_absolute}
@@ -18,13 +19,14 @@ use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
 use std.scv.compile_source_inventory_core.{compile_source_inventory_snapshot_cache_root_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
-    file_hash_sha256, file_is_regular_no_follow, file_exists}
+    file_hash_sha256, file_is_regular_no_follow, file_exists, file_create_exclusive}
 use std.nogc_sync_mut.io.dir_ops.{dir_create, is_dir}
 
 struct NativeGroupIndexAdmissionV1:
     config: NativeGroupIndexConfigV1
     sources: NativeFullInventorySourcesV1
     prior_index_digest: text
+    artifact_root: text
 
 fn native_group_index_normalize_v1(path: text) -> text:
     val normalized = path.replace("\\", "/")
@@ -107,10 +109,13 @@ fn native_group_index_manager_context_v1(work_root: text,
         return Err("index generic manager staged image differs")
     Ok(config_digest)
 
-fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1
+fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
+        artifact_root: text
         ) -> Result<NativeGroupIndexAdmissionV1, text>:
     if not native_group_index_absolute_v1(config.index_cache_root) or
-            not native_group_index_absolute_v1(config.output_root):
+            not native_group_index_absolute_v1(config.output_root) or
+            not native_group_index_absolute_v1(artifact_root) or
+            not artifact_root.replace("\\", "/").contains("/work/private/runtime-std-hir-artifacts"):
         return Err("index private roots were not resolved by manager adapter")
     if not file_is_regular_no_follow(config.producer_path) or
             file_hash_sha256(config.producer_path) != config.producer_digest:
@@ -150,14 +155,14 @@ fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1
     if config.expected_current_digest == "NONE":
         if file_exists(pointer) or current.valid:
             return Err("index cache has an unpinned CURRENT generation")
-        return Ok(NativeGroupIndexAdmissionV1(config, sources, ""))
+        return Ok(NativeGroupIndexAdmissionV1(config, sources, "", artifact_root))
     if not builder_digest_valid_v1(config.expected_current_digest) or
             not current.valid or current.generation == nil or
             current.digest != config.expected_current_digest:
         return Err("index expected CURRENT is absent, different, or not V2")
     if current.generation!.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2:
         return Err("index expected CURRENT is absent, different, or not V2")
-    Ok(NativeGroupIndexAdmissionV1(config, sources, current.digest))
+    Ok(NativeGroupIndexAdmissionV1(config, sources, current.digest, artifact_root))
 
 # Required missing compiler owner API: a public cold producer taking this
 # admitted inventory and typed variant, invoking the real full-inventory HIR
@@ -197,8 +202,22 @@ fn native_group_index_build_managed_v1(config_relative: text,
             config.output_root.replace("\\", "/").lower() + "/") or
             file_exists(receipt_path) or config_path.lower() == receipt_path.lower():
         return Err("index receipt must be new inside isolated output root")
-    val admitted = native_group_index_admit_v1(config)?
-    native_group_index_compiler_publish_v1(admitted)
+    val artifact_root = native_group_index_resolve_private_v1(work_root,
+        "@WORK@/private/runtime-std-hir-artifacts", true)?
+    val admitted = native_group_index_admit_v1(config, artifact_root)?
+    val receipt = native_group_index_compiler_publish_v1(admitted)?
+    val encoded = native_group_index_receipt_encode_v1(receipt)
+    if encoded == "" or receipt.index_cache_root != config.index_cache_root or
+            receipt.output_root != config.output_root or
+            receipt.producer_digest != config.producer_digest or
+            receipt.source_count != config.expected_spl_count or
+            receipt.variant_digest != config.variant_digest:
+        return Err("index compiler producer receipt differs from admitted task")
+    if not file_create_exclusive(receipt_path, encoded):
+        return Err("index receipt exclusive publication failed")
+    val readback = file_read_regular_no_follow_bounded(receipt_path, 16384)?
+    if readback != encoded: return Err("index receipt readback differs")
+    native_group_index_receipt_decode_v1(readback)
 
 export NativeGroupIndexAdmissionV1, native_group_index_admit_v1
 export native_group_index_compiler_publish_v1, native_group_index_build_managed_v1
