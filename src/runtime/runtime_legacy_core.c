@@ -824,13 +824,7 @@ int64_t rt_term_enable_ansi(void) {
 int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
     if (!cmd || !*cmd) return -1;
 #if defined(_WIN32)
-    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
-    if (!argv) return -1;
-    argv[0] = (char*)cmd;
-    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
-    intptr_t pid = _spawnvp(_P_NOWAIT, cmd, (const char* const*)argv);
-    free(argv);
-    return pid < 0 ? -1 : (int64_t)pid;
+    return rt_process_spawn_async_owned_windows(cmd, args, arg_count);
 #else
     pid_t pid = fork();
     if (pid < 0) return -1;
