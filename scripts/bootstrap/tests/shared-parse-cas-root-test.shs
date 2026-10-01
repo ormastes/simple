@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-shared-parse-root.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source" "$tmp/shared"
+for name in producer scv index-program handoff inventory manager worker broker; do
+  : >"$tmp/$name"
+done
+prepare() {
+  sh "$script_root/prepare-phase4-native-groups.shs" \
+    --producer-receipt="$tmp/producer" --scv-receipt="$tmp/scv" \
+    --index-program="$tmp/index-program" --index-handoff="$tmp/handoff" \
+    --source-root="$tmp/source" --inventory="$tmp/inventory" \
+    --output-root="$tmp/output" --manager-program="$tmp/manager" \
+    --worker-program="$tmp/worker" --broker-program="$tmp/broker" \
+    --manifest="$tmp/output/state/manifest.sdn" \
+    --shared-parse-cas-root="$1" >"$tmp/stdout" 2>"$tmp/stderr"
+}
+if prepare ''; then echo 'FAIL: missing shared parse root admitted' >&2; exit 1; fi
+grep -q 'absolute path required' "$tmp/stderr" || exit 1
+if prepare relative/path; then echo 'FAIL: relative shared parse root admitted' >&2; exit 1; fi
+grep -q 'absolute path required' "$tmp/stderr" || exit 1
+if prepare "$tmp/missing"; then echo 'FAIL: absent shared parse root admitted' >&2; exit 1; fi
+grep -q 'shared parse CAS root is not a real directory' "$tmp/stderr" || exit 1
+if prepare "$tmp/shared"; then echo 'FAIL: dummy index program admitted' >&2; exit 1; fi
+if grep -q 'shared parse CAS root' "$tmp/stderr"; then
+  echo 'FAIL: pre-existing shared parse root rejected by preflight' >&2; exit 1
+fi
+# The root is a config identity field; a changed value must not reuse the same
+# backend preparation root on resume.
+grep -Fq '"shared_parse_cas_root=$shared_parse_cas_root"' \
+  "$script_root/prepare-phase4-native-groups.shs" || exit 1
+grep -Fq 'cmp -s "$tmp" "$config"' \
+  "$script_root/prepare-phase4-native-groups.shs" || exit 1
+echo 'PASS: explicit shared parse CAS root admission and resume pin'

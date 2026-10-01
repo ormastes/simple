@@ -4581,7 +4581,16 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # grouped runner publishes completion only after five binary receipts and
   # both backend module ledgers pass their compiled admission gates.
   managed_producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "${stage2_admission_receipt_absolute}") || exit 1
-  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-roles-v3/${PLATFORM}/${managed_producer_sha}")"
+  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-roles-v3-parsecas/${PLATFORM}/${managed_producer_sha}")"
+  managed_shared_parse_cas_root=${SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT:-}
+  case "${managed_shared_parse_cas_root}" in
+    /*|[A-Za-z]:/*) ;;
+    *) echo "error: explicit absolute SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT required" >&2; exit 1 ;;
+  esac
+  [ -d "${managed_shared_parse_cas_root}" ] && [ ! -L "${managed_shared_parse_cas_root}" ] || {
+    echo "error: shared parse CAS root must be a pre-existing real directory" >&2; exit 1;
+  }
+  managed_shared_parse_cas_root=$(CDPATH= cd -- "${managed_shared_parse_cas_root}" && pwd -P) || exit 1
   managed_runner="${repo_root}/scripts/bootstrap/bootstrap-phase4-grouped.shs"
   if [ ! -f "${managed_runner}" ]; then
     echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
@@ -4733,6 +4742,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "--excluded-inventory-count=${managed_excluded_inventory_count}" \
     "--module-role-policy=${managed_module_role_policy}" \
     "--module-role-policy-digest=${managed_module_role_policy_digest}" \
+    "--shared-parse-cas-root=${managed_shared_parse_cas_root}" \
     "--authority-program=${managed_authority_program}" \
     "--authority-receipt=${managed_authority_receipt}" \
     "--authority-digest=${managed_authority_digest}" \
