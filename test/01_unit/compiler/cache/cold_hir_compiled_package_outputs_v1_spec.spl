@@ -20,6 +20,10 @@ use compiler.driver.cache.package_module_index_builder.{
     PackageModuleIndexBuildAuthorityV1,
     PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
 }
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    runtime_std_mir_body_payload_v1
+}
 
 fn cold_compiled_test_file(root: text, name: text,
         content: text) -> ColdHirCompiledPayloadFileV1:
@@ -53,7 +57,10 @@ describe "cold HIR compiled package output bridge":
         val initializer_file = cold_compiled_test_file(root, "initializer", "init-a")
         val provider_file = cold_compiled_test_file(root, "provider", "provider-a")
         val generated_file = cold_compiled_test_file(root, "generated", "generated-a")
-        val mir_file = cold_compiled_test_file(root, "mir", "mir-body-a")
+        val mir_content = runtime_std_mir_body_payload_v1(
+            MirModule("a", {}, {}, {}, {}), "src/a.spl",
+            source_digest).unwrap().content
+        val mir_file = cold_compiled_test_file(root, "mir", mir_content)
         val witness = sha256_text("simple-cold-hir-source-witness-v1|" +
             "{inventory_digest}|revision|commit|tree|9:src/a.spl|" +
             "{source_digest}|{source_content.len()}")
@@ -111,7 +118,10 @@ describe "cold HIR compiled package output bridge":
                 authority.inventory_digest, abi_digest, []), abi,
             "symbol|x|module|{abi_digest}|{abi_digest}")
         val facet = cold_compiled_test_file(root, "facet", "facet-x")
-        val mir = cold_compiled_test_file(root, "mir", "mir-x")
+        val mir_content = runtime_std_mir_body_payload_v1(
+            MirModule("x", {}, {}, {}, {}), "src/x.spl",
+            digest).unwrap().content
+        val mir = cold_compiled_test_file(root, "mir", mir_content)
         val wrong_action = cold_compiled_test_file(root, "action",
             "action|guess|compile-semantic|x|{mir.digest}")
         val objectless = ColdHirNativeObjectArtifactV1("x", "", 0, "none", "", "")
@@ -125,3 +135,18 @@ describe "cold HIR compiled package output bridge":
         expect(cold_hir_package_outputs_from_driver_v1(
             [typed], [objectless], inventory, authority, [missing]).unwrap_err()
         ).to_equal("cold-compiled-facet-read-invalid:x")
+        var malformed = artifact
+        malformed.mir_file = cold_compiled_test_file(root, "malformed-mir",
+            "not-a-canonical-mir-body")
+        expect(cold_hir_package_outputs_from_driver_v1(
+            [typed], [objectless], inventory, authority, [malformed]).unwrap_err()
+        ).to_equal("cold-compiled-mir-schema-invalid:x")
+        var wrong_module = artifact
+        val other_mir = runtime_std_mir_body_payload_v1(
+            MirModule("other", {}, {}, {}, {}), "src/x.spl",
+            digest).unwrap().content
+        wrong_module.mir_file = cold_compiled_test_file(root,
+            "wrong-module-mir", other_mir)
+        expect(cold_hir_package_outputs_from_driver_v1(
+            [typed], [objectless], inventory, authority, [wrong_module]).unwrap_err()
+        ).to_equal("cold-compiled-mir-schema-invalid:x")

@@ -32,7 +32,11 @@ use compiler.driver.cache.package_module_index.{
 use compiler.hir.archive.interface_action_archive.{
     interface_action_archive_payloads_decode_v1
 }
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    RuntimeStdMirBodyPayloadV1, runtime_std_mir_body_validate_v1
+}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.encoding.utf8.{text_byte_len}
 use std.nogc_sync_mut.io.file_ops.{
     file_read_regular_no_follow_bounded,
     file_read_regular_no_follow_bounded_bytes
@@ -42,6 +46,7 @@ use std.scv.compile_source_inventory_core.{
 }
 
 val COLD_COMPILED_PAYLOAD_MAX_BYTES_V1: i64 = 8388608
+val COLD_COMPILED_MIR_MAX_BYTES_V1: i64 = 16777216
 val COLD_COMPILED_ARCHIVE_MAX_BYTES_V1: i64 = 67108864
 
 struct ColdHirCompiledPayloadFileV1:
@@ -110,6 +115,29 @@ fn _cold_compiled_payload_read_v1(
     if content.len() != file.byte_count or
             sha256_text(content) != file.digest:
         return Err("cold-compiled-file-content-mismatch")
+    Ok(content)
+
+fn _cold_compiled_mir_read_v1(
+    file: ColdHirCompiledPayloadFileV1,
+    module_identity: text, source_identity: text, source_digest: text
+) -> Result<text, text>:
+    if file.path == "" or file.path.contains("\n") or
+            file.path.contains("\r") or file.byte_count <= 0 or
+            file.byte_count > COLD_COMPILED_MIR_MAX_BYTES_V1 or
+            not _cold_compiled_digest_valid_v1(file.digest):
+        return Err("cold-compiled-mir-receipt-invalid")
+    val read = file_read_regular_no_follow_bounded(
+        file.path, COLD_COMPILED_MIR_MAX_BYTES_V1)
+    if read.is_err():
+        return Err("cold-compiled-mir-read-failed")
+    val content = read.unwrap()
+    val payload = RuntimeStdMirBodyPayloadV1(
+        module_identity, source_identity, source_digest,
+        content, file.digest, file.byte_count)
+    if text_byte_len(content) != file.byte_count or
+            runtime_std_mir_body_validate_v1(payload, module_identity,
+                source_identity, source_digest, file.digest) != "ok":
+        return Err("cold-compiled-mir-schema-invalid")
     Ok(content)
 
 fn _cold_compiled_source_witness_v1(
@@ -244,13 +272,14 @@ fn cold_hir_package_outputs_from_driver_v1(
         val facets_valid = _cold_compiled_blob_verify_v1(artifact.export_file) and
             _cold_compiled_blob_verify_v1(artifact.initializer_file) and
             _cold_compiled_blob_verify_v1(artifact.provider_file) and
-            _cold_compiled_blob_verify_v1(artifact.generated_source_file) and
-            _cold_compiled_blob_verify_v1(artifact.mir_file)
+            _cold_compiled_blob_verify_v1(artifact.generated_source_file)
+        val mir_payload = _cold_compiled_mir_read_v1(artifact.mir_file,
+            identity, seed.source_identity, seed.source_digest)
         val action_payload = _cold_compiled_payload_read_v1(artifact.action_file)
         if not facets_valid or action_payload.is_err():
             return Err("cold-compiled-facet-read-invalid:{identity}")
-        if artifact.mir_file.byte_count == 0:
-            return Err("cold-compiled-mir-empty:{identity}")
+        if mir_payload.is_err():
+            return Err("{mir_payload.unwrap_err()}:{identity}")
         val source = inventory.entries[sources[seed.source_identity]]
         val source_witness = _cold_compiled_source_witness_v1(authority,
             seed.source_identity, seed.source_digest, source.byte_count)
