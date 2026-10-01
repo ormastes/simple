@@ -331,12 +331,16 @@ candidate_frontend_smoke() (
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-host-gpu-admission.XXXXXX") || exit 1
     trap 'rm -rf "$probe_dir"' 0
     trap 'exit 1' HUP INT TERM
-    # These source-fixture builds have fresh private caches, not an admitted
-    # persistent SCV/package-index generation. Select the driver's explicit
-    # cold-initialization contract only inside this smoke subshell; normal
-    # candidate invocations must still reject missing package-index authority.
-    SIMPLE_PACKAGE_INDEX_COLD_INIT=1
-    export SIMPLE_PACKAGE_INDEX_COLD_INIT
+    # Initialize once in the source owner, then reuse its real published
+    # inventory across fixture builds and bootstrap modes. Existing invalid
+    # authority is left to the compiler's fail-closed validation.
+    if [ ! -e "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ] &&
+       [ ! -L "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ]; then
+        SIMPLE_SCV_INVENTORY_COLD_INIT=1
+        export SIMPLE_SCV_INVENTORY_COLD_INIT
+    else
+        unset SIMPLE_SCV_INVENTORY_COLD_INIT
+    fi
     build_log=${CANDIDATE_FRONTEND_LOG_PATH:-$probe_dir/build.log}
     build_log_display=${CANDIDATE_FRONTEND_LOG_DISPLAY_PATH:-$build_log}
     status_path=${CANDIDATE_FRONTEND_STATUS_PATH:-}
@@ -431,7 +435,7 @@ candidate_frontend_smoke() (
         --backend "$candidate_backend" \
         --runtime-bundle core-c-bootstrap \
         --entry-closure \
-        --entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl \
+        --entry src/compiler/bootstrap_admission/p2_add.spl \
         --cache-dir "$probe_dir/cache" \
         --mode one-binary \
         --output "$probe_output" || probe_build_status=$?
@@ -465,6 +469,10 @@ candidate_frontend_smoke() (
         "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$probe_output" 2>/dev/null) || probe_run_status=$?
     [ "$probe_run_status" -eq 0 ] || candidate_frontend_fail p2_add-run "$probe_run_status"
     [ "$probe_stdout" = 5 ] || candidate_frontend_fail p2_add-output 1
+    # A successful native build and its observed result prove the initial
+    # owner admission completed. Later fixtures must validate that authority
+    # through the warm path rather than replace it with another cold refresh.
+    unset SIMPLE_SCV_INVENTORY_COLD_INIT
 
     # Exact Stage-2 MIR-retention guard. An admitted self-compiled compiler was
     # observed emitting two method-call instructions, then losing them when
@@ -487,7 +495,7 @@ candidate_frontend_smoke() (
         --backend "$candidate_backend" \
         --runtime-bundle core-c-bootstrap \
         --entry-closure \
-        --entry scripts/check/cert/redeploy_gate/fixtures/stage2_mir_retention.spl \
+        --entry src/compiler/bootstrap_admission/stage2_mir_retention.spl \
         --cache-dir "$probe_dir/cache-stage2-mir-retention" \
         --mode one-binary \
         --output "$retention_output" || retention_build_status=$?
@@ -536,7 +544,7 @@ candidate_frontend_smoke() (
         --backend "$candidate_backend" \
         --runtime-bundle core-c-bootstrap \
         --entry-closure \
-        --entry scripts/check/cert/redeploy_gate/fixtures/stage2_module_path_naming.spl \
+        --entry src/compiler/bootstrap_admission/stage2_module_path_naming.spl \
         --cache-dir "$probe_dir/cache-stage2-module-path-naming" \
         --mode one-binary \
         --output "$naming_output" || naming_build_status=$?
@@ -602,7 +610,7 @@ candidate_frontend_smoke() (
         --entry-closure \
         --cache-dir "$probe_dir/cache-hello-world-positional" \
         --mode one-binary \
-        scripts/check/cert/redeploy_gate/fixtures/hello_world.spl \
+        src/compiler/bootstrap_admission/hello_world.spl \
         --output "$positional_output"; then
         positional_status=0
     else
@@ -636,7 +644,7 @@ candidate_frontend_smoke() (
                 --entry-closure \
                 --cache-dir "$probe_dir/cache-hello-world-positional-debug" \
                 --mode one-binary \
-                scripts/check/cert/redeploy_gate/fixtures/hello_world.spl \
+                src/compiler/bootstrap_admission/hello_world.spl \
                 --output "$probe_dir/hello_world_positional_debug" || :
         if [ -f "$positional_debug_log" ] && [ ! -L "$positional_debug_log" ]; then
             echo "candidate_frontend_smoke: SIGSEGV replay log: ${build_log_display}.hello-world-positional.debugger.log" >&2

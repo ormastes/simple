@@ -14386,6 +14386,24 @@ int64_t rt_process_spawn_guarded_value(int64_t cmd, SplArray* args) {
     return pid;
 }
 
+/* Unique value ABI for native Simple callers. The raw C owner below
+ * keeps its existing (char*, char**, count) contract. */
+int64_t rt_process_spawn_async_value(int64_t cmd, SplArray* args) {
+    const char* command = rt_interp_cstr(cmd);
+    if (!command) return -1;
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -1;
+    const char** argv = (const char**)calloc((size_t)argc + 1, sizeof(char*));
+    if (!argv) return -1;
+    for (int64_t i = 0; i < argc; i++) {
+        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
+        argv[i] = value ? value : "";
+    }
+    int64_t pid = rt_process_spawn_async(command, argv, argc);
+    free(argv);
+    return pid;
+}
+
 int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }

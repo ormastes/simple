@@ -2,11 +2,12 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
-use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     cold_hir_typed_receipts_from_lowered_sources_v1
 }
 use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_hir_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
@@ -158,14 +159,41 @@ impl CompilerDriver:
         if source_root == "" or expected_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
             return false
-        val admitted = compile_source_inventory_read_current_v1(machine_cache_root())
-        if not admitted.valid or admitted.digest != expected_digest:
+        # Inventory belongs to the admitted SCV snapshot's worktree cache,
+        # while the package index and HIR artifacts use the host machine cache.
+        val snapshot_path = source_root.replace("\\", "/")
+        val snapshot_marker = snapshot_path.last_index_of("/snapshots/")
+        if snapshot_marker <= 0:
+            self.ctx.add_error("cold HIR inventory snapshot owner invalid")
+            return false
+        val inventory_cache_root = snapshot_path.substring(0, snapshot_marker)
+        val admitted = compile_source_inventory_read_current_v1(inventory_cache_root)
+        if not admitted.valid:
             self.ctx.add_error("cold HIR inventory admission failed: {admitted.reason}")
             return false
+        val snapshot = scv_compile_snapshot_open_v1(
+            ".", source_root,
+            env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+            env_get("SIMPLE_SCV_COMMIT_ID") ?? "",
+            env_get("SIMPLE_SCV_TREE_ID") ?? "", expected_digest)
+        if not snapshot.valid:
+            self.ctx.add_error("cold HIR snapshot admission failed: {snapshot.reason}")
+            return false
+        val inventory_generation_text = env_get("SIMPLE_SCV_INVENTORY_GENERATION") ?? ""
+        val expected_inventory_generation = inventory_generation_text.to_i64() ?? -1
+        # The snapshot digest covers its selected source rows, not the
+        # structured CURRENT generation (which also includes facets and tests).
+        val snapshot_inventory = match file_read_regular_no_follow_bounded(
+                "{source_root}/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024):
+            case Ok(content): content
+            case Err(reason):
+                self.ctx.add_error("cold HIR snapshot inventory read failed: {reason}")
+                return false
         match admitted.inventory:
             case Some(inventory):
                 match cold_hir_typed_receipts_from_lowered_sources_v1(
-                        source_root, expected_digest, inventory,
+                        source_root, admitted.digest, expected_inventory_generation, inventory,
+                        snapshot_inventory, expected_digest,
                         self.ctx.source_paths_owner,
                         self.ctx.source_identities_owner,
                         self.ctx.source_byte_lengths_owner,

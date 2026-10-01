@@ -2,7 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
-use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
     ObservedProcessPollStatusV1, ObservedProcessResultStatusV1,
@@ -803,7 +803,7 @@ use std.io_runtime.{env_get, env_get_nullable, read_file_text_result}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
 @unsafe(reason: "raw owned-child wait; -2 is timeout and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
@@ -936,7 +936,7 @@ fn _process_is_running_raw(pid: i64) -> bool:
 fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_async(host_path_native(rcmd), rargs)
+        rt_process_spawn_async_value(host_path_native(rcmd), rargs)
 
 fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
     unsafe(capabilities: [ffi]):
@@ -973,13 +973,9 @@ fn _process_close_piped_raw(pid: i64) -> bool:
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_size}
 
-# Platform detection - inlined to avoid bootstrap runtime limitations
+# Use the canonical runtime host decision even in sanitized environments.
 fn _is_windows_platform() -> bool:
-    val os_env = env_get("OS")
-    if os_env == nil:
-        false
-    else:
-        os_env.lower().contains("windows")
+    host_is_windows_host()
 
 # ============================================================================
 # Process Result struct

@@ -1904,6 +1904,7 @@ bootstrap_stage_sanity() (
   sanity_system_root=${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
   sanity_system_drive=${SystemDrive:-${SYSTEMDRIVE:-}}
   sanity_program_data=${ProgramData:-${PROGRAMDATA:-}}
+  sanity_os_identifier=${OS:-}
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
@@ -1992,6 +1993,9 @@ bootstrap_stage_sanity() (
     ProgramData=${sanity_program_data}
     export ProgramData
   fi
+  if [ "${os}" = windows ] && [ -n "${sanity_os_identifier}" ]; then
+    OS=${sanity_os_identifier}; export OS
+  fi
   if [ -n "${sanity_win_temp}" ]; then
     TEMP=${sanity_win_temp}
     TMP=${sanity_win_temp}
@@ -2043,7 +2047,7 @@ bootstrap_stage_sanity() (
   # the actual timeout/child status without weakening any subsequent check.
   set +e
   unsupported=$(run_timeout 10 "${candidate}" run \
-    scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1)
+    src/compiler/bootstrap_admission/p2_add.spl 2>&1)
   unsupported_status=$?
   set -e
   frontend_status=0
