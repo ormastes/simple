@@ -106,7 +106,7 @@ use compiler.common.cache.phase_compatibility_path_io.{
 }
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
-use compiler.mir_opt.mir_opt.mod.{target_opt_context_default}
+use compiler.mir_opt.mir_opt.mod.{TargetOptContext, target_opt_context_default}
 
 fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
     if ctx.demand_scc_publication == nil:
@@ -2065,11 +2065,15 @@ impl CompilerDriver:
             var module_units_attempted = 0
             var group_pair_eligible = false
             if val group_manifest = native_group:
-                if uncached_names.len() == 2:
-                    group_pair_eligible = _driver_group_pair_eligible_v1(
-                        capsules, uncached_names[0], uncached_names[1],
-                        group_manifest, native_target, backend_session.?,
-                        ctx.options.backend_plugin_path)
+                var pair_probe = 0
+                while pair_probe + 1 < uncached_names.len():
+                    if _driver_group_pair_eligible_v1(
+                            capsules, uncached_names[pair_probe],
+                            uncached_names[pair_probe + 1], group_manifest,
+                            native_target, backend_session.?,
+                            ctx.options.backend_plugin_path):
+                        group_pair_eligible = true
+                    pair_probe = pair_probe + 2
             if uncached_names.len() == 1:
                 val name = uncached_names[0]
                 val direct_result = _compile_frozen_module_capsule(capsules,
@@ -2098,87 +2102,53 @@ impl CompilerDriver:
                             driver_native_nonempty_failure_detail(e))
                         cache_miss_count = cache_miss_count + 1
             elif group_pair_eligible:
-                # A started pair is terminal: worker objects may already
-                # exist, so retrying serially could overwrite its evidence.
+                # Pair windows follow the frozen module order. An ineligible
+                # window (and an odd tail) uses the same serial capsule path;
+                # a started pair never retries over partial worker objects.
                 val group_manifest = native_group.unwrap()
-                val name_a = uncached_names[0]
-                val name_b = uncached_names[1]
-                val capsule_a = frozen_native_capsule_batch_find_v1(capsules, name_a)
-                val capsule_b = frozen_native_capsule_batch_find_v1(capsules, name_b)
-                val result_path = env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
-                val started_a = _driver_group_pair_mark_started_v1(
-                    capsule_a, group_manifest, result_path)
-                val started_b = _driver_group_pair_mark_started_v1(
-                    capsule_b, group_manifest, result_path)
-                module_units_attempted = 2
-                cache_miss_count = cache_miss_count + 2
-                if started_a != "" or started_b != "":
-                    val failure = if started_a != "": started_a else: started_b
-                    for name in [name_a, name_b]:
-                        module_unit_id = module_unit_id + 1
-                        driver_native_record_module_failure(module_outcomes,
-                            module_unit_id, name,
-                            driver_native_nonempty_failure_detail(failure))
-                else:
-                    val policy = group_native_options_for_capsule_v1(
-                        capsule_a, native_target, ctx.options.target_opt_ctx)
-                    if policy.is_err():
-                        for name in [name_a, name_b]:
-                            module_unit_id = module_unit_id + 1
-                            driver_native_record_module_failure(module_outcomes,
-                                module_unit_id, name,
-                                "builtin LLVM pair policy changed after admission")
+                var pair_start = 0
+                while pair_start < uncached_names.len():
+                    val name_a = uncached_names[pair_start]
+                    var window = [name_a]
+                    if pair_start + 1 < uncached_names.len():
+                        window = window.push(uncached_names[pair_start + 1])
+                    var run_pair = false
+                    if window.len() == 2:
+                        run_pair = _driver_group_pair_eligible_v1(
+                            capsules, window[0], window[1], group_manifest,
+                            native_target, backend_session.?,
+                            ctx.options.backend_plugin_path)
+                    if run_pair:
+                        val failures = _driver_group_pair_execute_v1(
+                            capsules, group_manifest, window[0], window[1],
+                            native_target, ctx.options.target_opt_ctx,
+                            build_cache, module_outcomes, module_unit_id,
+                            pair_start / 2 + 1)
+                        module_unit_id = module_unit_id + failures
                     else:
-                        val (pair_options, pair_target) = policy.unwrap()
-                        val measured = (env_get_nullable(
-                            "SIMPLE_NATIVE_GROUP_MEASURED_THREAD_BYTES") ?? "").parse_int() ?? 0
-                        val reserve = (env_get_nullable(
-                            "SIMPLE_NATIVE_GROUP_MEMORY_RESERVE_BYTES") ?? "").parse_int() ?? 0
-                        val host_cpus = match cpu_count_checked():
-                            case Ok(count): count
-                            case Err(_): 0
-                        val paired = group_native_compile_pairs_v1(
-                            capsules, name_a, name_b, pair_options, pair_target,
-                            group_manifest.generation, dirname(result_path),
-                            host_cpus, group_manifest.memory_limit_bytes,
-                            reserve, measured)
-                        var pair_verified = false
-                        if paired.accepted and paired.effective_threads == 2 and
-                                paired.qualification.? and paired.units.len() == 2:
-                            pair_verified =
-                                paired.units[0].module_name == name_a and
-                                paired.units[1].module_name == name_b and
-                                paired.units[0].object_path == capsule_a.object_path and
-                                paired.units[1].object_path == capsule_b.object_path and
-                                paired.units[0].status == 0 and paired.units[1].status == 0
-                        if not pair_verified:
-                            val reason = driver_native_nonempty_failure_detail(paired.reason)
-                            for name in [name_a, name_b]:
-                                module_unit_id = module_unit_id + 1
-                                driver_native_record_module_failure(module_outcomes,
-                                    module_unit_id, name, reason)
-                        else:
-                            print "[NATIVE] codegen: 2 uncached module(s), concurrency=2 "
-                                + "(same-process LLVM overlap and serial object parity qualified)"
-                            _sffi_stdout_flush()
-                            for name in [name_a, name_b]:
-                                val capsule = frozen_native_capsule_batch_find_v1(
-                                    capsules, name)
-                                val finish_reason = _driver_group_pair_finalize_receipt_v1(
-                                    capsule, capsule.object_path)
-                                if finish_reason != "":
-                                    module_unit_id = module_unit_id + 1
-                                    driver_native_record_module_failure(module_outcomes,
-                                        module_unit_id, name,
-                                        driver_native_nonempty_failure_detail(finish_reason))
-                                else:
-                                    val collect_reason = driver_native_collect_capsule_result_v1(
-                                        capsules, build_cache, name, capsule.object_path)
-                                    if collect_reason != "":
+                        for name in window:
+                            val direct_result = _compile_frozen_module_capsule(
+                                capsules, effective_backend, native_target,
+                                is_release, driver_opt_level,
+                                provider_receipt_hash, backend_session, name)
+                            match direct_result:
+                                case Ok(obj_path):
+                                    val collect_error = driver_native_collect_capsule_result_v1(
+                                        capsules, build_cache, name, obj_path)
+                                    if collect_error != "":
                                         module_unit_id = module_unit_id + 1
                                         driver_native_record_module_failure(module_outcomes,
                                             module_unit_id, name,
-                                            driver_native_nonempty_failure_detail(collect_reason))
+                                            driver_native_nonempty_failure_detail(
+                                                collect_error))
+                                case Err(error):
+                                    module_unit_id = module_unit_id + 1
+                                    driver_native_record_module_failure(module_outcomes,
+                                        module_unit_id, name,
+                                        driver_native_nonempty_failure_detail(error))
+                    module_units_attempted = module_units_attempted + window.len()
+                    cache_miss_count = cache_miss_count + window.len()
+                    pair_start = pair_start + window.len()
             else:
                 # `unstable` and `unit_timeout_ms` were omitted here. Partial
                 # struct literals are legal, so this compiled while silently
@@ -2785,6 +2755,87 @@ fn _driver_group_pair_finalize_receipt_v1(
     if (_sffi_file_read_text(receipt_path) ?? "") != receipt:
         return "capsule-receipt-write-unverified"
     driver_native_capsule_result_reason_v1(capsule)
+
+fn _driver_group_pair_execute_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1,
+    manifest: NativeGroupManifestV1,
+    name_a: text, name_b: text,
+    native_target: text,
+    target_opt_ctx: TargetOptContext,
+    build_cache: BuildCache,
+    outcomes: BuildOutcomeSet,
+    first_unit_id: i64,
+    pair_generation: i64
+) -> i64:
+    val capsule_a = frozen_native_capsule_batch_find_v1(batch, name_a)
+    val capsule_b = frozen_native_capsule_batch_find_v1(batch, name_b)
+    val result_path = env_get_nullable("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+    val started_a = _driver_group_pair_mark_started_v1(
+        capsule_a, manifest, result_path)
+    val started_b = _driver_group_pair_mark_started_v1(
+        capsule_b, manifest, result_path)
+    if started_a != "" or started_b != "":
+        val failure = if started_a != "": started_a else: started_b
+        for index in 0..2:
+            val name = if index == 0: name_a else: name_b
+            driver_native_record_module_failure(outcomes, first_unit_id + index + 1,
+                name, driver_native_nonempty_failure_detail(failure))
+        return 2
+    val policy = group_native_options_for_capsule_v1(
+        capsule_a, native_target, target_opt_ctx)
+    if policy.is_err():
+        for index in 0..2:
+            val name = if index == 0: name_a else: name_b
+            driver_native_record_module_failure(outcomes, first_unit_id + index + 1,
+                name, "builtin LLVM pair policy changed after admission")
+        return 2
+    val (pair_options, pair_target) = policy.unwrap()
+    val measured = (env_get_nullable(
+        "SIMPLE_NATIVE_GROUP_MEASURED_THREAD_BYTES") ?? "").parse_int() ?? 0
+    val reserve = (env_get_nullable(
+        "SIMPLE_NATIVE_GROUP_MEMORY_RESERVE_BYTES") ?? "").parse_int() ?? 0
+    val host_cpus = match cpu_count_checked():
+        case Ok(count): count
+        case Err(_): 0
+    val paired = group_native_compile_pairs_v1(
+        batch, name_a, name_b, pair_options, pair_target,
+        pair_generation, dirname(result_path), host_cpus,
+        manifest.memory_limit_bytes, reserve, measured)
+    var pair_verified = false
+    if paired.accepted and paired.effective_threads == 2 and
+            paired.qualification.? and paired.units.len() == 2:
+        pair_verified = paired.units[0].module_name == name_a and
+            paired.units[1].module_name == name_b and
+            paired.units[0].object_path == capsule_a.object_path and
+            paired.units[1].object_path == capsule_b.object_path and
+            paired.units[0].status == 0 and paired.units[1].status == 0
+    if not pair_verified:
+        val reason = driver_native_nonempty_failure_detail(paired.reason)
+        for index in 0..2:
+            val name = if index == 0: name_a else: name_b
+            driver_native_record_module_failure(outcomes, first_unit_id + index + 1,
+                name, reason)
+        return 2
+    print "[NATIVE] codegen: qualified LLVM pair concurrency=2 "
+        + "(same-process overlap and serial object parity)"
+    _sffi_stdout_flush()
+    var failed = 0
+    for name in [name_a, name_b]:
+        val capsule = frozen_native_capsule_batch_find_v1(batch, name)
+        val finish_reason = _driver_group_pair_finalize_receipt_v1(
+            capsule, capsule.object_path)
+        if finish_reason != "":
+            failed = failed + 1
+            driver_native_record_module_failure(outcomes, first_unit_id + failed,
+                name, driver_native_nonempty_failure_detail(finish_reason))
+        else:
+            val collect_reason = driver_native_collect_capsule_result_v1(
+                batch, build_cache, name, capsule.object_path)
+            if collect_reason != "":
+                failed = failed + 1
+                driver_native_record_module_failure(outcomes, first_unit_id + failed,
+                    name, driver_native_nonempty_failure_detail(collect_reason))
+    failed
 
 fn _driver_group_pair_eligible_v1(
     batch: FrozenNativeModuleCapsuleBatchV1,
