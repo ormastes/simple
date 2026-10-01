@@ -1,0 +1,85 @@
+use std.spec.{describe, it, expect, fail}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
+    config_variant_digest_v1}
+use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1}
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexReceiptV1,
+    native_group_index_config_decode_v1, native_group_index_receipt_encode_v1,
+    native_group_index_receipt_decode_v1}
+use app.bootstrap_builder.native_group_index_build.{NativeGroupIndexAdmissionV1,
+    native_group_index_compiler_publish_v1}
+
+fn index_digest_v1(ch: text) -> text: ch.repeat(64)
+
+fn index_variant_v1() -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1("x86_64-pc-windows-msvc", "llvm", ["avx2"],
+        "release", "simple-v1", ["opt=2"], ["TZ=UTC"])
+
+fn index_config_v1() -> text:
+    ["format=SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1", "phase=phase4",
+     "backend=llvm", "target=x86_64-pc-windows-msvc",
+     "producer_path=D:/phase2/simple.exe", "producer_digest=" + index_digest_v1("a"),
+     "source_root=D:/frozen", "snapshot_root=D:/frozen/build/scv/snapshots/rev1",
+     "scv_revision_id=rev1", "scv_commit_id=commit1", "scv_tree_id=tree1",
+     "scv_receipt_path=D:/frozen/build/scv/receipts/rev1.receipt",
+     "scv_receipt_digest=" + index_digest_v1("b"),
+     "snapshot_inventory_digest=" + index_digest_v1("c"),
+     "source_inventory_digest=" + index_digest_v1("d"),
+     "source_inventory_generation=7", "expected_spl_count=15754",
+     "full_source_authority_path=D:/authority/source-inputs-before.txt",
+     "full_source_authority_digest=" + index_digest_v1("e"),
+     "index_cache_root=D:/phase4/index-cache", "output_root=D:/phase4/index-output",
+     "expected_current_digest=NONE", "index_schema=V2",
+     "variant_target_triple=x86_64-pc-windows-msvc", "variant_backend=llvm",
+     "variant_build_mode=release", "variant_language_abi=simple-v1",
+     "variant_digest=" + config_variant_digest_v1(index_variant_v1()),
+     "variant_features_count=1", "variant_feature_0=avx2",
+     "variant_normalized_options_count=1", "variant_normalized_option_0=opt=2",
+     "variant_environment_inputs_count=1", "variant_environment_input_0=TZ=UTC"].join("\n") + "\n"
+
+fn index_receipt_v1() -> NativeGroupIndexReceiptV1:
+    NativeGroupIndexReceiptV1(index_digest_v1("a"), index_digest_v1("c"),
+        index_digest_v1("d"), 7, 15754, "phase4", "llvm",
+        "x86_64-pc-windows-msvc", config_variant_digest_v1(index_variant_v1()),
+        index_digest_v1("f"), 120, index_digest_v1("1"),
+        "D:/phase4/index-cache/package-module-index-v1/variant.receipt",
+        index_digest_v1("2"),
+        "D:/phase4/index-cache/runtime-std-authority-v1/runtime.receipt",
+        index_digest_v1("3"), "D:/phase4/index-cache", "D:/phase4/index-output")
+
+describe "grouped native full-inventory index builder contract":
+    it "admits explicit V2, OS-inclusive count, and seven typed variant fields":
+        match native_group_index_config_decode_v1(index_config_v1()):
+            Ok(config):
+                expect(config.expected_spl_count).to_equal(15754)
+                expect(config.variant.normalized_options[0]).to_equal("opt=2")
+                expect(config.variant_digest).to_equal(
+                    config_variant_digest_v1(index_variant_v1()))
+            Err(reason): fail(reason)
+        match native_group_index_config_decode_v1(
+                index_config_v1().replace("index_schema=V2", "index_schema=V3")):
+            Ok(_): fail("V3 substitution accepted")
+            Err(reason): expect(reason).to_contain("V2")
+        match native_group_index_config_decode_v1(
+                index_config_v1().replace("expected_spl_count=15754", "expected_spl_count=0")):
+            Ok(_): fail("empty inventory accepted")
+            Err(reason): expect(reason).to_contain("decimal")
+
+    it "round trips exact receipt bytes but never fabricates publication evidence":
+        val payload = native_group_index_receipt_encode_v1(index_receipt_v1())
+        expect(payload != "").to_equal(true)
+        match native_group_index_receipt_decode_v1(payload):
+            Ok(decoded): expect(native_group_index_receipt_encode_v1(decoded)).to_equal(payload)
+            Err(reason): fail(reason)
+        match native_group_index_receipt_decode_v1(payload + "extra"):
+            Ok(_): fail("trailing receipt data accepted")
+            Err(reason): expect(reason).to_contain("noncanonical")
+        match native_group_index_config_decode_v1(index_config_v1()):
+            Ok(config):
+                val sources = NativeFullInventorySourcesV1([], [], [], [], 15754,
+                    config.snapshot_inventory_digest, config.source_inventory_digest,
+                    config.scv_receipt_digest)
+                match native_group_index_compiler_publish_v1(
+                        NativeGroupIndexAdmissionV1(config, sources, "")):
+                    Ok(_): fail("missing compiler cold producer fabricated success")
+                    Err(reason): expect(reason).to_contain("unavailable")
+            Err(reason): fail(reason)

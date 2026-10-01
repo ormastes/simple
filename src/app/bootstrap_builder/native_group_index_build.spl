@@ -1,0 +1,100 @@
+# Admission boundary for the one-time OS-inclusive V2 cold index producer.
+# The compiler does not yet export a full-inventory producer that returns all
+# verified archive, variant, and runtime/std publication evidence. This leaf
+# deliberately refuses to create a success receipt until that owner exists.
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1,
+    NativeGroupIndexReceiptV1, native_group_index_config_decode_v1,
+    native_group_index_absolute_v1}
+use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1,
+    native_full_inventory_source_paths_v1}
+use compiler.driver.cache.package_module_index.{PACKAGE_MODULE_INDEX_SCHEMA_V2,
+    package_module_index_read_current_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_snapshot_cache_root_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_hash_sha256, file_is_regular_no_follow, file_exists}
+
+struct NativeGroupIndexAdmissionV1:
+    config: NativeGroupIndexConfigV1
+    sources: NativeFullInventorySourcesV1
+    prior_index_digest: text
+
+fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1
+        ) -> Result<NativeGroupIndexAdmissionV1, text>:
+    if not file_is_regular_no_follow(config.producer_path) or
+            file_hash_sha256(config.producer_path) != config.producer_digest:
+        return Err("index producer image differs from pinned Phase2 executable")
+    if not file_is_regular_no_follow(config.full_source_authority_path) or
+            file_hash_sha256(config.full_source_authority_path) !=
+                config.full_source_authority_digest:
+        return Err("index Stage2 full-source authority differs")
+    if not file_is_regular_no_follow(config.scv_receipt_path) or
+            file_hash_sha256(config.scv_receipt_path) != config.scv_receipt_digest:
+        return Err("index SCV receipt differs")
+    val snapshot = scv_compile_snapshot_open_v1(config.source_root,
+        config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
+        config.scv_tree_id, config.snapshot_inventory_digest)
+    if not snapshot.valid or snapshot.receipt_path.replace("\\", "/").lower() !=
+            config.scv_receipt_path.replace("\\", "/").lower():
+        return Err("index SCV snapshot or receipt ownership differs")
+    val inventory_cache = compile_source_inventory_snapshot_cache_root_v1(
+        config.source_root, config.snapshot_root, config.scv_revision_id)
+    if inventory_cache == "": return Err("index SCV source-inventory cache root invalid")
+    val source_inventory = compile_source_inventory_read_current_v1(inventory_cache)
+    if not source_inventory.valid or source_inventory.inventory == nil or
+            source_inventory.digest != config.source_inventory_digest:
+        return Err("index typed source-inventory generation differs")
+    if source_inventory.inventory!.generation != config.source_inventory_generation:
+        return Err("index typed source-inventory generation differs")
+    val sources = native_full_inventory_source_paths_v1(config.source_root,
+        config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
+        config.scv_tree_id, config.snapshot_inventory_digest,
+        config.source_inventory_digest, config.scv_receipt_digest,
+        config.expected_spl_count)?
+    if sources.source_count != config.expected_spl_count or
+            sources.source_identities.len() != config.expected_spl_count:
+        return Err("index full SCV source selection differs")
+    val pointer = config.index_cache_root + "/package-module-index-v1/CURRENT"
+    val current = package_module_index_read_current_v1(config.index_cache_root)
+    if config.expected_current_digest == "NONE":
+        if file_exists(pointer) or current.valid:
+            return Err("index cache has an unpinned CURRENT generation")
+        return Ok(NativeGroupIndexAdmissionV1(config, sources, ""))
+    if not builder_digest_valid_v1(config.expected_current_digest) or
+            not current.valid or current.generation == nil or
+            current.digest != config.expected_current_digest:
+        return Err("index expected CURRENT is absent, different, or not V2")
+    if current.generation!.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2:
+        return Err("index expected CURRENT is absent, different, or not V2")
+    Ok(NativeGroupIndexAdmissionV1(config, sources, current.digest))
+
+# Required missing compiler owner API: a public cold producer taking this
+# admitted inventory and typed variant, invoking the real full-inventory HIR
+# and package/archive/runtime-std publishers, and returning readback pins for
+# one complete V2 generation. The existing internal publisher accepts already
+# compiled ColdHirPackageOutputV1 values; this app must not invent those.
+fn native_group_index_compiler_publish_v1(admitted: NativeGroupIndexAdmissionV1
+        ) -> Result<NativeGroupIndexReceiptV1, text>:
+    if admitted.sources.source_count != admitted.config.expected_spl_count:
+        return Err("index producer admission source count differs")
+    Err("compiler public full-inventory cold V2 producer API is unavailable")
+
+fn native_group_index_build_v1(config_path: text, receipt_path: text
+        ) -> Result<NativeGroupIndexReceiptV1, text>:
+    if not native_group_index_absolute_v1(config_path) or
+            not native_group_index_absolute_v1(receipt_path) or
+            config_path.lower() == receipt_path.lower():
+        return Err("index config and receipt require distinct absolute paths")
+    val payload = file_read_regular_no_follow_bounded(config_path, 65536)?
+    val config = native_group_index_config_decode_v1(payload)?
+    if not receipt_path.replace("\\", "/").lower().starts_with(
+            config.output_root.replace("\\", "/").lower() + "/") or
+            file_exists(receipt_path):
+        return Err("index receipt must be new inside isolated output root")
+    val admitted = native_group_index_admit_v1(config)?
+    native_group_index_compiler_publish_v1(admitted)
+
+export NativeGroupIndexAdmissionV1, native_group_index_admit_v1
+export native_group_index_compiler_publish_v1, native_group_index_build_v1
