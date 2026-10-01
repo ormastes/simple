@@ -1,0 +1,124 @@
+# Purpose and audience: typed admission evidence for attributed adaptive factories.
+# @tag: unit, compiler, hir, collection
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl
+use std.spec.{describe, it, expect, step}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind, MethodResolution}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.expressions.*
+
+val factory_span = Span.empty()
+val text_set_module = "lib.nogc_sync_mut.src.collections.adaptive_text_set"
+val text_map_module = "lib.nogc_sync_mut.src.collections.adaptive_text_map"
+
+fn factory_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: factory_span)
+
+fn factory_literal(value: text) -> HirExpr:
+    HirExpr(kind: HirExprKind.StringLit(value, nil), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Str, span: factory_span), span: factory_span)
+
+describe "attributed collection factory admission":
+    it "should reject a resolved factory from another adaptive family":
+        # @req REQ-PSC-001 REQ-PSC-005
+        step("Declare distinct adaptive set and map types and a typed map factory")
+        var lowering = HirLowering.new()
+        val set_id = lowering.symbols.define("AdaptiveTextSet", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_set_module))
+        val map_id = lowering.symbols.define("AdaptiveTextMap", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_map_module))
+        val map_type = HirType(kind: HirTypeKind.Named(map_id, []), span: factory_span)
+        val make_id = lowering.symbols.define("make_text_map", SymbolKind.Function,
+            HirType(kind: HirTypeKind.Function([], map_type, []), span: factory_span),
+            factory_span, Visibility.Private, false, nil)
+        val source = HirExpr(kind: HirExprKind.Call(
+            HirExpr(kind: HirExprKind.Var(make_id), type_: nil, span: factory_span), [], []),
+            type_: nil, span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(set_id), type_: nil, span: factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("hash")),
+            factory_arg(factory_literal("ast://same-source/first"))], factory_span)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain(
+            "factory returns AdaptiveTextMap, expected AdaptiveTextSet")
+
+    it "should admit a matching typed factory at two distinct sites":
+        # @req REQ-PSC-001 REQ-PSC-003
+        step("Use the same typed factory at two stable parser site identities")
+        var lowering = HirLowering.new()
+        val set_id = lowering.symbols.define("AdaptiveTextSet", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_set_module))
+        val set_type = HirType(kind: HirTypeKind.Named(set_id, []), span: factory_span)
+        val make_id = lowering.symbols.define("make_text_set", SymbolKind.Function,
+            HirType(kind: HirTypeKind.Function([], set_type, []), span: factory_span),
+            factory_span, Visibility.Private, false, nil)
+        val source = HirExpr(kind: HirExprKind.Call(
+            HirExpr(kind: HirExprKind.Var(make_id), type_: nil, span: factory_span), [], []),
+            type_: nil, span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(set_id), type_: nil, span: factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("linear")),
+            factory_arg(factory_literal("ast://same-source/first"))], factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("ordered")),
+            factory_arg(factory_literal("ast://same-source/second"))], factory_span)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "should reject a resolved factory returning a non-adaptive type":
+        # @req REQ-PSC-001 REQ-PSC-005
+        step("Use a typed scalar factory as the source of an attributed adaptive set")
+        var lowering = HirLowering.new()
+        val set_id = lowering.symbols.define("AdaptiveTextSet", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_set_module))
+        val make_id = lowering.symbols.define("make_text", SymbolKind.Function,
+            HirType(kind: HirTypeKind.Function([], HirType(kind: HirTypeKind.Str,
+                span: factory_span), []), span: factory_span),
+            factory_span, Visibility.Private, false, nil)
+        val source = HirExpr(kind: HirExprKind.Call(
+            HirExpr(kind: HirExprKind.Var(make_id), type_: nil, span: factory_span), [], []),
+            type_: nil, span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(set_id), type_: nil, span: factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("hash")),
+            factory_arg(factory_literal("ast://wrong-scalar"))], factory_span)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain(
+            "factory returns text, expected AdaptiveTextSet")
+
+    it "should leave unrelated methods and unresolved factory types unchanged":
+        # @req REQ-PSC-005
+        step("Keep unrelated method dispatch and unknown return evidence on the existing path")
+        var lowering = HirLowering.new()
+        val set_id = lowering.symbols.define("AdaptiveTextSet", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_set_module))
+        val receiver = HirExpr(kind: HirExprKind.Var(set_id), type_: nil, span: factory_span)
+        val unresolved = HirExpr(kind: HirExprKind.MethodCall(receiver, "new", [],
+            MethodResolution.Unresolved), type_: nil, span: factory_span)
+        val args = [factory_arg(unresolved), factory_arg(factory_literal("hash")),
+            factory_arg(factory_literal("ast://unknown"))]
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", args, factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "other_method", args, factory_span)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "should leave a user-defined same-name type outside stdlib admission":
+        # @req REQ-PSC-001 REQ-PSC-005
+        step("Use an unrelated type named AdaptiveTextSet in another module")
+        var lowering = HirLowering.new()
+        val local_id = lowering.symbols.define("AdaptiveTextSet", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some("app.custom_collections"))
+        val map_id = lowering.symbols.define("AdaptiveTextMap", SymbolKind.Struct, nil,
+            factory_span, Visibility.Private, false, Some(text_map_module))
+        val map_type = HirType(kind: HirTypeKind.Named(map_id, []), span: factory_span)
+        val make_id = lowering.symbols.define("make_text_map", SymbolKind.Function,
+            HirType(kind: HirTypeKind.Function([], map_type, []), span: factory_span),
+            factory_span, Visibility.Private, false, nil)
+        val source = HirExpr(kind: HirExprKind.Call(
+            HirExpr(kind: HirExprKind.Var(make_id), type_: nil, span: factory_span), [], []),
+            type_: nil, span: factory_span)
+        val receiver = HirExpr(kind: HirExprKind.Var(local_id), type_: nil, span: factory_span)
+        lowering.validate_attributed_collection_factory(receiver, "attributed_at_site", [
+            factory_arg(source), factory_arg(factory_literal("hash")),
+            factory_arg(factory_literal("ast://custom-type"))], factory_span)
+        expect(lowering.errors.len()).to_equal(0)

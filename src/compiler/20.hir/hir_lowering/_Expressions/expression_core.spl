@@ -11,6 +11,98 @@ use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_dis
 use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 
 impl HirLowering:
+    fn attributed_collection_family_identity(name: text, owner: text) -> text:
+        # A local type may reuse an adaptive leaf name. Only the stdlib type's
+        # defining module grants this compiler-owned attribute admission.
+        val module_name = owner.replace("\\", "/")
+        if name == "AdaptiveTextSet" and (
+                module_name == "lib.nogc_sync_mut.src.collections.adaptive_text_set" or
+                module_name == "std.nogc_sync_mut.src.collections.adaptive_text_set" or
+                module_name == "src/lib/nogc_sync_mut/src/collections/adaptive_text_set.spl"):
+            return "AdaptiveTextSet"
+        if name == "AdaptiveTextMap" and (
+                module_name == "lib.nogc_sync_mut.src.collections.adaptive_text_map" or
+                module_name == "std.nogc_sync_mut.src.collections.adaptive_text_map" or
+                module_name == "src/lib/nogc_sync_mut/src/collections/adaptive_text_map.spl"):
+            return "AdaptiveTextMap"
+        if name == "AdaptiveSet" and (
+                module_name == "lib.nogc_sync_mut.src.collections.adaptive_set" or
+                module_name == "std.nogc_sync_mut.src.collections.adaptive_set" or
+                module_name == "src/lib/nogc_sync_mut/src/collections/adaptive_set.spl"):
+            return "AdaptiveSet"
+        if name == "AdaptiveMap" and (
+                module_name == "lib.nogc_sync_mut.src.collections.adaptive_map" or
+                module_name == "std.nogc_sync_mut.src.collections.adaptive_map" or
+                module_name == "src/lib/nogc_sync_mut/src/collections/adaptive_map.spl"):
+            return "AdaptiveMap"
+        ""
+
+    fn attributed_collection_family(type_: HirType) -> text:
+        match type_.kind:
+            case HirTypeKind.Named(owner, _):
+                if val symbol = self.symbols.get_symbol_raw(owner.id):
+                    if val module_name = symbol.defining_module:
+                        return self.attributed_collection_family_identity(symbol.name, module_name)
+            case _: ()
+        ""
+
+    fn attributed_factory_return_name(source: HirExpr) -> text:
+        var callable = SymbolId(id: -1)
+        match source.kind:
+            case HirExprKind.Call(callee, _, _):
+                callable = _hir_expr_symbol_or_invalid(callee.kind)
+            case HirExprKind.MethodCall(_, _, _, resolution):
+                match resolution:
+                    case MethodResolution.StaticMethod(_, method_id): callable = method_id
+                    case _: ()
+            case _: ()
+        if not callable.is_valid():
+            return ""
+        if val symbol = self.symbols.get_symbol_raw(callable.id):
+            if val signature = symbol.type_:
+                match signature.kind:
+                    case HirTypeKind.Function(_, returned, _):
+                        match returned.kind:
+                            case HirTypeKind.Named(owner, _):
+                                if val returned_symbol = self.symbols.get_symbol_raw(owner.id):
+                                    val family = self.attributed_collection_family(returned)
+                                    if family != "": return family
+                                    if returned_symbol.name == "AdaptiveTextSet" or
+                                            returned_symbol.name == "AdaptiveTextMap" or
+                                            returned_symbol.name == "AdaptiveSet" or
+                                            returned_symbol.name == "AdaptiveMap":
+                                        return "non-stdlib {returned_symbol.name}"
+                                    return returned_symbol.name
+                            case HirTypeKind.Str: return "text"
+                            case HirTypeKind.Int(_, _): return "integer"
+                            case HirTypeKind.Bool: return "bool"
+                            case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.TypeParam(_, _): return ""
+                            case _: return "non-adaptive value"
+                    case _: ()
+        ""
+
+    me validate_attributed_collection_factory(
+        receiver: HirExpr, method: text, args: [HirCallArg], span: Span
+    ):
+        # The parser carries the site and target as literal arguments to this
+        # wrapper. Validate a *resolved* factory signature before MIR erases
+        # the declared return family; an unresolved native fast-path call is
+        # not treated as proof of a matching factory.
+        if method != "attributed_at_site" and method != "attributed_with_prior_at_site":
+            return
+        if args.len() < 3:
+            return
+        val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+        if not owner.is_valid():
+            return
+        val expected = self.attributed_collection_family(
+            HirType(kind: HirTypeKind.Named(owner, []), span: span))
+        if expected == "":
+            return
+        val found = self.attributed_factory_return_name(args[0].value)
+        if found != "" and found != expected:
+            self.error("attributed collection factory returns {found}, expected {expected}", span)
+
     fn declared_static_method_resolution(receiver: HirExpr, method: text) -> MethodResolution:
         # Keep the declared owner while HIR still owns the receiver expression.
         # Native MIR cannot reconstruct this from a nested MethodCall payload;
@@ -308,6 +400,8 @@ impl HirLowering:
                                         type_: HirType(kind: HirTypeKind.Array(mc_dict_value, nil), span: e.span),
                                         span: e.span)
                                 case _: ()
+                    self.validate_attributed_collection_factory(
+                        mc_lowered_receiver, method_name_t, hir_args, e.span)
                     return HirExpr(
                         kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
                         has_type_: false,
