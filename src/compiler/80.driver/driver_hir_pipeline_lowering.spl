@@ -6,6 +6,9 @@ use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     cold_hir_typed_receipts_from_lowered_sources_v1
 }
+use compiler.driver.smf.runtime_std_hir_emission_v1.{
+    RuntimeStdHirModuleEmissionV1, runtime_std_hir_emit_module_v1
+}
 use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1,
     CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
     compile_source_inventory_snapshot_cache_root_v1}
@@ -143,6 +146,7 @@ impl CompilerDriver:
     # later MIR path evicts HIR. Warm routes never read the inventory here.
     me capture_cold_hir_typed_receipts_v1() -> bool:
         self.ctx.cold_hir_typed_receipts = []
+        self.ctx.runtime_std_hir_emissions = {}
         self.ctx.cold_hir_native_object_paths = {}
         self.ctx.cold_hir_native_capsule_identities = {}
         self.ctx.cold_hir_objectless_modules = {}
@@ -158,10 +162,22 @@ impl CompilerDriver:
             not compatibility_markers_present
         if not cold_init:
             return true
+        if full_inventory_cold and self.ctx.runtime_std_full_inventory_selection == nil:
+            self.ctx.add_error("full inventory typed HIR selection missing")
+            return false
         val source_root = sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
         val inventory_binding = CompileSourceInventoryBindingV1(
             snapshot_manifest_digest: sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
             source_inventory_digest: sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "")
+        var typed_hir_artifact_root = ""
+        if full_inventory_cold:
+            val selection = self.ctx.runtime_std_full_inventory_selection!
+            typed_hir_artifact_root = selection.artifact_root
+            if typed_hir_artifact_root == "" or
+                    selection.snapshot_manifest_digest != inventory_binding.snapshot_manifest_digest or
+                    selection.source_inventory_digest != inventory_binding.source_inventory_digest:
+                self.ctx.add_error("full inventory typed HIR selection differs from SCV binding")
+                return false
         if source_root == "" and inventory_binding.snapshot_manifest_digest == "" and inventory_binding.source_inventory_digest == "":
             if full_inventory_cold:
                 self.ctx.add_error("full inventory cold HIR authority missing")
@@ -231,6 +247,23 @@ impl CompilerDriver:
                                 self.ctx.add_error(
                                     "full inventory cold HIR receipt count mismatch: expected={expected_count} sources={self.ctx.source_paths_owner.len()} receipts={receipts.len()}")
                                 return false
+                            var emitted: Dict<text, RuntimeStdHirModuleEmissionV1> = {}
+                            for receipt in receipts:
+                                val seed = receipt.seed
+                                if emitted.contains_key(seed.source_identity) or
+                                        not self.ctx.hir_modules.contains_key(seed.module_identity):
+                                    self.ctx.add_error("full inventory typed HIR emission owner mismatch: {seed.source_identity}")
+                                    return false
+                                match runtime_std_hir_emit_module_v1(
+                                        self.ctx.hir_modules[seed.module_identity],
+                                        seed.source_identity, seed.source_digest,
+                                        typed_hir_artifact_root):
+                                    case Err(reason):
+                                        self.ctx.add_error("full inventory typed HIR emission failed: {reason}")
+                                        return false
+                                    case Ok(value):
+                                        emitted[seed.source_identity] = value
+                            self.ctx.runtime_std_hir_emissions = emitted
                         self.ctx.cold_hir_typed_receipts = receipts
                         log_phase("phase3:cold-hir-receipts:done count={receipts.len()}")
                         return true
