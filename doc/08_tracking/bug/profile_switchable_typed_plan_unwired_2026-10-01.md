@@ -1,0 +1,24 @@
+# Item 7 typed collection plan is not connected to MIR execution
+
+**Status:** OPEN. **Source examined:** `work/items-1-5-7-tdd-20261001` at `bf28063b843` plus the item 7 embedded-profile validation and HIR factory-family guard slices. **Requirements:** REQ-PSC-003, REQ-PSC-005, REQ-PSC-006, REQ-PSC-007. This is an implementation gap, not merely an unrun test.
+
+## Trigger and present behavior
+
+For an attributed declaration such as `@collection_algorithm("auto") var m: AdaptiveMap<i64, text> = AdaptiveMap.new()`, the flat parser rewrites the initializer to `AdaptiveMap.attributed_at_site(...)` or `attributed_with_prior_at_site(...)` in `src/compiler/10.frontend/core/collection_feedback.spl`. The supplied site string and admitted p95 counts can drive the adaptive runtime constructor, so this existing path is real and must be preserved. It does not use the typed compiler's `collection_plan_select` decision or lower a chosen CollectionPlan operation to MIR.
+
+`src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl` lowers the rewritten expression as an ordinary `HirExprKind.MethodCall`. `src/compiler/35.semantics/perf/collection_plan_extractor.spl` accepts only unary Map, Filter, FlatMap, DistinctBy, and CollectArray calls from a resolved operation registry; its source and operation facts leave equality, alias, callback, escape, and profitability proof false. It neither extracts the attributed set/map declaration nor carries that site's source attribute or target profile. `src/compiler/35.semantics/perf_facts/builtin_collection.spl` currently admits only selected Array callback operations. The distinct `CollectionPlanFacts` used by `src/compiler/60.mir_opt/mir_opt/collection_plan_selection.spl` has no compiler-pipeline producer; its only production bridge is offline `src/app/optimize/collection_plan_profile_bridge.spl`. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` lowers the attributed wrapper by ordinary method dispatch and has no selected-plan lowering branch.
+
+The current `simple optimize --explain-collection-plan` path in `src/app/optimize/collection_plan_cli.spl` reports an initial runtime choice from flat parser calls and explicitly emits `guard.typed_mir=unconnected` and `extra_memory_bytes=unknown`. It is not a receipt for a compiler-selected physical plan.
+
+## Smallest safe implementation sequence
+
+1. Retain the attribute and parser site on a **typed** adaptive set/map declaration; validate the factory's resolved return family and key capabilities. Define one target-bound site identity that survives HIR/MIR transport. Add a typed mismatch diagnostic and a same-source two-instance test.
+2. Add set/map operation metadata to the admitted registry after the P0 correctness gates named in `doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md`. Populate semantic, ordering, duplicate, ownership, policy and target facts from typed analyses; unknown evidence must select `Original`. Avoid using the separate advisory facts type as a proof source.
+3. Prepare the admitted `.sprof` set/metric index once per compilation and attach its source/target/workload identity to the typed site. Feed the proved facts and exact-site measurements to `collection_plan_select`.
+4. Lower only a proved decision to a concrete runtime operation/constructor in MIR; retain the existing adaptive wrapper for unproved or unsupported cases. The explain command must consume this same decision and report extra memory or an explicit unproved value.
+
+## Falsifiable acceptance
+
+On an admitted source-matched pure-Simple runner, a typed attributed set/map fixture with two independent sites must compile through interpreter and native backends, preserve contents across different choices, reject a wrong factory/key/target, and show the same selected decision in MIR, runtime observation, and explanation. A robust/critical policy must refuse an unbounded hash plan when no worst-case proof exists. Unknown facts must preserve the original algorithm. An advisory selector unit PASS or a parser rewrite alone does not close this defect.
+
+The first bounded stage now rejects a resolved wrong-family or non-adaptive factory return while HIR lowers the attributed wrapper, using exact stdlib defining-module identity; same-name user types do not enter that guard. `test/01_unit/compiler/hir/attributed_collection_factory_spec.spl` and its manual specify the behavior, with runtime execution pending an admitted compiler. This guard does not prove generic key arguments, key capabilities, attribute provenance, target-bound site identity, collection operation facts, or a selected MIR plan. Stages 1–4 above remain open at their full scope. The grouped compiler lane confirmed no overlapping collection-planner edits. Runtime tests and docgen remain blocked by the absent qualified feature runner.
