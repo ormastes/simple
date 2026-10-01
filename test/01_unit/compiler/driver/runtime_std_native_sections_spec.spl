@@ -1,0 +1,137 @@
+# The cold MIR payload must change when a retained body field changes and
+# reject serializer gaps before package-index or native publication.
+# @req REQ-RUNTIME-STD-COMPILED-MIR-BODY
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read_nullable}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_type}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    RUNTIME_STD_MIR_FIELD_SET_V1, RuntimeStdMirBodyPayloadV1,
+    runtime_std_mir_body_payload_v1, runtime_std_mir_body_validate_v1,
+    runtime_std_mir_body_matches_module_v1}
+
+fn _runtime_std_spec_module_v1() -> MirModule:
+    val source = "fn seed(x: i64) -> i64:\n    x + 1\n" +
+        "fn marker() -> i64:\n    2\n"
+    val ast = parse_full_frontend(source, "runtime_std_mir.spl",
+        "runtime_std_mir.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("runtime_std_mir.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var module = mir_lowering.lower_module(hir)
+    module.name = "test.runtime_std_mir"
+    module
+
+fn _runtime_std_declared_fields_v1(source: text, declaration: text) -> text:
+    val marker = "struct {declaration}:"
+    val start = source.index_of(marker)
+    if start < 0: return "missing"
+    val tail = source.substring(start + marker.len(), source.len())
+    var names: [text] = []
+    for line in tail.split("\n"):
+        if line.starts_with("struct ") or line.starts_with("enum ") or
+                line.starts_with("impl ") or line.starts_with("export "):
+            break
+        if not line.starts_with("    ") or line.starts_with("        "):
+            continue
+        val trimmed = line.trim()
+        if trimmed.starts_with("#") or trimmed.starts_with("\""):
+            continue
+        val colon = trimmed.index_of(":")
+        if colon <= 0: continue
+        val name = trimmed.substring(0, colon)
+        if name.contains(" ") or name.contains("("):
+            continue
+        names.push(name)
+    names.join(",")
+
+fn _runtime_std_schema_decl_v1(schema: text, name: text) -> text:
+    val marker = "{name}:"
+    val start = schema.index_of(marker)
+    if start < 0: return "missing"
+    val tail = schema.substring(start + marker.len(), schema.len())
+    val end = tail.index_of(";")
+    if end < 0: tail else: tail.substring(0, end)
+
+describe "runtime/std native MIR section payload", tag: ["only-compiled"]:
+    it "binds complete observed MIR bodies to source and rejects malformed bytes":
+        # @req REQ-RUNTIME-STD-COMPILED-MIR-BODY
+        step("Encode the actual lowered MIR before native object generation")
+        val source_digest = sha256_text("fn seed(x: i64) -> i64:\n    x + 1\n" +
+            "fn marker() -> i64:\n    2\n")
+        val module = _runtime_std_spec_module_v1()
+        val encoded = runtime_std_mir_body_payload_v1(
+            module, "src/lib/test/runtime_std_mir.spl", source_digest)
+        expect(encoded.is_ok()).to_equal(true)
+        val payload = encoded.unwrap()
+        expect(runtime_std_mir_body_validate_v1(payload, module.name,
+            payload.source_identity, source_digest, payload.digest)).to_equal("ok")
+        expect(runtime_std_mir_body_matches_module_v1(payload, module,
+            payload.source_identity, source_digest)).to_equal("ok")
+
+        step("Dictionary insertion order does not change canonical MIR bytes")
+        val symbols = module.functions.keys()
+        expect(symbols.len()).to_equal(2)
+        var reordered = module
+        var reversed_functions: Dict<SymbolId, MirFunction> = {}
+        reversed_functions[symbols[1]] = module.functions[symbols[1]]
+        reversed_functions[symbols[0]] = module.functions[symbols[0]]
+        reordered.functions = reversed_functions
+        val reversed_payload = runtime_std_mir_body_payload_v1(reordered,
+            payload.source_identity, source_digest)
+        expect(reversed_payload.is_ok()).to_equal(true)
+        expect(reversed_payload.unwrap().digest).to_equal(payload.digest)
+
+        step("Changing function metadata or external layout evidence changes the payload")
+        var changed = module
+        val symbol = changed.functions.keys()[0]
+        var function = changed.functions[symbol]
+        function.simd_req_level = "must"
+        changed.functions[symbol] = function
+        expect(runtime_std_mir_body_matches_module_v1(payload, changed,
+            payload.source_identity, source_digest) == "ok").to_equal(false)
+        changed = module
+        changed.external_layout_traces.push(MirExternalLayoutTraceV1(
+            "consumer", "owner", "type", sha256_text("layout"), 1))
+        expect(runtime_std_mir_body_matches_module_v1(payload, changed,
+            payload.source_identity, source_digest) == "ok").to_equal(false)
+
+        step("A self-hashed arbitrary text file is not a MIR payload")
+        val fake = RuntimeStdMirBodyPayloadV1(module.name,
+            payload.source_identity, source_digest, "fake", sha256_text("fake"), 4)
+        expect(runtime_std_mir_body_validate_v1(fake, module.name,
+            payload.source_identity, source_digest, fake.digest) == "ok").to_equal(false)
+
+    it "encodes formerly erased vector and bit-lane types exactly":
+        # @req REQ-RUNTIME-STD-COMPILED-MIR-BODY
+        expect(serialize_mir_type(MirType(kind: MirTypeKind.Vec4f))).to_contain("Vec4f")
+        expect(serialize_mir_type(MirType(kind: MirTypeKind.Vec16i))).to_contain("Vec16i")
+        expect(serialize_mir_type(MirType(kind: MirTypeKind.Bits(37, true)))).to_contain("37")
+        expect(serialize_mir_type(MirType(kind: MirTypeKind.ScalableVec(
+            MirType(kind: MirTypeKind.I64), 4)))).to_contain("ScalableVec")
+
+    it "guards every current MIR container field against silent omission":
+        # @req REQ-RUNTIME-STD-COMPILED-MIR-BODY
+        val graph = file_read_nullable(
+            "src/compiler/50.mir/mir_instruction_graph.spl") ?? ""
+        val types = file_read_nullable(
+            "src/compiler/50.mir/mir_types.spl") ?? ""
+        expect(graph == "").to_equal(false)
+        expect(types == "").to_equal(false)
+        for name in ["MirModule", "MirFunction", "MirInst"]:
+            expect(_runtime_std_declared_fields_v1(graph, name)).to_equal(
+                _runtime_std_schema_decl_v1(RUNTIME_STD_MIR_FIELD_SET_V1, name))
+        for name in ["MirLocal", "MirConstant", "MirStatic", "MirTypeDef",
+                "MirFieldDef", "MirVariantDef"]:
+            expect(_runtime_std_declared_fields_v1(types, name)).to_equal(
+                _runtime_std_schema_decl_v1(RUNTIME_STD_MIR_FIELD_SET_V1, name))
