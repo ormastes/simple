@@ -94,6 +94,37 @@ fn native_group_install_v1(root: text, path: text, payload: text) -> bool:
         if file_exists(root + "/broker.claim"): return false
         native_group_write_v1(path, payload)
 
+fn native_group_blocked_path_v1(run: NativeGroupRunV1,
+        manifest: NativeGroupManifestV1) -> text:
+    run.state_root + "/blocked/" + manifest.group_id + ".sdn"
+
+fn native_group_blocked_payload_v1(run_id: text, inventory_digest: text,
+        state_root: text, manifest_digest: text) -> text:
+    "SIMPLE-NATIVE-GROUP-BLOCKED-2\n" + run_id + "\n" +
+        inventory_digest + "\n" + state_root + "\n" +
+        manifest_digest + "\ndependency-marker-not-ready\n"
+
+fn native_group_blocked_marker_matches_v1(run_id: text,
+        inventory_digest: text, state_root: text, manifest_digest: text,
+        observed: text) -> bool:
+    observed == native_group_blocked_payload_v1(run_id,
+        inventory_digest, state_root, manifest_digest)
+
+fn native_group_mark_blocked_v1(run: NativeGroupRunV1,
+        manifest: NativeGroupManifestV1) -> bool:
+    native_group_write_v1(native_group_blocked_path_v1(run, manifest),
+        native_group_blocked_payload_v1(run.run_id, run.inventory_digest,
+            run.state_root, native_group_manifest_identity_v1(manifest)))
+
+fn native_group_was_blocked_v1(run: NativeGroupRunV1,
+        manifest: NativeGroupManifestV1) -> bool:
+    match file_read_regular_no_follow_bounded(
+            native_group_blocked_path_v1(run, manifest), 4096):
+        Ok(payload): native_group_blocked_marker_matches_v1(run.run_id,
+            run.inventory_digest, run.state_root,
+            native_group_manifest_identity_v1(manifest), payload)
+        Err(_): false
+
 fn native_group_save_v1(run: NativeGroupRunV1) -> bool:
     val payload = native_group_run_encode_v1(run)
     payload != "" and native_group_write_v1(run.state_root + "/ledger.sdn", payload)
@@ -793,6 +824,13 @@ fn native_group_completion_json_v1(run: NativeGroupRunV1, all_reaped: bool) -> t
                     elif row.status == "TIMEOUT": timeout = timeout + 1
                     elif row.status == "BLOCKED": blocked = blocked + 1
                     elif row.status == "NOT_RUN": not_run = not_run + 1
+                else:
+                    # Only a retained dependency decision is BLOCKED. Other
+                    # unattempted work remains NOT_RUN in an aborted run.
+                    if native_group_was_blocked_v1(run, manifest):
+                        blocked = blocked + 1
+                    else:
+                        not_run = not_run + 1
     val status = if native_group_complete_v1(run) and
             native_group_promotions_valid_v1(run) and all_reaped: "PASS" else: "FAIL"
     "{\"phase\":\"{run.phase}\",\"backend\":\"{run.backend}\",\"producer_sha256\":\"{run.producer_digest}\",\"inventory_sha256\":\"{run.inventory_digest}\",\"expected_count\":{run.inventory_count},\"accounted_count\":{native_group_accounted_v1(run)},\"ok_count\":{ok},\"error_count\":{error_count},\"crashed_count\":{crashed},\"terminated_count\":{terminated},\"timeout_count\":{timeout},\"blocked_count\":{blocked},\"not_run_count\":{not_run},\"qualified_smf_count\":{smf},\"object_only_count\":{object_only},\"all_reaped\":{if all_reaped: "true" else: "false"},\"status\":\"{status}\"}\n"
@@ -865,7 +903,9 @@ fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
         val ready = native_group_dependencies_ready_v1(next, manifest)?
         if not ready:
             if index == first_index:
-                return Err("next native group dependency marker is not ready: " + manifest.group_id)
+                # A failed predecessor may leave this group permanently blocked.
+                # The owner must still visit independent groups later in the list.
+                return Ok(next)
             print "native group prestart refused group={manifest.group_id} reason=dependency-marker-not-ready"
             break
         if started.len() > 0:
@@ -1066,8 +1106,11 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
                         return native_group_fail_with_cleanup_v1(run, initial_groups,
                             group_index, reason)
                 if not ready:
-                    return native_group_fail_with_cleanup_v1(run, initial_groups,
-                        group_index, "next native group dependency marker is not ready: " + manifest.group_id)
+                    if not native_group_mark_blocked_v1(run, manifest):
+                        return native_group_fail_with_cleanup_v1(run, initial_groups,
+                            group_index, "cannot retain blocked group decision")
+                    print "native group blocked group={manifest.group_id} reason=dependency-marker-not-ready"
+                    break
                 match native_group_run_attempt_v1(run, manifest, capacity):
                     Ok(updated):
                         run = updated
@@ -1180,3 +1223,4 @@ export NativeGroupedRunOutcomeV1, NativeGroupedCapacityV1, NativeGroupedCapacity
 export native_group_run_v1, native_group_verify_v1, native_group_completion_json_v1
 export native_group_normalize_crashed_sccs_v1
 export native_group_demote_unqualified_smf_v1
+export native_group_blocked_payload_v1, native_group_blocked_marker_matches_v1
