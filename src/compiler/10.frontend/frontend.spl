@@ -24,6 +24,10 @@ use std.env.{env_get}
 # dispatch, e.g. arm64 byte_len on x86_64). The unique `_pp_*` name cannot
 # collide, so the real stripping always runs.
 use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{
+    FrontendCfgDecisionReceiptV1, frontend_cfg_target_from_triple_v1,
+    frontend_cfg_decision_digest_v1}
 fn preprocess_conditionals(source: text) -> text:
     _pp_preprocess_conditionals(source)
 use compiler.common.config.{Logger}
@@ -163,6 +167,20 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
     advisory_generation: u64, advisory_cache_identity: text
 ) -> Result<ParserModule, FrontendAdvisoryPreprocessDispatchErrorV1>:
     val preprocessed = preprocess_conditionals(source)
+    match parse_full_frontend_preprocessed_with_scope(preprocessed,
+            file_path, module_name, log, streaming_scope, borrowed_scope,
+            advisory_policy, advisory_owner_id, advisory_session_id,
+            advisory_generation, advisory_cache_identity):
+        case Ok(parsed): Ok(parsed[0])
+        case Err(error): Err(error)
+
+fn parse_full_frontend_preprocessed_with_scope(
+    preprocessed: text, file_path: text, module_name: text,
+    log: Logger, streaming_scope: bool, borrowed_scope: bool,
+    advisory_policy: FrontendAdvisoryPreprocessPolicyV1,
+    advisory_owner_id: u64, advisory_session_id: u64,
+    advisory_generation: u64, advisory_cache_identity: text
+) -> Result<(ParserModule, text), FrontendAdvisoryPreprocessDispatchErrorV1>:
     var domain_blocks: [DomainBlock] = []
     var parse_source = preprocessed
     if frontend_may_have_domain_block(preprocessed):
@@ -176,6 +194,10 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
         parse_source, advisory_policy, advisory_owner_id, advisory_session_id,
         advisory_generation)?
     parse_source = advisory.parse_source
+
+    # This is the exact byte sequence passed to the reference parser (also on
+    # cache restore), after domain extraction and advisory selection.
+    val parser_input_digest = sha256_text(parse_source)
 
     frontend_log_trace(log, "2: core parser bridge...")
     if frontend_phase_trace_enabled():
@@ -198,7 +220,51 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
         print("PARSECACHE\tdesugar_ms={(desugar_t1 - desugar_t0) / 1000}\tpath={file_path}")
 
     # Return the parsed-and-desugared module (declared return type is ParserModule).
-    Ok(module)
+    Ok((module, parser_input_digest))
+
+pub fn parse_full_frontend_target_receipted_v1(
+    source: text, filename: text, module_name: text, logger: Logger,
+    source_identity: text, source_digest: text, target_triple: text
+) -> Result<(ParserModule, FrontendCfgDecisionReceiptV1), text>:
+    parse_full_frontend_target_receipted_scope_v1(source, filename,
+        module_name, logger, source_identity, source_digest, target_triple,
+        false)
+
+pub fn parse_full_frontend_target_receipted_in_borrowed_scope_v1(
+    source: text, filename: text, module_name: text, logger: Logger,
+    source_identity: text, source_digest: text, target_triple: text
+) -> Result<(ParserModule, FrontendCfgDecisionReceiptV1), text>:
+    parse_full_frontend_target_receipted_scope_v1(source, filename,
+        module_name, logger, source_identity, source_digest, target_triple,
+        true)
+
+fn parse_full_frontend_target_receipted_scope_v1(
+    source: text, filename: text, module_name: text, logger: Logger,
+    source_identity: text, source_digest: text, target_triple: text,
+    borrowed_scope: bool
+) -> Result<(ParserModule, FrontendCfgDecisionReceiptV1), text>:
+    if source_identity == "" or source_digest != sha256_text(source):
+        return Err("target cfg source identity or digest differs")
+    val target = match frontend_cfg_target_from_triple_v1(target_triple):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val preprocessed = match _pp_preprocess_conditionals_target_receipted_v1(
+            source, target[0], target[1]):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val cache_identity = sha256_text("target-cfg-v1|" + target_triple + "|" + preprocessed.source)
+    val parsed = match parse_full_frontend_preprocessed_with_scope(
+            preprocessed.source, filename, module_name, logger, false, borrowed_scope,
+            FrontendAdvisoryPreprocessPolicyV1.Reference, 0u64, 0u64, 0u64,
+            cache_identity):
+        case Ok(value): value
+        case Err(_): return Err("target cfg reference parser unavailable")
+    val receipt = FrontendCfgDecisionReceiptV1(
+        source_identity: source_identity, source_digest: source_digest,
+        target_triple: target_triple, target_os: target[0], target_arch: target[1],
+        preprocessed_digest: parsed[1], decisions: preprocessed.decisions,
+        decision_digest: frontend_cfg_decision_digest_v1(preprocessed.decisions))
+    Ok((parsed[0], receipt))
 
 fn parse_full_frontend(source: text, file_path: text, module_name: text, log: Logger) -> ParserModule:
     parse_full_frontend_with_scope(source, file_path, module_name, log, false, false,

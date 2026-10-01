@@ -27,6 +27,7 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlow
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_in_borrowed_scope}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{par_had_error_get}
@@ -250,6 +251,13 @@ impl CompilerDriver:
                             var emitted: Dict<text, RuntimeStdHirModuleEmissionV1> = {}
                             for receipt in receipts:
                                 val seed = receipt.seed
+                                if not self.ctx.runtime_std_cfg_decisions.has(seed.source_identity) or
+                                        not frontend_cfg_receipt_valid_v1(
+                                            self.ctx.runtime_std_cfg_decisions[seed.source_identity],
+                                            seed.source_identity, seed.source_digest,
+                                            self.ctx.native_target):
+                                    self.ctx.add_error("full inventory target cfg HIR source receipt mismatch: {seed.source_identity}")
+                                    return false
                                 if emitted.contains_key(seed.source_identity) or
                                         not self.ctx.hir_modules.contains_key(seed.module_identity):
                                     self.ctx.add_error("full inventory typed HIR emission owner mismatch: {seed.source_identity}")
@@ -321,7 +329,16 @@ impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
-        val module = parse_full_frontend_in_borrowed_scope(source.content, source.path, source.module_name, self.ctx.logger)
+        val module = if self.ctx.runtime_std_full_inventory_selection != nil:
+            val selected = self.parse_full_frontend_in_borrowed_scope_selected_v1(
+                source.content, source.path, source.module_name)
+            if selected.is_err():
+                val _ended = driver_end_transient_parse_scope()
+                return Err(selected.unwrap_err())
+            selected.unwrap()
+        else:
+            parse_full_frontend_in_borrowed_scope(
+                source.content, source.path, source.module_name, self.ctx.logger)
         driver_register_parser_module_source_aliases_v1(module, source.path)
         if par_had_error_get():
             return Err(driver_finish_failed_parse_scope(source.path))
