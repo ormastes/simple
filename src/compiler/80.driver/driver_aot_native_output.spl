@@ -52,6 +52,8 @@ use compiler.driver.cache.runtime_std_membership_policy_v1.{
     RuntimeStdMembershipPolicyOutputV1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_identity_cmp_v1}
 use compiler.driver.smf.runtime_std_native_sections_v1.{
     RuntimeStdNativeMemberV1, runtime_std_mir_body_payload_v1,
     runtime_std_native_directory_chain_real_v1,
@@ -68,7 +70,10 @@ use compiler.driver.smf.runtime_std_native_outcomes_v2.{
     RuntimeStdNativeOutcomeKindV2, RuntimeStdNativeOutcomeReceiptV2,
     runtime_std_native_semantic_action_key_v2}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{
-    frontend_cfg_receipt_valid_v1}
+    frontend_cfg_receipt_valid_v1,
+    frontend_cfg_excluded_emit_count_v1}
+use compiler.driver.smf.runtime_std_native_emit_witness_v1.{
+    runtime_std_native_emit_witness_valid_v1}
 use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
 use compiler.driver.action_graph.persisted_graph.{
     PersistedBuildGraphV1, persisted_graph_digest_v1,
@@ -3056,7 +3061,9 @@ fn _runtime_std_compile_members_with_session_v1(
     var module_names: [text] = []
     var prior_source = ""
     for member in selected:
-        if member.source_identity <= prior_source or
+        if (prior_source != "" and
+                compile_source_inventory_identity_cmp_v1(
+                    member.source_identity, prior_source) <= 0) or
                 member.source_digest == "" or
                 member.package_identity != selected[0].package_identity or
                 not ctx.runtime_std_hir_emissions.has(member.source_identity) or
@@ -3295,6 +3302,192 @@ fn _runtime_std_hir_emission_digest_v2(
         index = index + 1
     sha256_text(rows.join("\n") + "\n")
 
+fn _runtime_std_compile_native_members_v2(
+    ctx: CompileContext, policy: RuntimeStdMembershipPolicyOutputV1,
+    sources: NativeFullInventorySourcesV1, package_identity: text,
+    expected_index_digest: text, artifact_root: text,
+    target_cpu: text, expected_target: text
+) -> Result<[RuntimeStdNativeMemberV2], text>:
+    if ctx.runtime_std_full_inventory_selection == nil or
+            artifact_root !=
+                ctx.runtime_std_full_inventory_selection!.artifact_root or
+            (package_identity != "simple.runtime" and
+                package_identity != "simple.std") or
+            policy.index_digest != expected_index_digest or
+            policy.membership.source_inventory_digest !=
+                ctx.runtime_std_full_inventory_selection!.source_inventory_digest or
+            runtime_std_package_membership_encode_v1(
+                policy.membership, sources) != policy.membership_content or
+            sha256_text(policy.membership_content) != policy.membership_digest or
+            policy.policy_digest == "" or
+            expected_target == "" or expected_target != ctx.native_target or
+            not runtime_std_native_directory_chain_real_v1(artifact_root) or
+            ctx.options.backend_plugin_path != "" or
+            not driver_aot_uses_versioned_backend(ctx.options.backend) or
+            (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1" or
+            native_group_request_path_v1() != "":
+        return Err("runtime/std native v2 producer authority or mode unsupported")
+    val selected_result = runtime_std_package_members_v1(
+        policy.membership, sources, package_identity)
+    if selected_result.is_err(): return Err(selected_result.unwrap_err())
+    val selected = selected_result.unwrap()
+    if selected.len() == 0:
+        return Err("runtime/std native v2 package has no source members")
+    val backend_name = get_effective_backend_name(
+        ctx.options.backend, ctx.options.release)
+    if backend_name != "llvm" and backend_name != "cranelift":
+        return Err("runtime/std native v2 backend unsupported")
+    var names: [text] = []
+    var kinds: [RuntimeStdNativeOutcomeKindV2] = []
+    var hir_digests: [text] = []
+    var cfg_digests: [text] = []
+    var code_selected: [RuntimeStdPackageMemberV1] = []
+    var prior_source = ""
+    for member in selected:
+        if (prior_source != "" and
+                compile_source_inventory_identity_cmp_v1(
+                    member.source_identity, prior_source) <= 0) or
+                member.source_digest == "" or
+                not ctx.runtime_std_hir_emissions.has(member.source_identity) or
+                not ctx.runtime_std_mir_emissions.has(member.source_identity) or
+                not ctx.runtime_std_cfg_decisions.has(member.source_identity):
+            return Err("runtime/std native v2 selected source lacks live evidence")
+        prior_source = member.source_identity
+        var matched = -1
+        var receipt_index = 0
+        while receipt_index < ctx.cold_hir_typed_receipts.len():
+            val seed = ctx.cold_hir_typed_receipts[receipt_index].seed
+            if seed.source_identity == member.source_identity:
+                if matched >= 0 or seed.source_digest != member.source_digest or
+                        seed.inventory_digest !=
+                            ctx.runtime_std_full_inventory_selection!.source_inventory_digest:
+                    return Err("runtime/std native v2 source differs from SCV")
+                matched = receipt_index
+            receipt_index = receipt_index + 1
+        if matched < 0:
+            return Err("runtime/std native v2 source absent from SCV")
+        val name = ctx.cold_hir_typed_receipts[matched].seed.module_identity
+        if name == "" or name.contains("/") or name.contains("\\") or
+                name.contains("..") or names.contains(name) or
+                not ctx.mir_modules.has(name):
+            return Err("runtime/std native v2 module ownership invalid")
+        val hir_emission = ctx.runtime_std_hir_emissions[member.source_identity]
+        val mir_emission = ctx.runtime_std_mir_emissions[member.source_identity]
+        if hir_emission.module_identity != name or
+                hir_emission.source_digest != member.source_digest or
+                mir_emission.module_identity != name or
+                mir_emission.source_digest != member.source_digest:
+            return Err("runtime/std native v2 HIR/MIR ownership differs")
+        val cfg = ctx.runtime_std_cfg_decisions[member.source_identity]
+        if not frontend_cfg_receipt_valid_v1(cfg,
+                member.source_identity, member.source_digest,
+                expected_target):
+            return Err("runtime/std native v2 target cfg receipt invalid")
+        val hir_digest = _runtime_std_hir_emission_digest_v2(ctx,
+            member.source_identity, member.source_digest, name)
+        if hir_digest == "" or hir_emission.native_emit_witness == nil or
+                not runtime_std_native_emit_witness_valid_v1(
+                    hir_emission.native_emit_witness!,
+                    member.source_identity, member.source_digest, name,
+                    expected_target, backend_name, hir_digest):
+            return Err("runtime/std native v2 live HIR witness invalid")
+        val witness = hir_emission.native_emit_witness!
+        val mir = ctx.mir_modules[name]
+        var kind = RuntimeStdNativeOutcomeKindV2.code_object
+        if mir.functions.len() > 0:
+            if witness.active_function_count == 0 and
+                    witness.active_data_count == 0 and
+                    witness.active_runtime_init_count == 0:
+                return Err("runtime/std native v2 MIR code lacks HIR witness")
+            code_selected.push(member)
+        else:
+            if mir.statics.len() > 0 or witness.active_function_count != 0 or
+                    witness.active_data_count != 0 or
+                    witness.active_runtime_init_count != 0:
+                return Err("runtime/std native v2 active source needs object codegen")
+            kind = if frontend_cfg_excluded_emit_count_v1(cfg) > 0:
+                RuntimeStdNativeOutcomeKindV2.cfg_inactive
+            else: RuntimeStdNativeOutcomeKindV2.active_objectless
+        names.push(name)
+        kinds.push(kind)
+        hir_digests.push(hir_digest)
+        cfg_digests.push(cfg.decision_digest)
+    if code_selected.len() == 0:
+        return Err("runtime/std native v2 package has no code objects")
+    val opt_level = driver_effective_native_opt_level(ctx,
+        ctx.options.release)
+    val request = driver_aot_backend_plugin_request_v1(
+        ctx.options.backend, expected_target, target_cpu, opt_level,
+        ctx.options.backend_plugin_path)
+    val code_result = match BackendSessionOwnedLeaseV2.open(request):
+        case Err(_):
+            return Err("runtime/std native v2 backend session unavailable")
+        case Ok(opened):
+            var session = opened
+            if session.backend_name != backend_name or
+                    session.receipt_hash == "":
+                val _closed = session.close()
+                return Err("runtime/std native v2 provider receipt unavailable")
+            val result = _runtime_std_compile_members_with_session_v1(
+                ctx, code_selected, artifact_root, target_cpu, session)
+            if not session.close():
+                return Err("runtime/std native v2 backend session close failed")
+            result
+    if code_result.is_err(): return Err(code_result.unwrap_err())
+    val compiled_code = code_result.unwrap()
+    if compiled_code.len() != code_selected.len():
+        return Err("runtime/std native v2 code member count differs")
+    var members: [RuntimeStdNativeMemberV2] = []
+    var code_index = 0
+    var index = 0
+    while index < selected.len():
+        val selected_member = selected[index]
+        val kind = kinds[index]
+        var body = runtime_std_mir_body_payload_v1(
+            ctx.mir_modules[names[index]], selected_member.source_identity,
+            selected_member.source_digest)
+        if body.is_err(): return Err(body.unwrap_err())
+        var object_digest = ""
+        var object_bytes = 0
+        var capsule_digest = ""
+        var capsule: FrozenNativeModuleCapsuleV1? = nil
+        if kind == RuntimeStdNativeOutcomeKindV2.code_object:
+            if code_index >= compiled_code.len() or
+                    compiled_code[code_index].source_identity !=
+                        selected_member.source_identity or
+                    compiled_code[code_index].source_digest !=
+                        selected_member.source_digest:
+                return Err("runtime/std native v2 code source order differs")
+            val compiled_member = compiled_code[code_index]
+            body = Ok(compiled_member.mir_body)
+            capsule = Some(compiled_member.capsule)
+            val bytes = file_read_regular_no_follow_bounded_bytes(
+                compiled_member.capsule.object_path, 128 * 1024 * 1024)
+            if bytes.is_err() or bytes.unwrap().len() < 4:
+                return Err("runtime/std native v2 object readback unavailable")
+            object_digest = sha256_u8_hex(bytes.unwrap())
+            object_bytes = bytes.unwrap().len()
+            capsule_digest = sha256_text(
+                compiled_member.capsule.capsule_identity)
+            code_index = code_index + 1
+        val key = runtime_std_native_semantic_action_key_v2(
+            kind, selected_member.source_identity,
+            selected_member.source_digest, expected_target,
+            backend_name, hir_digests[index], body.unwrap().digest,
+            cfg_digests[index])
+        val outcome = RuntimeStdNativeOutcomeReceiptV2(
+            kind, selected_member.source_identity,
+            selected_member.source_digest, expected_target,
+            hir_digests[index], body.unwrap().digest,
+            cfg_digests[index], key, object_digest, object_bytes,
+            capsule_digest)
+        members.push(RuntimeStdNativeMemberV2(outcome,
+            body.unwrap(), capsule))
+        index = index + 1
+    if code_index != compiled_code.len():
+        return Err("runtime/std native v2 unconsumed code member")
+    Ok(members)
+
 # V2 claims the manager-budgeted action. The current producer admits only
 # code_object rows; a source with no emit-bearing MIR still fails closed until
 # live-HIR/cfg objectless classification is wired and qualified.
@@ -3341,50 +3534,21 @@ pub fn driver_runtime_std_compile_native_action_v2(
     if not claim.claim.valid:
         return Err("runtime/std native v2 action claim failed: " +
             claim.claim.reason)
-    val compiled = driver_runtime_std_compile_native_members_v1(
+    val compiled = _runtime_std_compile_native_members_v2(
         ctx, policy, sources, package_identity, expected_index_digest,
         artifact_root, target_cpu, expected_target)
     if compiled.is_err(): return Err(compiled.unwrap_err())
     if compiled.unwrap().len() == 0:
-        return Err("runtime/std native v2 package has no code objects")
-    var members: [RuntimeStdNativeMemberV2] = []
+        return Err("runtime/std native v2 package has no source members")
+    val members = compiled.unwrap()
     var source_identities: [text] = []
     var source_digests: [text] = []
-    for member in compiled.unwrap():
-        if not ctx.runtime_std_cfg_decisions.has(member.source_identity):
-            return Err("runtime/std native v2 source cfg receipt missing")
-        val cfg = ctx.runtime_std_cfg_decisions[member.source_identity]
-        if not frontend_cfg_receipt_valid_v1(cfg,
-                member.source_identity, member.source_digest,
-                expected_target):
-            return Err("runtime/std native v2 source cfg receipt invalid")
-        val hir_digest = _runtime_std_hir_emission_digest_v2(ctx,
-            member.source_identity, member.source_digest,
-            member.mir_body.module_name)
-        if hir_digest == "":
-            return Err("runtime/std native v2 HIR evidence unavailable")
-        val bytes = file_read_regular_no_follow_bounded_bytes(
-            member.capsule.object_path, 128 * 1024 * 1024)
-        if bytes.is_err() or bytes.unwrap().len() < 4:
-            return Err("runtime/std native v2 object readback unavailable")
-        val key = runtime_std_native_semantic_action_key_v2(
-            RuntimeStdNativeOutcomeKindV2.code_object,
-            member.source_identity, member.source_digest,
-            expected_target, member.capsule.backend_name,
-            hir_digest, member.mir_body.digest, cfg.decision_digest)
-        val outcome = RuntimeStdNativeOutcomeReceiptV2(
-            RuntimeStdNativeOutcomeKindV2.code_object,
-            member.source_identity, member.source_digest,
-            expected_target, hir_digest, member.mir_body.digest,
-            cfg.decision_digest, key, sha256_u8_hex(bytes.unwrap()),
-            bytes.unwrap().len(),
-            sha256_text(member.capsule.capsule_identity))
-        members.push(RuntimeStdNativeMemberV2(outcome,
-            member.mir_body, Some(member.capsule)))
-        source_identities.push(member.source_identity)
-        source_digests.push(member.source_digest)
+    for member in members:
+        source_identities.push(member.outcome.source_identity)
+        source_digests.push(member.outcome.source_digest)
     val observed = runtime_std_native_observed_output_digest_v2(
-        members, compiled.unwrap()[0].capsule.backend_name,
+        members, get_effective_backend_name(
+            ctx.options.backend, ctx.options.release),
         expected_target, source_identities, source_digests,
         object_store_root)
     if observed.is_err(): return Err(observed.unwrap_err())
