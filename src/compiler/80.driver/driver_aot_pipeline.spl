@@ -167,6 +167,49 @@ impl CompilerDriver:
             self.apply_debug_trace()
             log_phase("aot:debug_trace:done")
 
+        # The manager-owned full V2 index task needs the complete typed graph
+        # and its emitted HIR/MIR facets, not a monolithic native binary.  It
+        # must stop before backend codegen only after every SCV source has a
+        # matching private artifact receipt.  The index publisher performs
+        # separate archive/runtime/std readback before declaring success.
+        val full_index_marker =
+            (env_get_opt("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1"
+        val full_index_selection =
+            self.ctx.runtime_std_full_inventory_selection
+        if full_index_marker or full_index_selection != nil:
+            if not full_index_marker or full_index_selection == nil:
+                return CompileResult.CodegenError(
+                    "full inventory semantic selection differs from compiler mode")
+            val expected = self.ctx.source_paths_owner.len()
+            if expected == 0 or
+                    self.ctx.cold_hir_typed_receipts.len() != expected or
+                    self.ctx.runtime_std_hir_emissions.len() != expected or
+                    self.ctx.runtime_std_mir_emissions.len() != expected:
+                return CompileResult.CodegenError(
+                    "full inventory typed HIR/MIR artifact count differs")
+            val selected = full_index_selection!
+            for receipt in self.ctx.cold_hir_typed_receipts:
+                val seed = receipt.seed
+                if seed.inventory_digest != selected.source_inventory_digest or
+                        not self.ctx.runtime_std_hir_emissions.has(
+                            seed.source_identity) or
+                        not self.ctx.runtime_std_mir_emissions.has(
+                            seed.source_identity):
+                    return CompileResult.CodegenError(
+                        "full inventory typed source artifact missing")
+                val hir = self.ctx.runtime_std_hir_emissions[
+                    seed.source_identity]
+                val mir = self.ctx.runtime_std_mir_emissions[
+                    seed.source_identity]
+                if hir.module_identity != seed.module_identity or
+                        hir.source_digest != seed.source_digest or
+                        mir.module_identity != seed.module_identity or
+                        mir.source_digest != seed.source_digest:
+                    return CompileResult.CodegenError(
+                        "full inventory typed source artifact differs")
+            log_phase("aot:cold_full_index_semantics:done modules={expected}")
+            return CompileResult.Success(nil)
+
         log_phase("aot:output:start")
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
         log_phase("aot:output:done")
