@@ -56,16 +56,23 @@ commit limit minus committed total if that value is needed for admission.
 
 ## Admission decision
 
-Derive group member count, active process count, and effective inner threads
-from measured per-group peak, CPU allowance, and *current* host capacity. Cap
-an active group's committed bytes with the existing process-tree owner. Reserve
-all active group caps before admitting another process, include measured
-manager/staging overhead and only incremental WSL growth, then resample near
-spawn after staging. Fail closed when any required sample is unavailable or
-stale. Log candidate counts, each limiting quantity, chosen counts, and the
-specific refusal or clamp reason. Keep pending groups bounded and commit
-results in manifest order after complete tree reap. Effective inner threads
-remain one until same-process native backend overlap and byte parity qualify.
+Derive active process count from CPU allowance and *current* host capacity.
+The process-tree owner enforces each group's hard cap. Windows JobObject
+current charge is committed bytes, not resident bytes, so use
+`hard cap - current charge` only for the system commit-headroom check. For
+physical/host memory, reserve each active group's full hard cap until a
+tree-wide resident sample exists. Host available physical memory already
+accounts for WSL's current resident allocation; do not subtract it separately.
+A later measured incremental WSL-growth allowance belongs in the host reserve.
+This hard-cap rule allows bounded overlap without treating a prior
+group's lower peak as a guarantee for different modules. Record prior per-group
+peaks for review and use them to tune group size only after parity and repeated
+memory measurements. Resample after staging and just before spawn. Fail closed
+when a required sample is unavailable or stale. Log candidate counts, each
+limiting quantity, chosen counts, and refusal or clamp reason. Keep pending
+groups bounded and commit results in manifest order after complete tree reap.
+Effective inner threads remain one until comparable codegen-specific memory
+evidence and native backend overlap/parity qualify.
 
 The first implementation gate is a focused policy test using measured fixture
 values, including a post-staging capacity drop, unavailable commit headroom,
