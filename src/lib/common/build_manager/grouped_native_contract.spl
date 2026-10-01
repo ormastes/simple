@@ -241,6 +241,22 @@ fn native_group_manifest_identity_v1(value: NativeGroupManifestV1) -> text:
     if payload == "": return ""
     sha256_text(payload)
 
+# Child loader acceptance is an immutable receipt, not a compiler assertion.
+# For an OK SMF row, diagnostic_digest pins these exact bytes under the
+# attempt's qualification/<sha256(module_id)>.sdn path. The parent verifies
+# that receipt after reaping the complete worker process tree.
+fn native_group_smf_loader_receipt_v1(manifest: NativeGroupManifestV1,
+        module_id: text, output_digest: text) -> text:
+    val identity = native_group_manifest_identity_v1(manifest)
+    if identity == "" or not builder_digest_valid_v1(output_digest): return ""
+    var present = false
+    for member in manifest.members:
+        if member.module_id == module_id and member.output_kind == "SMF":
+            present = true
+    if not present: return ""
+    "SIMPLE-NATIVE-SMF-LOAD-1\n" + identity + "\n" + module_id + "\n" +
+        manifest.target + "\n" + output_digest + "\nACCEPT\n"
+
 fn native_group_manifest_decode_v1(payload: text) -> Result<NativeGroupManifestV1, text>:
     var reader = BuilderWireReaderV1.create(payload)
     if reader.scalar() != "SIMPLE-NATIVE-GROUP-MANIFEST-1": return Err("invalid native manifest header")
@@ -294,6 +310,9 @@ fn native_group_module_result_validate_v1(value: NativeModuleResultV1) -> text:
             return "OK requires exact output and exit zero"
         if value.output_kind == "OBJECT" and value.smf_qualified:
             return "object-only result cannot qualify as SMF"
+        if value.output_kind == "SMF" and value.smf_qualified and
+                not builder_digest_valid_v1(value.diagnostic_digest):
+            return "qualified SMF requires a loader receipt digest"
     else:
         if value.output_path != "" or value.output_digest != "" or value.smf_qualified:
             return "failed or unrun module cannot publish output"
@@ -771,6 +790,7 @@ export NativeGroupMemberV1, NativeGroupManifestV1, NativeModuleResultV1
 export NativeGroupResultV1, NativeGroupResourceV1, NativeGroupRunV1
 export native_group_manifest_validate_v1, native_group_manifest_encode_v1, native_group_manifest_decode_v1
 export native_group_manifest_identity_v1, native_group_result_validate_against_manifest_v1
+export native_group_smf_loader_receipt_v1
 export native_group_scc_set_id_v1
 export native_group_absolute_path_valid_v1, native_module_result_encode_v1, native_module_result_decode_v1
 export native_group_run_encode_v1, native_group_run_decode_v1, native_group_run_validate_v1
