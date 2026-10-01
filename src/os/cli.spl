@@ -35,7 +35,7 @@ use std.common.contracts.execution.process_launch_spec_v1.{
     process_launch_spec_validate_v1
 }
 
-fn os_parse_arch_arg(args: [text]) -> text:
+pub fn os_parse_arch_arg(args: [text]) -> text:
     for arg in args:
         if arg.starts_with("--arch="):
             val value = arg[7:]
@@ -53,18 +53,25 @@ fn os_parse_arch_arg(args: [text]) -> text:
                 return "__missing_arch__"
             return value
         i = i + 1
-    # Default: host arch (aarch64 hosts default to arm64 guests; see
-    # qemu_default_arch in os._QemuRunner.runner_targets). --arch/--target
-    # always overrides.
-    if qemu_default_arch() == "arm64":
-        return "arm64"
-    "x86_64"
+    # Preserve the selected identity, including invalid/unknown values. The
+    # canonical registry admits it; explicit CLI flags above take precedence.
+    qemu_default_arch()
 
 fn os_has_flag(args: [text], flag: text) -> bool:
     for arg in args:
         if arg == flag:
             return true
     false
+
+pub fn simpleos_run_inspection_error_v1(args: [text]) -> text:
+    """Reject inspection modes that cannot describe the requested execution."""
+    val show_plan = os_has_flag(args, "--show-plan")
+    val print_command = os_has_flag(args, "--print-command")
+    if show_plan and print_command:
+        return "Error: --show-plan and --print-command are mutually exclusive"
+    if (show_plan or print_command) and os_has_flag(args, "--debug-gui"):
+        return "Error: --debug-gui inspection is unavailable: its command shape has no sealed projection"
+    ""
 
 fn os_parse_log_arg(args: [text]) -> text:
     var mode = "on"
@@ -125,7 +132,7 @@ fn print_os_help():
     print "  targets            List supported architectures"
     print ""
     print "Options:"
-    print "  --arch=<name>      Target architecture (default: x86_64)"
+    print "  --arch=<name>      Guest alias or SimpleOS triple (default: discovered host arch)"
     print "  --target=<name>    Alias for --arch"
     print "  --all              Test all architectures (with 'test' command)"
     print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
@@ -208,7 +215,7 @@ fn print_os_targets():
         val name = arch_display_name(target.arch)
         print "  {name}  ->  {target.target_triple}  ({target.qemu_system})"
     print ""
-    print "Default: x86_64"
+    print "Default: SIMPLEOS_QEMU_ARCH or discovered host arch; otherwise select --arch."
 
 fn _export_os_log_mode(log_mode: text) -> bool:
     if env_set("SIMPLE_OS_LOG_MODE", log_mode):
@@ -239,6 +246,8 @@ fn os_parse_scenario_arg(args: [text]) -> text:
 fn _os_arch_arg_error(arch_name: text) -> text:
     if arch_name == "__missing_arch__":
         return "Error: --arch/--target requires a value"
+    if arch_name == "unknown":
+        return "Error: guest architecture is unknown; select --arch or SIMPLEOS_QEMU_ARCH"
     ""
 
 fn _os_scenario_arg_error(scenario_name: text) -> text:
@@ -290,6 +299,10 @@ fn handle_os_build(args: [text]) -> i64:
 
 fn _handle_os_inspection_v1(args: [text], print_command: bool) -> i64:
     """Inspect a sealed QEMU plan without mutating process environment state."""
+    val mode_error = simpleos_run_inspection_error_v1(args)
+    if mode_error != "":
+        print mode_error
+        return 1
     val log_mode = os_parse_log_arg(args)
     val log_error = os_log_arg_error(log_mode)
     if log_error != "":
@@ -342,11 +355,12 @@ fn _handle_os_inspection_v1(args: [text], print_command: bool) -> i64:
     0
 
 fn handle_os_run(args: [text]) -> i64:
+    val mode_error = simpleos_run_inspection_error_v1(args)
+    if mode_error != "":
+        print mode_error
+        return 1
     val show_plan = os_has_flag(args, "--show-plan")
     val print_command = os_has_flag(args, "--print-command")
-    if show_plan and print_command:
-        print "Error: --show-plan and --print-command are mutually exclusive"
-        return 1
     if show_plan or print_command:
         return _handle_os_inspection_v1(args, print_command)
     val log_mode = os_parse_log_arg(args)

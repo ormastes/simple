@@ -27,7 +27,8 @@ use os.port.simpleos_multiplatform_build.{simpleos_machine_target_projection}
 use os.port.qemu_machine_plan_v1.{
     QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
     QemuHostResolutionV1, QemuLaunchPlanV1,
-    qemu_machine_spec_from_lane_v1, qemu_launch_plan_bind_lane_parity_v1
+    qemu_machine_spec_from_lane_v1, qemu_machine_spec_from_named_lane_v1,
+    qemu_launch_plan_bind_lane_parity_v1
 }
 
 val ARG_OBSERVER_SOURCE = "test/03_system/os/feature/qemu_argv_observer.c"
@@ -77,7 +78,44 @@ fn expected_observed_argv_v1(plan: QemuLaunchPlanV1) -> text:
         index = index + 1
     result
 
+# @inline
+fn setup_named_catalog_qemu_plan_v1(target_name: text, lane_name: text, executable: text) -> QemuLaunchPlanV1:
+    val target = simpleos_machine_target_projection(target_name)
+    val lane = target.qemu_lane_or_smoke(lane_name)
+    val request = QemuAcceleratorRequestV1(
+        kind: QemuAcceleratorRequestKindV1.Auto, accelerator: QemuAcceleratorV1.Tcg)
+    val spec = qemu_machine_spec_from_named_lane_v1(
+        target, lane, IMAGE_DIGEST, qemu_launch_memory_mib_v1(lane.qemu_memory), request)
+    val host = QemuHostResolutionV1(
+        host_adapter_id: "host-process-fixture", executable_path: executable,
+        firmware_path: "", available_accelerators: [QemuAcceleratorV1.Tcg])
+    qemu_launch_plan_bind_lane_parity_v1(spec, host)
+
 describe "REQ-001 REQ-014 REQ-016 UP-AC-005: sealed catalog dispatch [host-fixture]":
+    it "delivers each represented named lane's ordered argv to the actual host observer":
+        # @req: REQ-001 REQ-014 REQ-016
+        """The named-plan dispatch sends every catalog argument to a real
+        child process. This fixture is neither QEMU nor guest boot evidence."""
+        step("Compile one real argv observer for the named-route matrix")
+        val executable = compile_argv_observer_v1()
+        if executable != "":
+            val target_names = ["x86_64", "x86_32", "riscv64", "riscv32"]
+            val lane_names = ["x86_64-q35-pure-nvme-perf", "x86_32-initrd-fat32-smf", "riscv64-virtio-fat32-smf", "riscv32-virtio-fat32-smf"]
+            for index in 0..lane_names.len():
+                val lane = lane_names[index]
+                step("Seal the named catalog command without reparsing display text")
+                val plan = setup_named_catalog_qemu_plan_v1(target_names[index], lane, executable)
+                expect(plan.admitted()).to_equal(true)
+                expect(plan.sealed_valid()).to_equal(true)
+                if plan.admitted() and plan.sealed_valid():
+                    step("Dispatch and compare the child's actual ordered arguments")
+                    val (stdout, stderr, status) = qemu_cli_dispatch_plan_v1(plan, 30000)
+                    expect(file_write(executable + "." + lane + ".txt",
+                        "plan_digest={plan.argv_digest()}\nexit={status}\nstdout:\n{stdout}\nstderr:\n{stderr}\n")).to_equal(true)
+                    expect(status).to_equal(37)
+                    expect(stderr.replace("\r\n", "\n")).to_equal("argv-observer: invoked\n")
+                    expect(stdout.replace("\r\n", "\n")).to_equal(expected_observed_argv_v1(plan))
+
     it "should seal a dispatch command for every catalog default target":
         """Each advertised default architecture gives the dispatch owner a
         usable sealed command; the single child-process scenario below checks

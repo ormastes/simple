@@ -132,3 +132,16 @@ is checked before narrowing CPU counts, and memory units normalize to MiB.
 Invalid values produce zero, which the machine-spec validator rejects. Both
 lane constructors accept `cpu_count: u16 = 10u16`; parity argv emits `-smp`
 explicitly. Inspection reads the same override owner as the existing runner.
+
+CLI identity resolution now uses
+`simpleos_platform_cli_arch_by_name(name: text) -> Architecture?` in the
+existing platform catalog accessor. The result is deliberately small rather
+than an optional full catalog record. The shared matcher also lets inspection
+resolve CLI-prefixed aliases and canonical userland triples. General build
+lookup retains its broader target semantics; architecture-only CLI lookup
+does not inherit its hosted/kernel-only/board admissions.
+
+`qemu_default_arch_from_facts_v1(configured, host)` preserves explicit intent
+or the observed host value. `os_parse_arch_arg` returns that identity without
+changing architectures; later registry admission rejects invalid/unknown
+values. The target-identity plan records the unrun behavioral and live gates.

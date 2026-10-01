@@ -1,8 +1,15 @@
+"""Exercise compiler identity and backend-capability boundaries with unit shims.
+
+The shims are test doubles for version/canary behavior, never admitted runtime
+or live CLI evidence. Real artifact selection is a separate system gate.
+"""
+use std.spec.{describe, it, expect, step}
 use os._QemuRunner.os_build_run.{
     simpleos_candidate_version_is_selfhosted,
     simpleos_compiler_candidate_supports_backend,
     simpleos_select_compiler_candidate
 }
+use app.io.env_ops.{env_get, env_set}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -15,7 +22,9 @@ fn install_compiler_shim(root: text, kind: text) -> text:
     val path = root + "/simple-" + kind + ".sh"
     val script = "#!/bin/sh\n" +
         "if [ \"$1\" = --version ]; then\n" +
+        "  printf 'warning=%s\\nbootstrap=%s\\n' \"$SIMPLE_RUST_SEED_WARNING\" \"$SIMPLE_BOOTSTRAP\" > \"" + root + "/version-env\" || exit 66\n" +
         "  if [ \"" + kind + "\" = seed ]; then echo 'WARNING: this Rust-built Simple binary is a bootstrap seed only' >&2; fi\n" +
+        "  if [ \"" + kind + "\" = suppressed-seed ] && [ \"$SIMPLE_RUST_SEED_WARNING\" = 1 ]; then echo 'WARNING: bootstrap seed only' >&2; fi\n" +
         "  echo 'Simple Language test compiler'; exit 0\n" +
         "fi\n" +
         "backend= output=\n" +
@@ -34,6 +43,7 @@ fn install_compiler_shim(root: text, kind: text) -> text:
 
 describe "SimpleOS compiler admission":
     it "rejects Rust bootstrap seed banners on either output stream":
+        # @req: REQ-001 REQ-016
         step("A seed reports its bootstrap identity through --version")
         expect(simpleos_candidate_version_is_selfhosted(
             "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.\nSimple Language v1.0.0-beta\n", "", 0
@@ -43,25 +53,37 @@ describe "SimpleOS compiler admission":
         )).to_equal(false)
 
     it "admits a runnable self-hosted version and rejects failed probes":
+        # @req: REQ-001 REQ-016
         step("A candidate must produce a successful nonempty version without the seed banner")
         expect(simpleos_candidate_version_is_selfhosted("Simple Language v1.0.0-beta\n", "", 0)).to_equal(true)
         expect(simpleos_candidate_version_is_selfhosted("", "", 0)).to_equal(false)
         expect(simpleos_candidate_version_is_selfhosted("Simple Language v1.0.0-beta\n", "", 1)).to_equal(false)
 
     it "pins the candidate and forces its seed identity banner":
+        # @req: REQ-001 REQ-016
         step("The version probe uses the same candidate identity and overrides seed warning suppression")
-        val source = rt_file_read_text("src/os/_QemuRunner/os_build_run.spl")
-        expect(source).to_contain("var env_args = _candidate_identity_env_args(candidate)")
-        expect(source).to_contain("env_args.push(\"SIMPLE_BOOTSTRAP=0\")")
-        expect(source).to_contain("env_args.push(\"SIMPLE_RUST_SEED_WARNING=1\")")
-        expect(source).to_contain("candidate, [\"--version\"], 5000, 65536, _candidate_version_env_args(candidate)")
+        val candidate = install_compiler_shim("build/test-simpleos-compiler-admission/suppressed-seed", "suppressed-seed")
+        expect(candidate.len()).to_be_greater_than(0)
+        if candidate != "":
+            val prior_warning = env_get("SIMPLE_RUST_SEED_WARNING") ?? ""
+            val prior_bootstrap = env_get("SIMPLE_BOOTSTRAP") ?? ""
+            val warning_set = env_set("SIMPLE_RUST_SEED_WARNING", "0")
+            val bootstrap_set = env_set("SIMPLE_BOOTSTRAP", "1")
+            val accepted = simpleos_compiler_candidate_supports_backend(candidate, "cranelift")
+            expect(env_set("SIMPLE_RUST_SEED_WARNING", prior_warning)).to_equal(true)
+            expect(env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)).to_equal(true)
+            expect(warning_set and bootstrap_set).to_equal(true)
+            expect(accepted).to_equal(false)
+            expect(rt_file_read_text("build/test-simpleos-compiler-admission/suppressed-seed/version-env").replace("\r\n", "\n")).to_equal("warning=1\nbootstrap=0\n")
 
     it "reaches the requested LLVM backend and executes its canary":
+        # @req: REQ-001 REQ-016
         step("A compiler shim only publishes the exact-output canary after observing --backend llvm")
         val candidate = install_compiler_shim("build/test-simpleos-compiler-admission/working", "working")
         expect(simpleos_compiler_candidate_supports_backend(candidate, "llvm")).to_equal(true)
 
     it "fails closed when no candidate can execute the backend canary":
+        # @req: REQ-001 REQ-016
         step("Seed and backend-failing candidates cannot be selected")
         val seed = install_compiler_shim("build/test-simpleos-compiler-admission/seed", "seed")
         val failing = install_compiler_shim("build/test-simpleos-compiler-admission/failing", "failing")
@@ -72,6 +94,7 @@ describe "SimpleOS compiler admission":
         expect(simpleos_select_compiler_candidate([seed, failing, wrong_output], "llvm")).to_equal("")
 
     it "deduplicates a failing alias and selects the first working compiler":
+        # @req: REQ-001 REQ-016
         step("Selection preserves priority without repeating the same cold backend canary")
         val failing = install_compiler_shim("build/test-simpleos-compiler-admission/fallback-failing", "failing")
         val working = install_compiler_shim("build/test-simpleos-compiler-admission/fallback-working", "working")

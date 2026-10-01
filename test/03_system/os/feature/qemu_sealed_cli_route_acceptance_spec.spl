@@ -17,7 +17,7 @@ Missing prerequisites fail as MissingEvidence; they never become skipped passes.
 use std.spec.*
 use std.io_runtime.{cwd, getpid, mkdir_p}
 use app.io.mod.{file_exists, file_hash_sha256, file_write, process_run_timeout}
-use app.io.env_ops.{env_get}
+use app.io.env_ops.{env_get, env_set}
 use os.qemu_cli_plan_v1.{
     qemu_cli_inspect_plan_v1,
     qemu_cli_inspect_named_lane_v1, qemu_cli_dispatch_command_v1,
@@ -27,13 +27,14 @@ use os.qemu_runner.{
     OsTarget, arch_from_name, get_qemu_target, scenario_by_name_direct,
     scenario_target, scenario_kernel_path,
     scenario_sealed_run_supported_v1, qemu_scenario_serial_acceptance_reason,
-    _scenario_required_marker_fragments
+    _scenario_required_marker_fragments, build_os
 }
 use os.fs_wrapper_artifact.{fs_wrapper_artifact_admitted}
 use os.qemu_compiler_admission_v1.{qemu_compiler_select_v1}
 
 var admitted_cli: text = ""
 var admitted_cli_digest: text = ""
+var admitted_provenance_digest: text = ""
 var route_evidence_root: text = ""
 
 # @inline
@@ -84,14 +85,19 @@ fn admit_full_cli_for_routes() -> bool:
     if selected_alias == "" or file_hash_sha256(selected_alias) != file_hash_sha256(cli):
         fail("CompilerSelectionFailed: an admitted alias was not selected with no primary override")
         return false
+    step("Reject an existing noncompiler artifact instead of falling back to an admitted alias")
+    val noncompiler = cwd() + "/release/version.sdn"
+    if not file_exists(noncompiler): return missing_cli_evidence("canonical version authority is absent")
+    expect(qemu_compiler_select_v1(noncompiler, cli, cwd())).to_equal("")
     admitted_cli = selected
     admitted_cli_digest = file_hash_sha256(cli)
-    if admitted_cli_digest.len() != 64:
+    admitted_provenance_digest = file_hash_sha256(cli + ".provenance.env")
+    if admitted_cli_digest.len() != 64 or admitted_provenance_digest.len() != 64:
         admitted_cli = ""
-        return missing_cli_evidence("could not hash the admitted full CLI")
+        return missing_cli_evidence("could not hash the admitted full CLI and its provenance")
     if not file_write(route_evidence_root + "/identity.txt",
         "cli={cli}\ncli_sha256={admitted_cli_digest}\n" +
-        "provenance_sha256=" + file_hash_sha256(cli + ".provenance.env") + "\n"):
+        "provenance_sha256=" + admitted_provenance_digest + "\n"):
         admitted_cli = ""
         return missing_cli_evidence("could not retain admitted CLI identity")
     true
@@ -120,6 +126,8 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     if admitted_cli == "": return missing_cli_evidence("full CLI admission is unavailable")
     if file_hash_sha256(admitted_cli) != admitted_cli_digest:
         return missing_cli_evidence("admitted CLI changed before route execution")
+    if file_hash_sha256(admitted_cli + ".provenance.env") != admitted_provenance_digest:
+        return missing_cli_evidence("admitted CLI provenance changed before route execution")
     var target: OsTarget = get_qemu_target(arch_from_name(arch).unwrap())
     var kernel = target.output
     var args = ["os", "run", "--arch=" + arch]
@@ -147,6 +155,8 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     val plan = prepared.launch_plan().unwrap()
     val command = qemu_cli_dispatch_command_v1(plan)
     if command.len() == 0: return missing_cli_evidence("prepared plan has no admitted sealed command")
+    val qemu_digest = file_hash_sha256(plan.executable_path())
+    if qemu_digest.len() != 64: return missing_cli_evidence("real QEMU identity could not be hashed")
 
     step("Admit real QEMU by the canonical host and accelerator probe")
     val (probe_out, probe_err, probe_status) = process_run_timeout("sh", [
@@ -156,6 +166,13 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     if not retain_cli_result(route + ".qemu-admission", probe_out, probe_err, probe_status): return false
     if probe_status != 0:
         return missing_cli_evidence("real QEMU host/accelerator admission failed for " + route)
+    val actual_host = cli_output_field(probe_out, "detected_host=")
+    if actual_host != "linux" and actual_host != "windows":
+        return missing_cli_evidence("this acceptance matrix requires an actual Linux or Windows host")
+    expect(cli_output_field(probe_out, "host_identity_status=")).to_equal("pass")
+    expect(cli_output_field(probe_out, "accelerator_probe_status=")).to_equal("pass")
+    expect(cli_output_field(probe_out, "qemu_sha256=")).to_equal(qemu_digest)
+    expect(cli_output_field(probe_out, "qemu_version=")).to_contain("QEMU emulator version")
 
     step("Inspect the plan through the admitted full CLI")
     val inspect_args = args + ["--show-plan"]
@@ -167,6 +184,7 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     expect(cli_output_field(inspect_out, "Sealed:")).to_equal("true")
     if inspect_status != 0: return false
     val host = cli_output_field(inspect_out, "Host:")
+    expect(host).to_equal(actual_host)
     val (display_out, display_err, display_status) = run_admitted_cli(args + ["--print-command"], 30000)
     if not retain_cli_result(route + ".command", display_out, display_err, display_status): return false
     expect(display_status).to_equal(0)
@@ -180,6 +198,8 @@ fn run_live_cli_route(arch: text, scenario_name: text) -> bool:
     if not retain_cli_result(route + ".run", stdout, stderr, status): return false
     expect(status).to_equal(0)
     expect(file_hash_sha256(admitted_cli)).to_equal(admitted_cli_digest)
+    expect(file_hash_sha256(admitted_cli + ".provenance.env")).to_equal(admitted_provenance_digest)
+    expect(file_hash_sha256(plan.executable_path())).to_equal(qemu_digest)
     expect(file_hash_sha256(kernel)).to_equal(kernel_digest)
     expect(fs_wrapper_artifact_admitted(target.entry, kernel)).to_equal(true)
     val label = if scenario_name == "": arch else: scenario_name
@@ -207,6 +227,59 @@ describe "Rebuilt CLI executes sealed SimpleOS routes with real QEMU":
     before_all:
         step("Require canonical full-CLI Stage4 provenance once for this suite")
         expect(admit_full_cli_for_routes()).to_equal(true)
+
+    it "refuses GUI inspection through the real CLI before building or launching all five routes":
+        # @req: REQ-014 REQ-016
+        """An unsupported inspection mode produces its own diagnostic before
+        kernel or QEMU work, even when real launch prerequisites exist."""
+        if admitted_cli == "":
+            fail("MissingEvidence: full CLI admission is unavailable")
+        else:
+            step("Request both inspection surfaces with an unrepresented GUI mode")
+            for route in ["--arch=x86_64", "--scenario=x86_64-q35-pure-nvme-perf", "--scenario=x86_32-initrd-fat32-smf", "--scenario=riscv64-virtio-fat32-smf", "--scenario=riscv32-virtio-fat32-smf"]:
+                for inspection in ["--show-plan", "--print-command"]:
+                    val (stdout, stderr, status) = run_admitted_cli(["os", "run", route, inspection, "--debug-gui"], 30000)
+                    val label = route.replace("--", "").replace("=", "-") + ".gui-" + inspection.replace("--", "")
+                    expect(retain_cli_result(label, stdout, stderr, status)).to_equal(true)
+                    expect(status).to_equal(1)
+                    expect(stdout.trim()).to_equal("Error: --debug-gui inspection is unavailable: its command shape has no sealed projection")
+                    expect(stdout.contains("[build]")).to_equal(false)
+                    expect(stdout.contains("[run]")).to_equal(false)
+
+    it "refuses a changed invalid compiler after a real successful build in the same process":
+        # @req: REQ-001 REQ-016
+        """A cached kernel cannot override my newly selected compiler identity."""
+        if admitted_cli == "":
+            fail("MissingEvidence: full CLI admission is unavailable")
+        else:
+            step("Warm the real default kernel through the admitted build owner")
+            val target = get_qemu_target(arch_from_name("x86_64").unwrap())
+            if not file_exists(target.output):
+                fail("MissingEvidence: prepare the real default kernel before cache admission testing")
+            else:
+                val prior_primary = env_get("SIMPLE_BINARY") ?? ""
+                val prior_alias = env_get("SIMPLE_BIN") ?? ""
+                val pinned_primary = env_set("SIMPLE_BINARY", admitted_cli)
+                val pinned_alias = env_set("SIMPLE_BIN", admitted_cli)
+                var warmed = false
+                var invalid_override_accepted = false
+                val missing = route_evidence_root + "/absent-cache-compiler"
+                expect(file_exists(missing)).to_equal(false)
+                if pinned_primary and pinned_alias and not file_exists(missing):
+                    warmed = build_os(target)
+                    if warmed:
+                        step("Change the explicit identity while retaining the real cached kernel")
+                        if env_set("SIMPLE_BINARY", missing):
+                            invalid_override_accepted = build_os(target)
+                        else:
+                            fail("MissingEvidence: could not change explicit compiler environment")
+                expect(env_set("SIMPLE_BINARY", prior_primary)).to_equal(true)
+                expect(env_set("SIMPLE_BIN", prior_alias)).to_equal(true)
+                expect(pinned_primary and pinned_alias).to_equal(true)
+                expect(warmed).to_equal(true)
+                expect(invalid_override_accepted).to_equal(false)
+                expect(file_write(route_evidence_root + "/cache-compiler-refusal.txt",
+                    "warm_build={warmed}\ninvalid_override_accepted={invalid_override_accepted}\n")).to_equal(true)
 
     it "runs the inspected default x86_64 route and checks its guest smoke banner":
         # @req: REQ-001 REQ-014 REQ-016
