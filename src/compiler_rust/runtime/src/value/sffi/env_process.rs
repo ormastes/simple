@@ -769,6 +769,31 @@ fn publish_spawned_child(registry: &Mutex<HashMap<i64, std::process::Child>>, mu
     }
 }
 
+/// Native two-word text/array facade. Keep the seed's split ptr/len ABI separate.
+/// Runtime strings are length-delimited (not necessarily NUL-terminated); only
+/// an already-raw native text pointer uses the C-string fallback.
+/// The caller borrows command/argv through this call; raw text must point to
+/// valid NUL-terminated storage. Known non-string heap values are rejected.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_spawn_async_value(cmd: RuntimeValue, args: RuntimeValue) -> i64 {
+    if rt_array_len(args) < 0 {
+        return -1;
+    }
+    let len = rt_string_len(cmd);
+    if len >= 0 {
+        return rt_process_spawn_async(rt_string_data(cmd), len as u64, args);
+    }
+    if cmd.heap_type().is_some() {
+        return -1;
+    }
+    let ptr = cmd.to_raw() as usize as *const std::ffi::c_char;
+    if (ptr as usize) < 0x10000 {
+        return -1;
+    }
+    let command = std::ffi::CStr::from_ptr(ptr).to_bytes();
+    rt_process_spawn_async(command.as_ptr(), command.len() as u64, args)
+}
+
 /// Spawn a process asynchronously without waiting.
 /// Returns process ID (pid) or -1 on error.
 /// The child is stored internally so it can be waited on or killed later.
@@ -2001,6 +2026,20 @@ mod tests {
             rt_array_push(args, RuntimeValue::from_int(7));
             let command = if cfg!(windows) { "cmd.exe" } else { "/bin/true" };
             assert_eq!(rt_process_spawn_async(command.as_ptr(), command.len() as u64, args), -1);
+        }
+    }
+
+    #[test]
+    fn async_spawn_value_rejects_invalid_values() {
+        unsafe {
+            let args = rt_array_new(0);
+            let name: &[u8] = if cfg!(windows) { b"cmd.exe" } else { b"/bin/true" };
+            let command = rt_string_new(name.as_ptr(), name.len() as u64);
+            assert_eq!(rt_process_spawn_async_value(RuntimeValue::NIL, args), -1);
+            assert_eq!(rt_process_spawn_async_value(args, args), -1);
+            assert_eq!(rt_process_spawn_async_value(command, command), -1);
+            rt_array_push(args, RuntimeValue::from_int(7));
+            assert_eq!(rt_process_spawn_async_value(command, args), -1);
         }
     }
 
