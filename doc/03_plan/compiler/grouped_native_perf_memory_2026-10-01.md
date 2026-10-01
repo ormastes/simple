@@ -63,6 +63,9 @@ current charge is committed bytes, not resident bytes, so use
 physical/host memory, reserve each active group's full hard cap until a
 tree-wide resident sample exists. Host available physical memory already
 accounts for WSL's current resident allocation; do not subtract it separately.
+The full-cap physical reservation can double-count active resident pages and
+therefore suppress otherwise-safe overlap; it is a conservative temporary
+bound, not a measured resident headroom estimate.
 A later measured incremental WSL-growth allowance belongs in the host reserve.
 This hard-cap rule allows bounded overlap without treating a prior
 group's lower peak as a guarantee for different modules. Record prior per-group

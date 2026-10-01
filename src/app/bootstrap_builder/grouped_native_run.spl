@@ -821,6 +821,21 @@ fn native_group_effective_threads_v1(manifest: NativeGroupManifestV1,
         return 2
     1
 
+fn native_group_active_charges_v1(run: NativeGroupRunV1,
+        started: [NativeGroupPrestartedV1]
+        ) -> Result<([NativeGroupActiveChargeV1], i64), text>:
+    var charges: [NativeGroupActiveChargeV1] = []
+    var disk_allowance: i64 = 0
+    for active in started:
+        val observed = group_process_poll_v1(active.owner)?
+        if not observed.terminal:
+            charges = charges.push(NativeGroupActiveChargeV1(
+                active.manifest.memory_limit_bytes,
+                observed.memory_current_bytes, active.effective_threads))
+            disk_allowance = disk_allowance + active.source_bytes * 8 +
+                run.estimated_group_disk_bytes
+    Ok((charges, disk_allowance))
+
 fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
         initial_groups: [text], first_index: i64,
         capacity: NativeGroupedCapacityV1) -> Result<NativeGroupRunV1, text>:
@@ -844,6 +859,42 @@ fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
                 return Err("next native group dependency marker is not ready: " + manifest.group_id)
             print "native group prestart refused group={manifest.group_id} reason=dependency-marker-not-ready"
             break
+        if started.len() > 0:
+            # Keep staging bounded too: check active future growth before the
+            # next attempt creates private inputs and cache directories.
+            val source_bytes = match native_group_source_bytes_v1(next, manifest):
+                Ok(value): value
+                Err(reason):
+                    print "native group prestart refused group={manifest.group_id} stage=before-staging reason={reason}"
+                    break
+            val before = match native_group_active_charges_v1(next, started):
+                Ok(value): value
+                Err(reason): return Err("active group observation unavailable before staging: " + reason)
+            val (before_charges, before_disk) = before
+            val before_sample = match native_group_capacity_check_v1(next,
+                    manifest, source_bytes, capacity):
+                Ok(value): value
+                Err(reason):
+                    print "native group prestart refused group={manifest.group_id} stage=before-staging reason={reason}"
+                    break
+            var before_threads: i64 = 1
+            for prior_resource in next.resources:
+                if prior_resource.group_id == manifest.group_id and
+                        prior_resource.attempt == manifest.attempt:
+                    before_threads = native_group_effective_threads_v1(
+                        manifest, prior_resource, host_cpus)
+            val before_budget = native_group_process_budget_v1(host_cpus,
+                before_threads, manifest.memory_limit_bytes,
+                next.memory_reserve_bytes, before_sample.available_memory_bytes,
+                before_sample.available_commit_bytes,
+                before_sample.commit_measured, before_charges)?
+            val before_disk_needed = next.minimum_free_disk_bytes + before_disk +
+                source_bytes * 8 + next.estimated_group_disk_bytes
+            if not before_budget.admitted or
+                    before_sample.available_disk_bytes < before_disk_needed:
+                val reason = if not before_budget.admitted: before_budget.reason else: "wave-disk-headroom"
+                print "native group prestart refused group={manifest.group_id} stage=before-staging reason={reason} available_memory={before_budget.available_memory_bytes} required_host={before_budget.required_host_bytes} available_commit={before_budget.available_commit_bytes} required_commit={before_budget.required_commit_bytes} available_disk={before_sample.available_disk_bytes} required_disk={before_disk_needed}"
+                break
         val prepared = match native_group_prepare_attempt_v1(next, manifest, capacity):
             Ok(value): value
             Err(reason):
@@ -851,22 +902,8 @@ fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
                 print "native group prestart refused group={manifest.group_id} reason={reason}"
                 break
         next = prepared.run
-        var charges: [NativeGroupActiveChargeV1] = []
-        var active_disk_allowance: i64 = 0
-        var uncertain = false
-        for active in started:
-            match group_process_poll_v1(active.owner):
-                Ok(observed):
-                    if not observed.terminal:
-                        charges = charges.push(NativeGroupActiveChargeV1(
-                            active.manifest.memory_limit_bytes,
-                            observed.memory_current_bytes, active.effective_threads))
-                        active_disk_allowance = active_disk_allowance +
-                            active.source_bytes * 8 + next.estimated_group_disk_bytes
-                Err(reason):
-                    print "native group prestart refused group={manifest.group_id} reason=active-owner-unknown detail={reason}"
-                    uncertain = true
-        if uncertain: break
+        val after = native_group_active_charges_v1(next, started)?
+        val (charges, active_disk_allowance) = after
         val sample = native_group_capacity_check_v1(next, manifest,
             prepared.source_bytes, capacity)?
         val wave_disk = next.minimum_free_disk_bytes + active_disk_allowance +
