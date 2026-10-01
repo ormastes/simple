@@ -34,6 +34,7 @@
 #if defined(_WIN32)
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 #include <windows.h>
