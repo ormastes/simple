@@ -1,0 +1,177 @@
+# Portable, opt-in flat-pool cache shared by isolated compiler processes.
+# Only the exact target-receipted parser input may cross host boundaries.
+# The source file, parser/codec source tree, target preprocessing identity,
+# relative logical path, and parse feature flags all participate in the key.
+# Each cell is an immutable no-replace publish with a verified payload digest.
+# A miss, torn write, corrupt cell, or conflicting concurrent publisher always
+# reparses. No target object, mutable index, or host-private cache state lives
+# under this root.
+
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use compiler.frontend.cache_dir_evict.{cache_dir_evict_to_cap}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, dir_exists, dir_create_all,
+    file_delete, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_publish_noreplace}
+use std.nogc_sync_mut.io.shared_parse_cell.{shared_parse_cell_read_nofollow_v1}
+
+val SHARED_PARSE_CELL_VERSION_V1: text = "simple-shared-flat-pool-v1"
+val SHARED_PARSE_MAX_CELL_BYTES_V1: i64 = 33554432
+val SHARED_PARSE_MAX_ROOT_BYTES_V1: i64 = 4294967296
+
+var _shared_parse_stores_v1: i64 = 0
+
+fn _shared_parse_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64: return false
+    val hex = "0123456789abcdef"
+    for character in digest:
+        if not hex.contains(character): return false
+    true
+
+pub fn frontend_shared_parse_path_portable_v1(path: text) -> bool:
+    if path == "" or path.len() > 1024 or path.contains("\\") or
+            path.contains(":") or path.contains("//") or path.contains(".."):
+        return false
+    path.starts_with("src/") or path.starts_with("examples/10_tooling/")
+
+pub fn frontend_shared_parse_logical_path_v1(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    if frontend_shared_parse_path_portable_v1(normalized): return normalized
+    val src_at = normalized.last_index_of("/src/")
+    val example_at = normalized.last_index_of("/examples/10_tooling/")
+    val at = if src_at > example_at: src_at else: example_at
+    if at < 0: return ""
+    val logical = normalized.substring(at + 1, normalized.len())
+    if frontend_shared_parse_path_portable_v1(logical): logical else: ""
+
+fn _shared_parse_payload_has_host_path_v1(path: text, blob: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if frontend_shared_parse_path_portable_v1(normalized): return false
+    val logical = frontend_shared_parse_logical_path_v1(path)
+    if logical == "": return true
+    val root = normalized.substring(0, normalized.len() - logical.len() - 1)
+    if root.len() < 3: return true
+    blob.contains(root + "/") or blob.contains(root.replace("/", "\\") + "\\")
+
+pub fn frontend_shared_parse_key_v1(source_sha: text, parser_input_sha: text,
+        parser_identity: text, target_identity: text, logical_path: text,
+        feature_identity: text) -> text:
+    if not _shared_parse_digest_valid_v1(source_sha) or
+            not _shared_parse_digest_valid_v1(parser_input_sha) or
+            not _shared_parse_digest_valid_v1(parser_identity) or
+            not _shared_parse_digest_valid_v1(target_identity) or
+            not _shared_parse_digest_valid_v1(feature_identity) or
+            not frontend_shared_parse_path_portable_v1(logical_path):
+        return ""
+    sha256_text(SHARED_PARSE_CELL_VERSION_V1 + "\n" + source_sha + "\n" +
+        parser_input_sha + "\n" + parser_identity + "\n" +
+        FLAT_POOL_CODEC_VERSION + "\n" + target_identity + "\n" +
+        feature_identity + "\n" + logical_path + "\n")
+
+pub fn frontend_shared_parse_feature_identity_v1() -> text:
+    # These are the parser/bridge feature switches that can alter flat-pool
+    # construction. A bootstrap interpreter's environment-backed arrays are
+    # deliberately excluded entirely below.
+    sha256_text("simple.shared-parse-features.v1\n" +
+        "arena=" + (env_get_opt("SIMPLE_NATIVE_ARENA_DECLS") ?? "") + "\n" +
+        "entry-closure=" + (env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") + "\n" +
+        "debug-match=" + (env_get_opt("SIMPLE_DEBUG_MATCH_PAT") ?? "") + "\n")
+
+fn _shared_parse_key_for_v1(source_sha: text, parse_source: text,
+        target_identity: text, logical_path: text) -> text:
+    if (env_get_opt("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? "") == "" or
+            (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" or
+            (env_get_opt("SIMPLE_FRONTEND_CACHE") ?? "") == "0" or
+            not _shared_parse_digest_valid_v1(target_identity) or
+            frontend_shared_parse_logical_path_v1(logical_path) == "":
+        return ""
+    val parser_identity = env_get_opt("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY") ?? ""
+    frontend_shared_parse_key_v1(source_sha, sha256_text(parse_source),
+        parser_identity, target_identity,
+        frontend_shared_parse_logical_path_v1(logical_path),
+        frontend_shared_parse_feature_identity_v1())
+
+pub fn frontend_shared_parse_cell_encode_v1(key: text, blob: text) -> text:
+    if not _shared_parse_digest_valid_v1(key) or blob == "" or
+            text_byte_len(blob) > SHARED_PARSE_MAX_CELL_BYTES_V1 - 160:
+        return ""
+    SHARED_PARSE_CELL_VERSION_V1 + "\n" + key + "\n" +
+        sha256_text(blob) + "\n" + blob
+
+pub fn frontend_shared_parse_cell_decode_v1(key: text, cell: text) -> text:
+    if not _shared_parse_digest_valid_v1(key) or cell == "" or
+            text_byte_len(cell) > SHARED_PARSE_MAX_CELL_BYTES_V1:
+        return ""
+    val first = cell.index_of("\n")
+    if first < 0 or cell.substring(0, first) != SHARED_PARSE_CELL_VERSION_V1:
+        return ""
+    val rest = cell.substring(first + 1, cell.len())
+    val second = rest.index_of("\n")
+    if second < 0 or rest.substring(0, second) != key: return ""
+    val remainder = rest.substring(second + 1, rest.len())
+    val third = remainder.index_of("\n")
+    if third < 0: return ""
+    val payload_digest = remainder.substring(0, third)
+    val payload = remainder.substring(third + 1, remainder.len())
+    if payload == "" or not _shared_parse_digest_valid_v1(payload_digest) or
+            sha256_text(payload) != payload_digest or
+            not payload.starts_with(FLAT_POOL_CODEC_VERSION + "\n"):
+        return ""
+    payload
+
+fn _shared_parse_load_cell_v1(root_path: text, key: text) -> text:
+    if not _shared_parse_digest_valid_v1(key): return ""
+    val path = root_path + "/parse-v1/" + key + ".spc"
+    val raw = shared_parse_cell_read_nofollow_v1(path,
+        SHARED_PARSE_MAX_CELL_BYTES_V1)
+    frontend_shared_parse_cell_decode_v1(key, raw)
+
+pub fn frontend_shared_parse_load_v1(source_sha: text, parse_source: text,
+        target_identity: text, logical_path: text) -> text:
+    val key = _shared_parse_key_for_v1(source_sha, parse_source,
+        target_identity, logical_path)
+    if key == "": return ""
+    _shared_parse_load_cell_v1(
+        env_get_opt("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? "", key)
+
+pub fn frontend_shared_parse_store_v1(source_sha: text, parse_source: text,
+        target_identity: text, logical_path: text, blob: text) -> bool:
+    if _shared_parse_payload_has_host_path_v1(logical_path, blob):
+        return false
+    val key = _shared_parse_key_for_v1(source_sha, parse_source,
+        target_identity, logical_path)
+    val cell = frontend_shared_parse_cell_encode_v1(key, blob)
+    if cell == "": return false
+    val root_path = env_get_opt("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? ""
+    # The manager owns root creation and budget. A worker cannot substitute
+    # a private root if its sealed shared authority is absent.
+    if not dir_exists(root_path): return false
+    val dir = root_path + "/parse-v1"
+    if not dir_create_all(dir): return false
+    val destination = dir + "/" + key + ".spc"
+    val nonce = sha256_text(key + "|" + getpid().to_text() + "|" +
+        time_now_unix_micros().to_text())
+    val temp = dir + "/." + nonce + ".tmp"
+    if not file_create_exclusive(temp, cell): return false
+    val published = file_publish_noreplace(temp, destination)
+    val unique_publisher = match published:
+        case Ok(value): value
+        case Err(_): false
+    val _removed = file_delete(temp)
+    # A racing publisher may have won. Admit only exact, digest-checked bytes.
+    val winner = _shared_parse_load_cell_v1(root_path, key)
+    if winner != blob: return false
+    if unique_publisher:
+        _shared_parse_stores_v1 = _shared_parse_stores_v1 + 1
+        if _shared_parse_stores_v1 % 32 == 0:
+            _ = cache_dir_evict_to_cap(root_path + "/parse-v1", ".spc",
+                SHARED_PARSE_MAX_ROOT_BYTES_V1)
+    true
+
+export SHARED_PARSE_CELL_VERSION_V1, SHARED_PARSE_MAX_CELL_BYTES_V1
+export frontend_shared_parse_path_portable_v1, frontend_shared_parse_key_v1
+export frontend_shared_parse_logical_path_v1
+export frontend_shared_parse_feature_identity_v1
+export frontend_shared_parse_cell_encode_v1, frontend_shared_parse_cell_decode_v1
+export frontend_shared_parse_load_v1, frontend_shared_parse_store_v1

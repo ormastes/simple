@@ -75,6 +75,7 @@ fn incremental_hash_text(content: text) -> i64:
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 var _frontend_src_fingerprint_memo: text = "@@unset@@"
+var _frontend_src_full_digest_memo: text = ""
 
 fn incremental_sift_down(mut values: [text], root_index: i64, heap_len: i64):
     var root = root_index
@@ -179,6 +180,7 @@ fn native_build_frontend_source_fingerprint() -> text:
         _frontend_src_fingerprint_memo = ""
         return ""
     var lines: [text] = []
+    var complete = true
     var dirs: [text] = [root]
     var i = 0
     while i < dirs.len():
@@ -190,7 +192,11 @@ fn native_build_frontend_source_fingerprint() -> text:
             if rt_dir_exists(full):
                 dirs = dirs.push(full)
             elif entry.ends_with(".spl"):
-                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+                val file_size = rt_file_size(full)
+                val file_digest = rt_file_hash_sha256(full)
+                if file_size < 0 or file_digest.len() != 64:
+                    complete = false
+                lines = lines.push("{full}|{file_size}|{file_digest}")
     var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
     dir_create_all("build")
     val tmp = "build/.frontend_src_fp.{rt_getpid()}.tmp"
@@ -198,9 +204,18 @@ fn native_build_frontend_source_fingerprint() -> text:
         val digest = rt_file_hash_sha256(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
+            if complete and lines.len() > 0:
+                _frontend_src_full_digest_memo = digest
             fp = "{digest.substring(0, 16)}n{lines.len()}"
     _frontend_src_fingerprint_memo = fp
     fp
+
+pub fn native_build_frontend_portable_source_digest_v1() -> text:
+    # Reuse the memoized 10.frontend scan. This tree contains the parser,
+    # target preprocessor, bridge and flat-pool codec; no backend or host
+    # executable bytes enter a cross-OS parse identity.
+    val _fingerprint = native_build_frontend_source_fingerprint()
+    _frontend_src_full_digest_memo
 
 fn native_build_compiler_executable_hash() -> text:
     # Under `simple run <script>` rt_cli_get_args()[0] is the SCRIPT, not the
@@ -1429,7 +1444,7 @@ pub fn build_cache_persist(cache: BuildCache) -> bool:
 
 
 
-export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_compiler_executable_hash, native_build_producer_identity
+export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1, native_build_compiler_executable_hash, native_build_producer_identity
 # Path-based entry points: the BuildCache instance never crosses a module
 # boundary (the current self-hosted child binary erases class values that do,
 # losing both methods and fields). All parameters and results are plain data.

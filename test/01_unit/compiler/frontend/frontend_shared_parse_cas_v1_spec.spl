@@ -1,0 +1,131 @@
+"""Portable parse cell key, corruption, and competing immutable publishers."""
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, env_get_opt, env_set, file_delete,
+    file_write_exact, getpid}
+use compiler.frontend.frontend_shared_parse_cas_v1.{
+    frontend_shared_parse_path_portable_v1, frontend_shared_parse_logical_path_v1,
+    frontend_shared_parse_key_v1,
+    frontend_shared_parse_cell_encode_v1, frontend_shared_parse_cell_decode_v1,
+    frontend_shared_parse_feature_identity_v1, frontend_shared_parse_load_v1,
+    frontend_shared_parse_store_v1}
+
+val ROOT: text = "build/test/shared-parse-cas-{getpid()}"
+val SOURCE_SHA: text = sha256_text("source-file-bytes")
+val PARSE_SOURCE: text = "post-target-cfg parser input\n"
+val TARGET_ID: text = sha256_text("target-cfg-v1|x86_64-unknown-linux|post-target-cfg parser input")
+val PARSER_ID: text = sha256_text("sorted frontend parser and codec source inventory")
+val BLOB_A: text = "spl-flatpool-v2\nvalidated-pool-a\n"
+val BLOB_B: text = "spl-flatpool-v2\nvalidated-pool-b\n"
+
+fn key_for(target: text, path: text) -> text:
+    frontend_shared_parse_key_v1(SOURCE_SHA, sha256_text(PARSE_SOURCE),
+        PARSER_ID, target, path, frontend_shared_parse_feature_identity_v1())
+
+describe("shared parse CAS v1", fn():
+    it("binds exact source, target preprocessing, parser/codec and logical path", fn():
+        val feature = sha256_text("features")
+        val baseline = frontend_shared_parse_key_v1(SOURCE_SHA,
+            sha256_text(PARSE_SOURCE), PARSER_ID, TARGET_ID,
+            "src/example.spl", feature)
+        assert_true(baseline.len() == 64, "portable identity is a digest")
+        assert_false(baseline == frontend_shared_parse_key_v1(
+            sha256_text("changed source"), sha256_text(PARSE_SOURCE),
+            PARSER_ID, TARGET_ID, "src/example.spl", feature),
+            "source bytes invalidate the cell")
+        assert_false(baseline == frontend_shared_parse_key_v1(
+            SOURCE_SHA, sha256_text("changed target preprocessing"),
+            PARSER_ID, TARGET_ID, "src/example.spl", feature),
+            "target-preprocessed parser input invalidates the cell")
+        assert_false(baseline == frontend_shared_parse_key_v1(
+            SOURCE_SHA, sha256_text(PARSE_SOURCE), sha256_text("new codec"),
+            TARGET_ID, "src/example.spl", feature),
+            "parser and codec source changes invalidate the cell")
+        assert_false(baseline == frontend_shared_parse_key_v1(
+            SOURCE_SHA, sha256_text(PARSE_SOURCE), PARSER_ID,
+            sha256_text("other target cfg receipt"), "src/example.spl", feature),
+            "target cfg decisions invalidate the cell")
+        assert_false(baseline == frontend_shared_parse_key_v1(
+            SOURCE_SHA, sha256_text(PARSE_SOURCE), PARSER_ID, TARGET_ID,
+            "src/other.spl", feature), "logical path is bound")
+        assert_false(baseline == frontend_shared_parse_key_v1(
+            SOURCE_SHA, sha256_text(PARSE_SOURCE), PARSER_ID, TARGET_ID,
+            "src/example.spl", sha256_text("other flags")),
+            "parser feature flags are bound")
+    )
+
+    it("refuses host absolute paths and legacy unreceipted target identity", fn():
+        assert_true(frontend_shared_parse_path_portable_v1("src/example.spl"),
+            "relative source path is portable")
+        assert_false(frontend_shared_parse_path_portable_v1("C:/work/src/example.spl"),
+            "Windows absolute path cannot cross hosts")
+        assert_false(frontend_shared_parse_path_portable_v1("/mnt/d/work/src/example.spl"),
+            "WSL absolute path cannot cross hosts")
+        assert_equal(frontend_shared_parse_logical_path_v1(
+            "C:/private/src/example.spl"), "src/example.spl",
+            "Windows snapshot source normalizes to a logical path")
+        assert_equal(frontend_shared_parse_logical_path_v1(
+            "/mnt/d/private/src/example.spl"), "src/example.spl",
+            "WSL snapshot source normalizes to the same logical path")
+        assert_equal(key_for("", "src/example.spl"), "",
+            "host-default parse has no target cfg authority")
+    )
+
+    it("rejects corrupt payload, wrong key, and truncated cell", fn():
+        val key = key_for(TARGET_ID, "src/corrupt.spl")
+        val cell = frontend_shared_parse_cell_encode_v1(key, BLOB_A)
+        assert_equal(frontend_shared_parse_cell_decode_v1(key, cell), BLOB_A,
+            "exact cell decodes")
+        assert_equal(frontend_shared_parse_cell_decode_v1(
+            sha256_text("wrong key"), cell), "", "wrong address is a miss")
+        assert_equal(frontend_shared_parse_cell_decode_v1(key,
+            cell.replace("validated-pool-a", "corrupted-pool-a")), "",
+            "payload digest detects corruption")
+        assert_equal(frontend_shared_parse_cell_decode_v1(key,
+            cell.substring(0, cell.len() - 1)), "", "truncation is a miss")
+    )
+
+    it("keeps one immutable winner under competing publishers and reparses corruption", fn():
+        val prior_root = env_get_opt("SIMPLE_SHARED_PARSE_CAS_ROOT") ?? ""
+        val prior_parser = env_get_opt("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY") ?? ""
+        val prior_bootstrap = env_get_opt("SIMPLE_BOOTSTRAP") ?? ""
+        val prior_enabled = env_get_opt("SIMPLE_FRONTEND_CACHE") ?? ""
+        val _root = dir_create_all(ROOT)
+        val _env_root = env_set("SIMPLE_SHARED_PARSE_CAS_ROOT", ROOT)
+        val _env_parser = env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", PARSER_ID)
+        val _env_bootstrap = env_set("SIMPLE_BOOTSTRAP", "0")
+        val _env_enabled = env_set("SIMPLE_FRONTEND_CACHE", "1")
+        val path = "src/competing-publishers.spl"
+        val key = key_for(TARGET_ID, path)
+        val cell_path = ROOT + "/parse-v1/" + key + ".spc"
+        val _clean_old = file_delete(cell_path)
+        assert_true(frontend_shared_parse_store_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, path, BLOB_A), "first publisher wins")
+        assert_false(frontend_shared_parse_store_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, path, BLOB_B), "competing bytes cannot replace winner")
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, path), BLOB_A, "winner readback remains exact")
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, "C:/private/src/competing-publishers.spl"), BLOB_A,
+            "Windows private source path hydrates the shared winner")
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, "/mnt/d/private/src/competing-publishers.spl"), BLOB_A,
+            "WSL private source path hydrates the same shared winner")
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            sha256_text("windows target cfg"), path), "",
+            "another target cannot reuse the winner")
+        assert_false(frontend_shared_parse_store_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, "C:/private/src/host-payload.spl",
+            "spl-flatpool-v2\nC:/private/src/host-payload.spl\n"),
+            "serialized producer private path is refused")
+        val _corrupt = file_write_exact(cell_path, "broken-cell")
+        assert_equal(frontend_shared_parse_load_v1(SOURCE_SHA, PARSE_SOURCE,
+            TARGET_ID, path), "", "corrupt winner is a reparse miss")
+        val _clean = file_delete(cell_path)
+        val _unset_root = env_set("SIMPLE_SHARED_PARSE_CAS_ROOT", prior_root)
+        val _unset_parser = env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", prior_parser)
+        val _restore_bootstrap = env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)
+        val _restore_enabled = env_set("SIMPLE_FRONTEND_CACHE", prior_enabled)
+    )
+)

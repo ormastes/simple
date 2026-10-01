@@ -11,6 +11,8 @@ use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped, parse_and_
 use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_key}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_load, frontend_parse_cache_store}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_phase3_immutable_v1}
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_load_v1, frontend_shared_parse_store_v1}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_note_hit, frontend_parse_cache_note_miss}
 use compiler.frontend.core.collection_feedback.{parser_collection_feedback_active}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
@@ -110,7 +112,8 @@ fn frontend_extract_domain_blocks(source: text) -> ([DomainBlock], text):
 # Every doubt is a MISS. A missing key (source not on disk), an absent entry, a
 # foreign scope, a torn blob: all fall through to a real parse.
 fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scope: bool,
-    advisory_cache_identity: text, borrowed_scope: bool) -> ParserModule:
+    advisory_cache_identity: text, borrowed_scope: bool,
+    shared_target_identity: text, raw_source_sha: text) -> ParserModule:
     # A profile-enriched initializer differs from a source-only flat AST.
     # Keep ordinary parse-cache entries untouched until profile identity is
     # included in that cache's key.
@@ -137,6 +140,19 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
                 print "[M4 parse] module={file_path} work=0 imports={hit.imports.len()}"
             return hit
+        # The shared store is consulted only after a private miss. Its
+        # target-receipted identity and bounded no-follow read are independent
+        # of the per-OS private cache scope.
+        val shared_blob = frontend_shared_parse_load_v1(raw_source_sha,
+            parse_source, shared_target_identity, file_path)
+        if shared_blob != "":
+            val shared_module = build_module_from_flat_pool_blob(
+                shared_blob, parse_source, file_path)
+            if shared_module != nil:
+                val _hydrated = frontend_parse_cache_store_phase3_immutable_v1(
+                    key, shared_blob)
+                frontend_parse_cache_note_hit()
+                return shared_module.unwrap()
         frontend_parse_cache_note_miss()
         flat_pool_capture_arm()
         val fresh = if borrowed_scope:
@@ -148,6 +164,8 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         val captured_blob = flat_pool_capture_take()
         val store_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         val stored = frontend_parse_cache_store(key, captured_blob)
+        val _shared_stored = frontend_shared_parse_store_v1(raw_source_sha,
+            parse_source, shared_target_identity, file_path, captured_blob)
         if frontend_cache_boundary_profile_enabled():
             val store_t1 = frontend_cache_boundary_profile_now()
             print("PARSECACHE\tstore_ms={(store_t1 - store_t0) / 1000}\tbytes={captured_blob.len()}\tstored={stored}\tpath={file_path}")
@@ -170,7 +188,8 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
     match parse_full_frontend_preprocessed_with_scope(preprocessed,
             file_path, module_name, log, streaming_scope, borrowed_scope,
             advisory_policy, advisory_owner_id, advisory_session_id,
-            advisory_generation, advisory_cache_identity):
+            advisory_generation, advisory_cache_identity, "",
+            sha256_text(source)):
         case Ok(parsed): Ok(parsed[0])
         case Err(error): Err(error)
 
@@ -179,7 +198,8 @@ fn parse_full_frontend_preprocessed_with_scope(
     log: Logger, streaming_scope: bool, borrowed_scope: bool,
     advisory_policy: FrontendAdvisoryPreprocessPolicyV1,
     advisory_owner_id: u64, advisory_session_id: u64,
-    advisory_generation: u64, advisory_cache_identity: text
+    advisory_generation: u64, advisory_cache_identity: text,
+    shared_target_identity: text, raw_source_sha: text
 ) -> Result<(ParserModule, text), FrontendAdvisoryPreprocessDispatchErrorV1>:
     var domain_blocks: [DomainBlock] = []
     var parse_source = preprocessed
@@ -203,7 +223,8 @@ fn parse_full_frontend_preprocessed_with_scope(
     if frontend_phase_trace_enabled():
         eprint("[frontend] parse_and_build:start path={file_path}")
     var module = frontend_parse_or_restore(
-        parse_source, file_path, streaming_scope, advisory_cache_identity, borrowed_scope)
+        parse_source, file_path, streaming_scope, advisory_cache_identity,
+        borrowed_scope, shared_target_identity, raw_source_sha)
     if domain_blocks.len() > 0:
         module.domain_blocks = domain_blocks
     if frontend_phase_trace_enabled():
@@ -256,7 +277,7 @@ fn parse_full_frontend_target_receipted_scope_v1(
     val parsed = match parse_full_frontend_preprocessed_with_scope(
             preprocessed.source, filename, module_name, logger, false, borrowed_scope,
             FrontendAdvisoryPreprocessPolicyV1.Reference, 0u64, 0u64, 0u64,
-            cache_identity):
+            cache_identity, cache_identity, source_digest):
         case Ok(value): value
         case Err(_): return Err("target cfg reference parser unavailable")
     val receipt = FrontendCfgDecisionReceiptV1(
