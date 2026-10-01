@@ -3060,6 +3060,15 @@ fn _runtime_std_compile_members_with_session_v1(
     val selection = ctx.runtime_std_full_inventory_selection!
     var module_names: [text] = []
     var prior_source = ""
+    var receipt_indices: Dict<text, i64> = {}
+    var receipt_index = 0
+    while receipt_index < ctx.cold_hir_typed_receipts.len():
+        val source_identity =
+            ctx.cold_hir_typed_receipts[receipt_index].seed.source_identity
+        if source_identity == "" or receipt_indices.has(source_identity):
+            return Err("runtime/std native duplicate SCV source receipt")
+        receipt_indices[source_identity] = receipt_index
+        receipt_index = receipt_index + 1
     for member in selected:
         if (prior_source != "" and
                 compile_source_inventory_identity_cmp_v1(
@@ -3070,18 +3079,13 @@ fn _runtime_std_compile_members_with_session_v1(
                 not ctx.runtime_std_mir_emissions.has(member.source_identity):
             return Err("runtime/std native selected source lacks typed ownership")
         prior_source = member.source_identity
-        var matched = -1
-        var receipt_index = 0
-        while receipt_index < ctx.cold_hir_typed_receipts.len():
-            val seed = ctx.cold_hir_typed_receipts[receipt_index].seed
-            if seed.source_identity == member.source_identity:
-                if matched >= 0 or seed.source_digest != member.source_digest or
-                        seed.inventory_digest != selection.source_inventory_digest:
-                    return Err("runtime/std native selected source differs from SCV")
-                matched = receipt_index
-            receipt_index = receipt_index + 1
-        if matched < 0:
+        if not receipt_indices.has(member.source_identity):
             return Err("runtime/std native selected source absent from SCV")
+        val matched = receipt_indices[member.source_identity]
+        val seed = ctx.cold_hir_typed_receipts[matched].seed
+        if seed.source_digest != member.source_digest or
+                seed.inventory_digest != selection.source_inventory_digest:
+            return Err("runtime/std native selected source differs from SCV")
         val name = ctx.cold_hir_typed_receipts[matched].seed.module_identity
         if name == "" or name.contains("/") or name.contains("\\") or
                 name.contains("..") or module_names.contains(name) or
