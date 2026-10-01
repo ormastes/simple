@@ -1,0 +1,705 @@
+# Parent process execution, using the existing coordinator/service authorities.
+# No second task DAG or platform-specific process primitive belongs here.
+use compiler.driver.driver_build.managed_parse_run_contract.{ManagedParseRunV1, managed_parse_run_validate_v1, managed_parse_run_encode_v1}
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseSnapshotV1, ManagedParseActionV1, managed_parse_snapshot_encode_v1, managed_parse_action_encode_v1, managed_parse_action_basename_v1, managed_parse_module_cache_key_v1}
+use compiler.driver.driver_build.managed_parse_group_result.{ManagedParseModuleResultV1, ManagedParseActionResultV1, managed_parse_action_result_encode_v1, managed_parse_action_result_decode_v1, managed_parse_action_result_validate_v1, managed_parse_module_result_decode_v1, managed_parse_module_result_encode_v1}
+use compiler.driver.action_graph.grouped_execution_adapter.{GroupedExecutionV1, grouped_execution_new_v1, grouped_execution_ready_v1, grouped_execution_claim_v1, grouped_execution_commit_v1, grouped_execution_recover_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1, BuildActionPoolV1, BuildActionStateV1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.action_graph.artifact_service_bridge.{demand_artifact_route_v1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1, GroupedReapReceiptV1}
+use app.bootstrap_builder.grouped_journal.{GroupedRunRecordV1, GroupedRunJournalV1, grouped_journal_encode_v1, grouped_journal_decode_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, GroupProcessRequestV1, GroupProcessInputV1, group_process_start_v1, group_process_recover_v1, group_process_poll_v1, group_process_cancel_v1, group_process_collect_reap_v1, group_process_peak_memory_v1, group_process_reap_path_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_exists, file_lock, file_unlock}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
+
+struct GroupedRunResultV1:
+    exit_code: i64
+    reason: text
+    completed_actions: i64
+    cached_actions: i64
+
+struct GroupedRunSlotV1:
+    snapshot: ManagedParseSnapshotV1
+    root: text
+    owner: GroupProcessOwnerV1?
+    lease: GroupedActionLeaseV1?
+    busy: bool
+    installed: bool
+    started_ms: i64
+    queued: bool
+    observation_failures: i64
+    stop_reason: text
+
+struct GroupedRunStateV1:
+    execution: GroupedExecutionV1
+    journal: GroupedRunJournalV1
+    slots: [GroupedRunSlotV1]
+    error: text
+    completed: i64
+    cached: i64
+    failed: bool
+
+fn grouped_run_parent_v1(path: text) -> text:
+    val parts = path.replace("\\", "/").split("/")
+    if parts.len() <= 1: return ""
+    parts[0:parts.len() - 1].join("/")
+
+fn grouped_run_root_v1(run: ManagedParseRunV1, worker: text, generation: i64) -> text:
+    run.state_root + "/groups/" + sha256_text(worker) + "/generation-{generation}"
+
+fn grouped_run_environment_v1(run: ManagedParseRunV1, root: text) -> [text]:
+    val keys = ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "TEMP", "TMP", "TMPDIR"]
+    var environment: [text] = []
+    for assignment in run.environment:
+        val parts = assignment.split("=")
+        if parts.len() > 1 and not keys.contains(parts[0].to_upper()):
+            environment = environment.push(assignment)
+    for key in keys:
+        environment = environment.push(key + "=" + root + "/private/" + key)
+    environment
+
+fn grouped_run_write_v1(path: text, payload: text, limit: i64 = 16777216) -> bool:
+    if payload.len() > limit: return false
+    if not dir_create(grouped_run_parent_v1(path), true) or not file_atomic_write(path, payload): return false
+    match file_read_regular_no_follow_bounded(path, limit):
+        case Ok(observed): observed == payload
+        case Err(_): false
+
+fn grouped_run_persist_v1(run: ManagedParseRunV1, journal: GroupedRunJournalV1) -> bool:
+    val payload = grouped_journal_encode_v1(journal)
+    payload != "" and grouped_run_write_v1(run.state_root + "/journal.sdn", payload)
+
+fn grouped_run_action_v1(state: GroupedExecutionV1, lease: GroupedActionLeaseV1, keep_going: bool) -> ManagedParseActionV1:
+    var members: [text] = []
+    for group in state.schedule.groups:
+        if group.identity == lease.group_id: members = group.members
+    ManagedParseActionV1(lease.action_id, lease.group_id, lease.worker_id, lease.generation,
+        lease.lease_id, lease.snapshot_digest, lease.cache_identity, members, keep_going)
+
+fn grouped_run_receipt_path_v1(run: ManagedParseRunV1, action_id: text) -> text:
+    run.state_root + "/completed/" + sha256_text(action_id) + ".sdn"
+
+fn grouped_run_read_result_v1(
+    run: ManagedParseRunV1, snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1,
+    receipt_path: text, artifact_root: text
+) -> Result<ManagedParseActionResultV1, text>:
+    val payload = match file_read_regular_no_follow_bounded(receipt_path, 16777216):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val result = match managed_parse_action_result_decode_v1(payload):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val invalid = managed_parse_action_result_validate_v1(snapshot, action, result)
+    if invalid != "": return Err(invalid)
+    if managed_parse_action_result_encode_v1(result) != payload:
+        return Err("noncanonical parse receipt")
+    for module in snapshot.modules:
+        if action.package_members.contains(module.package_id):
+            val source = match file_read_regular_no_follow_bounded(run.source_root + "/" + module.source_path, snapshot.max_source_bytes):
+                case Ok(value): value
+                case Err(error): return Err(error)
+            if sha256_text(source) != module.source_digest: return Err("source changed after snapshot installation")
+    for item in result.modules:
+        if item.status == "OK":
+            val blob = match file_read_regular_no_follow_bounded(artifact_root + "/" + item.blob_path, 134217728):
+                case Ok(value): value
+                case Err(error): return Err(error)
+            if sha256_text(blob) != item.blob_digest: return Err("parse artifact digest differs")
+    Ok(result)
+
+fn grouped_run_retain_cache_v1(run: ManagedParseRunV1, slot: GroupedRunSlotV1) -> bool:
+    if slot.snapshot.generation <= 1: return true
+    val previous_generation = slot.snapshot.generation - 1
+    val previous = grouped_run_root_v1(run, slot.snapshot.worker_id, previous_generation)
+    # Generation advancement is admitted only from an archived native reap
+    # receipt (or replay of that receipt). Never read a live peer's cache.
+    if not file_exists(previous + "/reaped-{previous_generation}.sdn"): return false
+    for module in slot.snapshot.modules:
+        val key = managed_parse_module_cache_key_v1(slot.snapshot, module)
+        val payload = match file_read_regular_no_follow_bounded(previous + "/cache/" + key + ".sdn", 65536):
+            case Ok(value): value
+            case Err(_): continue
+        val retained = match managed_parse_module_result_decode_v1(payload):
+            case Ok(value): value
+            case Err(_): continue
+        if retained.status != "OK" or retained.module_id != module.module_id or
+                retained.source_digest != module.source_digest or retained.diagnostics.len() != 0 or
+                retained.blob_path != "artifacts/" + retained.blob_digest + ".flat" or
+                managed_parse_module_result_encode_v1(retained) != payload:
+            continue
+        val blob = match file_read_regular_no_follow_bounded(previous + "/" + retained.blob_path, 134217728):
+            case Ok(value): value
+            case Err(_): continue
+        if sha256_text(blob) != retained.blob_digest: continue
+        if not grouped_run_write_v1(slot.root + "/" + retained.blob_path, blob, 134217728) or
+                not grouped_run_write_v1(slot.root + "/cache/" + key + ".sdn", payload):
+            return false
+    true
+
+fn grouped_run_stage_v1(run: ManagedParseRunV1, slot: GroupedRunSlotV1) -> Result<[GroupProcessInputV1], text>:
+    var pins: [GroupProcessInputV1] = []
+    var bytes = 0
+    for module in slot.snapshot.modules:
+        val source = match file_read_regular_no_follow_bounded(run.source_root + "/" + module.source_path, slot.snapshot.max_source_bytes - bytes):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        if sha256_text(source) != module.source_digest: return Err("source snapshot changed before process start")
+        bytes = bytes + source.len()
+        val target = slot.root + "/sources/" + module.source_path
+        if not grouped_run_write_v1(target, source, slot.snapshot.max_source_bytes): return Err("cannot install immutable group source")
+        pins = pins.push(GroupProcessInputV1(target, module.source_digest))
+    val installed = managed_parse_snapshot_encode_v1(slot.snapshot)
+    if installed == "" or not grouped_run_write_v1(slot.root + "/install.sdn", installed):
+        return Err("cannot install group inventory")
+    pins = pins.push(GroupProcessInputV1(slot.root + "/install.sdn", sha256_text(installed)))
+    if not dir_create(slot.root + "/requests", true): return Err("cannot prepare bounded group mailbox")
+    if not grouped_run_write_v1(slot.root + "/next.sdn", ""):
+        return Err("cannot reset reaped group mailbox")
+    if not grouped_run_retain_cache_v1(run, slot): return Err("cannot retain verified reaped group cache")
+    Ok(pins)
+
+fn grouped_run_publish_v1(run: ManagedParseRunV1, root: text, result: ManagedParseActionResultV1) -> bool:
+    # These content-addressed blobs may be staged before action admission; only
+    # the subsequently published completed receipt makes them authoritative.
+    for item in result.modules:
+        if item.status == "OK":
+            val blob = match file_read_regular_no_follow_bounded(root + "/" + item.blob_path, 134217728):
+                case Ok(value): value
+                case Err(_): return false
+            if sha256_text(blob) != item.blob_digest: return false
+            val target = run.state_root + "/" + item.blob_path
+            if not dir_create(grouped_run_parent_v1(target), true) or not file_atomic_write(target, blob): return false
+            val observed = match file_read_regular_no_follow_bounded(target, 134217728):
+                case Ok(value): value
+                case Err(_): return false
+            if sha256_text(observed) != item.blob_digest: return false
+    true
+
+fn grouped_run_admit_v1(
+    run: ManagedParseRunV1, state: GroupedRunStateV1, slot_index: i64,
+    result: ManagedParseActionResultV1, peak: i64, replay: bool
+) -> GroupedRunStateV1:
+    var next = state
+    val slot = next.slots[slot_index]
+    if slot.lease == nil:
+        next.error = "group result has no parent lease"
+        return next
+    val payload = managed_parse_action_result_encode_v1(result)
+    val digest = sha256_text(payload)
+    val succeeded = result.error == ""
+    val diagnostics = if succeeded: [] else: [result.error]
+    val terminal = BuildActionResultV1(result.action.action_id, result.action.snapshot_digest,
+        succeeded, false, if succeeded: digest else: "", "", diagnostics, peak)
+    if not replay and not grouped_run_publish_v1(run, slot.root, result):
+        next.error = "parent could not stage verified parse artifacts"
+        return next
+    val committed = grouped_execution_commit_v1(next.execution, slot.lease!, terminal,
+        if succeeded: digest else: "", [])
+    if not committed.accepted:
+        next.error = committed.reason + " (observed committed-memory peak {peak} bytes)"
+        return next
+    next.execution = committed.execution
+    if not replay:
+        var admission = "SIMPLE-GROUP-ADMISSION-1\n"
+        for field in [run.run_id, result.action.action_id, result.action.worker_id,
+                "{result.action.generation}", result.action.lease_id, result.action.snapshot_digest,
+                digest, "{peak}"]:
+            admission = admission + builder_wire_line_v1(field)
+        if not grouped_run_write_v1(grouped_run_receipt_path_v1(run, result.action.action_id) + ".admission", admission):
+            next.error = "cannot persist measured parent admission"
+            return next
+    if not replay and not grouped_run_write_v1(grouped_run_receipt_path_v1(run, result.action.action_id), payload):
+        next.error = "parent could not publish accepted parse receipt"
+        return next
+    if not replay:
+        next.journal.records = next.journal.records.push(GroupedRunRecordV1(
+            if succeeded: "OK" else: "ERROR", result.action.action_id, result.action.worker_id,
+            result.action.generation, result.action.lease_id, digest, peak, ""))
+    var updated = slot
+    updated.busy = false
+    updated.queued = false
+    updated.lease = committed.lease
+    next.slots[slot_index] = updated
+    next.completed = next.completed + 1
+    if replay: next.cached = next.cached + 1
+    if not succeeded: next.failed = true
+    next
+
+fn grouped_run_crash_result_v1(slot: GroupedRunSlotV1, action: ManagedParseActionV1, reason: text) -> ManagedParseActionResultV1:
+    var modules: [ManagedParseModuleResultV1] = []
+    for module in slot.snapshot.modules:
+        if action.package_members.contains(module.package_id):
+            modules = modules.push(ManagedParseModuleResultV1(module.module_id, module.source_digest,
+                "ERROR", "", "", [reason], false))
+    ManagedParseActionResultV1(action, modules, reason)
+
+fn grouped_run_archive_reap_v1(slot: GroupedRunSlotV1, receipt: GroupedReapReceiptV1) -> bool:
+    val payload = match file_read_regular_no_follow_bounded(group_process_reap_path_v1(slot.owner!), 65536):
+        case Ok(value): value
+        case Err(_): return false
+    sha256_text(payload) == receipt.tree_receipt_digest and
+        grouped_run_write_v1(slot.root + "/reaped-{receipt.generation}.sdn", payload)
+
+fn grouped_run_queue_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, slot_index: i64) -> bool:
+    val slot = state.slots[slot_index]
+    if slot.lease == nil: return false
+    val action = grouped_run_action_v1(state.execution, slot.lease!, run.keep_going)
+    val basename = managed_parse_action_basename_v1(action)
+    grouped_run_write_v1(slot.root + "/requests/" + basename, managed_parse_action_encode_v1(action)) and
+        grouped_run_write_v1(slot.root + "/next.sdn", basename + "\n")
+
+fn grouped_run_launch_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, slot_index: i64, recover: bool = false) -> GroupedRunStateV1:
+    var next = state
+    var slot = next.slots[slot_index]
+    var pins: [GroupProcessInputV1] = []
+    if recover:
+        for module in slot.snapshot.modules:
+            pins = pins.push(GroupProcessInputV1(slot.root + "/sources/" + module.source_path, module.source_digest))
+        pins = pins.push(GroupProcessInputV1(slot.root + "/install.sdn", sha256_text(managed_parse_snapshot_encode_v1(slot.snapshot))))
+    else:
+        match grouped_run_stage_v1(run, slot):
+            case Ok(value): pins = value
+            case Err(error):
+                next.error = error
+                return next
+        for key in ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "TEMP", "TMP", "TMPDIR"]:
+            if not dir_create(slot.root + "/private/" + key, true):
+                next.error = "cannot create private group cache"
+                return next
+    # Process lifetime and observation deadlines are explicit manifest policy.
+    val request = GroupProcessRequestV1(program: run.worker_program, producer_digest: run.worker_digest,
+        args: ["--group-root", slot.root], environment: grouped_run_environment_v1(run, slot.root), directory: slot.root, inputs: pins,
+        stdout_path: slot.root + "/stdout.log", stderr_path: slot.root + "/stderr.log", timeout_ms: run.lifetime_ms,
+        broker_program: run.broker_program, broker_digest: run.broker_digest)
+    val observed = if recover:
+        group_process_recover_v1(slot.root, slot.snapshot.worker_id, slot.snapshot.generation,
+            slot.snapshot.snapshot_digest, slot.snapshot.cache_identity, request, run.profile.memory_budget_bytes / run.worker_slots.len())
+    else:
+        group_process_start_v1(slot.root, slot.snapshot.worker_id, slot.snapshot.generation,
+            slot.snapshot.snapshot_digest, slot.snapshot.cache_identity, request, run.profile.memory_budget_bytes / run.worker_slots.len())
+    match observed:
+        case Ok(owner): slot.owner = Some(owner)
+        case Err(error):
+            next.error = "group process start failed: " + error
+            return next
+    slot.started_ms = current_time_ms()
+    slot.installed = false
+    slot.queued = false
+    slot.observation_failures = 0
+    slot.stop_reason = ""
+    next.slots[slot_index] = slot
+    next
+
+fn grouped_run_ready_marker_v1(slot: GroupedRunSlotV1) -> bool:
+    val payload = match file_read_regular_no_follow_bounded(slot.root + "/installed.sdn", 4096):
+        case Ok(value): value
+        case Err(_): return false
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-PARSE-INSTALLED-1" or reader.scalar() != slot.snapshot.worker_id:
+        return false
+    if reader.number(2147483647, false) != slot.snapshot.generation or reader.scalar() != slot.snapshot.snapshot_digest:
+        return false
+    if reader.number(4096, false) != slot.snapshot.modules.len(): return false
+    _ = reader.number(slot.snapshot.max_source_bytes, false)
+    reader.complete_error() == ""
+
+fn grouped_run_slot_index_v1(state: GroupedRunStateV1, worker_id: text) -> i64:
+    for i in 0..state.slots.len():
+        if state.slots[i].snapshot.worker_id == worker_id: return i
+    -1
+
+fn grouped_run_admission_peak_v1(run: ManagedParseRunV1, result: ManagedParseActionResultV1) -> Result<i64, text>:
+    val payload = match file_read_regular_no_follow_bounded(grouped_run_receipt_path_v1(run, result.action.action_id) + ".admission", 4096):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-GROUP-ADMISSION-1" or reader.scalar() != run.run_id or
+            reader.scalar() != result.action.action_id or reader.scalar() != result.action.worker_id or
+            reader.number(2147483647, false) != result.action.generation or
+            reader.scalar() != result.action.lease_id or reader.scalar() != result.action.snapshot_digest or
+            reader.scalar() != sha256_text(managed_parse_action_result_encode_v1(result)):
+        return Err("unjournalled admission authority differs")
+    val peak = reader.number(1125899906842624, false)
+    val malformed = reader.complete_error()
+    if malformed != "": return Err(malformed)
+    Ok(peak)
+
+fn grouped_run_replay_v1(run: ManagedParseRunV1, state: GroupedRunStateV1) -> GroupedRunStateV1:
+    var next = state
+    for record in state.journal.records:
+        val index = grouped_run_slot_index_v1(next, record.worker_id)
+        if index < 0:
+            next.error = "journal names an unconfigured worker"
+            return next
+        var slot = next.slots[index]
+        if record.kind == "CLAIM":
+            if record.generation != slot.snapshot.generation or slot.busy:
+                next.error = "journal claim skips unproven group generation or active action"
+                return next
+            val claim = grouped_execution_claim_v1(next.execution, record.action_id, record.worker_id,
+                record.generation, run.profile.memory_budget_bytes)
+            if not claim.accepted or claim.lease == nil or claim.lease!.lease_id != record.lease_id:
+                next.error = "journal claim no longer matches canonical authority"
+                return next
+            next.execution = claim.execution
+            slot.snapshot.generation = record.generation
+            slot.root = grouped_run_root_v1(run, record.worker_id, record.generation)
+            slot.lease = claim.lease
+            slot.busy = true
+            slot.stop_reason = ""
+            next.slots[index] = slot
+        elif record.kind == "RETRY":
+            if slot.lease == nil:
+                next.error = "journal retry lacks prior lease"
+                return next
+            val old = slot.lease!
+            if record.generation != old.generation + 1:
+                next.error = "journal retry skips group generation"
+                return next
+            val proof = match file_read_regular_no_follow_bounded(slot.root + "/reaped-{old.generation}.sdn", 65536):
+                case Ok(value): value
+                case Err(error):
+                    next.error = error
+                    return next
+            if sha256_text(proof) != record.digest:
+                next.error = "journal reaped-tree proof changed"
+                return next
+            val receipt = GroupedReapReceiptV1(old.group_id, old.action_id, old.worker_id, old.generation,
+                old.lease_id, old.snapshot_digest, old.cache_identity, record.digest)
+            val retried = grouped_execution_recover_v1(next.execution, receipt, record.generation)
+            if not retried.accepted or retried.lease == nil or retried.lease!.lease_id != record.lease_id:
+                next.error = "journal retry authority differs"
+                return next
+            next.execution = retried.execution
+            slot.snapshot.generation = record.generation
+            slot.root = grouped_run_root_v1(run, record.worker_id, record.generation)
+            slot.lease = retried.lease
+            slot.stop_reason = ""
+            next.slots[index] = slot
+        elif record.kind == "STOP":
+            if slot.lease == nil or slot.lease!.action_id != record.action_id or slot.lease!.lease_id != record.lease_id or slot.lease!.generation != record.generation:
+                next.error = "final group proof has stale lease"
+                return next
+            val proof_path = grouped_run_root_v1(run, record.worker_id, record.generation) + "/reaped-{record.generation}.sdn"
+            val proof = match file_read_regular_no_follow_bounded(proof_path, 65536):
+                case Ok(value): value
+                case Err(error):
+                    next.error = error
+                    return next
+            if sha256_text(proof) != record.digest:
+                next.error = "final group tree proof differs from parent journal"
+                return next
+            slot.stop_reason = "proven final shutdown"
+            slot.snapshot.generation = record.generation + 1
+            slot.root = grouped_run_root_v1(run, record.worker_id, slot.snapshot.generation)
+            next.slots[index] = slot
+        else:
+            if slot.lease == nil or slot.lease!.action_id != record.action_id or
+                    slot.lease!.lease_id != record.lease_id or slot.lease!.generation != record.generation:
+                next.error = "journal completion has stale lease"
+                return next
+            val action = grouped_run_action_v1(next.execution, slot.lease!, run.keep_going)
+            val parsed = match grouped_run_read_result_v1(run, slot.snapshot, action,
+                    grouped_run_receipt_path_v1(run, action.action_id), run.state_root):
+                case Ok(value): value
+                case Err(error):
+                    next.error = error
+                    return next
+            if sha256_text(managed_parse_action_result_encode_v1(parsed)) != record.digest or
+                    (record.kind == "OK") != (parsed.error == ""):
+                next.error = "journal completion digest or status differs"
+                return next
+            next = grouped_run_admit_v1(run, next, index, parsed, record.memory_peak_bytes, true)
+            if next.error != "": return next
+    # Crash window: completed receipt published but journal checkpoint not yet
+    # written. Reconcile immutable receipts without inferring process death.
+    for i in 0..next.slots.len():
+        val slot = next.slots[i]
+        if slot.busy and slot.lease != nil:
+            val action = grouped_run_action_v1(next.execution, slot.lease!, run.keep_going)
+            val path = grouped_run_receipt_path_v1(run, action.action_id)
+            if file_exists(path):
+                match grouped_run_read_result_v1(run, slot.snapshot, action, path, run.state_root):
+                    case Ok(parsed):
+                        match grouped_run_admission_peak_v1(run, parsed):
+                            case Ok(peak):
+                                next = grouped_run_admit_v1(run, next, i, parsed, peak, true)
+                                if next.error == "":
+                                    next.journal.records = next.journal.records.push(GroupedRunRecordV1(
+                                        if parsed.error == "": "OK" else: "ERROR", action.action_id, action.worker_id,
+                                        action.generation, action.lease_id, sha256_text(managed_parse_action_result_encode_v1(parsed)), peak, "reconciled"))
+                            case Err(error): next.error = error
+                    case Err(error): next.error = "stale or corrupt unjournalled receipt: " + error
+                if next.error != "": return next
+    next
+
+fn grouped_run_record_stop_v1(state: GroupedRunStateV1, receipt: GroupedReapReceiptV1, peak: i64) -> GroupedRunStateV1:
+    var next = state
+    next.journal.records = next.journal.records.push(GroupedRunRecordV1("STOP", receipt.action_id,
+        receipt.worker_id, receipt.generation, receipt.lease_id, receipt.tree_receipt_digest, peak, "owned tree reaped"))
+    next
+
+fn grouped_run_cleanup_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, cancel: bool) -> GroupedRunStateV1:
+    var next = state
+    var clean = true
+    for i in 0..next.slots.len():
+        var slot = next.slots[i]
+        if slot.owner == nil:
+            if slot.busy: clean = false
+            continue
+        if cancel:
+            _ = group_process_cancel_v1(slot.owner!)
+        else:
+            val stop = "{slot.snapshot.worker_id}\n{slot.snapshot.generation}\n{slot.snapshot.snapshot_digest}\n"
+            if not grouped_run_write_v1(slot.root + "/shutdown.sdn", stop):
+                _ = group_process_cancel_v1(slot.owner!)
+        var terminal = false
+        var measured_peak = 0
+        var deadline = current_time_ms() + run.shutdown_timeout_ms
+        var cancelled = cancel
+        while current_time_ms() <= deadline:
+            match group_process_poll_v1(slot.owner!):
+                case Ok(observed):
+                    measured_peak = observed.memory_peak_bytes
+                    if observed.terminal and observed.leader_reaped and observed.tree_empty:
+                        terminal = true
+                        break
+                case Err(_): ()
+            sleep_ms(run.poll_ms)
+            if not cancelled and current_time_ms() > deadline:
+                _ = group_process_cancel_v1(slot.owner!)
+                cancelled = true
+                deadline = current_time_ms() + run.shutdown_timeout_ms
+        if terminal and slot.lease != nil:
+            match group_process_collect_reap_v1(slot.owner!, slot.lease!):
+                case Ok(receipt):
+                    if grouped_run_archive_reap_v1(slot, receipt):
+                        next = grouped_run_record_stop_v1(next, receipt, measured_peak)
+                        slot.owner = nil
+                    else:
+                        clean = false
+                case Err(_): clean = false
+        else:
+            clean = false
+        next.slots[i] = slot
+    if clean:
+        next.journal.closed = true
+        if not grouped_run_persist_v1(run, next.journal):
+            next.error = "cannot persist proven group shutdown"
+    elif next.error == "":
+        next.error = "group process-tree shutdown remains unverified"
+    next
+
+fn grouped_run_observe_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, index: i64) -> GroupedRunStateV1:
+    var next = state
+    var slot = next.slots[index]
+    if slot.owner == nil: return next
+    val observed = match group_process_poll_v1(slot.owner!):
+        case Ok(value): value
+        case Err(_): return next
+    if slot.busy and slot.lease != nil:
+        val action = grouped_run_action_v1(next.execution, slot.lease!, run.keep_going)
+        val path = slot.root + "/receipts/" + managed_parse_action_basename_v1(action)
+        if file_exists(path):
+            match grouped_run_read_result_v1(run, slot.snapshot, action, path, slot.root):
+                case Ok(result):
+                    next = grouped_run_admit_v1(run, next, index, result, observed.memory_peak_bytes, false)
+                    if next.error != "": return next
+                    if not grouped_run_persist_v1(run, next.journal):
+                        next.error = "cannot checkpoint admitted group result"
+                        return next
+                    slot = next.slots[index]
+                case Err(error):
+                    next.error = "current group receipt rejected: " + error
+                    return next
+    if observed.terminal and observed.leader_reaped and observed.tree_empty and slot.lease != nil:
+        val receipt = match group_process_collect_reap_v1(slot.owner!, slot.lease!):
+            case Ok(value): value
+            case Err(error):
+                next.error = "terminal group collect failed: " + error
+                return next
+        if not grouped_run_archive_reap_v1(slot, receipt):
+            next.error = "cannot preserve group tree proof"
+            return next
+        slot.owner = nil
+        next.slots[index] = slot
+        if not slot.busy:
+            next = grouped_run_record_stop_v1(next, receipt, observed.memory_peak_bytes)
+            slot.stop_reason = ""
+            slot.snapshot.generation = slot.snapshot.generation + 1
+            slot.root = grouped_run_root_v1(run, slot.snapshot.worker_id, slot.snapshot.generation)
+            slot.installed = false
+            slot.queued = false
+            next.slots[index] = slot
+            if not grouped_run_persist_v1(run, next.journal): next.error = "cannot checkpoint idle group termination"
+            return next
+        val retried = grouped_execution_recover_v1(next.execution, receipt, slot.snapshot.generation + 1)
+        if retried.accepted and retried.lease != nil:
+            next.execution = retried.execution
+            slot.snapshot.generation = retried.lease!.generation
+            slot.root = grouped_run_root_v1(run, slot.snapshot.worker_id, slot.snapshot.generation)
+            slot.lease = retried.lease
+            slot.installed = false
+            slot.queued = false
+            slot.stop_reason = ""
+            next.slots[index] = slot
+            next.journal.records = next.journal.records.push(GroupedRunRecordV1("RETRY",
+                receipt.action_id, receipt.worker_id, slot.snapshot.generation, retried.lease!.lease_id,
+                receipt.tree_receipt_digest, observed.memory_peak_bytes, "proven process-tree termination"))
+            if not grouped_run_persist_v1(run, next.journal):
+                next.error = "cannot checkpoint group replacement lease"
+                return next
+            return grouped_run_launch_v1(run, next, index)
+        if retried.reason != "group-retry-budget-exhausted":
+            next.error = retried.reason
+            return next
+        val action = grouped_run_action_v1(next.execution, slot.lease!, run.keep_going)
+        val failed = grouped_run_crash_result_v1(slot, action, "group process terminated after bounded attempts; exit {observed.exit_code}")
+        next = grouped_run_admit_v1(run, next, index, failed, observed.memory_peak_bytes, false)
+        if next.error == "":
+            next = grouped_run_record_stop_v1(next, receipt, observed.memory_peak_bytes)
+            var exhausted = next.slots[index]
+            exhausted.snapshot.generation = exhausted.snapshot.generation + 1
+            exhausted.root = grouped_run_root_v1(run, exhausted.snapshot.worker_id, exhausted.snapshot.generation)
+            exhausted.installed = false
+            next.slots[index] = exhausted
+        if next.error == "" and not grouped_run_persist_v1(run, next.journal):
+            next.error = "cannot checkpoint terminal group failure"
+        return next
+    if slot.busy:
+        if not slot.installed:
+            slot.installed = grouped_run_ready_marker_v1(slot)
+            if not slot.installed and current_time_ms() - slot.started_ms > run.startup_timeout_ms and slot.stop_reason == "":
+                slot.stop_reason = "group installation exceeded startup deadline"
+                _ = group_process_cancel_v1(slot.owner!)
+        if slot.installed and not slot.queued and slot.stop_reason == "":
+            if not grouped_run_queue_v1(run, next, index):
+                next.error = "cannot publish bounded group request"
+                return next
+            slot.queued = true
+        next.slots[index] = slot
+    next
+
+fn grouped_run_locked_v1(run: ManagedParseRunV1) -> GroupedRunResultV1:
+    val coordinator = coordinator_new_v1(run.graph,
+        [BuildPoolBudgetV1(BuildActionPoolV1.parse, run.worker_slots.len(), run.profile.memory_budget_bytes)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), nil,
+        NativePromotionQueueV1([]), "", demand_compile_counters_empty_v1(), nil, nil, 0, "", 0, 0)
+    val route = demand_artifact_route_v1(execution, run.profile, false, run.run_id, 1)
+    val adapter = grouped_execution_new_v1(run.schedule, route, run.bindings, run.worker_slots, run.max_attempts)
+    if adapter.reason != "ok": return GroupedRunResultV1(2, adapter.reason, 0, 0)
+    val identity = sha256_text(managed_parse_run_encode_v1(run))
+    var journal = GroupedRunJournalV1(identity, false, [])
+    val journal_path = run.state_root + "/journal.sdn"
+    if file_exists(journal_path):
+        val payload = match file_read_regular_no_follow_bounded(journal_path, 16777216):
+            case Ok(value): value
+            case Err(error): return GroupedRunResultV1(2, error, 0, 0)
+        match grouped_journal_decode_v1(payload, identity):
+            case Ok(value): journal = value
+            case Err(error): return GroupedRunResultV1(2, error, 0, 0)
+    var slots: [GroupedRunSlotV1] = []
+    for snapshot in run.snapshots:
+        slots = slots.push(GroupedRunSlotV1(snapshot, grouped_run_root_v1(run, snapshot.worker_id, 1),
+            nil, nil, false, false, 0, false, 0, ""))
+    var state = GroupedRunStateV1(adapter, journal, slots, "", 0, 0, false)
+    state = grouped_run_replay_v1(run, state)
+    if state.error != "": return GroupedRunResultV1(2, state.error, state.completed, state.cached)
+    if state.journal.closed:
+        for slot in state.slots:
+            if slot.lease != nil and slot.stop_reason != "proven final shutdown":
+                return GroupedRunResultV1(2, "closed journal lacks final tree proof", state.completed, state.cached)
+        val succeeded = state.completed == run.graph.actions.len() and not state.failed
+        return GroupedRunResultV1(if succeeded: 0 else: 1,
+            if succeeded: "verified completed run" else: "retained terminal run has failed or blocked actions", state.completed, state.cached)
+    # Durable claims precede process startup. Existing broker authority must be
+    # freshly challenged; a missing response never licenses a replacement.
+    for i in 0..state.slots.len():
+        val slot = state.slots[i]
+        if slot.lease == nil: continue
+        if slot.stop_reason == "proven final shutdown":
+            var stopped = slot
+            stopped.stop_reason = ""
+            state.slots[i] = stopped
+            continue
+        if file_exists(slot.root + "/broker.claim"):
+            state = grouped_run_launch_v1(run, state, i, true)
+        elif slot.busy:
+            state = grouped_run_launch_v1(run, state, i)
+        if state.error != "":
+            var unresolved = state.slots[i]
+            unresolved.stop_reason = state.error
+            state.slots[i] = unresolved
+            state.error = ""
+    if not grouped_run_persist_v1(run, state.journal):
+        state.error = "cannot checkpoint replayed authority"
+    val run_deadline = current_time_ms() + run.lifetime_ms
+    while state.error == "":
+        for i in 0..state.slots.len():
+            state = grouped_run_observe_v1(run, state, i)
+            if state.error != "": break
+        if state.error != "": break
+        if state.failed and not run.keep_going: break
+        val ready = grouped_execution_ready_v1(state.execution)
+        for binding in ready:
+            for i in 0..state.slots.len():
+                var slot = state.slots[i]
+                if slot.busy or slot.stop_reason != "" or slot.snapshot.snapshot_digest != binding.snapshot_digest or slot.snapshot.cache_identity != binding.cache_identity:
+                    continue
+                val claim = grouped_execution_claim_v1(state.execution, binding.action_id,
+                    slot.snapshot.worker_id, slot.snapshot.generation, run.profile.memory_budget_bytes)
+                if not claim.accepted or claim.lease == nil: continue
+                state.execution = claim.execution
+                slot.lease = claim.lease
+                slot.busy = true
+                slot.queued = false
+                state.slots[i] = slot
+                state.journal.records = state.journal.records.push(GroupedRunRecordV1("CLAIM", binding.action_id,
+                    slot.snapshot.worker_id, slot.snapshot.generation, claim.lease!.lease_id, "", 0, ""))
+                if not grouped_run_persist_v1(run, state.journal):
+                    state.error = "cannot checkpoint group claim"
+                    break
+                if slot.owner == nil: state = grouped_run_launch_v1(run, state, i)
+                break
+            if state.error != "": break
+        if state.error != "": break
+        var active = false
+        var unresolved = false
+        for slot in state.slots:
+            if slot.busy and slot.owner != nil: active = true
+            if slot.busy and slot.owner == nil: unresolved = true
+        if not active:
+            if unresolved: state.error = "group authority unresolved; independent available actions exhausted"
+            break
+        if current_time_ms() > run_deadline:
+            state.error = "group run exceeded manifest lifetime"
+            break
+        sleep_ms(run.poll_ms)
+    state = grouped_run_cleanup_v1(run, state, state.error != "" or state.failed)
+    var all_succeeded = true
+    for runtime in state.execution.route.execution.coordinator!.runtime:
+        if runtime.state != BuildActionStateV1.succeeded: all_succeeded = false
+    val succeeded = state.error == "" and state.journal.closed and all_succeeded
+    val reason = if state.error != "": state.error else:
+        if succeeded: "all grouped actions admitted and process trees reaped" else: "grouped actions failed or remain dependency-blocked"
+    GroupedRunResultV1(if succeeded: 0 else: 1, reason, state.completed, state.cached)
+
+fn grouped_run_v1(run: ManagedParseRunV1) -> GroupedRunResultV1:
+    val invalid = managed_parse_run_validate_v1(run)
+    if invalid != "": return GroupedRunResultV1(2, invalid, 0, 0)
+    if not dir_create(run.state_root, true): return GroupedRunResultV1(2, "cannot create grouped state root", 0, 0)
+    val lock = file_lock(run.state_root + "/manager.lock", 1)
+    if lock < 0: return GroupedRunResultV1(2, "another manager owns grouped state", 0, 0)
+    val result = grouped_run_locked_v1(run)
+    file_unlock(lock)
+    result
+
+export GroupedRunResultV1, grouped_run_v1

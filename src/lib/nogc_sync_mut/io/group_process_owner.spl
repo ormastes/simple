@@ -1,0 +1,126 @@
+# Platform-neutral durable broker capability. The host entry installs a compiled
+# launcher; live process authority remains entirely in the independent broker.
+export use std.common.build_manager.group_process_protocol.{GroupProcessInputV1, GroupProcessRequestV1, GroupProcessPollV1}
+use std.common.build_manager.group_process_protocol.{GroupProcessLaunchV1, group_process_launch_validate_v1, group_process_launch_encode_v1, group_process_launch_decode_v1, group_process_identity_v1, group_process_observation_decode_v1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1, GroupedReapReceiptV1}
+use std.common.build_manager.codec.{builder_wire_line_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_create_exclusive, file_exists}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+struct GroupProcessOwnerV1:
+    launch: GroupProcessLaunchV1
+    identity_digest: text
+
+struct GroupProcessLauncherV1:
+    operation: fn(text, text, [text], text) -> Result<bool, text>
+
+fn _group_process_unconfigured_v1(program: text, digest: text, args: [text], directory: text) -> Result<bool, text>:
+    Err("group broker platform launcher has not been configured")
+
+var _group_process_launcher_v1 = GroupProcessLauncherV1(_group_process_unconfigured_v1)
+var _group_process_configured_v1 = false
+var _group_process_nonce_v1: i64 = 0
+
+fn group_process_set_launcher_v1(operation: fn(text, text, [text], text) -> Result<bool, text>) -> bool:
+    if _group_process_configured_v1: return false
+    _group_process_launcher_v1 = GroupProcessLauncherV1(operation)
+    _group_process_configured_v1 = true
+    true
+
+fn _group_process_terminal_v1(owner: GroupProcessOwnerV1) -> Result<GroupProcessPollV1, text>:
+    val payload = file_read_regular_no_follow_bounded(owner.launch.root + "/broker.tree.sdn", 4096)?
+    val observed = group_process_observation_decode_v1(owner.identity_digest, payload)?
+    if not observed.terminal or not observed.leader_reaped or not observed.tree_empty:
+        return Err("group broker terminal proof is incomplete")
+    # Budget admission and native process lifetime are separate facts. Windows
+    # can report a peak above the configured limit even after denying a charge.
+    # Preserve that value for the coordinator; it never invalidates real reap.
+    Ok(observed)
+
+fn _group_process_control_v1(owner: GroupProcessOwnerV1, command: text, budget_ms: i64) -> Result<GroupProcessPollV1, text>:
+    if file_exists(owner.launch.root + "/broker.tree.sdn"): return _group_process_terminal_v1(owner)
+    _group_process_nonce_v1 = _group_process_nonce_v1 + 1
+    val nonce = "n" + str(getpid()) + "_" + str(current_time_ms()) + "_" + str(_group_process_nonce_v1)
+    val request = owner.identity_digest + "\n" + nonce + "\n" + command
+    if not file_atomic_write(owner.launch.root + "/broker.control.request", request): return Err("cannot publish group challenge")
+    val deadline = current_time_ms() + budget_ms
+    while current_time_ms() < deadline:
+        if file_exists(owner.launch.root + "/broker.tree.sdn"): return _group_process_terminal_v1(owner)
+        match file_read_regular_no_follow_bounded(owner.launch.root + "/broker.control.response", 8192):
+            Ok(response):
+                val prefix = request + "\n"
+                if response.starts_with(prefix):
+                    val observed = group_process_observation_decode_v1(owner.identity_digest, response[prefix.len():])?
+                    # Only broker.tree.sdn proves post-collect terminal cleanup.
+                    if observed.terminal: return Err("terminal group observation lacks durable collected receipt")
+                    return Ok(observed)
+            Err(_message): pass
+        sleep_ms(20)
+    Err("group broker authority unknown: no fresh challenge response; retry forbidden")
+
+fn group_process_start_v1(root: text, worker_id: text, generation: i64, snapshot_digest: text, cache_identity: text, request: GroupProcessRequestV1, memory_limit_bytes: i64) -> Result<GroupProcessOwnerV1, text>:
+    if not _group_process_configured_v1: return Err("group broker launcher unavailable on this host")
+    val launch = GroupProcessLaunchV1(root, worker_id, generation, snapshot_digest, cache_identity, memory_limit_bytes, request)
+    val invalid = group_process_launch_validate_v1(launch)
+    if invalid != "": return Err(invalid)
+    val payload = group_process_launch_encode_v1(launch)
+    val owner = GroupProcessOwnerV1(launch, sha256_text(payload))
+    if not file_create_exclusive(root + "/broker.claim", owner.identity_digest): return Err("group broker root already claimed; recover required")
+    if not file_atomic_write(root + "/broker.request.sdn", payload): return Err("cannot persist immutable broker request")
+    val launched = _group_process_launcher_v1.operation(request.broker_program, request.broker_digest,
+        ["--broker-root", root, "--request-digest", owner.identity_digest], root)?
+    if not launched: return Err("group broker launcher did not admit process")
+    val _observed = _group_process_control_v1(owner, "probe", 30000)?
+    Ok(owner)
+
+fn group_process_recover_v1(root: text, worker_id: text, generation: i64, snapshot_digest: text, cache_identity: text, request: GroupProcessRequestV1, memory_limit_bytes: i64) -> Result<GroupProcessOwnerV1, text>:
+    val launch = GroupProcessLaunchV1(root, worker_id, generation, snapshot_digest, cache_identity, memory_limit_bytes, request)
+    val invalid = group_process_launch_validate_v1(launch)
+    if invalid != "": return Err(invalid)
+    val payload = file_read_regular_no_follow_bounded(root + "/broker.request.sdn", 16777216)?
+    if group_process_launch_encode_v1(launch) != payload: return Err("group restart request differs from admitted immutable request")
+    val owner = GroupProcessOwnerV1(launch, sha256_text(payload))
+    val _observed = _group_process_control_v1(owner, "probe", 30000)?
+    Ok(owner)
+
+fn group_process_poll_v1(owner: GroupProcessOwnerV1) -> Result<GroupProcessPollV1, text>:
+    # Polling one unresponsive slot is bounded; the caller can inspect other
+    # slots after an unknown observation. This does not revoke broker authority.
+    _group_process_control_v1(owner, "probe", 100)
+
+fn group_process_cancel_v1(owner: GroupProcessOwnerV1) -> Result<bool, text>:
+    val observation = _group_process_control_v1(owner, "cancel", 30000)?
+    if not observation.cancelled and not observation.terminal: return Err("group broker has not accepted cancellation")
+    Ok(true)
+
+fn group_process_peak_memory_v1(owner: GroupProcessOwnerV1) -> Result<i64, text>:
+    val observation = group_process_poll_v1(owner)?
+    Ok(observation.memory_peak_bytes)
+
+fn group_process_reap_path_v1(owner: GroupProcessOwnerV1) -> text:
+    owner.launch.root + "/tree-reaped.sdn"
+
+fn group_process_collect_reap_v1(owner: GroupProcessOwnerV1, lease: GroupedActionLeaseV1) -> Result<GroupedReapReceiptV1, text>:
+    if lease.worker_id != owner.launch.worker_id or lease.generation != owner.launch.generation or lease.snapshot_digest != owner.launch.snapshot_digest or lease.cache_identity != owner.launch.cache_identity:
+        return Err("group reap lease differs from native broker identity")
+    if lease.group_id == "" or lease.action_id == "" or lease.lease_id == "": return Err("group reap lease is incomplete")
+    val observed = _group_process_terminal_v1(owner)?
+    val terminal = file_read_regular_no_follow_bounded(owner.launch.root + "/broker.tree.sdn", 4096)?
+    var retained = "SIMPLE-GROUP-REAP-1\n"
+    for field in [lease.group_id, lease.action_id, lease.worker_id, str(lease.generation), lease.lease_id, lease.snapshot_digest, lease.cache_identity, owner.launch.request.producer_digest, owner.launch.request.broker_digest]:
+        retained = retained + builder_wire_line_v1(field)
+    retained = retained + terminal
+    val path = group_process_reap_path_v1(owner)
+    if file_exists(path):
+        val prior = file_read_regular_no_follow_bounded(path, 8192)?
+        if prior != retained: return Err("group terminal evidence already bound to a different lease")
+    elif not file_atomic_write(path, retained): return Err("cannot persist bound group terminal evidence")
+    val verified = file_read_regular_no_follow_bounded(path, 8192)?
+    if verified != retained: return Err("group terminal evidence persistence mismatch")
+    Ok(GroupedReapReceiptV1(lease.group_id, lease.action_id, lease.worker_id, lease.generation, lease.lease_id, lease.snapshot_digest, lease.cache_identity, sha256_text(retained)))
+
+export GroupProcessOwnerV1, group_process_set_launcher_v1
+export group_process_start_v1, group_process_recover_v1, group_process_poll_v1, group_process_cancel_v1
+export group_process_peak_memory_v1, group_process_collect_reap_v1, group_process_reap_path_v1

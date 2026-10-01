@@ -1,0 +1,29 @@
+# Frozen process operations. Entry composition selects the platform; portable
+# builds never import WinAPI declarations. Tokens stay in their owner's domain.
+use app.io.process_ops.{process_spawn_async, process_wait, process_kill}
+
+struct BuilderProcessPortV1:
+    spawn_operation: fn(text, text, [text], text) -> Result<i64, text>
+    wait_operation: fn(i64, i64) -> Result<i64, text>
+    terminate_operation: fn(i64) -> Result<bool, text>
+
+fn builder_portable_spawn_v1(program: text, digest: text, args: [text], directory: text) -> Result<i64, text>:
+    # The worker receives absolute request/root paths; compiler cwd is owned by
+    # the worker's isolated execution lease, not by this portable launcher.
+    val token = process_spawn_async(program, args)
+    if token <= 0: return Err("portable worker spawn failed")
+    Ok(token)
+
+fn builder_portable_wait_v1(token: i64, timeout_ms: i64) -> Result<i64, text>:
+    val code = process_wait(token, timeout_ms)
+    if code == -1: return Err("portable worker observation unavailable")
+    Ok(code)
+
+fn builder_portable_terminate_v1(token: i64) -> Result<bool, text>:
+    if not process_kill(token): return Err("portable worker termination failed")
+    Ok(true)
+
+fn builder_process_portable_v1() -> BuilderProcessPortV1:
+    BuilderProcessPortV1(spawn_operation: builder_portable_spawn_v1, wait_operation: builder_portable_wait_v1, terminate_operation: builder_portable_terminate_v1)
+
+export BuilderProcessPortV1, builder_process_portable_v1

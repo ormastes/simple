@@ -1,0 +1,238 @@
+# Worker owns its compiler lease and attempt-local writable files. Only the
+# manager may publish a result into the shared cache or canonical output tree.
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_task_identity_v1, builder_validate_task_v1, builder_identifier_valid_v1}
+use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
+use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_atomic_write, file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.io.env_ops.{env_vars}
+use app.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.io.process_observation_v4.{OwnedExecutablePin, OwnedCwdPinV4, ProcessObservationLeaseV4, process_observation_capabilities_v4, process_observation_start_pinned_v4}
+use std.common.process.observation_v4.{ProcessObservationRequestV4, ProcessObservationEnvironmentV4, ProcessObservationPacketKindV4, ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4, ProcessObservationFailureReasonV4, freeze_process_observation_receipt_v4, freeze_process_observation_cleanup_receipt_v4}
+
+pub fn builder_worker_verify_inputs_v1(task: BuildTaskV1, root: text) -> text:
+    for item in task.inputs:
+        val path = root + "/work/" + item.path
+        if not file_is_regular_no_follow(path):
+            return "input is not a regular file: " + item.path
+        if file_hash_sha256(path) != item.digest:
+            return "input digest mismatch: " + item.path
+    if not file_is_regular_no_follow(root + "/producer.exe"):
+        return "producer is not a regular file"
+    if file_hash_sha256(root + "/producer.exe") != task.producer_digest:
+        return "producer digest mismatch"
+    ""
+
+pub fn builder_worker_outputs_v1(task: BuildTaskV1, root: text) -> Result<[BuildInputV1], text>:
+    var outputs: [BuildInputV1] = []
+    for path in task.outputs:
+        val full = root + "/work/" + path
+        if not file_is_regular_no_follow(full):
+            return Err("missing regular output: " + path)
+        val digest = file_hash_sha256(full)
+        if digest.len() != 64:
+            return Err("cannot hash output: " + path)
+        outputs = outputs.push(BuildInputV1(path: path, digest: digest))
+    Ok(outputs)
+
+# Preserve the configured host environment, overwrite only owned cache paths,
+# and sort the exact encoded environment required by the V4 request contract.
+fn builder_worker_environment_v1(root: text) -> Result<[ProcessObservationEnvironmentV4], text>:
+    val maybe_snapshot = env_vars()
+    if maybe_snapshot == nil: return Err("environment snapshot unavailable")
+    val snapshot = maybe_snapshot ?? []
+    var keys: [text] = []
+    var values: {text: text} = {}
+    for pair in snapshot:
+        if not ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK", "TMP", "TEMP", "TMPDIR"].contains(pair.0):
+            if not keys.contains(pair.0): keys = keys.push(pair.0)
+            values[pair.0] = pair.1
+    keys = keys.push("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+    keys = keys.push("SIMPLE_NO_STUB_FALLBACK")
+    keys = keys.push("SIMPLE_RT_OBJ_CACHE_DIR")
+    keys = keys.push("SIMPLE_HIR_CACHE_DIR")
+    keys = keys.push("SIMPLE_FRONTEND_CACHE_DIR")
+    keys = keys.push("TEMP")
+    keys = keys.push("TMP")
+    keys = keys.push("TMPDIR")
+    values["SIMPLE_NATIVE_BUILD_CACHE_DIR"] = root + "/work/.builder-cache/native"
+    values["SIMPLE_RT_OBJ_CACHE_DIR"] = root + "/work/.builder-cache/runtime"
+    values["SIMPLE_NO_STUB_FALLBACK"] = "1"
+    values["SIMPLE_HIR_CACHE_DIR"] = root + "/work/.builder-cache/hir"
+    values["SIMPLE_FRONTEND_CACHE_DIR"] = root + "/work/.builder-cache/frontend"
+    values["TEMP"] = root + "/work/.builder-cache/temp"
+    values["TMP"] = root + "/work/.builder-cache/temp"
+    values["TMPDIR"] = root + "/work/.builder-cache/temp"
+    # Insertion sort is bounded by the process environment, never the source tree.
+    var i = 1
+    while i < keys.len():
+        var j = i
+        while j > 0 and keys[j] < keys[j - 1]:
+            val prior = keys[j - 1]
+            keys[j - 1] = keys[j]
+            keys[j] = prior
+            j = j - 1
+        i = i + 1
+    var result: [ProcessObservationEnvironmentV4] = []
+    for key in keys:
+        result = result.push(ProcessObservationEnvironmentV4(key: key, value: values[key] ?? ""))
+    Ok(result)
+
+# A fresh manager may observe this worker without adopting a recycled PID.
+# The worker answers only its exact immutable task identity and configured host.
+fn builder_worker_control_v1(root: text, identity: text, host_id: text) -> bool:
+    val request = match file_read_regular_no_follow_bounded(root + "/control.request", 4096):
+        Ok(value): value
+        Err(_message): return false
+    val fields = request.split("\n")
+    if fields.len() != 4 or fields[0] != identity or fields[1] != host_id:
+        return false
+    if not builder_identifier_valid_v1(fields[2]): return false
+    if fields[3] != "probe" and fields[3] != "cancel": return false
+    if not file_atomic_write(root + "/control.response", request): return false
+    fields[3] == "cancel"
+
+fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identity: text, host_id: text) -> bool:
+    var lease = owner
+    val _cancel = lease.cancel(100000000)
+    var polls = 0
+    while polls < 150:
+        match lease.collect(100000000):
+            Ok(receipt):
+                if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen and receipt.packet.leader_reaped and receipt.packet.tree_empty:
+                    match freeze_process_observation_receipt_v4(receipt):
+                        Ok(frozen):
+                            match lease.acknowledge(frozen):
+                                Ok(_ack): return file_atomic_write(root + "/compiler.reaped", identity + "\n" + host_id)
+                                Err(_message): return false
+                        Err(_message): return false
+                if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+                    match freeze_process_observation_cleanup_receipt_v4(receipt):
+                        Ok(frozen):
+                            val _ack = lease.acknowledge_cleanup(frozen)
+                            return false
+                        Err(_message): return false
+            Err(_message): sleep_ms(100)
+        polls = polls + 1
+    false
+
+fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<(text, i64), text>:
+    val capabilities = process_observation_capabilities_v4()?
+    if not capabilities.available: return Err("exact process observation V4 unavailable")
+    val environment = builder_worker_environment_v1(root)?
+    var executable = OwnedExecutablePin.pin(root + "/producer.exe")?
+    var directory = match OwnedCwdPinV4.pin(root + "/work"):
+        Ok(value): value
+        Err(message):
+            val _closed = executable.close()
+            return Err(message)
+    var argv: [text] = [root + "/producer.exe"]
+    for arg in task.args: argv = argv.push(arg)
+    val executable_digest = match executable.digest():
+        Ok(value): value
+        Err(message):
+            val _directory_closed = directory.close()
+            val _executable_closed = executable.close()
+            return Err(message)
+    val cwd_digest = match directory.digest():
+        Ok(value): value
+        Err(message):
+            val _directory_closed = directory.close()
+            val _executable_closed = executable.close()
+            return Err(message)
+    val request = ProcessObservationRequestV4(argv: argv, environment: environment,
+        canonical_cwd: root + "/work", canonical_pinned_directory: root,
+        executable_pin: 1, executable_digest: executable_digest,
+        cwd_pin_claim: 1, cwd_identity_digest: cwd_digest,
+        capability_bits: capabilities.capability_bits,
+        wall_budget_ns: task.timeout_ms * 1000000, term_grace_ns: 2000000000,
+        cleanup_budget_ns: 10000000000, stdout_limit_bytes: 1048576,
+        stderr_limit_bytes: 1048576, memory_limit_bytes: 0,
+        enforcement_kind: ProcessObservationEnforcementKindV4.None,
+        descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
+        max_clock_resolution_ns: 10000000)
+    val started = process_observation_start_pinned_v4(executable, directory, request)
+    val _directory_closed = directory.close()
+    val _executable_closed = executable.close()
+    val start = started?
+    var lease = start.lease
+    if not lease.active: return Err("compiler process was rejected before ownership transfer")
+    val identity = builder_task_identity_v1(task)
+    var cancelled = false
+    while true:
+        val control_cancel = builder_worker_control_v1(root, identity, host_id)
+        if (file_exists(root + "/cancel.request") or control_cancel) and not cancelled:
+            match lease.cancel(100000000):
+                Ok(_receipt): cancelled = true
+                Err(message):
+                    val _drained = builder_worker_abort_v1(lease, root, identity, host_id)
+                    return Err(message)
+            cancelled = true
+        val receipt = match lease.collect(100000000):
+            Ok(value): value
+            Err(message):
+                val _drained = builder_worker_abort_v1(lease, root, identity, host_id)
+                return Err(message)
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+            val cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)?
+            val _cleanup_ack = lease.acknowledge_cleanup(cleanup)?
+            return Err("compiler cleanup failed; receipt retained by runtime")
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen:
+            if not receipt.packet.leader_reaped or not receipt.packet.tree_empty:
+                return Err("compiler tree has not been reaped")
+            val frozen = freeze_process_observation_receipt_v4(receipt)?
+            if not file_write_bytes(root + "/stdout.log", receipt.stdout) or not file_write_bytes(root + "/stderr.log", receipt.stderr):
+                val _ack_failure = lease.acknowledge(frozen)?
+                return Err("cannot persist compiler output")
+            val _ack = lease.acknowledge(frozen)?
+            if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host_id):
+                return Err("cannot persist compiler reap evidence")
+            if cancelled: return Ok(("ERROR", 125))
+            if receipt.packet.failure_reason == ProcessObservationFailureReasonV4.ExecutionDeadline:
+                return Ok(("TIMEOUT", 124))
+            if receipt.packet.exit_code == 0 and receipt.packet.signal_number == 0:
+                return Ok(("OK", 0))
+            if receipt.packet.exit_code != 0: return Ok(("ERROR", receipt.packet.exit_code))
+            return Ok(("CRASHED", 128 + receipt.packet.signal_number))
+        sleep_ms(10)
+    Err("unreachable compiler observation state")
+
+pub fn builder_worker_execute_v1(task_path: text, attempt_root: text, host_id: text) -> i64:
+    val task = match builder_read_task_v1(task_path):
+        Ok(value): value
+        Err(message):
+            val _diagnostic = file_atomic_write(attempt_root + "/worker.error", message)
+            return 2
+    var status = "ERROR"
+    var exit_code: i64 = 2
+    var outputs: [BuildInputV1] = []
+    var diagnostic = builder_validate_task_v1(task)
+    if not builder_identifier_valid_v1(host_id): diagnostic = "invalid host identity"
+    if diagnostic == "": diagnostic = builder_worker_verify_inputs_v1(task, attempt_root)
+    if diagnostic == "":
+        for kind in ["native", "runtime", "hir", "frontend", "temp"]:
+            if not dir_create_all(attempt_root + "/work/.builder-cache/" + kind):
+                diagnostic = "cannot create isolated cache"
+    if diagnostic == "":
+        match builder_worker_run_v1(task, attempt_root, host_id):
+            Err(message): diagnostic = message
+            Ok(outcome):
+                status = outcome.0
+                exit_code = outcome.1
+                diagnostic = builder_worker_verify_inputs_v1(task, attempt_root)
+                if status == "OK" and diagnostic == "":
+                    match builder_worker_outputs_v1(task, attempt_root):
+                        Ok(value): outputs = value
+                        Err(message): diagnostic = message
+    if diagnostic != "":
+        status = "ERROR"
+        exit_code = 2
+        outputs = []
+        val _error = file_atomic_write(attempt_root + "/worker.error", diagnostic)
+    val result = BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: host_id,
+        status: status, exit_code: exit_code, outputs: outputs,
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    if not builder_write_result_v1(attempt_root + "/result.sdn", result): return 3
+    exit_code
+
+export builder_worker_execute_v1, builder_worker_verify_inputs_v1, builder_worker_outputs_v1

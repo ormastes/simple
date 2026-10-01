@@ -1,0 +1,63 @@
+# Bounded parent execution evidence. Canonical coordinator state is reconstructed
+# by replaying accepted operations, not by restoring a second semantic graph.
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+struct GroupedRunRecordV1:
+    kind: text
+    action_id: text
+    worker_id: text
+    generation: i64
+    lease_id: text
+    digest: text
+    memory_peak_bytes: i64
+    detail: text
+
+struct GroupedRunJournalV1:
+    identity: text
+    closed: bool
+    records: [GroupedRunRecordV1]
+
+fn grouped_journal_encode_v1(journal: GroupedRunJournalV1) -> text:
+    if not builder_digest_valid_v1(journal.identity) or journal.records.len() > 32768: return ""
+    var out = "SIMPLE-GROUPED-JOURNAL-1\n" + builder_wire_line_v1(journal.identity) +
+        builder_wire_line_v1(if journal.closed: "1" else: "0") + builder_wire_line_v1("{journal.records.len()}")
+    for record in journal.records:
+        for field in [record.kind, record.action_id, record.worker_id, "{record.generation}",
+                record.lease_id, record.digest, "{record.memory_peak_bytes}", record.detail]:
+            out = out + builder_wire_line_v1(field)
+    if out.len() > 16777216: return ""
+    out
+
+fn grouped_journal_decode_v1(payload: text, identity: text) -> Result<GroupedRunJournalV1, text>:
+    if payload.len() > 16777216: return Err("group journal exceeds bound")
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-GROUPED-JOURNAL-1": return Err("group journal schema differs")
+    val observed = reader.scalar()
+    if observed != identity or not builder_digest_valid_v1(observed): return Err("group journal manifest identity differs")
+    val closed = reader.number(1, false) == 1
+    val count = reader.number(32768, false)
+    var records: [GroupedRunRecordV1] = []
+    var i = 0
+    while i < count:
+        val kind = reader.scalar()
+        val action = reader.scalar()
+        val worker = reader.scalar()
+        val generation = reader.number(2147483647, false)
+        val lease = reader.scalar()
+        val digest = reader.scalar()
+        val peak = reader.number(1125899906842624, false)
+        val detail = reader.scalar()
+        if kind != "CLAIM" and kind != "RETRY" and kind != "OK" and kind != "ERROR" and kind != "STOP":
+            return Err("unknown group journal operation")
+        if action == "" or worker == "" or generation < 1 or not builder_digest_valid_v1(lease):
+            return Err("invalid group journal authority")
+        if digest != "" and not builder_digest_valid_v1(digest): return Err("invalid group journal digest")
+        records = records.push(GroupedRunRecordV1(kind, action, worker, generation, lease, digest, peak, detail))
+        i = i + 1
+    val malformed = reader.complete_error()
+    if malformed != "": return Err(malformed)
+    Ok(GroupedRunJournalV1(identity, closed, records))
+
+export GroupedRunRecordV1, GroupedRunJournalV1
+export grouped_journal_encode_v1, grouped_journal_decode_v1

@@ -1,0 +1,176 @@
+# Native manifest emitter for one canonical Phase 2 invocation. This is a
+# separate entry closure, not imported into the manager or its frozen build.
+use app.io.args_ops.{get_args}
+use app.io.file_ops.{file_exists, file_is_regular_no_follow, file_hash_sha256, file_copy}
+use app.io.dir_ops.{dir_create}
+use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
+use std.common.build_manager.contracts.{BuildInputV1, BuildTaskV1, BuildHostV1, BuildRunV1, builder_identifier_valid_v1, builder_digest_valid_v1, builder_relative_path_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn bootstrap_manifest_absolute_v1(path: text) -> bool:
+    if path == "" or path.contains("\n") or path.contains("\r") or path.contains("\0"): return false
+    if path.starts_with("/"): return true
+    path.len() > 3 and path[1:3] == ":/"
+
+fn bootstrap_manifest_hash_v1(path: text) -> Result<text, text>:
+    if not file_is_regular_no_follow(path): return Err("missing regular input: " + path)
+    val digest = file_hash_sha256(path)
+    if not builder_digest_valid_v1(digest): return Err("cannot hash input: " + path)
+    Ok(digest)
+
+# The codec requires a nonempty task array even for a host template. This
+# deliberately failing placeholder must be replaced by the compiler/qualifier;
+# accidentally running a template cannot emit successful artifact evidence.
+fn bootstrap_manifest_template_v1(args: [text]) -> Result<text, text>:
+    if args.len() != 5: return Err("--template WORKER WORKSPACE OUTPUT SLOTS")
+    for i in 1..4:
+        if not bootstrap_manifest_absolute_v1(args[i]): return Err("template paths must be absolute")
+    var slots: i64 = 0
+    for candidate in 1..65:
+        if args[4] == "{candidate}": slots = candidate
+    if slots == 0: return Err("template slots must be 1..64")
+    val digest = bootstrap_manifest_hash_v1(args[1])?
+    if file_exists(args[3]): return Err("template already exists")
+    val marker = sha256_text("bootstrap-host-template-must-replace-task-v1")
+    val placeholder = BuildTaskV1(id: "template-must-replace", attempt: 1, phase: "template-only",
+        producer_digest: digest, source_digest: marker, toolchain_digest: digest,
+        dependencies: [], program: args[1], args: ["--invalid-template-task"], inputs: [],
+        outputs: ["template-must-not-run"], cache_key: marker, timeout_ms: 1000)
+    val host = BuildHostV1(id: "bootstrap-local", transport: "local", endpoint: "",
+        workspace: args[2], worker_program: args[1], worker_digest: digest, slots: slots)
+    val run = BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 2)
+    if not builder_write_run_v1(args[3], run): return Err("template rejected or cannot be written")
+    Ok(args[3])
+
+# General local invocation emitter for an already prepared, private job root.
+# --job TEMPLATE PROGRAM ROOT ID PHASE OUTPUT --inputs FILE... -- ARGS...
+# Only the compiled codec writes wire records. Every staged input is hash-bound.
+fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
+    if args.len() < 11 or args[7] != "--inputs": return Err("invalid --job invocation")
+    for i in 1..4:
+        if not bootstrap_manifest_absolute_v1(args[i]): return Err("job paths must be absolute")
+    if not builder_identifier_valid_v1(args[4]) or not builder_identifier_valid_v1(args[5]):
+        return Err("invalid task or phase identity")
+    if not builder_relative_path_valid_v1(args[6]): return Err("invalid output path")
+    val template = builder_read_run_v1(args[1])?
+    for host in template.hosts:
+        if host.transport != "local": return Err("canonical jobs require qualified local hosts")
+        if bootstrap_manifest_hash_v1(host.worker_program)? != host.worker_digest:
+            return Err("worker image changed")
+    val program_sha = bootstrap_manifest_hash_v1(args[2])?
+    val template_sha = bootstrap_manifest_hash_v1(args[1])?
+    val root = args[3]
+    if file_exists(root + "/manifest.sdn"): return Err("job manifest already exists")
+    var inputs: [BuildInputV1] = []
+    var source_identity = "bootstrap-canonical-job-inputs-v1"
+    var index: i64 = 8
+    while index < args.len() and args[index] != "--":
+        val path = args[index]
+        if not builder_relative_path_valid_v1(path): return Err("invalid relative input")
+        val digest = bootstrap_manifest_hash_v1(root + "/" + path)?
+        inputs = inputs.push(BuildInputV1(path: path, digest: digest))
+        source_identity = source_identity + "{path.len()}:" + path + digest
+        index = index + 1
+    if inputs.len() == 0 or index >= args.len() - 1: return Err("job requires inputs and argv")
+    index = index + 1
+    var command: [text] = []
+    var identity = "bootstrap-canonical-job-v1|" + root + "|" + args[4]
+    while index < args.len():
+        val argument = args[index]
+        command = command.push(argument)
+        identity = identity + "{argument.len()}:" + argument
+        index = index + 1
+    val source_sha = sha256_text(source_identity)
+    val tools_sha = sha256_text(program_sha + template_sha)
+    val task = BuildTaskV1(id: args[4], attempt: 1, phase: args[5], producer_digest: program_sha,
+        source_digest: source_sha, toolchain_digest: tools_sha, dependencies: [],
+        program: args[2], args: command, inputs: inputs, outputs: [args[6]],
+        cache_key: sha256_text(identity + source_sha + tools_sha), timeout_ms: 0)
+    val run = BuildRunV1(tasks: [task], hosts: template.hosts, keep_going: template.keep_going, max_attempts: 1)
+    if not builder_write_run_v1(root + "/manifest.sdn", run): return Err("job manifest rejected or unwritable")
+    Ok(root + "/manifest.sdn")
+
+# Arguments: TEMPLATE SHELL ROOT OUTPUT SOURCE_SNAPSHOT TOOL_SNAPSHOT MANAGER
+# WORKER JOB_ROOT INVOCATION_ID -- <original canonical bootstrap arguments>.
+# JOB_ROOT must be new. A new outer invocation never reuses an old exit record;
+# the canonical bootstrap alone decides reuse of existing phase caches.
+fn bootstrap_manifest_emit_v1(args: [text]) -> Result<text, text>:
+    if args.len() < 14 or args[10] != "--": return Err("expected ten identity arguments, --, and bootstrap arguments")
+    for i in 0..9:
+        if not bootstrap_manifest_absolute_v1(args[i]): return Err("identity paths must be absolute")
+    if not builder_identifier_valid_v1(args[9]): return Err("invalid invocation identifier")
+    val template = builder_read_run_v1(args[0])?
+    val shell_sha = bootstrap_manifest_hash_v1(args[1])?
+    val root = args[2]
+    val output = args[3]
+    val source_sha = bootstrap_manifest_hash_v1(args[4])?
+    val tools_sha = bootstrap_manifest_hash_v1(args[5])?
+    val manager_sha = bootstrap_manifest_hash_v1(args[6])?
+    val worker_sha = bootstrap_manifest_hash_v1(args[7])?
+    val job_root = args[8]
+    val invocation = args[9]
+    val script_sha = bootstrap_manifest_hash_v1(root + "/scripts/bootstrap/bootstrap-from-scratch.sh")?
+    val wrapper = root + "/scripts/bootstrap/bootstrap-managed-stage.shs"
+    val wrapper_sha = bootstrap_manifest_hash_v1(wrapper)?
+    val template_sha = bootstrap_manifest_hash_v1(args[0])?
+    for host in template.hosts:
+        if host.transport != "local" or host.worker_program != args[7] or host.worker_digest != worker_sha:
+            return Err("outer bootstrap requires the selected hash-bound local worker")
+    var full: i64 = 0
+    var stage2: i64 = 0
+    var output_count: i64 = 0
+    var task_args: [text] = ["bootstrap-managed-stage.shs", root, script_sha, manager_sha, output,
+        "source.inputs", source_sha, args[1], shell_sha, "--"]
+    var identity = "bootstrap-outer-stage2-v1|" + invocation + "|" + job_root
+    for i in 11..args.len():
+        val argument = args[i]
+        if argument == "--full-bootstrap": full = full + 1
+        if argument == "--stop-after-stage2": stage2 = stage2 + 1
+        if argument.starts_with("--output="):
+            if argument != "--output=" + output: return Err("bootstrap output does not match pinned output root")
+            output_count = output_count + 1
+        task_args = task_args.push(argument)
+        identity = identity + "{argument.len()}:" + argument
+    if full != 1 or stage2 != 1 or output_count != 1:
+        return Err("outer invocation requires full-bootstrap, stop-after-stage2 and exactly one matching output")
+    val tool_identity = sha256_text(tools_sha + shell_sha + manager_sha + worker_sha + template_sha + wrapper_sha)
+    val task = BuildTaskV1(id: "bootstrap-" + invocation, attempt: 1, phase: "stage2-bootstrap",
+        producer_digest: shell_sha, source_digest: source_sha, toolchain_digest: tool_identity,
+        dependencies: [], program: args[1], args: task_args,
+        inputs: [BuildInputV1(path: "bootstrap-managed-stage.shs", digest: wrapper_sha),
+            BuildInputV1(path: "source.inputs", digest: source_sha),
+            BuildInputV1(path: "tools.inputs", digest: tools_sha)],
+        outputs: ["bootstrap-stage2.exit.env"], cache_key: sha256_text(identity + source_sha + tool_identity),
+        timeout_ms: 604800000)
+    # One outer worker owns the phase. Inner native compiler/group budgets stay
+    # with canonical bootstrap; the host template never multiplies this task.
+    val run = BuildRunV1(tasks: [task], hosts: template.hosts, keep_going: template.keep_going, max_attempts: 1)
+    if file_exists(job_root) or not dir_create(job_root, false): return Err("job root already exists or cannot be created")
+    if not file_copy(wrapper, job_root + "/bootstrap-managed-stage.shs") or
+            not file_copy(args[4], job_root + "/source.inputs") or
+            not file_copy(args[5], job_root + "/tools.inputs"):
+        return Err("cannot stage pinned invocation inputs; partial job root retained")
+    if bootstrap_manifest_hash_v1(job_root + "/bootstrap-managed-stage.shs")? != wrapper_sha or
+            bootstrap_manifest_hash_v1(job_root + "/source.inputs")? != source_sha or
+            bootstrap_manifest_hash_v1(job_root + "/tools.inputs")? != tools_sha:
+        return Err("input changed while staging; partial job root retained")
+    if not builder_write_run_v1(job_root + "/manifest.sdn", run): return Err("manifest rejected; partial job root retained")
+    Ok(job_root + "/manifest.sdn")
+
+fn main() -> i64:
+    val raw = get_args()
+    var args: [text] = []
+    for i in 1..raw.len(): args = args.push(raw[i])
+    val result = if args.len() > 0 and args[0] == "--template":
+        bootstrap_manifest_template_v1(args)
+    elif args.len() > 0 and args[0] == "--job":
+        bootstrap_manifest_job_v1(args)
+    else:
+        bootstrap_manifest_emit_v1(args)
+    match result:
+        case Ok(path):
+            print "{path}"
+            0
+        case Err(message):
+            print "bootstrap manifest: {message}"
+            2

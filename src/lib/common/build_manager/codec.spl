@@ -1,0 +1,290 @@
+# Canonical bounded wire records. Encoded payloads contain no process pointers.
+use std.common.build_manager.contracts.{
+    BuildInputV1, BuildTaskV1, BuildHostV1, BuildResultV1, BuildRunV1,
+    builder_text_valid_v1, builder_validate_task_v1, builder_validate_run_v1,
+    builder_validate_result_shape_v1, BUILDER_MAX_INPUTS_V1
+}
+
+fn builder_wire_escape_v1(value: text) -> text:
+    value.replace("%", "%25").replace("\t", "%09").replace("\r", "%0D").replace("\n", "%0A")
+
+fn builder_wire_unescape_v1(value: text) -> Result<text, text>:
+    if value.len() > 196608 or value.contains("\0") or value.contains("\t") or
+            value.contains("\n") or value.contains("\r"):
+        return Err("invalid wire scalar")
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        if c != "%":
+            out = out + c
+            i = i + 1
+        else:
+            if i + 3 > value.len(): return Err("truncated escape")
+            val code = value[i:i + 3]
+            if code == "%25": out = out + "%"
+            elif code == "%09": out = out + "\t"
+            elif code == "%0D": out = out + "\r"
+            elif code == "%0A": out = out + "\n"
+            else: return Err("unknown or noncanonical escape")
+            i = i + 3
+        if out.len() > 65536: return Err("wire scalar exceeds bound")
+    Ok(out)
+
+fn builder_wire_line_v1(value: text) -> text:
+    builder_wire_escape_v1(value) + "\n"
+
+fn builder_wire_digit_v1(value: text) -> i64:
+    # @workaround bug=native_string_methods_unresolved_in_mir_2026-07-17 reason=Admitted producer rejects text to_int method; bounded decimal lookup preserves strict digit semantics
+    val digits = "0123456789"
+    var digit: i64 = 0
+    while digit < 10:
+        if value == digits.substring(digit, digit + 1): return digit
+        digit = digit + 1
+    -1
+
+class BuilderWireReaderV1:
+    lines: [text]
+    index: i64
+    reason: text
+
+    static fn create(payload: text) -> BuilderWireReaderV1:
+        if payload.len() > 16777216 or not payload.ends_with("\n"):
+            return BuilderWireReaderV1(lines: [], index: 0, reason: "invalid wire size or terminator")
+        var count = 0
+        var i = 0
+        while i < payload.len():
+            if payload[i:i + 1] == "\n": count = count + 1
+            if count > 262144:
+                return BuilderWireReaderV1(lines: [], index: 0, reason: "too many wire fields")
+            i = i + 1
+        BuilderWireReaderV1(lines: payload.split("\n"), index: 0, reason: "")
+
+    me scalar() -> text:
+        if self.reason != "": return ""
+        if self.index >= self.lines.len() - 1:
+            self.reason = "truncated wire record"
+            return ""
+        val field = self.lines[self.index]
+        self.index = self.index + 1
+        match builder_wire_unescape_v1(field):
+            case Ok(value): value
+            case Err(reason):
+                self.reason = reason
+                ""
+
+    me number(limit: i64, signed: bool) -> i64:
+        val field = self.scalar()
+        if self.reason != "": return 0
+        if field == "" or field.len() > 17:
+            self.reason = "invalid wire integer"
+            return 0
+        var negative = false
+        var pos = 0
+        if field.starts_with("-") and signed:
+            negative = true
+            pos = 1
+        if pos >= field.len() or (field.len() - pos > 1 and field[pos:pos + 1] == "0"):
+            self.reason = "noncanonical wire integer"
+            return 0
+        var value: i64 = 0
+        while pos < field.len():
+            val c = field[pos:pos + 1]
+            if c < "0" or c > "9":
+                self.reason = "nondigit wire integer"
+                return 0
+            val digit: i64 = builder_wire_digit_v1(c)
+            if digit < 0 or value > (limit - digit) / 10:
+                self.reason = "wire integer exceeds bound"
+                return 0
+            value = value * 10 + digit
+            if value > limit:
+                self.reason = "wire integer exceeds bound"
+                return 0
+            pos = pos + 1
+        if negative:
+            if value == 0:
+                self.reason = "negative zero is not canonical"
+                return 0
+            return 0 - value
+        value
+
+    fn complete_error() -> text:
+        if self.reason != "": return self.reason
+        if self.index != self.lines.len() - 1: return "trailing wire fields"
+        ""
+
+fn builder_wire_task_body_v1(task: BuildTaskV1) -> text:
+    var pieces: [text] = []
+    for field in [task.id, "{task.attempt}", task.phase, task.producer_digest,
+            task.source_digest, task.toolchain_digest, task.program,
+            task.cache_key, "{task.timeout_ms}", "{task.dependencies.len()}"]:
+        pieces.push(builder_wire_line_v1(field))
+    for dep in task.dependencies:
+        pieces.push(builder_wire_line_v1(dep))
+    pieces.push(builder_wire_line_v1("{task.args.len()}"))
+    for arg in task.args:
+        pieces.push(builder_wire_line_v1(arg))
+    pieces.push(builder_wire_line_v1("{task.inputs.len()}"))
+    for item in task.inputs:
+        pieces.push(builder_wire_line_v1(item.path))
+        pieces.push(builder_wire_line_v1(item.digest))
+    pieces.push(builder_wire_line_v1("{task.outputs.len()}"))
+    for output in task.outputs:
+        pieces.push(builder_wire_line_v1(output))
+    pieces.join("")
+
+fn builder_wire_read_task_v1(reader: BuilderWireReaderV1) -> BuildTaskV1:
+    val id = reader.scalar()
+    val attempt = reader.number(100, false)
+    val phase = reader.scalar()
+    val producer_digest = reader.scalar()
+    val source_digest = reader.scalar()
+    val toolchain_digest = reader.scalar()
+    val program = reader.scalar()
+    val cache_key = reader.scalar()
+    val timeout_ms = reader.number(604800000, false)
+    val dep_count = reader.number(4096, false)
+    var dependencies: [text] = []
+    var i = 0
+    while i < dep_count:
+        dependencies = dependencies.push(reader.scalar())
+        i = i + 1
+    val arg_count = reader.number(1024, false)
+    var args: [text] = []
+    i = 0
+    while i < arg_count:
+        args = args.push(reader.scalar())
+        i = i + 1
+    val input_count = reader.number(BUILDER_MAX_INPUTS_V1, false)
+    var inputs: [BuildInputV1] = []
+    i = 0
+    while i < input_count:
+        val path = reader.scalar()
+        val digest = reader.scalar()
+        inputs = inputs.push(BuildInputV1(path: path, digest: digest))
+        i = i + 1
+    val output_count = reader.number(4096, false)
+    var outputs: [text] = []
+    i = 0
+    while i < output_count:
+        outputs = outputs.push(reader.scalar())
+        i = i + 1
+    BuildTaskV1(id: id, attempt: attempt, phase: phase,
+        producer_digest: producer_digest, source_digest: source_digest,
+        toolchain_digest: toolchain_digest, program: program, cache_key: cache_key,
+        timeout_ms: timeout_ms, dependencies: dependencies, args: args,
+        inputs: inputs, outputs: outputs)
+
+fn builder_encode_task_v1(task: BuildTaskV1) -> text:
+    if builder_validate_task_v1(task) != "": return ""
+    val payload = "SIMPLE-BUILD-TASK-1\n" + builder_wire_task_body_v1(task)
+    if payload.len() > 16777216: return ""
+    payload
+
+fn builder_decode_task_v1(payload: text) -> Result<BuildTaskV1, text>:
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-BUILD-TASK-1": return Err("invalid task wire header")
+    val task = builder_wire_read_task_v1(reader)
+    val parse_error = reader.complete_error()
+    if parse_error != "": return Err(parse_error)
+    val reason = builder_validate_task_v1(task)
+    if reason != "": return Err(reason)
+    Ok(task)
+
+fn builder_encode_run_v1(run: BuildRunV1) -> text:
+    if builder_validate_run_v1(run) != "": return ""
+    val policy = if run.keep_going: "1" else: "0"
+    var pieces: [text] = ["SIMPLE-BUILD-RUN-2\n", builder_wire_line_v1(policy),
+        builder_wire_line_v1("{run.max_attempts}"), builder_wire_line_v1("{run.hosts.len()}")]
+    var size = pieces.join("").len()
+    for host in run.hosts:
+        for field in [host.id, host.transport, host.endpoint, host.workspace,
+                host.worker_program, host.worker_digest, "{host.slots}"]:
+            val line = builder_wire_line_v1(field)
+            pieces.push(line)
+            size = size + line.len()
+    val count = builder_wire_line_v1("{run.tasks.len()}")
+    pieces.push(count)
+    size = size + count.len()
+    for task in run.tasks:
+        val body = builder_wire_task_body_v1(task)
+        size = size + body.len()
+        if size > 16777216: return ""
+        pieces.push(body)
+    pieces.join("")
+
+fn builder_decode_run_v1(payload: text) -> Result<BuildRunV1, text>:
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-BUILD-RUN-2": return Err("invalid run wire header (compiled worker digest required)")
+    val keep = reader.number(1, false)
+    val max_attempts = reader.number(3, false)
+    val host_count = reader.number(64, false)
+    var hosts: [BuildHostV1] = []
+    var i = 0
+    while i < host_count:
+        val id = reader.scalar()
+        val transport = reader.scalar()
+        val endpoint = reader.scalar()
+        val workspace = reader.scalar()
+        val worker_program = reader.scalar()
+        val worker_digest = reader.scalar()
+        val slots = reader.number(1024, false)
+        hosts = hosts.push(BuildHostV1(id: id, transport: transport, endpoint: endpoint,
+            workspace: workspace, worker_program: worker_program,
+            worker_digest: worker_digest, slots: slots))
+        i = i + 1
+    val task_count = reader.number(4096, false)
+    var tasks: [BuildTaskV1] = []
+    i = 0
+    while i < task_count:
+        tasks = tasks.push(builder_wire_read_task_v1(reader))
+        if reader.reason != "": return Err(reader.reason)
+        i = i + 1
+    val parse_error = reader.complete_error()
+    if parse_error != "": return Err(parse_error)
+    val run = BuildRunV1(tasks: tasks, hosts: hosts, keep_going: keep == 1, max_attempts: max_attempts)
+    val reason = builder_validate_run_v1(run)
+    if reason != "": return Err(reason)
+    Ok(run)
+
+fn builder_encode_result_v1(result: BuildResultV1) -> text:
+    if builder_validate_result_shape_v1(result) != "": return ""
+    var out = "SIMPLE-BUILD-RESULT-1\n"
+    for field in [result.task_id, "{result.attempt}", result.identity_digest,
+            result.host_id, result.status, "{result.exit_code}", "{result.cache_hits}",
+            "{result.cache_misses}", "{result.cache_stores}", "{result.outputs.len()}"]:
+        out = out + builder_wire_line_v1(field)
+    for item in result.outputs:
+        out = out + builder_wire_line_v1(item.path) + builder_wire_line_v1(item.digest)
+    if out.len() > 16777216: return ""
+    out
+
+fn builder_decode_result_v1(payload: text) -> Result<BuildResultV1, text>:
+    val reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-BUILD-RESULT-1": return Err("invalid result wire header")
+    val task_id = reader.scalar()
+    val attempt = reader.number(100, false)
+    val identity_digest = reader.scalar()
+    val host_id = reader.scalar()
+    val status = reader.scalar()
+    val exit_code = reader.number(4294967295, true)
+    val cache_hits = reader.number(1000000000000, true)
+    val cache_misses = reader.number(1000000000000, true)
+    val cache_stores = reader.number(1000000000000, true)
+    val output_count = reader.number(4096, false)
+    var outputs: [BuildInputV1] = []
+    var i = 0
+    while i < output_count:
+        val path = reader.scalar()
+        val digest = reader.scalar()
+        outputs = outputs.push(BuildInputV1(path: path, digest: digest))
+        i = i + 1
+    val parse_error = reader.complete_error()
+    if parse_error != "": return Err(parse_error)
+    val result = BuildResultV1(task_id: task_id, attempt: attempt, identity_digest: identity_digest,
+        host_id: host_id, status: status, exit_code: exit_code, outputs: outputs,
+        cache_hits: cache_hits, cache_misses: cache_misses, cache_stores: cache_stores)
+    val reason = builder_validate_result_shape_v1(result)
+    if reason != "": return Err(reason)
+    Ok(result)

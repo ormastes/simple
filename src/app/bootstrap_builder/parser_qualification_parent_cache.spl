@@ -1,0 +1,52 @@
+# Decode evidence produced by an actual compiler's private frontend cache.
+# The caller owns process execution, source pins, freshness and payload parity.
+use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub struct ParserQualificationParentCacheV1:
+    frontend_identity: text
+    blob: text
+    blob_digest: text
+
+fn parser_qualification_source_fingerprint_v1(value: text) -> bool:
+    # incremental.native_build_frontend_source_fingerprint: 16 hex, n, count.
+    if value.len() < 18 or value.substring(16, 17) != "n": return false
+    for index in 0..16:
+        if not "0123456789abcdef".contains(value.substring(index, index + 1)): return false
+    if not "123456789".contains(value.substring(17, 18)): return false
+    for index in 18..value.len():
+        if not "0123456789".contains(value.substring(index, index + 1)): return false
+    true
+
+pub fn parser_qualification_parent_cache_v1(raw: text, parent_digest: text) ->
+        Result<ParserQualificationParentCacheV1, text>:
+    if not builder_digest_valid_v1(parent_digest): return Err("parent executable digest invalid")
+    val newline = raw.index_of("\n")
+    if newline < 0 or newline > 4096 or raw.len() > 134217728:
+        return Err("parent frontend cache envelope invalid")
+    val header = raw.substring(0, newline)
+    val prefix = FRONTEND_CACHE_ENTRY_VERSION + " " + FLAT_POOL_CODEC_VERSION + " "
+    if not header.starts_with(prefix) or header.contains("\r"):
+        return Err("parent frontend cache version invalid")
+    val fields = header.substring(prefix.len()).split(";")
+    # Exact ordering rejects duplicate, missing and injected identity fields.
+    if fields.len() != 9: return Err("parent frontend cache scope shape invalid")
+    if not fields[0].starts_with("lane=") or fields[0].len() <= 5 or
+            fields[1] != "backend=smf" or fields[2] != "cpu=native" or
+            fields[3] != "features=" or fields[4] != "opt=0" or
+            fields[5] != "compiler=frontend-exe=" + parent_digest or
+            not fields[6].starts_with("sources=") or
+            fields[7] != "provider=compiler-bound-builtin:smf" or
+            fields[8] != "optimizer=compiler-bound-optimizer":
+        return Err("parent frontend cache scope authority differs")
+    val source_fingerprint = fields[6].substring(8)
+    if not parser_qualification_source_fingerprint_v1(source_fingerprint):
+        return Err("parent frontend source fingerprint unavailable or malformed")
+    val blob = raw.substring(newline + 1)
+    if blob == "": return Err("parent frontend cache payload empty")
+    Ok(ParserQualificationParentCacheV1("frontend-exe=" + parent_digest +
+        ";sources=" + source_fingerprint, blob, sha256_text(blob)))
+
+export ParserQualificationParentCacheV1, parser_qualification_parent_cache_v1

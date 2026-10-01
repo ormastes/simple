@@ -1,0 +1,189 @@
+# Compiled Windows worker entry. Keep kernel32 ownership out of Linux manager
+# link closures and bind this distinct image digest in BuildHostV1.
+use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_vars, env_get}
+use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_atomic_write}
+use app.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, BuildResultV1, builder_validate_task_v1, builder_task_identity_v1, builder_identifier_valid_v1}
+use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
+use app.bootstrap_builder.windows_staged_git.{BuilderStagedGitErrorV1, builder_windows_staged_git_v1, builder_windows_control_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessAdmissionV1, windows_process_admit_with_reserve_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
+use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
+
+fn builder_windows_reject_before_start_v1(task: BuildTaskV1, root: text, host: text, reason: text) -> text:
+    val proof = BuilderNoChildStartedV1(builder_task_identity_v1(task), host, reason)
+    val payload = builder_no_child_started_encode_v1(proof)
+    if payload == "" or not file_atomic_write(root + "/compiler.not-started.sdn", payload):
+        return reason + "; no-child-started receipt could not be persisted"
+    reason
+
+pub fn builder_windows_parse_required_memory_v1(value: text) -> Result<i64, text>:
+    if value == "" or value.len() > 16: return Err("pre-spawn memory requirement missing or invalid")
+    var bytes: i64 = 0
+    for index in 0..value.len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return Err("pre-spawn memory requirement missing or invalid")
+        bytes = bytes * 10 + digit
+    if bytes <= 0 or bytes > 1125899906842624:
+        return Err("pre-spawn memory requirement outside supported bound")
+    Ok(bytes)
+
+fn builder_windows_environment_v1(root: text) -> Result<[text], text>:
+    val snapshot = env_vars()
+    if snapshot == nil: return Err("Windows environment snapshot unavailable")
+    var result: [text] = []
+    var names: [text] = []
+    val replaced = ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK", "TEMP", "TMP", "TMPDIR"]
+    for pair in snapshot ?? []:
+        val name = pair.0.to_upper()
+        # Hidden per-drive cwd entries are superseded by the explicit cwd.
+        if pair.0 != "" and not pair.0.contains("=") and not replaced.contains(name) and not names.contains(name):
+            names = names.push(name)
+            result = result.push(pair.0 + "=" + pair.1)
+    result = result.push("SIMPLE_NATIVE_BUILD_CACHE_DIR=" + root + "/work/.builder-cache/native")
+    result = result.push("SIMPLE_RT_OBJ_CACHE_DIR=" + root + "/work/.builder-cache/runtime")
+    result = result.push("SIMPLE_HIR_CACHE_DIR=" + root + "/work/.builder-cache/hir")
+    result = result.push("SIMPLE_FRONTEND_CACHE_DIR=" + root + "/work/.builder-cache/frontend")
+    result = result.push("SIMPLE_NO_STUB_FALLBACK=1")
+    result = result.push("TEMP=" + root + "/work/.builder-cache/temp")
+    result = result.push("TMP=" + root + "/work/.builder-cache/temp")
+    result = result.push("TMPDIR=" + root + "/work/.builder-cache/temp")
+    Ok(result)
+
+pub fn builder_windows_setup_failure_v1(task: BuildTaskV1, root: text, host: text, failure: BuilderStagedGitErrorV1) -> text:
+    if not failure.tree_cleanup_confirmed: return failure.message + "; staged Git tree ownership unknown"
+    builder_windows_reject_before_start_v1(task, root, host, failure.message)
+
+fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
+    if file_exists(root + "/cancel.request"):
+        return Err(builder_windows_reject_before_start_v1(task, root, host, "cancelled before compiler setup"))
+    val _staged_commit = match builder_windows_staged_git_v1(task, root, host):
+        Ok(value): value
+        Err(failure):
+            return Err(builder_windows_setup_failure_v1(task, root, host, failure))
+    val configured_memory = env_get("SIMPLE_BUILD_COMPILER_MEMORY_BYTES") ?? ""
+    var memory_limit: i64 = 0
+    if configured_memory != "":
+        if configured_memory.len() > 13: return Err(builder_windows_reject_before_start_v1(task, root, host, "compiler memory bound invalid"))
+        for index in 0..configured_memory.len():
+            val digit = configured_memory.char_code_at(index) - 48
+            if digit < 0 or digit > 9: return Err(builder_windows_reject_before_start_v1(task, root, host, "compiler memory bound invalid"))
+            memory_limit = memory_limit * 10 + digit
+        if memory_limit <= 0 or memory_limit > 1099511627776:
+            return Err(builder_windows_reject_before_start_v1(task, root, host, "compiler memory bound invalid"))
+    var program = task.program
+    if not windows_process_path_valid_v1(program): program = root + "/producer.exe"
+    var inputs: [WindowsProcessInputV1] = []
+    for input in task.inputs:
+        inputs = inputs.push(WindowsProcessInputV1(path: root + "/work/" + input.path, digest: input.digest))
+    for kind in ["native", "runtime", "hir", "frontend", "temp"]:
+        if not dir_create_all(root + "/work/.builder-cache/" + kind):
+            return Err(builder_windows_reject_before_start_v1(task, root, host, "isolated cache unavailable"))
+    val environment = match builder_windows_environment_v1(root):
+        Ok(value): value
+        Err(reason): return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
+    val request = WindowsProcessRequestV1(program: program, producer_digest: task.producer_digest,
+        args: task.args, environment: environment,
+        directory: root + "/work", inputs: inputs, stdout_path: root + "/stdout.log",
+        stderr_path: root + "/stderr.log", timeout_ms: task.timeout_ms)
+    val identity = builder_task_identity_v1(task)
+    if file_exists(root + "/cancel.request") or builder_windows_control_v1(root, identity, host):
+        return Err(builder_windows_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
+    # The native owner rechecks after pinning all declared inputs, just before
+    # it opens child streams and calls CreateProcessW. Parsing fails closed here.
+    val configured_required = env_get("SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES") ?? ""
+    var required_memory: i64 = 0
+    if memory_limit > 0 or configured_required != "":
+        val required = match builder_windows_parse_required_memory_v1(configured_required):
+            Ok(value): value
+            Err(reason): return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
+        required_memory = required
+        if required < memory_limit:
+            return Err(builder_windows_reject_before_start_v1(task, root, host, "pre-spawn requirement below compiler memory bound"))
+    val lease = match windows_process_admit_with_reserve_v1(request, memory_limit, required_memory):
+        WindowsProcessAdmissionV1.Started(value): value
+        WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
+            return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
+        WindowsProcessAdmissionV1.FailedAfterCleanup(reason):
+            if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host):
+                return Err(reason + "; authoritative cleanup receipt could not be persisted")
+            return Err(reason)
+        WindowsProcessAdmissionV1.Unknown(reason): return Err(reason + "; native ownership unknown")
+    var cancelled = false
+    while true:
+        val requested = builder_windows_control_v1(root, identity, host)
+        if (requested or file_exists(root + "/cancel.request")) and not cancelled:
+            val _accepted = windows_process_cancel_v1(lease)?
+            cancelled = true
+        val observation = match windows_process_poll_v1(lease):
+            Ok(value): value
+            Err(message):
+                val _cancelled = windows_process_cancel_v1(lease)
+                return Err(message)
+        if observation.terminal:
+            val receipt = windows_process_collect_v1(lease)?
+            if not receipt.leader_reaped or not receipt.tree_empty: return Err("Windows tree cleanup unproven")
+            # Receipt is published only after exact handle/job cleanup completes.
+            if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host):
+                return Err("cannot persist Windows tree cleanup receipt")
+            if receipt.timed_out: return Ok(("TIMEOUT", 124))
+            if receipt.cancelled: return Ok(("ERROR", 125))
+            if receipt.exit_code == 0: return Ok(("OK", 0))
+            return Ok(("ERROR", receipt.exit_code))
+        sleep_ms(10)
+    Err("unreachable Windows owner loop")
+
+fn builder_windows_execute_v1(request_path: text, root: text, host: text) -> i64:
+    val task = match builder_read_task_v1(request_path):
+        Ok(value): value
+        Err(message):
+            print "worker: {message}"
+            return 2
+    var diagnostic = builder_validate_task_v1(task)
+    if not builder_identifier_valid_v1(host): diagnostic = "invalid worker host"
+    if diagnostic != "": diagnostic = builder_windows_reject_before_start_v1(task, root, host, diagnostic)
+    var status = "ERROR"
+    var exit_code: i64 = 2
+    var outputs: [BuildInputV1] = []
+    if diagnostic == "":
+        match builder_windows_run_v1(task, root, host):
+            Ok(outcome):
+                status = outcome.0
+                exit_code = outcome.1
+            Err(message): diagnostic = message
+    if diagnostic == "" and status == "OK":
+        for output in task.outputs:
+            val digest = windows_process_file_digest_v1(root + "/work/" + output)
+            if digest.len() != 64:
+                diagnostic = "missing regular output: " + output
+                break
+            outputs = outputs.push(BuildInputV1(path: output, digest: digest))
+    if diagnostic != "":
+        status = "ERROR"
+        exit_code = 2
+        outputs = []
+        val _written = file_atomic_write(root + "/worker.error", diagnostic)
+    val result = BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: host,
+        status: status, exit_code: exit_code, outputs: outputs,
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    if not builder_write_result_v1(root + "/result.sdn", result): return 3
+    exit_code
+
+fn main() -> i64:
+    val raw = get_args()
+    var args: [text] = []
+    for i in 1..raw.len(): args = args.push(raw[i])
+    val config = builder_cli_parse_v1(args)
+    if config.error != "":
+        print "worker: {config.error}"
+        return 2
+    if config.command == "--help" or config.command == "-h":
+        print "bootstrap-builder-windows-worker worker --request FILE --attempt-root DIR --host ID"
+        return 0
+    if config.command != "worker": return 2
+    builder_windows_execute_v1(config.request, config.attempt_root, config.host)
+
+export builder_windows_execute_v1, builder_windows_parse_required_memory_v1

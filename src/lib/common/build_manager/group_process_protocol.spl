@@ -1,0 +1,149 @@
+# Bounded, canonical process broker records. No handles or function pointers cross
+# this wire; immutable startup identity covers the complete request and budget.
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct GroupProcessInputV1:
+    path: text
+    digest: text
+
+struct GroupProcessRequestV1:
+    program: text
+    producer_digest: text
+    args: [text]
+    environment: [text]
+    directory: text
+    inputs: [GroupProcessInputV1]
+    stdout_path: text
+    stderr_path: text
+    timeout_ms: i64
+    broker_program: text
+    broker_digest: text
+
+struct GroupProcessLaunchV1:
+    root: text
+    worker_id: text
+    generation: i64
+    snapshot_digest: text
+    cache_identity: text
+    memory_limit_bytes: i64
+    request: GroupProcessRequestV1
+
+struct GroupProcessPollV1:
+    terminal: bool
+    leader_reaped: bool
+    tree_empty: bool
+    active_processes: i64
+    exit_code: i64
+    timed_out: bool
+    cancelled: bool
+    memory_peak_bytes: i64
+
+fn group_process_launch_validate_v1(value: GroupProcessLaunchV1) -> text:
+    val request = value.request
+    if value.root == "" or value.root.contains("\0") or not builder_identifier_valid_v1(value.worker_id): return "invalid group root/worker"
+    if value.generation < 1 or value.generation > 1000000000: return "invalid group generation"
+    for digest in [value.snapshot_digest, value.cache_identity, request.producer_digest, request.broker_digest]:
+        if not builder_digest_valid_v1(digest): return "invalid group digest"
+    if value.memory_limit_bytes < 1 or value.memory_limit_bytes > 1125899906842624: return "invalid group memory limit"
+    if request.timeout_ms < 1 or request.timeout_ms > 86400000: return "invalid group lifetime bound"
+    if request.args.len() != 2: return "group worker argv must have exactly two fields"
+    if request.args[0] != "--group-root" or request.args[1] != value.root: return "group worker argv must name exact group root"
+    if request.directory != value.root: return "group worker cwd must equal installed root"
+    if request.inputs.len() > 100000 or request.environment.len() > 4096: return "group request inventory exceeds bound"
+    for path in [request.program, request.broker_program, request.directory, request.stdout_path, request.stderr_path]:
+        if path == "" or path.contains("\0"): return "invalid group path"
+    for assignment in request.environment:
+        if assignment.contains("\0"): return "NUL in group environment"
+    for input in request.inputs:
+        if input.path == "" or input.path.contains("\0") or not builder_digest_valid_v1(input.digest): return "invalid group input"
+    ""
+
+fn group_process_launch_encode_v1(value: GroupProcessLaunchV1) -> text:
+    if group_process_launch_validate_v1(value) != "": return ""
+    val request = value.request
+    var out = "SIMPLE-GROUP-BROKER-1\n"
+    for field in [value.root, value.worker_id, str(value.generation), value.snapshot_digest, value.cache_identity, str(value.memory_limit_bytes), request.program, request.producer_digest, request.directory, request.stdout_path, request.stderr_path, str(request.timeout_ms), request.broker_program, request.broker_digest]:
+        out = out + builder_wire_line_v1(field)
+    out = out + builder_wire_line_v1(str(request.args.len()))
+    for arg in request.args: out = out + builder_wire_line_v1(arg)
+    out = out + builder_wire_line_v1(str(request.environment.len()))
+    for assignment in request.environment: out = out + builder_wire_line_v1(assignment)
+    out = out + builder_wire_line_v1(str(request.inputs.len()))
+    for input in request.inputs:
+        out = out + builder_wire_line_v1(input.path) + builder_wire_line_v1(input.digest)
+    if out.len() > 16777216: return ""
+    out
+
+fn group_process_launch_decode_v1(payload: text) -> Result<GroupProcessLaunchV1, text>:
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-GROUP-BROKER-1": return Err("invalid group broker header")
+    val root = reader.scalar()
+    val worker = reader.scalar()
+    val generation = reader.number(1000000000, false)
+    val snapshot = reader.scalar()
+    val cache = reader.scalar()
+    val memory = reader.number(1125899906842624, false)
+    val program = reader.scalar()
+    val producer = reader.scalar()
+    val directory = reader.scalar()
+    val stdout_path = reader.scalar()
+    val stderr_path = reader.scalar()
+    val timeout_ms = reader.number(86400000, false)
+    val broker_program = reader.scalar()
+    val broker_digest = reader.scalar()
+    var args: [text] = []
+    val argc = reader.number(4096, false)
+    var index = 0
+    while index < argc:
+        args = args.push(reader.scalar())
+        index = index + 1
+    var environment: [text] = []
+    val envc = reader.number(4096, false)
+    index = 0
+    while index < envc:
+        environment = environment.push(reader.scalar())
+        index = index + 1
+    var inputs: [GroupProcessInputV1] = []
+    val count = reader.number(100000, false)
+    index = 0
+    while index < count:
+        val path = reader.scalar()
+        inputs = inputs.push(GroupProcessInputV1(path, reader.scalar()))
+        index = index + 1
+    val result = GroupProcessLaunchV1(root, worker, generation, snapshot, cache, memory,
+        GroupProcessRequestV1(program, producer, args, environment, directory, inputs, stdout_path, stderr_path, timeout_ms, broker_program, broker_digest))
+    if reader.reason != "": return Err(reader.reason)
+    if group_process_launch_encode_v1(result) != payload: return Err("noncanonical/invalid group broker request")
+    Ok(result)
+
+fn group_process_identity_v1(value: GroupProcessLaunchV1) -> text:
+    sha256_text(group_process_launch_encode_v1(value))
+
+fn group_process_observation_encode_v1(identity: text, value: GroupProcessPollV1) -> text:
+    var out = "SIMPLE-GROUP-OBSERVATION-1\n" + builder_wire_line_v1(identity)
+    for flag in [value.terminal, value.leader_reaped, value.tree_empty, value.timed_out, value.cancelled]:
+        out = out + (if flag: "1\n" else: "0\n")
+    out + str(value.active_processes) + "\n" + str(value.exit_code) + "\n" + str(value.memory_peak_bytes) + "\n"
+
+fn group_process_observation_decode_v1(identity: text, payload: text) -> Result<GroupProcessPollV1, text>:
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-GROUP-OBSERVATION-1" or reader.scalar() != identity: return Err("group observation identity mismatch")
+    val terminal = reader.number(1, false) == 1
+    val leader = reader.number(1, false) == 1
+    val empty = reader.number(1, false) == 1
+    val timeout = reader.number(1, false) == 1
+    val cancelled = reader.number(1, false) == 1
+    val active = reader.number(1000000, false)
+    val code = reader.number(4294967295, true)
+    val peak = reader.number(1125899906842624, false)
+    val result = GroupProcessPollV1(terminal, leader, empty, active, code, timeout, cancelled, peak)
+    if reader.reason != "": return Err(reader.reason)
+    if terminal and (not leader or not empty or active != 0 or code < 0): return Err("inconsistent terminal group evidence")
+    if group_process_observation_encode_v1(identity, result) != payload: return Err("noncanonical group observation")
+    Ok(result)
+
+export GroupProcessInputV1, GroupProcessRequestV1, GroupProcessLaunchV1, GroupProcessPollV1
+export group_process_launch_validate_v1, group_process_launch_encode_v1, group_process_launch_decode_v1, group_process_identity_v1
+export group_process_observation_encode_v1, group_process_observation_decode_v1
