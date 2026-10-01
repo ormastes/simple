@@ -107,3 +107,28 @@ The image owner emits its manifest only after exact reread and successful close.
 Before filesystem boot, artifact admission requires strong serial, NVMe, FAT32,
 and runtime providers. Compiler bootstrap additionally binds guest version,
 build, execution, and persistence receipts to one image and boot session.
+
+## Default sealed CLI dispatch — 2026-10-01
+
+`QemuCliInspectOutcomeV1.launch_plan()` exposes an optional retained sealed
+plan. Rejection outcomes carry no plan. `qemu_cli_dispatch_command_v1` returns
+an owned executable/argv vector only after admission and seal validation.
+`qemu_cli_dispatch_plan_v1(plan, timeout_ms)` refuses invalid plans and deadlines
+outside 1..600000 ms before invoking the bounded process facade.
+
+The CLI's default non-debug branch calls `run_os_sealed_v1`. Its existing runner
+owner preserves file existence and filesystem-wrapper admission, then prepares
+the same catalog plan as inspection. Serial output, stderr, timeout and target
+exit classification are unchanged. Named scenarios and GUI paths retain their
+existing behavior and remain outside this cutover, not outside requirements.
+
+Focused scenarios live in `test/01_unit/os/qemu_cli_dispatch_v1_spec.spl`;
+runtime/docgen admission and real CLI evidence remain TEST_BLOCKED. The
+[scoped plan](../03_plan/sys_test/simpleos_sealed_cli_dispatch.md) records
+commands, owner, reviewer and the active remainder.
+
+Resource parsing lives in `os.qemu_launch_resources_v1`: bounded decimal input
+is checked before narrowing CPU counts, and memory units normalize to MiB.
+Invalid values produce zero, which the machine-spec validator rejects. Both
+lane constructors accept `cpu_count: u16 = 10u16`; parity argv emits `-smp`
+explicitly. Inspection reads the same override owner as the existing runner.

@@ -307,3 +307,12 @@ Tests covering:
 
 
 </details>
+
+## 2026-10-01 source update — regeneration blocked
+
+The executable scenario changed in the sealed CLI dispatch lane. Shared guest
+resource parsing preserves memory units and explicit CPU counts; the default
+runner facade export also has a regression check. The earlier generated body
+is retained as historical output and does not certify the current source.
+Self-hosted test execution and SPipe regeneration remain TEST_BLOCKED. Use
+`doc/03_plan/sys_test/simpleos_sealed_cli_dispatch.md` for exact resume commands.

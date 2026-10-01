@@ -112,3 +112,20 @@ requires native retained-root, no-follow, bounded-read, exclusive-publication,
 durability, and cleanup mechanisms. Filesystem QEMU lanes reject required weak
 provider symbols before launch. The compiler-in-guest cold-boot gate remains a
 separate scenario and cannot be inferred from a filesystem fixture.
+
+## Default CLI dispatch migration — 2026-10-01
+
+The default non-debug `os run` source path now consumes the existing sealed
+`QemuLaunchPlanV1` authority through `qemu_cli_plan_v1`. The inspection outcome
+retains its plan; dispatch validates it and uses its exact executable/argv
+through the bounded process facade. Existing artifact admission remains before
+dispatch. This creates no new machine, target or provider policy authority.
+
+Named/GUI paths remain legacy migration work. The slice has no admitted runtime
+evidence and does not close REQ-001/014/016 or the umbrella. Its test/knowledge
+gate is [the scoped plan](../03_plan/sys_test/simpleos_sealed_cli_dispatch.md).
+
+`os.qemu_launch_resources_v1` is the shared explicit guest resource owner for
+legacy and sealed launchers. It preserves memory/CPU overrides and the ten-core
+default without importing the runner's cyclic target/build modules. These are
+guest machine settings, independent of host provider admission or target ISA.
