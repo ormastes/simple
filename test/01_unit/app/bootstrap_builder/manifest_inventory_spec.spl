@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.manifest_main.{bootstrap_manifest_inventory_paths_v1,
+    bootstrap_manifest_job_from_inventory_v1, bootstrap_manifest_plain_path_v1}
+use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, path_absolute}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1}
+
+fn inventory_paths_error_v1(payload: text) -> text:
+    match bootstrap_manifest_inventory_paths_v1(payload, "inventory.txt"):
+        case Ok(_paths): ""
+        case Err(reason): reason
+
+describe "bootstrap inventory backed job manifest":
+    it "requires a bounded sorted unique LF list of contained paths":
+        match bootstrap_manifest_inventory_paths_v1("a.txt\nnested/b.txt\n", "inventory.txt"):
+            case Ok(paths): expect(paths).to_equal(["a.txt", "nested/b.txt"])
+            case Err(reason): fail(reason)
+        expect(inventory_paths_error_v1("a.txt\na.txt\n")).to_contain("ordered")
+        expect(inventory_paths_error_v1("B.txt\na.txt\n")).to_contain("ordered")
+        expect(inventory_paths_error_v1("../escape\n")).to_contain("invalid")
+        expect(inventory_paths_error_v1("inventory.txt\n")).to_contain("self-referential")
+        expect(inventory_paths_error_v1("a.txt")).to_contain("LF-terminated")
+        expect(inventory_paths_error_v1("a.txt\r\n")).to_contain("LF-terminated")
+        expect(inventory_paths_error_v1("a.txt\n\n")).to_contain("invalid")
+
+    it "writes one manager task with the inventory and every input digest pinned":
+        val root = bootstrap_manifest_plain_path_v1(path_absolute(".")) +
+            "/build/manifest-inventory-spec-" + str(getpid()) + "-" + str(time_now_unix_micros())
+        expect(dir_create_all(root + "/nested")).to_equal(true)
+        expect(file_atomic_write(root + "/producer.exe", "fixture producer\n")).to_equal(true)
+        expect(file_atomic_write(root + "/a.txt", "alpha\n")).to_equal(true)
+        expect(file_atomic_write(root + "/nested/b.txt", "beta\n")).to_equal(true)
+        expect(file_atomic_write(root + "/inventory.txt", "a.txt\nnested/b.txt\n")).to_equal(true)
+        val producer = root + "/producer.exe"
+        val digest = file_hash_sha256(producer)
+        val marker = file_hash_sha256(root + "/a.txt")
+        val placeholder = BuildTaskV1(id: "template", attempt: 1, phase: "template", producer_digest: digest,
+            source_digest: marker, toolchain_digest: digest, dependencies: [], program: producer,
+            args: ["unused"], inputs: [], outputs: ["unused.out"], cache_key: marker, timeout_ms: 0)
+        val host = BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: root,
+            worker_program: producer, worker_digest: digest, slots: 1)
+        expect(builder_write_run_v1(root + "/template.sdn",
+            BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 2))).to_equal(true)
+        match bootstrap_manifest_job_from_inventory_v1(["--job-from-inventory",
+                root + "/template.sdn", producer, root, "group_1", "native", "result.sdn",
+                "inventory.txt", "--", "--group", "one"]):
+            case Ok(manifest):
+                match builder_read_run_v1(manifest):
+                    case Ok(run):
+                        expect(run.tasks.len()).to_equal(1)
+                        expect(run.tasks[0].args).to_equal(["--group", "one"])
+                        expect(run.tasks[0].inputs.len()).to_equal(3)
+                        expect(run.tasks[0].inputs[0].path).to_equal("inventory.txt")
+                        expect(run.tasks[0].inputs[0].digest).to_equal(file_hash_sha256(root + "/inventory.txt"))
+                        expect(run.tasks[0].inputs[1].digest).to_equal(file_hash_sha256(root + "/a.txt"))
+                        expect(run.tasks[0].inputs[2].digest).to_equal(file_hash_sha256(root + "/nested/b.txt"))
+                        expect(run.max_attempts).to_equal(1)
+                    case Err(reason): fail(reason)
+            case Err(reason): fail(reason)

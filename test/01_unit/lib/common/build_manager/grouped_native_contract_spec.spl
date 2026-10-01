@@ -1,0 +1,181 @@
+use std.spec
+use std.common.build_manager.grouped_native_contract.{
+    NativeGroupMemberV1, NativeGroupManifestV1, NativeModuleResultV1,
+    NativeGroupResultV1, NativeGroupResourceV1, NativeGroupRunV1,
+    native_group_scc_set_id_v1, native_group_manifest_validate_v1,
+    native_group_manifest_encode_v1, native_group_manifest_decode_v1,
+    native_group_manifest_identity_v1, native_group_result_validate_against_manifest_v1,
+    native_group_run_validate_v1, native_group_run_encode_v1, native_group_run_decode_v1,
+    native_group_result_encode_v1, native_group_result_decode_v1,
+    native_module_result_encode_v1, native_module_result_decode_v1
+}
+
+fn digest(ch: text) -> text: ch.repeat(64)
+
+fn member(id: text, scc: text, kind: text) -> NativeGroupMemberV1:
+    NativeGroupMemberV1(id, scc, "src/{id}.spl", digest("a"), kind, "obj/{id}.o")
+
+fn manifest(members: [NativeGroupMemberV1]) -> NativeGroupManifestV1:
+    NativeGroupManifestV1(digest("1"), digest("2"), digest("9"), digest("c"),
+        "C:/state/routes/group_a-1.route", digest("f"),
+        digest("3"), digest("4"),
+        "phase4", "llvm", "x86_64", "group_a", native_group_scc_set_id_v1(members),
+        1, 1, digest("5"), 2, 1073741824, 2, members)
+
+fn run(first: NativeGroupManifestV1) -> NativeGroupRunV1:
+    NativeGroupRunV1("run_a", digest("1"), digest("2"), digest("9"), digest("a"),
+        digest("c"), digest("3"), digest("4"),
+        "phase4", "llvm", "x86_64", digest("5"), 2, 1073741824, 2,
+        268435456, 536870912, 1073741824,
+        "C:/source/build/scv/snapshots/rev1", "rev1", "commit1", "tree1",
+        "C:/state/source-inputs-before.txt", "C:/bin/tool.exe", "C:/bin/runtime.exe",
+        "C:/state/variant.receipt", digest("d"),
+        "C:/source/build/warm-index/runtime-std.authority", digest("6"),
+        "C:/source/build/warm-index", digest("0"),
+        "C:/state/scv.receipt", digest("e"),
+        "C:/source", "C:/state", "C:/output", "C:/bin/simple.exe",
+        "C:/bin/manager.exe", digest("b"),
+        "C:/bin/worker.exe", digest("6"), "C:/bin/broker.exe", digest("7"),
+        ["MODE=release"], 3, 100, 60000, [first], [], [])
+
+fn success(id: text, kind: text) -> NativeModuleResultV1:
+    NativeModuleResultV1(id, "OK", 0, kind, "obj/{id}.o", digest("8"),
+        kind == "SMF", "")
+
+describe "Pointer-free grouped native manifest and ledger":
+    it "round trips a complete frozen inventory and empty ledger":
+        val members = [member("a", "scc_a", "OBJECT"), member("b", "scc_b", "SMF")]
+        val first = manifest(members)
+        expect(native_group_manifest_validate_v1(first)).to_equal("")
+        match native_group_manifest_decode_v1(native_group_manifest_encode_v1(first)):
+            case Ok(decoded): expect(decoded.members[1].scc_id).to_equal("scc_b")
+            case Err(reason): fail(reason)
+        val value = run(first)
+        expect(native_group_run_validate_v1(value)).to_equal("")
+        match native_group_run_decode_v1(native_group_run_encode_v1(value)):
+            case Ok(decoded):
+                expect(decoded.manifests[0].members.len()).to_equal(2)
+                expect(decoded.worker_digest).to_equal(digest("6"))
+                expect(decoded.manager_program).to_equal("C:/bin/manager.exe")
+                expect(decoded.phase).to_equal("phase4")
+                expect(decoded.variant_digest).to_equal(digest("c"))
+                expect(decoded.minimum_free_disk_bytes).to_equal(1073741824)
+                expect(decoded.scv_receipt_digest).to_equal(digest("e"))
+                expect(decoded.runtime_std_authority_digest).to_equal(digest("6"))
+                expect(decoded.index_digest).to_equal(digest("0"))
+                expect(decoded.manifests[0].group_route_digest).to_equal(digest("f"))
+                expect(decoded.environment).to_equal(["MODE=release"])
+            case Err(reason): fail(reason)
+
+    it "rejects cross-phase reuse and an unpinned manager executable":
+        val first = manifest([member("a", "scc_a", "OBJECT"), member("b", "scc_b", "SMF")])
+        var value = run(first)
+        value.phase = "phase3"
+        expect(native_group_run_validate_v1(value)).to_equal("manifest differs from run identity or budget")
+        value.phase = "phase4"
+        value.manager_digest = ""
+        expect(native_group_run_validate_v1(value)).to_equal("invalid native run digest")
+        value.manager_digest = digest("b")
+        value.manager_program = "relative/manager.exe"
+        expect(native_group_run_validate_v1(value)).to_equal("invalid native absolute path")
+        value.manager_program = "C:/bin/manager.exe"
+        value.variant_digest = digest("f")
+        expect(native_group_run_validate_v1(value)).to_equal("manifest differs from run identity or budget")
+        value.variant_digest = digest("c")
+        value.minimum_free_disk_bytes = 0
+        expect(native_group_run_validate_v1(value)).to_equal("invalid native capacity policy")
+        value.minimum_free_disk_bytes = 1073741824
+        value.index_read_root = "C:/state/warm-index"
+        expect(native_group_run_validate_v1(value)).to_equal("warm index read root overlaps writable root")
+        value.index_read_root = "C:/source/build/warm-index"
+        value.runtime_std_authority_path = "C:/state/runtime-std.authority"
+        expect(native_group_run_validate_v1(value)).to_equal("runtime/std authority outside warm index root")
+
+    it "binds a resource measurement and every module receipt to one attempt":
+        val first = manifest([member("a", "scc_a", "OBJECT"), member("b", "scc_b", "SMF")])
+        val result = NativeGroupResultV1(native_group_manifest_identity_v1(first),
+            "group_a", 1, 1, [success("a", "OBJECT"), success("b", "SMF")], 20, 4096)
+        expect(native_group_result_validate_against_manifest_v1(first, result)).to_equal("")
+        match native_group_result_decode_v1(native_group_result_encode_v1(result)):
+            case Ok(decoded): expect(decoded.modules[1].smf_qualified).to_equal(true)
+            case Err(reason): fail(reason)
+        var value = run(first)
+        value.results = [result]
+        expect(native_group_run_validate_v1(value)).to_equal("result lacks pre-spawn resource measurement")
+        value.resources = [NativeGroupResourceV1("group_a", 1, 1073741824, 1073741824)]
+        expect(native_group_run_validate_v1(value)).to_equal("")
+
+    it "rejects object-only SMF qualification and malformed progress":
+        var object = success("a", "OBJECT")
+        object.smf_qualified = true
+        expect(native_module_result_encode_v1(object)).to_equal("")
+        object.smf_qualified = false
+        match native_module_result_decode_v1(native_module_result_encode_v1(object)):
+            case Ok(decoded): expect(decoded.status).to_equal("OK")
+            case Err(reason): fail(reason)
+        match native_module_result_decode_v1(native_module_result_encode_v1(object) + "extra\n"):
+            case Ok(decoded): fail("trailing progress field accepted")
+            case Err(reason): expect(reason).to_equal("trailing wire fields")
+
+    it "rejects mismatched output path and stale manifest identity":
+        val first = manifest([member("a", "scc_a", "OBJECT"), member("b", "scc_b", "SMF")])
+        var wrong_output = success("a", "OBJECT")
+        wrong_output.output_path = "obj/other.o"
+        var result = NativeGroupResultV1(native_group_manifest_identity_v1(first),
+            "group_a", 1, 1, [wrong_output, success("b", "SMF")], 20, 4096)
+        expect(native_group_result_validate_against_manifest_v1(first, result)).to_equal("result output path mismatch")
+        result.modules = [success("a", "OBJECT"), success("b", "SMF")]
+        result.manifest_digest = digest("f")
+        expect(native_group_result_validate_against_manifest_v1(first, result)).to_equal("result does not bind exact manifest attempt")
+
+    it "admits a failed-only retry as a verified subset of the initial group":
+        val first = manifest([member("a", "scc_a", "OBJECT"), member("b", "scc_b", "SMF")])
+        var retry = manifest([member("b", "scc_b", "SMF")])
+        retry.attempt = 2
+        retry.group_route_path = "C:/state/routes/group_a-2.route"
+        retry.group_route_digest = digest("d")
+        var value = run(first)
+        value.manifests = [first, retry]
+        expect(native_group_run_validate_v1(value)).to_equal("retry lacks previous attempt result")
+        value.resources = [NativeGroupResourceV1("group_a", 1, 1073741824, 1073741824)]
+        val failed = NativeModuleResultV1("b", "ERROR", 1, "SMF", "", "", false, digest("e"))
+        value.results = [NativeGroupResultV1(native_group_manifest_identity_v1(first),
+            "group_a", 1, 1, [success("a", "OBJECT"), failed], 20, 4096)]
+        expect(native_group_run_validate_v1(value)).to_equal("")
+        retry.group_route_path = first.group_route_path
+        value.manifests = [first, retry]
+        expect(native_group_run_validate_v1(value)).to_equal("duplicate native group route path")
+        retry.group_route_path = "C:/state/routes/group_a-2.route"
+        retry.members = [member("a", "scc_a", "OBJECT")]
+        retry.scc_id = native_group_scc_set_id_v1(retry.members)
+        value.manifests = [first, retry]
+        expect(native_group_run_validate_v1(value)).to_equal("retry must contain exactly failed modules")
+        retry.members = [member("c", "scc_c", "SMF")]
+        retry.scc_id = native_group_scc_set_id_v1(retry.members)
+        value.manifests = [first, retry]
+        expect(native_group_run_validate_v1(value)).to_equal("retry adds or changes inventory member")
+
+    it "rejects split SCCs and noncanonical or unbounded run data":
+        val first = manifest([member("a", "scc_shared", "OBJECT")])
+        var second = manifest([member("b", "scc_shared", "SMF")])
+        second.group_id = "group_b"
+        val one = manifest([member("a", "scc_shared", "OBJECT"), member("b", "scc_shared", "SMF")])
+        var value = run(one)
+        value.manifests = [first, second]
+        expect(native_group_run_validate_v1(value)).to_equal("duplicate native group route path")
+        second.group_route_path = "C:/state/routes/group_b-1.route"
+        value.manifests = [first, second]
+        expect(native_group_run_validate_v1(value)).to_equal("native SCC split across initial groups")
+        value = run(one)
+        value.worker_program = "relative/worker.exe"
+        expect(native_group_run_validate_v1(value)).to_equal("invalid native absolute path")
+        var escaped_route = manifest([member("a", "scc_shared", "OBJECT"),
+            member("b", "scc_shared", "SMF")])
+        escaped_route.group_route_path = "C:/source/build/warm-index/route.sdn"
+        value = run(escaped_route)
+        expect(native_group_run_validate_v1(value)).to_equal("native group route outside write-once state routes")
+        value = run(one)
+        val payload = native_group_run_encode_v1(value)
+        match native_group_run_decode_v1(payload + "extra\n"):
+            case Ok(decoded): fail("trailing run field accepted")
+            case Err(reason): expect(reason).to_equal("trailing wire fields")

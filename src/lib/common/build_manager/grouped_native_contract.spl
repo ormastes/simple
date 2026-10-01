@@ -1,0 +1,777 @@
+# Pointer-free grouped native request and parent-owned completion ledger.
+# A worker receives a frozen manifest and returns a fresh result. Only the
+# parent validates and adds that result to NativeGroupRunV1.results.
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{
+    builder_digest_valid_v1, builder_identifier_valid_v1,
+    builder_relative_path_valid_v1, builder_paths_overlap_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+val NATIVE_GROUP_WIRE_MAX_V1: i64 = 16777216
+val NATIVE_GROUP_MEMBER_MAX_V1: i64 = 4096
+
+struct NativeGroupMemberV1:
+    module_id: text
+    scc_id: text
+    source_path: text
+    source_digest: text
+    output_kind: text
+    output_path: text
+
+struct NativeGroupManifestV1:
+    producer_digest: text
+    # SHA256(SCV_COMPILE_INVENTORY), accepted by scv_compile_snapshot_open_v1.
+    source_snapshot_digest: text
+    # SHA256(Stage2 source-inputs-before.txt), a separate full-source pin.
+    full_source_authority_digest: text
+    variant_digest: text
+    group_route_path: text
+    group_route_digest: text
+    tool_digest: text
+    runtime_digest: text
+    phase: text
+    backend: text
+    target: text
+    group_id: text
+    scc_id: text
+    generation: i64
+    attempt: i64
+    inventory_digest: text
+    inventory_count: i64
+    memory_limit_bytes: i64
+    max_threads: i64
+    members: [NativeGroupMemberV1]
+
+struct NativeModuleResultV1:
+    module_id: text
+    status: text
+    exit_code: i64
+    output_kind: text
+    output_path: text
+    output_digest: text
+    smf_qualified: bool
+    diagnostic_digest: text
+
+struct NativeGroupResultV1:
+    manifest_digest: text
+    group_id: text
+    generation: i64
+    attempt: i64
+    modules: [NativeModuleResultV1]
+    elapsed_ms: i64
+    peak_memory_bytes: i64
+
+struct NativeGroupResourceV1:
+    group_id: text
+    attempt: i64
+    available_memory_bytes: i64
+    available_disk_bytes: i64
+
+struct NativeGroupRunV1:
+    run_id: text
+    producer_digest: text
+    # SHA256(SCV_COMPILE_INVENTORY), accepted by scv_compile_snapshot_open_v1.
+    source_snapshot_digest: text
+    # SHA256(Stage2 source-inputs-before.txt), not an SCV inventory digest.
+    full_source_authority_digest: text
+    # Warm package-index source-inventory generation digest.
+    scv_source_inventory_digest: text
+    variant_digest: text
+    tool_digest: text
+    runtime_digest: text
+    phase: text
+    backend: text
+    target: text
+    inventory_digest: text
+    inventory_count: i64
+    memory_limit_bytes: i64
+    max_threads: i64
+    memory_reserve_bytes: i64
+    estimated_group_disk_bytes: i64
+    minimum_free_disk_bytes: i64
+    scv_snapshot_root: text
+    scv_revision_id: text
+    scv_commit_id: text
+    scv_tree_id: text
+    full_source_authority_path: text
+    tool_path: text
+    runtime_path: text
+    variant_receipt_path: text
+    variant_receipt_digest: text
+    runtime_std_authority_path: text
+    runtime_std_authority_digest: text
+    index_read_root: text
+    index_digest: text
+    scv_receipt_path: text
+    scv_receipt_digest: text
+    source_root: text
+    state_root: text
+    output_root: text
+    producer_program: text
+    manager_program: text
+    manager_digest: text
+    worker_program: text
+    worker_digest: text
+    broker_program: text
+    broker_digest: text
+    environment: [text]
+    max_attempts: i64
+    poll_ms: i64
+    lifetime_ms: i64
+    manifests: [NativeGroupManifestV1]
+    resources: [NativeGroupResourceV1]
+    results: [NativeGroupResultV1]
+
+fn native_group_absolute_path_valid_v1(path: text) -> bool:
+    if path.len() < 2 or path.len() > 4096 or path.contains("\0") or
+            path.contains("\n") or path.contains("\r") or path.contains("\t"):
+        return false
+    if not path.starts_with("/"):
+        if path.len() < 4 or path[1:2] != ":" or
+                (path[2:3] != "/" and path[2:3] != "\\"):
+            return false
+        val drive = path[0:1].lower()
+        if drive < "a" or drive > "z": return false
+    val normalized = path.replace("\\", "/")
+    for part in normalized.split("/"):
+        if part == "." or part == "..": return false
+    true
+
+fn native_group_status_valid_v1(status: text) -> bool:
+    status == "OK" or status == "ERROR" or status == "CRASHED" or
+        status == "TERMINATED" or status == "TIMEOUT" or
+        status == "BLOCKED" or status == "NOT_RUN"
+
+fn native_group_output_kind_valid_v1(kind: text) -> bool:
+    kind == "OBJECT" or kind == "SMF"
+
+fn native_group_phase_valid_v1(phase: text) -> bool:
+    phase == "phase3" or phase == "phase4"
+
+# A group may pack several complete SCCs, each contiguous in dependency-first
+# member order. This is the digest of the ordered SCC set, not one member SCC.
+fn native_group_scc_set_id_v1(members: [NativeGroupMemberV1]) -> text:
+    if members.len() < 1 or members.len() > NATIVE_GROUP_MEMBER_MAX_V1: return ""
+    var seen: {text: bool} = {}
+    var previous = ""
+    var canonical = "SIMPLE-NATIVE-GROUP-SCC-SET-1\n"
+    for member in members:
+        if not builder_identifier_valid_v1(member.scc_id): return ""
+        val key = member.scc_id.lower()
+        if key != previous:
+            if seen.contains_key(key): return ""
+            seen[key] = true
+            canonical = canonical + builder_wire_line_v1(member.scc_id)
+            previous = key
+    sha256_text(canonical)
+
+fn native_group_manifest_validate_v1(value: NativeGroupManifestV1) -> text:
+    for digest in [value.producer_digest, value.source_snapshot_digest,
+            value.full_source_authority_digest, value.variant_digest,
+            value.group_route_digest, value.tool_digest,
+            value.runtime_digest, value.inventory_digest]:
+        if not builder_digest_valid_v1(digest): return "invalid manifest digest"
+    if not native_group_absolute_path_valid_v1(value.group_route_path):
+        return "invalid group route path"
+    if not native_group_phase_valid_v1(value.phase) or
+            not builder_identifier_valid_v1(value.backend) or
+            not builder_identifier_valid_v1(value.target) or
+            not builder_identifier_valid_v1(value.group_id) or
+            not builder_digest_valid_v1(value.scc_id):
+        return "invalid manifest identifier"
+    if value.generation < 1 or value.generation > 1000000000 or
+            value.attempt < 1 or value.attempt > 100:
+        return "invalid manifest generation or attempt"
+    if value.inventory_count < 1 or value.inventory_count > 100000 or
+            value.memory_limit_bytes < 1 or value.memory_limit_bytes > 1125899906842624 or
+            value.max_threads < 1 or value.max_threads > 1024:
+        return "invalid manifest inventory or budget"
+    if value.members.len() < 1 or value.members.len() > NATIVE_GROUP_MEMBER_MAX_V1 or
+            value.members.len() > value.inventory_count:
+        return "invalid manifest member count"
+    if value.scc_id != native_group_scc_set_id_v1(value.members):
+        return "manifest SCC set does not match members"
+    var ids: {text: bool} = {}
+    var sources: {text: bool} = {}
+    var outputs: {text: bool} = {}
+    for member in value.members:
+        if not builder_identifier_valid_v1(member.module_id) or
+                not builder_identifier_valid_v1(member.scc_id) or
+                not builder_relative_path_valid_v1(member.source_path) or
+                not builder_digest_valid_v1(member.source_digest) or
+                not native_group_output_kind_valid_v1(member.output_kind) or
+                not builder_relative_path_valid_v1(member.output_path):
+            return "invalid manifest member"
+        val id = member.module_id.lower()
+        val source = member.source_path.lower()
+        val output = member.output_path.lower()
+        if ids.contains_key(id) or sources.contains_key(source) or
+                outputs.contains_key(output) or source == output:
+            return "duplicate or overlapping manifest member"
+        ids[id] = true
+        sources[source] = true
+        outputs[output] = true
+    ""
+
+fn native_group_manifest_body_v1(value: NativeGroupManifestV1) -> text:
+    var out = ""
+    for field in [value.producer_digest, value.source_snapshot_digest,
+            value.full_source_authority_digest, value.variant_digest,
+            value.group_route_path, value.group_route_digest, value.tool_digest,
+            value.runtime_digest, value.phase, value.backend, value.target,
+            value.group_id, value.scc_id, str(value.generation), str(value.attempt),
+            value.inventory_digest, str(value.inventory_count),
+            str(value.memory_limit_bytes), str(value.max_threads), str(value.members.len())]:
+        out = out + builder_wire_line_v1(field)
+    for member in value.members:
+        for field in [member.module_id, member.scc_id, member.source_path, member.source_digest,
+                member.output_kind, member.output_path]:
+            out = out + builder_wire_line_v1(field)
+    out
+
+fn native_group_manifest_encode_v1(value: NativeGroupManifestV1) -> text:
+    if native_group_manifest_validate_v1(value) != "": return ""
+    val payload = "SIMPLE-NATIVE-GROUP-MANIFEST-1\n" + native_group_manifest_body_v1(value)
+    if payload.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
+    payload
+
+fn native_group_manifest_identity_v1(value: NativeGroupManifestV1) -> text:
+    val payload = native_group_manifest_encode_v1(value)
+    if payload == "": return ""
+    sha256_text(payload)
+
+fn native_group_manifest_decode_v1(payload: text) -> Result<NativeGroupManifestV1, text>:
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-NATIVE-GROUP-MANIFEST-1": return Err("invalid native manifest header")
+    val value = native_group_manifest_read_v1(reader)
+    val parse_error = reader.complete_error()
+    if parse_error != "": return Err(parse_error)
+    if native_group_manifest_encode_v1(value) != payload: return Err("noncanonical or invalid native manifest")
+    Ok(value)
+
+fn native_group_manifest_read_v1(reader: BuilderWireReaderV1) -> NativeGroupManifestV1:
+    val producer = reader.scalar()
+    val source = reader.scalar()
+    val full_source = reader.scalar()
+    val variant = reader.scalar()
+    val route_path = reader.scalar()
+    val route_digest = reader.scalar()
+    val tool = reader.scalar()
+    val runtime = reader.scalar()
+    val phase = reader.scalar()
+    val backend = reader.scalar()
+    val target = reader.scalar()
+    val group = reader.scalar()
+    val scc = reader.scalar()
+    val generation = reader.number(1000000000, false)
+    val attempt = reader.number(100, false)
+    val inventory = reader.scalar()
+    val inventory_count = reader.number(100000, false)
+    val memory = reader.number(1125899906842624, false)
+    val threads = reader.number(1024, false)
+    val count = reader.number(NATIVE_GROUP_MEMBER_MAX_V1, false)
+    var members: [NativeGroupMemberV1] = []
+    var i = 0
+    while i < count and reader.reason == "":
+        members = members.push(NativeGroupMemberV1(reader.scalar(), reader.scalar(),
+            reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar()))
+        i = i + 1
+    NativeGroupManifestV1(producer, source, full_source, variant, route_path,
+        route_digest, tool, runtime, phase, backend, target, group,
+        scc, generation, attempt, inventory, inventory_count, memory, threads, members)
+
+fn native_group_module_result_validate_v1(value: NativeModuleResultV1) -> text:
+    if not builder_identifier_valid_v1(value.module_id) or
+            not native_group_status_valid_v1(value.status) or
+            not native_group_output_kind_valid_v1(value.output_kind):
+        return "invalid module result identity or status"
+    if value.exit_code < -4294967295 or value.exit_code > 4294967295:
+        return "invalid module exit code"
+    if value.status == "OK":
+        if value.exit_code != 0 or not builder_relative_path_valid_v1(value.output_path) or
+                not builder_digest_valid_v1(value.output_digest):
+            return "OK requires exact output and exit zero"
+        if value.output_kind == "OBJECT" and value.smf_qualified:
+            return "object-only result cannot qualify as SMF"
+    else:
+        if value.output_path != "" or value.output_digest != "" or value.smf_qualified:
+            return "failed or unrun module cannot publish output"
+    if value.diagnostic_digest != "" and not builder_digest_valid_v1(value.diagnostic_digest):
+        return "invalid diagnostic digest"
+    ""
+
+fn native_group_result_validate_v1(value: NativeGroupResultV1) -> text:
+    if not builder_digest_valid_v1(value.manifest_digest) or
+            not builder_identifier_valid_v1(value.group_id) or
+            value.generation < 1 or value.generation > 1000000000 or
+            value.attempt < 1 or value.attempt > 100:
+        return "invalid result identity"
+    if value.modules.len() < 1 or value.modules.len() > NATIVE_GROUP_MEMBER_MAX_V1 or
+            value.elapsed_ms < 0 or value.elapsed_ms > 604800000 or
+            value.peak_memory_bytes < 0 or value.peak_memory_bytes > 1125899906842624:
+        return "invalid result count or telemetry"
+    var ids: {text: bool} = {}
+    var outputs: {text: bool} = {}
+    for module in value.modules:
+        val reason = native_group_module_result_validate_v1(module)
+        if reason != "": return reason
+        val id = module.module_id.lower()
+        if ids.contains_key(id): return "duplicate result module"
+        ids[id] = true
+        if module.status == "OK":
+            val output = module.output_path.lower()
+            if outputs.contains_key(output): return "duplicate result output"
+            outputs[output] = true
+    ""
+
+fn native_group_result_validate_against_manifest_v1(
+        manifest: NativeGroupManifestV1, result: NativeGroupResultV1) -> text:
+    val manifest_reason = native_group_manifest_validate_v1(manifest)
+    if manifest_reason != "": return manifest_reason
+    val result_reason = native_group_result_validate_v1(result)
+    if result_reason != "": return result_reason
+    if result.manifest_digest != native_group_manifest_identity_v1(manifest) or
+            result.group_id != manifest.group_id or
+            result.generation != manifest.generation or result.attempt != manifest.attempt:
+        return "result does not bind exact manifest attempt"
+    if result.modules.len() != manifest.members.len(): return "result lacks module receipts"
+    var index = 0
+    while index < manifest.members.len():
+        val member = manifest.members[index]
+        val module = result.modules[index]
+        if module.module_id != member.module_id or module.output_kind != member.output_kind:
+            return "result module order or kind mismatch"
+        if module.status == "OK" and module.output_path != member.output_path:
+            return "result output path mismatch"
+        index = index + 1
+    ""
+
+fn native_group_result_body_v1(value: NativeGroupResultV1) -> text:
+    var out = ""
+    for field in [value.manifest_digest, value.group_id, str(value.generation),
+            str(value.attempt), str(value.elapsed_ms), str(value.peak_memory_bytes),
+            str(value.modules.len())]:
+        out = out + builder_wire_line_v1(field)
+    for module in value.modules:
+        for field in [module.module_id, module.status, str(module.exit_code),
+                module.output_kind, module.output_path, module.output_digest,
+                (if module.smf_qualified: "1" else: "0"), module.diagnostic_digest]:
+            out = out + builder_wire_line_v1(field)
+    out
+
+fn native_module_result_encode_v1(value: NativeModuleResultV1) -> text:
+    if native_group_module_result_validate_v1(value) != "": return ""
+    var out = "SIMPLE-NATIVE-MODULE-RESULT-1\n"
+    for field in [value.module_id, value.status, str(value.exit_code),
+            value.output_kind, value.output_path, value.output_digest,
+            (if value.smf_qualified: "1" else: "0"), value.diagnostic_digest]:
+        out = out + builder_wire_line_v1(field)
+    if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
+    out
+
+fn native_module_result_decode_v1(payload: text) -> Result<NativeModuleResultV1, text>:
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-NATIVE-MODULE-RESULT-1": return Err("invalid module result header")
+    val id = reader.scalar()
+    val status = reader.scalar()
+    val code = reader.number(4294967295, true)
+    val kind = reader.scalar()
+    val path = reader.scalar()
+    val digest = reader.scalar()
+    val qualified = reader.number(1, false) == 1
+    val diagnostic = reader.scalar()
+    val reason = reader.complete_error()
+    if reason != "": return Err(reason)
+    val value = NativeModuleResultV1(id, status, code, kind, path, digest, qualified, diagnostic)
+    if native_module_result_encode_v1(value) != payload: return Err("noncanonical or invalid module result")
+    Ok(value)
+
+fn native_group_result_encode_v1(value: NativeGroupResultV1) -> text:
+    if native_group_result_validate_v1(value) != "": return ""
+    val payload = "SIMPLE-NATIVE-GROUP-RESULT-1\n" + native_group_result_body_v1(value)
+    if payload.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
+    payload
+
+fn native_group_result_read_v1(reader: BuilderWireReaderV1) -> NativeGroupResultV1:
+    val manifest = reader.scalar()
+    val group = reader.scalar()
+    val generation = reader.number(1000000000, false)
+    val attempt = reader.number(100, false)
+    val elapsed = reader.number(604800000, false)
+    val peak = reader.number(1125899906842624, false)
+    val count = reader.number(NATIVE_GROUP_MEMBER_MAX_V1, false)
+    var modules: [NativeModuleResultV1] = []
+    var i = 0
+    while i < count and reader.reason == "":
+        val id = reader.scalar()
+        val status = reader.scalar()
+        val code = reader.number(4294967295, true)
+        val kind = reader.scalar()
+        val path = reader.scalar()
+        val digest = reader.scalar()
+        val qualified = reader.number(1, false) == 1
+        val diagnostic = reader.scalar()
+        modules = modules.push(NativeModuleResultV1(id, status, code, kind, path,
+            digest, qualified, diagnostic))
+        i = i + 1
+    NativeGroupResultV1(manifest, group, generation, attempt, modules, elapsed, peak)
+
+fn native_group_result_decode_v1(payload: text) -> Result<NativeGroupResultV1, text>:
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-NATIVE-GROUP-RESULT-1": return Err("invalid native result header")
+    val value = native_group_result_read_v1(reader)
+    val parse_error = reader.complete_error()
+    if parse_error != "": return Err(parse_error)
+    if native_group_result_encode_v1(value) != payload: return Err("noncanonical or invalid native result")
+    Ok(value)
+
+fn native_group_run_validate_v1(value: NativeGroupRunV1) -> text:
+    if not builder_identifier_valid_v1(value.run_id) or
+            not native_group_phase_valid_v1(value.phase) or
+            not builder_identifier_valid_v1(value.backend) or
+            not builder_identifier_valid_v1(value.target):
+        return "invalid native run identifier"
+    for digest in [value.producer_digest, value.source_snapshot_digest,
+            value.full_source_authority_digest, value.scv_source_inventory_digest,
+            value.variant_digest, value.tool_digest, value.runtime_digest,
+            value.inventory_digest, value.variant_receipt_digest,
+            value.runtime_std_authority_digest, value.index_digest,
+            value.scv_receipt_digest, value.manager_digest,
+            value.worker_digest, value.broker_digest]:
+        if not builder_digest_valid_v1(digest): return "invalid native run digest"
+    if value.inventory_count < 1 or value.inventory_count > 100000 or
+            value.memory_limit_bytes < 1 or value.memory_limit_bytes > 1125899906842624 or
+            value.max_threads < 1 or value.max_threads > 1024:
+        return "invalid native run inventory or budget"
+    if value.memory_reserve_bytes < 1 or
+            value.memory_reserve_bytes > 1125899906842624 or
+            value.estimated_group_disk_bytes < 1 or
+            value.estimated_group_disk_bytes > 1125899906842624 or
+            value.minimum_free_disk_bytes < 1 or
+            value.minimum_free_disk_bytes > 1125899906842624:
+        return "invalid native capacity policy"
+    for path in [value.scv_snapshot_root, value.source_root, value.state_root, value.output_root,
+            value.full_source_authority_path, value.tool_path, value.runtime_path,
+            value.variant_receipt_path, value.runtime_std_authority_path,
+            value.index_read_root, value.scv_receipt_path,
+            value.producer_program, value.manager_program,
+            value.worker_program, value.broker_program]:
+        if not native_group_absolute_path_valid_v1(path): return "invalid native absolute path"
+    for identity in [value.scv_revision_id, value.scv_commit_id, value.scv_tree_id]:
+        if not builder_identifier_valid_v1(identity):
+            return "invalid SCV snapshot identity"
+    val source_root = value.source_root.replace("\\", "/")
+    val state_root = value.state_root.replace("\\", "/")
+    val output_root = value.output_root.replace("\\", "/")
+    if builder_paths_overlap_v1(source_root, state_root) or
+            builder_paths_overlap_v1(source_root, output_root) or
+            builder_paths_overlap_v1(state_root, output_root):
+        return "native roots must be disjoint"
+    val index_root = value.index_read_root.replace("\\", "/")
+    if builder_paths_overlap_v1(index_root, state_root) or
+            builder_paths_overlap_v1(index_root, output_root):
+        return "warm index read root overlaps writable root"
+    val runtime_std_authority = value.runtime_std_authority_path.replace("\\", "/")
+    if not runtime_std_authority.lower().starts_with(index_root.lower() + "/"):
+        return "runtime/std authority outside warm index root"
+    if value.max_attempts < 1 or value.max_attempts > 100 or
+            value.poll_ms < 1 or value.poll_ms > 60000 or
+            value.lifetime_ms < 1 or value.lifetime_ms > 604800000 or
+            value.environment.len() > 256:
+        return "invalid native lifecycle or environment bound"
+    var env_names: {text: bool} = {}
+    for assignment in value.environment:
+        if assignment.len() < 3 or assignment.len() > 4096 or
+                assignment.contains("\0") or assignment.contains("\n") or
+                assignment.contains("\r"):
+            return "invalid native environment"
+        val parts = assignment.split("=")
+        if parts.len() < 2 or not builder_identifier_valid_v1(parts[0]):
+            return "invalid native environment name"
+        val name = parts[0].lower()
+        if env_names.contains_key(name): return "duplicate native environment name"
+        env_names[name] = true
+    if value.manifests.len() < 1 or value.manifests.len() > 4096 or
+            value.resources.len() > value.manifests.len() or
+            value.results.len() > value.manifests.len():
+        return "invalid native group count"
+    var groups: {text: bool} = {}
+    var attempts: {text: bool} = {}
+    var ids: {text: bool} = {}
+    var sources: {text: bool} = {}
+    var outputs: {text: bool} = {}
+    var scc_groups: {text: text} = {}
+    var route_paths: {text: bool} = {}
+    var member_count = 0
+    for manifest in value.manifests:
+        val reason = native_group_manifest_validate_v1(manifest)
+        if reason != "": return reason
+        if manifest.producer_digest != value.producer_digest or
+                manifest.source_snapshot_digest != value.source_snapshot_digest or
+                manifest.full_source_authority_digest != value.full_source_authority_digest or
+                manifest.variant_digest != value.variant_digest or
+                manifest.tool_digest != value.tool_digest or
+                manifest.runtime_digest != value.runtime_digest or
+                manifest.phase != value.phase or
+                manifest.backend != value.backend or manifest.target != value.target or
+                manifest.inventory_digest != value.inventory_digest or
+                manifest.inventory_count != value.inventory_count or
+                manifest.memory_limit_bytes != value.memory_limit_bytes or
+                manifest.max_threads != value.max_threads:
+            return "manifest differs from run identity or budget"
+        if manifest.attempt > value.max_attempts: return "manifest exceeds retry bound"
+        val group = manifest.group_id.lower()
+        val key = group + ":" + str(manifest.attempt)
+        if attempts.contains_key(key): return "duplicate native group attempt"
+        attempts[key] = true
+        val route_path = manifest.group_route_path.replace("\\", "/").lower()
+        if not route_path.starts_with(state_root.lower() + "/routes/"):
+            return "native group route outside write-once state routes"
+        if route_paths.contains_key(route_path): return "duplicate native group route path"
+        route_paths[route_path] = true
+        if manifest.attempt == 1:
+            if groups.contains_key(group): return "duplicate initial native group"
+            groups[group] = true
+            for member in manifest.members:
+                val id = member.module_id.lower()
+                val source = member.source_path.lower()
+                val output = member.output_path.lower()
+                val scc = member.scc_id.lower()
+                if ids.contains_key(id) or sources.contains_key(source) or outputs.contains_key(output):
+                    return "duplicate native inventory member"
+                if scc_groups.contains_key(scc) and scc_groups[scc] != group:
+                    return "native SCC split across initial groups"
+                ids[id] = true
+                sources[source] = true
+                outputs[output] = true
+                scc_groups[scc] = group
+                member_count = member_count + 1
+        else:
+            var initial_found = false
+            for initial in value.manifests:
+                if initial.group_id == manifest.group_id and initial.attempt == 1:
+                    initial_found = true
+                    if initial.generation != manifest.generation:
+                        return "retry changes group generation"
+                    for member in manifest.members:
+                        var member_found = false
+                        for original in initial.members:
+                            if member.module_id == original.module_id and
+                                    member.scc_id == original.scc_id and
+                                    member.source_path == original.source_path and
+                                    member.source_digest == original.source_digest and
+                                    member.output_kind == original.output_kind and
+                                    member.output_path == original.output_path:
+                                member_found = true
+                        if not member_found: return "retry adds or changes inventory member"
+                    for original in initial.members:
+                        var scc_retried = false
+                        var member_retried = false
+                        for member in manifest.members:
+                            if member.scc_id == original.scc_id: scc_retried = true
+                            if member.module_id == original.module_id: member_retried = true
+                        if scc_retried and not member_retried:
+                            return "retry splits original SCC"
+            if not initial_found: return "retry without initial group"
+            var previous_found = false
+            var failed_members: [NativeGroupMemberV1] = []
+            for previous in value.manifests:
+                if previous.group_id == manifest.group_id and
+                        previous.attempt == manifest.attempt - 1:
+                    for receipt in value.results:
+                        if receipt.group_id == previous.group_id and
+                                receipt.attempt == previous.attempt:
+                            val previous_reason = native_group_result_validate_against_manifest_v1(
+                                previous, receipt)
+                            if previous_reason != "": return previous_reason
+                            previous_found = true
+                            var index = 0
+                            while index < receipt.modules.len():
+                                if receipt.modules[index].status != "OK":
+                                    failed_members = failed_members.push(previous.members[index])
+                                index = index + 1
+            if not previous_found: return "retry lacks previous attempt result"
+            if failed_members.len() != manifest.members.len():
+                return "retry must contain exactly failed modules"
+            var failed_index = 0
+            while failed_index < failed_members.len():
+                if failed_members[failed_index].module_id != manifest.members[failed_index].module_id:
+                    return "retry must contain exactly failed modules"
+                failed_index = failed_index + 1
+    if member_count != value.inventory_count: return "incomplete native inventory"
+    var resource_groups: {text: bool} = {}
+    for resource in value.resources:
+        if not builder_identifier_valid_v1(resource.group_id) or
+                resource.attempt < 1 or resource.attempt > value.max_attempts or
+                resource.available_memory_bytes < 1 or
+                resource.available_memory_bytes > 1125899906842624 or
+                resource.available_disk_bytes < 1 or
+                resource.available_disk_bytes > 1125899906842624:
+            return "invalid native resource measurement"
+        val key = resource.group_id.lower() + ":" + str(resource.attempt)
+        if resource_groups.contains_key(key): return "duplicate native resource measurement"
+        if not attempts.contains_key(key): return "resource for unknown native group attempt"
+        resource_groups[key] = true
+    var result_groups: {text: bool} = {}
+    for result in value.results:
+        val group = result.group_id.lower() + ":" + str(result.attempt)
+        if result_groups.contains_key(group): return "duplicate native group result"
+        if not resource_groups.contains_key(group): return "result lacks pre-spawn resource measurement"
+        result_groups[group] = true
+        var found = false
+        for manifest in value.manifests:
+            if manifest.group_id == result.group_id and manifest.attempt == result.attempt:
+                val reason = native_group_result_validate_against_manifest_v1(manifest, result)
+                if reason != "": return reason
+                found = true
+        if not found: return "result for unknown native group"
+    ""
+
+fn native_group_run_encode_v1(value: NativeGroupRunV1) -> text:
+    if native_group_run_validate_v1(value) != "": return ""
+    var out = "SIMPLE-NATIVE-GROUP-RUN-1\n"
+    for field in [value.run_id, value.producer_digest, value.source_snapshot_digest,
+            value.full_source_authority_digest, value.scv_source_inventory_digest,
+            value.variant_digest, value.tool_digest, value.runtime_digest,
+            value.phase, value.backend, value.target,
+            value.inventory_digest, str(value.inventory_count),
+            str(value.memory_limit_bytes), str(value.max_threads),
+            str(value.memory_reserve_bytes), str(value.estimated_group_disk_bytes),
+            str(value.minimum_free_disk_bytes),
+            value.scv_snapshot_root, value.scv_revision_id, value.scv_commit_id,
+            value.scv_tree_id, value.full_source_authority_path,
+            value.tool_path, value.runtime_path,
+            value.variant_receipt_path, value.variant_receipt_digest,
+            value.runtime_std_authority_path, value.runtime_std_authority_digest,
+            value.index_read_root, value.index_digest,
+            value.scv_receipt_path, value.scv_receipt_digest, value.source_root,
+            value.state_root, value.output_root, value.producer_program,
+            value.manager_program, value.manager_digest,
+            value.worker_program, value.worker_digest, value.broker_program,
+            value.broker_digest, str(value.environment.len())]:
+        out = out + builder_wire_line_v1(field)
+    for assignment in value.environment:
+        out = out + builder_wire_line_v1(assignment)
+    for field in [str(value.max_attempts), str(value.poll_ms),
+            str(value.lifetime_ms), str(value.manifests.len())]:
+        out = out + builder_wire_line_v1(field)
+    for manifest in value.manifests:
+        out = out + native_group_manifest_body_v1(manifest)
+        if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
+    out = out + builder_wire_line_v1(str(value.resources.len()))
+    for resource in value.resources:
+        for field in [resource.group_id, str(resource.attempt),
+                str(resource.available_memory_bytes), str(resource.available_disk_bytes)]:
+            out = out + builder_wire_line_v1(field)
+        if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
+    out = out + builder_wire_line_v1(str(value.results.len()))
+    for result in value.results:
+        out = out + native_group_result_body_v1(result)
+        if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
+    if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
+    out
+
+fn native_group_run_decode_v1(payload: text) -> Result<NativeGroupRunV1, text>:
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-NATIVE-GROUP-RUN-1": return Err("invalid native run header")
+    val run_id = reader.scalar()
+    val producer = reader.scalar()
+    val source = reader.scalar()
+    val full_source = reader.scalar()
+    val scv_inventory = reader.scalar()
+    val variant = reader.scalar()
+    val tool = reader.scalar()
+    val runtime = reader.scalar()
+    val phase = reader.scalar()
+    val backend = reader.scalar()
+    val target = reader.scalar()
+    val inventory = reader.scalar()
+    val inventory_count = reader.number(100000, false)
+    val memory = reader.number(1125899906842624, false)
+    val threads = reader.number(1024, false)
+    val reserve = reader.number(1125899906842624, false)
+    val group_disk = reader.number(1125899906842624, false)
+    val minimum_disk = reader.number(1125899906842624, false)
+    val scv_snapshot_root = reader.scalar()
+    val scv_revision_id = reader.scalar()
+    val scv_commit_id = reader.scalar()
+    val scv_tree_id = reader.scalar()
+    val full_source_path = reader.scalar()
+    val tool_path = reader.scalar()
+    val runtime_path = reader.scalar()
+    val variant_receipt_path = reader.scalar()
+    val variant_receipt_digest = reader.scalar()
+    val runtime_std_authority_path = reader.scalar()
+    val runtime_std_authority_digest = reader.scalar()
+    val index_read_root = reader.scalar()
+    val index_digest = reader.scalar()
+    val scv_receipt_path = reader.scalar()
+    val scv_receipt_digest = reader.scalar()
+    val source_root = reader.scalar()
+    val state_root = reader.scalar()
+    val output_root = reader.scalar()
+    val producer_program = reader.scalar()
+    val manager_program = reader.scalar()
+    val manager_digest = reader.scalar()
+    val worker_program = reader.scalar()
+    val worker_digest = reader.scalar()
+    val broker_program = reader.scalar()
+    val broker_digest = reader.scalar()
+    val environment_count = reader.number(256, false)
+    var environment: [text] = []
+    var e = 0
+    while e < environment_count and reader.reason == "":
+        environment = environment.push(reader.scalar())
+        e = e + 1
+    val max_attempts = reader.number(100, false)
+    val poll_ms = reader.number(60000, false)
+    val lifetime_ms = reader.number(604800000, false)
+    val manifest_count = reader.number(4096, false)
+    var manifests: [NativeGroupManifestV1] = []
+    var i = 0
+    while i < manifest_count and reader.reason == "":
+        manifests = manifests.push(native_group_manifest_read_v1(reader))
+        i = i + 1
+    val resource_count = reader.number(4096, false)
+    var resources: [NativeGroupResourceV1] = []
+    i = 0
+    while i < resource_count and reader.reason == "":
+        val group = reader.scalar()
+        val attempt = reader.number(100, false)
+        val available_memory = reader.number(1125899906842624, false)
+        val available_disk = reader.number(1125899906842624, false)
+        resources = resources.push(NativeGroupResourceV1(group, attempt,
+            available_memory, available_disk))
+        i = i + 1
+    val result_count = reader.number(4096, false)
+    var results: [NativeGroupResultV1] = []
+    i = 0
+    while i < result_count and reader.reason == "":
+        results = results.push(native_group_result_read_v1(reader))
+        i = i + 1
+    val parse_error = reader.complete_error()
+    if parse_error != "": return Err(parse_error)
+    val value = NativeGroupRunV1(run_id, producer, source, full_source,
+        scv_inventory, variant, tool, runtime, phase, backend, target, inventory,
+        inventory_count, memory, threads, reserve, group_disk, minimum_disk,
+        scv_snapshot_root, scv_revision_id, scv_commit_id, scv_tree_id,
+        full_source_path, tool_path, runtime_path, variant_receipt_path,
+        variant_receipt_digest, runtime_std_authority_path,
+        runtime_std_authority_digest, index_read_root, index_digest,
+        scv_receipt_path, scv_receipt_digest, source_root,
+        state_root, output_root, producer_program, manager_program, manager_digest,
+        worker_program, worker_digest,
+        broker_program, broker_digest, environment, max_attempts, poll_ms,
+        lifetime_ms, manifests, resources, results)
+    if native_group_run_encode_v1(value) != payload: return Err("noncanonical or invalid native run")
+    Ok(value)
+
+export NativeGroupMemberV1, NativeGroupManifestV1, NativeModuleResultV1
+export NativeGroupResultV1, NativeGroupResourceV1, NativeGroupRunV1
+export native_group_manifest_validate_v1, native_group_manifest_encode_v1, native_group_manifest_decode_v1
+export native_group_manifest_identity_v1, native_group_result_validate_against_manifest_v1
+export native_group_scc_set_id_v1
+export native_group_absolute_path_valid_v1, native_module_result_encode_v1, native_module_result_decode_v1
+export native_group_run_encode_v1, native_group_run_decode_v1, native_group_run_validate_v1
+export native_group_result_encode_v1, native_group_result_decode_v1, native_group_result_validate_v1
