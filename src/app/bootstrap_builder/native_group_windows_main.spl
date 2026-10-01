@@ -2,21 +2,46 @@
 # stay in this host leaf; the portable manager receives measured byte counts.
 use app.io.args_ops.{get_args}
 use std.common.build_manager.grouped_native_contract.{NativeGroupRunV1, native_group_run_decode_v1, native_group_absolute_path_valid_v1}
-use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1, native_group_run_v1, native_group_verify_v1}
+use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1, NativeGroupedCapacitySampleV1, native_group_run_v1, native_group_verify_v1}
 use app.bootstrap_builder.native_group_prepare.{native_group_prepare_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_hash_sha256}
 use std.nogc_sync_mut.io.group_process_owner.{group_process_set_launcher_v1}
 use std.nogc_sync_mut.io.windows_group_broker_launcher.{windows_group_broker_launch_v1}
 use std.nogc_sync_mut.io.windows_process_owner.{windows_available_physical_memory_v1, _windows_process_wide_v1}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree}
-use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u64}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u64, volatile_write_u32}
 
 @unsafe(reason: "Win64 current volume free-space snapshot", capabilities: [ffi, raw_ptr])
 extern fn GetDiskFreeSpaceExW(path: i64, available: i64, total: i64, total_free: i64) -> i32
 
+# PERFORMANCE_INFORMATION is 104 bytes on Win64. CommitTotal is at byte 8,
+# CommitLimit at 16, and PageSize at 88. Values are page counts, not bytes.
+@unsafe(reason: "Win64 system commit snapshot via kernel32", capabilities: [ffi, raw_ptr])
+extern fn K32GetPerformanceInfo(info: i64, size: u32) -> i32
+
+@unsafe(reason: "reads and releases a bounded Win64 system commit snapshot", capabilities: [ffi, raw_ptr])
+fn native_group_windows_commit_headroom_v1() -> Result<i64, text>:
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows process heap unavailable for commit check")
+    val info = HeapAlloc(heap, 8u32, 104u64)
+    if info == 0: return Err("Windows commit status allocation failed")
+    volatile_write_u32(info, 104u32)
+    val queried = K32GetPerformanceInfo(info, 104u32)
+    val total = if queried != 0: volatile_read_u64(info + 8) else: 0u64
+    val limit = if queried != 0: volatile_read_u64(info + 16) else: 0u64
+    val page = if queried != 0: volatile_read_u64(info + 88) else: 0u64
+    val released = HeapFree(heap, 0u32, info)
+    if queried == 0 or released == 0 or limit < total or page == 0u64:
+        return Err("Windows system commit query failed")
+    val free_pages = limit - total
+    if free_pages > 9223372036854775807u64 / page:
+        return Err("Windows system commit headroom exceeds supported bound")
+    Ok((free_pages * page) as i64)
+
 @unsafe(reason: "reads current Windows volume space and releases both native buffers", capabilities: [ffi, raw_ptr])
-fn native_group_windows_capacity_v1(path: text) -> Result<(i64, i64), text>:
+fn native_group_windows_capacity_v1(path: text) -> Result<NativeGroupedCapacitySampleV1, text>:
     val memory = windows_available_physical_memory_v1()?
+    val commit = native_group_windows_commit_headroom_v1()?
     val heap = GetProcessHeap()
     if heap == 0: return Err("Windows process heap unavailable for disk check")
     val wide = _windows_process_wide_v1(heap, path)
@@ -33,7 +58,7 @@ fn native_group_windows_capacity_v1(path: text) -> Result<(i64, i64), text>:
     val _freed_slots = HeapFree(heap, 0u32, slots)
     if queried == 0 or available == 0u64 or available > 9223372036854775807u64:
         return Err("Windows available disk query failed")
-    Ok((memory, available as i64))
+    Ok(NativeGroupedCapacitySampleV1(memory, available as i64, commit, true))
 
 fn native_group_read_input_v1(path: text, state: text) -> Result<NativeGroupRunV1, text>:
     if not native_group_absolute_path_valid_v1(path) or not native_group_absolute_path_valid_v1(state):

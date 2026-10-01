@@ -67,6 +67,8 @@ struct NativeGroupResourceV1:
     attempt: i64
     available_memory_bytes: i64
     available_disk_bytes: i64
+    available_commit_bytes: i64
+    commit_measured: bool
     measured_thread_bytes: i64
     thread_reserve_bytes: i64
 
@@ -629,6 +631,9 @@ fn native_group_run_validate_v1(value: NativeGroupRunV1) -> text:
                 resource.available_memory_bytes > 1125899906842624 or
                 resource.available_disk_bytes < 1 or
                 resource.available_disk_bytes > 1125899906842624 or
+                resource.available_commit_bytes < 0 or
+                resource.available_commit_bytes > 1125899906842624 or
+                (not resource.commit_measured and resource.available_commit_bytes != 0) or
                 resource.measured_thread_bytes < 0 or
                 resource.measured_thread_bytes > value.memory_limit_bytes or
                 resource.thread_reserve_bytes < 0 or
@@ -688,8 +693,10 @@ fn native_group_run_encode_v1(value: NativeGroupRunV1) -> text:
         if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
     out = out + builder_wire_line_v1(str(value.resources.len()))
     for resource in value.resources:
+        val commit_field = if resource.commit_measured: "1" else: "0"
         for field in [resource.group_id, str(resource.attempt),
                 str(resource.available_memory_bytes), str(resource.available_disk_bytes),
+                str(resource.available_commit_bytes), commit_field,
                 str(resource.measured_thread_bytes), str(resource.thread_reserve_bytes)]:
             out = out + builder_wire_line_v1(field)
         if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
@@ -769,10 +776,13 @@ fn native_group_run_decode_v1(payload: text) -> Result<NativeGroupRunV1, text>:
         val attempt = reader.number(100, false)
         val available_memory = reader.number(1125899906842624, false)
         val available_disk = reader.number(1125899906842624, false)
+        val available_commit = reader.number(1125899906842624, false)
+        val commit_measured = reader.number(1, false) == 1
         val measured_thread = reader.number(1125899906842624, false)
         val thread_reserve = reader.number(1125899906842624, false)
         resources = resources.push(NativeGroupResourceV1(group, attempt,
-            available_memory, available_disk, measured_thread, thread_reserve))
+            available_memory, available_disk, available_commit, commit_measured,
+            measured_thread, thread_reserve))
         i = i + 1
     val result_count = reader.number(4096, false)
     var results: [NativeGroupResultV1] = []

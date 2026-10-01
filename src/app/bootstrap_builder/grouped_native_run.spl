@@ -19,8 +19,14 @@ struct NativeGroupedRunOutcomeV1:
     expected_count: i64
     accounted_count: i64
 
+struct NativeGroupedCapacitySampleV1:
+    available_memory_bytes: i64
+    available_disk_bytes: i64
+    available_commit_bytes: i64
+    commit_measured: bool
+
 struct NativeGroupedCapacityV1:
-    probe: fn(text) -> Result<(i64, i64), text>
+    probe: fn(text) -> Result<NativeGroupedCapacitySampleV1, text>
 
 struct NativeGroupLatestV1:
     rows: {text: NativeModuleResultV1}
@@ -446,18 +452,34 @@ fn native_group_retry_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
 
 fn native_group_capacity_check_v1(run: NativeGroupRunV1,
         manifest: NativeGroupManifestV1, source_bytes: i64,
-        capacity: NativeGroupedCapacityV1) -> Result<(i64, i64), text>:
-    val (state_memory, state_disk) = capacity.probe(run.state_root)?
-    val (output_memory, output_disk) = capacity.probe(run.output_root)?
-    val memory = if state_memory < output_memory: state_memory else: output_memory
-    val disk = if state_disk < output_disk: state_disk else: output_disk
+        capacity: NativeGroupedCapacityV1) -> Result<NativeGroupedCapacitySampleV1, text>:
+    val state = capacity.probe(run.state_root)?
+    val output = capacity.probe(run.output_root)?
+    if state.commit_measured != output.commit_measured:
+        return Err("inconsistent commit measurement across native group roots")
+    if state.available_memory_bytes < 0 or output.available_memory_bytes < 0 or
+            state.available_disk_bytes < 0 or output.available_disk_bytes < 0 or
+            state.available_commit_bytes < 0 or output.available_commit_bytes < 0 or
+            (not state.commit_measured and
+                (state.available_commit_bytes != 0 or output.available_commit_bytes != 0)):
+        return Err("invalid native group capacity measurement")
+    val memory = if state.available_memory_bytes < output.available_memory_bytes:
+        state.available_memory_bytes else: output.available_memory_bytes
+    val disk = if state.available_disk_bytes < output.available_disk_bytes:
+        state.available_disk_bytes else: output.available_disk_bytes
+    val commit = if state.available_commit_bytes < output.available_commit_bytes:
+        state.available_commit_bytes else: output.available_commit_bytes
     val group_disk = source_bytes * 8 + run.estimated_group_disk_bytes
     val needed_disk = if group_disk > run.minimum_free_disk_bytes:
         group_disk else: run.minimum_free_disk_bytes
     val needed_memory = manifest.memory_limit_bytes + run.memory_reserve_bytes
-    if memory < needed_memory or disk < needed_disk:
-        return Err("insufficient measured memory or disk for next native group")
-    Ok((memory, disk))
+    if memory < needed_memory:
+        return Err("insufficient available host/cgroup memory for next native group: available={memory} needed={needed_memory}")
+    if state.commit_measured and commit < needed_memory:
+        return Err("insufficient Windows system commit headroom for next native group: available={commit} needed={needed_memory}")
+    if disk < needed_disk:
+        return Err("insufficient available disk for next native group: available={disk} needed={needed_disk}")
+    Ok(NativeGroupedCapacitySampleV1(memory, disk, commit, state.commit_measured))
 
 fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
         capacity: NativeGroupedCapacityV1) -> Result<NativeGroupRunV1, text>:
@@ -470,8 +492,7 @@ fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
     val root = native_group_attempt_root_v1(next, manifest)
     val recovering = file_exists(root + "/broker.claim")
     if not recovering:
-        val (memory, disk) = native_group_capacity_check_v1(next, manifest,
-            source_bytes, capacity)?
+        val sample = native_group_capacity_check_v1(next, manifest, source_bytes, capacity)?
         var resource_index: i64 = -1
         for i in 0..next.resources.len():
             if next.resources[i].group_id == manifest.group_id and
@@ -483,7 +504,9 @@ fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
         # A whole-group peak is not a per-thread codegen measurement. New attempts
         # pin zero; a previously staged attempt retains its exact thread policy.
         val measured = NativeGroupResourceV1(manifest.group_id, manifest.attempt,
-            memory, disk, thread_bytes, thread_reserve)
+            sample.available_memory_bytes, sample.available_disk_bytes,
+            sample.available_commit_bytes, sample.commit_measured,
+            thread_bytes, thread_reserve)
         if resource_index >= 0: next.resources[resource_index] = measured
         else: next.resources = next.resources.push(measured)
         if not native_group_save_v1(next): return Err("cannot persist pre-spawn resource measurement")
@@ -497,13 +520,14 @@ fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
     if not recovering:
         # Staging can consume both physical memory and disk. Revalidate after it,
         # then persist the final sample without changing the request's env pins.
-        val (memory, disk) = native_group_capacity_check_v1(next, manifest,
-            source_bytes, capacity)?
+        val sample = native_group_capacity_check_v1(next, manifest, source_bytes, capacity)?
         for i in 0..next.resources.len():
             if next.resources[i].group_id == manifest.group_id and
                     next.resources[i].attempt == manifest.attempt:
                 next.resources[i] = NativeGroupResourceV1(manifest.group_id,
-                    manifest.attempt, memory, disk,
+                    manifest.attempt, sample.available_memory_bytes,
+                    sample.available_disk_bytes, sample.available_commit_bytes,
+                    sample.commit_measured,
                     next.resources[i].measured_thread_bytes,
                     next.resources[i].thread_reserve_bytes)
         if not native_group_save_v1(next): return Err("cannot persist final pre-spawn resource measurement")
@@ -867,7 +891,7 @@ fn native_group_verify_v1(input: NativeGroupRunV1) -> NativeGroupedRunOutcomeV1:
     val _unlocked = file_unlock(lock)
     outcome
 
-export NativeGroupedRunOutcomeV1, NativeGroupedCapacityV1
+export NativeGroupedRunOutcomeV1, NativeGroupedCapacityV1, NativeGroupedCapacitySampleV1
 export native_group_run_v1, native_group_verify_v1, native_group_completion_json_v1
 export native_group_normalize_crashed_sccs_v1
 export native_group_demote_unqualified_smf_v1
