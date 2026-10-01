@@ -2860,6 +2860,32 @@ struct RtMcpChild {
 static SRWLOCK rt_mcp_children_lock = SRWLOCK_INIT;
 static struct RtMcpChild* rt_mcp_children = NULL;
 
+/* Core-C async spawn and wait share PID-keyed ownership. _spawnvp returns a
+ * HANDLE, which cannot be consumed by rt_process_wait's registry contract. */
+int64_t rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count) {
+    if (!cmd || !*cmd || arg_count < 0 || (arg_count > 0 && !args)) return -1;
+    char* line = win_cmd_build_line(cmd, args, arg_count);
+    if (!line) return -1;
+    struct RtMcpChild* owner = (struct RtMcpChild*)calloc(1, sizeof(*owner));
+    if (!owner) { free(line); return -1; }
+    STARTUPINFOA startup = {0};
+    PROCESS_INFORMATION process = {0};
+    startup.cb = sizeof(startup);
+    BOOL started = CreateProcessA(NULL, line, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                                 NULL, NULL, &startup, &process);
+    free(line);
+    if (!started) { free(owner); return -1; }
+    CloseHandle(process.hThread);
+    owner->pid = process.dwProcessId;
+    owner->process = process.hProcess;
+    DWORD published_pid = owner->pid;
+    AcquireSRWLockExclusive(&rt_mcp_children_lock);
+    owner->next = rt_mcp_children;
+    rt_mcp_children = owner;
+    ReleaseSRWLockExclusive(&rt_mcp_children_lock);
+    return (int64_t)published_pid;
+}
+
 static bool rt_mcp_duplicate_std(DWORD which, HANDLE* duplicate) {
     HANDLE source = GetStdHandle(which);
     *duplicate = NULL;

@@ -37,11 +37,37 @@ failure. Rust-only checks cover registered non-string command, non-array argv,
 and non-text argv. The driver requires `--parent`; an accidental empty-argv
 spawn exits99 and cannot recursively start the suite.
 
-The Linux core-C round trip passed before the final driver safety guard;
-that guard does not alter adapter behavior. Rust provider build, Windows
-native harness, and corrected canonical bootstrap are separate pending gates.
+The final Linux core-C round trip passed with the driver safety guard.
+The Windows core-C fixture passed after the ownership correction below,
+including timeout, subsequent wait, and repeated-wait refusal. Rust provider
+build and corrected canonical bootstrap remain separate pending gates.
 These C/Rust ABI probes do not establish a self-hosted Simple test-suite PASS.
 
 Rust unit `async_spawn_value_rejects_invalid_values` uses an existing host
 executable so malformed-value refusal cannot be masked by ENOENT. Native
 fixtures remain outside `doc/06_spec`.
+
+## Windows ownership correction
+
+The focused Windows core-C probe reproduced `wait=-1` after a successful
+spawn. `runtime_legacy_core.c` returned the HANDLE from `_spawnvp`, but
+`runtime_process.c` waited only for PIDs retained in its child registry. It
+also needed the existing command-line quoting helper to preserve empty,
+spaced, and quoted arguments.
+
+The Windows legacy owner now delegates to a process-owner helper which
+allocates its ownership record before CreateProcess, starts without a console
+window, closes the thread handle, retains the process handle under its real
+PID, and returns that PID. Timeout leaves the record available for the next
+wait; completion closes the handle and removes the record. The fixture checks
+both lifecycle transitions and rejects repeated wait after completion.
+The standalone platform header retains its separate paired handle ABI; this
+correction targets the core-C bundle used by native compiler products.
+
+Windows evidence: `D:/dev/bootstrap-spawn-value-windows-test-20261001/result.json`
+records source hashes and fixture SHA256
+`6a099f4075130d77386f9e73ed87660cec56164ce947ee3b58ded7c60d8b3627`.
+The timeout case uses a 250ms child delay and 1ms wait; it passed in this run,
+but severe scheduling stalls can make that timing fixture flaky. It is not a
+claim of deterministic synchronization under arbitrary host load.
+Independent source review accepted provider ownership and ABI wiring.

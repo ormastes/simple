@@ -1183,6 +1183,10 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 /* ===== Process Async ===== */
 
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+#ifdef _WIN32
+/* Core-C PID/handle ownership shared with rt_process_wait. */
+int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
+#endif
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 /* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
 int64_t  rt_process_spawn_inherit(void);

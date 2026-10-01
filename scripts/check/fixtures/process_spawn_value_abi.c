@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 static int64_t text(const char *s) {
     return rt_string_new((const uint8_t *)s, (uint64_t)strlen(s));
@@ -21,12 +24,22 @@ static int spawn_check(const char *self, int raw) {
     return 0;
 }
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    if (argc == 2 && strcmp(argv[1], "--delayed") == 0) { Sleep(250); return 37; }
+#endif
     if (argc > 1 && strcmp(argv[1], "--child") == 0) {
         return argc == 5 && strcmp(argv[2], "space value") == 0 &&
                strcmp(argv[3], "quote\"value") == 0 && strcmp(argv[4], "") == 0 ? 37 : 99;
     }
     if (argc != 2 || strcmp(argv[1], "--parent") != 0) return 99;
     if (spawn_check(argv[0], 0) || spawn_check(argv[0], 1)) return 1;
+#ifdef _WIN32
+    SplArray *delayed = rt_array_new(1);
+    rt_array_push(delayed, text("--delayed"));
+    int64_t child = rt_process_spawn_async_value(text(argv[0]), delayed);
+    if (child <= 0 || rt_process_wait(child, 1) != -2 ||
+        rt_process_wait(child, 10000) != 37 || rt_process_wait(child, 1) != -1) return 8;
+#endif
     SplArray *empty = rt_array_new(0);
     if (rt_process_spawn_async_value(0, empty) != -1) return 2;
     int64_t missing = rt_process_spawn_async_value(text("__simple_missing_spawn_abi_program__"), empty);
