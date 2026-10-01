@@ -67,6 +67,8 @@ struct NativeGroupResourceV1:
     attempt: i64
     available_memory_bytes: i64
     available_disk_bytes: i64
+    measured_thread_bytes: i64
+    thread_reserve_bytes: i64
 
 struct NativeGroupRunV1:
     run_id: text
@@ -626,7 +628,13 @@ fn native_group_run_validate_v1(value: NativeGroupRunV1) -> text:
                 resource.available_memory_bytes < 1 or
                 resource.available_memory_bytes > 1125899906842624 or
                 resource.available_disk_bytes < 1 or
-                resource.available_disk_bytes > 1125899906842624:
+                resource.available_disk_bytes > 1125899906842624 or
+                resource.measured_thread_bytes < 0 or
+                resource.measured_thread_bytes > value.memory_limit_bytes or
+                resource.thread_reserve_bytes < 0 or
+                resource.thread_reserve_bytes > value.memory_limit_bytes or
+                (resource.measured_thread_bytes == 0) !=
+                    (resource.thread_reserve_bytes == 0):
             return "invalid native resource measurement"
         val key = resource.group_id.lower() + ":" + str(resource.attempt)
         if resource_groups.contains_key(key): return "duplicate native resource measurement"
@@ -681,7 +689,8 @@ fn native_group_run_encode_v1(value: NativeGroupRunV1) -> text:
     out = out + builder_wire_line_v1(str(value.resources.len()))
     for resource in value.resources:
         for field in [resource.group_id, str(resource.attempt),
-                str(resource.available_memory_bytes), str(resource.available_disk_bytes)]:
+                str(resource.available_memory_bytes), str(resource.available_disk_bytes),
+                str(resource.measured_thread_bytes), str(resource.thread_reserve_bytes)]:
             out = out + builder_wire_line_v1(field)
         if out.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
     out = out + builder_wire_line_v1(str(value.results.len()))
@@ -760,8 +769,10 @@ fn native_group_run_decode_v1(payload: text) -> Result<NativeGroupRunV1, text>:
         val attempt = reader.number(100, false)
         val available_memory = reader.number(1125899906842624, false)
         val available_disk = reader.number(1125899906842624, false)
+        val measured_thread = reader.number(1125899906842624, false)
+        val thread_reserve = reader.number(1125899906842624, false)
         resources = resources.push(NativeGroupResourceV1(group, attempt,
-            available_memory, available_disk))
+            available_memory, available_disk, measured_thread, thread_reserve))
         i = i + 1
     val result_count = reader.number(4096, false)
     var results: [NativeGroupResultV1] = []
