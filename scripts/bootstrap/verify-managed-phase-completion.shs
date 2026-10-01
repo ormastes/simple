@@ -7,7 +7,7 @@ regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
 receipt= root= inventory= excluded_inventory= module_role_policy=
-producer_sha= source_root= image_receipt= builder_program= group_program=
+producer_sha= source_root= image_receipt= builder_program= group_program= index_program=
 for arg in "$@"; do
   case "$arg" in
     --receipt=*) receipt=${arg#*=} ;;
@@ -20,12 +20,13 @@ for arg in "$@"; do
     --image-receipt=*) image_receipt=${arg#*=} ;;
     --builder-program=*) builder_program=${arg#*=} ;;
     --group-program=*) group_program=${arg#*=} ;;
+    --index-program=*) index_program=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
   esac
 done
 regular "$receipt" && regular "$inventory" && regular "$excluded_inventory" &&
   regular "$module_role_policy" && regular "$image_receipt" &&
-  regular "$builder_program" && regular "$group_program" &&
+  regular "$builder_program" && regular "$group_program" && regular "$index_program" &&
   [ -d "$root" ] && [ ! -L "$root" ] &&
   [ -d "$source_root" ] && [ ! -L "$source_root" ] \
   || die "terminal receipt, inventory, manager images or roots unavailable"
@@ -39,7 +40,9 @@ image_field() { bootstrap_stage3_manifest_value "$1" "$image_receipt"; }
 [ "$(image_field builder_program)" = "$builder_program" ] &&
   [ "$(image_field builder_sha256)" = "$(hash_file "$builder_program")" ] &&
   [ "$(image_field group_program)" = "$group_program" ] &&
-  [ "$(image_field group_sha256)" = "$(hash_file "$group_program")" ] \
+  [ "$(image_field group_sha256)" = "$(hash_file "$group_program")" ] &&
+  [ "$(image_field index_program)" = "$index_program" ] &&
+  [ "$(image_field index_sha256)" = "$(hash_file "$index_program")" ] \
   || die "compiled manager images differ from sealed image receipt"
 [ "$(field format)" = SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4 ] &&
   [ "$(field status)" = PASS ] &&
@@ -91,16 +94,19 @@ for backend in llvm cranelift; do
 done
 for task_phase in phase3 phase4; do
   for backend in llvm cranelift; do
-    index_receipt="$root/$task_phase/index/$backend/output/index-output/receipt.sdn"
-    index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
+    index_job="$root/$task_phase/index/$backend"
+    index_receipt="$index_job/output/index-output/receipt.sdn"
+    index_handoff="$index_job/handoff.sdn"
+    index_manager_receipt="$index_job/state/receipts/index-$task_phase-$backend.sdn"
     group_state="$root/$task_phase/modules/$backend/state"
     group_manifest="$group_state/manifest.sdn"
     group_ledger="$group_state/ledger.sdn"
     group_completion="$group_state/completion.json"
-    for proof in index_receipt index_handoff group_manifest group_ledger group_completion; do
+    for proof in index_receipt index_handoff index_manager_receipt group_manifest group_ledger group_completion; do
       case "$proof" in
         index_receipt) path=$index_receipt ;;
         index_handoff) path=$index_handoff ;;
+        index_manager_receipt) path=$index_manager_receipt ;;
         group_manifest) path=$group_manifest ;;
         group_ledger) path=$group_ledger ;;
         group_completion) path=$group_completion ;;
@@ -111,6 +117,14 @@ for task_phase in phase3 phase4; do
       digest "$expected" && [ "$(hash_file "$path")" = "$expected" ] \
         || die "$task_phase/$backend $proof digest differs"
     done
+    "$builder_program" verify --manifest "$index_job/manifest.sdn" \
+      --state "$index_job/state" --source-root "$index_job/inputs" \
+      --output-root "$index_job/output" >/dev/null \
+      || die "$task_phase/$backend compiled index manager verification failed"
+    "$index_program" native-groups-index-verify \
+      --config "$index_job/inputs/index.config" --receipt "$index_receipt" \
+      --handoff "$index_handoff" >/dev/null \
+      || die "$task_phase/$backend typed V2 index verification failed"
     "$group_program" native-groups-verify --manifest "$group_manifest" \
       --state "$group_state" >/dev/null \
       || die "$task_phase/$backend compiled grouped verification failed"

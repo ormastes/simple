@@ -17,6 +17,7 @@ producer_sha=$(printf 'producer' | sha256sum | cut -d ' ' -f 1)
 binary_sha=$(printf 'binary' | sha256sum | cut -d ' ' -f 1)
 builder_program="$tmp/builder.sh"
 group_program="$tmp/group.sh"
+index_program="$tmp/index.sh"
 cat >"$builder_program" <<'SH'
 #!/bin/sh
 [ "$1" = verify ] || exit 2
@@ -41,10 +42,17 @@ cat >"$group_program" <<'SH'
 [ -f "$5/ledger.sdn" ] && [ "$(cat "$5/completion.json")" = '{"status":"PASS"}' ]
 SH
 chmod +x "$builder_program" "$group_program"
+cat >"$index_program" <<'SH'
+#!/bin/sh
+[ "$1" = native-groups-index-verify ] && [ "$2" = --config ] && [ -f "$3" ] &&
+  [ "$4" = --receipt ] && [ -f "$5" ] && [ "$6" = --handoff ] && [ -f "$7" ]
+SH
+chmod +x "$index_program"
 image_receipt="$tmp/manager-images.env"
-printf 'builder_program=%s\nbuilder_sha256=%s\ngroup_program=%s\ngroup_sha256=%s\n' \
+printf 'builder_program=%s\nbuilder_sha256=%s\ngroup_program=%s\ngroup_sha256=%s\nindex_program=%s\nindex_sha256=%s\n' \
   "$builder_program" "$(sha256sum "$builder_program" | cut -d ' ' -f 1)" \
   "$group_program" "$(sha256sum "$group_program" | cut -d ' ' -f 1)" \
+  "$index_program" "$(sha256sum "$index_program" | cut -d ' ' -f 1)" \
   >"$image_receipt"
 receipt="$root/completion.env"
 {
@@ -82,13 +90,15 @@ receipt="$root/completion.env"
     for backend in llvm cranelift; do
       index_receipt="$root/$phase/index/$backend/output/index-output/receipt.sdn"
       index_handoff="$root/$phase/index/$backend/handoff.sdn"
+      index_manager_receipt="$root/$phase/index/$backend/state/receipts/index-$phase-$backend.sdn"
       group_manifest="$root/$phase/modules/$backend/state/manifest.sdn"
       group_ledger="$root/$phase/modules/$backend/state/ledger.sdn"
       group_completion="$root/$phase/modules/$backend/state/completion.json"
-      for proof in index_receipt index_handoff group_manifest group_ledger group_completion; do
+      for proof in index_receipt index_handoff index_manager_receipt group_manifest group_ledger group_completion; do
         case "$proof" in
           index_receipt) path=$index_receipt ;;
           index_handoff) path=$index_handoff ;;
+          index_manager_receipt) path=$index_manager_receipt ;;
           group_manifest) path=$group_manifest ;;
           group_ledger) path=$group_ledger ;;
           group_completion) path=$group_completion ;;
@@ -101,6 +111,10 @@ receipt="$root/completion.env"
         printf '%s=%s\n' "${phase}_${backend}_${proof}_sha256" \
           "$(sha256sum "$path" | cut -d ' ' -f 1)"
       done
+      index_job="$root/$phase/index/$backend"
+      mkdir -p "$index_job/inputs" "$index_job/output" "$index_job/state"
+      printf 'index.config\n' >"$index_job/inputs/index.config"
+      printf 'manifest\n' >"$index_job/manifest.sdn"
     done
   done
 } >"$receipt"
@@ -110,7 +124,7 @@ verify() {
     --excluded-inventory="$excluded_inventory" --module-role-policy="$module_role_policy" \
     --producer-sha="$producer_sha" --source-root="$source_root" \
     --image-receipt="$image_receipt" --builder-program="$builder_program" \
-    --group-program="$group_program"
+    --group-program="$group_program" --index-program="$index_program"
 }
 verify >/dev/null || { echo 'FAIL: complete fixture rejected' >&2; exit 1; }
 cp "$receipt" "$tmp/good"
@@ -135,6 +149,12 @@ if verify >/dev/null 2>&1; then
   echo 'FAIL: missing Phase 3 Cranelift group proof admitted' >&2; exit 1
 fi
 mv "$tmp/phase3-group" "$phase3_group"
+index_manager_receipt="$root/phase3/index/llvm/state/receipts/index-phase3-llvm.sdn"
+mv "$index_manager_receipt" "$tmp/index-manager-receipt"
+if verify >/dev/null 2>&1; then
+  echo 'FAIL: missing Phase 3 index manager receipt admitted' >&2; exit 1
+fi
+mv "$tmp/index-manager-receipt" "$index_manager_receipt"
 sed 's/^phase4_status=PASS$/phase4_status=FAIL/' "$tmp/good" >"$receipt"
 if verify >/dev/null 2>&1; then
   echo 'FAIL: Phase 4 failure suppressed by Phase 3 proof' >&2; exit 1

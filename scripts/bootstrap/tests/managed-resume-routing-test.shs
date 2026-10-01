@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-managed-resume.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+planner="$tmp/planner-admission.env"
+run() { sh "$script_root/run-managed-from-admitted.shs" "--output=$tmp" "--planner-receipt=$planner" >"$tmp/stdout" 2>"$tmp/stderr"; }
+if run; then echo 'FAIL: missing Stage 2 admission resumed' >&2; exit 1; fi
+grep -q 'Stage 2 admission receipt unavailable' "$tmp/stderr" || exit 1
+admitted="$tmp/stage3/x86_64-unknown-linux-gnu/stage2-admitted"
+mkdir -p "$admitted"
+printf 'candidate_path=%s\n' "$admitted/simple" >"$admitted/admission.env"
+: >"$admitted/simple"
+printf 'status=pass\n' >"$planner"
+if run; then echo 'FAIL: incomplete Stage 2 admission resumed' >&2; exit 1; fi
+grep -q 'typed planner admission invalid' "$tmp/stderr" || exit 1
+printf 'candidate_path=%s\n' "$tmp/elsewhere/simple" >"$admitted/admission.env"
+if run; then echo 'FAIL: receipt candidate outside Stage 2 admission resumed' >&2; exit 1; fi
+grep -q 'Stage 2 candidate path differs' "$tmp/stderr" || exit 1
+# The real positive path requires the full typed admission and exact source
+# snapshot; both are replayed before any manager image/task in the helper.
+grep -Fq 'bootstrap_stage3_verify_stage2_admission_receipt' \
+  "$script_root/run-managed-from-admitted.shs" || exit 1
+grep -Fq 'bootstrap_planner_v2_verify' \
+  "$script_root/run-managed-from-admitted.shs" || exit 1
+grep -Fq 'cmp -s "$source_observed" "$source_authority"' \
+  "$script_root/run-managed-from-admitted.shs" || exit 1
+echo 'PASS: managed resume rejects missing, unplanned, and mismatched Stage 2 evidence'

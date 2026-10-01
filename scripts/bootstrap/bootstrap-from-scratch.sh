@@ -30,6 +30,7 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
   case "${bootstrap_arg}" in
     --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
+    --resume-managed-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
     --progress-interval|--invalidate-cache|--refresh-stage2-source-cache)
       bootstrap_value_missing=1
@@ -70,7 +71,8 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
       --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
       --produce-stage3-receipt=*|\
-      --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|--diagnostic-sweep)
+      --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|\
+      --resume-managed-from-admitted=*|--diagnostic-sweep)
         bootstrap_strategy_bypass=1
         ;;
       --target=simpleos-*|--target=freebsd-*) bootstrap_strategy_bypass=1 ;;
@@ -115,6 +117,19 @@ else
     /bin/sh "$0" "$@"
 fi
 set -eu
+
+# This bounded resume consumes an existing admitted Stage 2 receipt and enters
+# the same manager handoff as a fresh Stage 2. It never enters legacy Stage 3.
+case "${1:-}" in
+  --resume-managed-from-admitted=*)
+    managed_resume_output=${1#*=}
+    shift
+    [ "$#" -eq 1 ] || { echo 'error: managed resume requires one --bootstrap-receipt planner authority' >&2; exit 2; }
+    case "$1" in --bootstrap-receipt=*) managed_resume_planner=${1#*=} ;; *) exit 2 ;; esac
+    exec sh "${bootstrap_entry_dir}/run-managed-from-admitted.shs" \
+      "--output=${managed_resume_output}" "--planner-receipt=${managed_resume_planner}"
+    ;;
+esac
 . "${bootstrap_entry_dir}/lib/host-shared-cache.shs"
 simple_host_cache_configure
 . "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
@@ -258,6 +273,11 @@ Options:
   --resume-stage4-from-admitted=<output>
                      Continue at Stage 4 from OUTPUT's provenance-admitted
                      Stage 3 without rebuilding or mutating Stage 2/3.
+  --resume-managed-from-admitted=<output>
+                     Replay OUTPUT's exact admitted Stage 2 receipt and source,
+                     then resume manager-owned Phase 3 and Phase 4 without
+                     rebuilding Stage 2 or entering legacy Stage 3/4. Requires
+                     --bootstrap-receipt=<typed Stage 4 planner receipt>.
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
@@ -3136,7 +3156,7 @@ fi
 # successor starts. The high-level seed bootstrap had hidden direct Stage 3/4
 # compilation, so every full run now takes this manager handoff path.
 echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
-  if [ ! -x "${seed_bin}" ]; then
+  if [ -z "${bootstrap_stage2_parent_override}" ] && [ ! -x "${seed_bin}" ]; then
     echo "error: Rust seed required for manual bootstrap (${seed_bin})" >&2
     echo "Run: scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap" >&2
     exit 1
@@ -4576,209 +4596,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     exit 0
   fi
 
-  # Once Stage 2 is admitted, all remaining compilation is manager-owned.
-  # Phase 3 and Phase 4 are independent children of this exact producer. The
-  # grouped runner publishes completion only after five binary receipts and
-  # both backend module ledgers pass their compiled admission gates.
-  managed_producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "${stage2_admission_receipt_absolute}") || exit 1
-  managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-roles-v3-both-binaries/${PLATFORM}/${managed_producer_sha}")"
-  managed_shared_parse_cas_root=${SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT:-}
-  managed_shared_parse_cas_root=$(sh "${repo_root}/scripts/bootstrap/lib/shared-parse-cas-root.shs" "${managed_shared_parse_cas_root}") || {
-    echo "error: explicit absolute pre-existing real SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT required" >&2; exit 1;
-  }
-  managed_runner="${repo_root}/scripts/bootstrap/bootstrap-phase4-grouped.shs"
-  if [ ! -f "${managed_runner}" ]; then
-    echo "error: tracked post-Stage-2 manager handoff is unavailable" >&2
-    exit 1
-  fi
-  managed_image_preparer="${repo_root}/scripts/bootstrap/prepare-phase2-build-manager.shs"
-  managed_policy_preparer="${repo_root}/scripts/bootstrap/prepare-phase2-managed-policy.shs"
-  [ -f "${managed_policy_preparer}" ] || {
-    echo "error: tracked managed resource policy selector unavailable" >&2; exit 1;
-  }
-  managed_policy_receipt=$(
-    set -- "--source-estimate-root=${repo_root}" \
-      "--output-root=${managed_phase_root}/policy" "--threads=${build_threads}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES:-}" ] || set -- "$@" "--memory-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MEMORY_BYTES}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES:-}" ] || set -- "$@" "--reserve-bytes=${SIMPLE_BOOTSTRAP_MANAGED_RESERVE_BYTES}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE:-}" ] || set -- "$@" "--group-size=${SIMPLE_BOOTSTRAP_MANAGED_GROUP_SIZE}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS:-}" ] || set -- "$@" "--max-attempts=${SIMPLE_BOOTSTRAP_MANAGED_MAX_ATTEMPTS}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_POLL_MS:-}" ] || set -- "$@" "--poll-ms=${SIMPLE_BOOTSTRAP_MANAGED_POLL_MS}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS:-}" ] || set -- "$@" "--lifetime-ms=${SIMPLE_BOOTSTRAP_MANAGED_LIFETIME_MS}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES:-}" ] || set -- "$@" "--estimated-group-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_ESTIMATED_GROUP_DISK_BYTES}"
-    [ -z "${SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES:-}" ] || set -- "$@" "--minimum-free-disk-bytes=${SIMPLE_BOOTSTRAP_MANAGED_MINIMUM_FREE_DISK_BYTES}"
-    sh "${managed_policy_preparer}" "$@"
-  ) || { echo "error: local managed resource policy blocked; diagnostics retained" >&2; exit 1; }
-  managed_memory_bytes=$(bootstrap_stage3_manifest_value memory_bytes "${managed_policy_receipt}") || exit 1
-  managed_reserve_bytes=$(bootstrap_stage3_manifest_value reserve_bytes "${managed_policy_receipt}") || exit 1
-  managed_group_size=$(bootstrap_stage3_manifest_value group_size "${managed_policy_receipt}") || exit 1
-  managed_max_attempts=$(bootstrap_stage3_manifest_value max_attempts "${managed_policy_receipt}") || exit 1
-  managed_poll_ms=$(bootstrap_stage3_manifest_value poll_ms "${managed_policy_receipt}") || exit 1
-  managed_lifetime_ms=$(bootstrap_stage3_manifest_value lifetime_ms "${managed_policy_receipt}") || exit 1
-  managed_estimated_disk=$(bootstrap_stage3_manifest_value estimated_group_disk_bytes "${managed_policy_receipt}") || exit 1
-  managed_minimum_disk=$(bootstrap_stage3_manifest_value minimum_free_disk_bytes "${managed_policy_receipt}") || exit 1
-  [ -f "${managed_image_preparer}" ] || {
-    echo "error: tracked Phase 2 manager image builder unavailable" >&2; exit 1;
-  }
-  managed_image_receipt="${managed_phase_root}/manager-images/manager-images.env"
-  sh "${managed_image_preparer}" \
-    "--producer-receipt=${stage2_admission_receipt_absolute}" \
-    "--source-root=${repo_root}" \
-    "--output-root=${managed_phase_root}/manager-images" \
-    "--target=${PLATFORM}" \
-    "--runtime-bundle=${SIMPLE_BOOTSTRAP_MANAGED_RUNTIME_BUNDLE:-core-c-bootstrap}" \
-    "--memory-bytes=${managed_memory_bytes}" \
-    "--reserve-bytes=${managed_reserve_bytes}" \
-    || { echo "error: Phase 2 manager image admission blocked; logs retained" >&2; exit 1; }
-  managed_template=$(bootstrap_stage3_manifest_value template "${managed_image_receipt}") || exit 1
-  managed_manifest_program=$(bootstrap_stage3_manifest_value manifest_program "${managed_image_receipt}") || exit 1
-  managed_builder_program=$(bootstrap_stage3_manifest_value builder_program "${managed_image_receipt}") || exit 1
-  managed_group_program=$(bootstrap_stage3_manifest_value group_program "${managed_image_receipt}") || exit 1
-  managed_group_worker=$(bootstrap_stage3_manifest_value group_worker "${managed_image_receipt}") || exit 1
-  managed_group_broker=$(bootstrap_stage3_manifest_value group_broker "${managed_image_receipt}") || exit 1
-  managed_index_program=$(bootstrap_stage3_manifest_value index_program "${managed_image_receipt}") || exit 1
-  managed_authority_program=$(bootstrap_stage3_manifest_value authority_program "${managed_image_receipt}") || exit 1
-  managed_worker_program=$(bootstrap_stage3_manifest_value worker_program "${managed_image_receipt}") || exit 1
-  managed_image_pin() {
-    managed_pin_path=$(bootstrap_stage3_manifest_value "$1" "${managed_image_receipt}") || return 1
-    managed_pin_sha=$(bootstrap_stage3_manifest_value "$2" "${managed_image_receipt}") || return 1
-    [ -f "${managed_pin_path}" ] && [ ! -L "${managed_pin_path}" ] &&
-      [ "$(bootstrap_stage3_hash_file "${managed_pin_path}")" = "${managed_pin_sha}" ]
-  }
-  for managed_role in 'manifest_program manifest_sha256' 'builder_program builder_sha256' \
-      'worker_program worker_sha256' 'group_program group_sha256' \
-      'group_worker group_worker_sha256' 'group_broker group_broker_sha256' \
-      'index_program index_sha256' 'authority_program authority_sha256' \
-      'template template_sha256'; do
-    managed_path_field=${managed_role%% *}
-    managed_digest_field=${managed_role#* }
-    managed_image_pin "${managed_path_field}" "${managed_digest_field}" || {
-      echo "error: manager image or template differs from Phase 2 image receipt: ${managed_path_field}" >&2
-      exit 1
-    }
-  done
-  managed_authority_root="${managed_phase_root}/authority"
-  managed_authority_receipt="${managed_authority_root}/authority.receipt"
-  managed_canonical_snapshot="${managed_authority_root}/canonical-source.$$.txt"
-  mkdir -p "${managed_authority_root}" || exit 1
-  if [ -e "${managed_authority_receipt}" ]; then
-    bootstrap_stage3_source_snapshot "${managed_canonical_snapshot}" "${managed_authority_root}/source-root" || exit 1
-    managed_admitted_snapshot=$(bootstrap_stage3_manifest_value source_snapshot_path "${stage2_admission_receipt_absolute}") || exit 1
-    cmp -s "${managed_canonical_snapshot}" "${managed_admitted_snapshot}" || {
-      echo "error: resumed private source differs from admitted Stage 2 bytes" >&2; exit 1;
-    }
-    managed_authority_report=$("${managed_authority_program}" phase2-native-authority \
-      --producer-receipt "${stage2_admission_receipt_absolute}" \
-      --source-checkout "${repo_root}" --output-root "${managed_authority_root}" \
-      --target "${PLATFORM}" --receipt "${managed_authority_receipt}" \
-      --canonical-snapshot "${managed_canonical_snapshot}") || exit 1
-  else
-    managed_authority_report=$("${managed_authority_program}" phase2-native-authority \
-      --producer-receipt "${stage2_admission_receipt_absolute}" \
-      --source-checkout "${repo_root}" --output-root "${managed_authority_root}" \
-      --target "${PLATFORM}" --receipt "${managed_authority_receipt}") || exit 1
-  fi
-  [ -f "${managed_authority_receipt}" ] && [ ! -L "${managed_authority_receipt}" ] || exit 1
-  managed_authority_digest=$(bootstrap_stage3_hash_file "${managed_authority_receipt}") || exit 1
-  [ "${managed_authority_report}" = "${managed_authority_digest}" ] || {
-    echo "error: compiled authority digest differs from receipt readback" >&2; exit 1;
-  }
-  bootstrap_stage3_source_snapshot "${managed_canonical_snapshot}" "${managed_authority_root}/source-root" || exit 1
-  managed_admitted_snapshot=$(bootstrap_stage3_manifest_value source_snapshot_path "${stage2_admission_receipt_absolute}") || exit 1
-  cmp -s "${managed_canonical_snapshot}" "${managed_admitted_snapshot}" || {
-    echo "error: private source differs from admitted Stage 2 bytes" >&2; exit 1;
-  }
-  "${managed_authority_program}" phase2-native-authority-verify \
-    --receipt "${managed_authority_receipt}" --digest "${managed_authority_digest}" \
-    --canonical-snapshot "${managed_canonical_snapshot}" >/dev/null || exit 1
-  managed_authority_field() {
-    "${managed_authority_program}" phase2-native-authority-field \
-      --receipt "${managed_authority_receipt}" --digest "${managed_authority_digest}" \
-      --field "$1"
-  }
-  managed_source_root=$(managed_authority_field source_root) || exit 1
-  managed_scv_receipt=$(managed_authority_field scv_receipt_path) || exit 1
-  managed_source_inventory=$(managed_authority_field full_source_inventory_path) || exit 1
-  managed_source_links=$(managed_authority_field full_source_links_path) || exit 1
-  managed_module_inventory=$(managed_authority_field module_inventory_path) || exit 1
-  managed_module_inventory_count=$(managed_authority_field module_inventory_count) || exit 1
-  managed_excluded_inventory=$(managed_authority_field excluded_inventory_path) || exit 1
-  managed_excluded_inventory_digest=$(managed_authority_field excluded_inventory_digest) || exit 1
-  managed_excluded_inventory_count=$(managed_authority_field excluded_inventory_count) || exit 1
-  managed_module_role_policy=$(managed_authority_field module_role_policy_path) || exit 1
-  managed_module_role_policy_digest=$(managed_authority_field module_role_policy_digest) || exit 1
-  [ -f "${managed_module_inventory}" ] && [ ! -L "${managed_module_inventory}" ] &&
-    [ -f "${managed_excluded_inventory}" ] && [ ! -L "${managed_excluded_inventory}" ] &&
-    [ -f "${managed_module_role_policy}" ] && [ ! -L "${managed_module_role_policy}" ] &&
-    [ "$(wc -l <"${managed_module_inventory}" | tr -d ' ')" = "${managed_module_inventory_count}" ] &&
-    [ "$(sha256sum "${managed_excluded_inventory}" | cut -d ' ' -f 1)" = "${managed_excluded_inventory_digest}" ] &&
-    [ "$(wc -l <"${managed_excluded_inventory}" | tr -d ' ')" = "${managed_excluded_inventory_count}" ] &&
-    [ "$(sha256sum "${managed_module_role_policy}" | cut -d ' ' -f 1)" = "${managed_module_role_policy_digest}" ] || {
-    echo "error: Phase 2 module role authority differs from compiled V3 receipt" >&2; exit 1;
-  }
-  managed_llvm_index_config=$(managed_authority_field llvm_index_config_path) || exit 1
-  managed_cranelift_index_config=$(managed_authority_field cranelift_index_config_path) || exit 1
-  managed_phase3_llvm_index_config=$(managed_authority_field phase3_llvm_index_config_path) || exit 1
-  managed_phase3_cranelift_index_config=$(managed_authority_field phase3_cranelift_index_config_path) || exit 1
-  [ "$(managed_authority_field producer_digest)" = "${managed_producer_sha}" ] &&
-    [ "$(managed_authority_field target)" = "${PLATFORM}" ] || {
-    echo "error: authority producer or target differs from Stage 2" >&2; exit 1;
-  }
-  rm -f "${managed_canonical_snapshot}"
-  sh "${managed_runner}" \
-    "--producer-receipt=${stage2_admission_receipt_absolute}" \
-    "--scv-receipt=${managed_scv_receipt}" \
-    "--source-root=${managed_source_root}" \
-    "--source-inventory=${managed_source_inventory}" \
-    "--source-links=${managed_source_links}" \
-    "--module-inventory=${managed_module_inventory}" \
-    "--excluded-inventory=${managed_excluded_inventory}" \
-    "--excluded-inventory-digest=${managed_excluded_inventory_digest}" \
-    "--excluded-inventory-count=${managed_excluded_inventory_count}" \
-    "--module-role-policy=${managed_module_role_policy}" \
-    "--module-role-policy-digest=${managed_module_role_policy_digest}" \
-    "--shared-parse-cas-root=${managed_shared_parse_cas_root}" \
-    "--authority-program=${managed_authority_program}" \
-    "--authority-receipt=${managed_authority_receipt}" \
-    "--authority-digest=${managed_authority_digest}" \
-    "--image-receipt=${managed_image_receipt}" \
-    "--root=${managed_phase_root}" \
-    "--template=${managed_template}" \
-    "--manifest-program=${managed_manifest_program}" \
-    "--builder-program=${managed_builder_program}" \
-    "--group-program=${managed_group_program}" \
-    "--group-worker=${managed_group_worker}" \
-    "--group-broker=${managed_group_broker}" \
-    "--index-program=${managed_index_program}" \
-    "--llvm-index-config=${managed_llvm_index_config}" \
-    "--cranelift-index-config=${managed_cranelift_index_config}" \
-    "--phase3-llvm-index-config=${managed_phase3_llvm_index_config}" \
-    "--phase3-cranelift-index-config=${managed_phase3_cranelift_index_config}" \
-    "--threads=${build_threads}" \
-    "--memory-bytes=${managed_memory_bytes}" \
-    "--reserve-bytes=${managed_reserve_bytes}" \
-    "--target=${PLATFORM}" \
-    "--group-size=${managed_group_size}" \
-    "--max-attempts=${managed_max_attempts}" \
-    "--poll-ms=${managed_poll_ms}" \
-    "--lifetime-ms=${managed_lifetime_ms}" \
-    "--estimated-group-disk-bytes=${managed_estimated_disk}" \
-    "--minimum-free-disk-bytes=${managed_minimum_disk}" \
-    || { echo "error: managed Phase 3/4 handoff failed; receipts retained" >&2; exit 1; }
-  managed_completion="${managed_phase_root}/completion.env"
-  managed_completion_verifier="${repo_root}/scripts/bootstrap/verify-managed-phase-completion.shs"
-  [ -f "${managed_completion_verifier}" ] || {
-    echo "error: tracked managed completion verifier unavailable" >&2; exit 1;
-  }
-  sh "${managed_completion_verifier}" \
-    "--receipt=${managed_completion}" "--root=${managed_phase_root}" \
-    "--inventory=${managed_module_inventory}" "--producer-sha=${managed_producer_sha}" \
-    "--excluded-inventory=${managed_excluded_inventory}" \
-    "--module-role-policy=${managed_module_role_policy}" \
-    "--source-root=${managed_source_root}" "--image-receipt=${managed_image_receipt}" \
-    "--builder-program=${managed_builder_program}" "--group-program=${managed_group_program}" \
-    || { echo "error: managed Phase 3/4 terminal proofs differ" >&2; exit 1; }
-  bootstrap_verdict "ADMITTED: stage=phase3+phase4 exit=0 signal=none reason=managed-phase2-producer-completion"
+  sh "$repo_root/scripts/bootstrap/run-managed-from-admitted.shs" \
+    "--output=$(absolute_path "$output_dir")" \
+    "--producer-receipt=$stage2_admission_receipt_absolute" \
+    "--planner-receipt=$bootstrap_receipt_path" "--threads=$build_threads" || exit 1
   exit 0
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
