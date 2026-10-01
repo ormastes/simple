@@ -7,10 +7,14 @@ use std.nogc_sync_mut.io_runtime.{host_os}
 use std.nogc_sync_mut.io.windows_process_owner.{windows_process_directory_no_follow_v1}
 use app.io.dir_ops.{dir_create}
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
-use std.common.build_manager.contracts.{BuildInputV1, BuildTaskV1, BuildHostV1, BuildRunV1, BUILDER_MAX_INPUTS_V1,
+use std.common.build_manager.contracts.{BuildInputV1, BuildLinkV1, BuildTaskV1, BuildHostV1, BuildRunV1, BUILDER_MAX_INPUTS_V1,
     BUILDER_MEMORY_LIMIT_MAX_V2, builder_identifier_valid_v1,
     builder_digest_valid_v1, builder_relative_path_valid_v1}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.build_manager.contracts.{builder_link_resolved_path_v1,
+    builder_validate_task_v1}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_match_nofollow_v1}
 
 fn bootstrap_manifest_absolute_v1(path: text) -> bool:
     if path == "" or path.contains("\n") or path.contains("\r") or path.contains("\0"): return false
@@ -59,7 +63,7 @@ fn bootstrap_manifest_template_v1(args: [text]) -> Result<text, text>:
         producer_digest: digest, source_digest: marker, toolchain_digest: digest,
         dependencies: [], program: args[1], args: ["--invalid-template-task"], inputs: [],
         outputs: ["template-must-not-run"], cache_key: marker,
-        timeout_ms: 1000, memory_limit_bytes: memory_limit)
+        timeout_ms: 1000, memory_limit_bytes: memory_limit, links: [])
     val host = BuildHostV1(id: "bootstrap-local", transport: "local", endpoint: "",
         workspace: args[2], worker_program: args[1], worker_digest: digest, slots: slots)
     val run = BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 2)
@@ -101,7 +105,7 @@ fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
     if inputs.len() == 0 or index >= args.len() - 1: return Err("job requires inputs and argv")
     index = index + 1
     var command: [text] = []
-    var identity = "bootstrap-canonical-job-v2|" + root + "|" + args[4] +
+    var identity = "bootstrap-canonical-job-v3|" + root + "|" + args[4] +
         "|memory=" + str(memory_limit)
     while index < args.len():
         val argument = args[index]
@@ -114,7 +118,7 @@ fn bootstrap_manifest_job_v1(args: [text]) -> Result<text, text>:
         source_digest: source_sha, toolchain_digest: tools_sha, dependencies: [],
         program: args[2], args: command, inputs: inputs, outputs: [args[6]],
         cache_key: sha256_text(identity + source_sha + tools_sha),
-        timeout_ms: 86400000, memory_limit_bytes: memory_limit)
+        timeout_ms: 86400000, memory_limit_bytes: memory_limit, links: [])
     val run = BuildRunV1(tasks: [task], hosts: template.hosts,
         keep_going: template.keep_going, max_attempts: template.max_attempts)
     if not builder_write_run_v1(root + "/manifest.sdn", run): return Err("job manifest rejected or unwritable")
@@ -141,6 +145,59 @@ fn bootstrap_manifest_inventory_paths_v1(payload: text, inventory: text) -> Resu
         previous = path.lower()
     if paths.len() == 0: return Err("inventory must declare at least one input")
     Ok(paths)
+
+fn bootstrap_manifest_lower_hex_text_v1(encoded: text) -> Result<text, text>:
+    if encoded == "" or encoded.len() > 8192 or encoded.len() % 2 != 0:
+        return Err("invalid link hex field")
+    var bytes: [u8] = []
+    var index = 0
+    while index < encoded.len():
+        val high = encoded[index:index + 1]
+        val low = encoded[index + 1:index + 2]
+        var high_value: i64 = -1
+        var low_value: i64 = -1
+        if high >= "0" and high <= "9": high_value = high.char_code_at(0) - 48
+        elif high >= "a" and high <= "f": high_value = high.char_code_at(0) - 87
+        if low >= "0" and low <= "9": low_value = low.char_code_at(0) - 48
+        elif low >= "a" and low <= "f": low_value = low.char_code_at(0) - 87
+        if high_value < 0 or low_value < 0: return Err("noncanonical link hex field")
+        bytes.push((high_value * 16 + low_value).to_u8())
+        index = index + 2
+    validated_utf8_bytes_to_text_linear(bytes)
+
+# Exact Stage2 authority link rows, sorted by their encoded row bytes.
+fn bootstrap_manifest_link_rows_v1(payload: text) -> Result<[BuildLinkV1], text>:
+    if payload.len() > 8388608 or payload.contains("\r") or
+            payload.contains("\0") or (payload != "" and not payload.ends_with("\n")):
+        return Err("link inventory must be bounded LF-terminated UTF-8")
+    if payload == "": return Ok([])
+    val rows = payload.split("\n")
+    if rows.len() < 2 or rows.len() > 4097:
+        return Err("link inventory exceeds manager link bound")
+    var links: [BuildLinkV1] = []
+    var previous = ""
+    for index in 0..rows.len() - 1:
+        val row = rows[index]
+        if row == "" or (previous != "" and row <= previous):
+            return Err("link rows must be strictly ordered and unique")
+        val fields = row.split(":")
+        var kind = ""
+        if fields.len() == 4 and fields[0] == "link-dir-hex": kind = "dir"
+        elif fields.len() == 5 and fields[0] == "link-hex": kind = "file"
+        else: return Err("invalid typed link row")
+        val path = bootstrap_manifest_lower_hex_text_v1(fields[1])?
+        val target = bootstrap_manifest_lower_hex_text_v1(fields[2])?
+        val resolved = bootstrap_manifest_lower_hex_text_v1(fields[3])?
+        val digest = if kind == "file": fields[4] else: ""
+        if not builder_relative_path_valid_v1(path) or
+                not builder_relative_path_valid_v1(resolved) or
+                builder_link_resolved_path_v1(path, target) != resolved or
+                (kind == "file" and not builder_digest_valid_v1(digest)):
+            return Err("link row target is invalid or escapes root")
+        links.push(BuildLinkV1(kind: kind, path: path, target: target,
+            resolved_path: resolved, target_digest: digest))
+        previous = row
+    Ok(links)
 
 fn bootstrap_manifest_plain_path_v1(path: text) -> text:
     val normalized = path.replace("\\", "/")
@@ -204,24 +261,28 @@ fn bootstrap_manifest_regular_under_root_v1(root: text, relative: text) -> Resul
     Ok(path)
 
 # --job-from-inventory TEMPLATE PROGRAM ROOT ID PHASE OUTPUT INVENTORY
-#     --memory-limit-bytes N [--manifest ABSOLUTE_PRIVATE_PATH] -- ARGS...
+#     --memory-limit-bytes N --links-inventory REL
+#     [--manifest ABSOLUTE_PRIVATE_PATH] -- ARGS...
 # The inventory and its members are all declared, digest-pinned task inputs.
 fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
-    if args.len() < 12 or args[8] != "--memory-limit-bytes":
-        return Err("--job-from-inventory requires --memory-limit-bytes N")
+    if args.len() < 14 or args[8] != "--memory-limit-bytes" or
+            args[10] != "--links-inventory":
+        return Err("--job-from-inventory requires --memory-limit-bytes N --links-inventory REL")
     val memory_limit = bootstrap_manifest_memory_limit_v2(args[9])?
-    var first_argument: i64 = 11
-    if args[10] == "--manifest":
-        if args.len() < 14 or args[12] != "--": return Err("--manifest ABS must precede -- ARGS...")
-        first_argument = 13
-    elif args[10] != "--":
+    var first_argument: i64 = 13
+    if args[12] == "--manifest":
+        if args.len() < 16 or args[14] != "--": return Err("--manifest ABS must precede -- ARGS...")
+        first_argument = 15
+    elif args[12] != "--":
         return Err("expected --manifest ABS or -- before job arguments")
     for index in 1..4:
         if not bootstrap_manifest_absolute_v1(args[index]): return Err("job paths must be absolute")
     if not builder_identifier_valid_v1(args[4]) or not builder_identifier_valid_v1(args[5]):
         return Err("invalid task or phase identity")
     if not builder_relative_path_valid_v1(args[6]) or
-            not builder_relative_path_valid_v1(args[7]):
+            not builder_relative_path_valid_v1(args[7]) or
+            not builder_relative_path_valid_v1(args[11]) or
+            args[7].lower() == args[11].lower():
         return Err("invalid output or inventory path")
     val template = builder_read_run_v1(args[1])?
     for host in template.hosts:
@@ -232,8 +293,8 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
     val template_sha = bootstrap_manifest_hash_v1(args[1])?
     val root = bootstrap_manifest_plain_path_v1(path_absolute(args[3]))
     if root == "" or not bootstrap_manifest_absolute_v1(root): return Err("job root cannot be canonicalized")
-    val manifest_path = if args[10] == "--manifest":
-        bootstrap_manifest_private_target_v1(root, args[11])?
+    val manifest_path = if args[12] == "--manifest":
+        bootstrap_manifest_private_target_v1(root, args[13])?
     else:
         root + "/manifest.sdn"
     if file_exists(manifest_path): return Err("job manifest already exists")
@@ -243,10 +304,18 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
     if bootstrap_manifest_hash_v1(inventory_path)? != inventory_sha:
         return Err("inventory changed while reading")
     val paths = bootstrap_manifest_inventory_paths_v1(payload, args[7])?
-    var inputs: [BuildInputV1] = [BuildInputV1(path: args[7], digest: inventory_sha)]
+    val link_inventory_path = bootstrap_manifest_regular_under_root_v1(root, args[11])?
+    val link_inventory_sha = bootstrap_manifest_hash_v1(link_inventory_path)?
+    val link_payload = file_read_regular_no_follow_bounded(link_inventory_path, 8388608)?
+    if bootstrap_manifest_hash_v1(link_inventory_path)? != link_inventory_sha:
+        return Err("link inventory changed while reading")
+    val links = bootstrap_manifest_link_rows_v1(link_payload)?
+    var inputs: [BuildInputV1] = [BuildInputV1(path: args[7], digest: inventory_sha),
+        BuildInputV1(path: args[11], digest: link_inventory_sha)]
     val inventory_length = args[7].len()
-    var source_pieces: [text] = ["bootstrap-canonical-job-inventory-v1|{inventory_length}:",
-        args[7], inventory_sha]
+    val link_inventory_length = args[11].len()
+    var source_pieces: [text] = ["bootstrap-canonical-job-inventory-v2|{inventory_length}:",
+        args[7], inventory_sha, "{link_inventory_length}:", args[11], link_inventory_sha]
     for path in paths:
         val absolute = bootstrap_manifest_regular_under_root_v1(root, path)?
         val digest = bootstrap_manifest_hash_v1(absolute)?
@@ -255,8 +324,17 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         source_pieces.push("{length}:")
         source_pieces.push(path)
         source_pieces.push(digest)
+    for link in links:
+        val kind = if link.kind == "file": 1 else: 2
+        if not snapshot_symlink_match_nofollow_v1(root,
+                root + "/" + link.path, link.target, kind):
+            return Err("source link changed or escapes root: " + link.path)
+        for field in [link.kind, link.path, link.target, link.resolved_path,
+                link.target_digest]:
+            source_pieces.push("{field.len()}:")
+            source_pieces.push(field)
     var command: [text] = []
-    var identity = "bootstrap-canonical-job-v2|" + root + "|" + args[4] +
+    var identity = "bootstrap-canonical-job-v3|" + root + "|" + args[4] +
         "|memory=" + str(memory_limit)
     for index in first_argument..args.len():
         val argument = args[index]
@@ -268,7 +346,9 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         source_digest: source_sha, toolchain_digest: tools_sha, dependencies: [],
         program: args[2], args: command, inputs: inputs, outputs: [args[6]],
         cache_key: sha256_text(identity + source_sha + tools_sha),
-        timeout_ms: 86400000, memory_limit_bytes: memory_limit)
+        timeout_ms: 86400000, memory_limit_bytes: memory_limit, links: links)
+    val task_error = builder_validate_task_v1(task)
+    if task_error != "": return Err(task_error)
     val run = BuildRunV1(tasks: [task], hosts: template.hosts,
         keep_going: template.keep_going, max_attempts: template.max_attempts)
     # Recheck every file after constructing the record. The worker repeats
@@ -277,6 +357,11 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         val absolute = bootstrap_manifest_regular_under_root_v1(root, item.path)?
         if bootstrap_manifest_hash_v1(absolute)? != item.digest:
             return Err("declared input changed: " + item.path)
+    for link in links:
+        val kind = if link.kind == "file": 1 else: 2
+        if not snapshot_symlink_match_nofollow_v1(root,
+                root + "/" + link.path, link.target, kind):
+            return Err("declared link changed: " + link.path)
     if not builder_write_run_v1(manifest_path, run):
         return Err("job manifest rejected or unwritable")
     Ok(manifest_path)
@@ -335,7 +420,7 @@ fn bootstrap_manifest_emit_v1(args: [text]) -> Result<text, text>:
             BuildInputV1(path: "tools.inputs", digest: tools_sha)],
         outputs: ["bootstrap-stage2.exit.env"], cache_key: sha256_text(identity + source_sha + tool_identity),
         timeout_ms: 604800000,
-        memory_limit_bytes: template.tasks[0].memory_limit_bytes)
+        memory_limit_bytes: template.tasks[0].memory_limit_bytes, links: [])
     # One outer worker owns the phase. Inner native compiler/group budgets stay
     # with canonical bootstrap; the host template never multiplies this task.
     val run = BuildRunV1(tasks: [task], hosts: template.hosts, keep_going: template.keep_going, max_attempts: 1)

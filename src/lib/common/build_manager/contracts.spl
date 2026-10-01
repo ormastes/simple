@@ -9,6 +9,13 @@ struct BuildInputV1:
     path: text
     digest: text
 
+struct BuildLinkV1:
+    kind: text
+    path: text
+    target: text
+    resolved_path: text
+    target_digest: text
+
 struct BuildTaskV1:
     id: text
     attempt: i64
@@ -24,6 +31,7 @@ struct BuildTaskV1:
     cache_key: text
     timeout_ms: i64
     memory_limit_bytes: i64
+    links: [BuildLinkV1]
 
 struct BuildHostV1:
     id: text
@@ -106,6 +114,32 @@ fn builder_paths_overlap_v1(left: text, right: text) -> bool:
     val b = right.lower()
     a == b or a.starts_with(b + "/") or b.starts_with(a + "/")
 
+# Resolve only portable relative link text from the link's parent. Any path
+# that crosses the task root or depends on another link is rejected later.
+fn builder_link_resolved_path_v1(path: text, target: text) -> text:
+    if not builder_relative_path_valid_v1(path) or target == "" or
+            target.len() > 4096 or target.starts_with("/") or
+            target.contains("\\") or target.contains(":") or
+            target.contains("\n") or target.contains("\r") or
+            target.contains("\t") or target.contains("\0"):
+        return ""
+    val components = path.split("/")
+    var resolved: [text] = []
+    for index in 0..components.len() - 1:
+        resolved.push(components[index])
+    for component in target.split("/"):
+        if component == "": return ""
+        if component == ".": pass
+        elif component == "..":
+            if resolved.len() == 0: return ""
+            resolved = resolved[0:resolved.len() - 1]
+        else:
+            if not builder_relative_path_valid_v1(component): return ""
+            resolved.push(component)
+    val value = resolved.join("/")
+    if not builder_relative_path_valid_v1(value): return ""
+    value
+
 fn builder_path_prefixes_v1(normalized: text) -> [text]:
     val components = normalized.split("/")
     var prefixes: [text] = []
@@ -140,6 +174,7 @@ fn builder_validate_task_v1(task: BuildTaskV1) -> text:
     if task.program == "" or not builder_text_valid_v1(task.program):
         return "missing or invalid compiler program"
     if task.args.len() > 1024 or task.inputs.len() > BUILDER_MAX_INPUTS_V1 or
+            task.links.len() > 4096 or
             task.outputs.len() == 0 or task.outputs.len() > 4096 or task.dependencies.len() > 4096:
         return "task exceeds collection bounds or declares no outputs"
     for arg in task.args:
@@ -156,6 +191,8 @@ fn builder_validate_task_v1(task: BuildTaskV1) -> text:
         i = i + 1
     var input_files: {text: bool} = {}
     var input_ancestors: {text: bool} = {}
+    var input_digests: {text: text} = {}
+    var exact_directories: {text: bool} = {}
     i = 0
     while i < task.inputs.len():
         val item = task.inputs[i]
@@ -167,7 +204,33 @@ fn builder_validate_task_v1(task: BuildTaskV1) -> text:
             return "overlapping inputs"
         input_files[normalized] = true
         for prefix in prefixes: input_ancestors[prefix] = true
+        input_digests[item.path] = item.digest
+        for prefix in builder_path_prefixes_v1(item.path):
+            exact_directories[prefix] = true
         i = i + 1
+    for link in task.links:
+        if (link.kind != "file" and link.kind != "dir") or
+                not builder_relative_path_valid_v1(link.path) or
+                not builder_relative_path_valid_v1(link.resolved_path) or
+                builder_link_resolved_path_v1(link.path, link.target) != link.resolved_path or
+                builder_paths_overlap_v1(link.path, link.resolved_path):
+            return "invalid declared link"
+        if link.kind == "dir" and link.target_digest != "":
+            return "directory link must not invent a target digest"
+        if link.kind == "file" and not builder_digest_valid_v1(link.target_digest):
+            return "invalid file link target digest"
+        val normalized = link.path.lower()
+        val prefixes = builder_path_prefixes_v1(normalized)
+        if builder_indexed_path_overlap_v1(normalized, prefixes, input_files, input_ancestors):
+            return "link overlaps declared input"
+        val target_declared = if link.kind == "file":
+            input_digests.contains_key(link.resolved_path) and
+                input_digests[link.resolved_path] == link.target_digest
+        else:
+            exact_directories.contains_key(link.resolved_path)
+        if not target_declared: return "link target has no pinned regular input"
+        input_files[normalized] = true
+        for prefix in prefixes: input_ancestors[prefix] = true
     var output_files: {text: bool} = {}
     var output_ancestors: {text: bool} = {}
     i = 0
@@ -215,7 +278,7 @@ fn builder_identity_field_v1(value: text) -> text:
 
 fn builder_task_identity_v1(task: BuildTaskV1) -> text:
     if builder_validate_task_v1(task) != "": return ""
-    var pieces: [text] = ["simple-build-task-identity-v2"]
+    var pieces: [text] = ["simple-build-task-identity-v3"]
     for field in [task.id, "{task.attempt}", task.phase, task.producer_digest,
             task.source_digest, task.toolchain_digest, task.program, task.cache_key,
             "{task.timeout_ms}", "{task.memory_limit_bytes}",
@@ -230,6 +293,11 @@ fn builder_task_identity_v1(task: BuildTaskV1) -> text:
     for item in task.inputs:
         pieces.push(builder_identity_field_v1(item.path))
         pieces.push(builder_identity_field_v1(item.digest))
+    pieces.push(builder_identity_field_v1("{task.links.len()}"))
+    for link in task.links:
+        for field in [link.kind, link.path, link.target, link.resolved_path,
+                link.target_digest]:
+            pieces.push(builder_identity_field_v1(field))
     pieces.push(builder_identity_field_v1("{task.outputs.len()}"))
     for output in task.outputs:
         pieces.push(builder_identity_field_v1(output))

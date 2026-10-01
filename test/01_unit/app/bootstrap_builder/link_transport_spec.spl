@@ -1,0 +1,69 @@
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.contracts.{BuildInputV1, BuildLinkV1, BuildTaskV1,
+    builder_validate_task_v1}
+use app.bootstrap_builder.link_inputs.{builder_regular_input_parents_safe_v1,
+    builder_link_inputs_match_v1, builder_link_inputs_stage_v1}
+use app.bootstrap_builder.manifest_main.{bootstrap_manifest_plain_path_v1}
+use app.io.file_ops.{file_atomic_write, file_copy, file_hash_sha256,
+    path_absolute}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+
+describe "typed build link transport":
+    it "stages exact file links after pinned regular targets and rejects changed bytes":
+        val root = bootstrap_manifest_plain_path_v1(path_absolute(".")) +
+            "/build/builder-link-spec-" + str(getpid()) + "-" + str(time_now_unix_micros())
+        val source = root + "/source"
+        val work = root + "/work"
+        expect(dir_create_all(source)).to_equal(true)
+        expect(dir_create_all(work)).to_equal(true)
+        expect(file_atomic_write(source + "/target.txt", "pinned target\n")).to_equal(true)
+        val digest = file_hash_sha256(source + "/target.txt")
+        expect(snapshot_symlink_create_nofollow_v1(source,
+            source + "/alias.txt", "target.txt", 1)).to_equal(true)
+        val task = BuildTaskV1(id: "link-proof", attempt: 1, phase: "native",
+            producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+            dependencies: [], program: "producer", args: [],
+            inputs: [BuildInputV1(path: "target.txt", digest: digest)],
+            outputs: ["result.o"], cache_key: digest, timeout_ms: 1000,
+            memory_limit_bytes: 1073741824,
+            links: [BuildLinkV1(kind: "file", path: "alias.txt",
+                target: "target.txt", resolved_path: "target.txt", target_digest: digest)])
+        expect(builder_validate_task_v1(task)).to_equal("")
+        expect(builder_regular_input_parents_safe_v1(task, source)).to_equal(true)
+        expect(file_copy(source + "/target.txt", work + "/target.txt")).to_equal(true)
+        expect(builder_link_inputs_stage_v1(task, source, work)).to_equal("")
+        expect(builder_link_inputs_match_v1(task, work)).to_equal("")
+        expect(file_atomic_write(work + "/target.txt", "mutated target\n")).to_equal(true)
+        expect(builder_link_inputs_match_v1(task, work)).to_contain("digest differs")
+
+    it "recreates an in-root directory alias to declared examples targets":
+        val root = bootstrap_manifest_plain_path_v1(path_absolute(".")) +
+            "/build/builder-dir-link-spec-" + str(getpid()) + "-" + str(time_now_unix_micros())
+        val source = root + "/source"
+        val work = root + "/work"
+        val target = "examples/10_tooling/demo"
+        expect(dir_create_all(source + "/src/app")).to_equal(true)
+        expect(dir_create_all(source + "/" + target)).to_equal(true)
+        expect(dir_create_all(work + "/src/app")).to_equal(true)
+        expect(dir_create_all(work + "/" + target)).to_equal(true)
+        expect(file_atomic_write(source + "/" + target + "/entry.spl",
+            "fn main() -> i64:\n    0\n")).to_equal(true)
+        val digest = file_hash_sha256(source + "/" + target + "/entry.spl")
+        expect(snapshot_symlink_create_nofollow_v1(source,
+            source + "/src/app/demo", "../../examples/10_tooling/demo", 2)).to_equal(true)
+        val task = BuildTaskV1(id: "directory-link-proof", attempt: 1,
+            phase: "native", producer_digest: digest, source_digest: digest,
+            toolchain_digest: digest, dependencies: [], program: "producer",
+            args: [], inputs: [BuildInputV1(target + "/entry.spl", digest)],
+            outputs: ["result.o"], cache_key: digest, timeout_ms: 1000,
+            memory_limit_bytes: 1073741824,
+            links: [BuildLinkV1("dir", "src/app/demo",
+                "../../examples/10_tooling/demo", target, "")])
+        expect(builder_validate_task_v1(task)).to_equal("")
+        expect(file_copy(source + "/" + target + "/entry.spl",
+            work + "/" + target + "/entry.spl")).to_equal(true)
+        expect(builder_link_inputs_stage_v1(task, source, work)).to_equal("")
+        expect(builder_link_inputs_match_v1(task, work)).to_equal("")

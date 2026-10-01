@@ -8,6 +8,8 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, BuildResultV1, builder_validate_task_v1, builder_task_identity_v1, builder_identifier_valid_v1}
 use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
+use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1,
+    builder_regular_input_parents_safe_v1}
 use app.bootstrap_builder.windows_staged_git.{BuilderStagedGitErrorV1, builder_windows_staged_git_v1, builder_windows_control_v1}
 use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessAdmissionV1, windows_process_admit_with_reserve_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
@@ -59,6 +61,12 @@ pub fn builder_windows_setup_failure_v1(task: BuildTaskV1, root: text, host: tex
 fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
     if file_exists(root + "/cancel.request"):
         return Err(builder_windows_reject_before_start_v1(task, root, host, "cancelled before compiler setup"))
+    if not builder_regular_input_parents_safe_v1(task, root + "/work"):
+        return Err(builder_windows_reject_before_start_v1(task, root, host,
+            "staged input parent is a symlink or reparse point"))
+    val initial_links = builder_link_inputs_match_v1(task, root + "/work")
+    if initial_links != "":
+        return Err(builder_windows_reject_before_start_v1(task, root, host, initial_links))
     val _staged_commit = match builder_windows_staged_git_v1(task, root, host):
         Ok(value): value
         Err(failure):
@@ -84,6 +92,9 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
         directory: root + "/work", inputs: inputs, stdout_path: root + "/stdout.log",
         stderr_path: root + "/stderr.log", timeout_ms: task.timeout_ms)
     val identity = builder_task_identity_v1(task)
+    val ready_links = builder_link_inputs_match_v1(task, root + "/work")
+    if ready_links != "":
+        return Err(builder_windows_reject_before_start_v1(task, root, host, ready_links))
     if file_exists(root + "/cancel.request") or builder_windows_control_v1(root, identity, host):
         return Err(builder_windows_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
     # The native owner rechecks after pinning all declared inputs, just before
@@ -97,6 +108,9 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
         if required < memory_limit:
             return Err(builder_windows_reject_before_start_v1(task, root, host, "pre-spawn requirement below task memory bound"))
         required_memory = required
+    val final_links = builder_link_inputs_match_v1(task, root + "/work")
+    if final_links != "":
+        return Err(builder_windows_reject_before_start_v1(task, root, host, final_links))
     val lease = match windows_process_admit_with_reserve_v1(request, memory_limit, required_memory):
         WindowsProcessAdmissionV1.Started(value): value
         WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
@@ -148,6 +162,11 @@ fn builder_windows_execute_v1(request_path: text, root: text, host: text) -> i64
                 status = outcome.0
                 exit_code = outcome.1
             Err(message): diagnostic = message
+    if diagnostic == "":
+        if not builder_regular_input_parents_safe_v1(task, root + "/work"):
+            diagnostic = "staged input parent changed"
+    if diagnostic == "":
+        diagnostic = builder_link_inputs_match_v1(task, root + "/work")
     if diagnostic == "" and status == "OK":
         for output in task.outputs:
             val digest = windows_process_file_digest_v1(root + "/work/" + output)

@@ -5,6 +5,8 @@ use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildResultV1, bu
 use app.bootstrap_builder.codec.{builder_write_task_v1, builder_read_task_v1,
     builder_read_result_v1, builder_encode_result_v1}
 use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.bootstrap_builder.link_inputs.{builder_link_inputs_stage_v1,
+    builder_regular_input_parents_safe_v1}
 use std.common.build_manager.no_child_started.{builder_no_child_started_decode_v1}
 use app.io.file_ops.{file_exists, file_is_regular_no_follow, file_hash_sha256,
     file_copy, file_delete, file_create_exclusive, file_atomic_write,
@@ -135,6 +137,9 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
     result.error = builder_validate_task_v1(task)
     if result.error == "": result.error = builder_validate_host_v1(host)
     if result.error != "": return result
+    if host.transport != "local" and task.links.len() > 0:
+        result.error = "typed links require local no-follow staging"
+        return result
     if host.transport == "local":
         if not file_is_regular_no_follow(host.worker_program) or file_hash_sha256(host.worker_program) != host.worker_digest:
             result.error = "configured worker image digest mismatch"
@@ -154,6 +159,9 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
     if not dir_create_all(root + "/work"):
         result.error = "cannot create attempt workspace"
         return result
+    if not builder_regular_input_parents_safe_v1(task, source_root):
+        result.error = "source input parent is a symlink or reparse point"
+        return result
     var program = task.program
     if not program.starts_with("/") and not program.contains(":"):
         program = source_root + "/" + program
@@ -165,6 +173,11 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
             return result
         result.error = builder_transport_copy_v1(source_root + "/" + input.path, root + "/work/" + input.path, input.digest)
         if result.error != "": return result
+    if not builder_regular_input_parents_safe_v1(task, root + "/work"):
+        result.error = "staged input parent is a symlink or reparse point"
+        return result
+    result.error = builder_link_inputs_stage_v1(task, source_root, root + "/work")
+    if result.error != "": return result
     for output in task.outputs:
         if not dir_create_all(builder_transport_parent_v1(root + "/work/" + output)):
             result.error = "cannot create output directory"

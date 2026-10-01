@@ -7,6 +7,8 @@ use app.io.time_ops.{sleep_ms}
 use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildInputV1, BuildResultV1, builder_validate_task_v1, builder_task_identity_v1, builder_identifier_valid_v1}
 use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
+use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1,
+    builder_regular_input_parents_safe_v1}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessInputV1, LinuxProcessRequestV1, LinuxProcessLeaseV1, LinuxProcessPollV1, linux_process_start_with_memory_v1, linux_process_poll_v1, linux_process_cancel_v1, linux_process_collect_v1, linux_available_capacity_v1}
@@ -82,6 +84,8 @@ fn builder_linux_control_v1(root: text, identity: text, host: text) -> bool:
     fields[3] == "cancel"
 
 fn builder_linux_verify_inputs_v1(task: BuildTaskV1, root: text) -> text:
+    if not builder_regular_input_parents_safe_v1(task, root + "/work"):
+        return "staged input parent is a symlink or reparse point"
     if not file_is_regular_no_follow(root + "/producer.exe") or
             file_hash_sha256(root + "/producer.exe") != task.producer_digest:
         return "staged producer digest mismatch"
@@ -89,6 +93,8 @@ fn builder_linux_verify_inputs_v1(task: BuildTaskV1, root: text) -> text:
         val path = root + "/work/" + input.path
         if not file_is_regular_no_follow(path) or file_hash_sha256(path) != input.digest:
             return "staged input digest mismatch: " + input.path
+    val link_error = builder_link_inputs_match_v1(task, root + "/work")
+    if link_error != "": return link_error
     ""
 
 fn builder_linux_outputs_v1(task: BuildTaskV1, root: text) -> Result<[BuildInputV1], text>:
@@ -162,6 +168,9 @@ fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(te
     val request = LinuxProcessRequestV1(root + "/producer.exe", task.producer_digest,
         task.args, environment, root + "/work", inputs,
         root + "/stdout.log", root + "/stderr.log", task.timeout_ms)
+    val ready_links = builder_link_inputs_match_v1(task, root + "/work")
+    if ready_links != "":
+        return Err(builder_linux_reject_before_start_v1(task, root, host, ready_links))
     # Start errors can occur after clone3. They never certify no-child-started.
     val lease = linux_process_start_with_memory_v1(request, task.memory_limit_bytes,
         root, identity)?
@@ -211,6 +220,8 @@ pub fn builder_linux_execute_v1(task_path: text, root: text, host: text) -> i64:
                 status = outcome.0
                 exit_code = outcome.1
             Err(message): diagnostic = message
+    if diagnostic == "":
+        diagnostic = builder_link_inputs_match_v1(task, root + "/work")
     if diagnostic == "" and status == "OK":
         diagnostic = builder_linux_verify_inputs_v1(task, root)
         if diagnostic == "":
