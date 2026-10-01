@@ -7,16 +7,22 @@ use compiler.driver.driver_types.{
     frozen_native_capsule_batch_find_v1}
 use compiler.backend.backend.backend_types.{BackendCompileOptions, OptimizationLevel}
 use compiler.backend.backend.backend_helpers.{
-    backend_helper_aot_opt_level, backend_helper_debug_info,
-    backend_helper_native_target_for}
+    backend_helper_aot_opt_level, backend_helper_debug_info}
+use compiler.driver.driver_backend_plugin_selection.{driver_aot_backend_plugin_request_v1}
+use compiler.backend.backend_plugin.registry.{resolve_builtin_backend}
+use compiler.common.backend_plugin.receipt.{backend_plugin_receipt}
+use compiler.backend.backend_plugin.builtin_adapter.{builtin_backend_target}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.group_native_thread_capability.{
     GroupNativeLlvmJobV1, GroupNativeThreadQualificationV1,
     group_native_llvm_qualify_pair_v1, group_native_thread_capability_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use compiler.mir.mir_instructions.{MirModule}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.mir_opt.mir_opt.mod.{
-    OptLevel, TargetOptContext, optimize_module_for_backend}
+    OptLevel, TargetOptContext, optimize_module_for_backend,
+    target_opt_context_default}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{lower_mir_storage_project_fields_v1}
 
 pub struct GroupNativeCompiledUnitV1:
@@ -35,28 +41,42 @@ pub struct GroupNativeCompilePairResultV1:
 pub fn group_native_options_for_capsule_v1(
     capsule: FrozenNativeModuleCapsuleV1,
     native_target: text,
-    target_opt_ctx: TargetOptContext
+    _target_opt_ctx: TargetOptContext
 ) -> Result<(BackendCompileOptions, LlvmTargetConfig), text>:
     if not capsule.identity_valid() or capsule.backend_name != "llvm" or
-        capsule.provider_receipt_hash != "" or capsule.target != native_target:
+        capsule.provider_receipt_hash == "" or capsule.target != native_target:
         return Err("frozen LLVM capsule or target mismatch")
+    if not native_target.contains("-linux") and
+        not native_target.contains("-windows"):
+        return Err("LLVM inner workers are qualified only for Linux or Windows")
     if capsule.storage_snapshot.sites.len() != 0 or
         capsule.storage_snapshot.evidence.len() != 0:
         return Err("typed storage projections require serial backend authority")
-    val codegen_target = backend_helper_native_target_for(native_target)
+    # The production LLVM lane is always an admitted builtin BackendSession.
+    # Recreate its descriptor receipt from the exact frozen request. A dynamic
+    # provider's version/build identity cannot satisfy this builtin hash.
+    val request = driver_aot_backend_plugin_request_v1(
+        "llvm", native_target, capsule.target_cpu, capsule.opt_level)
+    val descriptor = match resolve_builtin_backend(request):
+        case Ok(value): value
+        case Err(_): return Err("builtin LLVM descriptor unavailable")
+    if backend_plugin_receipt(descriptor, request).hash() !=
+        capsule.provider_receipt_hash:
+        return Err("capsule has no matching builtin LLVM session receipt")
+    val codegen_target = match builtin_backend_target(request.target):
+        case Ok(value): value
+        case Err(_): return Err("builtin LLVM target unavailable")
     val options = BackendCompileOptions(
         target: codegen_target,
         opt_level: backend_helper_aot_opt_level(capsule.opt_level),
         debug_info: backend_helper_debug_info(capsule.is_release),
         emit_assembly: false, emit_llvm_ir: false, emit_mir: false,
-        verify_output: true, target_opt_ctx: target_opt_ctx,
+        verify_output: true, target_opt_ctx: target_opt_context_default(),
         backend_kind: nil)
-    # The existing built-in `_compile_selected_module` LLVM path does not
-    # retain a target config: its adapter uses this same portable default
-    # with nil CPU override. The capsule CPU request affects MIR target facts
-    # through target_opt_ctx; it is not an llc CPU override on that path.
-    val config = LlvmTargetConfig.for_target_portable_numeric(
-        codegen_target, nil)
+    # BuiltinBackendTargetContextV2 retains the admitted request CPU even in
+    # bootstrap mode. Keep the same config and llc arguments in both workers.
+    val config = LlvmTargetConfig.for_target_portable_numeric_with_mode(
+        codegen_target, Some(request.cpu), false)
     if _group_native_target_text_v1(config) != native_target:
         return Err("LLVM portable target does not match frozen native target")
     Ok((options, config))
@@ -98,7 +118,8 @@ fn _group_native_capsule_pair_valid_v1(
         a.storage_snapshot.evidence.len() != 0 or b.storage_snapshot.evidence.len() != 0:
         return false
     if a.backend_name != "llvm" or b.backend_name != "llvm" or
-        a.provider_receipt_hash != "" or b.provider_receipt_hash != "":
+        a.provider_receipt_hash == "" or
+        a.provider_receipt_hash != b.provider_receipt_hash:
         return false
     val target = _group_native_target_text_v1(config)
     if a.target != target or b.target != target or a.target != b.target:
@@ -106,10 +127,21 @@ fn _group_native_capsule_pair_valid_v1(
     if a.target_cpu != b.target_cpu or a.opt_level != b.opt_level or
         a.is_release != b.is_release:
         return false
-    if options.opt_level != backend_helper_aot_opt_level(a.opt_level):
+    val expected = group_native_options_for_capsule_v1(
+        a, a.target, target_opt_context_default())
+    if expected.is_err(): return false
+    val expected_b = group_native_options_for_capsule_v1(
+        b, b.target, target_opt_context_default())
+    if expected_b.is_err(): return false
+    val (canonical_options, canonical_config) = expected.unwrap()
+    if options.opt_level != canonical_options.opt_level or
+        options.target != canonical_options.target or
+        options.debug_info != canonical_options.debug_info:
         return false
-    if options.target != backend_helper_native_target_for(a.target) or
-        options.debug_info != backend_helper_debug_info(a.is_release):
+    if config.to_cpu_string() != canonical_config.to_cpu_string() or
+        config.to_feature_string() != canonical_config.to_feature_string() or
+        _group_native_target_text_v1(config) !=
+            _group_native_target_text_v1(canonical_config):
         return false
     a.object_path != "" and b.object_path != "" and a.object_path != b.object_path
 
@@ -163,8 +195,14 @@ pub fn group_native_compile_pairs_v1(
         return _group_native_pair_rejected_v1(a, b,
             "two native workers exceed CPU or measured memory capacity", 4, 4)
 
-    val prepared_a = _group_native_prepare_mir_v1(a, options)
-    val prepared_b = _group_native_prepare_mir_v1(b, options)
+    # Rebuild the admitted builtin values here. Caller-supplied option structs
+    # are checked above, but cannot substitute a different MIR optimization
+    # context or target payload after the frozen receipt has been verified.
+    val (canonical_options, canonical_config) =
+        group_native_options_for_capsule_v1(
+            a, a.target, target_opt_context_default()).unwrap()
+    val prepared_a = _group_native_prepare_mir_v1(a, canonical_options)
+    val prepared_b = _group_native_prepare_mir_v1(b, canonical_options)
     if prepared_a.is_err() or prepared_b.is_err():
         return _group_native_pair_rejected_v1(a, b,
             "owner-thread MIR preparation failed", 4, 4)
@@ -172,10 +210,16 @@ pub fn group_native_compile_pairs_v1(
         return _group_native_pair_rejected_v1(a, b,
             "frozen MIR capsule changed during preparation", 4, 4)
 
+    val bootstrap_mode = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val native_entry = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val entry_module = if native_entry == "": "" else:
+        module_logical_name_from_path(native_entry)
     val prefix = "{private_root}/group-native-{generation}"
     val job_a = GroupNativeLlvmJobV1(
         module: prepared_a.unwrap(), storage_bindings: a.storage_snapshot.sites,
-        options: options, target: target_config, is_entry: false,
+        options: canonical_options, target: canonical_config,
+        is_entry: entry_module == "" or entry_module == a.module_name,
+        bootstrap_mode: bootstrap_mode,
         baseline_object_path: "{prefix}-a.baseline.o",
         baseline_diagnostic_path: "{prefix}-a.baseline.diagnostic",
         object_path: a.object_path,
@@ -183,7 +227,9 @@ pub fn group_native_compile_pairs_v1(
         receipt_path: "{prefix}-a.thread.receipt")
     val job_b = GroupNativeLlvmJobV1(
         module: prepared_b.unwrap(), storage_bindings: b.storage_snapshot.sites,
-        options: options, target: target_config, is_entry: false,
+        options: canonical_options, target: canonical_config,
+        is_entry: entry_module == "" or entry_module == b.module_name,
+        bootstrap_mode: bootstrap_mode,
         baseline_object_path: "{prefix}-b.baseline.o",
         baseline_diagnostic_path: "{prefix}-b.baseline.diagnostic",
         object_path: b.object_path,

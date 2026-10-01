@@ -52,6 +52,7 @@ pub struct GroupNativeLlvmJobV1:
     options: BackendCompileOptions
     target: LlvmTargetConfig
     is_entry: bool
+    bootstrap_mode: bool
     baseline_object_path: text
     baseline_diagnostic_path: text
     object_path: text
@@ -114,6 +115,7 @@ fn _group_native_same_policy_v1(a: GroupNativeLlvmJobV1, b: GroupNativeLlvmJobV1
     a.options.target == b.options.target and
         a.options.opt_level == b.options.opt_level and
         a.options.debug_info == b.options.debug_info and
+        a.bootstrap_mode == b.bootstrap_mode and
         a.target.triple.arch == b.target.triple.arch and
         a.target.triple.vendor == b.target.triple.vendor and
         a.target.triple.os == b.target.triple.os and
@@ -127,7 +129,8 @@ fn _group_native_emit_v1(job: GroupNativeLlvmJobV1, object_path: text,
     val thread_id = thread_native_current_id()
     val start_us = time_now_unix_micros()
     val ir = llvm_group_translate_module_ir_v1(
-        job.options, job.module, job.target, job.is_entry)
+        job.options, job.module, job.target, job.is_entry,
+        job.bootstrap_mode)
     val end_us = time_now_unix_micros()
     val status = compile_ir_to_object_path(
         ir, job.target, job.options.opt_level,
@@ -191,24 +194,28 @@ pub fn group_native_llvm_qualify_pair_v1(
         _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
         return _group_native_llvm_pair_failure_v1(
             "explicit LLVM route does not admit ambient no-mangle policy", 4, 4, 4, 4)
-    if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
+    if ((env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1") != job_a.bootstrap_mode:
         _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
         return _group_native_llvm_pair_failure_v1(
-            "legacy bootstrap LLVM shortcuts use process-global state", 4, 4, 4, 4)
+            "frozen bootstrap policy differs from process policy", 4, 4, 4, 4)
+    if (env_get_opt("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1":
+        _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
+        return _group_native_llvm_pair_failure_v1(
+            "bootstrap debug translation is not private", 4, 4, 4, 4)
     _group_native_llvm_last_generation_v1 = generation
     _group_native_llvm_qualified_proof_hash_v1 = ""
 
-    # Produce the serial baseline through the ordinary built-in LLVM path,
-    # including its normal target header and llc argument policy. This runs
+    # Produce the serial baseline through the ordinary builtin-session LLVM
+    # path, retaining its admitted target config and llc argument policy. It runs
     # before either worker starts, so its legacy globals are owner-private in
     # time. Equal digests then prove worker objects match production emission,
     # not merely another run of the worker-only translator.
     val base_a = llvm_compile_module_direct_to_path(
         job_a.options, job_a.module, job_a.baseline_object_path,
-        job_a.baseline_diagnostic_path)
+        job_a.baseline_diagnostic_path, Some(job_a.target))
     val base_b = llvm_compile_module_direct_to_path(
         job_b.options, job_b.module, job_b.baseline_object_path,
-        job_b.baseline_diagnostic_path)
+        job_b.baseline_diagnostic_path, Some(job_b.target))
     if base_a != 0 or base_b != 0:
         _group_native_llvm_gate_v1.store(0, MemoryOrdering.SeqCst)
         return _group_native_llvm_pair_failure_v1(

@@ -11,6 +11,7 @@ use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir.mir_instructions.{MirModule}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.group_native_thread_capability.{
@@ -18,7 +19,7 @@ use compiler.backend.backend.group_native_thread_capability.{
     group_native_thread_capability_v1}
 
 fn grouped_thread_fixture_module(name: text) -> MirModule:
-    var source = "fn seed(x: i64) -> i64:\n    x + 1\n"
+    var source = "fn seed(x: i64) -> i64:\n    x + 1\nfn marker() -> text:\n    \"grouped-native\"\n"
     for index in 0..128:
         source = source + "\nfn work_{index}(x: i64) -> i64:\n    (x + {index}) * 3\n"
     val ast = parse_full_frontend(source, "group_thread.spl", "group_thread.spl", Logger(level: 0))
@@ -32,10 +33,14 @@ fn grouped_thread_fixture_module(name: text) -> MirModule:
 fn grouped_thread_job(module: MirModule, root: text, stem: text) -> GroupNativeLlvmJobV1:
     var options = compileoptions_default_options()
     options.target = CodegenTarget.X86_64
+    val native_entry = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val entry_module = if native_entry == "": "" else:
+        module_logical_name_from_path(native_entry)
     GroupNativeLlvmJobV1(
         module: module, storage_bindings: [], options: options,
         target: LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil),
-        is_entry: false,
+        is_entry: entry_module == "" or entry_module == module.name,
+        bootstrap_mode: (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1",
         baseline_object_path: "{root}/{stem}.serial.o",
         baseline_diagnostic_path: "{root}/{stem}.serial.diagnostic",
         object_path: "{root}/{stem}.thread.o",
