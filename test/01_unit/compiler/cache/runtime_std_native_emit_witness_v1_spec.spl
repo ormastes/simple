@@ -1,0 +1,61 @@
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.driver.smf.runtime_std_section_types_v1.{
+    RuntimeStdCompiledSectionPayloadV1}
+use compiler.driver.smf.runtime_std_native_emit_witness_v1.{
+    RuntimeStdNativeEmitWitnessV1, runtime_std_live_hir_semantic_digest_v1,
+    runtime_std_native_emit_witness_digest_v1,
+    runtime_std_native_emit_witness_valid_v1}
+
+describe "live typed HIR native emit witness":
+    it "uses the native V2 seven-member semantic digest framing":
+        step("uses the native V2 seven-member semantic digest framing")
+        val payloads = [
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.debug, "debug.smf", "debug"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.exports, "exports.smf", "exports"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.generics, "generics.smf", "generics"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.hir_summaries, "hir-summaries.smf", "hir"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.imports, "imports.smf", "imports"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.initialization, "initialization.smf", "init"),
+            RuntimeStdCompiledSectionPayloadV1(PackageSectionKindV1.types, "types.smf", "types")]
+        val debug_digest = sha256_text("debug")
+        val exports_digest = sha256_text("exports")
+        val generics_digest = sha256_text("generics")
+        val hir_digest = sha256_text("hir")
+        val imports_digest = sha256_text("imports")
+        val init_digest = sha256_text("init")
+        val types_digest = sha256_text("types")
+        val expected = sha256_text("simple-runtime-std-live-hir/v2\n" +
+            "source=scv:test\n" + "digest=source-sha\n" +
+            "module=module-sha\n" +
+            "debug.smf|{debug_digest}\n" +
+            "exports.smf|{exports_digest}\n" +
+            "generics.smf|{generics_digest}\n" +
+            "hir-summaries.smf|{hir_digest}\n" +
+            "imports.smf|{imports_digest}\n" +
+            "initialization.smf|{init_digest}\n" +
+            "types.smf|{types_digest}\n")
+        assert_equal(runtime_std_live_hir_semantic_digest_v1(payloads,
+            "scv:test", "source-sha", "module-sha"), expected)
+
+    it "rejects digest or backend drift in an otherwise valid witness":
+        step("rejects digest or backend drift in an otherwise valid witness")
+        val digest = runtime_std_native_emit_witness_digest_v1(
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha", 0, 0, 0)
+        val witness = RuntimeStdNativeEmitWitnessV1(
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha", 0, 0, 0, digest)
+        assert_true(runtime_std_native_emit_witness_valid_v1(witness,
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha"))
+        assert_false(runtime_std_native_emit_witness_valid_v1(witness,
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "cranelift", "hir-sha"))
+        var altered = witness
+        altered.active_data_count = 1
+        assert_false(runtime_std_native_emit_witness_valid_v1(altered,
+            "scv:test", "source-sha", "module-sha", "x86_64-unknown-linux-gnu",
+            "llvm", "hir-sha"))

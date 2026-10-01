@@ -9,6 +9,9 @@ use compiler.driver.cache.cold_hir_semantic_seed_v1.{
 use compiler.driver.smf.runtime_std_hir_emission_v1.{
     RuntimeStdHirModuleEmissionV1, runtime_std_hir_emit_module_v1
 }
+use compiler.driver.smf.runtime_std_native_emit_witness_v1.{
+    runtime_std_native_emit_witness_from_live_hir_v1}
+use compiler.backend.backend.backend_helpers.{get_effective_backend_name}
 use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1,
     CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
     compile_source_inventory_snapshot_cache_root_v1}
@@ -270,7 +273,22 @@ impl CompilerDriver:
                                         self.ctx.add_error("full inventory typed HIR emission failed: {reason}")
                                         return false
                                     case Ok(value):
-                                        emitted[seed.source_identity] = value
+                                        if value.module_identity != seed.module_identity:
+                                            self.ctx.add_error("full inventory typed HIR module identity changed: {seed.source_identity}")
+                                            return false
+                                        val backend = get_effective_backend_name(
+                                            self.ctx.options.backend, self.ctx.options.release)
+                                        val witness = runtime_std_native_emit_witness_from_live_hir_v1(
+                                            self.ctx.hir_modules[seed.module_identity],
+                                            value.semantic_payloads, seed.source_identity,
+                                            seed.source_digest, seed.module_identity,
+                                            self.ctx.native_target, backend)
+                                        if witness.is_err():
+                                            self.ctx.add_error("full inventory live HIR native emit witness failed: {witness.unwrap_err()}")
+                                            return false
+                                        var witnessed = value
+                                        witnessed.native_emit_witness = witness.unwrap()
+                                        emitted[seed.source_identity] = witnessed
                             self.ctx.runtime_std_hir_emissions = emitted
                         self.ctx.cold_hir_typed_receipts = receipts
                         log_phase("phase3:cold-hir-receipts:done count={receipts.len()}")
