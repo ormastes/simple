@@ -4,6 +4,16 @@ script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-shared-parse-root.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/source" "$tmp/shared"
+root_check="$script_root/lib/shared-parse-cas-root.shs"
+[ "$(sh "$root_check" "$tmp/shared")" = "$tmp/shared" ] || exit 1
+sh "$root_check" "$tmp/shared" "$tmp/shared" || exit 1
+mv "$tmp/shared" "$tmp/shared.saved"
+ln -s "$tmp/shared.saved" "$tmp/shared"
+if sh "$root_check" "$tmp/shared" "$tmp/shared"; then
+  echo 'FAIL: symlink replacement of shared parse root admitted' >&2; exit 1
+fi
+rm "$tmp/shared"
+mv "$tmp/shared.saved" "$tmp/shared"
 for name in producer scv index-program handoff inventory manager worker broker; do
   : >"$tmp/$name"
 done
@@ -33,4 +43,9 @@ grep -Fq '"shared_parse_cas_root=$shared_parse_cas_root"' \
   "$script_root/prepare-phase4-native-groups.shs" || exit 1
 grep -Fq 'cmp -s "$tmp" "$config"' \
   "$script_root/prepare-phase4-native-groups.shs" || exit 1
+generic_run_count=$(grep -c 'SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root"' \
+  "$script_root/bootstrap-phase4-grouped.shs")
+[ "$generic_run_count" -eq 2 ] || {
+  echo 'FAIL: generic binary/index manager CAS environment not sealed' >&2; exit 1;
+}
 echo 'PASS: explicit shared parse CAS root admission and resume pin'
