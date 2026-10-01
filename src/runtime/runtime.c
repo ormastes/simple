@@ -2293,7 +2293,18 @@ static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
 
 int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 #if defined(_WIN32)
-    (void)path_ptr; (void)path_len; return -1;
+    char path[RT_TEXT_PATH_MAX];
+    if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
+            memchr(path_ptr, '\0', (size_t)path_len)) return -1;
+    memcpy(path, path_ptr, (size_t)path_len); path[path_len] = '\0';
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return -1;
+    int valid_parent = rt_win_profile_path_parents_are_real(wide);
+    HANDLE file = valid_parent ? CreateFileW(wide, GENERIC_WRITE, 0, NULL,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL) :
+        INVALID_HANDLE_VALUE;
+    free(wide);
+    return file == INVALID_HANDLE_VALUE ? -1 : (int64_t)(intptr_t)file;
 #else
     char path[RT_TEXT_PATH_MAX];
     if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
@@ -2320,7 +2331,17 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 
 int rt_mem_snapshot_append_flush(int64_t fd64, const char* record, int64_t record_len) {
 #if defined(_WIN32)
-    (void)fd64; (void)record; (void)record_len; return 0;
+    if (fd64 == -1 || !record || record_len <= 0 || record_len > 65536 ||
+            record[record_len - 1] != '\n') return 0;
+    HANDLE file = (HANDLE)(intptr_t)fd64;
+    int64_t off = 0;
+    while (off < record_len) {
+        DWORD written = 0;
+        if (!WriteFile(file, record + off, (DWORD)(record_len - off), &written, NULL) ||
+                written == 0) return 0;
+        off += (int64_t)written;
+    }
+    return FlushFileBuffers(file) != 0;
 #else
     if (fd64 < 0 || fd64 > INT_MAX || !record || record_len <= 0 || record[record_len - 1] != '\n') return 0;
     int fd = (int)fd64; int64_t off = 0;
@@ -2397,7 +2418,7 @@ int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_
 
 int rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
-    (void)fd; return 0;
+    return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
 #else
     return fd >= 0 && fd <= INT_MAX && close((int)fd) == 0;
 #endif
