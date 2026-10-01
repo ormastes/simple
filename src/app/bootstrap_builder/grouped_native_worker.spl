@@ -27,6 +27,7 @@ struct NativeGroupWorkerRequestV1:
     source_root: text
     entry_source: text
     index_read_root: text
+    output_root: text
     backend: text
     threads: i64
     target: text
@@ -46,7 +47,8 @@ fn native_group_worker_request_valid_v1(request: NativeGroupWorkerRequestV1) -> 
     if not builder_digest_valid_v1(request.producer_digest) or not builder_digest_valid_v1(request.manifest_digest):
         return "worker input digest invalid"
     for path in [request.producer, request.group_manifest, request.group_result,
-            request.source_root, request.entry_source, request.index_read_root]:
+            request.source_root, request.entry_source, request.index_read_root,
+            request.output_root]:
         if not native_group_worker_absolute_v1(path) or path.contains("\0"):
             return "worker path must be absolute"
     val source = request.source_root.replace("\\", "/").lower()
@@ -55,6 +57,13 @@ fn native_group_worker_request_valid_v1(request: NativeGroupWorkerRequestV1) -> 
             native_group_worker_parent_v1(request.group_manifest).lower() !=
                 native_group_worker_parent_v1(request.group_result).lower():
         return "worker entry or result root differs"
+    val output = request.output_root.replace("\\", "/").lower()
+    val attempt = native_group_worker_parent_v1(request.group_result).lower()
+    if output == source or output.starts_with(source + "/") or
+            source.starts_with(output + "/") or
+            output == attempt or output.starts_with(attempt + "/") or
+            attempt.starts_with(output + "/"):
+        return "worker output root overlaps source or attempt"
     if request.backend != "llvm" and request.backend != "cranelift": return "worker backend invalid"
     if request.threads < 1 or request.threads > 256: return "worker thread bound invalid"
     if request.target == "" or request.target.contains("\0"): return "worker target invalid"
@@ -67,6 +76,7 @@ fn native_group_worker_request_encode_v1(request: NativeGroupWorkerRequestV1) ->
     for field in [request.producer, request.producer_digest, request.group_manifest,
             request.manifest_digest, request.group_result, request.source_root,
             request.entry_source, request.index_read_root,
+            request.output_root,
             request.backend, str(request.threads), request.target, str(request.timeout_ms)]:
         payload = payload + builder_wire_line_v1(field)
     payload
@@ -77,6 +87,7 @@ fn native_group_worker_request_decode_v1(payload: text) -> Result<NativeGroupWor
     if reader.scalar() != "SIMPLE-NATIVE-GROUP-WORKER-1": return Err("worker request header differs")
     val request = NativeGroupWorkerRequestV1(reader.scalar(), reader.scalar(), reader.scalar(),
         reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(),
+        reader.scalar(),
         reader.scalar(),
         reader.number(256, false), reader.scalar(), reader.number(86400000, false))
     if reader.complete_error() != "": return Err(reader.reason)
