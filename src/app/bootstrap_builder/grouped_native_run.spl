@@ -578,6 +578,34 @@ fn native_group_promote_ready_v1(run: NativeGroupRunV1) -> Result<bool, text>:
             val _promoted = native_group_promote_scc_v1(run, scc, members, latest)?
     Ok(true)
 
+# Publish a completed initial group before starting its successors. Their
+# target loader may need these already-qualified dependency SMFs. The initial
+# manifest owns complete SCC membership even after failed-only retry attempts.
+fn native_group_promote_initial_group_v1(run: NativeGroupRunV1,
+        initial: NativeGroupManifestV1) -> Result<bool, text>:
+    if initial.attempt != 1: return Err("dependency promotion requires initial group")
+    val latest = native_group_latest_rows_v1(run)
+    var ids: [text] = []
+    var by_scc: {text: [NativeGroupMemberV1]} = {}
+    for member in initial.members:
+        if not by_scc.contains_key(member.scc_id):
+            ids = ids.push(member.scc_id)
+        var peers = by_scc[member.scc_id] ?? []
+        peers = peers.push(member)
+        by_scc[member.scc_id] = peers
+    for scc in ids:
+        val peers = by_scc[scc]
+        var complete = true
+        for member in peers:
+            if member.output_kind != "SMF" or
+                    not latest.rows.contains_key(member.module_id) or
+                    latest.rows[member.module_id].status != "OK" or
+                    not latest.rows[member.module_id].smf_qualified:
+                complete = false
+        if complete:
+            val _promoted = native_group_promote_scc_v1(run, scc, peers, latest)?
+    Ok(true)
+
 fn native_group_promotions_valid_v1(run: NativeGroupRunV1) -> bool:
     val latest = native_group_latest_rows_v1(run)
     val index = native_group_scc_index_v1(run)
@@ -669,6 +697,14 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
     for manifest in input.manifests:
         if manifest.attempt == 1: initial_groups = initial_groups.push(manifest.group_id)
     for group_id in initial_groups:
+        var initial_manifest: NativeGroupManifestV1? = nil
+        for candidate in input.manifests:
+            if candidate.group_id == group_id and candidate.attempt == 1:
+                initial_manifest = Some(candidate)
+        if initial_manifest == nil:
+            return NativeGroupedRunOutcomeV1(2,
+                "initial native group manifest missing", run.inventory_count,
+                native_group_accounted_v1(run))
         var active = native_group_latest_manifest_v1(run, group_id)
         while active != nil:
             val manifest = active!
@@ -699,6 +735,12 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
                 return NativeGroupedRunOutcomeV1(2, "cannot persist native group retry", run.inventory_count,
                     native_group_accounted_v1(run))
             active = retry
+        match native_group_promote_initial_group_v1(run, initial_manifest!):
+            Ok(_): pass
+            Err(reason):
+                val _summary = native_group_publish_completion_v1(run, false)
+                return NativeGroupedRunOutcomeV1(2, reason, run.inventory_count,
+                    native_group_accounted_v1(run))
     val promoted = native_group_promote_ready_v1(run)
     match promoted:
         Err(reason):
