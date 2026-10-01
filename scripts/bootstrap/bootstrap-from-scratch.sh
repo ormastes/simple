@@ -249,7 +249,7 @@ Options:
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
-                     Stage 2 additionally EXERCISES the admitted Stage 2
+                     Every successful Stage 2 additionally EXERCISES the admitted
                      compiler with the phase verification matrix: it builds a
                      phase-bound full CLI and standalone test runner from that
                      compiler and runs the compiler-bootstrap, interpreter and
@@ -4262,7 +4262,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # refuses the run rather than retracting them — there is no post-admission
   # retraction idiom in this script (stage2-rejected/ is pre-admission only).
   # No existing gate, receipt or admission step is relaxed to make room here.
-  if [ "${full_bootstrap}" -eq 1 ] && [ "${stage2_status}" -eq 0 ]; then
+  if [ "${stage2_status}" -eq 0 ]; then
     stage2_tests_root="${output_dir}/stage2-compiler-tests/${PLATFORM}"
     stage2_tests_work="${stage2_tests_root}/verification"
     stage2_tests_summary="${stage2_tests_work}/summary.env"
@@ -4562,6 +4562,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
         $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
         $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
+        $1 == "test_execution" { executions++; if ($2 != "delegated-seed" && $2 != "in-process") bad = 1 }
         $1 == "task" {
           if ($3 != "result" || $4 != "PASS") bad = 1
           if ($2 == "compiler_cli_build") cli++
@@ -4572,7 +4573,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         }
         END {
           exit (bad || phases != 1 || policies != 1 || expected != 1 ||
-            actual != 1 || failures != 1 || outcomes != 1 ||
+            actual != 1 || failures != 1 || outcomes != 1 || executions != 1 ||
             cli != 1 || runner != 1 || bootstrap_tests != 1 ||
             interpreter_tests != 1 || loader_tests != 1)
         }
@@ -4613,7 +4614,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "verification_summary_sha256=$(bootstrap_stage3_hash_file "${stage2_tests_summary}")"
       echo "verification_log=${stage2_tests_log}"
       # Interim seed delegation must stay visible in the admitted receipt.
-      grep '^test_execution' "${stage2_tests_summary}" || echo "test_execution=unrecorded"
+      grep '^test_execution=' "${stage2_tests_summary}"
     } >"${stage2_tests_evidence}"
     chmod 400 "${stage2_tests_evidence}"
     echo "bootstrap-policy: stage2-compiler-tests=${stage2_tests_evidence}"
