@@ -1,7 +1,7 @@
 # Linux compiler worker. Its sealed image is selected by BuildHostV1; the
 # compiler and every descendant run inside one cgroup-v2 memory boundary.
 use app.io.args_ops.{get_args}
-use app.io.env_ops.{env_vars}
+use app.io.env_ops.{env_vars, env_get}
 use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_atomic_write}
 use app.io.time_ops.{sleep_ms}
 use app.bootstrap_builder.cli_args.{builder_cli_parse_v1}
@@ -14,6 +14,29 @@ use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessInputV1, LinuxProcessR
 fn builder_linux_absolute_v1(path: text) -> bool:
     path.starts_with("/") and not path.contains("\0") and
         not path.contains("/../") and not path.ends_with("/..")
+
+pub fn builder_linux_parse_required_memory_v1(value: text) -> Result<i64, text>:
+    if value == "" or value.len() > 16 or value[0:1] == "0":
+        return Err("pre-spawn memory requirement missing or invalid")
+    var bytes: i64 = 0
+    for index in 0..value.len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9:
+            return Err("pre-spawn memory requirement missing or invalid")
+        bytes = bytes * 10 + digit
+    if bytes > 1125899906842624:
+        return Err("pre-spawn memory requirement outside supported bound")
+    Ok(bytes)
+
+pub fn builder_linux_required_memory_v1(configured: text,
+        task_cap: i64) -> Result<i64, text>:
+    if task_cap < 1 or task_cap > 1125899906842624:
+        return Err("task memory cap outside supported bound")
+    if configured == "": return Ok(task_cap)
+    val required = builder_linux_parse_required_memory_v1(configured)?
+    if required < task_cap:
+        return Err("pre-spawn requirement below task memory cap")
+    Ok(required)
 
 fn builder_linux_reject_before_start_v1(task: BuildTaskV1, root: text,
         host: text, reason: text) -> text:
@@ -123,11 +146,17 @@ fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(te
     var inputs: [LinuxProcessInputV1] = []
     for input in task.inputs:
         inputs = inputs.push(LinuxProcessInputV1(root + "/work/" + input.path, input.digest))
+    val configured_required = env_get("SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES") ?? ""
+    val required_memory = match builder_linux_required_memory_v1(configured_required,
+            task.memory_limit_bytes):
+        Ok(value): value
+        Err(message): return Err(builder_linux_reject_before_start_v1(task, root, host, message))
     val capacity = match linux_available_capacity_v1(root + "/work"):
         Ok(value): value
         Err(message): return Err(builder_linux_reject_before_start_v1(task, root, host, message))
-    if capacity.0 < task.memory_limit_bytes:
-        return Err(builder_linux_reject_before_start_v1(task, root, host, "Linux pre-spawn memory below task cap"))
+    if capacity.0 < required_memory:
+        return Err(builder_linux_reject_before_start_v1(task, root, host,
+            "Linux pre-spawn memory below required cap plus reserve"))
     if file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host):
         return Err(builder_linux_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
     val request = LinuxProcessRequestV1(root + "/producer.exe", task.producer_digest,
@@ -213,3 +242,4 @@ fn main() -> i64:
     builder_linux_execute_v1(cli.request, cli.attempt_root, cli.host)
 
 export builder_linux_execute_v1, builder_linux_terminal_outcome_v1
+export builder_linux_parse_required_memory_v1, builder_linux_required_memory_v1
