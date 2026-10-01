@@ -1,0 +1,288 @@
+# Explicit package membership for one admitted, OS-inclusive SCV source set.
+# No source path prefix decides whether a module belongs to runtime or std.
+
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1, NATIVE_FULL_INVENTORY_MAX_SOURCES_V1
+}
+use compiler.driver.smf.runtime_std_hir_sections_v1.{
+    RuntimeStdCompiledSectionPayloadV1, RUNTIME_STD_HIR_MAX_SECTION_BYTES_V1
+}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RuntimeStdCompiledSectionReceiptV1,
+    RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1,
+    runtime_std_compiled_source_closure_digest_v1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1
+}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_path_valid_v1
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{
+    file_create_exclusive, file_read_regular_no_follow_bounded
+}
+
+val RUNTIME_STD_MEMBERSHIP_MAX_BYTES_V1: i64 = 16 * 1024 * 1024
+
+struct RuntimeStdPackageMemberV1:
+    source_identity: text
+    source_digest: text
+    package_identity: text
+
+struct RuntimeStdPackageMembershipV1:
+    snapshot_inventory_digest: text
+    source_inventory_digest: text
+    scv_receipt_digest: text
+    members: [RuntimeStdPackageMemberV1]
+
+struct RuntimeStdHirMemberV1:
+    source_identity: text
+    source_digest: text
+    sections: [RuntimeStdCompiledSectionPayloadV1]
+
+fn _runtime_std_membership_package_valid_v1(value: text) -> bool:
+    if value == "" or value.len() > 256:
+        return false
+    for ch in value:
+        if not ((ch >= "a" and ch <= "z") or
+                (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or
+                ch == "." or ch == "_" or ch == "-"):
+            return false
+    true
+
+fn runtime_std_package_membership_validate_v1(
+    membership: RuntimeStdPackageMembershipV1,
+    sources: NativeFullInventorySourcesV1
+) -> text:
+    if sources.source_count < 1 or
+            sources.source_count > NATIVE_FULL_INVENTORY_MAX_SOURCES_V1 or
+            sources.source_identities.len() != sources.source_count or
+            sources.source_digests.len() != sources.source_count or
+            membership.members.len() != sources.source_count or
+            membership.snapshot_inventory_digest !=
+                sources.snapshot_inventory_digest or
+            membership.source_inventory_digest !=
+                sources.source_inventory_digest or
+            membership.scv_receipt_digest != sources.scv_receipt_digest or
+            not builder_digest_valid_v1(membership.snapshot_inventory_digest) or
+            not builder_digest_valid_v1(membership.source_inventory_digest) or
+            not builder_digest_valid_v1(membership.scv_receipt_digest):
+        return "runtime-std-membership-scv-mismatch"
+    var runtime_count = 0
+    var std_count = 0
+    var os_count = 0
+    var previous = ""
+    var index = 0
+    while index < membership.members.len():
+        val member = membership.members[index]
+        if not compile_source_inventory_path_valid_v1(member.source_identity) or
+                not member.source_identity.ends_with(".spl") or
+                not builder_digest_valid_v1(member.source_digest) or
+                not _runtime_std_membership_package_valid_v1(
+                    member.package_identity) or
+                (previous != "" and member.source_identity <= previous) or
+                member.source_identity != sources.source_identities[index] or
+                member.source_digest != sources.source_digests[index]:
+            return "runtime-std-membership-member-mismatch"
+        if member.source_identity.starts_with("src/os/"):
+            os_count = os_count + 1
+        if member.package_identity == RUNTIME_PACKAGE_IDENTITY_V1:
+            runtime_count = runtime_count + 1
+        if member.package_identity == STD_PACKAGE_IDENTITY_V1:
+            std_count = std_count + 1
+        previous = member.source_identity
+        index = index + 1
+    if runtime_count == 0 or std_count == 0 or os_count == 0:
+        return "runtime-std-membership-required-package-missing"
+    "ok"
+
+fn runtime_std_package_membership_encode_v1(
+    membership: RuntimeStdPackageMembershipV1,
+    sources: NativeFullInventorySourcesV1
+) -> text:
+    if runtime_std_package_membership_validate_v1(
+            membership, sources) != "ok":
+        return ""
+    var lines = ["simple-runtime-std-package-membership-v1",
+        "snapshot-inventory={membership.snapshot_inventory_digest}",
+        "source-inventory={membership.source_inventory_digest}",
+        "scv-receipt={membership.scv_receipt_digest}",
+        "count={membership.members.len()}"]
+    for member in membership.members:
+        lines = lines.push("member={member.source_identity}|" +
+            "{member.source_digest}|{member.package_identity}")
+    val encoded = lines.join("\n")
+    if text_byte_len(encoded) > RUNTIME_STD_MEMBERSHIP_MAX_BYTES_V1:
+        return ""
+    encoded
+
+fn runtime_std_package_membership_decode_v1(
+    content: text, sources: NativeFullInventorySourcesV1
+) -> Result<RuntimeStdPackageMembershipV1, text>:
+    if content == "" or text_byte_len(content) >
+            RUNTIME_STD_MEMBERSHIP_MAX_BYTES_V1:
+        return Err("runtime-std-membership-size-invalid")
+    val lines = content.split("\n")
+    if lines.len() != sources.source_count + 5 or
+            lines[0] != "simple-runtime-std-package-membership-v1" or
+            lines[1] != "snapshot-inventory={sources.snapshot_inventory_digest}" or
+            lines[2] != "source-inventory={sources.source_inventory_digest}" or
+            lines[3] != "scv-receipt={sources.scv_receipt_digest}" or
+            lines[4] != "count={sources.source_count}":
+        return Err("runtime-std-membership-header-invalid")
+    var members: [RuntimeStdPackageMemberV1] = []
+    var index = 5
+    while index < lines.len():
+        val line = lines[index]
+        if not line.starts_with("member="):
+            return Err("runtime-std-membership-row-invalid")
+        val fields = line.substring(7, line.len()).split("|")
+        if fields.len() != 3:
+            return Err("runtime-std-membership-row-invalid")
+        members = members.push(RuntimeStdPackageMemberV1(
+            fields[0], fields[1], fields[2]))
+        index = index + 1
+    val membership = RuntimeStdPackageMembershipV1(
+        sources.snapshot_inventory_digest, sources.source_inventory_digest,
+        sources.scv_receipt_digest, members)
+    if runtime_std_package_membership_encode_v1(
+            membership, sources) != content:
+        return Err("runtime-std-membership-noncanonical-or-incomplete")
+    Ok(membership)
+
+fn runtime_std_package_membership_read_v1(
+    receipt_path: text,
+    expected_receipt_digest: text,
+    sources: NativeFullInventorySourcesV1
+) -> Result<RuntimeStdPackageMembershipV1, text>:
+    if receipt_path == "" or
+            not builder_digest_valid_v1(expected_receipt_digest):
+        return Err("runtime-std-membership-receipt-unpinned")
+    val loaded = file_read_regular_no_follow_bounded(
+        receipt_path, RUNTIME_STD_MEMBERSHIP_MAX_BYTES_V1)
+    if loaded.is_err():
+        return Err("runtime-std-membership-receipt-unreadable")
+    val content = loaded.unwrap()
+    if sha256_text(content) != expected_receipt_digest:
+        return Err("runtime-std-membership-receipt-digest-mismatch")
+    runtime_std_package_membership_decode_v1(content, sources)
+
+fn runtime_std_package_members_v1(
+    membership: RuntimeStdPackageMembershipV1,
+    sources: NativeFullInventorySourcesV1,
+    package_identity: text
+) -> Result<[RuntimeStdPackageMemberV1], text>:
+    if runtime_std_package_membership_validate_v1(
+            membership, sources) != "ok" or
+            (package_identity != RUNTIME_PACKAGE_IDENTITY_V1 and
+                package_identity != STD_PACKAGE_IDENTITY_V1):
+        return Err("runtime-std-membership-selection-invalid")
+    var selected: [RuntimeStdPackageMemberV1] = []
+    for member in membership.members:
+        if member.package_identity == package_identity:
+            selected = selected.push(member)
+    Ok(selected)
+
+fn _runtime_std_hir_aggregate_frame_v1(value: text) -> text:
+    "{text_byte_len(value)}:{value}"
+
+fn runtime_std_package_hir_sections_write_v1(
+    artifact_root: text,
+    membership: RuntimeStdPackageMembershipV1,
+    sources: NativeFullInventorySourcesV1,
+    package_identity: text,
+    hir_members: [RuntimeStdHirMemberV1]
+) -> Result<[RuntimeStdCompiledSectionReceiptV1], text>:
+    val selected = runtime_std_package_members_v1(
+        membership, sources, package_identity)?
+    if artifact_root == "" or hir_members.len() != selected.len() or
+            selected.len() == 0:
+        return Err("runtime-std-hir-aggregate-members-invalid")
+    val names = ["debug.smf", "exports.smf", "generics.smf",
+        "hir-summaries.smf", "imports.smf", "initialization.smf",
+        "types.smf"]
+    val kinds = [PackageSectionKindV1.debug, PackageSectionKindV1.exports,
+        PackageSectionKindV1.generics, PackageSectionKindV1.hir_summaries,
+        PackageSectionKindV1.imports, PackageSectionKindV1.initialization,
+        PackageSectionKindV1.types]
+    var identities: [text] = []
+    var digests: [text] = []
+    var index = 0
+    while index < selected.len():
+        if hir_members[index].source_identity !=
+                selected[index].source_identity or
+                hir_members[index].source_digest !=
+                    selected[index].source_digest or
+                hir_members[index].sections.len() != 7:
+            return Err("runtime-std-hir-aggregate-source-mismatch")
+        var section_index = 0
+        while section_index < 7:
+            val payload = hir_members[index].sections[section_index]
+            if payload.member_name != names[section_index] or
+                    payload.kind != kinds[section_index] or
+                    payload.content == "" or
+                    text_byte_len(payload.content) >
+                        RUNTIME_STD_HIR_MAX_SECTION_BYTES_V1:
+                return Err("runtime-std-hir-aggregate-section-invalid")
+            section_index = section_index + 1
+        identities = identities.push(selected[index].source_identity)
+        digests = digests.push(selected[index].source_digest)
+        index = index + 1
+    val closure = runtime_std_compiled_source_closure_digest_v1(
+        identities, digests)
+    if closure == "":
+        return Err("runtime-std-hir-aggregate-closure-invalid")
+    val output_root = "{artifact_root}/{package_identity}"
+    if not dir_create_all(output_root):
+        return Err("runtime-std-hir-aggregate-output-root-unavailable")
+    var receipts: [RuntimeStdCompiledSectionReceiptV1] = []
+    var section_index = 0
+    while section_index < 7:
+        val header = "simple-runtime-std-hir-package-section-v1\n" +
+            "package={package_identity}\nsource-closure={closure}\n" +
+            "member={names[section_index]}\ncount={selected.len()}\n"
+        var rows: [text] = []
+        var byte_count = text_byte_len(header)
+        index = 0
+        while index < selected.len():
+            val row =
+                _runtime_std_hir_aggregate_frame_v1(
+                    selected[index].source_identity) +
+                selected[index].source_digest +
+                _runtime_std_hir_aggregate_frame_v1(
+                    hir_members[index].sections[section_index].content) + "\n"
+            byte_count = byte_count + text_byte_len(row)
+            if byte_count >
+                    RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1:
+                return Err("runtime-std-hir-aggregate-section-size-limit")
+            rows = rows.push(row)
+            index = index + 1
+        val content = header + rows.join("")
+        val path = "{output_root}/{names[section_index]}"
+        if not file_create_exclusive(path, content):
+            return Err("runtime-std-hir-aggregate-write-refused")
+        val readback = file_read_regular_no_follow_bounded(
+            path, RUNTIME_STD_COMPILED_SECTION_MAX_BYTES_V1)
+        if readback.is_err() or readback.unwrap() != content:
+            return Err("runtime-std-hir-aggregate-readback-mismatch")
+        receipts = receipts.push(RuntimeStdCompiledSectionReceiptV1(
+            kinds[section_index], names[section_index], path,
+            sha256_text(content), text_byte_len(content)))
+        section_index = section_index + 1
+    Ok(receipts)
+
+export RUNTIME_STD_MEMBERSHIP_MAX_BYTES_V1
+export RuntimeStdPackageMemberV1, RuntimeStdPackageMembershipV1
+export RuntimeStdHirMemberV1
+export runtime_std_package_membership_validate_v1
+export runtime_std_package_membership_encode_v1
+export runtime_std_package_membership_decode_v1
+export runtime_std_package_membership_read_v1
+export runtime_std_package_members_v1
+export runtime_std_package_hir_sections_write_v1
