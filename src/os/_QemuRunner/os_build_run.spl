@@ -4,6 +4,8 @@ use os._QemuRunner.runner_targets.*
 use os._QemuRunner.scenario_catalog.*
 use os._QemuRunner.scenario_disks.*
 use os._QemuRunner.scenario_exec.*
+use os.qemu_cli_plan_v1.{qemu_cli_inspect_plan_v1, qemu_cli_dispatch_command_v1, qemu_cli_dispatch_plan_v1}
+use os.port.qemu_machine_plan_v1.{QemuLaunchPlanV1}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
 # Provides build + run + test functionality for all 6 architectures.
@@ -940,6 +942,10 @@ fn _qemu_extra_enables_network(qemu_extra: [text]) -> bool:
 fn run_os(target: OsTarget) -> bool:
     run_os_with_options(target, qemu_run_options_default())
 
+pub fn run_os_sealed_v1(target: OsTarget) -> bool:
+    """Run the default catalog lane using the operator's inspection owner."""
+    _run_os_with_options_impl(target, qemu_run_options_default(), true)
+
 fn run_os_debug_gui(target: OsTarget) -> bool:
     run_os_with_options(target, qemu_run_options_debug_gui())
 
@@ -947,6 +953,9 @@ fn run_os_headless(target: OsTarget) -> bool:
     run_os_with_options(target, qemu_run_options_headless())
 
 fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
+    _run_os_with_options_impl(target, options, false)
+
+fn _run_os_with_options_impl(target: OsTarget, options: QemuRunOptions, sealed: bool) -> bool:
     """Runs QEMU with the built kernel for the given target.
 
     Checks that the binary exists, then spawns QEMU. Returns true on success.
@@ -956,14 +965,32 @@ fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
     if not _fs_wrapper_artifact_admitted(target): return false
-    val cmd_parts = build_qemu_command_with_options(target, options)
+    var launch_plan: QemuLaunchPlanV1? = nil
+    var cmd_parts: [text] = []
+    if sealed:
+        val prepared = qemu_cli_inspect_plan_v1(
+            arch_display_name(target.arch), target.output, target.qemu_memory,
+            target.qemu_bios, target.qemu_extra, false)
+        if not prepared.ok() or prepared.launch_plan() == nil:
+            print "[run] ERROR: {prepared.error()}"
+            return false
+        launch_plan = prepared.launch_plan()
+        cmd_parts = qemu_cli_dispatch_command_v1(launch_plan.unwrap())
+        if cmd_parts.len() == 0:
+            print "[run] ERROR: invalid sealed QEMU command"
+            return false
+    else:
+        cmd_parts = build_qemu_command_with_options(target, options)
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     if target.gui_mode and options.debug_gui_serial:
         print "[run] GUI debug lane enabled: serial output is attached to stdio"
     print "[run] {arch_display_name(target.arch)}: {cmd_parts.join(" ")}"
     val timeout: i64 = if target.gui_mode: 600000 else: 30000
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
+    val (stdout, stderr, exit_code) = if launch_plan != nil:
+        qemu_cli_dispatch_plan_v1(launch_plan.unwrap(), timeout)
+    else:
+        rt_process_run_timeout(qemu_bin, qemu_args, timeout)
     if stdout != "":
         print "[run] serial output:\n{stdout}"
     if stderr != "":

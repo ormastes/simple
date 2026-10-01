@@ -1,0 +1,93 @@
+"""Inspect and dispatch one sealed QEMU command.
+
+The command inspected by an operator must be the command given to the process
+provider. A rejected plan must not produce an executable command. These are
+contract checks; a real QEMU boot remains a separate acceptance gate.
+"""
+# @req: REQ-001 REQ-014 REQ-016
+# @manual_section: Sealed command dispatch
+
+use std.spec.{describe, it, expect, step}
+use os.qemu_cli_plan_v1.{qemu_cli_dispatch_command_v1, qemu_cli_dispatch_plan_v1, qemu_cli_command_display_v1}
+use os.port.simpleos_multiplatform_build.{simpleos_machine_target_projection}
+use os.port.qemu_machine_plan_v1.{
+    QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
+    QemuHostResolutionV1, QemuLaunchPlanV1,
+    qemu_machine_spec_from_lane_v1, qemu_launch_plan_bind_lane_parity_v1
+}
+
+# @inline
+fn setup_catalog_qemu_plan_v1(executable: text, require_native: bool) -> QemuLaunchPlanV1:
+    val target = simpleos_machine_target_projection("x86_64")
+    val request = QemuAcceleratorRequestV1(
+        kind: if require_native: QemuAcceleratorRequestKindV1.Require else: QemuAcceleratorRequestKindV1.Auto,
+        accelerator: if require_native: QemuAcceleratorV1.Kvm else: QemuAcceleratorV1.Tcg)
+    val spec = qemu_machine_spec_from_lane_v1(
+        target, target.default_qemu_lane(),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        512u64, request)
+    val host = QemuHostResolutionV1(
+        host_adapter_id: "linux-x86_64", executable_path: executable,
+        firmware_path: "", available_accelerators: [QemuAcceleratorV1.Tcg])
+    qemu_launch_plan_bind_lane_parity_v1(spec, host)
+
+describe "Sealed QEMU command dispatch":
+    # @req: REQ-001 REQ-014 REQ-016
+    it "should dispatch the exact inspected executable and argument order":
+        # @req: REQ-001 REQ-014 REQ-016
+        """I can inspect a launch before running it without changing its command."""
+        step("Resolve the catalog QEMU lane")
+        val plan = setup_catalog_qemu_plan_v1("/opt/QEMU Tools/qemu-system-x86_64", false)
+        expect(plan.admitted()).to_equal(true)
+        step("Inspect the sealed launch command")
+        val inspected = qemu_cli_command_display_v1("linux", plan.executable_path(), plan.argv_copy())
+        step("Dispatch the sealed QEMU plan")
+        val command = qemu_cli_dispatch_command_v1(plan)
+        expect(command[0]).to_equal("/opt/QEMU Tools/qemu-system-x86_64")
+        expect(command.slice(1)).to_equal(plan.argv_copy())
+        expect(command).to_contain("-smp")
+        expect(command).to_contain("10")
+        expect(qemu_cli_command_display_v1("linux", command[0], command.slice(1))).to_equal(inspected)
+        # @capture(tui)
+        print inspected
+
+    # @req: REQ-014 REQ-016
+    it "should refuse dispatch when the required accelerator was rejected":
+        # @req: REQ-014 REQ-016
+        """A native-only request cannot silently become an emulated run."""
+        step("Require native acceleration from a TCG-only host")
+        val plan = setup_catalog_qemu_plan_v1("/usr/bin/qemu-system-x86_64", true)
+        expect(plan.admitted()).to_equal(false)
+        step("Reject an unsupported launch shape")
+        expect(qemu_cli_dispatch_command_v1(plan)).to_equal([])
+        val (stdout, stderr, status) = qemu_cli_dispatch_plan_v1(plan, 1000)
+        expect(stdout).to_equal("")
+        expect(stderr).to_equal("QEMU dispatch rejected an unadmitted or invalid seal")
+        expect(status).to_equal(-1)
+
+    # @req: REQ-001 REQ-014
+    it "should keep the sealed command unchanged when a caller edits its copy":
+        # @req: REQ-001 REQ-014
+        """Changing a returned command does not alter a later dispatch."""
+        step("Resolve the catalog QEMU lane")
+        val plan = setup_catalog_qemu_plan_v1("/usr/bin/qemu-system-x86_64", false)
+        val original = qemu_cli_dispatch_command_v1(plan)
+        var changed = qemu_cli_dispatch_command_v1(plan)
+        changed.push("-S")
+        step("Inspect a fresh command copy")
+        expect(changed.len()).to_equal(original.len() + 1)
+        expect(qemu_cli_dispatch_command_v1(plan)).to_equal(original)
+        expect(plan.sealed_valid()).to_equal(true)
+
+    # @req: REQ-014 REQ-016
+    it "should reject nonpositive and excessive process deadlines before launch":
+        # @req: REQ-014 REQ-016
+        """Every run has a finite deadline within the existing ten-minute ceiling."""
+        step("Resolve the catalog QEMU lane")
+        val plan = setup_catalog_qemu_plan_v1("/missing/qemu-system-x86_64", false)
+        for timeout_ms in [-1, 0, 600001]:
+            step("Reject a deadline outside the process budget")
+            val (stdout, stderr, status) = qemu_cli_dispatch_plan_v1(plan, timeout_ms)
+            expect(stdout).to_equal("")
+            expect(stderr).to_equal("QEMU dispatch requires a timeout from 1 to 600000 ms")
+            expect(status).to_equal(-1)

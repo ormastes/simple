@@ -1,0 +1,35 @@
+"""Keep explicit guest resource choices intact across inspection and execution.
+
+Resource text is bounded before it reaches the sealed machine plan. These
+checks do not probe host capabilities or change target code generation.
+"""
+# @manual_section: Guest launch resources
+use std.spec.{describe, it, expect, step}
+use os.qemu_launch_resources_v1.{qemu_launch_memory_mib_v1, qemu_launch_cpu_count_v1}
+
+describe "QEMU launch resource parsing":
+    it "should preserve MiB and GiB choices without truncating the unit":
+        # @req: REQ-014 REQ-022
+        """A 32 GiB request remains 32768 MiB in the launch plan."""
+        step("Normalize explicit guest memory choices")
+        expect(qemu_launch_memory_mib_v1("32G")).to_equal(32768u64)
+        expect(qemu_launch_memory_mib_v1(" 512m ")).to_equal(512u64)
+        expect(qemu_launch_memory_mib_v1("1024")).to_equal(1024u64)
+
+    it "should reject malformed and oversized memory choices":
+        # @req: REQ-014 REQ-022
+        """Invalid resource text cannot wrap into a different admissible size."""
+        step("Reject invalid guest memory text")
+        for value in ["", "G", "-32G", "32GB", "1025G", "1048577M", "999999999999999999999999999999G"]:
+            expect(qemu_launch_memory_mib_v1(value)).to_equal(0u64)
+
+    it "should retain supported CPU counts and reject narrowing overflow":
+        # @req: REQ-014 REQ-022
+        """The selected vCPU count remains explicit and bounded."""
+        step("Read valid CPU counts")
+        expect(qemu_launch_cpu_count_v1("10")).to_equal(10u16)
+        expect(qemu_launch_cpu_count_v1("1")).to_equal(1u16)
+        expect(qemu_launch_cpu_count_v1("4096")).to_equal(4096u16)
+        step("Reject invalid and overflowing CPU counts")
+        for value in ["", "0", "-1", "4097", "65537", "2.0", "99999999999999999999"]:
+            expect(qemu_launch_cpu_count_v1(value)).to_equal(0u16)
