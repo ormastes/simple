@@ -5,6 +5,33 @@ It records incomplete work, not build admission or permission to publish.
 
 ## Latest checkpoint: 2026-10-02 cached builds resumed
 
+### User-authorized 7 GB Windows attempt
+
+After hello5, the user explicitly changed the cap to 7 GB. The aggregate
+Windows Job cap is now 6,835,937 KiB (6,999,999,488 bytes); the 1200-second
+timeout, disk guard, worker hint, candidate and cache are unchanged.
+Hello6 failed before creating a compiler process because the C supervisor
+still rejected limits above 5,859,375 KiB, although its Perl watchdog already
+accepted the new limit. Preserve that setup-failure receipt (exit89, root0).
+
+The one-constant supervisor correction is in PR #2161, head
+`46ab1b4a1746a181c57ce41ec51a1c92a81e4a0c`. Native boundary checks passed:
+6,835,937 KiB admitted a real exit-zero workload; direct helper invocation at
+6,835,938 KiB rejected it with exit125. Required structural CI passed. These
+checks establish supervisor admission, not compiler or full-bootstrap success.
+
+The actual authorized attempt is hello7, launched with `resume-v11.shs`
+(SHA256 `846905e345bca28c05cfa2331ab2f90208ec4009d69dd0933e1a84cf4ea43a45`).
+It reuses Phase2 candidate `81500d1a...`, runtime-authority4's pinned snapshot
+and hello4's cache. At 2026-10-01 23:26:32 UTC, parent PID34008 was live;
+the sampler recorded 658,837,504 bytes aggregate with no child at that sample.
+This is a historical live checkpoint, not a terminal receipt. Logs and the
+PID/creation-time-bound sampler are under
+`D:/dev/bootstrap-phase2-selective-windows/hello7/`. The lane owner must inspect
+the terminal guard receipt and compile/run result before advancing. Only a
+compiled-and-executed hello PASS enables the authorized Phase3/4 continuation.
+Linux and manager retry limits are unchanged by this Windows cap exception.
+
 ### Subsequent recovery: Windows Phase2 linked
 
 Physical D recovered to about 58.97 GiB. The deleted shared Git admin made
