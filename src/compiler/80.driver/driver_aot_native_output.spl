@@ -3055,7 +3055,7 @@ fn _compile_frozen_module_capsule(
 fn _runtime_std_compile_members_with_session_v1(
     ctx: CompileContext, selected: [RuntimeStdPackageMemberV1],
     artifact_root: text, target_cpu: text,
-    session: BackendSessionOwnedLeaseV2
+    session: BackendSessionOwnedLeaseV2, allow_static_only: bool
 ) -> Result<[RuntimeStdNativeMemberV1], text>:
     val selection = ctx.runtime_std_full_inventory_selection!
     var module_names: [text] = []
@@ -3096,7 +3096,9 @@ fn _runtime_std_compile_members_with_session_v1(
                 ctx.runtime_std_mir_emissions[member.source_identity].module_identity != name or
                 ctx.runtime_std_mir_emissions[member.source_identity].source_digest != member.source_digest:
             return Err("runtime/std native HIR/MIR module ownership differs")
-        if ctx.mir_modules[name].functions.len() == 0:
+        if ctx.mir_modules[name].functions.len() == 0 and
+                (not allow_static_only or
+                    ctx.mir_modules[name].statics.len() == 0):
             return Err("runtime/std native source needs typed objectless or target outcome: " + member.source_identity)
         if ctx.modules.has(name) and
                 driver_native_module_is_export_facade(ctx.mir_modules[name],
@@ -3195,7 +3197,7 @@ pub fn driver_runtime_std_compile_native_members_v1(
                 val _closed = session.close()
                 return Err("runtime/std native object provider receipt unavailable")
             val result = _runtime_std_compile_members_with_session_v1(
-                ctx, selected, artifact_root, target_cpu, session)
+                ctx, selected, artifact_root, target_cpu, session, false)
             if not session.close():
                 return Err("runtime/std native backend session close failed")
             result
@@ -3402,7 +3404,7 @@ fn _runtime_std_compile_native_members_v2(
         val witness = hir_emission.native_emit_witness!
         val mir = ctx.mir_modules[name]
         var kind = RuntimeStdNativeOutcomeKindV2.code_object
-        if mir.functions.len() > 0:
+        if mir.functions.len() > 0 or mir.statics.len() > 0:
             if witness.active_function_count == 0 and
                     witness.active_data_count == 0 and
                     witness.active_runtime_init_count == 0:
@@ -3437,7 +3439,7 @@ fn _runtime_std_compile_native_members_v2(
                 val _closed = session.close()
                 return Err("runtime/std native v2 provider receipt unavailable")
             val result = _runtime_std_compile_members_with_session_v1(
-                ctx, code_selected, artifact_root, target_cpu, session)
+                ctx, code_selected, artifact_root, target_cpu, session, true)
             if not session.close():
                 return Err("runtime/std native v2 backend session close failed")
             result
@@ -3588,8 +3590,10 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
-    if mir_module.functions.keys().len() == 0:
-        return _aot_compile_failure(name, "MIR module has no functions")
+    if mir_module.functions.keys().len() == 0 and
+            mir_module.statics.keys().len() == 0:
+        return _aot_compile_failure(name,
+            "MIR module has no functions or static data")
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val c_path = "{output_base}.{name}.bootstrap_empty.c"
