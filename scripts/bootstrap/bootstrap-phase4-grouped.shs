@@ -7,6 +7,19 @@ regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+require_current_manifest() {
+  regular "$1" || die "generic task manifest is not a regular file: $1"
+  IFS= read -r manifest_header <"$1" || die "generic task manifest header unreadable"
+  [ "$manifest_header" = SIMPLE-BUILD-RUN-3 ] \
+    || die "generic task manifest uses obsolete wire; preserve it and use a new output root"
+}
+disk_preflight() {
+  available_disk_bytes=$(df -Pk "$1" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') \
+    || die "generic task disk probe failed"
+  positive "$available_disk_bytes" || die "generic task disk probe invalid"
+  [ "$available_disk_bytes" -ge "$((estimated_group_disk_bytes + minimum_free_disk_bytes))" ] \
+    || die "generic task disk below configured estimate plus reserve"
+}
 
 producer_receipt= scv_receipt= source_root= source_inventory= module_inventory=
 root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
@@ -61,6 +74,9 @@ for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempt
     "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
   positive "$n" || die "positive resource policy required"
 done
+case "$memory_bytes" in 0*) die "memory cap must use canonical decimal bytes" ;; esac
+[ "$memory_bytes" -le 1125899906842624 ] \
+  || die "memory cap exceeds manager task limit"
 [ -n "$target" ] || die "target required"
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
 for inventory in "$source_inventory" "$module_inventory"; do
@@ -139,9 +155,11 @@ build_binary() {
   id=$1 entry=$2 output=$3 task_phase=$4
   job_root="$root/$task_phase/binaries/$id"
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
+  disk_preflight "$job_root"
   if [ ! -f "$job_root/manifest.sdn" ]; then
     "$manifest_program" --job-from-inventory "$template" "$producer" "$source_root" \
       "$id" "$task_phase" "$output" "$source_inventory_relative" \
+      --memory-limit-bytes "$memory_bytes" \
       --manifest "$job_root/manifest.sdn" -- \
       native-build --target "$target" --backend llvm \
       --source src/compiler --source src/app --source src/lib \
@@ -149,6 +167,7 @@ build_binary() {
       --cache-dir "cache/$id" --output "$output" \
       || die "$id manifest blocked"
   fi
+  require_current_manifest "$job_root/manifest.sdn"
   SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$job_root/state" --source-root "$source_root" \
@@ -172,6 +191,7 @@ build_index() {
   output_root="$job_root/output"
   state_root="$job_root/state"
   mkdir -p "$input_root" "$output_root" "$state_root" || die "$backend index roots unavailable"
+  disk_preflight "$job_root"
   if [ -e "$input_root/index.config" ]; then
     regular "$input_root/index.config" && cmp -s "$config" "$input_root/index.config" \
       || die "$backend staged index config differs from replay"
@@ -191,11 +211,13 @@ build_index() {
   if [ ! -e "$job_root/manifest.sdn" ]; then
     "$manifest_program" --job-from-inventory "$template" "$index_program" \
       "$input_root" "index-$backend" phase4 index-output/receipt.sdn \
-      source.inventory --manifest "$job_root/manifest.sdn" -- \
+      source.inventory --memory-limit-bytes "$memory_bytes" \
+      --manifest "$job_root/manifest.sdn" -- \
       native-groups-index-build --manager-work --config index.config \
       --receipt @WORK@/index-output/receipt.sdn \
       || die "$backend index manifest blocked"
   fi
+  require_current_manifest "$job_root/manifest.sdn"
   SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$state_root" --source-root "$input_root" --output-root "$output_root" \

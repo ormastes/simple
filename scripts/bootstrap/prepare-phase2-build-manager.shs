@@ -31,6 +31,9 @@ case "$runtime_bundle" in core-c-bootstrap|hosted-c) ;; *) die "runtime bundle i
 for number in "$memory_bytes" "$reserve_bytes"; do
   case "$number" in ''|*[!0-9]*|0) die "positive resource policy required" ;; esac
 done
+case "$memory_bytes" in 0*) die "memory cap must use canonical decimal bytes" ;; esac
+[ "$memory_bytes" -le 1125899906842624 ] \
+  || die "memory cap exceeds manager task limit"
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
 . "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
@@ -80,7 +83,7 @@ case "$host" in
     broker_entry=src/app/bootstrap_builder/windows_group_broker.spl ;;
   linux)
     manager_entry=src/app/bootstrap_builder/main.spl
-    worker_entry=src/app/bootstrap_builder/main.spl
+    worker_entry=src/app/bootstrap_builder/linux_worker.spl
     group_manager_entry=src/app/bootstrap_builder/native_group_linux_main.spl
     broker_entry=src/app/bootstrap_builder/native_group_linux_broker.spl ;;
 esac
@@ -144,15 +147,20 @@ index_image="$output_root/images/index-builder$suffix"
 template="$output_root/host-template.sdn"
 if [ ! -e "$template" ]; then
   "$manifest_image" --template "$worker_image" "$output_root/template-workspace" "$template" 1 \
+    --memory-limit-bytes "$memory_bytes" \
     || die "compiled manifest emitter rejected local host template"
 fi
 regular "$template" || die "host template missing"
+IFS= read -r template_header <"$template" || die "host template header unreadable"
+[ "$template_header" = SIMPLE-BUILD-RUN-3 ] \
+  || die "host template uses an obsolete manager wire; preserve it and use a new output root"
 verify_sources
 tmp="$receipt.tmp.$$"
 umask 077
 {
   printf '%s\n' 'format=SIMPLE-PHASE2-MANAGER-IMAGES-1' "target=$target" \
     "producer_path=$producer" "producer_sha256=$producer_sha" \
+    "memory_limit_bytes=$memory_bytes" "memory_reserve_bytes=$reserve_bytes" \
     "source_authority_sha256=$(hash_file "$source_authority")" \
     "manifest_program=$manifest_image" "manifest_sha256=$(hash_file "$manifest_image")" \
     "builder_program=$builder_image" "builder_sha256=$(hash_file "$builder_image")" \
