@@ -177,6 +177,18 @@ pub(crate) fn compile_builtin_method<M: Module>(
             }
             return Ok(());
         }
+        // The MIR can erase the type of a text value produced by `??`.
+        // Treating that i64-shaped handle as an already-converted integer
+        // sends its address across typed calls. The runtime parses strings
+        // and preserves genuine integer receivers.
+        if matches!(method, "to_i64" | "to_int") && from_ty == TypeId::I64 {
+            let converted = call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, converted);
+                ctx.vreg_types.insert(*d, TypeId::I64);
+            }
+            return Ok(());
+        }
         let converted = if from_ty == to_ty {
             receiver_val
         } else if actual_is_float && to_is_int {

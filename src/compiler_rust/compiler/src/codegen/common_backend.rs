@@ -627,6 +627,9 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_data"
             | "rt_string_len"
             | "rt_string_bytes"
+            // Erased `.to_i64()`/`.to_int()` receivers synthesize this call
+            // during Cranelift lowering, so it is absent from MIR call names.
+            | "rt_to_int_dynamic"
             | "rt_string_builder_new"
             | "rt_string_builder_push"
             | "rt_string_builder_finish"
@@ -3163,6 +3166,7 @@ mod tests {
     #[test]
     fn synthesized_runtime_symbols_are_retained() {
         assert!(runtime_symbol_is_codegen_root("rt_string_bytes"));
+        assert!(runtime_symbol_is_codegen_root("rt_to_int_dynamic"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_discriminant"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_id"));
     }
