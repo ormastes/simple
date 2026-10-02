@@ -21,7 +21,22 @@ struct WindowsRedirectedState:
     failed: bool
     closed: bool
 
+struct WindowsRedirectedImage:
+    path: text
+    digest: text
+
 var _windows_redirected_states: [WindowsRedirectedState] = []
+var _windows_redirected_images: [WindowsRedirectedImage] = []
+
+fn _windows_redirected_image_digest(program: text) -> text:
+    # Expected bytes are frozen for this parent lifetime. Each admission still
+    # pins and verifies the actual image against this digest in the owner.
+    for image in _windows_redirected_images:
+        if image.path == program: return image.digest
+    val digest = windows_process_file_digest_v1(program)
+    if digest.len() == 64:
+        _windows_redirected_images.push(WindowsRedirectedImage(path: program, digest: digest))
+    digest
 
 fn windows_redirected_token_slot(token: i64, count: i64) -> i64:
     if token < WINDOWS_REDIRECTED_TOKEN_BASE: return -1
@@ -54,7 +69,7 @@ fn windows_redirected_spawn(cmd: text, args: [text], stdout_path: text,
     environment.push("SIMPLE_CACHE_DIR=" + private_root + "/cache")
     environment.push("SIMPLE_FRONTEND_CACHE_DIR=" + private_root + "/cache/frontend")
     environment.push("SIMPLE_NATIVE_BUILD_CACHE_DIR=" + private_root + "/cache/native")
-    val digest = windows_process_file_digest_v1(program)
+    val digest = _windows_redirected_image_digest(program)
     if digest.len() != 64: return -1
     val request = WindowsProcessRequestV1(program: program, producer_digest: digest,
         args: args, environment: environment, directory: host_path_native(cwd()),
@@ -86,6 +101,9 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
                         case Err(reason): return -1
                         case Ok(collected):
                             state.closed = true
+                            state.stdout_path = ""
+                            state.stderr_path = ""
+                            state.capture_limit = 0
                             _windows_redirected_states[slot] = state
                             if state.failed or collected.timed_out or collected.cancelled: return -1
                             return collected.exit_code

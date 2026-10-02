@@ -1,0 +1,10 @@
+# Windows parallel process detail design
+
+Public facade: process_spawn_redirected(command,args,stdout_path,stderr_path,timeout_ms,capture_limit)->i64. Positive tagged token is accepted by existing process_wait/process_is_running/process_kill. Negative-1 means refused/failed admission; runner-only-3 means process-slot backpressure, with no child started.
+
+The tracked runner reserves a process slot nonblockingly, registers successful tagged tokens, and releases slots on admission failure or terminal cleanup. Windows stdout/stderr files are created by the exact owner with CREATE_NEW; temp-name allocation must not precreate those files. Parent PID+timestamp+monotonic sequence identifies names.
+
+Two waves of80 native fixture children block behind a file barrier, so all80 must be live before release. Child79 exits7; all others exit0. The probe checks Unicode quoting, distinct streams, private environment, stale/unknown tokens,1025 additional sequential starts, actual descendant cancellation, missing image/NUL refusal, overflow, deadline cleanup and native peak RSS. HIR/MIR or generic runner results are not substitutes for this owner probe.
+
+Native qualification builds both test/fixtures/runner/windows_parallel_child.spl and test/02_integration/lib/windows_parallel_process_owner_probe.spl with admitted pure-Simple native-build, explicit backend and80threads, isolated caches and matching MSVC runtime. Copy the child artifact to a path containing spaces/Unicode before setting SIMPLE_WINDOWS_PARALLEL_CHILD_EXE. Set a new private SIMPLE_WINDOWS_PARALLEL_PROBE_DIR. Then execute the exact probe executable and retain its hash/log/exit status.
+Private .scope directories are deliberately retained diagnostic artifacts, including rejected admissions. They are never recursively deleted by the runner. The qualification parent owns their dedicated output tree; total retained disk usage must be measured and bounded before production admission. Poll/collect errors retain pending ownership and request cancellation; they cannot release process admission as terminal failures.

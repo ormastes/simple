@@ -1,0 +1,42 @@
+# Native fixture for actual argv, capture, barrier and descendant ownership.
+use std.sffi.cli.{cli_get_args}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_exists}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, eprint}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{thread_sleep}
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if args.len() != 5: return 91
+    val mode = args[1]
+    val directory = args[2]
+    val identity = args[3]
+    if mode == "leaf":
+        if not file_write(directory + "/leaf-ready", "ready"): return 92
+        val started = time_now_unix_micros()
+        while (time_now_unix_micros() - started) / 1000 < 180000:
+            thread_sleep(10)
+        return 93
+    if mode == "tree":
+        val child = process_spawn_async(args[0], ["leaf", directory, identity, args[4]])
+        if child <= 0: return 94
+    print "ARGV={args[4]}"
+    val home = env_get("HOME")
+    val temp = env_get("TMP")
+    print "HOME={home}"
+    print "TMP={temp}"
+    eprint("STDERR={identity}")
+    if mode == "overflow":
+        var payload = ""
+        for index in range(0, 4096): payload = payload + "Z"
+        for index in range(0, 512): print payload
+        return 0
+    if not file_write(directory + "/ready-" + identity, "ready"): return 95
+    if mode != "fast":
+        val started = time_now_unix_micros()
+        while not file_exists(directory + "/release"):
+            if (time_now_unix_micros() - started) / 1000 >= 180000: return 96
+            thread_sleep(10)
+    if identity == "79": return 7
+    0
