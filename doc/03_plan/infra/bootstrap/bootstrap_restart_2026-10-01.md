@@ -1638,3 +1638,96 @@ Manager implementation is checkpointed in draft PR #2255 (`54c030180e`),
 with shell/static checks but no native deployment proof. Actual manager
 primitive execution, full-CLI streaming qualification, remaining inventories,
 six suites and Windows/WSL shared-cache qualification remain outstanding.
+
+### 2026-10-03 reviewed diagnostic queues resumed
+
+The replacement route `phase34-diagnostic-resume1` is now running under the
+7734 build root. The old route remains terminal; it was not restarted. Fresh
+pair admission charged two 7 GB reservations, checked physical and commit
+availability, and enforced the disk floor. Windows process inspection confirmed
+two live `simple.exe` descendants of the replacement route. This is a launch
+checkpoint, not a completion receipt; consult its terminal/guard receipts for
+later state.
+
+Phase3 LLVM preserved the first 28 guarded results and resumed the suffix at
+original module 29. Phase4 LLVM retained its six failed binary tasks and recorded
+all three dependent suites as BLOCKED (76), because the required CLI/interpreter
+artifacts are absent. Its independent module inventory is running. No blocked
+suite is counted as a test pass or an executed test failure.
+
+The resume correction preserves nonzero suffix infrastructure statuses and
+returns ordinary failure when the merged inventory contains carried failures.
+Focused source review found no remaining P0/P1. The synthetic merge fixture
+contained both old and new failures; it does not prove the isolated case of an
+old failure followed by an entirely successful suffix.
+
+Standalone manager classifier and scheduler native probes are prepared against
+the pinned PR2255 source, using the hello-qualified bootstrap compiler's
+supported `native-build` command. They remain unrun and need separately charged
+resource admission. Their success would establish primitive behavior only, not
+full managed queues or cross-host cache deployment. The streaming FullCLI
+diagnostic is also queued; it must not silently repeat the capped ordinary path.
+Linux remains held on the unresolved provider-bound parse crash. Neither
+canonical Stage2 admission nor Phase3/Phase4 completion is claimed.
+
+An explicit temporary handoff to the manager probes has subsequently been
+requested through both existing resume1 stop markers. The legacy paired
+coordinator has no graceful pause handshake: a lane stopping at a task boundary
+can cancel the sibling task. Preserve interrupted rows and caches for requeue.
+At this checkpoint the pair session was still live and no pair terminal receipt
+existed, so both 7 GB reservations remained held; the manager must not launch
+until the pair and its Job guards positively prove quiescence.
+
+The first concrete module failure fix is isolated in draft PR #2264, commit
+`728a98d4791425b5ab7227e5af37a5e74afce697`: ten Curve25519 byte accesses now
+call the existing signed-index helper, and the stale clamp probe calls the
+existing clamp helper. Byte-loading and clamp-boundary regressions were added.
+Static checks passed; runtime/native checks remain queued and the patch is not
+landed or included in the frozen 7734 build.
+
+### 2026-10-03 native manager classifier verified; full manager still unverified
+
+The temporary bootstrap handoff completed with both Job trees quiescent.
+Phase3 LLVM now has 29 completed attempts: 14 PASS, 13 ordinary compile
+failures (1), and two RSS-cap failures (88). Module28 stopped during parsing;
+module29 reached HIR. Phase4 LLVM's interrupted module1 remains pending.
+The reviewed resume2 route preserves those results and both producer-scoped
+caches, starts the Phase3 suffix at original30, and requeues Phase4 module1.
+Its result-sealing AWK precedence error is fixed; empty and one-row fixtures
+passed. Resume2 is held for the manager/streaming diagnostic window, not lost.
+
+The real manager classifier has passed all ten native assertions using the
+hello-qualified `2f3d16f...f0384` bootstrap compiler and PR2255 source `54c030180e`.
+This was the third and final actual classifier attempt. Attempt1 was rejected
+before compilation because the archived source was not an admitted Git
+worktree and used an unsupported source selector. Attempt2 used a genuine
+worktree, compiled both modules, then failed runtime C compilation because its
+sparse checkout omitted the tracked counterpart SDK header. Neither counted
+as a test execution. Attempt3 materialized and pinned that header, preserved
+the genuine warm SCV inventory/native cache, and used cold initialization 0.
+
+Evidence is under
+`D:/dev/manager-shared-cache-deployment-20261002/primitive-regression/attempt3-plan/`.
+The child result records compile/run exit0; exact stdout is
+`MANAGER-PRIMITIVE failure-policy PASS checks=10`, with empty run stderr.
+Executable SHA256 is
+`f4bb28e4f62ae8e3e234ad28fef03e2f30fe7e66b232569c764b93e0ae26e508`.
+Source/runtime/control checks passed before and after execution. The enforced
+Job completed quiescent, with peak RSS 5,149,320 KiB; measured D growth was
+317,079,552 bytes. Its 7 GB/2 GiB reservations are released. Do not rerun this
+passing classifier criterion. Canonical admission remains 0 and the producer's
+source relation is still unproven; this is diagnostic cross-source evidence.
+
+Six scheduler primitive cases, actual grouped dispatch/recovery, the complete
+managed phase queues, and Windows/WSL shared-cache qualification remain
+unverified. PR2255 remains draft. Review of the missing header also found a
+production gap: canonical source admission/runtime pinning omit the exact
+owned `tools/counterpart/sdk/c/simple_counterpart_abi.h` input. An isolated
+follow-up is correcting its materialization and verification without admitting
+the whole tools tree. Separately, a native array-slice lowering gap affecting
+manager contracts is being fixed in an isolated compiler worktree.
+
+The pinned, opt-in streaming FullCLI diagnostic has the next resource slot.
+It does not change production defaults or establish a qualified test runner
+until an actual compile and subsequent execution checks pass. Linux's
+provider-bound parse crash and all incomplete phase inventories remain open.
