@@ -39,8 +39,10 @@ The user authorized deployment once both hosts verify; that condition remains un
    shared root. Set probe mode `publish` for producer, `consume` for consumer;
    each run is a new native process. The consumer must have no private entry.
    SOSIX's root receipts must prove canonical non-overlap, including mount and
-   reparse aliases. The probe's lexical slash/case/nesting guard is insufficient
-   to establish physical isolation by itself.
+   reparse aliases. The probe checks lexical slash/case/nesting and every
+   ancestor with the production no-follow directory owner. Native Windows
+   `_fullpath` still cannot establish mount/SUBST identity; see the blocker
+   below. A capacity receipt alone is not filesystem root authority.
 5. Require producer STORE and consumer HIT for the exact same key, immutable
    cell SHA and payload SHA. The compiled probe additionally validates the
    target receipt and actual AST literal 73. Producer parser-call delta must be
@@ -53,11 +55,13 @@ The user authorized deployment once both hosts verify; that condition remains un
    malformed cells use `reparse`: delta one plus the same semantic result.
    Missing/wrong parser authority must fail before the fixture claims success.
    Do not corrupt, delete or evict production data to run negative tests.
-   The fixed-source compact probe cannot execute every source/cfg/parser
-   mutation: its literal oracle rejects changed source, and it derives parser
-   identity instead of accepting a caller override. Those rows require
-   additional frozen source fixtures or an actual compiler run with a new
-   sealed parser snapshot. A fixture-input panic is not cache-miss evidence.
+   The probe supports explicit `portable`, `source-change` and `target-cfg`
+   source cases. `mutate` additionally requires the prior real cell key and
+   proves a different absent shared address, one actual parse, exact AST value
+   and successful publication. Parser identity is still derived from a sealed
+   snapshot, never a caller override. A parser-source mutation requires a new
+   qualified producer built from that snapshot. A fixture-input panic is not
+   cache-miss evidence.
 8. Run the remaining actual concurrency, interruption, no-follow and private
    generation cases. Retain loser/winner outcomes and artifact hashes. These
    remain mandatory even if the compact SSpec is green.
@@ -72,15 +76,42 @@ Both hosts require `SIMPLE_SHARED_PARSE_CAS_ROOT`,
 identity through the production sealed-authority owner; do not inject a digest
 as a substitute for source admission.
 
-Probe-specific inputs: `SIMPLE_SHARED_PARSE_PROBE_MODE`,
+Probe-specific inputs: `SIMPLE_SHARED_PARSE_PROBE_MODE` (`publish`, `consume`,
+`reparse`, `mutate`), `SIMPLE_SHARED_PARSE_PROBE_CASE` (`portable`,
+`source-change`, `target-cfg`),
 `SIMPLE_SHARED_PARSE_PROBE_SOURCE` (absolute frozen source filename), and
 `SIMPLE_SHARED_PARSE_PROBE_TARGET` (actual host target triple). Scope and private
-root differ for every cold run. The manager wrapper takes the explicit
+root differ for every cold run. `mutate` requires
+`SIMPLE_SHARED_PARSE_PROBE_REFERENCE_KEY` from the original native publication.
+The manager wrapper takes the explicit
 `--shared-parse-cas-root`/`SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT` admission input.
 
 Proposed shared root: `D:/dev/simple-shared-parse-cas-v1`, Linux spelling
 `/mnt/d/dev/simple-shared-parse-cas-v1`. These spellings are not themselves
 identity proof; bind them to the manager's pinned real-root receipt.
+
+## Dedicated mutation fixtures
+
+| Change | Frozen source / operation | Required outcome |
+|---|---|---|
+| Source | Copy `test/fixtures/compiler/shared_parse_cache_source_changed.spl` into the **same logical path** in a new immutable source snapshot; seal it independently. | `source-change`, `mutate`, value 74; original address remains unchanged. |
+| Target cfg | Copy `test/fixtures/compiler/shared_parse_cache_target_cfg.spl` into a fresh logical path; publish once for Windows and mutate for Linux using that original key. | Same raw source/parser/features/path, different actual input/cfg; values 74 and 75. |
+| Namespace | Place the exact portable source bytes at a second logical path in the frozen snapshot. | `portable`, `mutate`, value 73; only logical-path key input differs. |
+| Features | Reuse the portable snapshot with a different real parser feature switch, retaining its declared environment in the host receipt. | `portable`, `mutate`, value 73; printed feature digest differs. |
+| Parser source | Build and qualify a producer from a new sealed parser snapshot and re-use the portable source/path. | `portable`, `mutate`; actual parser identity differs. Do not substitute an arbitrary environment digest. |
+| Codec/envelope/corruption | Copy a genuine published cell into each isolated diagnostic root and mutate one case; retain before/after bytes and hashes. | `reparse`, correct source-specific AST value, one real parse; no admitted use of invalid pools. |
+
+The native output now prints the full key tuple for independent comparison.
+Publication also reads through the production shared owner after parsing, so
+an exit-zero compile with a failed store no longer passes the fixture. Consume
+requires an admitted shared cell before frontend execution, plus the external
+cold-private directory witness and actual AST/counter checks.
+Preload and readback themselves emit HIT traces, so only HIT/STORE events
+between the same process's `SHARED_PARSE_PROBE_PHASE begin=frontend` and
+`end=frontend` count as frontend cache evidence. Preserve ordered stderr.
+The printed `reference_key` must be joined to a retained original publication
+receipt and genuine cell; accepting an arbitrary different digest proves no
+relation to an earlier producer.
 
 ## Current blockers and evidence limits
 
@@ -90,6 +121,10 @@ identity proof; bind them to the manager's pinned real-root receipt.
   failure. The newer class-fix candidate is blocked at LLVM `rt_alloc(nil)`.
 - The manager capacity repair must rebuild manager and both workers from one
   reviewed commit; the old generic worker never launched its task child.
+- Canonical filesystem non-overlap remains unqualified: native Windows
+  `rt_path_absolute` uses lexical `_fullpath`, and no both-host descriptor-bound
+  directory ancestry owner has been supplied. See
+  `doc/08_tracking/bug/shared_cache_windows_canonical_root_identity_gap_2026-10-02.md`.
 - Qualified SSpec execution and SPipe docgen are UNRUN. The companion manual
   is explicitly authored from source, not a generated-success receipt.
 - `D:/dev/win-linux-shared-cache-proof-20261002/deployment.md` and
