@@ -11,6 +11,8 @@ use app.io.mod.{
     dir_exists, dir_create
 }
 use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_native_for,
+    host_path_canonical_for, host_is_windows_host}
 use app.io.time_ops.{time_now_unix_micros}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_bytes.{text_to_utf8_bytes}
@@ -129,15 +131,12 @@ fn scv_compile_snapshot_inventory_entries_v1(
     val admitted = compile_source_inventory_read_current_v1(cache_root)
     if not admitted.valid:
         return nil
+    val platform = if host_is_windows_host(): "windows" else: "posix"
     var roots: [text] = []
     for source_root in source_roots:
-        val candidate = if source_root.starts_with("/"):
-            source_root
-        elif root.ends_with("/"):
-            root + source_root
-        else:
-            root + "/" + source_root
-        val absolute = scv_compile_snapshot_plain_path_v1(path_absolute(candidate))
+        val candidate = scv_compile_snapshot_source_candidate_for_v1(root, source_root, platform)
+        if candidate == "": return nil
+        val absolute = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(candidate)))
         if (absolute == "" or (absolute != root and
                 not absolute.starts_with(root + "/"))):
             return nil
@@ -155,6 +154,21 @@ fn scv_compile_snapshot_inventory_entries_v1(
         if selected:
             entries = entries.push(entry)
     Some(entries)
+
+fn scv_compile_snapshot_source_candidate_for_v1(root: text, source_root: text, platform: text) -> text:
+    """Resolve selector syntax without treating native Windows absolute paths as relative.
+
+    Physical canonicalization and checkout/cache containment remain the caller's gates.
+    """
+    val selector = host_path_canonical_for(host_path_native_for(source_root, platform), platform)
+    if selector == "" or selector.split("/").contains(".."):
+        return ""
+    val absolute = compile_source_inventory_plain_checkout_v1(selector)
+    if selector.starts_with("/") or (platform == "windows" and absolute != ""):
+        return absolute
+    # A drive-relative selector cannot be safely joined to a checkout root.
+    if platform == "windows" and selector.contains(":"): return ""
+    if root.ends_with("/"): root + selector else: root + "/" + selector
 
 fn scv_compile_snapshot_revision_id_v1(
     tree_id: text, inventory_digest: text
@@ -334,10 +348,10 @@ fn scv_compile_snapshot_acquire_v1(
 ) -> ScvCompileSnapshotV1:
     if root == "" or cache_root == "" or source_roots.len() == 0:
         return scv_compile_snapshot_invalid_v1("snapshot-input-invalid")
-    val canonical_root = scv_compile_snapshot_plain_path_v1(path_absolute(root))
+    val canonical_root = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(root)))
     if canonical_root == "":
         return scv_compile_snapshot_invalid_v1("snapshot-root-unavailable")
-    val owned_cache_root = scv_compile_snapshot_plain_path_v1(path_absolute(cache_root))
+    val owned_cache_root = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(cache_root)))
     val cache_rel = scv_rel_path(canonical_root, owned_cache_root)
     if (owned_cache_root == "" or owned_cache_root == canonical_root or
             not owned_cache_root.starts_with(canonical_root + "/") or
@@ -524,6 +538,7 @@ export scv_compile_snapshot_provenance_v1
 export scv_compile_snapshot_receipt_v1
 export scv_compile_snapshot_open_v1
 export scv_compile_snapshot_acquire_v1
+export scv_compile_snapshot_source_candidate_for_v1
 export scv_compile_snapshot_recover_v1
 export scv_compile_snapshot_gc_v1
 export scv_compile_snapshot_cleanup_v1
