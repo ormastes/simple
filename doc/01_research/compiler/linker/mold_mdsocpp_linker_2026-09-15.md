@@ -429,3 +429,114 @@ platform, under the declared resource contract.
   - E09 cgroup v2
   - E10 Windows Job Objects
   - E11 Clang ThinLTO
+
+## 14. Release-branch research refresh — 2026-10-03
+
+**Author:** Codex research sidecar `/root/linker_research`.
+**Session:** `item4-linker-research-20261003`.
+**Worktree:** `C:/dev/simple-item4-linker-research-20261003`.
+**Work branch:** `work/item4-linker-research-20261003`.
+**Target:** `origin/release/1.0`; source-inspection base:
+`e9cd3153c881c55f59eaaa2573b4b8a5e803023a`.
+**Renewed session base and expected target:**
+`cb2f783acf0ea22e8da54ff0d8d18b4fb14c816c`.
+The integration owner fetched the original target before delegating the worktree,
+then renewed it after concurrent release integration. The private lane rebased
+with its sole owned edit preserved; the target delta changes none of this
+research document, linker sources, completion producer, or bounded composition.
+This append-only refresh preserves historical findings above. It records source
+inspection and primary-source research, not new runtime PASS evidence.
+
+### 14.1 Current implementation versus qualification
+
+The seven-plan host-completion document's item 4 retains the full linker scope.
+An emitted header, parser, model, or receipt validator cannot substitute for
+executable startup, host qualification, or measured resource compliance.
+
+| Evidence at the pinned base | Consequence for acceptance |
+|---|---|
+| `link_engine_external.spl::link_request_internal` rejects every non-ELF object format; `_LinkerWrapper/native_linking.spl::internal_link_native` rejects non-Linux OS and target/host architecture mismatch | The request facade's supported target set differs from the separate Windows COFF production route. Exercise both entrypoints; do not infer facade PE support from COFF writer tests. |
+| `link_request_to_native` resolves bounded policy and returns `UnsupportedBudget` before input access because its owned execution/job-scope provider is disconnected | Fail-closed admission is implemented; a successful bounded link and fast/bounded digest parity remain unproven. |
+| `src/compositions/linker_bounded/composition.spl` seals a static descriptor with a 6,000,000,000-byte policy | A declared memory contract does not prove actual stream/spill execution, descendant accounting, or the measured peak. |
+| `link_engine_external.spl::resolve_engine_id_for_success` documents that a successful compiler-driver fallback can be reported as the originally resolved direct linker | Engine identity must come from the actual execution result. A new detection probe after success cannot prove which engine ran. |
+| `requirement_from_header` constructs schema identity requirements from the same incoming header; `receipt_header` uses placeholder identity | Existing shape validation cannot establish independent schema identity admission. Preserve the S1 owner handoff; do not invent a second registry in the linker. |
+| `mold_compatibility.spl` reports Linux unqualified, Windows hosted-partial, and SimpleOS boot evidence pending | These source states contradict treating historical lane PASS notes as whole-product completion. |
+| `src/app/test/mold_completion_receipt.spl` checks ten ordered receipt keys, status text, regular files, and SHA-256 bindings before publishing an aggregate | The producer proves bound-file integrity. It does not parse actual command exit status, verify engine identity, inspect object-format semantics, or independently measure performance. Those checks remain obligations of each evidence producer and admission reviewer. |
+| Completion keys enumerate Linux, Windows, SimpleOS, corpus/parity/platform/performance evidence, but no explicit Mach-O or FreeBSD key | The generic `platform_receipts` artifact must enumerate those retained targets and their admission or user-approved unsupported decision. Their absence must not become implicit approval. |
+
+The initial scan found Mach-O parser/inspection modules, ELF engine modules,
+and a COFF engine with PE import/export/base-relocation writers. This establishes
+source ownership locations only. No native execution was performed in this
+research lane, and no target is newly certified by this document.
+
+### 14.2 Concrete retained acceptance inventory
+
+IDs below trace existing item-4 requirements and the research/plan G0–G6 gates.
+They do not select new optional scope or silently delete unsupported targets.
+Each scenario needs a real setup action, production entrypoint, independent
+observable assertion, and evidence tied to the exact tested commit/runtime.
+
+| ID | Concrete acceptance scenarios and failure oracle |
+|---|---|
+| ITEM4-REQ-001 | Map each retained layer/facet to its source owner and public entrypoint. Reject unknown schema identity, missing required facet, and incompatible ABI before reading inputs. Check both the facade and actual engine path. |
+| ITEM4-REQ-002 | Force an internal link and prove its receipt names the format-specific internal engine. Force direct-link failure followed by an allowed compiler-driver success and require the receipt to name that driver. For an explicit unavailable engine require a named failure and no fallback output. |
+| ITEM4-REQ-003 | Link two objects returning 42; test strong-over-weak and duplicate-strong failure. Build an archive where resolving one member creates a reference needing another extraction pass. Keep an explicit root/constructor/retained section, discard a dead section containing an undefined reference, and prove retained code executes. |
+| ITEM4-REQ-004 | For each admitted architecture, patch hand-derived relocation values and compare independent tool inspection. Test minimum/maximum legal values, adjacent overflow, misalignment, and unsupported relocation. Assert failure leaves no newly published executable and preserves an existing valid output. |
+| ITEM4-REQ-005 | Run an executable importing a function and data from a shared library; verify runtime result and required dependency metadata. Exercise admitted TLS and unwind paths. Link stripped and unstripped variants: both run identically, while inspection proves the requested symbol/debug removal without deleting required dynamic symbols. |
+| ITEM4-REQ-006 | Maintain explicit format/OS/architecture/backend rows for ELF, PE/COFF, and Mach-O, including FreeBSD, Windows ARM64, RISC-V, and SimpleOS obligations retained in G4. Each advertised row requires native execution or the declared firmware/board evidence. A missing host is BLOCKED; an unsupported scope decision requires user acceptance. |
+| ITEM4-REQ-007 | Re-link identical immutable inputs with controlled environment and scheduling variations; compare complete output digest and diagnostics ordering. Missing symbol, duplicate symbol, malformed input, and wrong machine must produce stable named diagnostics through the production API. |
+| ITEM4-REQ-008 | Link the real self-hosted compiler and representative applications using the internal engine; execute the resulting compiler on a known program and check its output. Bind all input, runtime, engine, output, command, and transcript identities. Small fixture execution alone cannot close this row. |
+| ITEM4-REQ-009 | Compare pinned internal/baseline runs on the same corpus, separating cold/warm runs. Record elapsed time, CPU, qualified peak memory, output size, I/O/spill, and correctness. Run fast and bounded modes with identical semantics; require whole-job peak strictly below 6,000,000,000 bytes and complete digest parity. Inject spill corruption, disk-full, and cancellation; prove failure cleanup and no partial publication. |
+| ITEM4-REQ-010 | Retained linker G5 only: replace a linker aspect without kernel edits, hold an existing session across replacement, and prove it continues with its pinned generation. Reject stale handles and ABI conflicts; prove the static recovery composition and `simple --help` remain independent of linker activation. This does not transfer item-5 ownership into this lane. |
+
+A modern SSpec manual should describe actions/results from these executable
+scenarios. Helpers must execute production behavior and assert returned data;
+a test-local Boolean named `success` or `linker_available` is not evidence.
+Mark unavailable infrastructure explicitly and keep the corresponding gate open.
+Mutation examples: bypass archive closure, suppress relocation overflow, report
+the requested engine after fallback, omit one platform row, and replace a
+measured memory receipt with `MeasuredOnly`. Each must make its acceptance fail.
+
+### 14.3 Primary-source research and design implications
+
+Research date: 2026-10-03. These upstream references inform test oracles; they do
+not certify Simple's implementation. Pin exact tool versions/commits in test
+receipts rather than relying on mutable upstream pages.
+
+- [mold manual](https://github.com/rui314/mold/blob/main/docs/mold.md)
+  documents deterministic output. Test whole-image reproducibility separately
+  from semantic equivalence against a different linker.
+- [mold's historical design](https://github.com/rui314/mold/blob/main/docs/design.md)
+  warns that its 2020 description is outdated. Use current implementation/manual
+  evidence when adopting performance or script-support claims.
+- [LLD implementation design](https://lld.llvm.org/NewLLD.html) and the
+  [Mach-O port](https://lld.llvm.org/MachO/index.html) describe distinct format
+  implementations. Their existence supports format-specific conformance gates,
+  not inference that an ELF engine implements Mach-O.
+- [LLD section-retention documentation](https://lld.llvm.org/ELF/start-stop-gc.html)
+  distinguishes compiler retention from linker garbage collection. Fixtures must
+  encode the actual retention contract rather than assume a compiler `used`
+  annotation roots a section during linking.
+- [Microsoft PE/COFF format](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)
+  is the reference for machine types, imports, base relocations, and image
+  structures. Check PE fields independently and execute through the Windows
+  loader; an ELF success or COFF parser success is insufficient.
+- [Linux cgroup v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)
+  defines memory controller interfaces including limits and swap controls.
+  Install the job boundary before the first input access, include descendants,
+  disable swap under the retained contract, and collect the qualified peak.
+  Process RSS alone does not prove the declared whole-job memory bound.
+
+### 14.4 Sequencing without scope loss
+
+First repair the measurement surface that can misidentify an executed engine
+and define the executable acceptance matrix. Then use red tests to drive missing
+format/facade routing and engine semantics. Keep host execution, compiler-corpus
+runs, bounded execution, and linker lifecycle gates visible until independently
+qualified; passing a policy validator is not an alternative end state.
+
+The branch owner integrates research into plan/design and allocates source/test
+ownership. Any new optional capability beyond the retained plan must have
+pros/cons/effort options and user selection before implementation. No unsupported
+target is accepted, no release is approved, and no whole-item PASS is claimed by
+this research addendum.
