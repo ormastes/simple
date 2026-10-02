@@ -21,5 +21,13 @@ The final narrowed link probe checks six pure-Simple alias assertions only:
 empty and hello known values through each public alias, alias agreement for
 hellp, and discrimination between hello and hellp. It does not gate parity.
 
+The LLVM native probe independently reproduced the same three observed values
+and passed the same six narrowed pure-alias assertions. Its evidence is
+`hash-alias.nCe1LD/{build.log,results.log,probe.exe}` under the local directory
+above (five compiled modules, zero failures, LLVM backend, 80 workers).
+The immutable LLVM-capable bootstrap producer was diagnostic-only and unadmitted,
+SHA-256 `5494f30e0a9b3e2911d8b95d3a5640861d49c36aff1566674538f51f6c86dc37`.
+This is real native alias evidence for both backends, not final qualification.
+
 Run `scripts/check/check-native-hash-public-alias.shs PRODUCER RUNTIME` for the
 narrow link probe. Full cross-language parity remains required separately.
