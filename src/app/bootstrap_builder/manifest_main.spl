@@ -14,6 +14,7 @@ use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.common.build_manager.contracts.{builder_link_resolved_path_v1,
     builder_validate_task_v1}
 use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_match_nofollow_v1}
+use app.bootstrap_builder.managed_suite.{managed_suite_main_v1}
 
 fn bootstrap_manifest_absolute_v1(path: text) -> bool:
     if path == "" or path.contains("\n") or path.contains("\r") or path.contains("\0"): return false
@@ -65,7 +66,7 @@ fn bootstrap_manifest_template_v1(args: [text]) -> Result<text, text>:
         timeout_ms: 1000, memory_limit_bytes: memory_limit, links: [])
     val host = BuildHostV1(id: "bootstrap-local", transport: "local", endpoint: "",
         workspace: args[2], worker_program: args[1], worker_digest: digest, slots: slots)
-    val run = BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 2)
+    val run = BuildRunV1(tasks: [placeholder], hosts: [host], keep_going: true, max_attempts: 1)
     if not builder_write_run_v1(args[3], run): return Err("template rejected or cannot be written")
     Ok(args[3])
 
@@ -331,9 +332,9 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         val digest = bootstrap_manifest_hash_v1(absolute)?
         inputs = inputs.push(BuildInputV1(path: path, digest: digest))
         val length = path.len()
-        source_pieces.push("{length}:")
-        source_pieces.push(path)
-        source_pieces.push(digest)
+        source_pieces = source_pieces.push("{length}:")
+        source_pieces = source_pieces.push(path)
+        source_pieces = source_pieces.push(digest)
     for link in links:
         val kind = if link.kind == "file": 1 else: 2
         if not snapshot_symlink_match_nofollow_v1(root,
@@ -341,8 +342,8 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
             return Err("source link changed or escapes root: " + link.path)
         for field in [link.kind, link.path, link.target, link.resolved_path,
                 link.target_digest]:
-            source_pieces.push("{field.len()}:")
-            source_pieces.push(field)
+            source_pieces = source_pieces.push("{field.len()}:")
+            source_pieces = source_pieces.push(field)
     var command: [text] = []
     var identity = "bootstrap-canonical-job-v3|" + root + "|" + args[4] +
         "|memory=" + str(memory_limit)
@@ -352,9 +353,14 @@ fn bootstrap_manifest_job_from_inventory_v1(args: [text]) -> Result<text, text>:
         identity = identity + "{argument.len()}:" + argument
     val source_sha = sha256_text(source_pieces.join(""))
     val tools_sha = sha256_text(program_sha + template_sha)
+    var published_outputs = [args[6]]
+    if args[0] == "--suite-from-inventory":
+        if args[6] != "suite/result.env" or command.len() == 0 or command[0] != "--managed-suite":
+            return Err("suite task must use the managed suite adapter")
+        published_outputs = ["suite/result.env", "suite/stdout.log", "suite/stderr.log", "suite/invocations.log"]
     val task = BuildTaskV1(id: args[4], attempt: 1, phase: args[5], producer_digest: program_sha,
         source_digest: source_sha, toolchain_digest: tools_sha, dependencies: [],
-        program: args[2], args: command, inputs: inputs, outputs: [args[6]],
+        program: args[2], args: command, inputs: inputs, outputs: published_outputs,
         cache_key: sha256_text(identity + source_sha + tools_sha),
         timeout_ms: 86400000, memory_limit_bytes: memory_limit, links: links)
     val task_error = builder_validate_task_v1(task)
@@ -450,11 +456,12 @@ fn main() -> i64:
     val raw = get_args()
     var args: [text] = []
     for i in 1..raw.len(): args = args.push(raw[i])
+    if args.len() > 0 and args[0] == "--managed-suite": return managed_suite_main_v1(args)
     val result = if args.len() > 0 and args[0] == "--template":
         bootstrap_manifest_template_v1(args)
     elif args.len() > 0 and args[0] == "--job":
         bootstrap_manifest_job_v1(args)
-    elif args.len() > 0 and args[0] == "--job-from-inventory":
+    elif args.len() > 0 and (args[0] == "--job-from-inventory" or args[0] == "--suite-from-inventory"):
         bootstrap_manifest_job_from_inventory_v1(args)
     else:
         bootstrap_manifest_emit_v1(args)

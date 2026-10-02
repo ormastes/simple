@@ -43,6 +43,9 @@ use std.common.crypto.sha256.{sha256_text}
 # directly instead of a second, disagreeing detector.
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1, native_tool_strict_revalidate_v1}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1, native_runtime_strict_revalidate_v1, native_runtime_strict_generated_inputs_v1}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
@@ -251,6 +254,45 @@ pub fn link_error_detail(site: text, payload: text) -> text:
     site + ": " + rendered
 
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    val result = native_link_with_admitted_inputs_v1(object_files, output, config)
+    if native_tool_strict_requested_v1() and result.is_ok():
+        val tools_checked = native_tool_strict_revalidate_v1()
+        val runtime_checked = native_runtime_strict_revalidate_v1(true)
+        if tools_checked.is_err() or runtime_checked.is_err():
+            file_delete(output)
+            if tools_checked.is_err(): return Err(tools_checked.unwrap_err())
+            return Err(runtime_checked.unwrap_err())
+    result
+
+fn native_link_with_admitted_inputs_v1(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    if native_tool_strict_requested_v1():
+        val argument_error = managed_native_extra_args_error_v1(config.extra_flags)
+        if argument_error != "": return Err(argument_error)
+        val _linker = native_tool_strict_resolve_v1("linker")?
+        if config.runtime_path == "none":
+            val _runtime_objects = native_runtime_strict_generated_inputs_v1(object_files)?
+        # A configured library must not shadow a sealed provider by basename
+        # (the MSVC renderer intentionally deduplicates that way in legacy mode).
+        var explicit_inputs = object_files
+        for library in config.libraries: explicit_inputs.push(library)
+        var argv_paths = explicit_inputs
+        for path in config.library_paths: argv_paths.push(path)
+        argv_paths.push(output)
+        val path_argument_error = managed_native_input_args_error_v1(argv_paths)
+        if path_argument_error != "": return Err(path_argument_error)
+        for input in explicit_inputs:
+            val normalized = input.replace("\\", "/")
+            val parts = normalized.split("/")
+            val basename = parts[parts.len() - 1].lower()
+            if basename == "simple_compiler" or basename == "simple_compiler_backfill" or basename == "simple_native_all":
+                return Err("managed runtime provider must use its admitted absolute archive path")
+            if basename == "simple_compiler.lib" or basename == "libsimple_compiler.a" or
+                    basename == "simple_compiler_backfill.lib" or basename == "libsimple_compiler_backfill.a" or
+                    basename == "simple_native_all.lib" or basename == "libsimple_native_all.a":
+                val root = env_get("SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH") ?? ""
+                val _provider = native_runtime_strict_archives_v1(root, [normalized])?
+        if requested_linker_override().trim().lower() == "internal" or is_simpleos_target():
+            return Err("managed native admission requires the admitted external hosted linker")
     val trace = linker_trace_enabled()
     val reproduce_path = env_get("SIMPLE_NATIVE_LINK_REPRODUCE_PATH") ?? ""
     if trace:
@@ -283,7 +325,7 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     # Validate named runtime authority before SMF or platform dispatch. SMF
     # ultimately materializes native objects and re-enters this linker; doing
     # the check here also prevents Windows MinGW/MSVC from bypassing it.
-    val msvc_runtime = os == "windows" and not _is_mingw_env()
+    val msvc_runtime = os == "windows-msvc" or (os == "windows" and not _is_mingw_env())
     val provider_error = link_status_text(
         "native-runtime-provider-selection",
         native_runtime_provider_selection_error_for_config_platform(config, msvc_runtime))
@@ -317,6 +359,10 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     link_native_unix(object_files, output, config)
 
 fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    # Let the admitted C driver supply its SDK/CRT instead of shelling out to
+    # ambient gcc during direct-link CRT discovery. Its linker is pinned below.
+    if native_tool_strict_requested_v1():
+        return link_native_cc(object_files, output, config)
     val os = host_os()
     val arch = host_arch()
     val trace = linker_trace_enabled()
@@ -1771,6 +1817,19 @@ fn native_runtime_provider_selection_error_for_config(config: NativeLinkConfig) 
 
 fn native_runtime_provider_selection_error_for_config_platform(
         config: NativeLinkConfig, msvc: bool) -> text:
+    if native_tool_strict_requested_v1():
+        # LLVM owns generated runtime objects and marks this sentinel; it must
+        # not acquire a different archive provider from ambient directories.
+        if config.runtime_path == "none": return ""
+        val admitted_dir = env_get("SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH") ?? ""
+        if config.runtime_path != "" and config.runtime_path != admitted_dir:
+            return "runtime path differs from managed authority"
+        if config.runtime_bundle == "" or config.runtime_bundle == "auto":
+            return "managed runtime requires an explicit provider bundle"
+        val inputs = native_runtime_archive_inputs_for_platform(admitted_dir, config.runtime_bundle, msvc)
+        match native_runtime_strict_archives_v1(admitted_dir, inputs):
+            case Ok(_): return ""
+            case Err(reason): return reason
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
@@ -2069,6 +2128,9 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
       - A hosted CROSS link runs the cross driver, but find_requested_linker
         resolves HOST binaries (which mold / which ld.lld), so honouring the
         request would point the cross driver at a host-native linker."""
+    if native_tool_strict_requested_v1():
+        val path = native_tool_strict_resolve_v1("linker")?
+        return Ok("-fuse-ld=" + path)
     val requested = requested_linker_override()
     if requested == "":
         return Ok("")
@@ -2083,6 +2145,13 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
     Ok("-fuse-ld=" + linker_fuse_ld_name(linker_type_for_path(resolved_path)))
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    if native_tool_strict_requested_v1():
+        if host_os() != "linux" and host_os() != "windows":
+            return Err("managed native C-driver linking is admitted only for Linux and Windows")
+        val argument_error = managed_native_extra_args_error_v1(config.extra_flags)
+        if argument_error != "": return Err(argument_error)
+        val path_argument_error = managed_native_input_args_error_v1(object_files + [output] + config.library_paths + config.libraries)
+        if path_argument_error != "": return Err(path_argument_error)
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
     # fork/exec, so subprocess cc is unavailable — in-process LLD is the
     # only supported path. Reaching here means find_linker() or
@@ -2126,7 +2195,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         print "[linker-wrapper] cc-fuse-ld-selection failed: {fuse_ld_result.unwrap_err()}"
         return Err(link_error_detail("cc-fuse-ld-selection", fuse_ld_result.unwrap_err()))
     val requested_fuse_ld = fuse_ld_result.unwrap()
-    var cc = env_get("SIMPLE_CC") ?? ""
+    var cc = if native_tool_strict_requested_v1():
+        native_tool_strict_resolve_v1("cc")?
+    else: env_get("SIMPLE_CC") ?? ""
+    if native_tool_strict_requested_v1() and not cc.lower().contains("clang"):
+        return Err("managed C-driver linking requires admitted clang with an absolute linker path")
     if cc == "":
         if hosted_cross:
             cc = find_c_compiler()
@@ -2437,6 +2510,8 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
 fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     """Link using MSVC toolchain (link.exe or lld-link)."""
     var msvc_config: MsvcConfig = MsvcConfig.default()
+    if native_tool_strict_requested_v1():
+        msvc_config.link_exe = native_tool_strict_resolve_v1("linker")?
     msvc_config.debug = config.debug
     val link_arch = _windows_link_arch(config)
     if link_arch == "aarch64":

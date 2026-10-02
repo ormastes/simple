@@ -1,0 +1,156 @@
+# Executes the production manager loop with a counting process port. No OS
+# child is created; these are dispatch-policy tests, not containment evidence.
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.main.{builder_cli_run_locked_v1}
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1, BuildResultV1,
+    builder_task_identity_v1}
+use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode_v1,
+    builder_manager_decode_v1}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.io.file_ops.{file_atomic_write, file_read, file_hash_sha256}
+use app.io.dir_ops.{dir_create_all}
+use app.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1}
+
+var failure_dispatch_spawns: i64 = 0
+var failure_dispatch_mode: text = "unknown"
+var failure_dispatch_waits: [text] = []
+var failure_dispatch_roots: [text] = []
+var failure_dispatch_identity: text = ""
+
+fn failure_dispatch_spawn(program: text, digest: text, args: [text], directory: text) -> Result<i64, text>:
+    failure_dispatch_spawns = failure_dispatch_spawns + 1
+    failure_dispatch_roots = failure_dispatch_roots.push(args[4])
+    if failure_dispatch_mode == "collect-error":
+        expect(file_atomic_write(args[4] + "/compiler.reaped", failure_dispatch_identity + "\nlocal")).to_equal(true)
+        expect(file_atomic_write(args[4] + "/capacity.settled", builder_capacity_settlement_encode_v1(
+            BuilderCapacitySettlementV1(failure_dispatch_identity, "local", "windows-job-settled")))).to_equal(true)
+        expect(file_atomic_write(args[4] + "/result.sdn", "malformed retained result")).to_equal(true)
+    Ok(77 + failure_dispatch_spawns)
+
+fn failure_dispatch_wait(token: i64, timeout_ms: i64) -> Result<i64, text>:
+    failure_dispatch_waits = failure_dispatch_waits.push(str(token) + ":" + str(timeout_ms))
+    if failure_dispatch_mode == "collect-error": return Ok(1)
+    Err("injected observation failure")
+
+fn failure_dispatch_terminate(token: i64) -> Result<bool, text>:
+    Err("injected unknown cleanup remains owned")
+
+fn failure_dispatch_directory(path: text) -> bool:
+    path != ""
+
+fn failure_dispatch_fixture(name: text, retained_status: text, slots: i64 = 1) -> (BuildRunV1, BuilderCliV1):
+    val root = cwd().replace("\\", "/") + "/build/failure-dispatch-" + str(getpid()) + "-" + name
+    val source = root + "/source"
+    val state_root = root + "/state"
+    expect(dir_create_all(source)).to_equal(true)
+    expect(dir_create_all(state_root + "/receipts")).to_equal(true)
+    expect(dir_create_all(root + "/output")).to_equal(true)
+    val image = source + "/producer"
+    expect(file_atomic_write(image, "counting-port-image\n")).to_equal(true)
+    val digest = file_hash_sha256(image)
+    var tasks: [BuildTaskV1] = []
+    for id in ["first", "independent", "last"]:
+        tasks = tasks.push(BuildTaskV1(id: id, attempt: 1, phase: "module",
+            producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+            dependencies: [], program: image, args: [], inputs: [], outputs: ["out.bin"],
+            cache_key: digest, timeout_ms: 1000, memory_limit_bytes: 1048576, links: []))
+    val run = BuildRunV1(tasks: tasks, hosts: [BuildHostV1(id: "local", transport: "local",
+        endpoint: "", workspace: root, worker_program: image, worker_digest: digest, slots: slots)],
+        keep_going: true, max_attempts: 1)
+    if retained_status != "":
+        var state = builder_manager_start(run)
+        state.statuses[0] = "FAILED"
+        state.host_ids[0] = "local"
+        expect(file_atomic_write(state_root + "/journal.sdn", builder_manager_encode_v1(state))).to_equal(true)
+        if retained_status != "missing":
+            val receipt = BuildResultV1(task_id: "first", attempt: 1,
+                identity_digest: builder_task_identity_v1(tasks[0]), host_id: "local",
+                status: retained_status, exit_code: 1, outputs: [],
+                cache_hits: -1, cache_misses: -1, cache_stores: -1)
+            expect(builder_write_result_v1(state_root + "/receipts/first.sdn", receipt)).to_equal(true)
+            if name == "qualified-replay":
+                val attempt = state_root + "/attempts/first/1/local"
+                expect(dir_create_all(attempt + "/work")).to_equal(true)
+                expect(builder_write_result_v1(attempt + "/result.sdn", receipt)).to_equal(true)
+                expect(file_atomic_write(attempt + "/compiler.reaped", receipt.identity_digest + "\nlocal")).to_equal(true)
+                expect(file_atomic_write(attempt + "/capacity.settled", builder_capacity_settlement_encode_v1(
+                    BuilderCapacitySettlementV1(receipt.identity_digest, "local", "windows-job-settled")))).to_equal(true)
+    val config = BuilderCliV1(command: "run", manifest: "", state: state_root,
+        source_root: source, output_root: root + "/output", request: "", attempt_root: "", host: "", error: "")
+    (run, config)
+
+fn failure_dispatch_port() -> BuilderProcessPortV1:
+    BuilderProcessPortV1(failure_dispatch_spawn, failure_dispatch_wait,
+        failure_dispatch_terminate, failure_dispatch_directory)
+
+fn failure_dispatch_reset(mode: text):
+    failure_dispatch_mode = mode
+    failure_dispatch_spawns = 0
+    failure_dispatch_waits = []
+    failure_dispatch_roots = []
+
+describe "manager does not dispatch after unknown authority":
+    it "rejects missing, crashed and unproven retained failure before independent dispatch":
+        for status in ["missing", "CRASHED", "ERROR"]:
+            val (run, config) = failure_dispatch_fixture(status, status)
+            failure_dispatch_reset("unknown")
+            expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+            expect(failure_dispatch_spawns).to_equal(0)
+            match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
+                Ok(restored): expect(restored.statuses[1]).to_equal("PENDING")
+                Err(reason): expect(reason).to_equal("valid retained journal")
+
+    it "keeps the uncertain first attempt owned and never dispatches the second":
+        val (run, config) = failure_dispatch_fixture("poll", "")
+        failure_dispatch_reset("unknown")
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(failure_dispatch_spawns).to_equal(1)
+        match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
+            Ok(restored):
+                expect(restored.statuses[0]).to_equal("RUNNING")
+                expect(restored.statuses[1]).to_equal("PENDING")
+                expect(restored.host_ids[0]).to_equal("local")
+            Err(reason): expect(reason).to_equal("valid unresolved ownership journal")
+
+    it "admits exact ERROR1 replay and reaches an independent dispatch":
+        val (run, config) = failure_dispatch_fixture("qualified-replay", "ERROR")
+        failure_dispatch_reset("unknown")
+        # The newly launched independent child is intentionally uncertain;
+        # exit2 comes from that child, after the retained ERROR1 was admitted.
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(failure_dispatch_spawns).to_equal(1)
+        expect(failure_dispatch_roots[0]).to_contain("/independent/1/local")
+        expect(failure_dispatch_waits.contains("78:1")).to_equal(true)
+        expect(failure_dispatch_waits.contains("78:30000")).to_equal(true)
+
+    it "aborts collection failure after reaching real collect and keeps the next task pending":
+        val (run, config) = failure_dispatch_fixture("collect-error", "")
+        failure_dispatch_reset("collect-error")
+        failure_dispatch_identity = builder_task_identity_v1(run.tasks[0])
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(failure_dispatch_spawns).to_equal(1)
+        expect(failure_dispatch_waits.contains("78:1")).to_equal(true)
+        expect(failure_dispatch_waits.contains("78:30000")).to_equal(true)
+        expect(file_read(failure_dispatch_roots[0] + "/cancel.request")).to_equal("cancel\n")
+        match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
+            Ok(restored):
+                expect(restored.statuses[0]).to_equal("UNRESOLVED")
+                expect(restored.statuses[1]).to_equal("PENDING")
+            Err(reason): expect(reason).to_equal("valid unresolved collection journal")
+
+    it "requests bounded cleanup for every owned uncertain attempt before any third dispatch":
+        val (run, config) = failure_dispatch_fixture("two-owned", "", 2)
+        failure_dispatch_reset("unknown")
+        expect(builder_cli_run_locked_v1(run, config, failure_dispatch_port())).to_equal(2)
+        expect(failure_dispatch_spawns).to_equal(2)
+        for token in [78, 79]:
+            expect(failure_dispatch_waits.contains(str(token) + ":30000")).to_equal(true)
+        for root in failure_dispatch_roots:
+            expect(file_read(root + "/cancel.request")).to_equal("cancel\n")
+        match builder_manager_decode_v1(run, file_read(config.state + "/journal.sdn")):
+            Ok(restored): expect(restored.statuses[2]).to_equal("PENDING")
+            Err(reason): expect(reason).to_equal("valid retained ownership journal")

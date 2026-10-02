@@ -1,0 +1,33 @@
+# Request composition tests only. Actual cross-host admission remains UNRUN.
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.managed_suite_environment.{managed_suite_environment_request_v1}
+
+fn suite_environment_value_v1(values: [(text, text)], key: text) -> text:
+    for pair in values:
+        if pair.0 == key: return pair.1
+    "missing"
+
+describe "managed suite canonical environment request":
+    it "binds both backends on Linux and Windows without runtime object shadows":
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        for root in ["/owned", "D:/owned"]:
+            for backend in ["llvm", "cranelift"]:
+                match managed_suite_environment_request_v1(backend, root + "/source",
+                        root + "/source.snapshot", digest, root + "/runtime",
+                        root + "/runtime.snapshot", digest, root + "/tools", digest):
+                    Ok(values):
+                        expect(suite_environment_value_v1(values, "SIMPLE_PROJECT_ROOT")).to_equal(root + "/source")
+                        expect(suite_environment_value_v1(values, "SIMPLE_MANAGED_NATIVE_TOOLS")).to_equal("1")
+                        expect(suite_environment_value_v1(values, "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH")).to_equal(root + "/tools")
+                        expect(suite_environment_value_v1(values, "SIMPLE_RT_OBJ_CACHE")).to_equal("0")
+                        expect(suite_environment_value_v1(values, "SIMPLE_RUNTIME_LIB")).to_equal("")
+                    Err(reason): expect(reason).to_equal("valid managed environment request")
+
+    it "rejects unspecified backend and ambient relative authorities":
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(managed_suite_environment_request_v1("auto", "/source", "/snapshot",
+            digest, "/runtime", "/runtime.snapshot", digest, "/tools", digest).is_err()).to_equal(true)
+        expect(managed_suite_environment_request_v1("llvm", "source", "/snapshot",
+            digest, "/runtime", "/runtime.snapshot", digest, "/tools", digest).is_err()).to_equal(true)
+        expect(managed_suite_environment_request_v1("llvm", "/source", "/snapshot",
+            digest, "/runtime", "/runtime.snapshot", digest, "/tools", "unknown").is_err()).to_equal(true)

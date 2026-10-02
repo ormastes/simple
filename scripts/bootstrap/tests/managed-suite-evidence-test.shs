@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-suite-evidence.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+for kind in stdout stderr invocations; do
+  printf '%s evidence\n' "$kind" >"$tmp/$kind.log"
+  printf '%s_sha256=%s\n' "$kind" "$(sha256sum "$tmp/$kind.log" | cut -d ' ' -f 1)" >>"$tmp/result.env"
+done
+check() { sh "$script_root/lib/managed-suite-evidence.shs" "$tmp/result.env" "$tmp"; }
+check
+for kind in stdout stderr invocations; do
+  mv "$tmp/$kind.log" "$tmp/saved"
+  if check; then echo "FAIL missing $kind" >&2; exit 1; fi
+  printf 'tampered\n' >"$tmp/$kind.log"
+  if check; then echo "FAIL tampered $kind" >&2; exit 1; fi
+  mv "$tmp/saved" "$tmp/$kind.log"
+done
+: >"$tmp/invocations.log"
+empty_sha=$(sha256sum "$tmp/invocations.log" | cut -d ' ' -f 1)
+sed "s/^invocations_sha256=.*/invocations_sha256=$empty_sha/" "$tmp/result.env" >"$tmp/empty.env"
+mv "$tmp/empty.env" "$tmp/result.env"
+if check; then echo 'FAIL empty invocation evidence' >&2; exit 1; fi
+echo 'PASS: all published suite logs are required and hash-bound; empty invocation evidence rejected'

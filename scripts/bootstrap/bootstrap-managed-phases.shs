@@ -1,0 +1,121 @@
+#!/bin/sh
+# Pin the complete phase-driver closure, then enter the compiled two-lane owner.
+set -eu
+die() { echo "managed-phases: $*" >&2; exit 2; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+root= source= inventory= builder= emitter= template= cap= reserve= threads= disk= floor= poll= lifetime=
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+for arg in "$@"; do
+  case "$arg" in
+    --root=*) root=${arg#*=} ;; --source-root=*) source=${arg#*=} ;;
+    --source-inventory=*) inventory=${arg#*=} ;; --builder-program=*) builder=${arg#*=} ;;
+    --manifest-program=*) emitter=${arg#*=} ;; --template=*) template=${arg#*=} ;;
+    --memory-bytes=*) cap=${arg#*=} ;; --reserve-bytes=*) reserve=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;; --estimated-group-disk-bytes=*) disk=${arg#*=} ;;
+    --minimum-free-disk-bytes=*) floor=${arg#*=} ;; --poll-ms=*) poll=${arg#*=} ;;
+    --lifetime-ms=*) lifetime=${arg#*=} ;;
+  esac
+done
+for path in "$root" "$source" "$inventory" "$builder" "$emitter" "$template"; do
+  case "$path" in /*|[A-Za-z]:/*) ;; *) die "absolute admitted inputs required" ;; esac
+done
+for number in "$cap" "$reserve" "$threads" "$disk" "$floor" "$poll" "$lifetime"; do
+  case "$number" in ''|0|0*|*[!0-9]*) die "positive resource bounds required" ;; esac
+done
+overhead=268435456
+[ "$cap" -gt "$overhead" ] || die "phase cap cannot hold manager overhead"
+inner_cap=$((cap - overhead))
+aggregate=$((cap * 2 + overhead))
+phase_state="$root/parallel"
+stage="$root/driver-inputs"
+[ ! -L "$stage" ] && [ ! -L "$phase_state" ] || die "phase state cannot be a symlink"
+mkdir -p "$stage/.managed" || die "private driver staging unavailable"
+publish_exact() {
+  if [ -e "$2" ]; then
+    regular "$2" && cmp -s "$1" "$2" || die "retained launch input differs: $2"
+    rm -f "$1"
+  else
+    mv "$1" "$2" || die "launch input publication failed"
+  fi
+}
+candidate_inventory="$stage/.managed/source.inventory.candidate.$$"
+# Only the driver closure is copied here. The frozen compiler/test tree stays
+# at its admitted source authority and is staged by each owned inner task.
+awk '/^scripts\/bootstrap\// || /^scripts\/check\/lib\// {print}' "$inventory" >"$candidate_inventory"
+printf '%s\n' VERSION release/version.sdn src/app/cli/bootstrap_identity.spl >>"$candidate_inventory"
+LC_ALL=C sort -u "$candidate_inventory" >"$candidate_inventory.sorted"
+mv "$candidate_inventory.sorted" "$candidate_inventory"
+while IFS= read -r relative; do
+  case "$relative" in VERSION|release/version.sdn) original="$repo/$relative" ;; *) original="$source/$relative" ;; esac
+  regular "$original" || die "driver input is missing or symlinked: $relative"
+  mkdir -p "$stage/$(dirname -- "$relative")" || die "driver input directory failed"
+  before=$(sha "$original")
+  if [ -e "$stage/$relative" ]; then
+    regular "$stage/$relative" && [ "$(sha "$stage/$relative")" = "$before" ] || die "retained driver input changed"
+  else
+    cp -p "$original" "$stage/$relative" || die "driver input copy failed"
+  fi
+  [ "$(sha "$original")" = "$before" ] && [ "$(sha "$stage/$relative")" = "$before" ] || die "driver input changed during copy"
+done <"$candidate_inventory"
+shell=$(command -v sh) || die "shell unavailable"
+case "$shell" in /*|[A-Za-z]:/*) ;; *) die "shell path is not absolute" ;; esac
+regular "$shell" || die "shell must be a regular executable"
+shell_sha=$(sha "$shell")
+# Quote every original argument as data. No command substitution or eval.
+quote() { printf "'"; printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
+for phase in phase3 phase4; do
+  command="$stage/.managed/$phase.shs.candidate.$$"
+  {
+    printf '#!/bin/sh\nset -eu\nexec '
+    quote "$shell"
+    printf ' "$PWD/scripts/bootstrap/bootstrap-phase4-grouped.shs"'
+    for arg in "$@"; do
+      case "$arg" in --memory-bytes=*) arg="--memory-bytes=$inner_cap" ;; esac
+      printf ' '; quote "$arg"
+    done
+    printf ' '; quote "--phase-only=$phase"
+    printf ' '; quote "--phase-output=phase-output/$phase/completion.env"
+    printf '\n'
+  } >"$command" || die "phase command construction failed"
+  publish_exact "$command" "$stage/.managed/$phase.shs"
+  printf '.managed/%s.shs\n' "$phase" >>"$candidate_inventory"
+done
+LC_ALL=C sort "$candidate_inventory" >"$candidate_inventory.sorted"
+rm -f "$candidate_inventory"
+publish_exact "$candidate_inventory.sorted" "$stage/.managed/source.inventory"
+: >"$stage/.managed/source.links.candidate.$$"
+publish_exact "$stage/.managed/source.links.candidate.$$" "$stage/.managed/source.links"
+driver_bytes=$(perl -e 'my $r=shift; my $n=0; while (<>) {chomp; my $s=-s "$r/$_"; defined($s) or die "missing driver input\n"; $n+=$s;} print "$n\n"' "$stage" "$stage/.managed/source.inventory")
+compiler_bytes=$(perl -e 'my $r=shift; my $n=0; while (<>) {chomp; my $s=-s "$r/$_"; defined($s) or die "missing compiler input\n"; $n+=$s;} print "$n\n"' "$source" "$inventory")
+# Charge nested compiler staging as well as the small outer driver closure.
+source_bytes=$((driver_bytes + compiler_bytes))
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) commit=1 ;; Linux*) commit=0 ;; *) die "unsupported admission host" ;; esac
+policy="$root/phase-policy.sdn"
+host_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null) || die "CPU ceiling unavailable"
+case "$host_cpus" in ''|0|*[!0-9]*) die "CPU ceiling invalid" ;; esac
+cpu_ceiling=$((threads * 2))
+[ "$cpu_ceiling" -le "$host_cpus" ] || cpu_ceiling=$host_cpus
+printf '%s\n' SIMPLE-MANAGED-PHASE-POLICY-1 "$aggregate" "$cap" "$overhead" "$reserve" "$floor" "$cpu_ceiling" "$commit" \
+  "$cap" "$source_bytes" "$disk" "$threads" "$cap" "$source_bytes" "$disk" "$threads" >"$policy.candidate.$$"
+publish_exact "$policy.candidate.$$" "$policy"
+# This receipt pins the shell executable and every sourced file through the
+# two generated task manifests. The compiled owner alone admits resources.
+# Parent lifetime includes capacity waiting. Each task's effective deadline
+# is min(its 24h generic limit, remaining parent lease); expiry cannot reset it.
+sh "$stage/scripts/bootstrap/lib/managed-phase-launch.shs" \
+  "--builder=$builder" "--builder-sha256=$(sha "$builder")" \
+  "--emitter=$emitter" "--emitter-sha256=$(sha "$emitter")" \
+  "--template=$template" "--template-sha256=$(sha "$template")" \
+  "--shell=$shell" "--shell-sha256=$shell_sha" \
+  "--stage-root=$stage" "--inventory=$stage/.managed/source.inventory" "--links=$stage/.managed/source.links" \
+  "--root=$phase_state" --phase3-command=.managed/phase3.shs --phase4-command=.managed/phase4.shs \
+  "--phase3-memory-bytes=$cap" "--phase4-memory-bytes=$cap" \
+  "--policy=$policy" "--policy-sha256=$(sha "$policy")" "--poll-ms=$poll" "--lifetime-ms=$lifetime" || {
+    code=$?
+    echo "managed-phases: aggregate owner exit=$code; retained authority and children require typed recovery" >&2
+    exit "$code"
+  }
+# Success means the aggregate owner verified results and reaped both trees.
+# Re-admit every inner output below; shell outcome markers confer no authority.
+"$shell" "$stage/scripts/bootstrap/bootstrap-phase4-grouped.shs" "$@" --finalize-only

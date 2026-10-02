@@ -46,8 +46,9 @@ image_field() { bootstrap_stage3_manifest_value "$1" "$image_receipt"; }
   [ "$(image_field index_program)" = "$index_program" ] &&
   [ "$(image_field index_sha256)" = "$(hash_file "$index_program")" ] \
   || die "compiled manager images differ from sealed image receipt"
-[ "$(field format)" = SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4 ] &&
+[ "$(field format)" = SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-5 ] &&
   [ "$(field status)" = PASS ] &&
+  [ "$(field binary_count)" = 14 ] && [ "$(field suite_count)" = 6 ] &&
   [ "$(field phase3_status)" = PASS ] &&
   [ "$(field phase4_status)" = PASS ] \
   || die "both independent phases must report PASS"
@@ -67,10 +68,11 @@ case "$excluded_count" in ''|*[!0-9]*|0[0-9]*) die "excluded inventory count inv
   || die "V3 module role ledger or policy differs"
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
 for backend in llvm cranelift; do
-  for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+  for binary in bootstrap full-cli interpreter mcp lsp test-runner phase3-bootstrap; do
     case "$binary" in
       bootstrap) task_phase=phase4; output="bin/simple_bootstrap$exe_suffix" ;;
       full-cli) task_phase=phase4; output="bin/simple$exe_suffix" ;;
+      interpreter) task_phase=phase4; output="bin/simple_interpreter$exe_suffix" ;;
       mcp) task_phase=phase4; output="bin/simple_mcp_server$exe_suffix" ;;
       lsp) task_phase=phase4; output="bin/simple_lsp_mcp_server$exe_suffix" ;;
       test-runner) task_phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
@@ -92,6 +94,44 @@ for backend in llvm cranelift; do
     "$builder_program" verify --manifest "$manifest" --state "$job_root/state" \
       --source-root "$source_root" --output-root "$job_root" >/dev/null \
       || die "$key compiled manager verification failed"
+  done
+done
+aggregate_evidence=$(sh "$(dirname -- "$0")/lib/managed-phase-evidence.shs" \
+  "$root" "$builder_program" "$(field phase_admission_poll_ms)" "$(field phase_admission_lifetime_ms)") || die "aggregate phase authority rejected"
+while IFS='=' read -r key value; do
+  [ "$(field "$key")" = "$value" ] || die "aggregate phase evidence differs: $key"
+done <<EOF
+$aggregate_evidence
+EOF
+for key in source_authority_sha256 runtime_snapshot_sha256 tool_authority_sha256; do
+  expected=$(field "$key") || die "$key absent"
+  digest "$expected" && [ "$expected" = "$(image_field "$key")" ] || die "$key differs from manager image authority"
+done
+for backend in llvm cranelift; do
+  for suite in compiler loader interpreter; do
+    job="$root/phase4/tests/$backend/$suite"
+    result="$job/suite/result.env"
+    manager_receipt="$job/state/receipts/test-$suite-$backend.sdn"
+    regular "$result" && regular "$manager_receipt" && regular "$job/manifest.sdn" || die "$backend/$suite evidence missing"
+    [ "$(hash_file "$result")" = "$(field "phase4_${backend}_test_${suite}_result_sha256")" ] &&
+      [ "$(hash_file "$manager_receipt")" = "$(field "phase4_${backend}_test_${suite}_manager_receipt_sha256")" ] || die "$backend/$suite evidence digest differs"
+    suite_field() { bootstrap_stage3_manifest_value "$1" "$result"; }
+    [ "$(suite_field format)" = SIMPLE-MANAGED-PHASE4-SUITE-1 ] &&
+      [ "$(suite_field suite)" = "$suite" ] && [ "$(suite_field backend)" = "$backend" ] &&
+      [ "$(suite_field status)" = PASS ] && [ "$(suite_field expected)" = 3 ] &&
+      [ "$(suite_field total)" = 3 ] && [ "$(suite_field passed)" = 3 ] &&
+      [ "$(suite_field failed)" = 0 ] && [ "$(suite_field exit_code)" = 0 ] || die "$backend/$suite lacks all three successful scenarios"
+    [ "$(suite_field cli_sha256)" = "$(field "phase4_${backend}_full-cli")" ] &&
+      [ "$(suite_field interpreter_sha256)" = "$(field "phase4_${backend}_interpreter")" ] || die "$backend/$suite used other tools"
+    spec="$source_root/test/03_system/app/bootstrap_builder/feature/phase4_${suite}_acceptance_spec.spl"
+    regular "$spec" && [ "$(suite_field spec_sha256)" = "$(hash_file "$spec")" ] || die "$backend/$suite used another spec"
+    for key in source_authority_sha256 runtime_snapshot_sha256 tool_authority_sha256; do
+      [ "$(suite_field "$key")" = "$(field "$key")" ] || die "$backend/$suite authority differs"
+    done
+    digest "$(suite_field environment_identity)" || die "$backend/$suite environment binding absent"
+    sh "$(dirname -- "$0")/lib/managed-suite-evidence.shs" "$result" "$job/suite" || die "$backend/$suite published logs missing or changed"
+    "$builder_program" verify --manifest "$job/manifest.sdn" --state "$job/state" \
+      --source-root "$source_root" --output-root "$job" >/dev/null || die "$backend/$suite compiled manager verification failed"
   done
 done
 for task_phase in phase3 phase4; do

@@ -2403,7 +2403,41 @@ bootstrap_stage3_tool_requested_path() {
             lld-link) bootstrap_stage3_requested_tool=${CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER:-${LD:-lld-link}} ;;
             llvm-ar) bootstrap_stage3_requested_tool=${AR:-llvm-ar} ;;
             llvm-ranlib) bootstrap_stage3_requested_tool=${RANLIB:-llvm-ranlib} ;;
+            llc|llvm-as|opt|llvm-nm)
+                # Projection admission chooses once; strict compiler consumers
+                # use only these exact bytes, without repeating discovery.
+                for bootstrap_stage3_llvm_dir in "${SIMPLE_LLVM_BIN:-}" \
+                    "${LLVM_SYS_231_PREFIX:+$LLVM_SYS_231_PREFIX/bin}" \
+                    "${SIMPLE_LLVM_WIN_ROOT_23:+$SIMPLE_LLVM_WIN_ROOT_23/bin}"; do
+                    [ -n "$bootstrap_stage3_llvm_dir" ] || continue
+                    for bootstrap_stage3_llvm_suffix in -20 -19 -18 -17 -16 ''; do
+                        for bootstrap_stage3_llvm_exe in '' .exe; do
+                            bootstrap_stage3_llvm_candidate="$bootstrap_stage3_llvm_dir/$bootstrap_stage3_requested_name$bootstrap_stage3_llvm_suffix$bootstrap_stage3_llvm_exe"
+                            if [ -f "$bootstrap_stage3_llvm_candidate" ]; then
+                                case "$bootstrap_stage3_llvm_candidate" in
+                                    [A-Za-z]:[\\/]*) cygpath -u "$bootstrap_stage3_llvm_candidate" ;;
+                                    *) printf '%s\n' "$bootstrap_stage3_llvm_candidate" ;;
+                                esac
+                                return $?
+                            fi
+                        done
+                    done
+                done
+                for bootstrap_stage3_llvm_suffix in -20 -19 -18 -17 -16 ''; do
+                    if command -v "$bootstrap_stage3_requested_name$bootstrap_stage3_llvm_suffix" >/dev/null 2>&1; then
+                        command -v "$bootstrap_stage3_requested_name$bootstrap_stage3_llvm_suffix"
+                        return $?
+                    fi
+                done
+                return 1 ;;
         esac
+        if [ "${SIMPLE_MANAGED_NATIVE_TOOLS:-}" = 1 ]; then
+            case "$bootstrap_stage3_requested_name" in
+                ld) bootstrap_stage3_requested_tool=${LD:-ld} ;;
+                ar) bootstrap_stage3_requested_tool=${AR:-ar} ;;
+                ranlib) bootstrap_stage3_requested_tool=${RANLIB:-ranlib} ;;
+            esac
+        fi
         case "$bootstrap_stage3_requested_tool" in
             [A-Za-z]:[\\/]*)
                 bootstrap_stage3_requested_tool=$(cygpath -u "$bootstrap_stage3_requested_tool") || return 1 ;;
@@ -2427,6 +2461,25 @@ bootstrap_stage3_tool_authority_snapshot() (
     : >"$bootstrap_stage3_tool_tmp" || return 1
     printf 'PATH=%s\n' "$bootstrap_stage3_tool_path" \
         >>"$bootstrap_stage3_tool_tmp" || return 1
+    bootstrap_stage3_managed_llvm_tools=
+    case "${SIMPLE_MANAGED_NATIVE_TOOLS:-}" in
+        '') ;;
+        1)
+            bootstrap_stage3_managed_llvm_tools='llc llvm-as opt llvm-nm'
+            printf 'managed-native-tools-format=1\n' >>"$bootstrap_stage3_tool_tmp" || return 1
+            for bootstrap_stage3_managed_env in \
+                "INCLUDE=${INCLUDE:-}" "LIB=${LIB:-}" "LIBPATH=${LIBPATH:-}" \
+                "LIBRARY_PATH=${LIBRARY_PATH:-}" \
+                "SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI:-}" \
+                "SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR:-}"; do
+                case "$bootstrap_stage3_managed_env" in *'|'*|*'
+'*) return 1;; esac
+                printf 'managed-tool-env=%s|value=%s\n' \
+                    "${bootstrap_stage3_managed_env%%=*}" "${bootstrap_stage3_managed_env#*=}" \
+                    >>"$bootstrap_stage3_tool_tmp" || return 1
+            done ;;
+        *) return 1 ;;
+    esac
     bootstrap_stage3_tool_old_ifs=$IFS
     IFS=:
     for bootstrap_stage3_tool_dir in $bootstrap_stage3_tool_path; do
@@ -2500,7 +2553,7 @@ bootstrap_stage3_tool_authority_snapshot() (
     fi
     for bootstrap_stage3_tool_name in \
         $bootstrap_stage3_portable_authority_tools \
-        cargo rustc "$bootstrap_stage3_tool_c_name" $bootstrap_stage3_tool_archive_tools sh env perl sed file cmp \
+        cargo rustc "$bootstrap_stage3_tool_c_name" $bootstrap_stage3_tool_archive_tools $bootstrap_stage3_managed_llvm_tools sh env perl sed file cmp \
         "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
@@ -2567,6 +2620,30 @@ bootstrap_stage3_tool_authority_snapshot() (
             "$bootstrap_stage3_tool_version_status" \
             "$bootstrap_stage3_tool_version" "$bootstrap_stage3_tool_arch" \
             >>"$bootstrap_stage3_tool_tmp" || return 1
+        if [ "${SIMPLE_MANAGED_NATIVE_TOOLS:-}" = 1 ]; then
+            bootstrap_stage3_managed_role=
+            case "$bootstrap_stage3_tool_name" in
+                "$bootstrap_stage3_tool_c_name") bootstrap_stage3_managed_role=cc ;;
+                ld|lld-link) bootstrap_stage3_managed_role=linker ;;
+                ar|llvm-ar) bootstrap_stage3_managed_role=ar ;;
+                ranlib|llvm-ranlib) bootstrap_stage3_managed_role=ranlib ;;
+                llvm-nm) bootstrap_stage3_managed_role=nm ;;
+                llc|llvm-as|opt) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
+            esac
+            if [ -n "$bootstrap_stage3_managed_role" ]; then
+                [ "$bootstrap_stage3_tool_version_status" -eq 0 ] || return 1
+                bootstrap_stage3_managed_native_path=$bootstrap_stage3_tool_canonical
+                case "$(bootstrap_stage3_host_platform)" in
+                    *windows*) bootstrap_stage3_managed_native_path=$(cygpath -m "$bootstrap_stage3_tool_canonical") || return 1 ;;
+                esac
+                case "$bootstrap_stage3_managed_native_path" in *'|'*|*'
+'*) return 1;; esac
+                printf 'managed-tool=%s|path=%s|sha256=%s\n' \
+                    "$bootstrap_stage3_managed_role" "$bootstrap_stage3_managed_native_path" \
+                    "$(bootstrap_stage3_hash_file "$bootstrap_stage3_tool_canonical")" \
+                    >>"$bootstrap_stage3_tool_tmp" || return 1
+            fi
+        fi
         if [ "$bootstrap_stage3_tool_name" = rustc ]; then
             printf '%s\n' "$bootstrap_stage3_rust_authority" \
                 >>"$bootstrap_stage3_tool_tmp" || return 1

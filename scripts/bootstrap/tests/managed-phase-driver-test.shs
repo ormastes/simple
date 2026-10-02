@@ -1,0 +1,70 @@
+#!/bin/sh
+# Tests real command construction/staging/replay with a launch spy; no native
+# capacity or compiler success is inferred from this shell-only fixture.
+set -eu
+scripts=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase-driver.XXXXXX")
+case "$tmp" in "${TMPDIR:-/tmp}"/simple-phase-driver.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+repo="$tmp/repo"
+source="$tmp/source"
+mkdir -p "$repo/scripts/bootstrap" "$repo/release" "$source/scripts/bootstrap/lib" "$source/scripts/check/lib" "$source/src/app/cli"
+cp "$scripts/bootstrap-managed-phases.shs" "$repo/scripts/bootstrap/"
+printf 'version\n' >"$repo/VERSION"
+printf 'authority\n' >"$repo/release/version.sdn"
+printf 'identity\n' >"$source/src/app/cli/bootstrap_identity.spl"
+printf 'pinned sourced library\n' >"$source/scripts/check/lib/closure.shs"
+cat >"$source/scripts/bootstrap/bootstrap-phase4-grouped.shs" <<'SH'
+#!/bin/sh
+set -eu
+root= phase= memory= sentinel= finalize=0
+for arg in "$@"; do
+  case "$arg" in
+    --root=*) root=${arg#*=} ;; --phase-only=*) phase=${arg#*=} ;;
+    --memory-bytes=*) memory=${arg#*=} ;; --sentinel=*) sentinel=${arg#*=} ;;
+    --finalize-only) finalize=1 ;;
+  esac
+done
+[ "$sentinel" = "$EXPECTED_SENTINEL" ] || exit 71
+[ -f "$PWD/scripts/check/lib/closure.shs" ] || [ "$finalize" = 1 ] || exit 72
+if [ "$finalize" = 1 ]; then
+  [ -f "$root/phase3/done" ] && [ -f "$root/phase4/done" ] || exit 73
+  printf 'finalized\n' >>"$root/events"
+else
+  [ "$memory" = 805306368 ] || exit 74
+  mkdir -p "$root/$phase"
+  printf 'done\n' >"$root/$phase/done"
+  printf '%s\n' "$phase" >>"$root/events"
+fi
+SH
+cat >"$source/scripts/bootstrap/lib/managed-phase-launch.shs" <<'SH'
+#!/bin/sh
+set -eu
+for arg in "$@"; do
+  case "$arg" in --stage-root=*) stage=${arg#*=} ;; --shell=*) shell=${arg#*=} ;; esac
+done
+for phase in phase3 phase4; do
+  grep -Fx ".managed/$phase.shs" "$stage/.managed/source.inventory" >/dev/null
+  (cd "$stage"; "$shell" "$stage/.managed/$phase.shs")
+done
+SH
+printf '%s\n' scripts/bootstrap/bootstrap-phase4-grouped.shs scripts/bootstrap/lib/managed-phase-launch.shs scripts/check/lib/closure.shs src/app/cli/bootstrap_identity.spl >"$source/inventory"
+printf 'pinned fake image\n' >"$tmp/image"
+EXPECTED_SENTINEL='spaces apostrophe '\'' and literal $(do-not-run) `do-not-run` $HOME'
+export EXPECTED_SENTINEL
+run() {
+  sh "$repo/scripts/bootstrap/bootstrap-managed-phases.shs" \
+    "--root=$tmp/run" "--source-root=$source" "--source-inventory=$source/inventory" \
+    "--builder-program=$tmp/image" "--manifest-program=$tmp/image" "--template=$tmp/image" \
+    --memory-bytes=1073741824 --reserve-bytes=1073741824 --threads=1 \
+    --estimated-group-disk-bytes=1048576 --minimum-free-disk-bytes=1048576 \
+    --poll-ms=10 --lifetime-ms=1000 "--sentinel=$EXPECTED_SENTINEL"
+}
+run
+[ "$(cat "$tmp/run/events")" = "$(printf 'phase3\nphase4\nfinalized')" ]
+run
+[ "$(wc -l <"$tmp/run/events" | tr -d ' ')" -eq 6 ]
+printf 'changed library\n' >"$source/scripts/check/lib/closure.shs"
+if run >"$tmp/rejected.log" 2>&1; then echo 'FAIL changed retained closure admitted' >&2; exit 1; fi
+[ "$(wc -l <"$tmp/run/events" | tr -d ' ')" -eq 6 ]
+echo 'PASS: staged driver closure, literal argv, private phase entry, parent finalization and immutable resume; native owner untested'

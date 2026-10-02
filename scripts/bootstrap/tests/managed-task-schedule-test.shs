@@ -1,0 +1,121 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-managed-schedule.XXXXXX")
+case "$tmp" in "${TMPDIR:-/tmp}"/simple-managed-schedule.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+events="$tmp/events"
+statuses="$tmp/statuses"
+exe_suffix=
+llvm_index_config=phase4-llvm.config
+cranelift_index_config=phase4-cranelift.config
+phase3_llvm_index_config=phase3-llvm.config
+phase3_cranelift_index_config=phase3-cranelift.config
+build_binary() {
+  printf 'binary %s %s %s\n' "$4" "$5" "$1" >>"$events"
+  if [ "$4:$5:$1" = phase4:llvm:bootstrap ]; then return "$binary_code"; fi
+  if [ "$4:$5:$1" = phase4:llvm:full-cli ]; then return "${cli_code:-0}"; fi
+}
+run_test_suite() {
+  printf 'suite %s %s\n' "$1" "$2" >>"$events"
+  if [ "$1:$2" = llvm:compiler ]; then return "${suite_code:-0}"; fi
+}
+build_index() {
+  printf 'index %s %s\n' "$1" "$2" >>"$events"
+  if [ "${stop_after_index:-0}" = 1 ]; then : >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE"; fi
+  if [ "$1:$2" = phase4:llvm ]; then return "$index_code"; fi
+}
+prepare_backend() {
+  printf 'prepare %s %s\n' "$1" "$2" >>"$events"
+  return "$prepare_code"
+}
+run_module_backend() {
+  printf 'group %s %s\n' "$1" "$2" >>"$events"
+  if [ "$1:$2" = phase3:llvm ]; then return "$group_code"; fi
+}
+. "$script_root/lib/managed-task-schedule.shs"
+run_case() {
+  : >"$events"
+  : >"$statuses"
+  code=0
+  (managed_dispatch_tasks) >"$tmp/stdout" 2>"$tmp/stderr" || code=$?
+  [ "$code" -eq "$1" ] || { echo "FAIL: expected $1, got $code" >&2; exit 1; }
+}
+
+# Independent compiler failures still account for the complete required DAG.
+binary_code=1 index_code=1 prepare_code=0 group_code=1
+run_case 1
+[ "$(grep -c '^binary ' "$events")" -eq 14 ]
+[ "$(grep -c '^suite ' "$events")" -eq 6 ]
+[ "$(grep -c '^index ' "$events")" -eq 4 ]
+[ "$(grep -c '^group ' "$events")" -eq 3 ]
+[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 28 ]
+grep -q '^phase4_llvm_bootstrap[[:space:]]FAILED[[:space:]]1$' "$statuses"
+grep -q '^phase4_llvm_group[[:space:]]BLOCKED[[:space:]]1$' "$statuses"
+grep -q '^phase3_llvm_group[[:space:]]FAILED[[:space:]]1$' "$statuses"
+grep -q '^phase3_cranelift_group[[:space:]]SUCCEEDED[[:space:]]0$' "$statuses"
+! grep -q '^group phase4 llvm$' "$events"
+
+# Admission, resource, containment and signal errors are never continuation.
+for binary_code in 2 74 124 130 137 143; do
+  index_code=0 group_code=0
+  run_case 2
+  [ "$(wc -l <"$events" | tr -d ' ')" -eq 1 ]
+  grep -q '^phase4_llvm_bootstrap[[:space:]]ABORTED' "$statuses"
+done
+binary_code=0 index_code=2
+run_case 2
+[ "$(grep -c '^binary ' "$events")" -eq 6 ]
+! grep -q '^group ' "$events"
+
+index_code=0 prepare_code=1
+run_case 2
+! grep -q '^group ' "$events"
+
+prepare_code=0 group_code=2
+run_case 2
+! grep -q 'phase3 cranelift' "$events"
+
+# Owner markers prevent the first launch; do not confuse these with failures.
+group_code=0
+SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE="$tmp/owner.stop"
+: >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE"
+run_case 143
+[ ! -s "$events" ]
+unset SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE
+SIMPLE_MODULE_SYSTEMIC_STOP_FILE="$tmp/systemic.stop"
+: >"$SIMPLE_MODULE_SYSTEMIC_STOP_FILE"
+run_case 74
+[ ! -s "$events" ]
+unset SIMPLE_MODULE_SYSTEMIC_STOP_FILE
+
+# A stop arriving while the index ran must prevent group preparation too.
+SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE="$tmp/after-index.stop"
+stop_after_index=1
+run_case 143
+! grep -q '^prepare ' "$events"
+unset SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE stop_after_index
+
+cli_code=1
+run_case 1
+[ "$(grep -c '^suite ' "$events")" -eq 3 ]
+[ "$(grep -c 'test_.*BLOCKED' "$statuses")" -eq 3 ]
+grep -q '^phase3_cranelift_group[[:space:]]SUCCEEDED' "$statuses"
+cli_code=0 suite_code=1
+run_case 1
+[ "$(grep -c '^suite ' "$events")" -eq 6 ]
+grep -q '^phase4_llvm_test_compiler[[:space:]]FAILED' "$statuses"
+suite_code=2
+run_case 2
+[ "$(grep -c '^suite ' "$events")" -eq 1 ]
+! grep -q '^index ' "$events"
+suite_code=0
+run_case 0
+[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 28 ]
+[ "$(grep -c 'SUCCEEDED' "$statuses")" -eq 28 ]
+# Phase entry must not dispatch work from its sibling lane.
+: >"$events"; : >"$statuses"
+managed_dispatch_phase phase3
+[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 6 ]
+! grep -q 'phase4' "$events"
+echo 'PASS: fourteen binaries, six suites and four index/group lanes; qualified failures continue, authority and owner stops abort'

@@ -1,0 +1,70 @@
+# Suite adapters consume canonical native tool/runtime owners, not receipt
+# text hashes as a substitute for the bytes their children will execute.
+use app.io.env_ops.{env_get, env_set}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_absolute_v1,
+    native_tool_digest_valid_v1, native_tool_strict_child_environment_v1,
+    native_tool_strict_environment_validate_v1, native_tool_strict_revalidate_v1}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{
+    native_runtime_strict_prepare_v1, native_runtime_strict_revalidate_v1}
+
+pub struct ManagedSuiteEnvironmentV1:
+    assignments: [(text, text)]
+    identity: text
+
+pub fn managed_suite_environment_request_v1(backend: text, source: text,
+        source_authority: text, source_digest: text, runtime_root: text,
+        runtime_snapshot: text, runtime_digest: text,
+        tools: text, tools_digest: text) -> Result<[(text, text)], text>:
+    if backend != "llvm" and backend != "cranelift": return Err("unsupported managed suite backend")
+    for path in [source, source_authority, runtime_root, runtime_snapshot, tools]:
+        if not native_tool_absolute_v1(path): return Err("managed suite authority path is not absolute")
+    for digest in [source_digest, runtime_digest, tools_digest]:
+        if not native_tool_digest_valid_v1(digest): return Err("managed suite authority digest invalid")
+    Ok([
+        ("SIMPLE_MANAGED_NATIVE_TOOLS", "1"),
+        ("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH", tools),
+        ("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256", tools_digest),
+        ("SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH", runtime_root),
+        ("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH", runtime_snapshot),
+        ("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256", runtime_digest),
+        ("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT", source),
+        ("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH", source_authority),
+        ("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256", source_digest),
+        ("SIMPLE_PROJECT_ROOT", source), ("SIMPLE_RUNTIME_PATH", runtime_root),
+        ("SIMPLE_NATIVE_RUNTIME_BUNDLE", "core-c-bootstrap"),
+        ("SIMPLE_RUNTIME_LIB", ""), ("SIMPLE_NATIVE_BUILD_RUNTIME_PATH", ""),
+        ("SIMPLE_RT_OBJ_CACHE", "0"), ("SIMPLE_RT_OBJ_CACHE_DIR", ""),
+        ("SIMPLE_BOOTSTRAP", ""), ("SIMPLE_NATIVE_BUILD_RUST", "0")])
+
+fn managed_suite_environment_install_v1(assignments: [(text, text)]) -> Result<bool, text>:
+    for pair in assignments:
+        if not env_set(pair.0, pair.1) or env_get(pair.0) != pair.1:
+            return Err("managed suite environment installation failed: " + pair.0)
+    Ok(true)
+
+pub fn managed_suite_environment_prepare_v1(backend: text, source: text,
+        source_authority: text, source_digest: text, runtime_root: text,
+        runtime_snapshot: text, runtime_digest: text,
+        tools: text, tools_digest: text) -> Result<ManagedSuiteEnvironmentV1, text>:
+    var assignments = managed_suite_environment_request_v1(backend, source,
+        source_authority, source_digest, runtime_root, runtime_snapshot,
+        runtime_digest, tools, tools_digest)?
+    val _selectors = managed_suite_environment_install_v1(assignments)?
+    val tool_environment = native_tool_strict_child_environment_v1()?
+    val _tools = managed_suite_environment_install_v1(tool_environment)?
+    for pair in tool_environment: assignments = assignments.push(pair)
+    val _tool_authority = native_tool_strict_environment_validate_v1()?
+    val _runtime_authority = native_runtime_strict_prepare_v1(backend)?
+    var canonical = "managed-suite-environment-v1\n" + backend + "\n"
+    for pair in assignments:
+        canonical = canonical + str(pair.0.len()) + ":" + pair.0 +
+            str(pair.1.len()) + ":" + pair.1 + "\n"
+    Ok(ManagedSuiteEnvironmentV1(assignments, sha256_text(canonical)))
+
+pub fn managed_suite_environment_revalidate_v1(binding: ManagedSuiteEnvironmentV1) -> Result<bool, text>:
+    for pair in binding.assignments:
+        if env_get(pair.0) != pair.1:
+            return Err("managed suite environment changed: " + pair.0)
+    val _tools = native_tool_strict_revalidate_v1()?
+    native_runtime_strict_revalidate_v1(true)

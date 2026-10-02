@@ -1,0 +1,81 @@
+#!/bin/sh
+# Emit two pinned generic phase tasks and enter the compiled aggregate owner.
+# The caller supplies a private, source-authority-verified complete closure.
+# Each command must invoke the STAGED phase wrapper and all sourced helpers;
+# this adapter never blesses a partial script inventory or mutable repo paths.
+set -eu
+die() { echo "managed-phase-launch: $*" >&2; exit 2; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+builder= builder_sha= emitter= emitter_sha= template= template_sha= shell= shell_sha=
+stage= inventory= links= root= command3= command4= cap3= cap4= policy= policy_sha=
+poll_ms= lifetime_ms=
+for arg in "$@"; do
+  case "$arg" in
+    --builder=*) builder=${arg#*=} ;; --builder-sha256=*) builder_sha=${arg#*=} ;;
+    --emitter=*) emitter=${arg#*=} ;; --emitter-sha256=*) emitter_sha=${arg#*=} ;;
+    --template=*) template=${arg#*=} ;; --template-sha256=*) template_sha=${arg#*=} ;;
+    --shell=*) shell=${arg#*=} ;; --shell-sha256=*) shell_sha=${arg#*=} ;;
+    --stage-root=*) stage=${arg#*=} ;; --inventory=*) inventory=${arg#*=} ;;
+    --links=*) links=${arg#*=} ;; --root=*) root=${arg#*=} ;;
+    --phase3-command=*) command3=${arg#*=} ;; --phase4-command=*) command4=${arg#*=} ;;
+    --phase3-memory-bytes=*) cap3=${arg#*=} ;; --phase4-memory-bytes=*) cap4=${arg#*=} ;;
+    --policy=*) policy=${arg#*=} ;; --policy-sha256=*) policy_sha=${arg#*=} ;;
+    --poll-ms=*) poll_ms=${arg#*=} ;; --lifetime-ms=*) lifetime_ms=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$builder" "$emitter" "$template" "$shell" "$policy" "$inventory" "$links"; do
+  absolute "$path" && regular "$path" || die "absolute regular pinned input required"
+done
+for path in "$stage" "$root"; do absolute "$path" || die "absolute state/staging root required"; done
+[ -d "$stage" ] && [ ! -L "$stage" ] || die "private staging directory unavailable"
+case "$root/" in "$stage/"*) die "state overlaps staged source" ;; esac
+case "$stage/" in "$root/"*) die "staged source overlaps state" ;; esac
+for digest in "$builder_sha" "$emitter_sha" "$template_sha" "$shell_sha" "$policy_sha"; do
+  case "$digest" in ''|*[!0-9a-f]*) die "canonical input digest required" ;; esac
+  [ "${#digest}" -eq 64 ] || die "canonical input digest required"
+done
+[ "$(sha "$builder")" = "$builder_sha" ] && [ "$(sha "$emitter")" = "$emitter_sha" ] &&
+  [ "$(sha "$template")" = "$template_sha" ] && [ "$(sha "$shell")" = "$shell_sha" ] &&
+  [ "$(sha "$policy")" = "$policy_sha" ] || die "pinned launch input changed"
+for n in "$cap3" "$cap4" "$poll_ms" "$lifetime_ms"; do
+  case "$n" in ''|0|0*|*[!0-9]*) die "canonical positive policy values required" ;; esac
+done
+case "$inventory" in "$stage"/*) inventory_relative=${inventory#"$stage"/} ;; *) die "inventory outside staged closure" ;; esac
+case "$links" in "$stage"/*) links_relative=${links#"$stage"/} ;; *) die "links outside staged closure" ;; esac
+for command in "$command3" "$command4"; do
+  case "$command" in ''|/*|*:*|*\\*|../*|*/../*|*/..|./*|*/./*|*/.) die "invalid phase command path" ;; esac
+  regular "$stage/$command" || die "phase command not staged"
+  grep -Fx -- "$command" "$inventory" >/dev/null || die "phase command missing from pinned input closure"
+done
+[ "$command3" != "$command4" ] || die "phase commands must be isolated"
+mkdir -p "$root/manifests" || die "manifest root unavailable"
+pending=
+trap '[ -z "$pending" ] || rm -f -- "$pending"' EXIT HUP INT TERM
+for phase in phase3 phase4; do
+  case "$phase" in phase3) command=$command3 cap=$cap3 ;; phase4) command=$command4 cap=$cap4 ;; esac
+  manifest="$root/manifests/$phase.sdn"
+  pending="$manifest.pending.$$"
+  [ ! -e "$pending" ] || die "manifest scratch already exists"
+  "$emitter" --job-from-inventory "$template" "$shell" "$stage" \
+    "managed-$phase" "$phase" "phase-output/$phase/completion.env" "$inventory_relative" \
+    --memory-limit-bytes "$cap" --links-inventory "$links_relative" \
+    --manifest "$pending" -- "@WORK@/$command" || die "phase manifest emission refused"
+  if [ -e "$manifest" ]; then
+    regular "$manifest" && cmp -s "$pending" "$manifest" \
+      || die "retained phase manifest differs; preserve its owner/cache and admit a new identity"
+    rm -f -- "$pending"
+  else
+    mv "$pending" "$manifest" || die "cannot publish phase manifest"
+  fi
+  pending=
+done
+# Policy and generated task caps are compared again by the compiled owner.
+# Physical/commit/disk/CPU decisions and process leases never come from shell.
+exec "$builder" managed-phases \
+  --phase3-manifest "$root/manifests/phase3.sdn" --phase3-sha256 "$(sha "$root/manifests/phase3.sdn")" \
+  --phase4-manifest "$root/manifests/phase4.sdn" --phase4-sha256 "$(sha "$root/manifests/phase4.sdn")" \
+  --policy "$policy" --policy-sha256 "$policy_sha" --source-root "$stage" \
+  --state "$root/owner" --poll-ms "$poll_ms" --lifetime-ms "$lifetime_ms"

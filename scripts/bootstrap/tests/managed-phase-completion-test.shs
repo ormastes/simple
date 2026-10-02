@@ -20,6 +20,7 @@ group_program="$tmp/group.sh"
 index_program="$tmp/index.sh"
 cat >"$builder_program" <<'SH'
 #!/bin/sh
+[ "$1" != managed-phases-verify ] || exit 0
 [ "$1" = verify ] || exit 2
 shift
 manifest= state= source= output=
@@ -54,10 +55,18 @@ printf 'format=SIMPLE-PHASE2-MANAGER-IMAGES-1\nbuilder_program=%s\nbuilder_sha25
   "$group_program" "$(sha256sum "$group_program" | cut -d ' ' -f 1)" \
   "$index_program" "$(sha256sum "$index_program" | cut -d ' ' -f 1)" \
   >"$image_receipt"
+printf 'source_authority_sha256=%s\nruntime_snapshot_sha256=%s\ntool_authority_sha256=%s\n' \
+  "$producer_sha" "$producer_sha" "$producer_sha" >>"$image_receipt"
 receipt="$root/completion.env"
+mkdir -p "$root/parallel/manifests" "$root/parallel/owner/phase3" "$root/parallel/owner/phase4" "$root/driver-inputs"
+for path in phase-policy.sdn parallel/manifests/phase3.sdn parallel/manifests/phase4.sdn parallel/owner/phase3/result.sdn parallel/owner/phase4/result.sdn; do
+  printf 'fixture aggregate evidence\n' >"$root/$path"
+done
 {
-  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4' \
+  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-5' \
     'status=PASS' 'phase3_status=PASS' 'phase4_status=PASS' \
+    'binary_count=14' 'suite_count=6' \
+    "source_authority_sha256=$producer_sha" "runtime_snapshot_sha256=$producer_sha" "tool_authority_sha256=$producer_sha" \
     "producer_sha256=$producer_sha" \
     "module_inventory_sha256=$(sha256sum "$inventory" | cut -d ' ' -f 1)" \
     'module_inventory_count=1' 'phase3_module_inventory_count=1' \
@@ -65,12 +74,15 @@ receipt="$root/completion.env"
     "excluded_inventory_sha256=$(sha256sum "$excluded_inventory" | cut -d ' ' -f 1)" \
     'excluded_inventory_count=1' \
     "module_role_policy_sha256=$(sha256sum "$module_role_policy" | cut -d ' ' -f 1)"
+  printf 'phase_admission_poll_ms=1000\nphase_admission_lifetime_ms=6000\n'
+  sh "$script_root/lib/managed-phase-evidence.shs" "$root" "$builder_program" 1000 6000
   case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
   for backend in llvm cranelift; do
-    for binary in bootstrap full-cli mcp lsp test-runner phase3-bootstrap; do
+    for binary in bootstrap full-cli interpreter mcp lsp test-runner phase3-bootstrap; do
       case "$binary" in
         bootstrap) phase=phase4; output="bin/simple_bootstrap$exe_suffix" ;;
         full-cli) phase=phase4; output="bin/simple$exe_suffix" ;;
+        interpreter) phase=phase4; output="bin/simple_interpreter$exe_suffix" ;;
         mcp) phase=phase4; output="bin/simple_mcp_server$exe_suffix" ;;
         lsp) phase=phase4; output="bin/simple_lsp_mcp_server$exe_suffix" ;;
         test-runner) phase=phase4; output="bin/simple_test_runner$exe_suffix" ;;
@@ -84,6 +96,24 @@ receipt="$root/completion.env"
       printf '%s=%s\n' "${phase}_${backend}_${binary}" "$binary_sha"
       printf '%s=%s\n' "${phase}_${backend}_${binary}_manager_receipt_sha256" \
         "$(sha256sum "$job/state/receipts/$binary-$backend.sdn" | cut -d ' ' -f 1)"
+    done
+    for suite in compiler loader interpreter; do
+      job="$root/phase4/tests/$backend/$suite"
+      spec="$source_root/test/03_system/app/bootstrap_builder/feature/phase4_${suite}_acceptance_spec.spl"
+      mkdir -p "$job/suite" "$job/state/receipts" "$(dirname -- "$spec")"
+      printf 'fake test manager input for %s\n' "$suite" >"$spec"
+      printf 'manifest\n' >"$job/manifest.sdn"
+      printf 'terminal\n' >"$job/state/receipts/test-$suite-$backend.sdn"
+      printf 'format=SIMPLE-MANAGED-PHASE4-SUITE-1\nsuite=%s\nbackend=%s\nstatus=PASS\nexpected=3\ntotal=3\npassed=3\nfailed=0\nexit_code=0\ncli_sha256=%s\ninterpreter_sha256=%s\nspec_sha256=%s\nsource_authority_sha256=%s\nruntime_snapshot_sha256=%s\ntool_authority_sha256=%s\nstdout_sha256=%s\nstderr_sha256=%s\n' \
+        "$suite" "$backend" "$binary_sha" "$binary_sha" "$(sha256sum "$spec" | cut -d ' ' -f 1)" \
+        "$producer_sha" "$producer_sha" "$producer_sha" "$producer_sha" "$producer_sha" >"$job/suite/result.env"
+      for log in stdout stderr invocations; do
+        printf 'producer' >"$job/suite/$log.log"
+      done
+      printf 'invocations_sha256=%s\n' "$producer_sha" >>"$job/suite/result.env"
+      printf 'environment_identity=%s\n' "$producer_sha" >>"$job/suite/result.env"
+      printf 'phase4_%s_test_%s_result_sha256=%s\n' "$backend" "$suite" "$(sha256sum "$job/suite/result.env" | cut -d ' ' -f 1)"
+      printf 'phase4_%s_test_%s_manager_receipt_sha256=%s\n' "$backend" "$suite" "$(sha256sum "$job/state/receipts/test-$suite-$backend.sdn" | cut -d ' ' -f 1)"
     done
   done
   for phase in phase3 phase4; do
@@ -135,6 +165,24 @@ if verify >/dev/null 2>&1; then
 fi
 cp "$tmp/canonical-images" "$image_receipt"
 cp "$receipt" "$tmp/good"
+suite_result="$root/phase4/tests/llvm/interpreter/suite/result.env"
+cp "$suite_result" "$tmp/good-suite"
+for change in 'total=0' 'total=1' 'passed=2' 'failed=1' 'expected=1' "interpreter_sha256=$producer_sha"; do
+  key=${change%%=*}
+  sed "s/^$key=.*/$change/" "$tmp/good-suite" >"$suite_result"
+  changed_sha=$(sha256sum "$suite_result" | cut -d ' ' -f 1)
+  sed "s/^phase4_llvm_test_interpreter_result_sha256=.*/phase4_llvm_test_interpreter_result_sha256=$changed_sha/" "$tmp/good" >"$receipt"
+  if verify >/dev/null 2>&1; then echo "FAIL: incomplete/misbound suite admitted: $change" >&2; exit 1; fi
+done
+cp "$tmp/good-suite" "$suite_result"
+cp "$tmp/good" "$receipt"
+mv "$suite_result" "$tmp/missing-suite"
+if verify >/dev/null 2>&1; then echo 'FAIL: missing interpreter suite admitted' >&2; exit 1; fi
+mv "$tmp/missing-suite" "$suite_result"
+interpreter_output="$root/phase4/binaries/llvm/interpreter/bin/simple_interpreter$exe_suffix"
+mv "$interpreter_output" "$tmp/missing-interpreter"
+if verify >/dev/null 2>&1; then echo 'FAIL: missing interpreter binary admitted' >&2; exit 1; fi
+mv "$tmp/missing-interpreter" "$interpreter_output"
 mv "$excluded_inventory" "$tmp/excluded.saved"
 if verify >/dev/null 2>&1; then
   echo 'FAIL: missing excluded module ledger admitted' >&2; exit 1
@@ -214,4 +262,4 @@ cp "$tmp/provisional.run" "$receipt"
 if verify >/dev/null 2>&1; then
   echo 'FAIL: copied provisional final receipt admitted as canonical completion' >&2; exit 1
 fi
-echo 'PASS: independent Phase 3/4 index, group, and status proofs required'
+echo 'PASS: fourteen binaries, six nonvacuous bound suites, and four index/group proofs required'

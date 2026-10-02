@@ -18,6 +18,8 @@ use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_s
 use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target}
 use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -108,6 +110,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     Returns Ok(output_path) on success, Err(message) on failure.
     """
+    if native_tool_strict_requested_v1():
+        if (env_get("SIMPLE_LINK_OBJECTS") ?? "") != "":
+            return Err("managed native links do not admit ambient SIMPLE_LINK_OBJECTS")
+        if (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1":
+            return Err("managed suite tool authority does not admit Stage4 capsule construction")
     val trace = llvm_link_trace_enabled()
     if trace:
         print "[LLVM-LINK] enter link_llvm_native"
@@ -186,6 +193,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     val bootstrap_native_all = _llvm_bootstrap_native_all_path(
         stage4_requested, runtime_path, runtime_bundle,
         hosted_plan.requires_cross, hosted_os, _is_mingw())
+    if native_tool_strict_requested_v1() and bootstrap_native_all != "":
+        val _admitted = native_runtime_strict_archives_v1(runtime_path, [bootstrap_native_all])?
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld

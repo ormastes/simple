@@ -1,0 +1,79 @@
+use std.spec.*
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_snapshot_decode_v1,
+    native_runtime_provider_pins_v1, native_runtime_relative_valid_v1}
+use std.io_runtime.{cwd, process_run}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use compiler.backend.backend.llvm_backend_tools.{extract_symbols_nm_output_v1}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
+
+fn runtime_pin_digest_v1() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "Managed runtime authority":
+    it "admits generated origin rpath but refuses direct and indirect driver overrides":
+        expect(managed_native_extra_args_error_v1([])).to_equal("")
+        expect(managed_native_extra_args_error_v1(["-rpath", "$ORIGIN"])).to_equal("")
+        for args in [["@override.rsp"], ["--config=override.cfg"], ["--config", "override.cfg"], ["--ld-path=/ambient/ld"], ["-Xclang", "--ld-path=/ambient/ld"], ["-Wl,@override.rsp"], ["/clang:--ld-path=C:/ambient/link.exe"], ["-rpath", "$ORIGIN", "@override.rsp"]]:
+            expect(managed_native_extra_args_error_v1(args) != "").to_equal(true)
+        expect(managed_native_input_args_error_v1(["/tmp/user.o", "C:/owned/runtime.obj"])).to_equal("")
+        for input in ["@object-response.o", "--config=provider.o", "/clang:--ld-path=C:/ambient/link.exe"]:
+            expect(managed_native_input_args_error_v1([input]) != "").to_equal(true)
+
+    it "preserves defined nm symbols and excludes undefined or weak initializers":
+        val symbols = extract_symbols_nm_output_v1("0000 T __module_init_main\n U __module_init_missing\n0000 W __module_init_weak\n")
+        expect(symbols.len()).to_equal(1)
+        expect(symbols[0].name).to_equal("__module_init_main")
+
+    it "decodes canonical runtime and source rows without changing provider identity":
+        val digest = runtime_pin_digest_v1()
+        val runtime = native_runtime_snapshot_decode_v1(
+            "file-hex:6c696273696d706c655f6e61746976655f616c6c2e61:0:" + digest + "\n", false)
+        expect(runtime.is_ok()).to_equal(true)
+        expect(runtime.unwrap()[0].relative).to_equal("libsimple_native_all.a")
+        val source = native_runtime_snapshot_decode_v1(
+            "file-hex:21:7372632f72756e74696d652f72756e74696d652e63:0:" + digest + "\n", true)
+        expect(source.is_ok()).to_equal(true)
+        expect(source.unwrap()[0].relative).to_equal("src/runtime/runtime.c")
+
+    it "rejects duplicate providers, invalid digests and altered source path lengths":
+        val row = "file-hex:6c696273696d706c655f6e61746976655f616c6c2e61:0:" + runtime_pin_digest_v1() + "\n"
+        expect(native_runtime_snapshot_decode_v1(row + row, false).is_err()).to_equal(true)
+        expect(native_runtime_snapshot_decode_v1(row.replace(runtime_pin_digest_v1(), "bad"), false).is_err()).to_equal(true)
+        expect(native_runtime_snapshot_decode_v1("file-hex:20:7372632f72756e74696d652f72756e74696d652e63:0:" + runtime_pin_digest_v1() + "\n", true).is_err()).to_equal(true)
+
+    it "selects only exact sealed runtime paths on Unix and Windows":
+        val pins = native_runtime_snapshot_decode_v1(
+            "file-hex:6c696273696d706c655f6e61746976655f616c6c2e61:0:" + runtime_pin_digest_v1() + "\n", false).unwrap()
+        for root in ["/sealed/runtime", "D:/sealed/runtime"]:
+            val path = root + "/libsimple_native_all.a"
+            expect(native_runtime_provider_pins_v1(root, root, [path], pins).is_ok()).to_equal(true)
+            expect(native_runtime_provider_pins_v1(root, "/ambient/runtime", [path], pins).is_err()).to_equal(true)
+            expect(native_runtime_provider_pins_v1(root, root, [root + "/libsimple_compiler.a"], pins).is_err()).to_equal(true)
+            expect(native_runtime_provider_pins_v1(root, root, [root + "-other/libsimple_native_all.a"], pins).is_err()).to_equal(true)
+            expect(native_runtime_provider_pins_v1(root, root, [], pins).is_err()).to_equal(true)
+
+    it "refuses path traversal and source link aliases":
+        for path in ["../runtime.a", "/runtime.a", "deps//runtime.a", "deps/./runtime.a", "deps/../runtime.a", "C:/runtime.a"]:
+            expect(native_runtime_relative_valid_v1(path)).to_equal(false)
+        expect(native_runtime_snapshot_decode_v1(
+            "link-hex:7372632f72756e74696d652f72756e74696d652e63:61:61:" + runtime_pin_digest_v1() + "\n", true).is_err()).to_equal(true)
+
+    it "requires the exact generated object set and rejects later replacement":
+        val binary = env_get("SIMPLE_BINARY")
+        expect(binary != "").to_equal(true)
+        val root = if env_get("SIMPLE_PROJECT_ROOT") != "": env_get("SIMPLE_PROJECT_ROOT") else: cwd()
+        val fixture = root + "/test/fixtures/compiler/native_runtime_mutation.spl"
+        val (stdout, stderr, code) = process_run(binary, ["run", fixture])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("strict-runtime-mutation-sticky")
+
+    it "does not fall back to ambient SIMPLE_CC when strict mode is invalid":
+        # Invalid admission is sticky by design; isolate it from the test
+        # runner's process-owned registry instead of adding a reset backdoor.
+        val binary = env_get("SIMPLE_BINARY")
+        expect(binary != "").to_equal(true)
+        val root = if env_get("SIMPLE_PROJECT_ROOT") != "": env_get("SIMPLE_PROJECT_ROOT") else: cwd()
+        val fixture = root + "/test/fixtures/compiler/native_runtime_invalid_tool.spl"
+        val (stdout, stderr, code) = process_run(binary, ["run", fixture])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("strict-ambient-cc-refused")

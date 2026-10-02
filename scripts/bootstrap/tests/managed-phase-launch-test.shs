@@ -1,0 +1,72 @@
+#!/bin/sh
+# Emitter/CLI spies only: production launch and native admission are UNRUN.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/managed-phase-launch.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/stage/.managed" "$tmp/tools"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/stage/.managed/phase3.shs"
+cp "$tmp/stage/.managed/phase3.shs" "$tmp/stage/.managed/phase4.shs"
+printf '.managed/phase3.shs\n.managed/phase4.shs\n' >"$tmp/stage/inputs.list"
+: >"$tmp/stage/links.list"
+printf 'fixture template\n' >"$tmp/template"
+printf 'fixture policy\n' >"$tmp/policy"
+export PHASE_TEST_LOG="$tmp/events"
+cat >"$tmp/tools/emitter" <<'SH'
+#!/bin/sh
+set -eu
+printf 'emit %s %s\n' "$5" "$6" >>"$PHASE_TEST_LOG"
+manifest=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --manifest ]; then manifest=$2; shift; fi
+  shift
+done
+[ -n "$manifest" ]
+printf 'test emitted manifest\n' >"$manifest"
+SH
+cat >"$tmp/tools/builder" <<'SH'
+#!/bin/sh
+set -eu
+[ "$1" = managed-phases ]
+printf 'dispatch %s\n' "$#" >>"$PHASE_TEST_LOG"
+SH
+chmod +x "$tmp/tools/emitter" "$tmp/tools/builder"
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+launch() {
+  sh "$base/lib/managed-phase-launch.shs" \
+    --builder="$tmp/tools/builder" --builder-sha256="$(sha "$tmp/tools/builder")" \
+    --emitter="$tmp/tools/emitter" --emitter-sha256="$(sha "$tmp/tools/emitter")" \
+    --template="$tmp/template" --template-sha256="$(sha "$tmp/template")" \
+    --shell="$tmp/tools/builder" --shell-sha256="$(sha "$tmp/tools/builder")" \
+    --stage-root="$tmp/stage" --inventory="$tmp/stage/inputs.list" --links="$tmp/stage/links.list" \
+    --root="$tmp/$1" --phase3-command=.managed/phase3.shs --phase4-command=.managed/phase4.shs \
+    --phase3-memory-bytes=6000000000 --phase4-memory-bytes=7000000000 \
+    --policy="$tmp/policy" --policy-sha256="$2" --poll-ms=1000 --lifetime-ms=60000
+}
+fail() { echo "FAIL: $*" >&2; exit 1; }
+launch valid "$(sha "$tmp/policy")"
+[ "$(grep -c '^emit ' "$PHASE_TEST_LOG")" -eq 2 ] || fail 'not exactly two isolated manifests'
+grep -q '^emit managed-phase3 phase3$' "$PHASE_TEST_LOG" || fail 'phase3 binding lost'
+grep -q '^emit managed-phase4 phase4$' "$PHASE_TEST_LOG" || fail 'phase4 binding lost'
+grep -q '^dispatch 21$' "$PHASE_TEST_LOG" || fail 'wrong compiled owner invocation'
+
+: >"$PHASE_TEST_LOG"
+code=0
+launch stale 0000000000000000000000000000000000000000000000000000000000000000 >"$tmp/out" 2>"$tmp/err" || code=$?
+[ "$code" -eq 2 ] && [ ! -s "$PHASE_TEST_LOG" ] || fail 'stale pin executed emitter/owner'
+
+printf '.managed/phase3.shs\n' >"$tmp/stage/inputs.list"
+code=0
+launch missing "$(sha "$tmp/policy")" >"$tmp/out" 2>"$tmp/err" || code=$?
+[ "$code" -eq 2 ] && [ ! -s "$PHASE_TEST_LOG" ] || fail 'unstaged closure command admitted'
+
+printf '.managed/phase3.shs\n.managed/phase4.shs\n' >"$tmp/stage/inputs.list"
+launch valid "$(sha "$tmp/policy")"
+grep -q '^dispatch 21$' "$PHASE_TEST_LOG" || fail 'exact retained manifests could not resume'
+: >"$PHASE_TEST_LOG"
+printf 'different retained authority\n' >"$tmp/valid/manifests/phase3.sdn"
+code=0
+launch valid "$(sha "$tmp/policy")" >"$tmp/out" 2>"$tmp/err" || code=$?
+[ "$code" -eq 2 ] && ! grep -q '^dispatch ' "$PHASE_TEST_LOG" || fail 'changed prior manifest admitted'
+[ "$(cat "$tmp/valid/manifests/phase3.sdn")" = 'different retained authority' ] || fail 'prior manifest overwritten'
+echo 'PASS: pinned two-phase jobs resume exact manifests and reject drift/missing command; native dispatch UNRUN'

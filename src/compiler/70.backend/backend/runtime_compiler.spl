@@ -14,6 +14,9 @@ use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_source_dir_v1, native_runtime_strict_revalidate_v1,
+    native_runtime_strict_generated_bind_v1, native_runtime_strict_generated_release_v1}
 
 extern fn rt_path_absolute(path: text) -> text?
 
@@ -201,6 +204,10 @@ fn find_c_compiler() -> text:
     val plan = hosted_c_compiler_plan(target, host_os(), host_arch())
     if not plan.supported:
         return ""
+    if native_tool_strict_requested_v1():
+        match native_tool_strict_resolve_v1("cc"):
+            case Ok(path): return path
+            case Err(_): return ""
 
     # User override via env var, after target admission.
     val simple_cc = env_get_nullable("SIMPLE_CC")
@@ -403,6 +410,10 @@ fn find_runtime_source_dir() -> text:
     misses the tree entirely.
     Returns the path or empty string if not found.
     """
+    if native_tool_strict_requested_v1():
+        match native_runtime_strict_source_dir_v1():
+            case Ok(path): return path
+            case Err(_): return ""
     # Try SIMPLE_PROJECT_ROOT env var first so tests and callers can force
     # deterministic resolution even when cwd also contains src/runtime.
     val project_root = env_get_nullable("SIMPLE_PROJECT_ROOT") ?? ""
@@ -469,7 +480,7 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     when caching is unavailable or disabled (SIMPLE_RT_OBJ_CACHE=0), in which
     case the caller compiles exactly as before.
     """
-    if (env_get_nullable("SIMPLE_RT_OBJ_CACHE") ?? "") == "0":
+    if native_tool_strict_requested_v1() or (env_get_nullable("SIMPLE_RT_OBJ_CACHE") ?? "") == "0":
         return ""
     if _is_windows():
         return ""
@@ -570,13 +581,20 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     val trace = runtime_compile_trace_enabled()
     if trace:
         print "[RT-COMPILE] enter compile_runtime_objects"
-    val cc = if compiler != "": compiler else: find_c_compiler()
+    val cc = if native_tool_strict_requested_v1():
+        native_tool_strict_resolve_v1("cc")?
+    elif compiler != "": compiler
+    else: find_c_compiler()
+    if native_tool_strict_requested_v1() and compiler != "" and compiler != cc:
+        return Err("runtime C compiler differs from admitted tool")
     if trace:
         print "[RT-COMPILE] cc={cc}"
     if cc == "":
         return Err("No C compiler found. Install clang or gcc.")
 
-    val rt_dir = find_runtime_source_dir()
+    val rt_dir = if native_tool_strict_requested_v1():
+        native_runtime_strict_source_dir_v1()?
+    else: find_runtime_source_dir()
     if trace:
         print "[RT-COMPILE] rt_dir={rt_dir}"
     if rt_dir == "":
@@ -760,6 +778,14 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         var comp_err = ""
         var comp_code = 0
         if not cache_hit:
+            if native_tool_strict_requested_v1():
+                val checked = native_tool_strict_resolve_v1("cc")
+                if checked.is_err():
+                    cleanup_runtime_objects(objects)
+                    return Err(checked.unwrap_err())
+                if checked.unwrap() != cc:
+                    cleanup_runtime_objects(objects)
+                    return Err("runtime C compiler authority changed")
             val (run_out, run_err, run_code) = process_run(cc, comp_args)
             comp_out = run_out
             comp_err = run_err
@@ -797,10 +823,21 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
 
     if trace:
         print "[RT-COMPILE] returning Ok with {object_count} objects"
+    if native_tool_strict_requested_v1():
+        val checked = native_runtime_strict_revalidate_v1(true)
+        if checked.is_err():
+            cleanup_runtime_objects(objects)
+            return Err(checked.unwrap_err())
+        val generated = native_runtime_strict_generated_bind_v1(objects)
+        if generated.is_err():
+            cleanup_runtime_objects(objects)
+            return Err(generated.unwrap_err())
     Ok(objects)
 
 fn cleanup_runtime_objects(objects: [text]):
     """Remove temporary runtime object files."""
+    if native_tool_strict_requested_v1():
+        native_runtime_strict_generated_release_v1(objects)
     for obj in objects:
         file_delete(obj)
 

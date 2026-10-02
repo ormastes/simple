@@ -1,0 +1,125 @@
+#!/bin/sh
+# Test-only owners prove shell lifecycle/order, NOT native cap enforcement.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+. "$base/lib/managed-phase-parallel.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/managed-phase-parallel.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+managed_phase_owner_validate() { [ "$validate" -eq 0 ]; }
+managed_phase_owner_start() {
+  current=0
+  for p in phase3 phase4; do [ ! -f "$case_root/$p/active" ] || current=$((current + 1)); done
+  [ "$current" -lt "$capacity" ] || return 75
+  : >"$2/active"
+  printf 'start %s\n' "$1" >>"$case_root/events"
+  (
+    while [ ! -f "$2/go" ]; do sleep 0.01; done
+    : >"$2/done"
+  ) &
+  echo "$!" >"$2/pid"
+}
+managed_phase_owner_poll() {
+  [ "$abort_poll" -eq 0 ] || return 20
+  [ -f "$2/done" ] || return 0
+  if [ "$1" = phase3 ] && [ "$compiler_failure" -eq 1 ]; then return 11; fi
+  return 10
+}
+managed_phase_owner_cancel() {
+  printf 'cancel %s\n' "$1" >>"$case_root/events"
+  : >"$2/go"
+}
+managed_phase_owner_collect() {
+  [ ! -f "$2/pid" ] || wait "$(cat "$2/pid")"
+  [ "$collect_failure" -eq 0 ] || return 1
+  [ -f "$2/done" ] || return 1
+  : >"$2/collected"
+  printf 'collect %s\n' "$1" >>"$case_root/events"
+}
+managed_phase_owner_release() {
+  [ -f "$2/collected" ] || fail 'released without collected child'
+  rm -f "$2/active"
+  printf 'release %s\n' "$1" >>"$case_root/events"
+}
+managed_phase_owner_wait() {
+  for p in phase3 phase4; do
+    [ ! -f "$case_root/$p/active" ] || : >"$case_root/$p/go"
+  done
+  sleep 0.04
+}
+setup() {
+  case_root="$tmp/$1"
+  mkdir -p "$case_root"
+  : >"$case_root/events"
+  capacity=2 validate=0 abort_poll=0 compiler_failure=0 collect_failure=0
+}
+run() {
+  result=0
+  managed_parallel_dispatch "$case_root" "${2:-20}" 1 >"$case_root/stdout" 2>"$case_root/stderr" || result=$?
+  [ "$result" -eq "$1" ] || fail "expected $1 got $result"
+}
+
+setup overlap
+run 0
+[ "$(head -n 2 "$case_root/events" | tr '\n' '|')" = 'start phase3|start phase4|' ] || fail 'phases did not overlap'
+[ "$(grep -c '^release ' "$case_root/events")" -eq 2 ] || fail 'missing release'
+
+setup queued
+capacity=1
+run 0
+grep -q '^phase4[[:space:]]RESOURCE_WAIT$' "$case_root/dispatch.tsv" || fail 'capacity was not pending'
+[ "$(sed -n '4p' "$case_root/events")" = 'start phase4' ] || fail 'second phase started before first release'
+! grep -q 'FAILED' "$case_root/dispatch.tsv" || fail 'capacity became compiler failure'
+
+setup no_capacity
+capacity=0
+run 75
+[ ! -s "$case_root/events" ] || fail 'started without capacity'
+
+setup validation
+validate=1
+run 78
+[ ! -s "$case_root/events" ] || fail 'started without authority'
+
+setup failure
+compiler_failure=1
+run 1
+grep -q '^phase4[[:space:]]SUCCEEDED$' "$case_root/dispatch.tsv" || fail 'independent phase stopped'
+
+setup unknown_reap
+collect_failure=1
+run 2
+! grep -q '^release ' "$case_root/events" || fail 'unknown tree released capacity'
+grep -q 'OWNERSHIP_UNKNOWN' "$case_root/dispatch.tsv" || fail 'unknown ownership lost'
+
+setup owner_abort
+abort_poll=1
+run 2
+[ "$(grep -c '^cancel ' "$case_root/events")" -eq 2 ] || fail 'sibling not cancelled'
+[ "$(grep -c '^release ' "$case_root/events")" -eq 2 ] || fail 'cancelled trees not reaped'
+
+setup deadline
+run 2 1
+[ "$(grep -c '^cancel ' "$case_root/events")" -eq 2 ] || fail 'deadline leaked children'
+
+managed_dispatch_phase() {
+  [ "$statuses" = "$managed_phase_root/task-outcomes.tsv" ] || return 2
+  [ "$hashes" = "$managed_phase_root/binary-hashes.env" ] || return 2
+  [ "$scratch" = "$managed_phase_root/scratch" ] || return 2
+  printf '%s\n' "$1" >"$statuses"
+  printf '%s\n' "$1" >"$hashes"
+}
+setup private_files
+managed_phase_run phase3 "$case_root/phase3" &
+first=$!
+managed_phase_run phase4 "$case_root/phase4" &
+second=$!
+wait "$first" && wait "$second" || fail 'lane isolation failed'
+[ "$(cat "$case_root/phase3/task-outcomes.tsv")" = phase3 ] || fail 'phase3 overwritten'
+[ "$(cat "$case_root/phase4/binary-hashes.env")" = phase4 ] || fail 'phase4 overwritten'
+
+setup missing_owner
+unset -f managed_phase_owner_release
+run 78
+[ ! -s "$case_root/events" ] || fail 'missing owner launched a child'
+echo 'PASS: overlap, pending capacity, isolation, bounded cancellation and reap-before-release; native enforcement UNRUN'

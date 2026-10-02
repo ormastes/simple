@@ -1,0 +1,57 @@
+# Linux composition reuses the existing cgroup-aware capacity authority.
+use app.bootstrap_builder.main.{builder_cli_main_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1}
+use app.bootstrap_builder.native_group_linux_main.{native_group_linux_capacity_v1}
+use app.io.args_ops.{get_args}
+use app.io.dir_ops.{dir_create_all}
+use app.bootstrap_builder.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_cgroup_parent_acquire_v1,
+    linux_cgroup_parent_release_v1}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() > 1 and args[1] == "managed-phases-verify":
+        # Verification reads exact terminal receipts; it must neither acquire
+        # a cgroup parent nor sample admission capacity.
+        return builder_cli_main_v1(builder_process_portable_v1(),
+            Some(NativeGroupedCapacityV1(native_group_linux_capacity_v1)))
+    if args.len() < 2 or args[1] != "managed-phases":
+        return builder_cli_main_v1(builder_process_portable_v1())
+    if args.len() != 22: return 2
+    var state = ""
+    var pins = ""
+    var seen: {text: bool} = {}
+    var index = 2
+    while index < args.len():
+        val key = args[index]
+        if seen.has(key): return 2
+        seen[key] = true
+        if key == "--state": state = args[index + 1]
+        if key == "--phase3-sha256" or key == "--phase4-sha256" or key == "--policy-sha256":
+            if not builder_digest_valid_v1(args[index + 1]): return 2
+            pins = pins + key + "\n" + args[index + 1] + "\n"
+        index = index + 2
+    if not seen.has("--phase3-sha256") or not seen.has("--phase4-sha256") or
+            not seen.has("--policy-sha256") or not state.starts_with("/") or
+            state.contains("\0") or state.contains("\n") or
+            state.contains("/../") or state.ends_with("/.."):
+        return 2
+    if not dir_create_all(state): return 2
+    # The capacity probe requires its own delegated, empty measurement parent.
+    # Worker brokers acquire separate parents and retain their own exact leases.
+    # The common CLI verifies the full pinned manifests before any worker start.
+    val parent = match linux_cgroup_parent_acquire_v1(state, sha256_text(pins + state)):
+        Ok(value): value
+        Err(reason):
+            print "managed phases capacity admission: {reason}"
+            return 2
+    val code = builder_cli_main_v1(builder_process_portable_v1(),
+        Some(NativeGroupedCapacityV1(native_group_linux_capacity_v1)))
+    match linux_cgroup_parent_release_v1(parent):
+        Ok(_): pass
+        Err(reason):
+            print "managed phases capacity cleanup: {reason}"
+            return 2
+    code

@@ -1,0 +1,262 @@
+# Managed runtime inputs are projections of the existing sealed source/runtime
+# snapshots. Provider selection stays in the compiler; this owner only binds
+# the selected files. Legacy calls never enter this module's strict APIs.
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{NativePinnedArtifactV1,
+    native_pinned_artifact_open_v1, native_pinned_artifact_revalidate_v1,
+    native_tool_absolute_v1, native_tool_digest_valid_v1, native_tool_strict_resolve_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_promote}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.encoding.utf8.{text_byte_len}
+
+pub struct NativeRuntimePinV1:
+    relative: text
+    digest: text
+
+struct NativeRuntimeAuthorityV1:
+    identity: text
+    root: text
+    snapshot: NativePinnedArtifactV1
+    pins: [NativeRuntimePinV1]
+
+var _native_runtime_authorities_v1: [NativeRuntimeAuthorityV1] = []
+var _native_runtime_files_v1: [NativePinnedArtifactV1] = []
+var _native_runtime_failed_v1: bool = false
+var _native_runtime_generated_v1: [NativePinnedArtifactV1] = []
+
+fn native_runtime_hex_v1(encoded: text) -> Result<text, text>:
+    if encoded == "" or encoded.len() > 8192 or encoded.len() % 2 != 0:
+        return Err("managed runtime snapshot path encoding invalid")
+    var bytes: [u8] = []
+    var index = 0
+    while index < encoded.len():
+        var value: i64 = 0
+        for offset in 0..2:
+            val digit = encoded.byte_at(index + offset) as i64
+            val decoded = if digit >= 48 and digit <= 57: digit - 48 elif digit >= 97 and digit <= 102: digit - 87 else: -1
+            if decoded < 0: return Err("managed runtime snapshot hex invalid")
+            value = value * 16 + decoded
+        bytes.push(value.to_u8())
+        index = index + 2
+    validated_utf8_bytes_to_text_linear(bytes)
+
+pub fn native_runtime_relative_valid_v1(path: text) -> bool:
+    if path == "" or path.contains("\\") or path.contains(":") or
+            path.contains("\0") or path.contains("\r") or path.contains("\n"):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..": return false
+    true
+
+pub fn native_runtime_snapshot_decode_v1(payload: text, source: bool) -> Result<[NativeRuntimePinV1], text>:
+    if payload == "" or payload.len() > 67108864 or not payload.ends_with("\n") or
+            payload.contains("\r") or payload.contains("\0"):
+        return Err("managed runtime snapshot framing invalid")
+    var pins: [NativeRuntimePinV1] = []
+    var seen: Dict<text, bool> = {}
+    for row in payload.split("\n"):
+        if row == "": continue
+        val fields = row.split(":")
+        if source and fields[0] != "file-hex":
+            # The source authority admits links elsewhere, but runtime source
+            # dependencies must be regular files, never resolved link aliases.
+            if fields.len() > 1:
+                val relative = native_runtime_hex_v1(fields[1])?
+                if relative.starts_with("src/runtime/"):
+                    return Err("managed runtime source link is unsupported")
+            continue
+        val expected = if source: 5 else: 4
+        if fields.len() != expected or fields[0] != "file-hex":
+            return Err("managed runtime snapshot row invalid")
+        val path_index = if source: 2 else: 1
+        val relative = native_runtime_hex_v1(fields[path_index])?
+        if source and not relative.starts_with("src/runtime/"): continue
+        if not native_runtime_relative_valid_v1(relative) or seen.has(relative.lower()):
+            return Err("managed runtime snapshot path invalid or duplicated")
+        if source and (fields[1].to_i64() ?? -1) != text_byte_len(relative):
+            return Err("managed runtime source path length invalid")
+        val executable = fields[path_index + 1]
+        val digest = fields[path_index + 2]
+        if (executable != "0" and executable != "1") or not native_tool_digest_valid_v1(digest):
+            return Err("managed runtime snapshot metadata invalid")
+        seen[relative.lower()] = true
+        pins.push(NativeRuntimePinV1(relative, digest))
+    if pins.is_empty(): return Err("managed runtime snapshot has no runtime inputs")
+    Ok(pins)
+
+fn native_runtime_authority_v1(source: bool) -> Result<NativeRuntimeAuthorityV1, text>:
+    val result = native_runtime_authority_open_v1(source)
+    if result.is_err(): _native_runtime_failed_v1 = true
+    result
+
+fn native_runtime_binding_validate_v1(binding: NativePinnedArtifactV1, hash_bytes: bool) -> Result<bool, text>:
+    if _native_runtime_failed_v1: return Err("managed runtime authority previously invalidated")
+    val result = native_pinned_artifact_revalidate_v1(binding, hash_bytes)
+    if result.is_err(): _native_runtime_failed_v1 = true
+    result
+
+fn native_runtime_authority_open_v1(source: bool) -> Result<NativeRuntimeAuthorityV1, text>:
+    if _native_runtime_failed_v1: return Err("managed runtime authority previously invalidated")
+    # Validate strict mode and the canonical tool authority as part of admission.
+    val _cc = native_tool_strict_resolve_v1("cc")?
+    val root = if source: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT") else: env_get("SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH")
+    val path = if source: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH") else: env_get("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH")
+    val digest = if source: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256") else: env_get("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256")
+    if not native_tool_absolute_v1(root) or root.ends_with("/"):
+        return Err("managed runtime authority root invalid")
+    val configured = if source: env_get("SIMPLE_PROJECT_ROOT") else: env_get("SIMPLE_RUNTIME_PATH")
+    if configured != "" and configured != root:
+        return Err("ambient runtime root differs from admitted authority")
+    val identity = "{source}\n{root}\n{path}\n{digest}"
+    for authority in _native_runtime_authorities_v1:
+        if authority.identity.starts_with("{source}\n"):
+            if authority.identity != identity:
+                return Err("managed runtime authority changed within invocation")
+            val _unchanged = native_runtime_binding_validate_v1(authority.snapshot, false)?
+            return Ok(authority)
+    val snapshot = native_pinned_artifact_open_v1(path, digest)?
+    val payload = file_read_regular_no_follow_bounded(path, 67108864)?
+    val pins = native_runtime_snapshot_decode_v1(payload, source)?
+    val _unchanged = native_runtime_binding_validate_v1(snapshot, true)?
+    val authority = NativeRuntimeAuthorityV1(identity, root, snapshot, pins)
+    var authorities = _native_runtime_authorities_v1
+    authorities.push(authority)
+    if not transient_promote(authorities): return Err("managed runtime authority promotion failed")
+    _native_runtime_authorities_v1 = authorities
+    Ok(authority)
+
+fn native_runtime_pin_v1(authority: NativeRuntimeAuthorityV1, relative: text) -> Result<text, text>:
+    val result = native_runtime_pin_open_v1(authority, relative)
+    if result.is_err(): _native_runtime_failed_v1 = true
+    result
+
+fn native_runtime_pin_open_v1(authority: NativeRuntimeAuthorityV1, relative: text) -> Result<text, text>:
+    if _native_runtime_failed_v1: return Err("managed runtime authority previously invalidated")
+    val path = authority.root + "/" + relative
+    for binding in _native_runtime_files_v1:
+        if binding.path == path:
+            val _unchanged = native_runtime_binding_validate_v1(binding, false)?
+            return Ok(path)
+    for pin in authority.pins:
+        if pin.relative == relative:
+            val binding = native_pinned_artifact_open_v1(path, pin.digest)?
+            var files = _native_runtime_files_v1
+            files.push(binding)
+            if not transient_promote(files): return Err("managed runtime binding promotion failed")
+            _native_runtime_files_v1 = files
+            return Ok(path)
+    Err("runtime input absent from admitted snapshot: " + relative)
+
+pub fn native_runtime_strict_source_dir_v1() -> Result<text, text>:
+    val authority = native_runtime_authority_v1(true)?
+    # Includes nested headers and C include fragments, bound once per process.
+    for pin in authority.pins:
+        val _path = native_runtime_pin_v1(authority, pin.relative)?
+    val _runtime = native_runtime_pin_v1(authority, "src/runtime/runtime.c")?
+    Ok(authority.root + "/src/runtime")
+
+pub fn native_runtime_strict_root_v1() -> Result<text, text>:
+    val authority = native_runtime_authority_v1(false)?
+    Ok(authority.root)
+
+pub fn native_runtime_strict_prepare_v1(backend: text) -> Result<bool, text>:
+    if backend == "llvm":
+        val _source = native_runtime_strict_source_dir_v1()?
+    elif backend == "cranelift":
+        val authority = native_runtime_authority_v1(false)?
+        # Preflight every archived provider in the sealed root. The compiler's
+        # existing bundle selector still chooses the actual provider set.
+        var count = 0
+        for pin in authority.pins:
+            if pin.relative.ends_with(".a") or pin.relative.ends_with(".lib"):
+                val _path = native_runtime_pin_v1(authority, pin.relative)?
+                count = count + 1
+        if count == 0: return Err("managed runtime authority has no archived providers")
+    else:
+        return Err("managed runtime backend unsupported")
+    Ok(true)
+
+pub fn native_runtime_provider_pins_v1(root: text, runtime_dir: text,
+        inputs: [text], pins: [NativeRuntimePinV1]) -> Result<[NativeRuntimePinV1], text>:
+    if runtime_dir != root or not native_tool_absolute_v1(root) or inputs.is_empty():
+        return Err("runtime provider is not the exact admitted provider set")
+    var selected: [NativeRuntimePinV1] = []
+    for path in inputs:
+        val prefix = root + "/"
+        if not path.starts_with(prefix): return Err("runtime provider outside admitted authority")
+        val relative = path[prefix.len():]
+        if not native_runtime_relative_valid_v1(relative): return Err("runtime provider path invalid")
+        var found = false
+        for pin in pins:
+            if pin.relative == relative:
+                selected.push(pin)
+                found = true
+        if not found: return Err("runtime provider absent from admitted snapshot: " + relative)
+    Ok(selected)
+
+pub fn native_runtime_strict_archives_v1(runtime_dir: text, inputs: [text]) -> Result<[text], text>:
+    val authority = native_runtime_authority_v1(false)?
+    val selected = native_runtime_provider_pins_v1(authority.root, runtime_dir, inputs, authority.pins)?
+    for pin in selected:
+        val _path = native_runtime_pin_v1(authority, pin.relative)?
+    Ok(inputs)
+
+pub fn native_runtime_strict_generated_bind_v1(paths: [text]) -> Result<bool, text>:
+    if _native_runtime_failed_v1: return Err("managed runtime authority previously invalidated")
+    if paths.is_empty(): return Err("managed runtime generated object set is empty")
+    var bindings: [NativePinnedArtifactV1] = []
+    for path in paths:
+        val normalized = path.replace("\\", "/")
+        bindings.push(native_pinned_artifact_open_v1(normalized, file_hash_sha256(normalized))?)
+    if not transient_promote(bindings): return Err("managed runtime generated binding promotion failed")
+    _native_runtime_generated_v1 = bindings
+    Ok(true)
+
+pub fn native_runtime_strict_generated_inputs_v1(inputs: [text]) -> Result<bool, text>:
+    if _native_runtime_failed_v1: return Err("managed runtime authority previously invalidated")
+    if _native_runtime_generated_v1.is_empty():
+        return Err("managed runtime 'none' requires this invocation's compiled runtime objects")
+    for binding in _native_runtime_generated_v1:
+        var found = false
+        for input in inputs:
+            if input.replace("\\", "/") == binding.path: found = true
+        if not found: return Err("managed compiled runtime object omitted")
+        val _unchanged = native_runtime_binding_validate_v1(binding, false)?
+    Ok(true)
+
+pub fn native_runtime_strict_generated_release_v1(paths: [text]):
+    var retained: [NativePinnedArtifactV1] = []
+    for binding in _native_runtime_generated_v1:
+        var released = false
+        for path in paths:
+            if path.replace("\\", "/") == binding.path: released = true
+        if not released: retained.push(binding)
+    if not transient_promote(retained):
+        _native_runtime_failed_v1 = true
+        return
+    _native_runtime_generated_v1 = retained
+
+pub fn native_runtime_strict_revalidate_v1(hash_bytes: bool) -> Result<bool, text>:
+    if _native_runtime_failed_v1: return Err("managed runtime authority previously invalidated")
+    for authority in _native_runtime_authorities_v1:
+        val source = authority.identity.starts_with("true\n")
+        match native_runtime_authority_v1(source):
+            Ok(_): pass
+            Err(reason):
+                _native_runtime_failed_v1 = true
+                return Err(reason)
+        match native_pinned_artifact_revalidate_v1(authority.snapshot, hash_bytes):
+            Ok(_): pass
+            Err(reason):
+                _native_runtime_failed_v1 = true
+                return Err(reason)
+    for binding in _native_runtime_files_v1:
+        match native_pinned_artifact_revalidate_v1(binding, hash_bytes):
+            Ok(_): pass
+            Err(reason):
+                _native_runtime_failed_v1 = true
+                return Err(reason)
+    for binding in _native_runtime_generated_v1:
+        val _unchanged = native_runtime_binding_validate_v1(binding, hash_bytes)?
+    Ok(true)

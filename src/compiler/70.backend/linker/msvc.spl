@@ -5,6 +5,7 @@
 
 use std.platform (is_windows, normalize_path, join_path)
 use std.io_runtime.{process_run, file_exists, env_get_opt, file_write}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_environment_v1}
 use compiler.backend.linker.link (LinkConfig, LinkError, LinkErrorKind, Linker)
 
 struct MsvcShellResult:
@@ -344,6 +345,18 @@ fn find_msvc_crt_paths_for_arch(lib_arch: text) -> [text]:
     """Discover MSVC CRT, UCRT, and Windows SDK library paths for lib_arch
     (the SDK subdirectory name: "x64" or "arm64")."""
     var paths: [text] = []
+    if native_tool_strict_requested_v1():
+        # LIB is projected from the sealed tool authority by the suite owner.
+        # Discovery through vswhere/cmd/PATH is not an admitted SDK provider.
+        val environment = match native_tool_strict_environment_v1():
+            case Ok(values): values
+            case Err(_): return []
+        var admitted = ""
+        for pair in environment:
+            if pair.0 == "LIB": admitted = pair.1
+        for path in admitted.split(";"):
+            if path != "": paths.push(path)
+        return paths
 
     # 1. MSVC CRT: VC\Tools\MSVC\<ver>\lib\<arch>
     val vs_opt = find_visual_studio()
