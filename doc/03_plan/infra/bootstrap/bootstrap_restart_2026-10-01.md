@@ -838,3 +838,35 @@ under unchanged memory/disk guards. Windows remains at4 for the current compile:
 frontend was judged slower than finishing. Direct measurement previously showed
 3.99 active Windows cores and Linux386% averageCPU, establishing actual parallel
 execution but not absence of a performance regression. Phase3/4 have not started.
+
+### 2026-10-02 Windows Phase2 linked; first real hello running
+
+Windows exact6b9 candidate build succeeded:927 compiled,191 cached,0 failed;
+compile1708.8s,link54.0s,total1762.7s. Candidate:
+`D:/dev/bootstrap-memory-fix-validation-20261002/phase2-parallel4/output/stage2-fixed.exe`,
+19,666,432bytes, SHA256
+`e7ec89c1f106353cc8fdc792d5d41359336c72287f410aa039b57d8f6101dfdf`
+(independently hashed by root). Guard complete/quiescent1,
+peak1,886,248KiB. This proves linking, not self-hosted hello or full bootstrap.
+
+The automatic hello1 wrapper failed before compiler launch because a nested
+script retained the previous output path. That setup evidence is preserved.
+Fresh hello2 launched at11:19:40KST with producerPID41040, Job guardPID40344,
+monitorPID7432, execsession29550. It pins the candidate hash and uses private
+SIMPLE_CACHE/frontend/HIR, cold-init1, one worker,7GB guard,1200s timeout.
+The single-worker cold hello preserves comparison with the prior memory failure;
+next substantive Phase3/4 builds target8workers. No hello completion is claimed.
+
+PR2162 was merged by another session into release/1.0 at02:03:28UTC,
+commit3d021ee9bc6456857a1450928fd6aff127aba13f. This supersedes earlier draft
+status but does not establish native verification. Manager diagnostics are in
+draft PR2163, release-based headd55ff8ea217875082f077d0455cc49720b5bfbc5;
+worker dispatch remains unproven.
+
+Linux cached retry subsequently launched with8workers, compilerPID253 and
+watchdogPID246. Runtime provider archive SHA256
+`786a6f3914451356a406340a9ee6e680c8a588fa919af34f815b9ae1ed088a1a`
+is selected via explicit runtime-authority/runtime path. It records2compiled,
+1116reused,0failed and is linking; no terminal verdict yet. Log and receipt:
+`build/native_probe/stage2-retry8.log` and `stage2-retry8.rss.env` under the
+same6b9 Debian checkout. Original failed runtime/link evidence is preserved.
