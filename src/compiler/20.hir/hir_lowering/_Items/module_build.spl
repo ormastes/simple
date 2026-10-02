@@ -44,6 +44,7 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.hir_function_order.{hir_function_symbol_order}
 
 impl HirLowering:
     me lower_parser_module_unstub(module: ParserModule, is_entry: bool) -> HirModule:
@@ -116,12 +117,9 @@ impl HirLowering:
             # bootstrap accumulator loses the entry's functions under the
             # bootstrap ABI even though lower_module populated its Dict.
             var flat_functions: [HirFunction] = []
-            var flat_function_keys = lowered_module.functions.keys()
-            flat_function_keys.sort()
-            flat_idx = 0
-            while flat_idx < flat_function_keys.len():
-                flat_functions = flat_functions.push(lowered_module.functions[flat_function_keys[flat_idx]])
-                flat_idx = flat_idx + 1
+            val flat_function_values: [HirFunction] = lowered_module.functions.values()
+            for function_index in hir_function_symbol_order(flat_function_values):
+                flat_functions = flat_functions.push(flat_function_values[function_index])
             var flat_constants: [HirConst] = []
             var flat_constant_keys = lowered_module.constants.keys()
             flat_constant_keys.sort()
@@ -410,6 +408,7 @@ impl HirLowering:
         var constants: Dict<SymbolId, HirConst> = {}
 
         var lower_idx = 0
+        var bootstrap_function_symbol_ids: Dict<i64, bool> = {}
         if bootstrap_mode:
             bootstrap_hir_functions_reset()
             # Lower the REAL parsed functions of the entry module. They are held
@@ -477,9 +476,16 @@ impl HirLowering:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
                     gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
                     self.symbols.register_gpu_function_metadata(hir_fn.name, hir_fn.gpu_target, hir_fn.gpu_backend_order)
-                val fn_key: SymbolId = SymbolId(id: lower_idx)
-                functions[fn_key] = hir_fn
-                bootstrap_hir_functions_add(hir_fn)
+                # MIR resolves a function key against HirFunction.symbol.
+                # Imported/declaration symbols consume IDs before this loop,
+                # so the traversal index is not the function's identity.
+                val fn_key: SymbolId = hir_fn.symbol
+                if fn_key.id < 0 or bootstrap_function_symbol_ids.has(fn_key.id):
+                    self.error("bootstrap HIR function identity invalid or duplicated: {hir_fn.name} ({fn_key.id})", hir_fn.span)
+                else:
+                    bootstrap_function_symbol_ids[fn_key.id] = true
+                    functions[fn_key] = hir_fn
+                    bootstrap_hir_functions_add(hir_fn)
                 if bootstrap_diag:
                     eprint("[hir-lower] function:done module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 lower_idx = lower_idx + 1
@@ -593,13 +599,18 @@ impl HirLowering:
                 while bootstrap_impl_idx < module.impls.len():
                     impls = impls.push(self.lower_impl(module.impls[bootstrap_impl_idx]))
                     bootstrap_impl_idx = bootstrap_impl_idx + 1
-                # Native `Dict.len()` always returns -1, which would seed the
-                # synthetic keys at -1 and collide with the real SymbolIds.
-                # See doc/07_guide/language/dict_native_pitfalls.md
-                var bootstrap_impl_fn_key = functions.keys().len()
-                for bootstrap_impl_sym in self.lowered_impl_functions.keys():
-                    functions[SymbolId(id: bootstrap_impl_fn_key)] = self.lowered_impl_functions[bootstrap_impl_sym]
-                    bootstrap_impl_fn_key = bootstrap_impl_fn_key + 1
+                # Methods share the function identity namespace. A count-based
+                # key can overwrite a declared function whose real ID equals
+                # that count after imports/declarations consumed earlier IDs.
+                val bootstrap_impl_functions: [HirFunction] = self.lowered_impl_functions.values()
+                for impl_index in hir_function_symbol_order(bootstrap_impl_functions):
+                    val impl_fn: HirFunction = bootstrap_impl_functions[impl_index]
+                    val impl_symbol: SymbolId = impl_fn.symbol
+                    if impl_symbol.id < 0 or bootstrap_function_symbol_ids.has(impl_symbol.id):
+                        self.error("bootstrap HIR function identity invalid or duplicated: {impl_fn.name} ({impl_symbol.id})", impl_fn.span)
+                    else:
+                        bootstrap_function_symbol_ids[impl_symbol.id] = true
+                        functions[impl_symbol] = impl_fn
             # ParserModule-level `val` constants: this bootstrap early-return used to
             # hard-code `constants: {}`, so module globals never reached HIR ->
             # MIR and every reference lowered to an uninitialized alloca (stack

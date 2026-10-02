@@ -1,0 +1,119 @@
+# Real parser/HIR/MIR regressions; native naming PE/run remains a separate gate.
+use std.spec.{describe, it, expect}
+use std.io.{file_read}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_env_set, sosix_env_remove}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.{SymbolId, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_function_order.{hir_function_symbol_order}
+use compiler.mir.mir.*
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+describe "bootstrap function identities survive aggregate retention":
+    it "keys the original private naming main by its real consumed symbol ID":
+        val source_path = "src/compiler/bootstrap_admission/stage2_module_path_naming.spl"
+        val source = file_read(source_path)
+        val parsed = parse_full_frontend(source, source_path, "compiler.bootstrap_admission.stage2_module_path_naming", Logger(level: 0))
+        val old_bootstrap = sosix_env_get_nullable("SIMPLE_BOOTSTRAP")
+        val old_stage4 = sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4")
+        sosix_env_set("SIMPLE_BOOTSTRAP", "1")
+        sosix_env_set("SIMPLE_BOOTSTRAP_STAGE4", "0")
+        var lowering = HirLowering.with_filename(source_path)
+        val reserved = lowering.symbols.define("preconsumed_import", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+        val registry_before = bootstrap_hir_module_count()
+        val hir = lowering.lower_parser_module_unstub(parsed, true)
+        val registered: HirFunction = bootstrap_hir_module_function_at(registry_before, 0)
+        if old_bootstrap != nil:
+            sosix_env_set("SIMPLE_BOOTSTRAP", old_bootstrap!)
+        else:
+            sosix_env_remove("SIMPLE_BOOTSTRAP")
+        if old_stage4 != nil:
+            sosix_env_set("SIMPLE_BOOTSTRAP_STAGE4", old_stage4!)
+        else:
+            sosix_env_remove("SIMPLE_BOOTSTRAP_STAGE4")
+        expect(reserved.id).to_be_greater_than(-1)
+        expect(hir.functions.keys().len()).to_equal(1)
+        val keys = hir.functions.keys()
+        val values: [HirFunction] = hir.functions.values()
+        val main: HirFunction = values[0]
+        val main_symbol: SymbolId = main.symbol
+        expect(main_symbol.id).to_be_greater_than(reserved.id)
+        expect(keys[0].id).to_equal(main_symbol.id)
+        expect(main.name).to_equal("main")
+        expect(main.is_extern).to_equal(false)
+        expect(main.is_public).to_equal(false)
+        expect(main.body.stmts.len()).to_be_greater_than(0)
+        expect(registered.symbol.id).to_equal(main_symbol.id)
+        expect(registered.name).to_equal(main.name)
+        expect(registered.is_extern).to_equal(main.is_extern)
+        expect(registered.is_public).to_equal(main.is_public)
+        expect(registered.body.stmts.len()).to_equal(main.body.stmts.len())
+
+    it "retains private main and an impl method through ordered values and ambient MIR":
+        val source_path = "testdata/bootstrap_function_identity.spl"
+        val source = "struct Offset:\n    value: i64\n\nimpl Offset:\n    me read() -> i64:\n        self.value\n\nfn main() -> i64:\n    7\n"
+        val parsed = parse_full_frontend(source, source_path, "bootstrap_function_identity", Logger(level: 0))
+        val old_bootstrap = sosix_env_get_nullable("SIMPLE_BOOTSTRAP")
+        val old_stage4 = sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4")
+        val old_closure = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        sosix_env_set("SIMPLE_BOOTSTRAP", "1")
+        sosix_env_set("SIMPLE_BOOTSTRAP_STAGE4", "0")
+        sosix_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        var hir_lowering = HirLowering.with_filename(source_path)
+        val reserved = hir_lowering.symbols.define("preconsumed_import", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+        val hir = hir_lowering.lower_parser_module_unstub(parsed, true)
+        val values: [HirFunction] = hir.functions.values()
+        val order = hir_function_symbol_order(values)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var mir_lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = mir_lowering.lower_module(hir)
+        if old_bootstrap != nil:
+            sosix_env_set("SIMPLE_BOOTSTRAP", old_bootstrap!)
+        else:
+            sosix_env_remove("SIMPLE_BOOTSTRAP")
+        if old_stage4 != nil:
+            sosix_env_set("SIMPLE_BOOTSTRAP_STAGE4", old_stage4!)
+        else:
+            sosix_env_remove("SIMPLE_BOOTSTRAP_STAGE4")
+        if old_closure != nil:
+            sosix_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure!)
+        else:
+            sosix_env_remove("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(values.len()).to_equal(2)
+        expect(order.len()).to_equal(values.len())
+        val first: HirFunction = values[order[0]]
+        val second: HirFunction = values[order[1]]
+        expect(first.symbol.id).to_be_less_than(second.symbol.id)
+        expect(first.symbol.id).to_be_greater_than(reserved.id)
+        expect(first.body.has or second.body.has).to_equal(true)
+        expect(first.is_extern).to_equal(false)
+        expect(second.is_extern).to_equal(false)
+        val reversed: [HirFunction] = [second, first]
+        val reordered = hir_function_symbol_order(reversed)
+        expect(reordered.len()).to_equal(2)
+        expect(reordered[0]).to_equal(1)
+        expect(reordered[1]).to_equal(0)
+        val restored_first: HirFunction = reversed[reordered[0]]
+        val restored_second: HirFunction = reversed[reordered[1]]
+        expect(restored_first.name).to_equal(first.name)
+        expect(restored_second.name).to_equal(second.name)
+        expect(restored_first.body.has).to_equal(first.body.has)
+        expect(restored_second.body.has).to_equal(second.body.has)
+        expect(restored_first.is_public).to_equal(first.is_public)
+        expect(restored_second.is_public).to_equal(second.is_public)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(mir.functions.keys().len()).to_equal(2)
+        var main_count = 0
+        for function in mir.functions.values():
+            if function.name == "main":
+                main_count = main_count + 1
+                expect(function.blocks.len()).to_be_greater_than(0)
+        expect(main_count).to_equal(1)
