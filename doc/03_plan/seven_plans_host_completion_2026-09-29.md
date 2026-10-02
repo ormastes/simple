@@ -1,7 +1,17 @@
 # Completion plan for the seven requested items, by host
 
 Date: 2026-09-29
-Status: execution plan; implementation completion is not certified.
+Status: stopped at user request; implementation completion is not certified.
+## 2026-10-02 stop checkpoint
+
+The user stopped further feature implementation for items 1 and 5 at their
+current partial scope, then requested landing completed fixes on release and
+stopping this session. Neither item is implementation-complete. All session-owned
+bootstrap jobs are stopped with caches and logs retained. Source fixes in
+PRs #2163-#2166 landed on release/1.0; this does not establish native acceptance
+or completion of the seven plans. No current coding percentage is certified.
+See the [restart checkpoint](infra/bootstrap/bootstrap_restart_2026-10-01.md)
+for terminal evidence, unfinished work locations and verification gaps.
 
 Parallel pure-Simple TDD update (2026-09-29): five bounded implementation
 changes and their diagnostic results are recorded in
