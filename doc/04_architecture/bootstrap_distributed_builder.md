@@ -80,6 +80,39 @@ later work, with its remaining evidence stated explicitly.
 
 ## Performance and evidence
 
+Capacity admission requires a canonical `capacity.request.sdn` sidecar bound to
+the exact task identity and host. Its `owned-platform-boundary-v1` policy
+authorizes a fresh platform boundary; it does not alter task/cache identity.
+The Linux SOSIX owner walks the cgroup2 mount without following symlinks,
+requires memory already delegated at the mount root, and exclusively creates
+an empty `simple-parent-<identity>` child. Only that fresh parent's memory
+subtree controller is enabled. Its descriptor, device and inode remain pinned
+through capacity measurement, capped `clone3`, complete tree reap and removal.
+No inherited inhabited cgroup or ambient host root is adopted as the task parent.
+The worker writes `capacity.receipt` before launch and `capacity.released`
+only after removing its empty parent. Every settled attempt also requires
+positive typed `capacity.settled` evidence; a missing or failed receipt read
+never proves absence of a parent. Acquisition distinguishes clean rejection,
+retained ownership after failed rollback, and unknown ownership. Parent lease
+tokens are never reused within the owner process. Cleanup failures remain errors.
+Windows consumes the same authority sidecar, measures the minimum of physical
+and commit headroom, and reads back the owned JobObject limit before process
+creation. These runtime checks remain separate from scheduler estimates.
+The grouped Linux composition acquires a measurement parent for its admitted
+local run; each sealed broker launch acquires a distinct task parent. Brokers
+withhold terminal tree publication until that parent's removal succeeds.
+
+Root-child provisioning intentionally creates a task boundary separate from
+the broker's current cgroup. It requires the explicit owned-boundary policy
+and root delegation/creation rights; no claim is made that the new sibling
+inherits a limit applied to the broker's original cgroup. Host-wide reserves
+and active task charges remain the manager's admission responsibility.
+
+Native Linux adapter integration passed on 2026-10-02 (fresh parent, identity
+rejection, parent capacity cap, atomic child entry, child memory cap, reap,
+cleanup and unchanged global controllers). Rebuilt manager/worker compiler-task
+qualification on both hosts remains pending; the native probe is not that proof.
+
 Manager startup imports the small common protocol and app facades, not compiler
 frontend/backend modules. The compiled source authority and full index are
 explicit pre-group work; a group worker reads its admitted manifest and warm

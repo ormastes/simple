@@ -1,6 +1,8 @@
 # Source regression coverage for the future protocol. Not qualified by the
 # retained manager/worker images; those binaries predate this protocol.
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1, builder_no_child_started_decode_v1}
+use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1,
+    BuilderLinuxParentReceiptV1, builder_linux_parent_receipt_encode_v1}
 use app.bootstrap_builder.contracts.{BuildHostV1, BuildResultV1}
 use app.bootstrap_builder.codec.{builder_write_result_v1}
 use app.bootstrap_builder.process_port.{builder_process_portable_v1}
@@ -40,9 +42,29 @@ describe "bootstrap builder no-child-started protocol":
             host_id: "local", status: "ERROR", exit_code: 2, outputs: [],
             cache_hits: -1, cache_misses: -1, cache_stores: -1)
         expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
+        expect(builder_transport_no_child_started_v1(attempt)).to_equal(false)
+        expect(file_atomic_write(root + "/capacity.settled", builder_capacity_settlement_encode_v1(
+            BuilderCapacitySettlementV1(NO_CHILD_DIGEST, "local", "no-parent-owned")))).to_equal(true)
         expect(builder_transport_no_child_started_v1(attempt)).to_equal(true)
         expect(builder_transport_terminal_v1(attempt)).to_equal(true)
         expect(builder_transport_reaped_v1(attempt)).to_equal(false)
         result.host_id = "different"
         expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
         expect(builder_transport_no_child_started_v1(attempt)).to_equal(false)
+
+    it "requires positive parent release proof even after compiler reap":
+        val root = "build/bootstrap-parent-settlement-test-" + str(getpid())
+        expect(dir_create_all(root)).to_equal(true)
+        val attempt = no_child_fixture_attempt(root)
+        expect(file_atomic_write(root + "/compiler.reaped", NO_CHILD_DIGEST + "\nlocal")).to_equal(true)
+        expect(builder_transport_reaped_v1(attempt)).to_equal(false)
+        expect(file_atomic_write(root + "/capacity.settled", builder_capacity_settlement_encode_v1(
+            BuilderCapacitySettlementV1(NO_CHILD_DIGEST, "local", "linux-parent-released")))).to_equal(true)
+        # Failed/missing acquisition reads cannot be interpreted as no parent.
+        expect(builder_transport_reaped_v1(attempt)).to_equal(false)
+        val parent = builder_linux_parent_receipt_encode_v1(BuilderLinuxParentReceiptV1(
+            NO_CHILD_DIGEST, "local", "/sys/fs/cgroup/simple-parent-" + NO_CHILD_DIGEST, 24, 16619))
+        expect(file_atomic_write(root + "/capacity.receipt", parent)).to_equal(true)
+        expect(builder_transport_reaped_v1(attempt)).to_equal(false)
+        expect(file_atomic_write(root + "/capacity.released", parent)).to_equal(true)
+        expect(builder_transport_reaped_v1(attempt)).to_equal(true)

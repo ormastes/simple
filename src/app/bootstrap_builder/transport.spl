@@ -8,6 +8,9 @@ use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
 use app.bootstrap_builder.link_inputs.{builder_link_inputs_stage_v1,
     builder_regular_input_parents_safe_v1, builder_link_inputs_match_v1}
 use std.common.build_manager.no_child_started.{builder_no_child_started_decode_v1}
+use std.common.build_manager.capacity_request.{BuilderCapacityRequestV1,
+    builder_capacity_request_encode_v1, builder_linux_parent_receipt_decode_v1,
+    builder_capacity_settlement_decode_v1}
 use app.io.file_ops.{file_exists, file_is_regular_no_follow, file_hash_sha256,
     file_copy, file_delete, file_create_exclusive, file_atomic_write,
     file_read_regular_no_follow_bounded, path_absolute}
@@ -184,6 +187,11 @@ pub fn builder_transport_start_v1(task: BuildTaskV1, host: BuildHostV1, source_r
     if not builder_write_task_v1(root + "/request.sdn", task):
         result.error = "cannot persist task before launch"
         return result
+    val capacity_request = builder_capacity_request_encode_v1(BuilderCapacityRequestV1(
+        result.identity_digest, host.id, "owned-platform-boundary-v1"))
+    if capacity_request == "" or not file_create_exclusive(root + "/capacity.request.sdn", capacity_request):
+        result.error = "cannot persist owned capacity authority before launch"
+        return result
     if host.transport == "local":
         result.error = builder_transport_retry_cache_v1(task, host, run_root, root, process)
         if result.error != "": return result
@@ -283,7 +291,22 @@ fn builder_transport_read_control_v1(attempt: BuilderAttemptV1, name: text, limi
         Err(_message): ""
 
 pub fn builder_transport_reaped_v1(attempt: BuilderAttemptV1) -> bool:
-    builder_transport_read_control_v1(attempt, "compiler.reaped") == attempt.identity_digest + "\n" + attempt.host.id
+    if builder_transport_read_control_v1(attempt, "compiler.reaped") != attempt.identity_digest + "\n" + attempt.host.id:
+        return false
+    builder_transport_capacity_released_v1(attempt)
+
+fn builder_transport_capacity_released_v1(attempt: BuilderAttemptV1) -> bool:
+    val settlement = match builder_capacity_settlement_decode_v1(
+            builder_transport_read_control_v1(attempt, "capacity.settled"),
+            attempt.identity_digest, attempt.host.id):
+        Ok(value): value
+        Err(_): return false
+    if settlement.disposition != "linux-parent-released": return true
+    val acquired = builder_transport_read_control_v1(attempt, "capacity.receipt")
+    match builder_linux_parent_receipt_decode_v1(acquired, attempt.identity_digest, attempt.host.id):
+        Ok(_): pass
+        Err(_): return false
+    builder_transport_read_control_v1(attempt, "capacity.released") == acquired
 
 # A no-child certificate is NOT a tree-reap receipt. It is admissible only with
 # the exact ERROR result and no accepted outputs for this same task attempt.
@@ -293,6 +316,7 @@ pub fn builder_transport_no_child_started_v1(attempt: BuilderAttemptV1) -> bool:
         Ok(value): value
         Err(_message): return false
     if proof.identity_digest != attempt.identity_digest or proof.host_id != attempt.host.id: return false
+    if not builder_transport_capacity_released_v1(attempt): return false
     val result = match builder_transport_collect_v1(attempt):
         Ok(value): value
         Err(_message): return false

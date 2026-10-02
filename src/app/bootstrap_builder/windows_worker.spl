@@ -13,12 +13,21 @@ use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1,
 use app.bootstrap_builder.windows_staged_git.{BuilderStagedGitErrorV1, builder_windows_staged_git_v1, builder_windows_control_v1}
 use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessAdmissionV1, windows_process_admit_with_reserve_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_path_valid_v1, windows_process_file_digest_v1}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
+use std.common.build_manager.capacity_request.{builder_capacity_request_decode_v1,
+    BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1}
+
+fn builder_windows_capacity_settle_v1(task: BuildTaskV1, root: text, host: text) -> bool:
+    val payload = builder_capacity_settlement_encode_v1(BuilderCapacitySettlementV1(
+        builder_task_identity_v1(task), host, "windows-job-settled"))
+    payload != "" and file_atomic_write(root + "/capacity.settled", payload)
 
 fn builder_windows_reject_before_start_v1(task: BuildTaskV1, root: text, host: text, reason: text) -> text:
     val proof = BuilderNoChildStartedV1(builder_task_identity_v1(task), host, reason)
     val payload = builder_no_child_started_encode_v1(proof)
     if payload == "" or not file_atomic_write(root + "/compiler.not-started.sdn", payload):
         return reason + "; no-child-started receipt could not be persisted"
+    if not builder_windows_capacity_settle_v1(task, root, host):
+        return reason + "; capacity settlement could not be persisted"
     reason
 
 pub fn builder_windows_parse_required_memory_v1(value: text) -> Result<i64, text>:
@@ -59,6 +68,12 @@ pub fn builder_windows_setup_failure_v1(task: BuildTaskV1, root: text, host: tex
     builder_windows_reject_before_start_v1(task, root, host, failure.message)
 
 fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
+    val capacity_payload = match file_read_regular_no_follow_bounded(root + "/capacity.request.sdn", 4096):
+        Ok(value): value
+        Err(reason): return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
+    match builder_capacity_request_decode_v1(capacity_payload, builder_task_identity_v1(task), host):
+        Ok(_): pass
+        Err(reason): return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
     if file_exists(root + "/cancel.request"):
         return Err(builder_windows_reject_before_start_v1(task, root, host, "cancelled before compiler setup"))
     if not builder_regular_input_parents_safe_v1(task, root + "/work"):
@@ -118,6 +133,8 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
         WindowsProcessAdmissionV1.FailedAfterCleanup(reason):
             if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host):
                 return Err(reason + "; authoritative cleanup receipt could not be persisted")
+            if not builder_windows_capacity_settle_v1(task, root, host):
+                return Err(reason + "; capacity settlement could not be persisted")
             return Err(reason)
         WindowsProcessAdmissionV1.Unknown(reason): return Err(reason + "; native ownership unknown")
     var cancelled = false
@@ -137,6 +154,8 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
             # Receipt is published only after exact handle/job cleanup completes.
             if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host):
                 return Err("cannot persist Windows tree cleanup receipt")
+            if not builder_windows_capacity_settle_v1(task, root, host):
+                return Err("cannot persist Windows capacity settlement")
             if receipt.timed_out: return Ok(("TIMEOUT", 124))
             if receipt.cancelled: return Ok(("ERROR", 125))
             if receipt.exit_code == 0: return Ok(("OK", 0))

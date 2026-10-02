@@ -1,5 +1,46 @@
 # Bootstrap distributed builder detail design
 
+## Capacity admission repair (2026-10-02)
+
+`common/build_manager/capacity_request.spl` owns the canonical bounded sidecar:
+version header, task identity, host identity and `owned-platform-boundary-v1`.
+Transport persists it before launching either compiled worker. Missing, altered,
+cross-task or cross-host authority is rejected before acquiring a resource.
+
+Linux's `LinuxCgroupParentV1` exposes a lease token and observed path/device/inode;
+the native SOSIX adapter retains the actual directory descriptors. Acquisition
+fails on existing names, unavailable delegation, or failed controller readback.
+Capacity and process start reuse that exact descriptor; start additionally checks
+the task identity and attempt root. Release refuses live/uncollected children
+and removes only the pinned empty directory. The worker brackets every admitted
+run with acquisition and release, including pre-start rejection paths.
+Generation tokens prevent a stale copied lease from releasing a later parent.
+Failed rollback retains the parent token and descriptors; typed admission
+distinguishes this cleanup obligation from a proven clean rejection.
+
+`BuilderCapacitySettlementV1` requires positive task/host-bound evidence for
+`no-parent-owned`, `linux-parent-released`, or `windows-job-settled`. For a
+released Linux parent, transport also requires canonical acquisition and
+identical release receipts. Read errors never imply absence. The grouped Linux
+broker keeps its tree receipt pending until parent release, then publishes
+the terminal record. The grouped manager's separate parent only measures
+capacity and is removed after the admitted run.
+
+Windows capacity is `min(ullAvailPhys, ullAvailPageFile)` from one
+`MEMORYSTATUSEX` snapshot, since JobObject limits account commit. Admission reads
+back `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY` and the
+exact byte limit before attempting `CreateProcessW`.
+
+Tests: `capacity_request_spec.spl`, `windows_capacity_headroom_spec.spl`,
+`no_child_started_spec.spl`, and the Linux/Windows capacity owner fixtures.
+`test/fixtures/bootstrap_builder/linux_capacity_owner.c` runs real
+cgroup2/clone3/pidfd operations and requires an already memory-delegating mount.
+Its `lifecycle` mode separately injects delegation/rollback failures and
+checks retained ownership and stale-lease rejection. Windows native coverage
+is `test/fixtures/bootstrap_builder/windows_capacity_owner_main.spl`.
+Manager and worker must be rebuilt together: old workers lack the sidecar
+contract, and old compiler text-ABI registries mis-lower the Linux owner calls.
+
 Status: shared protocol implemented; native qualification pending.
 
 ## Shared interface

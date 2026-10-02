@@ -8,6 +8,8 @@ use std.common.build_manager.group_process_protocol.{GroupProcessLaunchV1, Group
 use std.common.build_manager.grouped_native_charge_evidence.{NativeGroupChargeSampleV1, NativeGroupChargeTraceV1, native_group_charge_trace_encode_v1}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessInputV1, LinuxProcessRequestV1, LinuxProcessLeaseV1, LinuxProcessPollV1, linux_process_start_with_memory_v1, linux_process_poll_v1, linux_process_cancel_v1, linux_process_peak_memory_v1, linux_process_collect_v1}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_cgroup_parent_acquire_v1, linux_cgroup_parent_release_v1}
+use std.common.build_manager.capacity_request.{BuilderLinuxParentReceiptV1, builder_linux_parent_receipt_encode_v1}
 
 fn native_linux_group_observation_v1(observed: LinuxProcessPollV1, peak: i64) -> GroupProcessPollV1:
     val active_charge = if observed.terminal: 0 else: observed.memory_current_bytes
@@ -49,7 +51,9 @@ fn native_linux_group_finish_v1(root: text, identity: text,
         print "Linux group broker charge evidence unavailable reason=write-failed"
     val payload = group_process_observation_encode_v1(identity,
         native_linux_group_observation_v1(receipt, peak))
-    if not file_atomic_write(root + "/broker.tree.sdn", payload):
+    # Terminal authority is published only after the outer owner removes the
+    # acquired parent. The pending record cannot settle a manager attempt.
+    if not file_atomic_write(root + "/broker.tree.pending.sdn", payload):
         return Err("cannot persist Linux group tree cleanup receipt")
     Ok(true)
 
@@ -68,6 +72,25 @@ fn native_linux_group_drain_v1(root: text, identity: text,
     Err("Linux group cancellation cleanup remains unproven")
 
 fn native_linux_group_run_v1(launch: GroupProcessLaunchV1,
+        identity: text) -> Result<bool, text>:
+    # The sealed local GroupProcessLaunchV1 is the acquisition authority.
+    val parent = linux_cgroup_parent_acquire_v1(launch.root, identity)?
+    val acquired = builder_linux_parent_receipt_encode_v1(BuilderLinuxParentReceiptV1(
+        identity, "linux-local", parent.path, parent.device, parent.inode))
+    if acquired == "" or not file_atomic_write(launch.root + "/capacity.receipt", acquired):
+        val _released = linux_cgroup_parent_release_v1(parent)?
+        return Err("cannot persist Linux broker parent receipt")
+    val outcome = native_linux_group_run_in_parent_v1(launch, identity)
+    val _released = linux_cgroup_parent_release_v1(parent)?
+    if not file_atomic_write(launch.root + "/capacity.released", acquired):
+        return Err("cannot persist Linux broker parent cleanup")
+    if file_exists(launch.root + "/broker.tree.pending.sdn"):
+        val terminal = file_read_regular_no_follow_bounded(launch.root + "/broker.tree.pending.sdn", 4096)?
+        if not file_atomic_write(launch.root + "/broker.tree.sdn", terminal):
+            return Err("cannot publish Linux broker terminal cleanup receipt")
+    outcome
+
+fn native_linux_group_run_in_parent_v1(launch: GroupProcessLaunchV1,
         identity: text) -> Result<bool, text>:
     val request = launch.request
     if not file_is_regular_no_follow(request.broker_program) or

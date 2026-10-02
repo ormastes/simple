@@ -84,6 +84,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_current_dir")
         || name.starts_with("rt_set_current_dir")
         || name.starts_with("rt_process_")
+        || name.starts_with("rt_linux_group_")
         || name.starts_with("rt_exec")
         || name.starts_with("rt_write_file")
         || name.starts_with("rt_getpid")
@@ -2148,6 +2149,19 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_is_regular_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_exists", &[I64, I64], &[I8]),  // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_is_real_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
+    // Linux SOSIX owner C ABI. Register MACHINE signatures as well as semantic
+    // text indices: otherwise signature adaptation truncates expanded ptr/len
+    // pairs back to the Simple extern's argument count.
+    RuntimeFuncSpec::new("rt_linux_group_available_capacity_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_parent_acquire_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_parent_release_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_launch_broker_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_start_v1",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_poll_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_cancel_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_collect_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]),  // path_ptr, path_len -> i64 (mtime seconds)
     // =========================================================================
     // File I/O Operations
@@ -2456,6 +2470,25 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_owner_machine_signatures_preserve_all_ptr_len_pairs() {
+        for (name, machine_arity) in [
+            ("rt_linux_group_available_capacity_v1", 2),
+            ("rt_linux_group_parent_acquire_v1", 4),
+            ("rt_linux_group_parent_release_v1", 1),
+            ("rt_linux_group_launch_broker_v1", 5),
+            ("rt_linux_group_start_v1", 18),
+            ("rt_linux_group_poll_v1", 1),
+            ("rt_linux_group_cancel_v1", 1),
+            ("rt_linux_group_collect_v1", 1),
+        ] {
+            let spec = spec_for(name).expect("Linux C owner requires an explicit runtime signature");
+            assert_eq!(spec.params, vec![I64; machine_arity], "{name}");
+            assert_eq!(spec.returns, [I64], "{name}");
+            assert_eq!(spec.tier(), RuntimeFuncTier::Sys, "{name}");
+        }
+    }
 
     #[test]
     fn collection_set_abi_is_registered_for_native_codegen() {
