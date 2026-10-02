@@ -1,11 +1,69 @@
 # mold-based MDSOC++ Linker — Plan (2026-09-18)
 
-**Status:** RC1 lanes A0/A1/A2/A4a/A5 started 2026-09-18. **Design:** `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` (D1–D9, §2 owner map).
+**Current status (2026-10-03):** internal ELF/COFF implementation exists; whole-item acceptance is unverified. See the current acceptance continuation below. Historical RC1 lane states are retained as dated history, not current certification. **Design:** `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md`.
 **Research/audit:** `doc/01_research/compiler/linker/{mold_mdsocpp_linker_2026-09-15,linker_loader_inventory_2026-09-18}.md`.
 **Base:** `simple-rc1-share` @ `cc205ae0778`. **Host for evidence:** aarch64, `bin/release/aarch64-unknown-linux-gnu/simple`.
 `L/` = `src/compiler/70.backend/linker/`, `LD/` = `src/compiler/99.loader/`, `T/` = `test/01_unit/`.
 
+## Current acceptance continuation — 2026-10-03
+
+The release-targeted work is based on `release/1.0` at
+`e9cd3153c881c55f59eaaa2573b4b8a5e803023a`, in separate session-owned worktrees.
+The complete [acceptance matrix](../../sys_test/item4_linker_acceptance_2026-10-03.md)
+maps ITEM4-REQ-001 through ITEM4-REQ-010 to the existing item-4/G0-G6 scope.
+The [parallel ownership ledger](../../agent_tasks/item4_linker_acceptance_2026-10-03.md)
+assigns research, test and integration files. Research §14 reconciles upstream
+sources and the current implementation; design's dated continuation defines
+the validation boundary and evidence obligations.
+
+### Concrete execution order
+
+1. Preserve the existing selected scope and append new research. Reconcile
+   current owners and distinguish historical lane results from fresh evidence.
+2. Add modern step-based acceptance under
+   `test/03_system/app/compiler/feature/item4_linker_acceptance_spec.spl`:
+   direct ELF x86_64/aarch64 images, archive fixpoint, selected ET_EXEC/ET_DYN
+   rejection, an unused-member control, missing/duplicate definitions,
+   machine mismatch, truncated input and deterministic AMD64 PE construction.
+3. Execute the two selected-member regressions on unchanged source with an
+   admitted pure-Simple runtime. Source inspection finds the direct-object
+   ET_REL guard absent from the hosted selected-member loop; this is a
+   predicted failure, not an executed RED result.
+4. Once RED is observed, add the selected-member ET_REL check before
+   resolution/layout, retain the member name/type in the error, and rerun
+   the new spec plus relevant existing regressions to GREEN.
+5. Continue the remaining matrix: actual-engine receipts including fallback,
+   facade/format admission, relocation boundary cases, shared/TLS/unwind and
+   strip execution, publication failure behavior, full compiler/application
+   runs, bounded execution and linker lifecycle. These are completion work,
+   not optional follow-up replaced by the first fixture slice.
+6. Generate the manual through admitted SSpec/SPipe tooling, run required
+   guards/core/MCP checks, review exact-head evidence, and land through a
+   reviewed PR targeting `release/1.0`. This work creates no release tag.
+
+### Current evidence and dependencies
+
+The deployed Windows `bin/simple.exe` identifies itself as a Rust bootstrap
+seed. No admitted self-hosted test CLI has been found in the sampled local
+locations. Another session has a live Windows bootstrap; its unfinished output
+does not admit these tests. Preserve that process and resume this test lane
+only with a provenance-admitted runtime. Do not use the seed as a test fallback.
+Until then, RED/GREEN execution, generated manual and verification remain open.
+
+The request adapter currently rejects bounded execution with UnsupportedBudget;
+the bounded composition descriptor alone cannot pass G3. Actual external-engine
+fallback attribution is also an open defect. PE writer tests do not establish
+PE support through the LinkRequest facade. Mach-O/FreeBSD and retained boot and
+board gates remain explicit; no unsupported scope decision is inferred.
+Completion aggregate hash validation does not itself prove transcript semantics
+or platform qualification. Each matrix row needs its own real-run evidence.
+
 ## 1. Rules every lane follows
+
+Historical execution commands and host paths in this section record the
+2026-09-18 lane setup. They are superseded for new runs by the admitted-runtime
+protocol in the current acceptance plan; do not copy a historical binary path
+without proving its present provenance. Ownership and evidence rules still apply.
 
 | Rule | Concretely |
 |---|---|

@@ -1,12 +1,73 @@
 # mold-based MDSOC++ Linker — Design
 
-**Date:** 2026-09-18 · **Status:** Proposed (architecture decisions; no code landed)
+**Date:** 2026-09-18; current-state refresh 2026-10-03. **Status:** partially implemented; full acceptance and host qualification remain open. The original proposal and dated extensions below retain historical context.
 **Worktree:** `simple-rc1-share` @ `cc205ae0778` · **Host used for reading:** aarch64 (`bin/release/aarch64-unknown-linux-gnu/simple`)
 **Inputs:** research `doc/01_research/compiler/linker/mold_mdsocpp_linker_2026-09-15.md` (R-doc),
 audit `doc/01_research/compiler/linker/linker_loader_inventory_2026-09-18.md` (I-doc),
 frozen `doc/05_design/platform/structural_compute/link_manager_contract_v1.md` (C1).
 **Plan:** `doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md`.
 `L/` = `src/compiler/70.backend/linker/`, `LD/` = `src/compiler/99.loader/`.
+
+## Current acceptance design — 2026-10-03
+
+Inspected release base: `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`.
+The [acceptance plan](../../../03_plan/sys_test/item4_linker_acceptance_2026-10-03.md)
+is the requirement-to-evidence authority for this continuation. Research §14
+records primary sources and gaps. These additions do not replace the selected
+D1-D9 architecture, silently drop targets, or claim that the proposed bounded
+engine exists merely because its descriptor can be sealed.
+
+### Selected archive input contract
+
+Owner: `src/compiler/70.backend/linker/elf/elf_static_link.spl`,
+`elf_link_mode`, immediately after archive fixpoint selection and before the
+selected object enters TLS relaxation, symbol resolution, GC or layout.
+
+Direct inputs already require ET_REL and the requested e_machine. Selected
+archive members must satisfy the same two invariants. Today the hosted loop
+checks only e_machine. Add an ET_REL rejection there; diagnostics must retain
+the archive member name and actual e_type. Keep archive parsing and selection
+separate: an unselected member is not an admitted input and must not change
+the linked image. The SimpleOS route already revalidates selected member bytes
+through its named-object path; do not add a second parser or move rejection
+earlier into the generic archive reader.
+
+TDD fixtures mutate only e_type in a real archived ET_REL member: ET_EXEC for
+the initially selected `mid_a64.o`, ET_DYN for the transitive `leaf_a64.o`, and
+ET_DYN for `unused_a64.o` as a selection-boundary control. Parse archive offsets
+through the production archive reader rather than hardcode offsets. Setup
+asserts the member exists and was ET_REL before mutation. The unchanged archive
+and direct-object cases establish valid behavior. No interface/type changes
+or new linker owner are required for this correction.
+
+### Evidence boundaries and remaining implementation
+
+- Production ELF/COFF API calls plus byte/metadata assertions establish image
+  construction only. Native loader execution, dynamic semantics, full compiler
+  corpus behavior, boot and resource qualification need separate scenarios.
+- `LinkReceiptV1` must report the actual successful engine. Re-running linker
+  discovery after a compiler-driver fallback does not establish that identity;
+  the production execution result must carry it to the adapter. This remains
+  an implementation/TDD gate, not a claim that the current receipt is correct.
+- Schema identity requirements must come from the existing schema authority,
+  not the incoming header being validated. Preserve D8 and its owner handoff;
+  do not create a parallel linker schema registry to hide placeholder identity.
+- Explicit internal format admission must be consistent at the request facade
+  and platform production entrypoints. The current ELF-only request adapter
+  cannot inherit Windows support merely from the separate COFF implementation.
+- Bounded execution must own qualified job accounting before input access,
+  actual streaming/spill work and transactional publication. UnsupportedBudget
+  is honest rejection, but does not implement bounded linking or digest parity.
+- Aggregate receipt hashes bind supplied files; the platform/corpus/performance
+  producers and reviewer must verify the commands, outcomes and semantics.
+  The generic platform artifact must enumerate Mach-O/FreeBSD and other retained
+  targets explicitly. Missing rows cannot silently become supported or excluded.
+
+The new SSpec uses `std.spec.step` and real production imports. Missing runtime,
+parse/import failure, or an unimplemented scenario never counts as behavioral
+RED or PASS. Manual generation and release qualification follow observed
+RED/GREEN and the full applicable verification gates. See the acceptance plan
+for the current runtime blocker and the full remaining scope.
 
 ## 0. Decisions in one screen
 
