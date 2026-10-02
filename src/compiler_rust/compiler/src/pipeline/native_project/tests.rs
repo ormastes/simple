@@ -4808,6 +4808,8 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         "rt_file_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
+        "rt_fd_stat_snapshot_v1",
+        "rt_sosix_directory_pair_check_v1",
     ]
     .into_iter()
     .map(str::to_string)
@@ -4826,11 +4828,14 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         0,
         "bootstrap supplement must not duplicate the full Rust runtime's secure-staging provider"
     );
-    // rt_heap_live_bytes / rt_heap_peak_bytes are OWNED by the outer (Rust)
-    // runtime. runtime_memtrack.c ships them as WEAK fallbacks (93e0b028ffb), so
-    // the capsule may carry them only as weak globals the owner overrides --
-    // never as strong exports and never localized into a private copy.
-    let owner_provided = ["rt_heap_live_bytes", "rt_heap_peak_bytes"]
+    // These providers belong to the outer Rust native-all runtime. The
+    // projected core-C supplement must leave them weak or unresolved.
+    let owner_provided = [
+        "rt_heap_live_bytes",
+        "rt_heap_peak_bytes",
+        "rt_array_bytes_validate",
+        "rt_array_bytes_copy_checked",
+    ]
         .into_iter()
         .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>();
