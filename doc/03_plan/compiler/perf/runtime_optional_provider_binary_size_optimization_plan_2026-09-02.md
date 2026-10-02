@@ -252,6 +252,21 @@ Gate: full feature matrix passes with no static optional dependency regression.
 
 ## Completion Conditions
 
+### 2026-10-02 item 5 acceptance update
+
+The retained scope is now mapped to [14 concrete runtime acceptance cases](../../sys_test/item5_provider_size_acceptance_2026-10-02.md).
+Current-source research and ownership are recorded in the
+[development ledger](../../evidence/item5_tdd_progress_2026-10-02.md).
+Source-token assertions and synthetic BS7 cohorts remain auxiliary checker
+evidence; they cannot certify optional loading, closure exclusion or NFRs.
+
+I5-04 behavioral authority mutations were authored before a minimal admission
+fix binding pinned member geometry/digests and archive bounds. Execution is
+blocked by the missing admitted self-hosted test runtime, so RED/GREEN and
+completion remain unproven. Full activation, closure, CLI cutover, packaging,
+lifetime, parity and host/resource evidence remain required. Release/1.0
+retains a different repeated-rejection contract; renew its tests separately.
+
 - No optional provider loads for no-import hello.
 - Pure-Simple provider promotion is receipt-backed and reversible.
 - No feature or architecture is removed.
