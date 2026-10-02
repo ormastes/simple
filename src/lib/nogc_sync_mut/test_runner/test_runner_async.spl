@@ -232,9 +232,10 @@ fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_exp
 
     # Cleanup quarantine is authoritative even if a child exits zero and
     # presents green counts. Inspect the bounded raw captures before parsing.
-    if stdout.contains("NATIVE-CACHE-CLEANUP-FAILED") or stderr.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+    val cleanup_diagnostic = _native_cleanup_diagnostic(stdout, stderr)
+    if cleanup_diagnostic != "":
         return _parallel_admission_failure(run.file_path,
-            "NATIVE-CACHE-CLEANUP-FAILED: " + stdout + "\n" + stderr, duration_ms)
+            "NATIVE-CACHE-CLEANUP-FAILED: " + cleanup_diagnostic, duration_ms)
 
     # A monitor-enforced deadline is authoritative.  Handle captures first
     # without trusting -1, which also represents a child crash/start failure.
@@ -366,7 +367,7 @@ fn run_tests_parallel_with_monitoring(
             val exit_code = poll_tracked_process(run.pid)
             if exit_code != -2:
                 val result = collect_async_result(run, exit_code)
-                if result.error.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+                if result.error.starts_with("NATIVE-CACHE-CLEANUP-FAILED:"):
                     admission_blocked = true
                 results[run.inventory_index] = Some(result)
                 had_completion = true
@@ -375,7 +376,7 @@ fn run_tests_parallel_with_monitoring(
             val elapsed_ms = (current_time - run.start_time) / 1000
             if elapsed_ms > run.timeout_ms:
                 val result = collect_async_result(run, -2, true)
-                if result.error.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+                if result.error.starts_with("NATIVE-CACHE-CLEANUP-FAILED:"):
                     admission_blocked = true
                 results[run.inventory_index] = Some(result)
                 had_completion = true
@@ -419,6 +420,13 @@ fn _parallel_admission_failure(file: text, reason: text, duration_ms: i64) -> Te
     # Parent admission failure has no child exit status to scrape/classify.
     TestFileResult(path: file, passed: 0, failed: 1, skipped: 0, pending: 0,
         duration_ms: duration_ms, setup_ms: 0, error: reason, timed_out: false, cached: false)
+
+fn _native_cleanup_diagnostic(stdout: text, stderr: text) -> text:
+    for line in (stdout + "\n" + stderr).split("\n"):
+        val diagnostic = line.trim()
+        if diagnostic == "error: NATIVE-CACHE-CLEANUP-FAILED" or diagnostic.starts_with("error: NATIVE-CACHE-CLEANUP-FAILED:"):
+            return diagnostic
+    ""
 
 # ============================================================================
 # Helper: CPU Count Detection
