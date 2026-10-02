@@ -404,6 +404,16 @@ sub install_cached_windows_helper {
     my ($compiler, $style, @flags) = windows_compile_flags();
     my $cache = $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE} ||
         abs_path(dirname(__FILE__) . '/../..') . '/.simple/storage/cache/bootstrap-session-helper';
+    $cache =~ m{\A/} or die "session helper cache must be POSIX-absolute";
+    # The native Job supervisor starts an MSYS shell for the workload. Preserve
+    # this path across the preceding MSYS-to-native launch so an inherited
+    # guard does not receive D:/... and publish a non-POSIX helper path.
+    if (exists $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE}) {
+        my $excluded = $ENV{MSYS2_ENV_CONV_EXCL} // '';
+        my $name = 'SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE=';
+        $ENV{MSYS2_ENV_CONV_EXCL} = length($excluded) ? "$excluded;$name" : $name
+            unless ";$excluded;" =~ /;\Q$name\E;/;
+    }
     make_path($cache);
     -d $cache or die "cannot create session helper cache $cache";
     # `clang-cl --version` costs ~180 ms, most of a warm guard start. Memoize
