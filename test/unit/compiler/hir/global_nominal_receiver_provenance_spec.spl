@@ -1,0 +1,40 @@
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.hir.hir_types.{SymbolTable, SymbolKind}
+use compiler.hir.hir_definitions.SymbolId
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirStatic, MirSignature}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+describe "global nominal receiver provenance":
+    it "resolves canonical class identities without treating them as HIR symbol IDs":
+        val span = Span.empty()
+        var symbols = SymbolTable.new()
+        val left = symbols.define("Cell", SymbolKind.Class, nil, span, Visibility.Public, false, Some("left"))
+        val right = symbols.define("Cell", SymbolKind.Class, nil, span, Visibility.Public, false, Some("right"))
+        var mir = MirLowering.new(symbols)
+        mir.class_type_names["left.Cell"] = true
+        mir.class_type_names["right.Cell"] = true
+        val left_canonical = mir.canonical_mir_type_symbol(left)
+        val right_canonical = mir.canonical_mir_type_symbol(right)
+        expect(left_canonical.id >= 1000000000).to_equal(true)
+        expect(left_canonical.id != right_canonical.id).to_equal(true)
+        var builder = mir.builder
+        builder.begin_function(SymbolId(id: 99999), "global_receiver_probe",
+            MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), span)
+        mir.builder = builder
+        mir.global_symbol_ids[100] = true
+        mir.global_symbol_ids[101] = true
+        mir.global_statics_by_id[100] = MirStatic(symbol: SymbolId(id: 100), name: "left_gate",
+            type_: MirType(kind: MirTypeKind.Struct(left_canonical)), init: nil,
+            is_mutable: true, alignment: 0, visibility: Visibility.Private)
+        mir.global_statics_by_id[101] = MirStatic(symbol: SymbolId(id: 101), name: "right_gate",
+            type_: MirType(kind: MirTypeKind.Struct(right_canonical)), init: nil,
+            is_mutable: true, alignment: 0, visibility: Visibility.Private)
+        val left_value = mir.try_lower_global_read(100).unwrap()
+        val right_value = mir.try_lower_global_read(101).unwrap()
+        expect(mir.struct_value_syms[left_value.id]).to_equal("left.Cell")
+        expect(mir.struct_value_syms[right_value.id]).to_equal("right.Cell")
+        expect(mir.errors.len()).to_equal(0)
