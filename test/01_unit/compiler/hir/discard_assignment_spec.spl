@@ -1,0 +1,85 @@
+# @req REQ-HIR-DISCARD-001
+# @cover src/compiler/20.hir/hir_lowering/statements.spl
+use std.spec.{describe, it, expect, step}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Stmt, StmtKind, AssignOp}
+use compiler.hir.hir_definitions.{HirExprKind, HirStmtKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering.expressions.*
+
+fn discard_ident(name: text) -> Expr:
+    Expr(kind: ExprKind.Ident(name), span: Span.empty())
+
+fn discard_rhs() -> Expr:
+    Expr(kind: ExprKind.IntLit(37), span: Span.empty())
+
+fn expect_discard_unit_block(kind: HirStmtKind):
+    match kind:
+        case HirStmtKind.Expr(expr):
+            match expr.kind:
+                case HirExprKind.Block(block):
+                    expect(block.has).to_equal(false)
+                    expect(block.stmts.len()).to_equal(1)
+                    match block.stmts[0].kind:
+                        case HirStmtKind.Expr(rhs):
+                            match rhs.kind:
+                                case HirExprKind.IntLit(value, _): expect(value).to_equal(37)
+                                case _: assert(false)
+                        case _: assert(false)
+                case _: assert(false)
+        case _: assert(false)
+
+describe "discard assignment preserves effects without resolving underscore":
+    it "lowers structured assignment to one RHS inside a unit block":
+        step("Lower a structured discard assignment")
+        var lowering = HirLowering.with_filename("discard_structured.spl")
+        val source = Stmt(kind: StmtKind.Assign(discard_ident("_"), nil, discard_rhs()), span: Span.empty())
+        val lowered = lowering.lower_hir_stmt(source)
+        expect(lowering.errors.len()).to_equal(0)
+        expect_discard_unit_block(lowered.kind)
+
+    it "uses identical semantics for the flat parser expression assignment":
+        step("Lower the flat parser assignment representation")
+        var lowering = HirLowering.with_filename("discard_flat.spl")
+        val assignment = Expr(kind: ExprKind.Assign(discard_ident("_"), nil, discard_rhs()), span: Span.empty())
+        val lowered = lowering.lower_hir_stmt(Stmt(kind: StmtKind.Expr(assignment), span: Span.empty()))
+        expect(lowering.errors.len()).to_equal(0)
+        expect_discard_unit_block(lowered.kind)
+
+    it "rejects compound discard instead of inventing a previous value":
+        step("Reject a compound discard target")
+        var lowering = HirLowering.with_filename("discard_compound.spl")
+        val lowered = lowering.lower_hir_assignment_kind(discard_ident("_"), Some(AssignOp.Add), discard_rhs(), Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("discard assignment does not support a compound operator")
+        match lowered:
+            case HirStmtKind.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.Error: ()
+                    case _: assert(false)
+            case _: assert(false)
+
+    it "still diagnoses an ordinary undeclared assignment target":
+        step("Preserve ordinary target name resolution")
+        var lowering = HirLowering.with_filename("discard_missing_target.spl")
+        val lowered = lowering.lower_hir_assignment_kind(discard_ident("missing_target"), nil, discard_rhs(), Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("unresolved name: missing_target")
+        match lowered:
+            case HirStmtKind.Assign(_, _, _): ()
+            case _: assert(false)
+
+    it "lowers an invalid discarded RHS exactly once":
+        step("Count the single RHS diagnostic")
+        var lowering = HirLowering.with_filename("discard_rhs_once.spl")
+        val lowered = lowering.lower_hir_assignment_kind(discard_ident("_"), nil, discard_ident("missing_rhs"), Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("unresolved name: missing_rhs")
+
+    it "does not treat underscore as a universally valid expression":
+        step("Reject underscore outside discard target position")
+        var lowering = HirLowering.with_filename("discard_read.spl")
+        val lowered = lowering.lower_hir_expr(discard_ident("_"))
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("unresolved name: _")
