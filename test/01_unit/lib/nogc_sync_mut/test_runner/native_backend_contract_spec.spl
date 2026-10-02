@@ -4,10 +4,25 @@ use app.test_runner_new.test_runner_args.{parse_test_args}
 use std.test_runner.test_runner_types.{TestExecutionMode}
 use std.test_runner.test_runner_execute.{native_test_request_error, native_test_compile_args, cleanup_native_generated_files}
 use std.test_runner.test_executor_parsing.{build_child_args, make_result_from_output, _tp_get_temp_dir}
-use std.io_runtime.{dir_create_all, file_exists, file_write}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_exists, file_write, file_delete, read_file_text}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 describe "Explicit native backend test contract":
+    it "fails closed and records quarantine when cleanup cannot prove ownership":
+        step("Reject cleanup of a cache outside its exact artifact binding")
+        val stamp = time_now_unix_micros()
+        val artifact = _tp_get_temp_dir() + "/native-quarantine-{stamp}.exe"
+        val rejected_cache = artifact + ".wrong-cache"
+        val quarantine = _tp_get_temp_dir() + "/native-quarantine-evidence-{stamp}.env"
+        dir_create_all(rejected_cache)
+        file_write(rejected_cache + "/sentinel", "must remain")
+        val clean = cleanup_native_generated_files(artifact, "", "", "", "original.spl", false, rejected_cache, quarantine)
+        expect(clean).to_equal(false)
+        expect(file_exists(rejected_cache + "/sentinel")).to_equal(true)
+        expect(read_file_text(quarantine)).to_contain("NATIVE-CACHE-CLEANUP-FAILED")
+        dir_remove_all(rejected_cache)
+        file_delete(quarantine)
+
     it "retains requested native artifacts and removes private caches otherwise":
         step("Release the completed native entry's private cache")
         val artifact = _tp_get_temp_dir() + "/native-cleanup-{time_now_unix_micros()}.exe"

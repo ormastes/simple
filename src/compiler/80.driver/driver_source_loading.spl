@@ -19,6 +19,7 @@ use compiler.traits.trait_validation.{TraitError}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -1446,6 +1447,30 @@ fn _driver_load_bulk_source_file(path: text, native_entry_active: bool) -> [Sour
         return []
     _driver_module_aliases(path, content, _driver_module_name_from_path(path))
 
+pub fn _driver_is_explicit_native_entry_source(path: text, native_entry: text, cached_physical_entry: text = "") -> bool:
+    # Request authority applies to exactly one normalized source file, never
+    # its containing tree or similarly prefixed neighbors.
+    if native_entry == "" or not path.ends_with(".spl"):
+        return false
+    val normalized = _driver_canonical_source_path(path)
+    val requested = _driver_canonical_source_path(native_entry)
+    if normalized == requested:
+        return true
+    # The name prefilter avoids filesystem resolution for unrelated bulk
+    # inventory rows. Resolve aliases only for the selected file's basename.
+    val path_parts = normalized.split("/")
+    val entry_parts = requested.split("/")
+    if path_parts.len() == 0 or entry_parts.len() == 0 or
+            path_parts[path_parts.len() - 1].lower() != entry_parts[entry_parts.len() - 1].lower():
+        return false
+    val physical_path = _driver_physical_source_key_strict_v1(normalized)
+    val physical_entry = if cached_physical_entry != "": cached_physical_entry
+        else: _driver_physical_source_key_strict_v1(requested)
+    if physical_path == "" or physical_entry == "":
+        return false
+    if host_is_windows_host(): physical_path.lower() == physical_entry.lower()
+    else: physical_path == physical_entry
+
 pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
     var result: [SourceFile] = []
@@ -1453,6 +1478,9 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         print "[collect_sources] path {p}"
     if p.ends_with(".spl"):
         _g_source_classification_count = _g_source_classification_count + 1
+        val selected_native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        if _driver_is_explicit_native_entry_source(p, selected_native_entry):
+            return _driver_collect_explicit_compiler_source(p)
         if _driver_source_trace_enabled():
             print "[collect_sources] file {p}"
         # It's a source file
@@ -1499,11 +1527,16 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         var native_entry = ""
         native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val native_entry_active = native_entry != ""
+        val physical_native_entry = if native_entry_active:
+                _driver_physical_source_key_strict_v1(_driver_canonical_source_path(native_entry))
+            else: ""
         for discovered_path in discovered:
             val path = discovered_path.trim()
-            if not _driver_bulk_source_candidate_allowed(path):
+            val explicit_entry = _driver_is_explicit_native_entry_source(path, native_entry, physical_native_entry)
+            if not explicit_entry and not _driver_bulk_source_candidate_allowed(path):
                 continue
-            val loaded = _driver_load_bulk_source_file(path, native_entry_active)
+            val loaded = if explicit_entry: _driver_collect_explicit_compiler_source(path)
+                else: _driver_load_bulk_source_file(path, native_entry_active)
             for s in loaded:
                 result = result.push(s)
     result

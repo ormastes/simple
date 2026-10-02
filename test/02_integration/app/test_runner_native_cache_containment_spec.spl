@@ -1,0 +1,36 @@
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{dir_create_all, dir_remove_all, file_exists, file_write, read_file_text}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.test_runner.test_runner_execute.{cleanup_native_generated_files}
+
+describe "Native compiler cache cleanup does not traverse linked directories":
+    it "retains an external target reached through a nested cache junction or symlink":
+        # @req REQ-NATIVE-003
+        step("Create a nested directory link to a separate task-owned target")
+        val stamp = time_now_unix_micros()
+        val artifact = _tp_get_temp_dir() + "/native-containment-{stamp}.exe"
+        val cache = artifact + ".cache"
+        val outside = _tp_get_temp_dir() + "/native-external-{stamp}"
+        val linked = cache + "/nested/linked"
+        dir_create_all(cache + "/nested")
+        dir_create_all(outside)
+        file_write(outside + "/sentinel", "external target must survive")
+        val (create_out, create_err, create_code) = if host_is_windows_host():
+                process_run_timeout("cmd.exe", ["/c", "mklink", "/J", host_path_native(linked), host_path_native(outside)], 10000)
+            else:
+                process_run_timeout("ln", ["-s", outside, linked], 10000)
+        expect(create_code).to_equal(0)
+        expect(file_exists(linked + "/sentinel")).to_equal(true)
+        step("Clean the private cache using the actual runtime directory owner")
+        cleanup_native_generated_files(artifact, "", "", "", "original.spl", false, cache)
+        val external_survived = file_exists(outside + "/sentinel")
+        val sentinel_text = if external_survived: read_file_text(outside + "/sentinel") else: ""
+        val linked_removed = not file_exists(linked + "/sentinel")
+        dir_remove_all(outside)
+        expect(external_survived).to_equal(true)
+        expect(sentinel_text).to_equal("external target must survive")
+        expect(linked_removed).to_equal(true)
