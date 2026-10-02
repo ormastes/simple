@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fail() { echo "FAIL: $*" >&2; exit 1; }
+case "$(uname -s)" in MSYS*|MINGW*|CYGWIN*) ;; *) echo 'SKIP: Windows nested Job contract'; exit 0 ;; esac
+if [ "${1:-}" = --child ]; then
+    evidence=$2
+    BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    mkdir "$evidence/home" "$evidence/tmp"
+    status=0
+    bootstrap_stage3_run_transcribed "$evidence/inherit.transcript" "$root" \
+        "$evidence/inherit.log" "$evidence/home" "$evidence/tmp" "$PATH" \
+        -- /bin/sh -c 'printf "actual inherited workload\n" > "$1"; exit 9' \
+        sh "$evidence/body.txt" || status=$?
+    [ "$status" -eq 9 ] || fail "inherited workload exit $status, expected 9"
+    grep -Fxq 'actual inherited workload' "$evidence/body.txt" || fail 'inherited body never ran'
+    grep -Fxq 'session_mode=inherit' "$evidence/inherit.log.rss.env" || fail 'session policy was not inherited'
+    grep -Fxq 'observer_backend=win32-job-object' "$evidence/inherit.log.rss.env" || fail 'not native Windows sampler'
+    grep -Fxq 'quiescent=1' "$evidence/inherit.log.rss.env" || fail 'inherited Job left live members'
+    exit 0
+fi
+[ -n "${1:-}" ] || fail 'owned evidence parent is required'
+evidence=$(mktemp -d "$1/bootstrap-rss-inherit.XXXXXX")
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=262144
+perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode=new --rss-cap-mode=enforce --max-rss-kib=524288 \
+    --interval-ms=100 --timeout-seconds=30 --receipt="$evidence/parent.rss.env" -- \
+    /bin/sh "$0" --child "$evidence"
+grep -Fxq 'observer_backend=win32-job-object' "$evidence/parent.rss.env" || fail 'parent Job sampler missing'
+grep -Fxq 'quiescent=1' "$evidence/parent.rss.env" || fail 'parent Job left live members'
+echo "PASS: inherited RSS Job contains actual transcribed child; evidence=$evidence"
