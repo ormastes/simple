@@ -1,0 +1,425 @@
+run_timeout() {
+  timeout_seconds=$1
+  shift
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MSYS*|MINGW*|CYGWIN*)
+      timeout_capture=$(mktemp "${TMPDIR:-/tmp}/simple-timeout.XXXXXX") || return 1
+      timeout_marker="${timeout_capture}.expired"
+      "$@" >"${timeout_capture}" 2>&1 &
+      timeout_pid=$!
+      (
+        sleep "${timeout_seconds}"
+        if kill -0 "${timeout_pid}" 2>/dev/null; then
+          : >"${timeout_marker}"
+          kill "${timeout_pid}" 2>/dev/null || true
+          sleep 1
+          kill -9 "${timeout_pid}" 2>/dev/null || true
+        fi
+      ) &
+      timeout_watchdog=$!
+      timeout_status=0
+      wait "${timeout_pid}" || timeout_status=$?
+      kill "${timeout_watchdog}" 2>/dev/null || true
+      wait "${timeout_watchdog}" 2>/dev/null || true
+      cat "${timeout_capture}"
+      if [ -f "${timeout_marker}" ]; then
+        timeout_status=124
+      fi
+      rm -f "${timeout_capture}" "${timeout_marker}"
+      return "${timeout_status}"
+      ;;
+  esac
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${timeout_seconds}" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "${timeout_seconds}" "$@"
+  else
+    "$@"
+  fi
+}
+
+bootstrap_stage_sanity() (
+  candidate=$1
+  evidence_path=${2:-}
+  sanity_home=$3
+  sanity_tmpdir=$4
+  sanity_path=$5
+  # Captured BEFORE the environment scrub below, which unsets everything.
+  sanity_repo_root=${repo_root}
+  sanity_controls=${SIMPLE_BOOTSTRAP_SANITY_BASE_CONTROLS_FILE:?verified control snapshot required}
+  sanity_controls_sha=$(bootstrap_stage3_hash_file "$sanity_controls") || return 1
+  sanity_controls_writer=${SIMPLE_BOOTSTRAP_SANITY_CONTROL_WRITER:?pinned writer path required}
+  sanity_controls_writer_sha=$(bootstrap_stage3_hash_file "$sanity_controls_writer") || return 1
+  # Also captured before the scrub, same reasoning as sanity_repo_root: on
+  # Windows this function used to hand the candidate a Windows-ABI-less,
+  # toolchain-less environment, which silently changed WHICH compiler got
+  # invoked and whether it could find anything once invoked.
+  #
+  # SIMPLE_WINDOWS_ABI/SIMPLE_LINKER_FLAVOR: without these,
+  # Target::linker_flavor() (common/src/target.rs) falls back to an MSYSTEM
+  # heuristic, which is always set under Git Bash -- so a requested
+  # --target x86_64-pc-windows-msvc build silently ran GNU flavor and invoked
+  # the wrong main-stub C driver. This is the exact "bootstrap_windows_abi_env" fix
+  # already applied to the stage2/stage3 native-build invocations (see that
+  # variable's own comment above) but never wired into this sanity check.
+  # INCLUDE/LIB/LIBPATH: required for cl.exe/clang-cl to find MSVC headers and
+  # import libraries at all.
+  # SystemRoot/SystemDrive/ProgramData: MSYS/Git Bash exports these in UPPER
+  # CASE (SYSTEMROOT/SYSTEMDRIVE/PROGRAMDATA); a native cmd shell's mixed-case
+  # spellings are absent, so falling back only to the mixed-case name captures
+  # empty. SystemDrive is required for link.exe to resolve drive-rooted LIB
+  # entries (bisected 2026-08-24: its absence alone produces
+  # LNK1181 'cannot open input file kernel32.lib' even with LIB correct).
+  # TEMP/TMP: native (non-MSYS) Windows toolchain binaries resolve their own
+  # scratch directory via the Win32 TEMP/TMP
+  # environment variables, not the POSIX TMPDIR this function sets below. With
+  # both unset, GetTempPath falls back to the Windows install directory, which
+  # is not writable without elevation: "Cannot create temporary file in
+  # C:\WINDOWS\: Permission denied" -- measured 2026-08-31, the actual cause
+  # behind a frontend-smoke failure that used to report no diagnostic text at
+  # all (see the frontend_log preservation added just above this function).
+  sanity_windows_abi=${SIMPLE_WINDOWS_ABI:-}
+  sanity_linker_flavor=${SIMPLE_LINKER_FLAVOR:-}
+  # Captured before the scrub, like INCLUDE/LIB below. The backend resolves
+  # llc through _env_tool_dirs, which reads these two BEFORE any PATH lookup.
+  # Without them the sanity child saw env_dirs=0 (measured), fell through to a
+  # shell `where llc`, and the LLVM object stage returned "llc not found" --
+  # surfacing only as "backend object-path status 1".
+  sanity_llvm_bin=${SIMPLE_LLVM_BIN:-}
+  sanity_llvm_prefix=${LLVM_SYS_231_PREFIX:-}
+  sanity_include=${INCLUDE:-}
+  sanity_lib=${LIB:-}
+  sanity_libpath=${LIBPATH:-}
+  sanity_system_root=${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
+  sanity_system_drive=${SystemDrive:-${SYSTEMDRIVE:-}}
+  sanity_program_data=${ProgramData:-${PROGRAMDATA:-}}
+  sanity_os_identifier=${OS:-}
+  sanity_win_temp=${TEMP:-${TMP:-}}
+  sanity_cc=${CC:-}
+  sanity_cxx=${CXX:-}
+  # The stage2 sanity probes are bounded by COMPILER_BUILD_TIMEOUT_SECONDS
+  # (admission script default 180s, sized for native hardware). Capture the
+  # caller's value before the scrub so an emulated lane (QEMU TCG FreeBSD,
+  # where hello-world-positional scans the whole import graph and exceeds
+  # 180s) can raise it; without this the scrub always restored the 180s
+  # default and the probe timed out with raw_status=124.
+  sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
+  # The outer guard owns these values. Scrubbing them makes the bounded-log
+  # collector create a new session, escaping the still-active outer monitor.
+  # Validate before any candidate execution, and preserve presence (including
+  # malformed/empty contracts) rather than silently falling back to standalone.
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0)
+      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-id raw_status=125' >&2
+      return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *)
+      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-helper raw_status=125' >&2
+      return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || {
+      echo 'bootstrap-sanity-error: phase=session-validation reason=session-check-failed raw_status=125' >&2
+      return 125
+    }
+  fi
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *)
+    echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-rss-cap-mode raw_status=125' >&2
+    return 125 ;; esac
+  for sanity_env_name in $(env | sed 's/=.*//'); do
+    case "${sanity_env_name}" in
+      SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
+      ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+    esac
+    unset "${sanity_env_name}"
+  done
+  HOME=${sanity_home}
+  TMPDIR=${sanity_tmpdir}
+  PATH=${sanity_path}
+  LC_ALL=C
+  LANG=C
+  export HOME TMPDIR PATH LC_ALL LANG
+  if [ -n "${sanity_llvm_bin}" ]; then
+    SIMPLE_LLVM_BIN=${sanity_llvm_bin}
+    export SIMPLE_LLVM_BIN
+  fi
+  if [ -n "${sanity_llvm_prefix}" ]; then
+    LLVM_SYS_231_PREFIX=${sanity_llvm_prefix}
+    export LLVM_SYS_231_PREFIX
+  fi
+  if [ -n "${sanity_build_timeout}" ]; then
+    COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
+    export COMPILER_BUILD_TIMEOUT_SECONDS
+  fi
+  if [ -n "${sanity_windows_abi}" ]; then
+    SIMPLE_WINDOWS_ABI=${sanity_windows_abi}
+    export SIMPLE_WINDOWS_ABI
+  fi
+  if [ -n "${sanity_linker_flavor}" ]; then
+    SIMPLE_LINKER_FLAVOR=${sanity_linker_flavor}
+    export SIMPLE_LINKER_FLAVOR
+  fi
+  # Written as `if ... fi`, not a bare `[ -n ... ] && { ...; }` list. This
+  # function runs under the top-level `set -eu` (subshells inherit shell
+  # options), and on every non-Windows platform every one of these six
+  # variables is genuinely empty by design, so the `[ -n ... ]` test always
+  # fails there. POSIX exempts a non-last command of an AND-OR list from
+  # errexit, so a bare `[ -n ... ] && { ...; }` does NOT actually abort the
+  # subshell (verified directly against this host's `sh`) -- but relying on
+  # that exemption rule to hold for every future edit to this block (e.g. an
+  # accidental reorder that makes the test the last statement) is exactly
+  # the kind of shell subtlety that has already bitten this file once. `if`
+  # removes the question entirely at zero cost.
+  if [ -n "${sanity_include}" ]; then
+    INCLUDE=${sanity_include}
+    export INCLUDE
+  fi
+  if [ -n "${sanity_lib}" ]; then
+    LIB=${sanity_lib}
+    export LIB
+  fi
+  if [ -n "${sanity_libpath}" ]; then
+    LIBPATH=${sanity_libpath}
+    export LIBPATH
+  fi
+  if [ -n "${sanity_system_root}" ]; then
+    SystemRoot=${sanity_system_root}
+    export SystemRoot
+  fi
+  if [ -n "${sanity_system_drive}" ]; then
+    SystemDrive=${sanity_system_drive}
+    export SystemDrive
+  fi
+  if [ -n "${sanity_program_data}" ]; then
+    ProgramData=${sanity_program_data}
+    export ProgramData
+  fi
+  if [ "${os}" = windows ] && [ -n "${sanity_os_identifier}" ]; then
+    OS=${sanity_os_identifier}; export OS
+  fi
+  if [ -n "${sanity_win_temp}" ]; then
+    TEMP=${sanity_win_temp}
+    TMP=${sanity_win_temp}
+    export TEMP TMP
+  fi
+  if [ -n "${sanity_cc}" ]; then
+    CC=${sanity_cc}
+    export CC
+  fi
+  if [ "${os}" != windows ] && [ -n "${sanity_cxx}" ]; then
+    CXX=${sanity_cxx}
+    export CXX
+  fi
+  sanity_evidence_stem="${evidence_path:-${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}/bootstrap-sanity}"
+  evidence_tmp="${sanity_evidence_stem}.tmp.$$"
+  frontend_log="${sanity_evidence_stem}.frontend-driver.log"
+  frontend_bootstrap0_log="${sanity_evidence_stem}.frontend-bootstrap-0.log"
+  frontend_bootstrap0_status_path="${sanity_evidence_stem}.frontend-bootstrap-0.status.env"
+  frontend_bootstrap1_log="${sanity_evidence_stem}.frontend-bootstrap-1.log"
+  frontend_bootstrap1_status_path="${sanity_evidence_stem}.frontend-bootstrap-1.status.env"
+  bootstrap_stage2_sanity_output_preflight "${evidence_path}" || return 1
+  rm -f "${evidence_tmp}" "${frontend_log}" \
+    "${frontend_bootstrap0_log}" "${frontend_bootstrap0_status_path}" \
+    "${frontend_bootstrap1_log}" "${frontend_bootstrap1_status_path}"
+  candidate_sha_before=$(bootstrap_stage3_hash_file "${candidate}") || return 1
+  # Expected version is DERIVED, never hardcoded. The literal
+  # "simple-bootstrap 1.0.0-beta" used to live here; release commit 9a3f6051996
+  # bumped src/app/cli/bootstrap_identity.spl (and ./VERSION) to 1.0.0-RC and did
+  # not update this file, making the gate unsatisfiable by ANY correctly-built
+  # Stage-2 binary. The failure was invisible because the version comparison had
+  # no *_status field in the evidence -- every recorded field read as passing.
+  # Fail-closed: an unreadable/empty VERSION, or a VERSION that disagrees with
+  # bootstrap_identity.spl, is an ERROR (sanity_status=error), never a pass.
+  version_expect_status=0
+  version_expected=$(bootstrap_stage3_canonical_version \
+    "${sanity_repo_root}") || version_expect_status=1
+  version_status=0
+  [ "$(bootstrap_stage3_hash_file "$sanity_controls")" = "$sanity_controls_sha" ] || return 1
+  version=$(bootstrap_stage3_manifest_value version_output "$sanity_controls") || version_status=$?
+  version_match_status=1
+  if [ "${version_expect_status}" -eq 0 ] &&
+    [ "${version}" = "simple-bootstrap ${version_expected}" ]; then
+    version_match_status=0
+  fi
+  # Capture the native process status directly. On MSYS, wrapping this command
+  # substitution in an `if` has intermittently reported the assignment's zero
+  # status instead of the Windows child's exit 1, even though the candidate
+  # emitted the expected diagnostic. Temporarily disabling errexit preserves
+  # the actual timeout/child status without weakening any subsequent check.
+  unsupported=
+  unsupported_status=$(bootstrap_stage3_manifest_value unsupported_status "$sanity_controls") || return 1
+  unsupported_output_sha=$(bootstrap_stage3_manifest_value unsupported_output_sha256 "$sanity_controls") || return 1
+  frontend_status=0
+  candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || {
+    sanity_capture_status=$?
+    echo "bootstrap-sanity-error: phase=frontend-capture reason=capture-setup-failed raw_status=${sanity_capture_status}" >&2
+    return "${sanity_capture_status}"
+  }
+  frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
+  frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
+  # The smoke exercises the FRONTEND through whichever worker binary the lane
+  # admits. When the Rust seed was built without the llvm cargo feature (the
+  # decoupled lane: SIMPLE_BOOTSTRAP_RUST_LLVM=0, LLVM served to the
+  # pure-Simple backends via LLVM-C.dll), the seed-side worker cannot honour
+  # --backend llvm, so the smoke drives it with cranelift. The llvm backend
+  # admission itself is the K1 composition gate downstream, unaffected here.
+  if [ "${llvm_features}" = "" ]; then
+    frontend_smoke_backend=cranelift
+  else
+    frontend_smoke_backend=${backend}
+  fi
+  CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
+    CANDIDATE_FRONTEND_BOOTSTRAP=0 \
+    CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
+    CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_status_path##*/}" \
+    candidate_frontend_pinned_smoke "${candidate}" "${frontend_log_authority}" ||
+    frontend_status=$?
+  # Second pass under SIMPLE_BOOTSTRAP=1 -- the EXACT configuration Stage 3
+  # invokes this candidate in. The single-pass (SIMPLE_BOOTSTRAP=0) gate
+  # certified a configuration Stage 3 never uses, and on 2026-08-09 it admitted
+  # a Stage-2 binary that could not lex a two-line file, whose failure then ran
+  # unbounded (444 MB log / 32 GB RSS). See doc/08_tracking/bug/
+  # stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
+  frontend_bootstrap_status=0
+  frontend_bootstrap_ran=false
+  if [ "${frontend_status}" -eq 0 ]; then
+    frontend_bootstrap_ran=true
+    CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
+      CANDIDATE_FRONTEND_BOOTSTRAP=1 \
+      CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
+      CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_status_path##*/}" \
+      candidate_frontend_pinned_smoke "${candidate}" "${frontend_log_authority}" ||
+      frontend_bootstrap_status=$?
+    frontend_status=${frontend_bootstrap_status}
+  fi
+  candidate_sha_after=$(bootstrap_stage3_hash_file "${candidate}") || return 1
+  # The `run` sub-check is a NEGATIVE CONTROL, not a capability probe: the
+  # Stage-2 candidate is built from src/app/cli/bootstrap_main.spl, which
+  # deliberately implements only native-build/compile/--version/--help. Asserting
+  # that `run` is rejected with rc 1 and the exact diagnostic proves the
+  # candidate reached its own argv dispatch -- i.e. it is the bootstrap entry we
+  # asked for and not some other binary. Do not "fix" it into a `run` that works.
+  unsupported_match_status=$(bootstrap_stage3_manifest_value unsupported_match_status "$sanity_controls") || return 1
+  sha_stable_status=1
+  if [ "${candidate_sha_before}" = "${candidate_sha_after}" ]; then
+    sha_stable_status=0
+  fi
+  # Non-vacuity: count the sub-checks actually evaluated. A run that evaluated
+  # none is ERROR, never a pass.
+  sanity_checks_run=5
+  if [ "${version_expect_status}" -ne 0 ]; then
+    sanity_status=error
+    sanity_checks_run=0
+  elif [ "${version_status}" -eq 0 ] &&
+    [ "${version_match_status}" -eq 0 ] &&
+    [ "${unsupported_match_status}" -eq 0 ] &&
+    [ "${frontend_status}" -eq 0 ] &&
+    [ "${sha_stable_status}" -eq 0 ]; then
+    sanity_status=pass
+  else
+    sanity_status=fail
+  fi
+  # Name the failing sub-check. The old gate exited 2 with no diagnostic text at
+  # all, which is why a stale version literal cost a full 30-minute bootstrap to
+  # even localise.
+  if [ "${sanity_status}" != pass ]; then
+    [ "${version_expect_status}" -eq 0 ] ||
+      echo "error: sanity ERROR - canonical release version or its projections are invalid under ${sanity_repo_root}" >&2
+    [ "${version_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - --version exited ${version_status}" >&2
+    { [ "${version_expect_status}" -ne 0 ] || [ "${version_match_status}" -eq 0 ]; } ||
+      echo "error: sanity FAIL - version mismatch: got '${version}', want 'simple-bootstrap ${version_expected}'" >&2
+    [ "${unsupported_match_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - 'run' negative control: rc ${unsupported_status}, output '${unsupported}'" >&2
+    [ "${frontend_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - frontend smoke exited ${frontend_status} (bootstrap-mode pass: ${frontend_bootstrap_status})" >&2
+    [ "${sha_stable_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - candidate binary mutated during sanity" >&2
+  fi
+  if [ -n "${evidence_path}" ]; then
+    {
+      echo "schema=simple-bootstrap-sanity-evidence-v1"
+      echo "status=${sanity_status}"
+      echo "base_control_profile=llvm-32867-qualification1-controls-v1"
+      echo "base_control_snapshot_sha256=$sanity_controls_sha"
+      echo "base_control_writer_sha256=$sanity_controls_writer_sha"
+      echo "candidate_sha256_before=${candidate_sha_before}"
+      echo "version_status=${version_status}"
+      echo "version_output=${version}"
+      echo "version_expected=${version_expected}"
+      echo "version_expect_status=${version_expect_status}"
+      echo "version_match_status=${version_match_status}"
+      echo "unsupported_status=${unsupported_status}"
+      printf 'unsupported_output_sha256=%s\n' \
+        "$unsupported_output_sha"
+      echo "frontend_smoke_status=${frontend_status}"
+      echo "frontend_smoke_backend=${backend}"
+      echo "frontend_smoke_bootstrap0_raw_status=$([ -f "${frontend_bootstrap0_status_path}" ] && sed -n 's/^raw_status=//p' "${frontend_bootstrap0_status_path}" || echo "${frontend_status}")"
+      echo "frontend_smoke_bootstrap0_log_path=${frontend_bootstrap0_log}"
+      echo "frontend_smoke_bootstrap0_log_sha256=$(frontend_hash_or_dash "${frontend_bootstrap0_log}")"
+      echo "frontend_smoke_bootstrap0_status_path=${frontend_bootstrap0_status_path}"
+      echo "frontend_smoke_bootstrap0_status_sha256=$(frontend_hash_or_dash "${frontend_bootstrap0_status_path}")"
+      echo "unsupported_match_status=${unsupported_match_status}"
+      echo "frontend_smoke_bootstrap_mode_status=${frontend_bootstrap_status}"
+      echo "frontend_smoke_bootstrap1_ran=${frontend_bootstrap_ran}"
+      echo "frontend_smoke_bootstrap1_raw_status=$([ -f "${frontend_bootstrap1_status_path}" ] && sed -n 's/^raw_status=//p' "${frontend_bootstrap1_status_path}" || echo not-run)"
+      echo "frontend_smoke_bootstrap1_log_path=$([ "${frontend_bootstrap_ran}" = true ] && echo "${frontend_bootstrap1_log}" || echo -)"
+      echo "frontend_smoke_bootstrap1_log_sha256=$([ "${frontend_bootstrap_ran}" = true ] && frontend_hash_or_dash "${frontend_bootstrap1_log}" || echo -)"
+      echo "frontend_smoke_bootstrap1_status_path=$([ "${frontend_bootstrap_ran}" = true ] && echo "${frontend_bootstrap1_status_path}" || echo -)"
+      echo "frontend_smoke_bootstrap1_status_sha256=$([ "${frontend_bootstrap_ran}" = true ] && frontend_hash_or_dash "${frontend_bootstrap1_status_path}" || echo -)"
+      echo "frontend_smoke_output_sha256=$(frontend_hash_or_dash "${frontend_log}")"
+      echo "frontend_smoke_driver_log_path=${frontend_log}"
+      echo "frontend_smoke_driver_log_sha256=$(frontend_hash_or_dash "${frontend_log}")"
+      echo "candidate_sha256_after=${candidate_sha_after}"
+      echo "sha_stable_status=${sha_stable_status}"
+      echo "checks_run=${sanity_checks_run}"
+    } >"${evidence_tmp}" || return 1
+    mv "${evidence_tmp}" "${evidence_path}"
+  fi
+  if [ "${sanity_status}" != pass ]; then
+    echo "bootstrap-sanity-error: version_status=${version_status} version_output=${version} unsupported_status=${unsupported_status} frontend_status=${frontend_status} candidate_unchanged=$([ "${candidate_sha_before}" = "${candidate_sha_after}" ] && echo true || echo false)" >&2
+    # The frontend log used to be unconditionally rm'd below with nothing ever
+    # having printed its content -- only its sha256 landed in the evidence
+    # file. That is what made a failing frontend smoke UNDIAGNOSABLE: the gate
+    # reported frontend_status=1 with no error text of any kind. Preserve a
+    # durable copy next to the evidence file (never in $TMPDIR, which this
+    # subshell's own caller may clean up) and echo a bounded excerpt to
+    # stderr so the real compiler/linker error is visible in the run's own
+    # log, not just inferable from a hash.
+    if [ -s "${frontend_log}" ]; then
+      echo "bootstrap-sanity-error: frontend smoke log follows (first 65536 bytes of ${frontend_log}):" >&2
+      head -c 65536 "${frontend_log}" >&2
+      echo "" >&2
+      if [ -n "${evidence_path}" ]; then
+        frontend_log_durable="${evidence_path}.frontend-failure.log"
+        cp -f "${frontend_log}" "${frontend_log_durable}" 2>/dev/null &&
+          echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
+      fi
+    else
+      echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
+    fi
+  fi
+  if [ "${sanity_status}" != pass ]; then
+    if [ -s "${frontend_log}" ]; then
+      echo "bootstrap-sanity-error: frontend smoke log follows (first 65536 bytes):" >&2
+      head -c 65536 "${frontend_log}" >&2
+      echo "" >&2
+      if [ -n "${evidence_path}" ]; then
+        frontend_log_durable="${evidence_path}.frontend-failure.log"
+        if cp -f "${frontend_log}" "${frontend_log_durable}"; then
+          echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
+        else
+          echo "bootstrap-sanity-error: preserving original frontend smoke log at ${frontend_log}" >&2
+        fi
+      fi
+    else
+      echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
+    fi
+  fi
+  # A durable sanity receipt binds this original log on both pass and fail.
+  # Cleanup only scratch evidence that has no published receipt.
+  if [ -z "${evidence_path}" ]; then
+    rm -f "${frontend_log}"
+  fi
+  [ "${sanity_status}" = pass ]
+)
+

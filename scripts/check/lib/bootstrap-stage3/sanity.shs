@@ -727,7 +727,7 @@ bootstrap_stage3_write_composed_sanity_receipt() (
     ln "$tmp" "$output" || return 1
 )
 
-bootstrap_stage3_verify_sanity_evidence_receipt() (
+_bootstrap_stage3_verify_sanity_evidence_receipt_legacy() (
     [ "$#" = 5 ] || return 1
     if [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-components-v1 ]; then
         bootstrap_stage3_verify_composed_sanity_receipt "$@"
@@ -1482,3 +1482,72 @@ bootstrap_stage3_verify_sanity_evidence() (
 #   BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE3_SANITY
 #   BSTAGE3_TOOL_AUTHORITY BSTAGE3_TOOL_AUTHORITY_BEFORE
 #   BSTAGE3_LOCK
+
+# Additive archived-control profile. Fresh frontend oracles stay in the legacy
+# reader; a reused-control child receipt is never accepted directly as legacy.
+bootstrap_stage3_base_control_command() (
+    [ "$#" -ge 2 ] || return 1
+    bcc_candidate=$1 bcc_parent=$2
+    shift 2
+    bcc_python=/c/Users/user/AppData/Local/Programs/Python/Python313/python.exe
+    bcc_helper="$bootstrap_stage3_facade_dir/bootstrap-stage3/sanity-base-controls.py"
+    [ "$(bootstrap_stage3_hash_file "$bcc_helper")" = 'f948c9b340e96c14d4d4da6d7d05729b41aa601dad1982c4b5309f3e14002a25' ] || return 1
+    "$bcc_python" "$(cygpath -aw "$bcc_helper")" \
+        --profile llvm-32867-qualification1-controls-v1 \
+        --archive C:/Users/user/.simple/worktrees/simple-windows-phase2/build/native_probe/llvm-patched-candidate-qualification1 \
+        --owner C:/Users/user/.simple/worktrees/simple/runtime/llvm-patched-candidate-qualification \
+        --candidate "$(cygpath -aw "$bcc_candidate")" \
+        --source "$(cygpath -aw "$bcc_parent/source-before.txt")" \
+        --git "$(cygpath -aw "$bcc_parent/current-consumer-before.env")" \
+        --runtime "$(cygpath -aw "$bcc_parent/runtime-before.txt")" \
+        --tool "$(cygpath -aw "$bcc_parent/tools-before.txt")" "$@"
+)
+
+bootstrap_stage3_verify_sanity_evidence_receipt() (
+    [ "$#" = 5 ] || return 1
+    bcc_file=$1 bcc_display=$2 bcc_parent=$3 bcc_candidate=$4 bcc_root=$5
+    bootstrap_stage3_sanity_regular_authority "$bcc_file" || return 1
+    bcc_schema=$(bootstrap_stage3_manifest_value schema "$bcc_file") || return 1
+    case "$bcc_schema" in
+        simple-bootstrap-sanity-components-v1)
+            _bootstrap_stage3_verify_sanity_evidence_receipt_legacy "$@"
+            ;;
+        simple-bootstrap-sanity-evidence-v1)
+            if bootstrap_stage3_manifest_value base_control_profile "$bcc_file" >/dev/null 2>&1; then
+                printf 'stage2-sanity-error: reused controls require composed receipt\n' >&2
+                return 1
+            fi
+            _bootstrap_stage3_verify_sanity_evidence_receipt_legacy "$@"
+            ;;
+        simple-bootstrap-sanity-control-composition-v1)
+            bootstrap_stage3_sanity_display_absolute "$bcc_display" || return 1
+            bcc_fresh_display=$(bootstrap_stage3_manifest_value fresh_sanity_display "$bcc_file") || return 1
+            bootstrap_stage3_sanity_display_absolute "$bcc_fresh_display" || return 1
+            bcc_fresh="$bcc_parent/${bcc_fresh_display##*/}"
+            bootstrap_stage3_base_control_command "$bcc_candidate" "$bcc_parent" \
+                --fresh-sanity "$(cygpath -aw "$bcc_fresh")" \
+                --fresh-display "$bcc_fresh_display" \
+                --verify-composed "$(cygpath -aw "$bcc_file")" >/dev/null || return 1
+            # This verifies BOTH full mode groups, every native collector/log,
+            # PE and actual expected execution output, not just status headers.
+            _bootstrap_stage3_verify_sanity_evidence_receipt_legacy \
+                "$bcc_fresh" "$bcc_fresh_display" "$bcc_parent" "$bcc_candidate" "$bcc_root"
+            ;;
+        *) return 1 ;;
+    esac
+)
+
+bootstrap_stage3_write_sanity_control_composition() (
+    [ "$#" = 7 ] || return 1
+    bcc_output=$1 bcc_display=$2 bcc_fresh=$3 bcc_fresh_display=$4
+    bcc_parent=$5 bcc_candidate=$6 bcc_root=$7
+    bootstrap_stage3_sanity_display_absolute "$bcc_display" || return 1
+    _bootstrap_stage3_verify_sanity_evidence_receipt_legacy \
+        "$bcc_fresh" "$bcc_fresh_display" "$bcc_parent" "$bcc_candidate" "$bcc_root" || return 1
+    bootstrap_stage3_base_control_command "$bcc_candidate" "$bcc_parent" \
+        --fresh-sanity "$(cygpath -aw "$bcc_fresh")" \
+        --fresh-display "$bcc_fresh_display" \
+        --write-composed "$(cygpath -aw "$bcc_output")" >/dev/null || return 1
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bcc_output" "$bcc_display" "$bcc_parent" "$bcc_candidate" "$bcc_root"
+)
