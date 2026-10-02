@@ -2,6 +2,7 @@
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.provider_globals.*
 use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir._MirLowering.bootstrap_type_registration.{bootstrap_type_registry_reset, bootstrap_register_flat_type_defs, bootstrap_register_flat_class_defs, bootstrap_register_flat_class_providers, bootstrap_register_hir_type_defs}
 # MIR Lowering - HIR to MIR Transformation
@@ -105,6 +106,7 @@ var _bootstrap_mir_static_init_kinds: [i64] = []
 var _bootstrap_mir_static_init_payloads: [text] = []
 var _bootstrap_mir_static_alignments: [i64] = []
 var _bootstrap_mir_static_visibilities: [i64] = []
+var _bootstrap_mir_static_externals: [bool] = []
 var _bootstrap_function_value_names: [text] = []
 var _bootstrap_callable_link_names: Dict<text, text> = {}
 
@@ -144,13 +146,14 @@ fn bootstrap_mir_registries_promote() -> bool:
     val static_init_payloads_ok = rt_transient_heap_promote(_bootstrap_mir_static_init_payloads)
     val static_alignments_ok = rt_transient_heap_promote(_bootstrap_mir_static_alignments)
     val static_visibilities_ok = rt_transient_heap_promote(_bootstrap_mir_static_visibilities)
+    val static_externals_ok = rt_transient_heap_promote(_bootstrap_mir_static_externals)
     val value_names_ok = rt_transient_heap_promote(_bootstrap_function_value_names)
     val callable_links_ok = rt_transient_heap_promote(_bootstrap_callable_link_names)
     fns_ok and names_ok and modules_ok and ret_tags_ok and ret_unsigned_ok and
         p_starts_ok and p_counts_ok and p_tags_ok and static_modules_ok and
         static_symbol_ids_ok and static_names_ok and static_type_tags_ok and
         static_init_kinds_ok and static_init_payloads_ok and
-        static_alignments_ok and static_visibilities_ok and value_names_ok and callable_links_ok
+        static_alignments_ok and static_visibilities_ok and static_externals_ok and value_names_ok and callable_links_ok
 
 fn bootstrap_function_value_names_reset():
     _bootstrap_function_value_names = []
@@ -217,6 +220,7 @@ fn bootstrap_mir_functions_reset():
     _bootstrap_mir_static_init_payloads = []
     _bootstrap_mir_static_alignments = []
     _bootstrap_mir_static_visibilities = []
+    _bootstrap_mir_static_externals = []
 
 fn bootstrap_mir_functions_add(name: text, fn_: MirFunction, module_index: i64):
     val return_type_tag = bootstrap_mir_static_type_tag(fn_.signature.return_type)
@@ -307,6 +311,7 @@ fn bootstrap_mir_modules_add(module: MirModule):
     var bs_init_payloads = _bootstrap_mir_static_init_payloads
     var bs_alignments = _bootstrap_mir_static_alignments
     var bs_visibilities = _bootstrap_mir_static_visibilities
+    var bs_externals = _bootstrap_mir_static_externals
     val bs_static_vals = module.statics.values()
     var bs_si = 0
     while bs_si < bs_static_vals.len():
@@ -332,6 +337,7 @@ fn bootstrap_mir_modules_add(module: MirModule):
         val alignment = if static_.alignment > 0: static_.alignment else: static_.type_.alignment()
         bs_alignments = bs_alignments.push(alignment)
         bs_visibilities = bs_visibilities.push(bootstrap_mir_static_visibility_tag(static_.visibility))
+        bs_externals = bs_externals.push(static_.is_external)
         bs_si = bs_si + 1
     _bootstrap_mir_static_modules = bs_modules
     _bootstrap_mir_static_symbol_ids = bs_symbol_ids
@@ -341,6 +347,7 @@ fn bootstrap_mir_modules_add(module: MirModule):
     _bootstrap_mir_static_init_payloads = bs_init_payloads
     _bootstrap_mir_static_alignments = bs_alignments
     _bootstrap_mir_static_visibilities = bs_visibilities
+    _bootstrap_mir_static_externals = bs_externals
     _bootstrap_mir_module_count_value = module_index + 1
 
 # The real HIR module for the bootstrap entry, set by the driver
@@ -466,6 +473,35 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     # calling an undefined `@C` ctor. (Class method resolution is a follow-up that
     # also needs the method bodies lowered into the flat function stream.)
     lowering = bootstrap_register_flat_class_defs(lowering, module_index)
+    # The flat path bypasses lower_module. Borrow only demanded provider
+    # declarations here; do not reconstruct or retain whole provider modules.
+    var source_functions: [HirFunction] = []
+    var source_function_index = 0
+    while source_function_index < bootstrap_hir_module_function_count(module_index):
+        source_functions = source_functions.push(bootstrap_hir_module_function_at(module_index, source_function_index))
+        source_function_index = source_function_index + 1
+    val references = mir_global_reference_ids(source_functions, constants)
+    val demands = lowering.imported_global_demands(module_name, references)
+    val callable_demands = lowering.imported_callable_initializer_demands(module_name, references)
+    var demanded_owners = mir_global_demanded_owners(demands)
+    for owner in callable_demands.keys():
+        demanded_owners[owner] = true
+    var found_globals: Dict<text, bool> = {}
+    if demanded_owners.len() > 0:
+        var provider_index = 0
+        while provider_index < bootstrap_hir_module_count():
+            val provider_name = bootstrap_hir_module_name_at(provider_index)
+            val provider_owner = mir_layout_canonical_module_name(provider_name)
+            if demanded_owners.has(provider_owner):
+                var provider_constants: [HirConst] = []
+                var provider_constant_index = 0
+                while provider_constant_index < bootstrap_hir_module_constant_count(provider_index):
+                    provider_constants = provider_constants.push(bootstrap_hir_module_constant_at(provider_index, provider_constant_index))
+                    provider_constant_index = provider_constant_index + 1
+                val provider_symbols = bootstrap_flat_symbol_table(provider_index)
+                found_globals = lowering.register_provider_global_bindings(provider_name, provider_symbols, provider_constants, demands, found_globals, callable_demands)
+            provider_index = provider_index + 1
+        lowering.reject_missing_global_providers(demands, found_globals)
     for const_ in constants:
         lowering.lower_const(const_)
         lowering.lower_static(const_)
@@ -810,6 +846,9 @@ fn bootstrap_mir_static_alignment_at(index: i64) -> i64:
 
 fn bootstrap_mir_static_visibility_at(index: i64) -> i64:
     _bootstrap_mir_static_visibilities[index]
+
+fn bootstrap_mir_static_external_at(index: i64) -> bool:
+    _bootstrap_mir_static_externals[index]
 
 fn bootstrap_mir_symbol_for_index(index: i64) -> SymbolId:
     if index == 0:
