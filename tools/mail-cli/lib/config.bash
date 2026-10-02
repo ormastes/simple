@@ -397,7 +397,18 @@ mail_config_get_value() {
   _mail_config_query top "" "$key"
 }
 
+# Combined DevHub files are read-only through the mail settings writer: its
+# legacy block editor must never rewrite unrelated provider sections.
+_mail_config_assert_writable() {
+  if [ -f "$MAIL_CONFIG_FILE" ] && ! _mail_config_json; then
+    local scope
+    scope=$(_mail_config_query top "" _mail_config_scope) || return $?
+    [ "$scope" != email ] || { echo "MAIL_CONFIG_EMAIL_READ_ONLY" >&3; return 2; }
+  fi
+}
+
 mail_config_set_value() {
+  _mail_config_assert_writable || return $?
   local key="$1" value="$2" tmp
   [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || return 2
   mail_config_init
@@ -413,6 +424,7 @@ mail_config_set_value() {
 }
 
 mail_config_set_default() {
+  _mail_config_assert_writable || return $?
   local name="$1"
   [ -z "$name" ] || _mail_config_valid_name "$name" || return 2
   mail_config_init
@@ -441,6 +453,7 @@ mail_config_get_account() {
 }
 
 mail_config_set_account() (
+  _mail_config_assert_writable || return $?
   umask 077
   local name="$1" account_json="$2"
   _mail_config_valid_name "$name" || return 2
@@ -491,6 +504,7 @@ _mail_config_without_account() {
 }
 
 mail_config_delete_account() {
+  _mail_config_assert_writable || return $?
   local name="$1"
   _mail_config_valid_name "$name" || return 2
   if mail_config_exists; then
