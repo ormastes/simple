@@ -1,0 +1,55 @@
+# @tag: unit, compiler, only-compiled
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.core.parser.{parser_promote_transient_owners}
+use compiler.core.types.{
+    TYPE_I64, TYPE_TEXT, TYPE_NAMED_BASE, reset_all_pools, named_type_register,
+    custom_primitive_register, custom_primitive_is_name,
+    custom_primitive_underlying_type_tag_by_name,
+    custom_primitive_underlying_name_by_name, type_tag_name,
+    dict_type_register, dict_tag_to_id, dict_type_get_key, dict_type_get_value
+}
+use compiler.frontend.core.types.{
+    union_type_register, result_type_register
+}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+describe "HIR type registries survive parser scope reclamation":
+    it "retains custom primitives and Dict specializations after the parse scope ends":
+        step("Register HIR-used type metadata in a transient parser scope")
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        reset_all_pools()
+        val primitive_name = "RetainedWidth{TYPE_I64}"
+        val named_name = "OwnerName{TYPE_I64}"
+        val named_index = named_type_register(named_name, [], [])
+        val union_tag = union_type_register([TYPE_I64, TYPE_TEXT])
+        val result_tag = result_type_register(union_tag, TYPE_NAMED_BASE + named_index)
+        val primitive_index = custom_primitive_register(primitive_name, result_tag)
+        val dict_tag = dict_type_register(TYPE_TEXT, TYPE_I64)
+        expect(primitive_index).to_be_greater_than(-1)
+
+        step("Promote the parser owners before reclaiming that scope")
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(parser_promote_transient_owners()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+
+        # Reuse freed-size allocations before reading the retained registries.
+        var churn: [text] = []
+        for index in 0..128:
+            churn.push("link_output={index}")
+
+        step("Read the exact global registries consulted by HIR")
+        expect(custom_primitive_is_name("RetainedWidth{TYPE_I64}")).to_equal(true)
+        expect(custom_primitive_underlying_type_tag_by_name("RetainedWidth{TYPE_I64}")).to_equal(result_tag)
+        expect(type_tag_name(TYPE_NAMED_BASE + named_index)).to_equal("OwnerName{TYPE_I64}")
+        expect(type_tag_name(union_tag)).to_equal("i64 | text")
+        expect(custom_primitive_underlying_name_by_name("RetainedWidth{TYPE_I64}")).to_equal(
+            "Result<i64 | text,OwnerName{TYPE_I64}>")
+        val dict_index = dict_tag_to_id(dict_tag)
+        expect(dict_type_get_key(dict_index)).to_equal(TYPE_TEXT)
+        expect(dict_type_get_value(dict_index)).to_equal(TYPE_I64)
+        reset_all_pools()
