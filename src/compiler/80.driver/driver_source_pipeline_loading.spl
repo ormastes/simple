@@ -3,7 +3,7 @@
 # The main driver retains parsing, HIR, and later compilation phases.
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
-use std.io_runtime.{file_read_nullable, process_run}
+use std.io_runtime.{file_read_nullable, file_exists, process_run}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
@@ -864,8 +864,22 @@ impl CompilerDriver:
                         closure_scan_sources.len(), closure_src.path,
                         0, 6, 0, 0, "running")
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
-                val (_, cached_closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)
+                val (_, cached_closure_imports, cached_closure_siblings, _) = _driver_cached_entry_source_scan(closure_src.path)
                 var closure_imports = cached_closure_imports
+                val closure_module = if closure_src.module_name.ends_with(".__init__"):
+                    closure_src.module_name[0:closure_src.module_name.len() - 9]
+                else:
+                    closure_src.module_name
+                for sibling in cached_closure_siblings:
+                    if sibling.starts_with(".") and not sibling.starts_with(".."):
+                        # Generated facades may retain historical comments for
+                        # owners moved elsewhere. The native closure walker
+                        # skips missing relative files; match that behavior
+                        # before turning a hint into a required module import.
+                        val sibling_file = closure_dir + "/" +
+                            sibling.substring(1).replace(".", "/") + ".spl"
+                        if file_exists(sibling_file):
+                            closure_imports.push(sibling)
                 # Hidden compiler ABI dependencies are admitted from a typed
                 # parser result. The substring is only an allocation-saving
                 # prefilter; it never decides whether a declaration is HAL.
@@ -898,7 +912,12 @@ impl CompilerDriver:
                     "phase1:load_sources:closure:scan path={closure_src.path} imports={closure_imports.len()} content_len={closure_src.content.len()}")
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
-                for closure_mp in closure_imports:
+                for closure_mp_input in closure_imports:
+                    val closure_mp = if closure_mp_input.starts_with(".") and
+                        not closure_mp_input.starts_with(".."):
+                        closure_module + closure_mp_input
+                    else:
+                        closure_mp_input
                     if closure_seen_mods.contains_key(closure_mp):
                         continue
                     closure_seen_mods[closure_mp] = true
@@ -912,7 +931,7 @@ impl CompilerDriver:
                         log_phase(
                             "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
                         continue
-                    var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
+                    var closure_file = _driver_resolve_entry_import(closure_mp_input, closure_dir)
                     if closure_file == "":
                         for closure_source_root in closure_source_roots:
                             closure_file = _driver_resolve_entry_import(closure_mp, closure_source_root)
