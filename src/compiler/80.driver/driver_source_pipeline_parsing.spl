@@ -513,6 +513,7 @@ impl CompilerDriver:
             return Err("module surface builder is frozen")
         if builder.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
+        val parser_generation = parser_initialization_generation_v1()
         if not _sffi_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source_path}")
         val source = SourceFile(
@@ -526,7 +527,15 @@ impl CompilerDriver:
         val module = match selected_module:
             case Ok(value): value
             case Err(error):
-                val _ended = driver_end_transient_parse_scope()
+                if not _sffi_transient_array_scope_pause():
+                    val _ended = driver_end_transient_parse_scope()
+                    return Err("transient parser scope pause failed for {source_path}")
+                val error_ok = rt_transient_heap_promote(selected_module)
+                val owners_ok = driver_promote_retained_frontend_owners_v1(
+                    parser_initialization_generation_v1() != parser_generation)
+                val ended = driver_end_transient_parse_scope()
+                if not (error_ok and owners_ok and ended):
+                    return Err("transient parser scope error ownership failed for {source_path}")
                 return Err(error)
         if par_had_error_get():
             if not _sffi_transient_array_scope_pause():
@@ -535,7 +544,8 @@ impl CompilerDriver:
             if not self.promote_target_cfg_receipt_v1(source_path):
                 val _ended = driver_end_transient_parse_scope()
                 return Err("target cfg receipt promotion failed for {source_path}")
-            if not driver_promote_frontend_registry_owners():
+            if not driver_promote_retained_frontend_owners_v1(
+                    parser_initialization_generation_v1() != parser_generation):
                 val _ended = driver_end_transient_parse_scope()
                 return Err("frontend registry promotion failed after parse error for {source_path}")
             val _ended = driver_end_transient_parse_scope()
@@ -557,10 +567,14 @@ impl CompilerDriver:
             if not self.promote_target_cfg_receipt_v1(source_path):
                 val _ended = driver_end_transient_parse_scope()
                 return Err("target cfg receipt promotion failed for {source_path}")
-            if not driver_promote_frontend_registry_owners():
+            if not driver_promote_retained_frontend_owners_v1(
+                    parser_initialization_generation_v1() != parser_generation):
                 val _ended = driver_end_transient_parse_scope()
                 return Err("frontend registry promotion failed after surface error for {source_path}")
-            val _ended = driver_end_transient_parse_scope()
+            val error_ok = rt_transient_heap_promote(surface_result)
+            val ended = driver_end_transient_parse_scope()
+            if not (error_ok and ended):
+                return Err("transient parser scope surface error ownership failed for {source_path}")
             return Err(surface_result.unwrap_err())
         val surface = surface_result.unwrap()
         log_module_surface_stage(source_path, "surface-done")
@@ -570,7 +584,8 @@ impl CompilerDriver:
         if not self.promote_target_cfg_receipt_v1(source_path):
             val _ended = driver_end_transient_parse_scope()
             return Err("target cfg receipt promotion failed for {source_path}")
-        if not driver_promote_frontend_registry_owners():
+        if not driver_promote_retained_frontend_owners_v1(
+                parser_initialization_generation_v1() != parser_generation):
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed for {source_path}")
         if not module_surface_promote(surface):
@@ -710,8 +725,12 @@ impl CompilerDriver:
             ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
         val finish_error = builder.finish_into(retained_surfaces)
         if finish_error != "":
-            val _paused = _sffi_transient_array_scope_pause()
-            val _ended = _sffi_transient_array_scope_end()
+            val paused = _sffi_transient_array_scope_pause()
+            val error_owned = if paused: rt_transient_heap_promote(finish_error) else: false
+            val ended = _sffi_transient_array_scope_end()
+            if not (paused and error_owned and ended):
+                self.ctx.add_error("Module surface alignment error ownership failed")
+                return false
             self.ctx.add_error(
                 "Module surface alignment error: {finish_error}")
             return false
@@ -722,7 +741,11 @@ impl CompilerDriver:
             return false
         val promote_reason = module_surfaces_promote_reason(retained_surfaces)
         if promote_reason != "":
-            val _ended = _sffi_transient_array_scope_end()
+            val error_owned = rt_transient_heap_promote(promote_reason)
+            val ended = _sffi_transient_array_scope_end()
+            if not (error_owned and ended):
+                self.ctx.add_error("Module surface registry promotion error ownership failed")
+                return false
             self.ctx.add_error(
                 "Module surface registry graph promotion failed after phase 2: {promote_reason}")
             return false

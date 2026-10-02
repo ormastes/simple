@@ -29,13 +29,13 @@ use compiler.hir.hir_lowering.items.{
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
-use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_in_borrowed_scope}
+use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
-use compiler.core.parser.{par_had_error_get}
+use compiler.core.parser.{par_had_error_get, parser_initialization_generation_v1}
 use compiler.frontend.parser_types.*
-use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
+use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope, driver_promote_frontend_registry_owners, driver_promote_retained_frontend_owners_v1}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
@@ -345,18 +345,25 @@ impl CompilerDriver:
         Ok(hir_module)
 
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
+        val parser_generation = parser_initialization_generation_v1()
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
-        val module = if self.ctx.runtime_std_full_inventory_selection != nil:
-            val selected = self.parse_full_frontend_in_borrowed_scope_selected_v1(
-                source.content, source.path, source.module_name)
-            if selected.is_err():
+        # Reparse under the exact policy/provider/cache identity used to build
+        # the surface. Reference policy is not an implicit fallback here.
+        val selected = self.parse_full_frontend_in_borrowed_scope_selected_v1(
+            source.content, source.path, source.module_name)
+        if selected.is_err():
+            if not rt_transient_array_scope_pause():
                 val _ended = driver_end_transient_parse_scope()
-                return Err(selected.unwrap_err())
-            selected.unwrap()
-        else:
-            parse_full_frontend_in_borrowed_scope(
-                source.content, source.path, source.module_name, self.ctx.logger)
+                return Err("transient parser scope pause failed for {source.path}")
+            val error_ok = rt_transient_heap_promote(selected)
+            val owners_ok = driver_promote_retained_frontend_owners_v1(
+                parser_initialization_generation_v1() != parser_generation)
+            val ended = driver_end_transient_parse_scope()
+            if not (error_ok and owners_ok and ended):
+                return Err("transient parser scope error ownership failed for {source.path}")
+            return Err(selected.unwrap_err())
+        val module = selected.unwrap()
         driver_register_parser_module_source_aliases_v1(module, source.path)
         if par_had_error_get():
             return Err(driver_finish_failed_parse_scope(source.path))
@@ -392,7 +399,8 @@ impl CompilerDriver:
                 driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
                 val _ended = driver_end_transient_parse_scope()
                 return Err("flat HIR row ownership promotion failed for {source.path}")
-        if not driver_promote_frontend_registry_owners():
+        if not driver_promote_retained_frontend_owners_v1(
+                parser_initialization_generation_v1() != parser_generation):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed during HIR reparse for {source.path}")

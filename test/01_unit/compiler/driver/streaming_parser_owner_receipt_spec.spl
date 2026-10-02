@@ -1,0 +1,41 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn stream_field(report: text, key: text) -> text:
+    var value = ""
+    var count = 0
+    for line in report.split("\n"):
+        if line.starts_with(key + "="):
+            value = line.substring(key.len() + 1).trim()
+            count = count + 1
+    expect(count).to_equal(1)
+    value
+
+describe "native streaming parser boundary ownership":
+    it "retains cold parser owners and errors under the selected provider policy":
+        val root = env_get_opt("SIMPLE_STREAM_REPORT_DIR") ?? ""
+        expect(root != "").to_equal(true)
+        val producer = env_get_opt("SIMPLE_STREAM_PRODUCER_SHA256") ?? ""
+        val producer_source = env_get_opt("SIMPLE_STREAM_PRODUCER_SOURCE_REVISION") ?? ""
+        val source = env_get_opt("SIMPLE_STREAM_SOURCE_REVISION") ?? ""
+        expect(producer.len()).to_equal(64)
+        expect(producer_source.len()).to_equal(40)
+        expect(source.len()).to_equal(40)
+        for identity in [producer, producer_source, source]:
+            for character in identity:
+                expect("0123456789abcdef".contains(character)).to_equal(true)
+        for mode in ["surface", "hir"]:
+            val report = file_read(root + "/{mode}.env")
+            expect(stream_field(report, "profile")).to_equal("streaming-parser-owner-v1")
+            expect(stream_field(report, "mode")).to_equal(mode)
+            expect(stream_field(report, "producer_sha256")).to_equal(producer)
+            expect(stream_field(report, "producer_source_revision")).to_equal(producer_source)
+            expect(stream_field(report, "source_revision")).to_equal(source)
+            expect(stream_field(report, "successful_modules")).to_equal("3")
+            expect(stream_field(report, "parser_initializations")).to_equal("4")
+            for key in ["required_provider_rejected", "error_lifetime_ok", "retained_output_ok", "complete"]:
+                expect(stream_field(report, key)).to_equal("yes")
+            # This focused regression does not pretend to qualify the known
+            # separate reverse-reference collector lifetime gap.
+            expect(stream_field(report, "collector_active")).to_equal("no")
