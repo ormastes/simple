@@ -1147,3 +1147,26 @@ static production candidates after three explicit fixture exclusions. OS
 modules are required and `src/unit` contains measurement classes. Actual
 snapshot/role receipts must qualify this inventory before claiming completion.
 See `D:/dev/bootstrap-crosshost-apply-verify-20261002/linux-d6-draft/CANONICAL-SCOPE.md`.
+
+### 2026-10-02 manager compiler-task milestone
+
+The Linux diagnostic manager now executed a real compiler task successfully:
+manifest admission, worker dispatch, native compile/link, output verification,
+and executable startup passed. Exactly one attempt produced `Hello World\n`
+with empty stderr. Worker reaping and matching capacity acquisition/release
+receipts plus settlement were verified. The initial private output comparator
+omitted the newline; correcting that read-only comparator required no rebuild.
+Evidence: `D:/dev/manager-bootstrap-verification-20261001/release-243db-scanner-images-linux/compiler-hello-release243-v4`.
+
+This proof uses the older 6b9 source/producer and seed-built manager images.
+It does not qualify new Phase2-built manager deployment, Windows execution,
+grouped failure isolation, or complete module inventory execution. Earlier
+attempts exposed missing staged headers; all failed attempts and their caches
+remain preserved. The successful task explicitly allows only one attempt.
+
+The next shared bootstrap source is `fa703ca0e1814e2a7ec9b9305378df449373b643`,
+tree `e1d9575a6821f9240ef8adf0b18585701eec650b`. Its independently checked
+inventory contains 17,147 compile modules and three explicit exclusions.
+Both host builds are in progress; no new producer/hello PASS is recorded here.
+Separate diagnostic routes may start after actual hello with identity/resource
+checks, as requested, without representing themselves as canonical admission.
