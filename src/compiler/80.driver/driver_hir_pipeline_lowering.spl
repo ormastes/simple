@@ -4,8 +4,7 @@ use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
-    cold_hir_typed_receipts_from_lowered_sources_v1,
-    cold_hir_inventory_generation_binding_reason_v1
+    cold_hir_typed_receipts_from_lowered_sources_v1
 }
 use compiler.driver.smf.runtime_std_hir_emission_v1.{
     RuntimeStdHirModuleEmissionV1, runtime_std_hir_emit_module_v1
@@ -216,7 +215,6 @@ impl CompilerDriver:
             self.ctx.add_error("cold HIR snapshot admission failed: {snapshot.reason}")
             return false
         val inventory_generation_text = sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_GENERATION") ?? ""
-        val expected_inventory_generation = inventory_generation_text.to_i64() ?? -1
         # The snapshot digest covers selected source rows, while CURRENT also
         # includes facets and tests. Validate both encodings independently.
         val snapshot_inventory = match file_read_regular_no_follow_bounded(
@@ -227,17 +225,17 @@ impl CompilerDriver:
                 return false
         match admitted.inventory:
             case Some(inventory):
-                # Bind generation before the long receipt call. Native Stage 2
-                # corrupted this scalar argument while preserving the inventory.
-                val generation_reason = cold_hir_inventory_generation_binding_reason_v1(
-                    expected_inventory_generation, inventory.generation)
-                if generation_reason != "ok":
+                # The authority publisher writes str(inventory_generation).
+                # Compare that canonical text directly: native Stage 2 can
+                # retain the source text handle through to_i64() ?? -1.
+                if inventory.generation < 0 or
+                        inventory_generation_text != "{inventory.generation}":
                     val bounded_generation_text = if inventory_generation_text.len() > 32:
                         inventory_generation_text[:32]
                     else:
                         inventory_generation_text
                     self.ctx.add_error(
-                        "cold HIR inventory generation mismatch: raw='{bounded_generation_text}' raw_len={inventory_generation_text.len()} parsed={expected_inventory_generation} admitted={inventory.generation} admitted_digest={admitted.digest}")
+                        "cold HIR inventory generation mismatch: raw='{bounded_generation_text}' raw_len={inventory_generation_text.len()} admitted={inventory.generation} admitted_digest={admitted.digest}")
                     return false
                 match cold_hir_typed_receipts_from_lowered_sources_v1(
                         source_root, inventory_binding.source_inventory_digest,
