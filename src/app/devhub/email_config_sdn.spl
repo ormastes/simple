@@ -1,0 +1,93 @@
+# One shared SDN authority for DevHub and the compiled mail CLI bridge.
+# Errors deliberately contain no input fragments, account names, or secrets.
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.json.{json_object, json_string}
+
+fn parse_email_sdn_json(content: text) -> Result<any, text>:
+    if content.len() > 1048576:
+        return Err("MAIL_CONFIG_SIZE")
+    # The generic SDN reader deliberately tolerates prose. Account files must
+    # fail closed on malformed lines; decoding remains the canonical parser's job.
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            if not trimmed.contains(":") or line.contains("\t"):
+                return Err("MAIL_CONFIG_SYNTAX")
+            val colon = trimmed.find(":")
+            val raw = trimmed[colon + 1:].trim()
+            if raw.starts_with("\"") and (raw.len() < 2 or not raw.ends_with("\"")):
+                return Err("MAIL_CONFIG_SYNTAX")
+    match parse_with_issues(content):
+        case Err(_):
+            return Err("MAIL_CONFIG_SYNTAX")
+        case Ok(parsed):
+            if parsed.1.len() > 0:
+                return Err("MAIL_CONFIG_DUPLICATE")
+            return email_sdn_root_json(parsed.0)
+
+fn email_sdn_root_json(root: SdnValue) -> Result<any, text>:
+    if not root.is_dict():
+        return Err("MAIL_CONFIG_ROOT")
+    val entries = root.get("accounts") ?? SdnValue.Null
+    if not entries.is_dict():
+        return Err("MAIL_CONFIG_ACCOUNTS")
+    val default_value = root.get("default_account") ?? SdnValue.String("")
+    if not default_value.is_string():
+        return Err("MAIL_CONFIG_DEFAULT")
+    var accounts: [(text, any)] = []
+    val account_map = entries.as_dict() ?? {}
+    for name in account_map.keys():
+        if name == "":
+            return Err("MAIL_CONFIG_ACCOUNT")
+        val entry = account_map[name]
+        if not entry.is_dict():
+            return Err("MAIL_CONFIG_ACCOUNT")
+        var fields: [(text, any)] = []
+        val field_map = entry.as_dict() ?? {}
+        for key in field_map.keys():
+            val value = field_map[key]
+            var scalar = ""
+            if value.is_string():
+                scalar = value.as_str() ?? ""
+            elif value.is_int() and (key == "imap_port" or key == "pop3_port" or key == "smtp_port"):
+                scalar = (value.as_i64() ?? 0).to_text()
+            else:
+                return Err("MAIL_CONFIG_FIELD_TYPE")
+            if scalar.contains("\n") or scalar.contains("\r"):
+                return Err("MAIL_CONFIG_CONTROL")
+            if key == "password" and scalar != "" and not scalar.starts_with("encrypted:v2:"):
+                return Err("MAIL_CONFIG_SECRET_LITERAL")
+            if key == "client_secret" or key == "token":
+                return Err("MAIL_CONFIG_SECRET_LITERAL")
+            if key == "protocol" and scalar != "imap" and scalar != "pop3" and scalar != "graph":
+                return Err("MAIL_CONFIG_PROTOCOL")
+            if key == "tls" and scalar != "implicit" and scalar != "starttls":
+                return Err("MAIL_CONFIG_TLS")
+            if key == "imap_port" or key == "pop3_port" or key == "smtp_port":
+                if not email_sdn_valid_port(scalar):
+                    return Err("MAIL_CONFIG_PORT")
+            fields = fields + [(key, json_string(scalar))]
+        accounts = accounts + [(name, json_object(fields))]
+    var root_fields: [(text, any)] = [("default_account", json_string(default_value.as_str() ?? "")), ("accounts", json_object(accounts))]
+    val root_map = root.as_dict() ?? {}
+    for key in root_map.keys():
+        if key != "accounts" and key != "default_account":
+            val value = root_map[key]
+            if not value.is_string():
+                return Err("MAIL_CONFIG_FIELD_TYPE")
+            root_fields = root_fields + [(key, json_string(value.as_str() ?? ""))]
+    Ok(json_object(root_fields))
+
+fn email_sdn_valid_port(value: text) -> bool:
+    if value == "" or value.len() > 5:
+        return false
+    var port: i64 = 0
+    var i: i64 = 0
+    while i < value.len():
+        val digit = "0123456789".find(value[i:i + 1])
+        if digit < 0:
+            return false
+        port = port * 10 + digit
+        i = i + 1
+    port > 0 and port < 65536

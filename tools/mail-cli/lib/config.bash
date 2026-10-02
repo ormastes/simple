@@ -354,57 +354,21 @@ _mail_config_valid_name() {
   [[ "$1" =~ ^[a-zA-Z0-9_.@+-]+$ ]]
 }
 
-# Keep the same deliberately small SDN shape parsed by DevHub's
-# load_email_config: top-level default_account and two-space account blocks.
-# Quoted values use JSON string escapes, which are also valid SDN strings.
+# Canonical Simple SDN parser; the installed helper never compiles at startup.
 _mail_config_query() {
-  local mode="$1" name="${2:-}" key="${3:-}"
+  local mode="$1" name="${2:-}" key="${3:-}" helper document
   [ -f "$MAIL_CONFIG_FILE" ] || return 0
-  awk -v mode="$mode" -v wanted="$name" -v key="$key" '
-    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-    function unquote(s) {
-      s=trim(s)
-      if (s ~ /^".*"$/) { s=substr(s,2,length(s)-2); gsub(/\\"/, "\"", s); gsub(/\\\\/, "\\", s) }
-      return s
-    }
-    /^accounts:[[:space:]]*$/ { in_accounts=1; current=""; next }
-    /^default_account:[[:space:]]*/ {
-      if (mode=="default") { s=$0; sub(/^[^:]*:[[:space:]]*/, "", s); print unquote(s) }
-      if (mode=="top" && key=="default_account") { s=$0; sub(/^[^:]*:[[:space:]]*/, "", s); print unquote(s) }
-      next
-    }
-    /^[a-zA-Z_][a-zA-Z0-9_-]*:[[:space:]]*/ {
-      if (mode=="top") {
-        field=$0; sub(/:.*/, "", field)
-        if (field==key) { s=$0; sub(/^[^:]*:[[:space:]]*/, "", s); print unquote(s) }
-      }
-    }
-    in_accounts && /^[^ #[:space:]][^:]*:/ { in_accounts=0; current="" }
-    in_accounts && /^  [^ #[:space:]][^:]*:[[:space:]]*$/ {
-      current=$0; sub(/^  /,"",current); sub(/:[[:space:]]*$/,"",current)
-      if (mode=="list") print current
-      next
-    }
-    in_accounts && current==wanted && /^    [a-zA-Z_][a-zA-Z0-9_]*:[[:space:]]*/ {
-      s=$0; field=s; sub(/:.*/, "", field); field=trim(field)
-      sub(/^[^:]*:[[:space:]]*/, "", s)
-      if (mode=="field" && field==key) print unquote(s)
-      if (mode=="account") {
-        # Values written by this tool are JSON-quoted. For bare SDN scalars,
-        # quote them for the existing JSON consumers.
-        s=trim(s)
-        if (s !~ /^".*"$/) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); s="\"" s "\"" }
-        if (count++) printf ","
-        printf "\"%s\":%s", field, s
-      }
-    }
-    END { if (mode=="account" && count) print "}" }
-  ' "$MAIL_CONFIG_FILE" | if [ "$mode" = account ]; then
-    # Prefix in the same stream so callers receive one complete JSON object.
-    awk 'NR==1 { print "{" $0; next } { print }'
-  else
-    cat
-  fi
+  helper=$(mail_expand_path "${MAIL_CONFIG_BIN:-${MAIL_CREDENTIAL_BIN:-simple-mail-credentials}}") || return $?
+  command -v "$helper" >/dev/null 2>&1 || { echo "error: compiled shared SDN helper unavailable" >&3; return 2; }
+  document=$("$helper" config-json "$MAIL_CONFIG_FILE") || return $?
+  case "$mode" in
+    list) printf '%s' "$document" | jq -r '.accounts | keys[]' ;;
+    default) printf '%s' "$document" | jq -r '.default_account // empty' ;;
+    top) printf '%s' "$document" | jq -r --arg k "$key" '.[$k] // empty' ;;
+    account) printf '%s' "$document" | jq -c --arg n "$name" '.accounts[$n] // empty' ;;
+    field) printf '%s' "$document" | jq -r --arg n "$name" --arg k "$key" '.accounts[$n][$k] // empty' ;;
+    *) return 2 ;;
+  esac
 }
 
 mail_config_list_accounts() {
@@ -507,6 +471,9 @@ mail_config_set_account() (
       builtin printf '    %s: %s\n' "$field" "$quoted" >> "$tmp"
     fi
   done
+  local helper
+  helper=$(mail_expand_path "${MAIL_CONFIG_BIN:-${MAIL_CREDENTIAL_BIN:-simple-mail-credentials}}") || return $?
+  "$helper" config-json "$tmp" >/dev/null || return $?
   chmod 600 "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
 )
 
@@ -544,7 +511,7 @@ mail_config_delete_account() {
 mail_resolve_account() {
   local name="${MAIL_ACCOUNT:-}"
   if [ -z "$name" ]; then
-    name=$(mail_config_get_default)
+    name=$(mail_config_get_default) || return $?
   fi
   if [ -z "$name" ]; then
     echo "${C_RED}error:${C_RESET} no account specified and no default set. Use --account NAME or run 'mail auth login'." >&2
@@ -552,7 +519,7 @@ mail_resolve_account() {
   fi
 
   local acc
-  acc=$(mail_config_get_account "$name")
+  acc=$(mail_config_get_account "$name") || return $?
   if [ -z "$acc" ]; then
     echo "${C_RED}error:${C_RESET} account '${name}' not found" >&2
     return 2
@@ -581,7 +548,10 @@ mail_resolve_account() {
   MAIL_ACCT_TLS=$(echo "$acc" | jq -r '.tls // "implicit"')
   MAIL_ACCT_PROTOCOL=$(printf '%s' "$acc" | jq -r '.protocol // "imap"')
   MAIL_ACCT_POP3_SERVER=$(printf '%s' "$acc" | jq -r '.pop3_server // empty')
-  MAIL_ACCT_POP3_PORT=$(printf '%s' "$acc" | jq -r '.pop3_port // 995')
+  MAIL_ACCT_POP3_PORT=$(printf '%s' "$acc" | jq -r '.pop3_port // empty')
+  if [ -z "$MAIL_ACCT_POP3_PORT" ]; then
+    if [ "$MAIL_ACCT_TLS" = starttls ]; then MAIL_ACCT_POP3_PORT=110; else MAIL_ACCT_POP3_PORT=995; fi
+  fi
 
   # Password resolution: password_cmd (if set) takes priority over the
   # stored plaintext password. This keeps the secret out of email.sdn —
