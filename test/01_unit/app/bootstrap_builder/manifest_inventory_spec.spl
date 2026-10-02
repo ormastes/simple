@@ -8,6 +8,7 @@ use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
 use app.bootstrap_builder.main.{builder_cli_input_error_v1}
 use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_exists, path_absolute}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
 use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1}
@@ -18,6 +19,20 @@ fn inventory_paths_error_v1(payload: text) -> text:
         case Err(reason): reason
 
 describe "bootstrap inventory backed job manifest":
+    it "rejects a private manifest destination through a directory link":
+        val base = bootstrap_manifest_plain_path_v1(path_absolute(".")) +
+            "/build/manifest-nofollow-spec-" + str(getpid()) + "-" + str(time_now_unix_micros())
+        val source = base + "/source"
+        expect(dir_create_all(source)).to_equal(true)
+        expect(dir_create_all(base + "/real")).to_equal(true)
+        match bootstrap_manifest_private_target_v1(source, base + "/real/manifest.sdn"):
+            case Ok(path): expect(path).to_equal(base + "/real/manifest.sdn")
+            case Err(reason): fail(reason)
+        expect(snapshot_symlink_create_nofollow_v1(base, base + "/alias", "real", 2)).to_equal(true)
+        match bootstrap_manifest_private_target_v1(source, base + "/alias/manifest.sdn"):
+            case Ok(_path): fail("directory link accepted as manifest parent")
+            case Err(reason): expect(reason).to_contain("link or reparse")
+
     it "requires canonical explicit memory limits within 1..2^50":
         match bootstrap_manifest_memory_limit_v2("1125899906842624"):
             case Ok(value): expect(value).to_equal(1125899906842624)

@@ -3,8 +3,7 @@
 use app.io.args_ops.{get_args}
 use app.io.file_ops.{file_exists, file_is_regular_no_follow, file_hash_sha256, file_copy,
     file_read_regular_no_follow_bounded, path_absolute}
-use std.nogc_sync_mut.io_runtime.{host_os}
-use std.nogc_sync_mut.io.windows_process_owner.{windows_process_directory_no_follow_v1}
+use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_dir_is_real_no_follow}
 use app.io.dir_ops.{dir_create}
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_write_run_v1}
 use std.common.build_manager.contracts.{BuildInputV1, BuildLinkV1, BuildTaskV1, BuildHostV1, BuildRunV1, BUILDER_MAX_INPUTS_V1,
@@ -234,17 +233,16 @@ fn bootstrap_manifest_private_target_v1(root: text, candidate: text) -> Result<t
     if parent == "" or file_exists(manifest): return Err("manifest destination is unavailable or already exists")
     val canonical_parent = bootstrap_manifest_plain_path_v1(path_absolute(parent))
     if canonical_parent == "": return Err("manifest parent must already exist")
-    if host_os() == "windows":
-        val parts = parent.split("/")
-        var prefix = parts[0] + "/"
-        if not windows_process_directory_no_follow_v1(prefix):
-            return Err("manifest path crosses a reparse directory")
-        for index in 1..parts.len():
-            if parts[index] != "":
-                prefix = prefix + parts[index]
-                if not windows_process_directory_no_follow_v1(prefix):
-                    return Err("manifest path crosses a reparse directory")
-                prefix = prefix + "/"
+    val parts = parent.split("/")
+    var prefix = parts[0] + "/"
+    if not sosix_dir_is_real_no_follow(prefix):
+        return Err("manifest path crosses a link or reparse directory")
+    for index in 1..parts.len():
+        if parts[index] != "":
+            prefix = prefix + parts[index]
+            if not sosix_dir_is_real_no_follow(prefix):
+                return Err("manifest path crosses a link or reparse directory")
+            prefix = prefix + "/"
     val normalized_root = root.lower()
     val normalized_parent = canonical_parent.lower()
     if normalized_parent == normalized_root or normalized_parent.starts_with(normalized_root + "/"):
@@ -252,8 +250,8 @@ fn bootstrap_manifest_private_target_v1(root: text, candidate: text) -> Result<t
     Ok(manifest)
 
 # Every intermediate directory must remain a materialized directory. On
-# Windows the native handle probe rejects reparse points that path_absolute
-# cannot distinguish; elsewhere canonical resolution detects a link/escape.
+# SOSIX rejects links and reparse points on each host before canonical
+# resolution checks the complete file path.
 fn bootstrap_manifest_regular_under_root_v1(root: text, relative: text) -> Result<text, text>:
     if not builder_relative_path_valid_v1(relative): return Err("invalid relative input")
     val parts = relative.split("/")
@@ -262,14 +260,13 @@ fn bootstrap_manifest_regular_under_root_v1(root: text, relative: text) -> Resul
         if index > 0: prefix = prefix + "/"
         prefix = prefix + parts[index]
         val directory = root + "/" + prefix
-        if host_os() == "windows":
-            if not windows_process_directory_no_follow_v1(directory):
-                return Err("input directory is unavailable or a reparse point: " + relative)
-        elif bootstrap_manifest_plain_path_v1(path_absolute(directory)) != directory:
+        if not sosix_dir_is_real_no_follow(directory):
+            return Err("input directory is unavailable or a link: " + relative)
+        if sosix_platform() != "windows" and bootstrap_manifest_plain_path_v1(path_absolute(directory)) != directory:
             return Err("input directory is a symlink or escapes root: " + relative)
     val path = root + "/" + relative
     if not file_is_regular_no_follow(path): return Err("missing regular input: " + relative)
-    if host_os() != "windows" and bootstrap_manifest_plain_path_v1(path_absolute(path)) != path:
+    if sosix_platform() != "windows" and bootstrap_manifest_plain_path_v1(path_absolute(path)) != path:
         return Err("input is a symlink or escapes root: " + relative)
     Ok(path)
 
