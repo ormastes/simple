@@ -1514,3 +1514,20 @@ Read-only comparison with release `8aa06c7ffc` confirmed they are absent;
 configuration files alone cannot enable or qualify that API. Prepare the
 reviewed source change for a subsequent candidate rather than patch this live
 source or claim generated-Simple cross-host reuse from native C tests.
+
+### 2026-10-02 Stage2 linked, then canonical sanity rejected the candidate
+
+Stage2 native-build completed 1,136 modules, zero cache hits and zero compile
+failures (1229.1s compilation plus 83.8s linking). The linked 19,974,144-byte
+candidate is preserved as `stage2/x86_64-pc-windows-msvc/simple.exe.rejected`,
+SHA256 `2f3d16fdfaaafcdb630361dd37ed62fe8cef171946b245fe88629b6e5d5f0384`.
+The canonical sanity gate failed, and the overall run exited 1. The terminal
+Job receipt confirms quiescence and peak RSS 4,446,264 KiB, below the sampled
+6,835,937 KiB cap; this was not a memory or disk stop.
+
+All advertised sanity evidence/log files are absent. The source has early
+session-contract and frontend-capture setup returns before those logs, so the
+compiler's runtime failure and actual sanity invocation count are unknown.
+Astra is investigating these gates with a bounded helper-only reproducer;
+there is no hello-world PASS, Stage2 admission or planner receipt. Manager and
+Phase3/Phase4 launches remain held. Preserve the rejected artifact and caches.
