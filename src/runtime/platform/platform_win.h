@@ -200,76 +200,86 @@ void rt_dir_list_free(const char** entries, int64_t count) {
 }
 
 /* Helper: Recursively remove directory contents */
-static bool rt_dir_remove_all_impl(const char* path) {
+#include "runtime_win_long_path.h"
+
+static bool rt_dir_remove_all_wide_impl(const wchar_t* path) {
     if (!path) return false;
     /* Remove a directory link itself; never enumerate a reparse target. This
        applies at every recursive entry, including nested junctions. */
-    DWORD attributes = GetFileAttributesA(path);
+    DWORD attributes = GetFileAttributesW(path);
     if (attributes == INVALID_FILE_ATTRIBUTES) return false;
     if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
         return (attributes & FILE_ATTRIBUTE_DIRECTORY)
-            ? RemoveDirectoryA(path) : DeleteFileA(path);
+            ? RemoveDirectoryW(path) : DeleteFileW(path);
     }
 
     /* Build search pattern */
-    size_t path_len = strlen(path);
-    char* search_pattern = malloc(path_len + 3);
+    size_t path_len = wcslen(path);
+    wchar_t* search_pattern = malloc((path_len + 3) * sizeof(wchar_t));
     if (!search_pattern) return false;
-    strcpy(search_pattern, path);
+    wcscpy(search_pattern, path);
     if (path_len > 0 && path[path_len - 1] != '\\' && path[path_len - 1] != '/') {
-        strcat(search_pattern, "\\");
+        wcscat(search_pattern, L"\\");
     }
-    strcat(search_pattern, "*");
+    wcscat(search_pattern, L"*");
 
-    WIN32_FIND_DATAA find_data;
-    HANDLE hFind = FindFirstFileA(search_pattern, &find_data);
+    WIN32_FIND_DATAW find_data;
+    HANDLE hFind = FindFirstFileW(search_pattern, &find_data);
     free(search_pattern);
 
     if (hFind == INVALID_HANDLE_VALUE) {
-        return RemoveDirectoryA(path);
+        return RemoveDirectoryW(path);
     }
 
     bool success = true;
     do {
-        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0) {
+        if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) {
             continue;
         }
 
-        /* Build full path: path + "\\" + filename */
-        size_t full_len = path_len + 1 + strlen(find_data.cFileName) + 1;
-        char* full_path = malloc(full_len);
+        /* Build full path: path + L"\\" + filename */
+        size_t full_len = path_len + 1 + wcslen(find_data.cFileName) + 1;
+        wchar_t* full_path = malloc(full_len * sizeof(wchar_t));
         if (!full_path) {
             success = false;
             continue;
         }
-        strcpy(full_path, path);
+        wcscpy(full_path, path);
         if (path_len > 0 && path[path_len - 1] != '\\' && path[path_len - 1] != '/') {
-            strcat(full_path, "\\");
+            wcscat(full_path, L"\\");
         }
-        strcat(full_path, find_data.cFileName);
+        wcscat(full_path, find_data.cFileName);
 
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             /* Recursively remove subdirectory */
-            if (!rt_dir_remove_all_impl(full_path)) {
+            if (!rt_dir_remove_all_wide_impl(full_path)) {
                 success = false;
             }
         } else {
             /* Delete file */
-            if (!DeleteFileA(full_path)) {
+            if (!DeleteFileW(full_path)) {
                 success = false;
             }
         }
         free(full_path);
-    } while (FindNextFileA(hFind, &find_data));
+    } while (FindNextFileW(hFind, &find_data));
 
     FindClose(hFind);
 
     /* Remove the directory itself */
-    if (!RemoveDirectoryA(path)) {
+    if (!RemoveDirectoryW(path)) {
         success = false;
     }
 
     return success;
+}
+
+static bool rt_dir_remove_all_impl(const char* path) {
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return false;
+    bool result = rt_dir_remove_all_wide_impl(wide);
+    free(wide);
+    return result;
 }
 
 /* C-string worker. The public rt_dir_* entry point lives in runtime.c and
