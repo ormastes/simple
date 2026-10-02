@@ -1,0 +1,88 @@
+"""
+# SCV snapshot materialization resource regression
+
+Compare a precompiled native fixture in four fresh processes, scoped/baseline
+at N/2N, with identical bytes and empty chunk stores. The first scoped
+materialization is cold; a shared large inventory scope then establishes raw
+table high-water before the remaining small files. Snapshot timing excludes
+that identical prelude and post-validation; process RSS includes all work.
+
+SCV_SNAPSHOT_PROFILE_DIAGNOSTIC=1 explicitly allows pinned, hello-verified
+provisional producers. Passing measured thresholds in that mode is diagnostic
+evidence only; canonical qualification remains pending. Without that opt-in
+the collector replays canonical Stage2 admission. Native execution is pending.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{process_run}
+use app.io.env_ops.{env_get}
+
+fn snapshot_profile_value(report: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var count = 0
+    for line in report.split("\n"):
+        if line.starts_with(prefix):
+            value = line.substring(prefix.len(), line.len())
+            count = count + 1
+    expect(count).to_equal(1)
+    expect(value.len()).to_be_greater_than(0)
+    value
+
+fn snapshot_profile_number(report: text, key: text) -> i64:
+    val raw = snapshot_profile_value(report, key)
+    for index in 0..raw.len():
+        val digit = raw.substring(index, index + 1)
+        expect(digit >= "0" and digit <= "9").to_equal(true)
+    val number = raw.to_i64() ?? -1
+    expect(number).to_be_greater_than(0)
+    # Reject implausible/overflowing evidence before ratio multiplication.
+    expect(number).to_be_less_than(1000000000000)
+    number
+
+describe "SCV snapshot scratch preserves native performance and source bytes":
+    it "compares cold promotion and high-water small-file cleanup against unscoped materialization":
+        step("Collect or validate four independently measured native processes with bound producer identity")
+        val diagnostic = (env_get("SCV_SNAPSHOT_PROFILE_DIAGNOSTIC") ?? "") == "1"
+        var args = ["scripts/check/check-scv-snapshot-resource-profile.shs"]
+        if diagnostic: args.push("--diagnostic-only")
+        if (env_get("SCV_SNAPSHOT_PROFILE_EVIDENCE_DIR") ?? "") != "": args.push("--receipts")
+        val (report, errors, code) = process_run("/bin/sh", args)
+        print report
+        print errors
+        expect(code).to_equal(0)
+        expect(snapshot_profile_value(report, "complete")).to_equal("yes")
+        expect(snapshot_profile_value(report, "admission")).to_equal(if diagnostic: "provisional" else: "canonical")
+        expect(snapshot_profile_value(report, "qualification")).to_equal(if diagnostic: "pending" else: "canonical-producer")
+        for key in ["compiler_sha256", "source_sha256", "fixture_binary_sha256"]:
+            expect(snapshot_profile_value(report, key).len()).to_equal(64)
+        step("Check sample sizes, identical retained-row digests, and heterogeneous fixture bytes")
+        for mode in ["scoped", "baseline"]:
+            expect(snapshot_profile_number(report, "{mode}_n_count")).to_equal(256)
+            expect(snapshot_profile_number(report, "{mode}_double_count")).to_equal(512)
+            for size in ["n", "double"]:
+                expect(snapshot_profile_number(report, "{mode}_{size}_large_bytes")).to_be_greater_than(65536)
+                expect(snapshot_profile_number(report, "{mode}_{size}_small_bytes")).to_be_less_than(1024)
+                expect(snapshot_profile_number(report, "{mode}_{size}_elapsed_us")).to_be_less_than(60000000)
+        for size in ["n", "double"]:
+            val digest = snapshot_profile_value(report, "scoped_{size}_digest")
+            expect(digest.len()).to_equal(64)
+            expect(digest).to_equal(snapshot_profile_value(report, "baseline_{size}_digest"))
+            expect(snapshot_profile_number(report, "scoped_{size}_large_bytes")).to_equal(snapshot_profile_number(report, "baseline_{size}_large_bytes"))
+            expect(snapshot_profile_number(report, "scoped_{size}_small_bytes")).to_equal(snapshot_profile_number(report, "baseline_{size}_small_bytes"))
+        step("Reject scope overhead above 1.5x plus 20 ms and scaling above 3x plus 20 ms")
+        val small = snapshot_profile_number(report, "scoped_n_elapsed_us")
+        val large = snapshot_profile_number(report, "scoped_double_elapsed_us")
+        expect(large <= small * 3 + 20000).to_equal(true)
+        for size in ["n", "double"]:
+            val scoped = snapshot_profile_number(report, "scoped_{size}_elapsed_us")
+            val baseline = snapshot_profile_number(report, "baseline_{size}_elapsed_us")
+            expect(scoped * 2 <= baseline * 3 + 40000).to_equal(true)
+        step("Require strict live-object reduction and peak RSS within 16 MiB of the matched baseline")
+        for size in ["n", "double"]:
+            val scoped_live = snapshot_profile_number(report, "scoped_{size}_live_allocations")
+            val baseline_live = snapshot_profile_number(report, "baseline_{size}_live_allocations")
+            expect(scoped_live * 2).to_be_less_than(baseline_live)
+            val scoped_rss = snapshot_profile_number(report, "scoped_{size}_peak_rss_bytes")
+            val baseline_rss = snapshot_profile_number(report, "baseline_{size}_peak_rss_bytes")
+            expect(scoped_rss <= baseline_rss + 16777216).to_equal(true)
