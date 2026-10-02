@@ -973,3 +973,29 @@ bindings in aspect_pack_io.spl and unresolved atomic methods in
 aspect_lifecycle_gate.spl; a separate triage owner is investigating. No inventory
 seal or full-module PASS exists yet. Shared interpreter facade fix6fad4592 is
 in draft PR2165 with static review accepted and native validation pending.
+
+### 2026-10-02 Linux full-route admission correction
+
+The first parallel Linux route d244a6e did launch coordinator199 and children
+273/274, but task logs exposed SCV-E-ADMISSION compile-event-journal-missing.
+It was stopped through its owned signal handlers; all46attempted guard receipts
+are quiescent and no owned process remains. Evidence:
+D:/dev/linux-runtime-binding-20261002/route-stop-audit.json.
+No module PASS is claimed from this attempt. Existing output/caches are kept.
+
+Source inspection corrected the initial assumption about private caches:
+SIMPLE_CACHE does not relocate admitted SCV inventory; it lives at checkout
+build/scv. The revised launcher must serialize one cold initialization, prove
+admission, and let both phase lanes reuse that checkout journal with cold-init
+explicitly disabled. Any subsequent SCV-E-ADMISSION error must stop the route,
+not repeat the same configuration error for every module. This change is pending
+review/native probe and is not yet a successful full-route restart.
+
+Manager ABI fix78ef897a0b is committed on its isolated branch: the no-follow
+directory predicate was absent from text-argument registries/runtime declarations.
+Its compiled wrapper passed one tagged word to a C pointer/length ABI; a direct
+C probe succeeded on the same directory. Source review includes pure lowering
+and dynamic-directory regression cases; corrected producer and real manager
+worker dispatch remain pending. Shared Linux runtime repair is draft PR2166;
+Windows archive symbol-format inspection passed, while a native Windows nm DLL
+loading issue remains a tooling compatibility check before deployment.
