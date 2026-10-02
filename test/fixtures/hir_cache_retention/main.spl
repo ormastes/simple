@@ -1,0 +1,180 @@
+# Native diagnostic: exercise real lowering, cache publication and decoding.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_load,
+    hir_cache_last_warnings, hir_cache_stores}
+use std.nogc_sync_mut.io_runtime.{env_set_process, env_get_opt, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+class RetainedHirCacheProbe:
+    module: HirModule
+
+fn valid_identity(value: text, length: i64) -> bool:
+    if value.len() != length: return false
+    for character in value:
+        if not "0123456789abcdef".contains(character): return false
+    true
+
+fn module_source(index: i64, functions: i64) -> text:
+    var lines: [text] = []
+    var function_index = 0
+    while function_index < functions:
+        lines.push("pub fn cache_value_{function_index}() -> i64:\n    return {index * 1000 + function_index}\n")
+        function_index = function_index + 1
+    lines.join("\n")
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.len() != 3: return 10
+    val root = args[1]
+    val count = args[2].to_i64() ?? 0
+    if count != 4 and count != 8: return 11
+    val producer = env_get_opt("SIMPLE_HIR_STORE_PRODUCER_SHA256") ?? ""
+    val producer_source = env_get_opt("SIMPLE_HIR_STORE_PRODUCER_SOURCE_REVISION") ?? ""
+    val source_revision = env_get_opt("SIMPLE_HIR_STORE_SOURCE_REVISION") ?? ""
+    if not valid_identity(producer, 64) or not valid_identity(producer_source, 40) or
+            not valid_identity(source_revision, 40): return 12
+    if not dir_create_all(root): return 13
+    if not env_set_process("SIMPLE_HIR_CACHE", "1") or
+            not env_set_process("SIMPLE_BOOTSTRAP", "0") or
+            not env_set_process("SIMPLE_FRONTEND_CACHE", "1") or
+            not env_set_process("SIMPLE_FRONTEND_CACHE_SCOPE", "") or
+            not env_set_process("SIMPLE_HIR_CACHE_DIR", root + "/cache"):
+        return 14
+    var modules: [RetainedHirCacheProbe] = []
+    var keys: [text] = []
+    var sizes: [i64] = []
+    var source_parts: [text] = []
+    var index = 0
+    while index < count:
+        # The first encode is the largest. Later small stores expose retained
+        # scratch and raw-allocation registry high-water behavior.
+        val functions = if index == 0: 256 else: 24 + index * 3
+        val source = module_source(index, functions)
+        val path = root + "/module_{index}.spl"
+        val parsed = parse_full_frontend(source, path, "cache.module_{index}", Logger(level: 0))
+        var lowering = HirLowering.with_filename(path)
+        val lowered = lowering.lower_parser_module_unstub(parsed, true)
+        if lowered.functions.len() != functions or lowering.lowering_error_count() != 0: return 15
+        modules.push(RetainedHirCacheProbe(module: lowered))
+        keys.push(sha256_text(source))
+        sizes.push(functions)
+        source_parts.push(source)
+        index = index + 1
+    val fixture_digest = sha256_text(source_parts.join("\n"))
+    # Empty setup scope was deliberately not memoized. The first store must
+    # initialize its private memo outside the new serialization boundary.
+    if not env_set_process("SIMPLE_FRONTEND_CACHE_SCOPE", "hir-store-retention-v1"): return 29
+    val warnings = ["first warning\nsecond line", "escaped \\ warning", "unicode λ"]
+    val stores_before = hir_cache_stores()
+    var total_elapsed = 0
+    var max_live_growth = 0
+    var max_object_growth = 0
+    index = 0
+    while index < count:
+        val live_before = rt_heap_live_bytes()
+        val objects_before = rt_heap_registry_count()
+        val start = rt_time_now_unix_micros()
+        val stored = hir_cache_store(keys[index], modules[index].module, warnings)
+        val elapsed = rt_time_now_unix_micros() - start
+        val live_growth = rt_heap_live_bytes() - live_before
+        val object_growth = rt_heap_registry_count() - objects_before
+        if not stored or elapsed < 0: return 16
+        if index == 0:
+            print "first_store_elapsed_us={elapsed}"
+            print "first_store_live_growth={live_growth}"
+            print "first_store_object_growth={object_growth}"
+        # Bounded cold memo/runtime bookkeeping, independent of encoded size.
+        if live_growth > 65536 or object_growth > 128:
+            print "failure=store-retained-scratch"
+            print "failure_index={index}"
+            print "live_growth={live_growth}"
+            print "object_growth={object_growth}"
+            return 17
+        if live_growth > max_live_growth: max_live_growth = live_growth
+        if object_growth > max_object_growth: max_object_growth = object_growth
+        total_elapsed = total_elapsed + elapsed
+        index = index + 1
+    if hir_cache_stores() != stores_before + count: return 18
+    # Decode after ALL store scopes close and compare complete real HIR bytes.
+    # This includes executable bodies, symbol tables and source spans.
+    index = 0
+    while index < count:
+        val loaded = hir_cache_load(keys[index])
+        if loaded == nil or loaded.unwrap().functions.len() != sizes[index]: return 19
+        val expected = hir_module_encode(modules[index].module)
+        val actual = hir_module_encode(loaded.unwrap())
+        if expected == "" or expected.len() != actual.len() or
+                sha256_text(expected) != sha256_text(actual): return 20
+        val recovered = hir_cache_last_warnings()
+        if recovered.len() != warnings.len(): return 21
+        var warning_index = 0
+        while warning_index < warnings.len():
+            if recovered[warning_index] != warnings[warning_index]: return 22
+            warning_index = warning_index + 1
+        index = index + 1
+    # Nested refusal must neither borrow nor close the caller's arena.
+    if not transient_scope_begin(): return 23
+    val nested = hir_cache_store(keys[0], modules[0].module, warnings)
+    val caller_ended = transient_scope_end()
+    if nested or not caller_ended: return 24
+    # Real write failure must also close its scope; the next store must work.
+    val blocker = root + "/not-a-directory"
+    if not file_write(blocker, "block") or
+            not env_set_process("SIMPLE_HIR_CACHE_DIR", blocker): return 25
+    val failed_live_before = rt_heap_live_bytes()
+    val failed_objects_before = rt_heap_registry_count()
+    val refused = hir_cache_store(keys[0], modules[0].module, warnings)
+    val failed_live_growth = rt_heap_live_bytes() - failed_live_before
+    val failed_object_growth = rt_heap_registry_count() - failed_objects_before
+    if failed_live_growth > 65536 or failed_object_growth > 128: return 30
+    if not env_set_process("SIMPLE_HIR_CACHE_DIR", root + "/cache"): return 26
+    if refused or not hir_cache_store(keys[0], modules[0].module, warnings): return 27
+    if hir_cache_stores() != stores_before + count + 1: return 28
+    # A directory at the final file path lets temporary writing succeed but
+    # makes atomic rename fail. This covers the separate temp cleanup branch.
+    val blocked_key = sha256_text("blocked-final-path")
+    if not dir_create_all(root + "/cache/" + blocked_key + ".hir"): return 31
+    val rename_live_before = rt_heap_live_bytes()
+    val rename_objects_before = rt_heap_registry_count()
+    val rename_stored = hir_cache_store(blocked_key, modules[0].module, warnings)
+    val rename_live_growth = rt_heap_live_bytes() - rename_live_before
+    val rename_object_growth = rt_heap_registry_count() - rename_objects_before
+    if rename_stored or rename_live_growth > 65536 or rename_object_growth > 128: return 32
+    if hir_cache_stores() != stores_before + count + 1: return 33
+    if not transient_scope_begin(): return 34
+    if not transient_scope_end(): return 35
+    print "profile=hir-cache-store-retention-v1"
+    print "producer_sha256={producer}"
+    print "producer_source_revision={producer_source}"
+    print "source_revision={source_revision}"
+    print "fixture_digest={fixture_digest}"
+    print "count={count}"
+    print "stores={count + 1}"
+    print "max_live_growth={max_live_growth}"
+    print "max_object_growth={max_object_growth}"
+    print "elapsed_us={total_elapsed}"
+    print "roundtrip_ok=yes"
+    print "warnings_ok=yes"
+    print "nested_scope_ok=yes"
+    print "write_failure_cleanup_ok=yes"
+    print "rename_failure_cleanup_ok=yes"
+    print "failure_live_growth={failed_live_growth}"
+    print "failure_object_growth={failed_object_growth}"
+    print "rename_live_growth={rename_live_growth}"
+    print "rename_object_growth={rename_object_growth}"
+    print "complete=yes"
+    0
