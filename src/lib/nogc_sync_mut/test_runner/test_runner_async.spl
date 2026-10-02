@@ -297,6 +297,8 @@ fn run_tests_parallel_with_monitoring(
     var next_file_idx = 0
     var poll_iteration = 0
     var admission_started = time_now_unix_micros()
+    var admission_blocked = false
+    val admission_timeout_ms = if options.timeout > 0: options.timeout * 1000 else: 60000
 
     # Fork mode is sequential — skip it when parallel is explicitly requested.
     # Subprocess parallelism with N workers is faster than sequential fork
@@ -312,7 +314,7 @@ fn run_tests_parallel_with_monitoring(
     while next_file_idx < files.len() or active_runs.len() > 0:
         signal_dispatch_pending()
         # Spawn new tests (respecting both max_workers and resource governor)
-        while active_runs.len() < max_workers and next_file_idx < files.len():
+        while not admission_blocked and active_runs.len() < max_workers and next_file_idx < files.len():
             # Check resource governor before spawning
             if not governor_can_spawn(gov, active_runs.len()):
                 break
@@ -336,6 +338,8 @@ fn run_tests_parallel_with_monitoring(
             val exit_code = poll_tracked_process(run.pid)
             if exit_code != -2:
                 val result = collect_async_result(run, exit_code)
+                if result.error.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+                    admission_blocked = true
                 results[run.inventory_index] = Some(result)
                 had_completion = true
                 continue
@@ -343,15 +347,22 @@ fn run_tests_parallel_with_monitoring(
             val elapsed_ms = (current_time - run.start_time) / 1000
             if elapsed_ms > run.timeout_ms:
                 val result = collect_async_result(run, -2, true)
+                if result.error.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+                    admission_blocked = true
                 results[run.inventory_index] = Some(result)
                 had_completion = true
             else:
                 new_runs.push(run)
 
         active_runs = new_runs
+        if admission_blocked:
+            while next_file_idx < files.len():
+                results[next_file_idx] = Some(make_result_from_output(files[next_file_idx], "",
+                    "NATIVE-CACHE-CLEANUP-FAILED: further admission blocked", -1, 0, options.timeout))
+                next_file_idx = next_file_idx + 1
         if active_runs.len() > 0 or had_completion:
             admission_started = current_time
-        elif next_file_idx < files.len() and (current_time - admission_started) / 1000 >= options.timeout * 1000:
+        elif next_file_idx < files.len() and (current_time - admission_started) / 1000 >= admission_timeout_ms:
             # Admission has its own finite deadline even when another owner
             # holds every process slot and this pool has nothing to poll.
             while next_file_idx < files.len():
