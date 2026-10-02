@@ -1,0 +1,80 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.common.dependency.visibility.Visibility
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.Module
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.HirModule
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_globals.*
+use test.helpers.module_surface_owner_fixture.module_surfaces_from_test_modules
+
+fn global_storage_modules() -> [HirModule]:
+    val logger = Logger(level: 0)
+    val source = "pub var COUNT: i64 = 1\npub val LABELS: [text] = [\"a\", \"b\"]\npub fn read_count() -> i64:\n    COUNT\n"
+    val consumer = "use storage.provider.\{COUNT as LocalCount, LABELS, read_count\}\nfn main() -> i64:\n    LocalCount = LocalCount + 1\n    for label in LABELS:\n        print label\n    read_count()\n"
+    val provider_ast = parse_full_frontend(source, "storage.provider", "storage.provider", logger)
+    var modules: Dict<text, Module> = {}
+    modules["storage.provider"] = provider_ast
+    val surfaces = module_surfaces_from_test_modules(modules, [
+        SourceFile(path: "storage/provider.spl", content: source, module_name: "storage.provider")]).unwrap()
+    var provider_lowering = hirlowering_for_module("storage.provider", surfaces)
+    var consumer_lowering = hirlowering_for_module("storage.consumer", surfaces)
+    val provider = provider_lowering.lower_module(provider_ast)
+    val consumer_ast = parse_full_frontend(consumer, "storage.consumer", "storage.consumer", logger)
+    val consumer_module = consumer_lowering.lower_module(consumer_ast)
+    expect(provider_lowering.errors.len()).to_equal(0)
+    expect(consumer_lowering.errors.len()).to_equal(0)
+    [provider, consumer_module]
+
+describe "imported globals bind provider storage":
+    it "creates typed external aliases and shares the provider initializer":
+        val modules = global_storage_modules()
+        val provider = modules[0]
+        val consumer = modules[1]
+        var lowering = MirLowering.new(consumer.symbols)
+        lowering.register_imported_global_bindings(consumer, [provider])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.builder.module.statics.len()).to_equal(2)
+        val count_id = consumer.symbols.lookup_or_invalid("LocalCount").id
+        val labels_id = consumer.symbols.lookup_or_invalid("LABELS").id
+        val count = lowering.global_statics_by_id[count_id]
+        val labels = lowering.global_statics_by_id[labels_id]
+        expect(count.is_external).to_equal(true)
+        expect(labels.is_external).to_equal(true)
+        expect(count.init == nil).to_equal(true)
+        expect(labels.init == nil).to_equal(true)
+        expect(count.name.ends_with("__COUNT")).to_equal(true)
+        expect(count.is_mutable).to_equal(true)
+        expect(labels.is_mutable).to_equal(false)
+        expect(lowering.imported_global_initializers.has(labels_id)).to_equal(true)
+        expect(lowering.imported_global_initializers[count_id]).to_equal(lowering.imported_global_initializers[labels_id])
+        val callable_id = consumer.symbols.lookup_or_invalid("read_count").id
+        expect(lowering.imported_global_initializers[callable_id]).to_equal(lowering.imported_global_initializers[labels_id])
+
+    it "keeps one owning slot for package-visible folded constants":
+        val modules = global_storage_modules()
+        val provider = modules[0]
+        var lowering = MirLowering.new(provider.symbols)
+        for original in provider.constants.values():
+            if original.name == "COUNT":
+                var scoped = original
+                scoped.is_mutable = false
+                scoped.visibility = Visibility.Package
+                lowering.lower_static(scoped)
+        expect(lowering.builder.module.statics.len()).to_equal(1)
+        val storage = lowering.builder.module.statics.values()[0]
+        expect(storage.visibility).to_equal(Visibility.Package)
+        expect(storage.is_external).to_equal(false)
+        expect(storage.init != nil).to_equal(true)
+
+    it "rejects a referenced imported declaration without its provider":
+        val modules = global_storage_modules()
+        val consumer = modules[1]
+        var lowering = MirLowering.new(consumer.symbols)
+        lowering.register_imported_global_bindings(consumer, [])
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.builder.module.statics.len()).to_equal(0)

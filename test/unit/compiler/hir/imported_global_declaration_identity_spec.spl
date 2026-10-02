@@ -1,0 +1,48 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.Module
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirTypeKind, SymbolKind}
+use test.helpers.module_surface_owner_fixture.module_surfaces_from_test_modules
+
+describe "imported globals retain declaration identity":
+    it "keeps alias lookup separate from owner name, type and mutability":
+        val logger = Logger(level: 0)
+        val left_source = "pub var VALUE: [text] = []\n"
+        val right_source = "pub val VALUE: i64 = 9\n"
+        val consumer_source = "use identity.left.\{VALUE as LeftValue\}\nuse identity.right.\{VALUE as RightValue\}\nfn main() -> i64:\n    RightValue\n"
+        var modules: Dict<text, Module> = {}
+        modules["identity.left"] = parse_full_frontend(left_source, "identity.left", "identity.left", logger)
+        modules["identity.right"] = parse_full_frontend(right_source, "identity.right", "identity.right", logger)
+        val surfaces = module_surfaces_from_test_modules(modules, [
+            SourceFile(path: "identity/left.spl", content: left_source, module_name: "identity.left"),
+            SourceFile(path: "identity/right.spl", content: right_source, module_name: "identity.right")]).unwrap()
+        var lowering = hirlowering_for_module("identity.consumer", surfaces)
+        val consumer = parse_full_frontend(consumer_source, "identity.consumer", "identity.consumer", logger)
+        val hir = lowering.lower_module(consumer)
+        val left_id = hir.symbols.lookup_or_invalid("LeftValue")
+        val right_id = hir.symbols.lookup_or_invalid("RightValue")
+        expect(left_id.is_valid()).to_equal(true)
+        expect(right_id.is_valid()).to_equal(true)
+        expect(left_id.id != right_id.id).to_equal(true)
+        val left = hir.symbols.get_symbol_raw(left_id.id).unwrap()
+        val right = hir.symbols.get_symbol_raw(right_id.id).unwrap()
+        expect(left.name).to_equal("VALUE")
+        expect(right.name).to_equal("VALUE")
+        expect(left.defining_module.unwrap()).to_equal("identity.left")
+        expect(right.defining_module.unwrap()).to_equal("identity.right")
+        expect(left.is_mutable).to_equal(true)
+        expect(right.is_mutable).to_equal(false)
+        var text_array = false
+        if val type_ = left.type_:
+            match type_.kind:
+                case HirTypeKind.Array(element, _):
+                    match element.kind:
+                        case HirTypeKind.Str: text_array = true
+                        case _: ()
+                case _: ()
+        expect(text_array).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)

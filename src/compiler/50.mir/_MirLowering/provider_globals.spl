@@ -1,0 +1,160 @@
+# Imported globals bind provider storage, never provider initializer expressions.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.global_initializer_guard.*
+use compiler.hir.generated.hir_children.{HirNode, hir_children_of, hir_children_of_block}
+
+fn mir_global_storage_name(owner: text, name: text) -> text:
+    val safe_owner = owner.replace(".", "_").replace("/", "_").replace("-", "_").replace(":", "_").replace("\\", "_")
+    if safe_owner == "": name else: "{safe_owner}__{name}"
+
+fn mir_global_declaration_key(owner: text, name: text) -> text:
+    "{mir_layout_canonical_module_name(owner)}::{name}"
+
+fn mir_global_demanded_owners(demanded: Dict<text, [i64]>) -> Dict<text, bool>:
+    var owners: Dict<text, bool> = {}
+    for key in demanded.keys():
+        val separator = key.index_of("::")
+        if separator >= 0:
+            owners[key.substring(0, separator)] = true
+    owners
+
+fn mir_global_reference_ids(functions: [HirFunction], constants: [HirConst]) -> [i64]:
+    # One bounded-to-this-module traversal; ambient imported declarations that
+    # are never referenced must not require their providers to join the closure.
+    var pending: [HirNode] = []
+    for function in functions:
+        for node in hir_children_of_block(function.body):
+            pending = pending.push(node)
+        for param in function.params:
+            if param.has_default:
+                pending = pending.push(HirNode.Expr(param.default))
+    for constant in constants:
+        pending = pending.push(HirNode.Expr(constant.value))
+    var seen: Dict<i64, bool> = {}
+    var result: [i64] = []
+    var index = 0
+    while index < pending.len():
+        val node: HirNode = pending[index]
+        index = index + 1
+        match node:
+            case HirNode.Expr(expression):
+                match expression.kind:
+                    case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                        if not seen.has(symbol.id):
+                            seen[symbol.id] = true
+                            result = result.push(symbol.id)
+                    case _: ()
+            case _: ()
+        for child in hir_children_of(node):
+            pending = pending.push(child)
+    result
+
+impl MirLowering:
+    me register_imported_global_bindings(module: HirModule, providers: [HirModule]):
+        val referenced = mir_global_reference_ids(module.functions.values(), module.constants.values())
+        val demanded = self.imported_global_demands(module.name, referenced)
+        val callables = self.imported_callable_initializer_demands(module.name, referenced)
+        var owners = mir_global_demanded_owners(demanded)
+        for owner in callables.keys():
+            owners[owner] = true
+        var found: Dict<text, bool> = {}
+        for provider in providers:
+            if owners.has(mir_layout_canonical_module_name(provider.name)):
+                found = self.register_provider_global_bindings(provider.name, provider.symbols, provider.constants.values(), demanded, found, callables)
+        self.reject_missing_global_providers(demanded, found)
+
+    fn imported_global_demands(module_name: text, referenced: [i64]) -> Dict<text, [i64]>:
+        var demanded: Dict<text, [i64]> = {}
+        val consumer_owner = mir_layout_canonical_module_name(module_name)
+        for symbol_id in referenced:
+            val raw_symbol = self.symbols.get_symbol_raw(symbol_id)
+            if raw_symbol == nil:
+                continue
+            val symbol: HirSymbol = raw_symbol
+            if symbol.kind != SymbolKind.Const:
+                continue
+            val owner = mir_layout_canonical_module_name(symbol.defining_module ?? "")
+            if owner == "" or owner == consumer_owner:
+                continue
+            val key = mir_global_declaration_key(owner, symbol.name)
+            var ids: [i64] = demanded.get(key) ?? []
+            ids = ids.push(symbol.id.id)
+            demanded[key] = ids
+        demanded
+
+    fn imported_callable_initializer_demands(module_name: text, referenced: [i64]) -> Dict<text, [i64]>:
+        var owners: Dict<text, [i64]> = {}
+        val consumer_owner = mir_layout_canonical_module_name(module_name)
+        for id in referenced:
+            if val symbol = self.symbols.get_symbol_raw(id):
+                if symbol.kind == SymbolKind.Function:
+                    val owner = mir_layout_canonical_module_name(symbol.defining_module ?? "")
+                    if owner != "" and owner != consumer_owner:
+                        var ids: [i64] = owners.get(owner) ?? []
+                        ids = ids.push(id)
+                        owners[owner] = ids
+        owners
+
+    me register_provider_global_bindings(provider_name: text, provider_symbols: SymbolTable, constants: [HirConst], demanded: Dict<text, [i64]>, previous: Dict<text, bool>, callables: Dict<text, [i64]> = {}) -> Dict<text, bool>:
+        var found = previous
+        val owner = mir_layout_canonical_module_name(provider_name)
+        var needs_initialization = runtime_module_initializers_in_declaration_order(constants).len() > 0
+        for slot in constants:
+            if slot.is_mutable:
+                match slot.value.kind:
+                    case HirExprKind.NamedVar(callable_id, _):
+                        if val callable = provider_symbols.get_symbol_raw(callable_id.id):
+                            if callable.kind == SymbolKind.Function:
+                                needs_initialization = true
+                    case _: ()
+        if needs_initialization and callables.has(owner):
+            for callable_id in callables[owner]:
+                self.imported_global_initializers[callable_id] = mir_global_initializer_wrapper_name(provider_name)
+        for raw_constant in constants:
+            val constant: HirConst = raw_constant
+            val key = mir_global_declaration_key(owner, constant.name)
+            if not demanded.has(key):
+                continue
+            if found.has(key):
+                self.error_fatal("duplicate provider declaration for imported global '{key}'", Some(constant.span))
+                continue
+            found[key] = true
+            val relocated_type = self.relocate_provider_type(constant.type_, provider_symbols)
+            var storage_type = self.lower_type(relocated_type)
+            match relocated_type.kind:
+                case HirTypeKind.Dict(_, _): storage_type = MirType.i64()
+                case HirTypeKind.Str: storage_type = self.bootstrap_text_type()
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                    self.error_fatal("imported global '{key}' lacks a resolved storage type", Some(constant.span))
+                    continue
+                case _: ()
+            var definition_owner = provider_name
+            if val definition = provider_symbols.get_symbol_raw(constant.symbol.id):
+                definition_owner = definition.defining_module ?? provider_name
+            val storage_name = mir_global_storage_name(definition_owner, constant.name)
+            for imported_id in demanded[key]:
+                val declaration = MirStatic(symbol: SymbolId(id: imported_id), name: storage_name,
+                    type_: storage_type, init: nil, is_mutable: constant.is_mutable,
+                    alignment: 0, visibility: constant.visibility, is_external: true)
+                self.global_symbol_ids[imported_id] = true
+                self.global_statics_by_id[imported_id] = declaration
+                if needs_initialization:
+                    self.imported_global_initializers[imported_id] = mir_global_initializer_wrapper_name(provider_name)
+                var builder = self.builder
+                var output = builder.module
+                var statics = output.statics
+                statics[declaration.symbol] = declaration
+                output.statics = statics
+                builder.module = output
+                self.builder = builder
+        found
+
+    me reject_missing_global_providers(demanded: Dict<text, [i64]>, found: Dict<text, bool>):
+        for key in demanded.keys():
+            if not found.has(key):
+                self.error_fatal("missing provider declaration for imported global '{key}'", nil)

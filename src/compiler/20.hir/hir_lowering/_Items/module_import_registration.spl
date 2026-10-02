@@ -718,9 +718,23 @@ impl HirLowering:
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
         elif constant_position >= 0:
             val imported_constant = imported_mod.constant_values[constant_position]
-            self.symbols.define(local_name, SymbolKind.Const, nil, import_span,
+            var imported_constant_type: HirType? = nil
+            if imported_constant.has_type_:
+                # The type belongs to the declaration owner, including names
+                # nested in arrays and optionals. Reuse signature dependency
+                # projection; do not materialize or copy the initializer here.
+                for dependency in parser_type_named_dependencies(imported_constant.type_):
+                    self.materialize_imported_callable_dependency(
+                        imported_mod, imported_mod_name, dependency,
+                        import_span, materialize_enum)
+                imported_constant_type = Some(self.imported_surface_type(
+                    imported_constant.type_, imported_mod.module_name))
+            val imported_constant_symbol = self.symbols.define(local_name, SymbolKind.Const, imported_constant_type, import_span,
                 Visibility.Public, imported_constant.is_mutable,
                 Some(imported_mod.module_name))
+            # Lexical aliases are lookup keys, never declaration identities.
+            if local_name != imported_name:
+                self.symbols.rename_symbol(imported_constant_symbol, imported_name)
         else:
             # Re-export facade chase: the imported module does not declare
             # `imported_name` itself — it may re-export it (`export use

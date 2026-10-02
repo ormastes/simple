@@ -19,7 +19,7 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at,
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
     bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
-    bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at}
+    bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at, bootstrap_mir_static_external_at}
 use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
@@ -414,12 +414,18 @@ impl MirTextCodegen for MirToLlvm:
         if module.statics.keys().len() > 0:
             self.builder.emit("")
             self.builder.emit("; Module-level mutable globals")
+            var declared_external_globals: Dict<text, bool> = {}
             for static_ in module.statics.values():
                 val g_ty = self.valid_llvm_type(self.llvm_type_text(static_.type_))
                 val g_name = "@g_{static_.name}"
                 val g_key = self.global_static_key(static_.symbol.id)
                 self.global_static_names[g_key] = g_name
                 self.global_static_types[g_key] = g_ty
+                if static_.is_external:
+                    if not declared_external_globals.has(g_name):
+                        self.builder.emit("{g_name} = external global {g_ty}")
+                        declared_external_globals[g_name] = true
+                    continue
                 var g_init = "zeroinitializer"
                 if static_.init.?:
                     val init_const: MirConstant = static_.init.unwrap()
@@ -558,6 +564,11 @@ impl MirTextCodegen for MirToLlvm:
         var emitted_names: Dict<text, bool> = {}
         var index = 0
         while index < static_count:
+            # Aggregate bootstrap IR contains the provider definition. Keep
+            # alias lookup metadata but never emit a consumer definition.
+            if bootstrap_mir_static_external_at(index):
+                index = index + 1
+                continue
             val g_name = "@g_{bootstrap_mir_static_name_at(index)}"
             val g_ty = bootstrap_llvm_static_type_text(bootstrap_mir_static_type_tag_at(index), self.native_int_type)
             var g_init = "zeroinitializer"

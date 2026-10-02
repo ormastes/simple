@@ -1,6 +1,8 @@
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.provider_globals.*
+use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir._MirLowering.transient_owner.*
@@ -443,6 +445,7 @@ impl MirLowering:
             canonical_type_symbols: {},
             next_canonical_type_symbol: 1000000000,
             global_symbol_ids: {},
+            imported_global_initializers: {},
             # mcp_native_build_post_mono_nil_contains_2026-09-01: these two were
             # DECLARED (mir_lowering_types.spl:424-425) but initialised nowhere
             # -- not here, and by no later assignment -- so every MirLowering
@@ -1508,6 +1511,12 @@ impl MirLowering:
                 for provider_func in provider_module.functions.values():
                     self.register_provider_method(provider_func, provider_module.symbols, provider_links)
         self.global_symbol_ids = {}
+        self.imported_global_initializers = {}
+        # These mirrors contain module-local SymbolIds just like the owner
+        # set. A reused lowering must not bind a consumer ID to prior storage.
+        self.global_statics_by_id = {}
+        self.global_constants_by_id = {}
+        self.global_const_exprs = {}
         val bootstrap_mode = self.ambient_bootstrap_enabled()
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = bootstrap_mode and trace_enabled
@@ -1562,6 +1571,8 @@ impl MirLowering:
             self.enum_runtime_id_index_q = {}
         if bootstrap_trace:
             print "[mir-lower] builder-done"
+
+        self.register_imported_global_bindings(module, providers)
 
         if bootstrap_mode:
             if bootstrap_trace:
@@ -1991,7 +2002,7 @@ impl MirLowering:
         non-folded bindings receive runtime initialization."""
         val folded = self.lower_const_expr(const_.value)
         if folded.?:
-            if not const_.is_mutable:
+            if not const_.is_mutable and const_.visibility.is_private():
                 return
         elif not runtime_module_initializer_supported(const_):
             return
@@ -2068,19 +2079,7 @@ impl MirLowering:
             if val defining_module = symbol_info.defining_module:
                 if defining_module != "":
                     global_owner = defining_module
-        val owner_dots = global_owner.replace(".", "_")
-        val owner_slashes = owner_dots.replace("/", "_")
-        val owner_dashes = owner_slashes.replace("-", "_")
-        # Windows source paths reach this name with a drive colon and
-        # backslashes ("C:\dir"). Neither is legal in an LLVM global name, and
-        # llc rejects the module with "expected '=' in global variable". Sanitize
-        # them the same way as the separators above; the three copies of this
-        # sequence (lower_static, lower_runtime_module_initializers_named,
-        # materialize_folded_global_static_for_address) must stay identical or
-        # one symbol would get two storage slots.
-        val owner_colons = owner_dashes.replace(":", "_")
-        val owner_safe = owner_colons.replace("\\", "_")
-        val global_link_name = if owner_safe == "": const_.name else: "{owner_safe}__{const_.name}"
+        val global_link_name = mir_global_storage_name(global_owner, const_.name)
         if sym_id >= 0:
             self.global_symbol_ids[sym_id] = true
         var bldr = self.builder
@@ -2091,7 +2090,10 @@ impl MirLowering:
             name: global_link_name,
             type_: static_type,
             init: init_const,
-            is_mutable: const_.is_mutable
+            is_mutable: const_.is_mutable,
+            alignment: 0,
+            visibility: const_.visibility,
+            is_external: false
         )
         statics[const_.symbol] = lowered_static
         module_.statics = statics
@@ -2178,6 +2180,8 @@ impl MirLowering:
         self.builder = bldr
 
         var finalized_statics: [MirStatic] = []
+        val initializer_guard = self.begin_global_initializer_guard(init_name)
+
         for const_ in dynamic:
             val value = self.lower_expr(const_.value)
             var value_type = self.lookup_local_type(value)
@@ -2197,18 +2201,16 @@ impl MirLowering:
                 if val runtime_defining_module = runtime_symbol_info.defining_module:
                     if runtime_defining_module != "":
                         runtime_global_owner = runtime_defining_module
-            val runtime_owner_dots = runtime_global_owner.replace(".", "_")
-            val runtime_owner_slashes = runtime_owner_dots.replace("/", "_")
-            val runtime_owner_dashes = runtime_owner_slashes.replace("-", "_")
-            val runtime_owner_colons = runtime_owner_dashes.replace(":", "_")
-            val runtime_owner_safe = runtime_owner_colons.replace("\\", "_")
-            val runtime_global_link_name = if runtime_owner_safe == "": const_.name else: "{runtime_owner_safe}__{const_.name}"
+            val runtime_global_link_name = mir_global_storage_name(runtime_global_owner, const_.name)
             val runtime_static = MirStatic(
                 symbol: const_.symbol,
                 name: runtime_global_link_name,
                 type_: value_type,
                 init: nil,
-                is_mutable: const_.is_mutable
+                is_mutable: const_.is_mutable,
+                alignment: 0,
+                visibility: const_.visibility,
+                is_external: false
             )
             statics[const_.symbol] = runtime_static
             finalized_statics = finalized_statics.push(runtime_static)
@@ -2224,6 +2226,7 @@ impl MirLowering:
             value_builder.emit(MirInst(kind: MirInstKind.StoreGlobal(const_.symbol, mir_operand_copy(value)), span: Some(const_.span)))
             self.builder = value_builder
 
+        self.finish_global_initializer_guard(initializer_guard)
         var finish = self.builder
         finish.terminate_return(nil)
         val init_function = finish.end_function()
@@ -2239,6 +2242,7 @@ impl MirLowering:
         self.builder = finish
         if bootstrap_module_index >= 0:
             bootstrap_mir_functions_add(init_function.name, init_function, bootstrap_module_index)
+        self.lower_global_initializer_wrapper(module_name_raw, init_name, bootstrap_module_index)
 
     me lower_struct_type(struct_def: HirStruct):
         """Lower a HIR struct definition into MIR type metadata."""

@@ -1,6 +1,8 @@
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: expression dispatch, match-case, gpu lane, bitfield helpers
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLowering.global_initializer_guard.*
+use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -286,19 +288,7 @@ impl MirLowering:
             visibility = symbol_info.visibility
             if val defining_module = symbol_info.defining_module:
                 if defining_module != "": owner = defining_module
-        val owner_dots = owner.replace(".", "_")
-        val owner_slashes = owner_dots.replace("/", "_")
-        val owner_dashes = owner_slashes.replace("-", "_")
-        # Windows source paths reach this name with a drive colon and
-        # backslashes ("C:\dir"). Neither is legal in an LLVM global name, and
-        # llc rejects the module with "expected '=' in global variable". Sanitize
-        # them the same way as the separators above; the three copies of this
-        # sequence (lower_static, lower_runtime_module_initializers_named,
-        # materialize_folded_global_static_for_address) must stay identical or
-        # one symbol would get two storage slots.
-        val owner_colons = owner_dashes.replace(":", "_")
-        val owner_safe = owner_colons.replace("\\", "_")
-        val link_name = if owner_safe == "": constant.name else: "{owner_safe}__{constant.name}"
+        val link_name = mir_global_storage_name(owner, constant.name)
         val corrected_constant = MirConstant(
             symbol: constant.symbol, name: constant.name,
             type_: corrected_type, value: constant.value)
@@ -339,6 +329,7 @@ impl MirLowering:
         if not static_.?:
             return nil
         val target = static_.unwrap()
+        self.ensure_imported_global_initialized(symbol_id)
         var b = self.builder
         val dest = b.emit_global_addr(target.symbol, target.type_, mutable)
         self.builder = b
@@ -403,6 +394,9 @@ impl MirLowering:
             self.error(message, nil)
 
     me try_lower_global_read(symbol_id: i64) -> LocalId?:
+        # Imported callable values can observe provider globals when invoked
+        # indirectly; initialize their provider before publishing the value.
+        self.ensure_imported_global_initialized(symbol_id)
         if not self.global_symbol_ids.contains(symbol_id):
             return nil
         # Mutable (`var`) case first: real storage, backed by a LoadGlobal
@@ -412,6 +406,19 @@ impl MirLowering:
             val dest = b_glob.new_temp(static_.type_)
             b_glob.emit(MirInst(kind: MirInstKind.LoadGlobal(dest, static_.symbol), span: nil))
             self.builder = b_glob
+            # Storage may be an i64 handle while the declaration is a Dict or
+            # array. Keep semantic provenance on the loaded receiver/iterable.
+            if val global_symbol = self.symbols.get_symbol_raw(symbol_id):
+                if val declared_type = global_symbol.type_:
+                    self.remember_local_hir_type(dest.id, declared_type, 0, 0)
+                    match declared_type.kind:
+                        case HirTypeKind.Dict(_, _):
+                            self.runtime_dict_locals[dest.id] = true
+                            self.mark_runtime_value_local(dest.id)
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            self.runtime_array_locals[dest.id] = true
+                            self.mark_runtime_value_local(dest.id)
+                        case _: ()
             # Register struct provenance for the loaded local, mirroring every
             # other struct-value-producing site (mir_lowering_stmts.spl:291,
             # method_calls_literals.spl:537, etc). Every other such site

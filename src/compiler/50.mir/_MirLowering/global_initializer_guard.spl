@@ -1,0 +1,96 @@
+# Provider initialization remains single-owner even when consumers initialize
+# in a different link order. Startup is serialized before application threads.
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.bootstrap_globals.bootstrap_mir_functions_add
+
+fn mir_global_initializer_wrapper_name(owner: text) -> text:
+    "__simple_global_initialize_" + mir_layout_canonical_module_name(owner)
+
+impl MirLowering:
+    me ensure_imported_global_initialized(symbol_id: i64):
+        if not self.imported_global_initializers.has(symbol_id):
+            return
+        val name = self.imported_global_initializers[symbol_id]
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))))
+        var builder = self.builder
+        builder.emit_call(callee, [], MirType.unit())
+        self.builder = builder
+
+    me begin_global_initializer_guard(init_name: text) -> SymbolId:
+        val span = Span.empty()
+        val name = "{init_name}$state"
+        var symbols = self.symbols
+        val state = symbols.define(name, SymbolKind.Const, nil, span, Visibility.Private, true, nil)
+        self.symbols = symbols
+        val initial = MirConstant(symbol: state, name: name, type_: MirType.i64(), value: MirConstValue.Int(0))
+        val storage = MirStatic(symbol: state, name: name, type_: MirType.i64(), init: Some(initial),
+            is_mutable: true, alignment: 8, visibility: Visibility.Private, is_external: false)
+        var builder = self.builder
+        var module = builder.module
+        var statics = module.statics
+        statics[state] = storage
+        module.statics = statics
+        builder.module = module
+        val current = builder.new_temp(MirType.i64())
+        builder.emit(MirInst(kind: MirInstKind.LoadGlobal(current, state), span: nil))
+        val completed = builder.emit_const_int(2)
+        val is_complete = builder.emit_binop(MirBinOp.Eq, mir_operand_copy(current), mir_operand_copy(completed), MirType.bool())
+        val done = builder.new_block(Some("initializer_done"))
+        val check = builder.new_block(Some("initializer_check"))
+        val cycle = builder.new_block(Some("initializer_cycle"))
+        val start = builder.new_block(Some("initializer_start"))
+        builder.terminate_if(mir_operand_copy(is_complete), done, check)
+        builder.switch_to_block(done)
+        builder.terminate_return(nil)
+        builder.switch_to_block(check)
+        val active = builder.emit_const_int(1)
+        val is_active = builder.emit_binop(MirBinOp.Eq, mir_operand_copy(current), mir_operand_copy(active), MirType.bool())
+        builder.terminate_if(mir_operand_copy(is_active), cycle, start)
+        builder.switch_to_block(cycle)
+        val message = builder.emit_const_str("cyclic module-global initialization: {init_name}")
+        val panic_fn = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))))
+        builder.emit_call(panic_fn, [mir_operand_copy(message)], MirType.unit())
+        builder.terminate_return(nil)
+        builder.switch_to_block(start)
+        val begun = builder.emit_const_int(1)
+        builder.emit(MirInst(kind: MirInstKind.StoreGlobal(state, mir_operand_copy(begun)), span: nil))
+        self.builder = builder
+        state
+
+    me finish_global_initializer_guard(state: SymbolId):
+        var builder = self.builder
+        val completed = builder.emit_const_int(2)
+        builder.emit(MirInst(kind: MirInstKind.StoreGlobal(state, mir_operand_copy(completed)), span: nil))
+        self.builder = builder
+
+    me lower_global_initializer_wrapper(owner: text, target: text, bootstrap_module_index: i64):
+        val name = mir_global_initializer_wrapper_name(owner)
+        val span = Span.empty()
+        var symbols = self.symbols
+        val symbol = symbols.define(name, SymbolKind.Function, nil, span, Visibility.Public, false, nil)
+        self.symbols = symbols
+        var builder = self.builder
+        val signature = MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)
+        builder.begin_function(symbol, name, signature, span)
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(target), MirType(kind: MirTypeKind.FuncPtr(signature))))
+        builder.emit_call(callee, [], MirType.unit())
+        builder.terminate_return(nil)
+        var wrapper = builder.end_function()
+        wrapper.is_export_c = true
+        wrapper.export_name = name
+        var module = builder.module
+        var functions = module.functions
+        functions[wrapper.symbol] = wrapper
+        module.functions = functions
+        builder.module = module
+        self.builder = builder
+        if bootstrap_module_index >= 0:
+            bootstrap_mir_functions_add(name, wrapper, bootstrap_module_index)
