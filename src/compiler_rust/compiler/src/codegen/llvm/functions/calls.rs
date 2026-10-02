@@ -122,6 +122,10 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
 /// Mirrors the Cranelift backend's text_arg_indices in codegen/instr/calls.rs.
 fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
+        "rt_linux_group_available_capacity_v1" => Some(&[0]),
+        "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
+        "rt_linux_group_launch_broker_v1" => Some(&[0, 1]),
+        "rt_linux_group_start_v1" => Some(&[0, 1, 4, 5, 6, 9, 10]),
         // Print/IO (text → ptr, len)
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
 

@@ -44,6 +44,15 @@ typedef struct {
 
 static RtLinuxGroup rt_linux_group = {0};
 
+/* An explicit acquisition owns an EMPTY parent; the broker stays outside it.
+ * Only this fresh parent's subtree_control may be changed. */
+static struct {
+    int active, root_fd, parent_fd;
+    dev_t device;
+    ino_t inode;
+    char name[80], identity[65], attempt[4096];
+} rt_lg_delegation;
+
 static int rt_lg_copy_text(const char *data, uint64_t len, char *out, size_t cap) {
     if (!data || !out || len == 0 || len >= cap || memchr(data, 0, (size_t)len))
         return 0;
@@ -53,7 +62,9 @@ static int rt_lg_copy_text(const char *data, uint64_t len, char *out, size_t cap
 static int rt_lg_read_fd(int fd, char *out, size_t cap) {
     if (fd < 0 || !out || cap < 2) return 0;
     ssize_t n = read(fd, out, cap - 1);
-    if (n <= 0 || (size_t)n >= cap) return 0;
+    if (n < 0) return 0;
+    if (n == 0) { errno = ENODATA; return 0; }
+    if ((size_t)n >= cap - 1) { errno = EOVERFLOW; return 0; }
     out[n] = 0; return 1;
 }
 
@@ -244,10 +255,103 @@ static int rt_lg_kill(RtLinuxGroup *owner) {
     return rt_lg_write_at(owner->group_fd, "cgroup.kill", "1");
 }
 
+/* A controller being available is not a delegation to child groups. Do not
+ * create a probe or change subtree_control under an undelegated host parent. */
+static int rt_lg_memory_delegated(int parent) {
+    char controllers[4096];
+    if (!rt_lg_read_at(parent, "cgroup.subtree_control", controllers,
+            sizeof(controllers))) return 0;
+    const char *at = controllers;
+    while (*at) {
+        at += strspn(at, " \t\r\n");
+        size_t length = strcspn(at, " \t\r\n");
+        if (length == 6 && memcmp(at, "memory", 6) == 0) return 1;
+        at += length;
+    }
+    errno = ENOTSUP; return 0;
+}
+
+static int rt_lg_delegation_fd(void) {
+    struct stat status, named;
+    if (!rt_lg_delegation.active) { errno = ENOENT; return -1; }
+    if (fstat(rt_lg_delegation.parent_fd, &status) ||
+        fstatat(rt_lg_delegation.root_fd, rt_lg_delegation.name, &named,
+            AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode) ||
+        status.st_dev != rt_lg_delegation.device ||
+        status.st_ino != rt_lg_delegation.inode ||
+        named.st_dev != status.st_dev || named.st_ino != status.st_ino) {
+        errno = ESTALE; return -1;
+    }
+    return fcntl(rt_lg_delegation.parent_fd, F_DUPFD_CLOEXEC, 3);
+}
+
+/* Receipt: status, token, device, inode. Acquisition never adopts an existing
+ * directory and never enables a controller in the host root or current group. */
+SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t attempt_len,
+        const char *identity_data, uint64_t identity_len) {
+    int64_t answer[4] = {EINVAL, 0, 0, 0};
+    char attempt[4096], identity[65], name[80];
+    int root = -1, parent = -1, created = 0;
+    struct statfs fs;
+    struct stat status;
+    if (rt_lg_delegation.active || rt_linux_group.active ||
+        !rt_lg_copy_text(attempt_data, attempt_len, attempt, sizeof(attempt)) ||
+        attempt[0] != '/' || !rt_lg_hex_digest(identity_data, identity_len, identity))
+        goto done;
+    root = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const char *components[] = {"sys", "fs", "cgroup"};
+    for (size_t i = 0; root >= 0 && i < 3; i++) {
+        int next = openat(root, components[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int saved = errno; close(root); root = next; errno = saved;
+    }
+    if (root < 0 || fstatfs(root, &fs) ||
+        (unsigned long)fs.f_type != CGROUP2_SUPER_MAGIC) {
+        answer[0] = ENOTSUP; goto done;
+    }
+    if (!rt_lg_memory_delegated(root)) { answer[0] = errno; goto done; }
+    snprintf(name, sizeof(name), "simple-parent-%s", identity);
+    if (mkdirat(root, name, 0700)) { answer[0] = errno; goto done; }
+    created = 1;
+    parent = openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int populated = 1;
+    if (parent < 0 || fstat(parent, &status) ||
+        !rt_lg_populated(parent, &populated) || populated ||
+        !rt_lg_write_at(parent, "cgroup.subtree_control", "+memory") ||
+        !rt_lg_memory_delegated(parent)) {
+        answer[0] = errno ? errno : ENOTSUP; goto done;
+    }
+    rt_lg_delegation.active = 1;
+    rt_lg_delegation.root_fd = root; rt_lg_delegation.parent_fd = parent;
+    rt_lg_delegation.device = status.st_dev; rt_lg_delegation.inode = status.st_ino;
+    strcpy(rt_lg_delegation.name, name); strcpy(rt_lg_delegation.identity, identity);
+    strcpy(rt_lg_delegation.attempt, attempt);
+    answer[0] = 0; answer[1] = 1;
+    answer[2] = (int64_t)status.st_dev; answer[3] = (int64_t)status.st_ino;
+    return owned_adapter_values(answer, 4);
+done:
+    if (parent >= 0) close(parent);
+    if (created && unlinkat(root, name, AT_REMOVEDIR)) answer[0] = errno;
+    if (root >= 0) close(root);
+    return owned_adapter_values(answer, 4);
+}
+
+int64_t rt_linux_group_parent_release_v1(int64_t token) {
+    if (token != 1 || !rt_lg_delegation.active) return EINVAL;
+    if (rt_linux_group.active && !rt_linux_group.collected) return EBUSY;
+    int pinned = rt_lg_delegation_fd();
+    if (pinned < 0) return errno;
+    close(pinned);
+    if (unlinkat(rt_lg_delegation.root_fd, rt_lg_delegation.name, AT_REMOVEDIR)) return errno;
+    close(rt_lg_delegation.parent_fd); close(rt_lg_delegation.root_fd);
+    rt_lg_delegation.active = 0;
+    return 0;
+}
+
 static int rt_lg_capacity_capability(int parent) {
 #if !defined(SYS_pidfd_open) || !defined(SYS_clone3) || !defined(SYS_execveat)
     (void)parent; errno = ENOTSUP; return 0;
 #else
+    if (!rt_lg_memory_delegated(parent)) return 0;
     int pidfd = (int)syscall(SYS_pidfd_open, getpid(), 0);
     if (pidfd < 0) return 0;
     close(pidfd);
@@ -407,8 +511,14 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     if (exec_fd < 0 || cwd_fd < 0) {
         answer[1] = errno ? errno : ESTALE; goto done;
     }
-    parent_fd = rt_lg_parent();
+    if (rt_lg_delegation.active &&
+        (strcmp(root, rt_lg_delegation.attempt) ||
+         strcmp(identity, rt_lg_delegation.identity))) { answer[1] = ESTALE; goto done; }
+    parent_fd = rt_lg_delegation.active ? rt_lg_delegation_fd() : rt_lg_parent();
     if (parent_fd < 0) { answer[1] = errno ? errno : ENOTSUP; goto done; }
+    if (!rt_lg_memory_delegated(parent_fd)) {
+        answer[1] = errno ? errno : ENOTSUP; goto done;
+    }
     char name[80]; snprintf(name, sizeof(name), "simple-native-%s", identity);
     if (mkdirat(parent_fd, name, 0700) != 0) { answer[1] = errno; goto done; }
     created = 1;
@@ -525,7 +635,7 @@ SplArray *rt_linux_group_available_capacity_v1(const char *path_data, uint64_t p
         }
     }
     fclose(file);
-    int parent = rt_lg_parent();
+    int parent = rt_lg_delegation.active ? rt_lg_delegation_fd() : rt_lg_parent();
     if (parent < 0 || available <= 0) {
         if (parent >= 0) close(parent);
         result[0] = ENOTSUP; return owned_adapter_values(result, 3);

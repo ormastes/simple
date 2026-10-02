@@ -55,9 +55,10 @@ struct WindowsProcessStateV1:
 
 var _windows_process_slots_v1: [WindowsProcessStateV1] = []
 
-# MEMORYSTATUSEX is 64 bytes on Win64; ullAvailPhys begins at byte 16.
+# MEMORYSTATUSEX is 64 bytes on Win64; physical and commit headroom are
+# distinct. JobObject memory limits account committed bytes.
 @unsafe(reason: "reads a bounded native host memory snapshot and releases its buffer", capabilities: [ffi, raw_ptr])
-fn windows_available_physical_memory_v1() -> Result<i64, text>:
+fn windows_available_memory_headroom_v1() -> Result<i64, text>:
     val heap = GetProcessHeap()
     if heap == 0: return Err("Windows process heap unavailable for memory check")
     val status = HeapAlloc(heap, 8u32, 64u64)
@@ -65,10 +66,17 @@ fn windows_available_physical_memory_v1() -> Result<i64, text>:
     volatile_write_u32(status, 64u32)
     val queried = GlobalMemoryStatusEx(status)
     val available = if queried != 0: volatile_read_u64(status + 16) else: 0u64
+    val commit_available = if queried != 0: volatile_read_u64(status + 32) else: 0u64
     val released = HeapFree(heap, 0u32, status)
     if queried == 0 or released == 0: return Err("Windows available memory query failed")
-    if available > 9223372036854775807u64: return Err("Windows available memory exceeds supported bound")
-    Ok(available as i64)
+    if available > 9223372036854775807u64 or commit_available > 9223372036854775807u64:
+        return Err("Windows available memory exceeds supported bound")
+    Ok(windows_capacity_headroom_v1(available as i64, commit_available as i64))
+
+fn windows_capacity_headroom_v1(physical_bytes: i64, commit_bytes: i64) -> i64:
+    if physical_bytes < 0 or commit_bytes < 0: return 0
+    if physical_bytes < commit_bytes: return physical_bytes
+    commit_bytes
 
 fn _windows_scalar_utf8_width_v1(scalar: i64) -> i64:
     if scalar < 128: return 1
@@ -408,7 +416,7 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     var thread: i64 = 0
     var creation_attempted = false
     if error == "" and required_available_bytes > 0:
-        match windows_available_physical_memory_v1():
+        match windows_available_memory_headroom_v1():
             Ok(available):
                 if available < required_available_bytes:
                     error = "pre-spawn available memory below required bytes: available={available} required={required_available_bytes}"
@@ -455,6 +463,12 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
         job = CreateJobObjectW(0, 0)
         if job == 0 or SetInformationJobObject(job, 9, limits, 144u32) == 0:
             error = "JobObject admission failed"
+        elif QueryInformationJobObject(job, 9, limits, 144u32, 0) == 0:
+            error = "JobObject limit readback failed"
+        elif memory_limit_bytes > 0 and
+                (volatile_read_u32(limits + 16) != 8704u32 or
+                 volatile_read_u64(limits + 120) != memory_limit_bytes as u64):
+            error = "JobObject memory limit readback differs"
     if error == "":
         # CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW.
         creation_attempted = true
@@ -585,4 +599,4 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
 
 export windows_process_start_with_memory_v1, windows_process_peak_memory_v1
 export WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_admit_with_reserve_v1
-export windows_available_physical_memory_v1
+export windows_available_memory_headroom_v1, windows_capacity_headroom_v1

@@ -10,6 +10,9 @@ use app.bootstrap_builder.codec.{builder_read_task_v1, builder_write_result_v1}
 use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1,
     builder_regular_input_parents_safe_v1}
 use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
+use std.common.build_manager.capacity_request.{builder_capacity_request_decode_v1,
+    BuilderLinuxParentReceiptV1, builder_linux_parent_receipt_encode_v1}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_cgroup_parent_acquire_v1, linux_cgroup_parent_release_v1}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessInputV1, LinuxProcessRequestV1, LinuxProcessLeaseV1, LinuxProcessPollV1, linux_process_start_with_memory_v1, linux_process_poll_v1, linux_process_cancel_v1, linux_process_collect_v1, linux_available_capacity_v1}
 
@@ -138,6 +141,28 @@ pub fn builder_linux_terminal_outcome_v1(receipt: LinuxProcessPollV1,
     Ok(("ERROR", receipt.exit_code))
 
 fn builder_linux_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
+    val identity = builder_task_identity_v1(task)
+    val payload = match file_read_regular_no_follow_bounded(root + "/capacity.request.sdn", 4096):
+        Ok(value): value
+        Err(reason): return Err(builder_linux_reject_before_start_v1(task, root, host, reason))
+    match builder_capacity_request_decode_v1(payload, identity, host):
+        Ok(_): pass
+        Err(reason): return Err(builder_linux_reject_before_start_v1(task, root, host, reason))
+    val parent = match linux_cgroup_parent_acquire_v1(root, identity):
+        Ok(value): value
+        Err(reason): return Err(builder_linux_reject_before_start_v1(task, root, host, reason))
+    val receipt = builder_linux_parent_receipt_encode_v1(BuilderLinuxParentReceiptV1(
+        identity, host, parent.path, parent.device, parent.inode))
+    if receipt == "" or not file_atomic_write(root + "/capacity.receipt", receipt):
+        val released = linux_cgroup_parent_release_v1(parent)?
+        return Err(builder_linux_reject_before_start_v1(task, root, host, "cannot persist owned parent receipt"))
+    val outcome = builder_linux_run_in_parent_v1(task, root, host)
+    val released = linux_cgroup_parent_release_v1(parent)?
+    if not file_atomic_write(root + "/capacity.released", receipt):
+        return Err("cannot persist owned parent cleanup receipt")
+    outcome
+
+fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text) -> Result<(text, i64), text>:
     val identity = builder_task_identity_v1(task)
     if file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host):
         return Err(builder_linux_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))

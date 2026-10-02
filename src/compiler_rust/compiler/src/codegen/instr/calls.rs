@@ -199,6 +199,15 @@ mod tests {
     }
 
     #[test]
+    fn linux_owner_text_pairs_preserve_arrays_and_scalar_limits() {
+        assert_eq!(text_arg_indices("rt_linux_group_available_capacity_v1"), Some(&[0][..]));
+        assert_eq!(text_arg_indices("rt_linux_group_parent_acquire_v1"), Some(&[0, 1][..]));
+        assert_eq!(text_arg_indices("rt_linux_group_launch_broker_v1"), Some(&[0, 1][..]));
+        assert_eq!(text_arg_indices("rt_linux_group_start_v1"), Some(&[0, 1, 4, 5, 6, 9, 10][..]));
+        assert_eq!(text_arg_indices("rt_linux_group_poll_v1"), None);
+    }
+
+    #[test]
     fn owned_process_v3_start_expands_only_command_text() {
         assert_eq!(
             super::process_c_runtime_arg_indices("rt_process_owned_v3_start_value"),
@@ -2668,6 +2677,10 @@ fn returns_c_string(func_name: &str) -> bool {
 ///
 pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
+        "rt_linux_group_available_capacity_v1" => Some(&[0]),
+        "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
+        "rt_linux_group_launch_broker_v1" => Some(&[0, 1]),
+        "rt_linux_group_start_v1" => Some(&[0, 1, 4, 5, 6, 9, 10]),
         // Print/IO (text → ptr, len)
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
 

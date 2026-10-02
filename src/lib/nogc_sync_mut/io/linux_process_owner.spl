@@ -21,6 +21,12 @@ struct LinuxProcessRequestV1:
 struct LinuxProcessLeaseV1:
     token: i64
 
+struct LinuxCgroupParentV1:
+    token: i64
+    path: text
+    device: i64
+    inode: i64
+
 struct LinuxProcessPollV1:
     terminal: bool
     leader_reaped: bool
@@ -48,6 +54,25 @@ extern fn rt_linux_group_cancel_v1(token: i64) -> i64
 extern fn rt_linux_group_collect_v1(token: i64) -> [i64]
 @unsafe(reason: "Linux meminfo/cgroup and statvfs capacity snapshot", capabilities: [ffi])
 extern fn rt_linux_group_available_capacity_v1(path: text) -> [i64]
+@unsafe(reason: "explicit fresh empty cgroup parent acquisition", capabilities: [ffi])
+extern fn rt_linux_group_parent_acquire_v1(attempt: text, identity: text) -> [i64]
+@unsafe(reason: "removes only the pinned owned empty cgroup parent", capabilities: [ffi])
+extern fn rt_linux_group_parent_release_v1(token: i64) -> i64
+
+fn linux_cgroup_parent_acquire_v1(attempt: text, identity: text) -> Result<LinuxCgroupParentV1, text>:
+    if not linux_process_absolute_v1(attempt) or not builder_digest_valid_v1(identity):
+        return Err("invalid Linux parent acquisition request")
+    val fields = unsafe(capabilities: [ffi]): rt_linux_group_parent_acquire_v1(attempt, identity)
+    if fields.len() != 4: return Err("Linux parent acquisition receipt layout differs")
+    if fields[0] != 0: return Err("Linux owned parent acquisition rejected: " + str(fields[0]))
+    if fields[1] <= 0 or fields[2] < 0 or fields[3] <= 0:
+        return Err("Linux parent acquisition receipt invalid")
+    Ok(LinuxCgroupParentV1(fields[1], "/sys/fs/cgroup/simple-parent-" + identity, fields[2], fields[3]))
+
+fn linux_cgroup_parent_release_v1(parent: LinuxCgroupParentV1) -> Result<bool, text>:
+    val code = unsafe(capabilities: [ffi]): rt_linux_group_parent_release_v1(parent.token)
+    if code != 0: return Err("Linux owned parent cleanup unproven: " + str(code))
+    Ok(true)
 
 fn linux_process_absolute_v1(path: text) -> bool:
     path.starts_with("/") and not path.contains("\0") and
@@ -132,7 +157,11 @@ fn linux_process_collect_v1(lease: LinuxProcessLeaseV1) -> Result<LinuxProcessPo
 fn linux_available_capacity_v1(path: text) -> Result<(i64, i64), text>:
     if not linux_process_absolute_v1(path): return Err("Linux capacity path must be absolute")
     val fields = unsafe(capabilities: [ffi]): rt_linux_group_available_capacity_v1(path)
-    if fields.len() != 3 or fields[0] != 0 or fields[1] <= 0 or fields[2] <= 0:
+    if fields.len() != 3:
+        return Err("Linux capacity measurement unavailable")
+    if fields[0] != 0:
+        return Err("Linux capacity measurement unavailable (native status {fields[0]}; requires a writable cgroup-v2 parent with memory delegated to children)")
+    if fields[1] <= 0 or fields[2] <= 0:
         return Err("Linux capacity measurement unavailable")
     Ok((fields[1], fields[2]))
 
@@ -155,3 +184,4 @@ export linux_process_start_with_memory_v1, linux_process_poll_v1
 export linux_process_cancel_v1, linux_process_peak_memory_v1, linux_process_collect_v1
 export linux_available_capacity_v1, linux_process_request_valid_v1
 export linux_process_launch_broker_v1
+export LinuxCgroupParentV1, linux_cgroup_parent_acquire_v1, linux_cgroup_parent_release_v1

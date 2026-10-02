@@ -1,5 +1,31 @@
 # Bootstrap distributed builder detail design
 
+## Capacity admission repair (2026-10-02)
+
+`common/build_manager/capacity_request.spl` owns the canonical bounded sidecar:
+version header, task identity, host identity and `owned-platform-boundary-v1`.
+Transport persists it before launching either compiled worker. Missing, altered,
+cross-task or cross-host authority is rejected before acquiring a resource.
+
+Linux's `LinuxCgroupParentV1` exposes a lease token and observed path/device/inode;
+the native SOSIX adapter retains the actual directory descriptors. Acquisition
+fails on existing names, unavailable delegation, or failed controller readback.
+Capacity and process start reuse that exact descriptor; start additionally checks
+the task identity and attempt root. Release refuses live/uncollected children
+and removes only the pinned empty directory. The worker brackets every admitted
+run with acquisition and release, including pre-start rejection paths.
+
+Windows capacity is `min(ullAvailPhys, ullAvailPageFile)` from one
+`MEMORYSTATUSEX` snapshot, since JobObject limits account commit. Admission reads
+back `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY` and the
+exact byte limit before attempting `CreateProcessW`.
+
+Tests: `capacity_request_spec.spl`, `windows_capacity_headroom_spec.spl`, and
+`test/fixtures/bootstrap_builder/linux_capacity_owner.c`. The latter runs real
+cgroup2/clone3/pidfd operations and requires an already memory-delegating mount.
+Manager and worker must be rebuilt together: old workers lack the sidecar
+contract, and old compiler text-ABI registries mis-lower the Linux owner calls.
+
 Status: shared protocol implemented; native qualification pending.
 
 ## Shared interface
