@@ -3142,15 +3142,20 @@ bootstrap_stage3_copy_seed_tuple() {
     # Same layout change for the runtime archive: older cargo parked it in
     # deps/ (the slot the last invocation wins); newer cargo leaves the
     # staticlib at the profile root, where the last runtime-producing build
-    # still wins. Admit the root spelling as a source alias for the GNU
-    # spelling only; the frozen generation still stores deps/libsimple_runtime.a.
-    if [ "$bootstrap_stage3_tuple_runtime_name" = deps/libsimple_runtime.a ] &&
+    # still wins. Admit the root spelling as a source alias for GNU and MSVC
+    # spellings; the frozen generation retains the canonical deps/ member.
+    case "$bootstrap_stage3_tuple_runtime_name" in
+        deps/libsimple_runtime.a|deps/simple_runtime.lib)
+            bootstrap_stage3_tuple_runtime_root=${bootstrap_stage3_tuple_runtime_name#deps/} ;;
+        *) return 1 ;;
+    esac
+    if
         [ ! -f "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_runtime_name" ] &&
-        [ -f "$bootstrap_stage3_tuple_source/libsimple_runtime.a" ] &&
-        [ ! -L "$bootstrap_stage3_tuple_source/libsimple_runtime.a" ]; then
+        [ -f "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_runtime_root" ] &&
+        [ ! -L "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_runtime_root" ]; then
         case "$bootstrap_stage3_tuple_aliases" in
-            '') bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_runtime_name=libsimple_runtime.a" ;;
-            *) bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_aliases;$bootstrap_stage3_tuple_runtime_name=libsimple_runtime.a" ;;
+            '') bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_runtime_name=$bootstrap_stage3_tuple_runtime_root" ;;
+            *) bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_aliases;$bootstrap_stage3_tuple_runtime_name=$bootstrap_stage3_tuple_runtime_root" ;;
         esac
     fi
     BOOTSTRAP_STAGE3_TUPLE_SOURCE_ALIASES=$bootstrap_stage3_tuple_aliases
@@ -5398,8 +5403,9 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         # Every resolved dependency must stay inside this checkout, must not
         # traverse a symlink, and must contribute all Cargo.toml/Rust inputs.
         bootstrap_stage3_seed_trace collect-cargo-path-dependencies
-        "$bootstrap_stage3_seed_find" src/compiler_rust -name Cargo.toml -type f \
-            -not -path '*/target/*' -print \
+        "$bootstrap_stage3_seed_find" src/compiler_rust \
+            \( -type d -name target -prune \) -o \
+            \( -name Cargo.toml -type f -print \) \
             >"$bootstrap_stage3_seed_tmp/cargo-manifests" || exit 1
         : >"$bootstrap_stage3_seed_tmp/path-deps.unsorted" || exit 1
         while IFS= read -r bootstrap_stage3_seed_manifest; do

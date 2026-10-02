@@ -1,0 +1,25 @@
+#!/bin/sh
+# Validate real verifier admission without executing a compiler or native build.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+probe() {
+  phase=$1 tests=$2 modules=$3 expected=$4
+  status=0
+  BOOTSTRAP_VERIFY_TEST_WORKERS=$tests BOOTSTRAP_VERIFY_MODULE_WORKERS=$modules \
+    BOOTSTRAP_VERIFY_BUILD_THREADS=80 sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase="$phase" --compiler="$work/missing" >"$work/log" 2>&1 || status=$?
+  [ "$status" -eq 2 ] || { cat "$work/log"; exit 1; }
+  grep -q -- "$expected" "$work/log" || { cat "$work/log"; exit 1; }
+}
+probe stage2 80 80 'compiler is not executable'
+probe stage2 81 1 'test workers must be from 1 to 80'
+probe stage2 1 81 'module workers must be from 1 to 80'
+probe stage2 0 1 'test workers must be a positive integer'
+probe stage2 bad 1 'test workers must be a positive integer'
+probe stage2 1 00 'module workers must be from 1 to 80'
+probe stage1 13 1 'test workers must be from 1 to 12'
+probe stage1 1 13 'module workers must be from 1 to 12'
+probe stage1 12 12 'compiler is not executable'
+printf 'PASS: Stage2 accepts 80 workers, invalid pools fail, other phase limits remain bounded\n'

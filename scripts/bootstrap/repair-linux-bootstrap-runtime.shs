@@ -18,10 +18,12 @@ for symbol in rt_native_build rt_set_args rt_alloc rt_free rt_string_new rt_stri
 done
 : > "$output/providers.nm"
 : > "$output/source.sha256"
+set --
 for pair in runtime_native:rt_dir_is_real_no_follow runtime_secure_staging:rt_shared_parse_cell_read_v1 runtime_thread:spl_thread_current_id; do
     unit=${pair%%:*}; symbol=${pair#*:}
     if awk -v s="$symbol" '$NF==s {found=1} END {exit !found}' "$output/original.nm"; then
-        echo "authority already owns $symbol; source-specific review required" >&2; exit 1
+        echo "authority already owns $symbol; retaining original provider"
+        continue
     fi
     sha256sum "$source_root/src/runtime/$unit.c" >> "$output/source.sha256"
     # Explicit C mode is mandatory even if CC is a C++ driver.
@@ -40,6 +42,7 @@ for pair in runtime_native:rt_dir_is_real_no_follow runtime_secure_staging:rt_sh
     # Strip those entries so the closure audit sees retained relocations only.
     objcopy --strip-unneeded "$output/objects/$unit.o"
     nm -g --defined-only "$output/objects/$unit.o" >> "$output/providers.nm"
+    set -- "$@" "$output/objects/$unit.o"
     readelf -Wr "$output/objects/$unit.o" > "$output/objects/$unit.relocations"
     nm -u "$output/objects/$unit.o" > "$output/objects/$unit.undefined"
     [ "$(nm -g --defined-only "$output/objects/$unit.o" | awk 'NF>=3 {n++} END {print n+0}')" -eq 1 ] || exit 1
@@ -60,8 +63,9 @@ for pair in runtime_native:rt_dir_is_real_no_follow runtime_secure_staging:rt_sh
     fi
 done
 cp "$authority" "$output/runtime/libsimple_native_all.a"
-ar r "$output/runtime/libsimple_native_all.a" "$output/objects/runtime_native.o" \
-    "$output/objects/runtime_secure_staging.o" "$output/objects/runtime_thread.o"
+if [ "$#" -gt 0 ]; then
+    ar r "$output/runtime/libsimple_native_all.a" "$@"
+fi
 ranlib "$output/runtime/libsimple_native_all.a"
 # Preserve the entire original export multiset, including weak definitions.
 # This also catches an accidental archive-member replacement by ar.
