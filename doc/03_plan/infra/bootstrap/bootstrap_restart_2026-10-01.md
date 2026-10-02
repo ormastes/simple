@@ -1345,3 +1345,23 @@ Direct Phase3/4 fallback identities retain all 17,147 modules, but no queue has
 launched. The new paired monitor still requires fixes for cleanup proof and
 bounded timeout handling before resource admission. Canonical manager deployment,
 full module completion and cross-host cache qualification remain incomplete.
+
+### 2026-10-02 full-queue guard review and resource admission
+
+The paired monitor's cleanup-proof and bounded-wait fixes passed focused
+negative tests and independent source/evidence review. Missing or malformed
+Job receipts retain ownership markers and produce containment-unverified;
+disk-stop handling drains owned lanes with finite deadlines. The review is
+`D:/dev/capacity-admission-verification-20261002/phase34-paired-disk-monitor-review.md`.
+
+The next fresh admission refused the pair before any native launch: available
+physical memory was 22,125,076,480 bytes, below the 22,589,934,592-byte requirement
+for two 7 GB jobs plus an 8 GiB host reserve. Commit headroom and disk passed.
+A serial full-scope route is being prepared; no thresholds were reduced and
+all 17,147 modules, both backends and requested suites remain in scope.
+
+The isolated seed-dispatch candidate is now `edea133ff0bbdd9d48a300a3d008723aece8399d`,
+exactly fa703 plus landed fix `9e190c6642`, with matching patch identity. Source
+materialization, canonical Cargo-cache compatibility and a private guard are
+being prepared before its canonical Stage2 bootstrap. No new seed build has
+started. Linux's three-attempt stop and the manager batch failure remain in force.
