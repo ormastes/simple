@@ -14603,7 +14603,13 @@ int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
  * the machine boundary scalar on already-admitted self-hosted producers;
  * no newly named text extern can accidentally collapse a pointer/length pair.
  */
+#include "runtime_fd_stat_v1.h"
 #include "runtime_sosix_directory_roots_v1.h"
+
+int64_t rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t out_bytes) {
+    return rt_fd_stat_snapshot_v1_impl(
+        descriptor, (uint64_t *)(uintptr_t)out_addr, out_bytes);
+}
 
 static int rt_sdr_values_paths_v1(int64_t shared_bytes, int64_t private_bytes,
                                 char *shared, char *private_root) {

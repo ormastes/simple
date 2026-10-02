@@ -1514,6 +1514,7 @@ int64_t     rt_sosix_directory_pair_check_v1(int64_t shared_bytes, int64_t priva
 int64_t     rt_sosix_directory_pair_revalidate_v1(int64_t token);
 int64_t     rt_sosix_directory_pair_snapshot_v1(int64_t token, int64_t output, int64_t bytes);
 int64_t     rt_sosix_directory_pair_close_v1(int64_t token);
+int64_t     rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t out_bytes);
 int64_t     rt_shared_parse_cell_read_v1(const uint8_t* path_ptr, uint64_t path_len, int64_t maximum);
 int         rt_file_write(const char* path, const char* content);
 int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);

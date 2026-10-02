@@ -2061,13 +2061,31 @@ int main(int argc, char** argv) {
                             cmd.arg(runtime_lib);
                             cmd.arg("-Wl,--no-whole-archive");
                         } else {
-                            let roots = Self::runtime_retention_symbols(
+                            let mut roots = Self::runtime_retention_symbols(
                                 object_paths,
                                 &main_o,
                                 init_o.as_ref(),
                                 runtime_lib,
                                 imports,
                             )?;
+                            if bootstrap_mutex_runtime.is_some() {
+                                // The projected core-C supplement retains weak
+                                // array-byte fallbacks. Pull the strong Rust
+                                // array owner first so SOSIX path checks read
+                                // the seed runtime's `[u8]` representation.
+                                let owned = Self::read_defined_symbol_set(runtime_lib)?;
+                                for symbol in [
+                                    "rt_array_bytes_validate",
+                                    "rt_array_bytes_copy_checked",
+                                ] {
+                                    if !owned.contains(symbol) {
+                                        return Err(format!(
+                                            "bootstrap native-all runtime lacks array owner `{symbol}`"
+                                        ));
+                                    }
+                                    roots.push(symbol.to_string());
+                                }
+                            }
                             Self::add_elf_undefined_roots(&mut cmd, &roots);
                             cmd.arg(runtime_lib);
                         }
