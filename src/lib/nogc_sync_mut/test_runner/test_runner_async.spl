@@ -313,8 +313,7 @@ fn run_tests_parallel_with_monitoring(
         if (time_now_unix_micros() - admission_started) / 1000 >= admission_timeout_ms:
             var denied: [TestFileResult] = []
             for file in files:
-                denied.push(make_result_from_output(file, "", "process admission deadline exceeded", -1,
-                    admission_timeout_ms, options.timeout))
+                denied.push(_parallel_admission_failure(file, "process admission deadline exceeded", admission_timeout_ms))
             return denied
         thread_sleep(_wait_poll_sleep_ms(poll_iteration))
         poll_iteration = poll_iteration + 1
@@ -373,8 +372,8 @@ fn run_tests_parallel_with_monitoring(
         active_runs = new_runs
         if admission_blocked:
             while next_file_idx < files.len():
-                results[next_file_idx] = Some(make_result_from_output(files[next_file_idx], "",
-                    "NATIVE-CACHE-CLEANUP-FAILED: further admission blocked", -1, 0, options.timeout))
+                results[next_file_idx] = Some(_parallel_admission_failure(files[next_file_idx],
+                    "NATIVE-CACHE-CLEANUP-FAILED: further admission blocked", 0))
                 next_file_idx = next_file_idx + 1
         if active_runs.len() > 0 or had_completion:
             admission_started = current_time
@@ -382,8 +381,8 @@ fn run_tests_parallel_with_monitoring(
             # Admission has its own finite deadline even when another owner
             # holds every process slot and this pool has nothing to poll.
             while next_file_idx < files.len():
-                results[next_file_idx] = Some(make_result_from_output(files[next_file_idx], "",
-                    "process admission deadline exceeded", -1, options.timeout * 1000, options.timeout))
+                results[next_file_idx] = Some(_parallel_admission_failure(files[next_file_idx],
+                    "process admission deadline exceeded", admission_timeout_ms))
                 next_file_idx = next_file_idx + 1
 
         # Only sleep after a full pass with no completion.
@@ -399,10 +398,14 @@ fn run_tests_parallel_with_monitoring(
         match result:
             case Some(value): ordered.push(value)
             case nil:
-                ordered.push(make_result_from_output(files[result_index], "",
-                    "owned child completion missing", -1, 0, options.timeout))
+                ordered.push(_parallel_admission_failure(files[result_index], "owned child completion missing", 0))
         result_index = result_index + 1
     ordered
+
+fn _parallel_admission_failure(file: text, reason: text, duration_ms: i64) -> TestFileResult:
+    # Parent admission failure has no child exit status to scrape/classify.
+    TestFileResult(path: file, passed: 0, failed: 1, skipped: 0, pending: 0,
+        duration_ms: duration_ms, setup_ms: 0, error: reason, timed_out: false, cached: false)
 
 # ============================================================================
 # Helper: CPU Count Detection
