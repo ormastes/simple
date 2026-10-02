@@ -1568,3 +1568,34 @@ remain unrun. Capture-only tool configuration must not activate strict
 compiler discovery until sealed authority selectors exist. Shared Windows/
 Linux parse-cache qualification is still pending; no deployment or complete
 module traversal is established by these source and shell checks.
+
+### 2026-10-02 cold inventory completed; explicit entry collection failed
+
+The second actual diagnostic compiler invocation used the same preserved
+Stage2 image with explicit first-checkout SCV initialization. It completed
+inventory/snapshot admission, then exited 1 during HIR source loading:
+the snapshot entry `test/04_smoke/windows_native_hello.spl` collected zero
+source files. The entry actually exists, is 65 bytes, and matches the original
+fixture digest. There is still no hello binary or run result. Evidence is in
+`D:/dev/windows-release-7734-build-20261002/rejected-hello-cycle3/`; the directory
+suffix is not the actual invocation count. The terminal supervisor confirms
+quiescence and peak RSS 3,510,724 KiB, below the sampled 7 GB cap. No memory or
+disk stop occurred.
+
+Preserve `build/scv/source-inventory/CURRENT` generation 1 and snapshot
+`scv-revision-v1-9c659e8cdbf3f63f6c95a79c7d3992cf46e59bd19514b0f0d3bd8f4ea04ee831`.
+Any justified subsequent attempt must acquire genuine warm authority with
+cold initialization disabled; do not rebuild or fabricate these receipts.
+
+Exact-source review ruled out adding `--source test/04_smoke` as a supported
+fix: entry-closure collection seeds the explicit entry independently. The
+collector can return no files after nullable read/tuple handling or after
+module-name/alias-array construction. The current diagnostic does not separate
+those cases. Astra owns bounded native artifact/ABI diagnosis before the
+third and final attempt; no speculative unchanged retry is authorized.
+
+The manager aggregate verifier and strict tool/runtime corrections are frozen
+for a combined draft checkpoint. Focused corrected-source review found no
+remaining P0/P1 in strict binding; native/SPL validation, complete module runs,
+and cross-host cache qualification remain unrun. Phase3/Phase4 on this candidate
+remain held pending actual hello success.
