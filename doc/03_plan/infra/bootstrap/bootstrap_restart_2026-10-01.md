@@ -1405,3 +1405,24 @@ its LLVM full-CLI binary. No live source or guard was edited. A source-only
 memory investigation is comparing the retained evidence with existing fixes.
 The corrected seed's separate nested-supervisor fixture also exposed a helper
 cache path-conversion failure; its narrow environment fix remains unverified.
+
+### 2026-10-02 stale producer retired; replacement synced to release
+
+The fa703 queues were retired through their owned stop protocol because that
+frozen source omits landed fixes, including PR2200's HIR serialization scratch
+scope. The coordinator, lanes, guards and compiler children are gone; positive
+Job receipts and the paired terminal confirm quiescence. Both reservations are
+released. Old source, caches, outputs and failure receipts remain preserved.
+
+Phase3 completed 28 actual module Jobs: six passed and 22 failed. A cancellation
+propagation bug then recorded 77 synthetic exit-143 rows without compiler
+children, plus one incomplete attempt directory. These are unattempted work,
+not additional compiler failures. Phase4 retained four actual binary results.
+Evidence: `D:/dev/windows-phase2-release-next-20261002/phase34-full/retirement-evidence.env`.
+
+The clean replacement worktree was synced to release commit
+`7734f947be8ba9465d0ba312170681074e990587`, including the landed ownership, AST,
+HIR and diagnostic fixes. Materialization and the corrected nested-supervisor
+fixture are proceeding under fresh resource admission. This candidate has not
+built yet. Complete source inventories, both backends, canonical manager
+admission and Windows/Linux cache qualification remain required and unfinished.
