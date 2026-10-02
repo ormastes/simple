@@ -1,6 +1,79 @@
 use std.spec
 use std.common.build_manager.grouped_native_process_policy.{
-    NativeGroupActiveChargeV1, native_group_process_budget_v1}
+    NativeGroupActiveChargeV1, native_group_process_budget_v1,
+    native_group_disk_required_v1, native_group_disk_budget_v1}
+
+fn disk_required(reserve: i64, active: i64, source: i64, estimate: i64) -> i64:
+    match native_group_disk_required_v1(reserve, active, source, estimate):
+        case Ok(value): value
+        case Err(reason):
+            fail(reason)
+            -1
+
+fn disk_refused(reserve: i64, active: i64, source: i64, estimate: i64, reason: text):
+    match native_group_disk_required_v1(reserve, active, source, estimate):
+        case Ok(_): fail("invalid disk arithmetic was admitted")
+        case Err(actual): expect(actual).to_equal(reason)
+
+describe "Grouped disk admission preserves reserve after estimated growth":
+    it "rejects the singleton gap that max reserve or growth used to admit":
+        # The reported empty-source boundary: 8.5 GiB reserve + 2 GiB growth.
+        val empty_source = native_group_disk_budget_v1(9126805504,
+            9126805504, 0, 0, 2147483648).unwrap()
+        expect(empty_source.required_bytes).to_equal(11274289152)
+        expect(empty_source.admitted).to_equal(false)
+        expect(native_group_disk_budget_v1(11274289151,
+            9126805504, 0, 0, 2147483648).unwrap().admitted).to_equal(false)
+        expect(native_group_disk_budget_v1(11274289152,
+            9126805504, 0, 0, 2147483648).unwrap().admitted).to_equal(true)
+        # 20 GiB reserve plus 1 GiB source * 8 and 2 GiB output growth.
+        val budget = native_group_disk_budget_v1(26843545600,
+            21474836480, 0, 1073741824, 2147483648).unwrap()
+        expect(budget.required_bytes).to_equal(32212254720)
+        expect(budget.admitted).to_equal(false)
+        expect(native_group_disk_budget_v1(32212254719,
+            21474836480, 0, 1073741824, 2147483648).unwrap().admitted).to_equal(false)
+        expect(native_group_disk_budget_v1(32212254720,
+            21474836480, 0, 1073741824, 2147483648).unwrap().admitted).to_equal(true)
+
+    it "adds active growth once and gives the same rule for an empty wave":
+        expect(disk_required(100, 0, 5, 10)).to_equal(150)
+        expect(disk_required(100, 30, 5, 10)).to_equal(180)
+        val wave = native_group_disk_budget_v1(179, 100, 30, 5, 10).unwrap()
+        expect(wave.required_bytes).to_equal(180)
+        expect(wave.admitted).to_equal(false)
+        expect(native_group_disk_budget_v1(180, 100, 30, 5, 10).unwrap().admitted).to_equal(true)
+        val first_growth = disk_required(0, 0, 5, 10)
+        val both_growth = disk_required(0, first_growth, 3, 6)
+        expect(both_growth).to_equal(80)
+        expect(disk_required(100, both_growth, 0, 0)).to_equal(180)
+        expect(disk_required(0, 0, 0, 0)).to_equal(0)
+
+    it "rejects a negative value in each input before doing arithmetic":
+        val reason = "invalid native group disk budget input"
+        disk_refused(-1, 0, 0, 0, reason)
+        disk_refused(0, -1, 0, 0, reason)
+        disk_refused(0, 0, -1, 0, reason)
+        disk_refused(0, 0, 0, -1, reason)
+        match native_group_disk_budget_v1(-1, 0, 0, 0, 0):
+            case Ok(_): fail("negative observed disk capacity was admitted")
+            case Err(actual): expect(actual).to_equal("invalid native group disk capacity measurement")
+
+    it "rejects multiplication and every addition overflow without wrapping":
+        val maximum: i64 = 9223372036854775807
+        val reason = "native group disk budget overflow"
+        disk_refused(0, 0, 1152921504606846976, 0, reason)
+        disk_refused(0, 0, 1152921504606846975, 8, reason)
+        disk_refused(0, maximum, 1, 0, reason)
+        disk_refused(maximum, 0, 1, 0, reason)
+        expect(disk_required(0, 0, 1152921504606846975, 7)).to_equal(maximum)
+        expect(disk_required(maximum, 0, 0, 0)).to_equal(maximum)
+        expect(disk_required(0, maximum, 0, 0)).to_equal(maximum)
+        expect(disk_required(0, 0, 0, maximum)).to_equal(maximum)
+        expect(native_group_disk_budget_v1(maximum, maximum, 0, 0, 0).unwrap().admitted).to_equal(true)
+        match native_group_disk_budget_v1(maximum, 0, 0, maximum, 0):
+            case Ok(_): fail("overflowing growth produced an admission decision")
+            case Err(actual): expect(actual).to_equal(reason)
 
 describe "Grouped process admission separates physical and commit headroom":
     it "admits a second group only when both full-cap host and commit fit":
