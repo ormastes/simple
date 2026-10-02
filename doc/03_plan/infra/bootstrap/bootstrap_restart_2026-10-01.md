@@ -1484,3 +1484,16 @@ candidate: restored FAILED receipts must be re-admitted before any new dispatch,
 and unknown transport/poll/collection outcomes must stop new dispatch while
 existing children are cleaned up. Both are assigned for correction; the patch
 is not approved for deployment yet.
+
+Acceptance-scope review also found that the retired diagnostic's selected
+compiler/interpreter suites contain toy assertions without exercising those
+subsystems. A nonzero `Results:` count alone cannot qualify them. Its test
+environment points `SIMPLE_BINARY` at Phase2 and never invokes the new Phase4
+interpreter. Replacement acceptance must bind and execute the actual Phase4
+artifacts on meaningful positive and negative fixtures; the existing loader
+spec has real loader imports but still needs the correct produced-tool binding.
+
+The same canonical run completed `rust-native-all-build` in 7m16s with
+supervisor/native status zero, then entered `rust-rust-runtime-nolto-build`.
+Fresh Cargo/rustc children were observed; no restart or Stage2 admission is
+implied by this intermediate runtime-build milestone.
