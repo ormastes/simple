@@ -2325,7 +2325,17 @@ bootstrap_stage3_tool_requested_path() {
     if [ "$bootstrap_stage3_requested_name" = "$bootstrap_stage3_selected_c_name" ]; then
         printf '%s\n' "$bootstrap_stage3_selected_c_path"
     else
-        command -v "$bootstrap_stage3_requested_name" 2>/dev/null
+        bootstrap_stage3_requested_tool=$bootstrap_stage3_requested_name
+        case "$bootstrap_stage3_requested_name" in
+            lld-link) bootstrap_stage3_requested_tool=${CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER:-${LD:-lld-link}} ;;
+            llvm-ar) bootstrap_stage3_requested_tool=${AR:-llvm-ar} ;;
+            llvm-ranlib) bootstrap_stage3_requested_tool=${RANLIB:-llvm-ranlib} ;;
+        esac
+        case "$bootstrap_stage3_requested_tool" in
+            [A-Za-z]:[\\/]*)
+                bootstrap_stage3_requested_tool=$(cygpath -u "$bootstrap_stage3_requested_tool") || return 1 ;;
+        esac
+        command -v "$bootstrap_stage3_requested_tool" 2>/dev/null
     fi
 }
 
@@ -2388,6 +2398,11 @@ bootstrap_stage3_tool_authority_snapshot() (
     bootstrap_stage3_tool_c_name=$(basename \
         "$bootstrap_stage3_tool_c_path")
     bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
+    bootstrap_stage3_tool_archive_tools='ld ar ranlib'
+    case "$(bootstrap_stage3_host_platform)" in
+        *-pc-windows-msvc)
+            bootstrap_stage3_tool_archive_tools='lld-link llvm-ar llvm-ranlib' ;;
+    esac
     bootstrap_stage3_hash_tool=""
     for bootstrap_stage3_hash_candidate in \
         sha256sum shasum sha256 openssl; do
@@ -2412,7 +2427,7 @@ bootstrap_stage3_tool_authority_snapshot() (
     fi
     for bootstrap_stage3_tool_name in \
         $bootstrap_stage3_portable_authority_tools \
-        cargo rustc "$bootstrap_stage3_tool_c_name" ld ar ranlib sh env perl sed file cmp \
+        cargo rustc "$bootstrap_stage3_tool_c_name" $bootstrap_stage3_tool_archive_tools sh env perl sed file cmp \
         "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
