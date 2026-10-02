@@ -41,6 +41,35 @@ use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
+    me resolve_qualified_named_type(name: text, span: Span) -> i64:
+        # Fully qualified annotations name their declaring module, not a local
+        # symbol whose spelling happens to contain dots. Never fall back to a
+        # same-named type in the importing module on an owner miss.
+        var separator = name.len() - 1
+        while separator >= 0 and name.substring(separator, separator + 1) != ".":
+            separator = separator - 1
+        if separator <= 0 or separator + 1 >= name.len():
+            return -1
+        val owner_name = name.substring(0, separator)
+        val member_name = name.substring(separator + 1)
+        val owner_key = self.resolve_module_key(owner_name)
+        if owner_key == "":
+            return -1
+        val owner_index = self.surface_index_for_name(owner_key)
+        if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
+            return -1
+        val owner_module = self.module_surfaces.surfaces[owner_index].module_name
+        val existing = self.symbols.lookup_qualified_type_raw(owner_module, member_name)
+        if existing >= 0:
+            return existing
+        val saved_registering = self.registering_import_symbols
+        self.registering_import_symbols = true
+        val qualified_local = owner_module + "::" + member_name
+        self.register_imported_symbol(owner_index, owner_key, member_name,
+            qualified_local, span, true)
+        self.registering_import_symbols = saved_registering
+        self.symbols.lookup_qualified_type_raw(owner_module, member_name)
+
     me materialize_imported_field_dependency(
         imported_index: i64,
         imported_mod_name: text,
@@ -600,7 +629,11 @@ impl HirLowering:
                 if alias_target != imported_name and
                    module_surface_name_position(imported_mod.type_alias_names, alias_target) < 0 and
                    hir_module_declares_item(imported_mod, alias_target):
+                    val alias_owner = imported_mod.module_name
                     self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, alias_target, local_name, import_span, materialize_enum)
+                    val target_type = self.symbols.lookup_qualified_type_raw(alias_owner, alias_target)
+                    if target_type >= 0:
+                        self.symbols.bind_qualified_type(alias_owner, imported_name, SymbolId(id: target_type))
                     return
             # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
             val existing_alias_symbol_id = self.symbols.lookup_or_invalid(local_name)
