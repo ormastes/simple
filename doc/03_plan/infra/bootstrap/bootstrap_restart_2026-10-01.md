@@ -945,3 +945,31 @@ acceptance or manager dispatch. Direct guarded scripts remain the active route
 until the manager actually passes admission/worker execution. Common source
 fixes must be reviewed on release and applied to new frozen host lanes, never
 mutated beneath an active build.
+
+### 2026-10-02 Linux self-hosted hello PASS and Windows continuation
+
+Linux repaired Stage2 is now linked and guard-complete (exit0, quiescent1,
+RSS enforcement enabled): 2compiled,1116cached,0failed;50.2seconds total.
+Producer SHA25604d72b6adc0e9d1b6696f721bb4a088b5194f10d80642f0e43c2cdabb6c5444d.
+The bootstrap seed explicitly skipped unsupported dynload and emitted one binary;
+this does not verify dynload. Actual self-hosted LLVM hello compilation and
+execution passed, printing Hello World. Receipt:
+/root/linux-bootstrap-ext4/spawn-abi-9e89-run1/linux-runtime-binding-20261002/hello-gate.json
+SHA256453323b23cce7dda3c97b4f22d9ea81dbdfe85bee5ddf142a33b37e858eb6ea2.
+Derived ELF SHA25697a8ea0f75b262f8e55a8a3538616dab532496867b1ca4a3b299aa284f926537.
+Root read the pinned receipt; Astra verified the terminal guards. Stage2 peak
+1,910,628KiB; hello compile247,268KiB; hello run8,264KiB. The initial broad
+project hello invocation failed inventory admission and remains recorded.
+
+Linux launcher142e46db0d5fc280db5bfa15e831d0045e8b27eaa935c1cf93070a477dda7b6d
+has root review for parallel Phase3/4 after memory admission. It reuses the exact
+hello gate rather than compiling it again in each phase. Launch authorization
+is not evidence that those phase jobs have started or passed.
+
+Windows per-module keep-going is proven: the capped loader __init__ attempt
+recorded a failed row and the collector advanced to subsequent modules in both
+independent phase lanes. Subsequent real errors include unresolved wildcard
+bindings in aspect_pack_io.spl and unresolved atomic methods in
+aspect_lifecycle_gate.spl; a separate triage owner is investigating. No inventory
+seal or full-module PASS exists yet. Shared interpreter facade fix6fad4592 is
+in draft PR2165 with static review accepted and native validation pending.
