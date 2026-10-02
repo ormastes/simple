@@ -78,6 +78,31 @@ that file and forwards its exact location. Conflicting file/directory flags
 are rejected. Mail-cli alone supports matching MAIL_CONFIG_FILE/DIR environment
 defaults. Custom file parents are created when configuration is initialized.
 
+An explicitly selected DevHub SDN file may contain the mail configuration under
+its top-level `email` section. Use the same flags as for a standalone account
+file:
+
+```bash
+mail inbox --config-file "{home}/.config/devhub/config.sdn" --account work --json
+mail read 1 --config-file "{home}/.config/devhub/config.sdn" --account work --raw
+mail config get default_account --config-file "{home}/.config/devhub/config.sdn"
+```
+
+Inside that file, `email.default_account` and `email.accounts` have the same
+schema as the standalone file's root `default_account` and `accounts`. Mail-cli
+ignores other root sections, such as `confluence`, `jira`, and `output`, when
+selecting mail settings. The whole document must still be valid SDN. If `email`
+is present, it takes precedence over any root-level account fields. An invalid
+`email` section or missing account mapping fails; it does not select settings
+from another file. The explicit path overrides environment/default locations,
+and `--account` overrides only the selected document's default account.
+
+Combined DevHub documents are currently read-only through mail-cli: setup,
+password persistence, and configuration changes fail explicitly rather than
+rewriting unrelated sections. Use invocation-only `--password-file` or
+`--password-cmd` when overriding credentials for a read. Standalone `email.sdn`
+continues to support account updates.
+
 The shared schema has `default_account` and `accounts` blocks; account fields
 include `protocol`, `email`, `username`, `pop3_server`, `pop3_port`,
 `smtp_server`, `smtp_port`, `tls`, and `password` (encrypted) or `password_cmd`.
