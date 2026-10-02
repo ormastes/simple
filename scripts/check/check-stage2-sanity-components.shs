@@ -3,7 +3,7 @@
 # compiler execution evidence or admission receipts.
 set -eu
 profile=${1:-all}
-case "$profile" in primary|owner|all) ;; *) exit 64 ;; esac
+case "$profile" in primary|owner|bounds|all) ;; *) exit 64 ;; esac
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 work=$(mktemp -d "${TMPDIR:-/tmp}/sanity-components.XXXXXX") || exit 2
 trap 'rm -rf "$work"' EXIT
@@ -80,7 +80,7 @@ replace() {
     sed "s/^$1=.*/$1=$2/" "$3" >"$work/changed"
     mv "$work/changed" "$3"
 }
-if [ "$profile" != owner ]; then
+if [ "$profile" = primary ] || [ "$profile" = all ]; then
 fixture
 verify || { echo 'FAIL: valid two-component fixture rejected' >&2; exit 1; }
 echo 'PASS: valid two-component parser fixture'
@@ -99,7 +99,7 @@ status_fixture; reject truncated-log
 fixture; rm "$log.hello-world-positional"; reject missing-positional-artifact
 fixture; replace schema simple-candidate-frontend-status-v2 "$status"; reject legacy-schema-substitution
 fi
-if [ "$profile" != primary ]; then
+if [ "$profile" = owner ] || [ "$profile" = all ]; then
 fixture
 sed '/^naming_run_status=/d' "$status" >"$work/changed"; mv "$work/changed" "$status"
 reject missing-native-runtime-status
@@ -150,5 +150,13 @@ for role in source runtime tool; do
     if bootstrap_stage3_verify_composed_snapshot "$role" "$work/$role.txt" "$composed"; then exit 1; fi
     printf 'PASS: rejects changed %s snapshot\n' "$role"
 done
+fi
+if [ "$profile" = bounds ] || [ "$profile" = all ]; then
+fixture
+COMPILER_BUILD_TIMEOUT_SECONDS=180
+bootstrap_stage3_verify_frontend_remaining_receipt "$status" "$status" "$log" "$log" \
+    1 llvm "$(bootstrap_stage3_hash_file "$status")" "$collector" || exit 1
+[ "$COMPILER_BUILD_TIMEOUT_SECONDS" = 180 ] || exit 1
+echo 'PASS: standalone component bounds fixed1200 without changing caller180'
 fi
 echo 'PASS: requested component parser matrix; no candidate or collector executed'
