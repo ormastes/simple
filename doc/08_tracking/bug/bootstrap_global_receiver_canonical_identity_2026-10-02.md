@@ -30,3 +30,20 @@ Focused spec checks the real global-read hook with two canonical class owners.
 Positive native fixtures are `nominal_receiver_local_native.spl` and
 `nominal_receiver_global_native.spl` under `test/fixtures/compiler/`.
 Post-fix compiler rebuild, test execution and native execution remain pending.
+
+## Post-fix MIR discriminator
+
+Integrated Linux producer
+`8f817f2b6d5430ab6a18f36e8c9e136857783341adfea8741acfe7a5aea552d4`
+contains this repair plus the class/LLVM declaration fixes, without the enum
+patch. Both fixtures now pass MIR. The local fixture compiles and runs exit 0.
+The global fixture reaches LLVM and fails on duplicate `@g_...__gate` definitions,
+the independently owned provisional/runtime static-finalization defect
+(commit 829d89e72a). Thus the targeted owner-resolution error is eliminated;
+global native execution and full compiler/MCP verification are still pending.
+
+Evidence: classfix-source-fcb35f85cd/build/global-receiver-proof-20261002 under
+the same Linux bootstrap root. Separate private caches and 512 MiB / 60 s
+watchdogs were used. The local probe briefly overlapped a separate GDB job's
+checkout-wide cold SCV initialization; there were no SCV diagnostics, but these
+results do not claim SCV concurrency validation. Both jobs reached quiescence.
