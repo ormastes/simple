@@ -1,0 +1,64 @@
+# Kernel-owned image identity. No subprocess, argv or environment lookup.
+use std.common.string_core.{char_from_code_inline}
+
+# Reject truncation and malformed UTF16 rather than substituting characters.
+pub fn windows_image_decode(units: [i64], length: i64, capacity: i64) -> Result<text, text>:
+    if capacity <= 0 or capacity > 32768 or length <= 0 or length >= capacity:
+        return Err("Windows image query failed or truncated")
+    if units.len() != length + 1 or units[length] != 0:
+        return Err("Windows image query missing terminator")
+    var path = ""
+    var index = 0
+    while index < length:
+        val unit = units[index]
+        if unit <= 0 or unit > 65535:
+            return Err("Windows image query invalid UTF16 unit")
+        var scalar = unit
+        if unit >= 55296 and unit <= 56319:
+            if index + 1 >= length:
+                return Err("Windows image query unpaired high surrogate")
+            val low = units[index + 1]
+            if low < 56320 or low > 57343:
+                return Err("Windows image query invalid surrogate pair")
+            scalar = 65536 + (unit - 55296) * 1024 + low - 56320
+            index = index + 1
+        elif unit >= 56320 and unit <= 57343:
+            return Err("Windows image query unpaired low surrogate")
+        path = path + char_from_code_inline(scalar)
+        index = index + 1
+    val drive = path.len() >= 3 and (path.substring(1, 3) == ":\\" or path.substring(1, 3) == ":/")
+    if not drive and not path.starts_with("\\\\") and not path.starts_with("//"):
+        return Err("Windows image query returned a relative path")
+    Ok(path)
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, GetModuleFileNameW}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u16}
+
+# Capacity is exposed for genuine kernel truncation qualification.
+@unsafe(reason: "bounded private Win32 image buffer copied before checked release", capabilities: [ffi, raw_ptr])
+pub fn windows_image_path_with_capacity(capacity: i64) -> Result<text, text>:
+    if capacity <= 0 or capacity > 32768:
+        return Err("Windows image query invalid capacity")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows image query heap unavailable")
+    val buffer = HeapAlloc(heap, 8u32, (capacity * 2) as u64)
+    if buffer == 0: return Err("Windows image query allocation failed")
+    val length = GetModuleFileNameW(0, buffer, capacity as u32) as i64
+    var units: [i64] = []
+    if length > 0 and length < capacity:
+        for index in 0..(length + 1):
+            units = units.push(volatile_read_u16(buffer + index * 2))
+    val released = HeapFree(heap, 0u32, buffer)
+    if released == 0: return Err("Windows image query release failed")
+    windows_image_decode(units, length, capacity)
+@else:
+pub fn windows_image_path_with_capacity(capacity: i64) -> Result<text, text>:
+    Err("Windows image query unavailable on this platform")
+@end
+
+pub fn windows_image_path() -> Result<text, text>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        windows_image_path_with_capacity(32768)
+
+export windows_image_decode, windows_image_path_with_capacity, windows_image_path
