@@ -1365,3 +1365,26 @@ exactly fa703 plus landed fix `9e190c6642`, with matching patch identity. Source
 materialization, canonical Cargo-cache compatibility and a private guard are
 being prepared before its canonical Stage2 bootstrap. No new seed build has
 started. Linux's three-attempt stop and the manager batch failure remain in force.
+
+### 2026-10-02 Windows full Phase3/4 queues launched in parallel
+
+At 11:36:45 UTC, the reviewed diagnostic coordinator started both Windows
+queues with the same hello-qualified Phase2 producer and frozen fa703 source.
+The coordinator PID 43068 was independently observed live; its first active
+task guards select the Phase3 LLVM bootstrap and Phase4 LLVM bootstrap tasks.
+All 17,147 modules remain selected, with LLVM then Cranelift and the requested
+binary/test-suite tasks. Launch is not module completion or canonical admission.
+
+The policy enforces sampled RSS limits of 6 GB for Phase3 and 7 GB for Phase4,
+both within the requested 7 GB maximum, while retaining the 8 GiB host reserve.
+Fresh physical memory was 21,604,638,720 bytes against a 21,589,934,592-byte
+requirement; commit headroom was 36,422,746,112 bytes. D had 36,898,639,872 bytes
+free. Disk accounting retains the conservative cumulative shared-volume limits.
+Boundary tests, a harmless real Windows Job, and independent review passed
+before launch. Evidence: `D:/dev/windows-phase2-release-next-20261002/phase34-full/paired-disk-admission.env`.
+
+The corrected edea seed source has separately passed materialization and source
+verification. An independent Cargo-cache copy preserves the old cache; canonical
+Cargo freshness checks are still required. Its native bootstrap remains held
+while the two diagnostic Windows queues own their resource reservations. Linux
+and canonical manager admission remain incomplete; no earlier failure was reset.
