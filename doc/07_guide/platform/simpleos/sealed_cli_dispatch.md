@@ -55,3 +55,24 @@ candidate. It invokes the actual CLI and records host process results, then
 checks captured guest serial output separately. Its draft manual is
 `doc/06_spec/03_system/os/feature/qemu_sealed_cli_route_acceptance_spec.md`.
 Neither that spec nor its Linux/Windows lanes has executed yet.
+
+Current compiler admission also precedes warm kernel-cache reuse. A prior
+successful build cannot make a later missing explicit compiler acceptable;
+the persistent build cache remains available after its normal checks.
+Combining `--debug-gui` with either inspection flag now reports that the GUI
+shape has no sealed projection, rather than displaying the normal run shape.
+The follow-up gate inventory is
+`doc/03_plan/sys_test/simpleos_sealed_cli_followup_2026-10-01.md`.
+
+CLI guest selection now uses the canonical catalog for short aliases,
+`simpleos-<alias>` spellings and SimpleOS userland triples. For example,
+`--target=simpleos-x86_64` and `--target=x86_64-unknown-simpleos` choose the same
+guest. `riscv64-unknown-simpleos` is an alias of the existing RV64GC profile;
+it does not change its ABI or generated-code ISA. Hosted, kernel-only and
+physical-board identities are refused by this architecture-only CLI surface.
+
+Explicit `--arch`/`--target` wins over `SIMPLEOS_QEMU_ARCH`; otherwise the
+environment choice or observed host architecture is retained. Unknown
+discovery no longer invents an x86_64 default. Select `--arch` explicitly when
+host discovery is unavailable. This source change remains runtime/docgen
+UNRUN; see `doc/03_plan/sys_test/simpleos_cli_target_identity_2026-10-01.md`.

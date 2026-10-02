@@ -25,6 +25,18 @@ precedence using a real admitted artifact. Version text alone is insufficient.
 It also rejects a missing primary despite a valid admitted alias, and verifies
 that the admitted alias is selected when the primary is absent. The missing
 path is checked absent under this run's evidence directory before the call.
+An existing version-authority SDN file is also rejected as an explicit
+compiler despite the valid admitted alias. No false receipt is constructed.
+
+The warm-cache regression calls the actual build owner twice in one process:
+first with the admitted compiler and real default kernel, then with a missing
+explicit compiler while retaining that same kernel. The second call must
+reject the override. This checks that persistent-cache reuse remains behind
+current compiler admission; a prior successful target cannot bypass it.
+
+The GUI-mode negative matrix invokes the real CLI for both inspection flags
+on all five routes. Each must produce the exact unsupported-mode diagnostic
+before build or run output. No kernel or QEMU result is substituted.
 
 ## Inspect and run each route
 
@@ -34,7 +46,11 @@ Five scenarios cover default x86_64 and the represented named routes:
 
 For each route, require its actual kernel, filesystem-wrapper admission where
 applicable, media and sealed plan. The canonical QEMU host-admission command
-must execute its real TCG/QMP probe. Missing prerequisites produce
+must execute its real TCG/QMP probe. The real host must be Linux or Windows,
+and the CLI's reported host must match that detected host. The probe's QEMU
+digest and version are checked against the planned executable, whose digest
+must remain unchanged through execution. The admitted CLI provenance digest
+is retained and rechecked too. Missing prerequisites produce
 `MissingEvidence`, including the currently unresolved x86_32 executable-policy
 boundary; an absent dependency never becomes a skipped or inferred pass.
 

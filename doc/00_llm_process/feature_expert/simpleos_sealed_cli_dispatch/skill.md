@@ -40,3 +40,20 @@ provenance evidence. The live `qemu_sealed_cli_route_acceptance_spec.spl`
 requires actual Stage4/kernel/media/QEMU prerequisites and separately checks
 host CLI and guest serial evidence. It does not remove installed seeds or
 synthesize admission artifacts. Both host lanes remain TEST_BLOCKED.
+
+The follow-up removes the target-only in-process kernel cache: current
+compiler admission must precede canonical persistent-cache reuse. Preserve
+the live warm-build/changed-override regression. Inspection with `--debug-gui`
+is explicitly unavailable until that command shape has a sealed projection.
+New pure and real-CLI mode matrices cover all five routes; named host observers
+check actual argv delivery, separately from live guest marker checks.
+See `doc/03_plan/sys_test/simpleos_sealed_cli_followup_2026-10-01.md`; execution
+and docgen remain blocked, including warm performance measurements.
+
+CLI target selection now delegates to
+`simpleos_platform_cli_arch_by_name` in the existing catalog accessor owner.
+Only canonical SimpleOS architecture rows participate; board/host/kernel-only
+identities retain their separate general-build authority. Explicit defaults
+and unknown discovery survive to admission instead of becoming x86_64.
+Follow `doc/03_plan/sys_test/simpleos_cli_target_identity_2026-10-01.md` and
+its modern SSpec regression. Native SSpec/docgen are UNRUN, not passed.

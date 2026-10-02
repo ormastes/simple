@@ -35,7 +35,8 @@ use os.port.simpleos_multiplatform_build.{
     simpleos_platform_qemu_smoke_lane,
     simpleos_platform_qemu_system,
     simpleos_platform_kernel_output,
-    simpleos_platform_target_by_name
+    simpleos_platform_target_by_name,
+    simpleos_platform_cli_arch_by_name
 }
 use os.desktop_qemu_contract.{
     clear_qemu_serial_log,
@@ -91,25 +92,8 @@ fn get_all_targets() -> [OsTarget]:
     ]
 
 fn arch_from_name(name: text) -> Architecture?:
-    """Parse architecture name string to Architecture enum.
-
-    Accepts: x86_64, x86_32, x86, i386, i686, riscv64, riscv32, arm64, aarch64, arm32, armv7.
-    Returns nil for unrecognized names.
-    """
-    if name == "x86_64":
-        Some(Architecture.X86_64)
-    elif name == "x86_32" or name == "x86" or name == "i386" or name == "i686":
-        Some(Architecture.X86)
-    elif name == "riscv64":
-        Some(Architecture.Riscv64)
-    elif name == "riscv32":
-        Some(Architecture.Riscv32)
-    elif name == "arm64" or name == "aarch64":
-        Some(Architecture.Arm64)
-    elif name == "arm32" or name == "armv7":
-        Some(Architecture.Arm32)
-    else:
-        nil
+    """Resolve CLI guest aliases and userland triples through the canonical registry."""
+    simpleos_platform_cli_arch_by_name(name)
 
 fn arch_display_name(arch: Architecture) -> text:
     """Human-readable name for an architecture."""
@@ -124,11 +108,6 @@ fn arch_display_name(arch: Architecture) -> text:
 # ===========================================================================
 # Build
 # ===========================================================================
-
-var _last_successful_build_entry: text = ""
-var _last_successful_build_output: text = ""
-var _last_successful_build_backend: text = ""
-var _last_successful_build_target: text = ""
 
 fn build_os(target: OsTarget) -> bool:
     build_os_with_backend(target, _os_build_backend_for_target(target))
@@ -193,12 +172,9 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """
     val arch_label = arch_display_name(target.arch)
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
-    val cached_build_matches = _last_successful_build_entry == target.entry and _last_successful_build_output == target.output and _last_successful_build_backend == backend_name and _last_successful_build_target == target.target_triple
-    if (cached_build_matches and rt_file_exists(target.output) and
-        (not _needs_elf32_wrap(target) or _elf32_multiboot_artifact_valid(target.output))):
-        if not _fs_wrapper_artifact_admitted(target): return false
-        print "[build][{arch_label}] phase=native-build cached output={target.output}"
-        return true
+    # Admit the current compiler before the canonical persistent cache check.
+    # A target-only process-local shortcut cannot track changed overrides,
+    # compiler provenance, source inputs or build options.
     val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
     val log_mode = _os_build_log_mode()
     val timeout_ms = _os_build_timeout_ms()
@@ -212,10 +188,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     if build_marker == "" and _native_build_cache_hit(target, stamp_content, simple_bin):
         if not _fs_wrapper_artifact_admitted(target): return false
         print "[build][{arch_label}] phase=native-build persistent-cache output={target.output}"
-        _last_successful_build_entry = target.entry
-        _last_successful_build_output = target.output
-        _last_successful_build_backend = backend_name
-        _last_successful_build_target = target.target_triple
         return true
     val old_bootstrap = env_get("SIMPLE_BOOTSTRAP") ?? ""
     val old_lib = env_get("SIMPLE_LIB") ?? ""
@@ -283,10 +255,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     if build_marker != "":
         print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
     _write_bootstrap_result(target, true, false, backend_name)
-    _last_successful_build_entry = target.entry
-    _last_successful_build_output = target.output
-    _last_successful_build_backend = backend_name
-    _last_successful_build_target = target.target_triple
     if build_marker == "":
         _write_native_build_stamp(target, stamp_content)
     _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)

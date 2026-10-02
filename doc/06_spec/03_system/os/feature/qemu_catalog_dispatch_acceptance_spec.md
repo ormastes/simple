@@ -20,6 +20,12 @@ The executable scenario is
 
 ## Operator workflow
 
+The named-route matrix now dispatches all four represented named catalog
+plans to the compiled observer and compares every returned argv position,
+stderr marker and exit code. Per-lane files beside the observer retain the
+actual results and plan digest. This complements the existing default-route
+dispatch observation; no named guest or real QEMU completion is inferred.
+
 From the repository root, with an admitted self-hosted `bin/simple` and a host C
 compiler named `cc`, run:
 
