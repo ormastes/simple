@@ -1761,6 +1761,41 @@ impl MirLowering:
         self.builder = b
         boot_temp
 
+    me lower_bootstrap_assert_call(args: [HirCallArg]) -> LocalId:
+        # __assert is a language builtin, not libc's incompatible __assert.
+        # Preserve ordinary argument evaluation order and evaluate each once.
+        if args.len() == 0:
+            return self.lower_bootstrap_panic_call([])
+        val condition = self.lower_cond_expr(args[0].value)
+        var message = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("assertion failed"), self.bootstrap_text_type()))
+        if args.len() > 1:
+            val message_local = self.lower_expr(args[1].value)
+            message = self.coerce_concat_operand(message_local)
+        var branch = self.builder
+        val success = branch.new_block(Some("assert_success"))
+        val failure = branch.new_block(Some("assert_failure"))
+        branch.terminate_if(mir_operand_copy(condition), success, failure)
+        branch.switch_to_block(failure)
+        self.builder = branch
+        self.emit_mcdc_abort_if_active()
+        var failed = self.builder
+        val unwrap_text = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: self.bootstrap_text_type(), is_variadic: false)))))
+        val raw_message = failed.emit_call(unwrap_text, [message], self.bootstrap_text_type())
+        if val raw = raw_message:
+            message = mir_operand_copy(raw)
+        val panic_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))))
+        failed.emit_call(panic_fn, [message], MirType.unit())
+        failed.terminate_abort("assertion failed -- must not fall through")
+        failed.switch_to_block(success)
+        val result = failed.new_temp(MirType.unit())
+        self.builder = failed
+        result
+
     me lower_bootstrap_panic_call(args: [HirCallArg]) -> LocalId:
         """`panic(msg)` -- the diverging builtin. MUST be a loud, unmistakable stop.
 
@@ -4984,6 +5019,8 @@ impl MirLowering:
                 return self.lower_bootstrap_print_call(args, "rt_println")
             if direct_name == "panic":
                 return self.lower_bootstrap_panic_call(args)
+            if direct_name == "__assert":
+                return self.lower_bootstrap_assert_call(args)
             # Task #178 (text3 lane): `int("42")` -- the global value-parsing
             # builtin call form, distinct from `i64(x)`-style fixed-width
             # numeric casts (see primitive_cast_type_kind's comment: "int/
