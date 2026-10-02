@@ -102,6 +102,31 @@ full() { bootstrap_stage3_seed_inputs_fingerprint "$1" "${2:-cranelift}" "${3:-n
 base=$(full "$a")
 bootstrap_stage3_valid_fingerprint "$base" || fail 'invalid aggregate'
 [ "$(full "$b")" = "$base" ] || fail 'full relocated fingerprint changed'
+# Cached Cargo output must be pruned before traversal, not merely filtered
+# from results. Refuse unpruned discovery rather than using a timing limit.
+cat >"$fixture/tools/find" <<'EOF'
+#!/bin/sh
+case "$*" in
+    'src/compiler_rust '*'-name Cargo.toml'*)
+        case " $* " in
+            *' -type d -name target -prune '*) ;;
+            *) echo 'Cargo discovery traversed cached target output' >&2; exit 94 ;;
+        esac
+        ;;
+esac
+exec /usr/bin/find "$@"
+EOF
+chmod +x "$fixture/tools/find"
+mkdir -p "$a/src/compiler_rust/target/nested/target" \
+    "$a/src/compiler_rust/nested/target/deeper"
+printf '[dependencies]\ninvalid = { path = "/missing-cache-dependency" }\n' \
+    >"$a/src/compiler_rust/target/nested/Cargo.toml"
+cp "$a/src/compiler_rust/target/nested/Cargo.toml" \
+    "$a/src/compiler_rust/nested/target/deeper/Cargo.toml"
+[ "$(full "$a")" = "$base" ] || fail 'cached target files changed authority'
+rm -rf "$a/src/compiler_rust/target" "$a/src/compiler_rust/nested"
+rm "$fixture/tools/find"
+
 different() { [ "$1" != "$base" ] || fail "$2 did not invalidate aggregate"; }
 for relative in src/compiler_rust/main.rs src/runtime/runtime.c src/runtime/runtime.h \
     tools/counterpart/sdk/c/simple_counterpart_abi.h hosted/lib.rs src/compiler_rust/rust-toolchain.toml; do
