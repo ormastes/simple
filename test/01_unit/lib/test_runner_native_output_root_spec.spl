@@ -1,0 +1,56 @@
+# Native wrapper output ownership. Runtime execution awaits an admitted producer.
+use std.spec.*
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write, file_read, file_exists, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.test_runner.test_result_wrapper.{preprocess_spipe_native_result_file_in}
+
+fn native_wrapper_owned_root() -> text:
+    match secure_temp_dir(get_temp_dir(), "spipe-wrapper-owned-"):
+        Ok(path): path
+        Err(message): panic(message)
+
+fn native_wrapper_fixture(root: text) -> text:
+    val source = root + "/input_spec.spl"
+    val content = "use std.nogc_sync_mut.io.file_ops.{file_exists}\n" +
+        "describe \"wrapper provenance\":\n" +
+        "    it \"retains its authored input\":\n" +
+        "        expect(file_exists(\"" + source + "\")).to_be(true)\n"
+    expect(file_write(source, content)).to_be(true)
+    source
+
+describe "native wrapper caller-owned output root":
+    it "writes a fresh result-bearing artifact in the supplied private root":
+        val root = native_wrapper_owned_root()
+        val source = native_wrapper_fixture(root)
+        val first = preprocess_spipe_native_result_file_in(source, root)
+        val second = preprocess_spipe_native_result_file_in(source, root)
+        expect(first.starts_with(root + "/")).to_be(true)
+        expect(second.starts_with(root + "/")).to_be(true)
+        expect(first == second).to_be(false)
+        expect(file_exists(first)).to_be(true)
+        expect(file_exists(second)).to_be(true)
+        val wrapped = file_read(first)
+        expect(wrapped).to_contain("rt_bdd_clear_state()")
+        expect(wrapped).to_contain("rt_bdd_executed_count()")
+        expect(wrapped).to_contain("rt_bdd_format_results()")
+        expect(file_delete(first)).to_be(true)
+        expect(file_delete(second)).to_be(true)
+        expect(file_delete(source)).to_be(true)
+        expect(dir_remove(root, false)).to_be(true)
+
+    it "rejects an empty explicit root":
+        val root = native_wrapper_owned_root()
+        val source = native_wrapper_fixture(root)
+        expect(preprocess_spipe_native_result_file_in(source, "")).to_equal("")
+        expect(file_delete(source)).to_be(true)
+        expect(dir_remove(root, false)).to_be(true)
+
+    it "fails without falling back when the requested root is missing":
+        val root = native_wrapper_owned_root()
+        val source = native_wrapper_fixture(root)
+        val missing = root + "/absent"
+        expect(preprocess_spipe_native_result_file_in(source, missing)).to_equal("")
+        expect(file_exists(missing)).to_be(false)
+        expect(file_delete(source)).to_be(true)
+        expect(dir_remove(root, false)).to_be(true)
