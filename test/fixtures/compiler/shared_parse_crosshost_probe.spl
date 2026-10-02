@@ -1,0 +1,88 @@
+# Compiled native host fixture; launch through the SOSIX capacity owner.
+# An exit-zero receipt is valid only with external process/host, binary lineage,
+# authority, cold private-cache and exact STORE/HIT cell witnesses.
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.driver.driver_build.incremental.{native_build_frontend_portable_source_digest_v1}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_logical_path_v1}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind}
+
+fn required_environment(name: text) -> text:
+    val value = env_get_opt(name) ?? ""
+    if value == "": panic("missing required probe input: {name}")
+    value
+
+# This lexical guard supplements, and cannot replace, SOSIX's canonical root
+# receipts: mount aliases, hard links and reparse ancestry require host proof.
+fn probe_root_spelling(path: text) -> text:
+    var normalized = path.replace("\\", "/")
+    if normalized.contains("..") or normalized.contains("//"):
+        panic("probe root has ambiguous path components")
+    while normalized.ends_with("/"):
+        normalized = normalized.substring(0, normalized.len() - 1)
+    if normalized.contains(":"): normalized.to_lower() else: normalized
+
+fn main() -> i64:
+    val mode = required_environment("SIMPLE_SHARED_PARSE_PROBE_MODE")
+    if mode != "publish" and mode != "consume" and mode != "reparse":
+        panic("probe mode must be publish, consume or reparse")
+    if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        panic("bootstrap mode cannot prove shared parse admission")
+    if (env_get_opt("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
+        panic("private frontend cache must be enabled")
+    val private_scope = required_environment("SIMPLE_FRONTEND_CACHE_SCOPE")
+    val private_dir = required_environment("SIMPLE_FRONTEND_CACHE_DIR")
+    val shared_root = required_environment("SIMPLE_SHARED_PARSE_CAS_ROOT")
+    val private_spelling = probe_root_spelling(private_dir)
+    val shared_spelling = probe_root_spelling(shared_root)
+    if private_spelling == "" or shared_spelling == "" or
+            private_spelling == shared_spelling or
+            private_spelling.starts_with(shared_spelling + "/") or
+            shared_spelling.starts_with(private_spelling + "/"):
+        panic("private frontend root overlaps shared root")
+    val root = required_environment("SIMPLE_SHARED_PARSE_SOURCE_ROOT")
+    val authority = required_environment("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH")
+    val authority_digest = required_environment("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST")
+    val parser_digest = native_build_frontend_portable_source_digest_v1(
+        root, authority, authority_digest)
+    if parser_digest.len() != 64: panic("sealed parser source authority rejected")
+    if not env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", parser_digest):
+        panic("could not publish admitted parser identity")
+    if not env_set("SIMPLE_SHARED_PARSE_CAS_TRACE", "1"):
+        panic("could not enable cache evidence trace")
+    val filename = required_environment("SIMPLE_SHARED_PARSE_PROBE_SOURCE")
+    val logical = frontend_shared_parse_logical_path_v1(filename)
+    if logical == "": panic("probe source must have a portable logical path")
+    val source = file_read_regular_no_follow_bounded(filename, 4096).unwrap()
+    if source != "fn portable_answer() -> i64:\n    73\n":
+        panic("probe source differs from its semantic oracle")
+    val target = required_environment("SIMPLE_SHARED_PARSE_PROBE_TARGET")
+    val before = flat_parse_module_body_calls()
+    val parsed = parse_full_frontend_target_receipted_v1(source, filename,
+        "shared_parse_crosshost_probe", Logger(level: 0), logical,
+        sha256_text(source), target).unwrap()
+    val parse_calls = flat_parse_module_body_calls() - before
+    val expected_calls = if mode == "consume": 0 else: 1
+    if parse_calls != expected_calls:
+        panic("unexpected parser work: mode={mode} calls={parse_calls}")
+    if not frontend_cfg_receipt_valid_v1(parsed[1], logical, sha256_text(source), target):
+        panic("target cfg receipt does not bind the parsed input")
+    val module = parsed[0]
+    if module.functions.len() != 1: panic("hydration retained foreign functions")
+    val function = module.functions["portable_answer"]
+    if function.name != "portable_answer" or function.body.stmts.len() != 1:
+        panic("hydrated function shape differs")
+    match function.body.stmts[0].kind:
+        case StmtKind.Expr(expression):
+            match expression.kind:
+                case ExprKind.IntLit(value):
+                    if value != 73: panic("hydrated return value differs")
+                case _: panic("hydrated body is not an integer literal")
+        case _: panic("hydrated body is not an expression statement")
+    print "SHARED_PARSE_PROBE\tmode={mode}\tparse_calls={parse_calls}\tvalue=73\tpath={logical}\tsource_sha256={sha256_text(source)}\tparser_sha256={parser_digest}\tauthority_sha256={authority_digest}\ttarget={target}\tprivate_scope={private_scope}"
+    0
