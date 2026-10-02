@@ -1684,3 +1684,50 @@ call the existing signed-index helper, and the stale clamp probe calls the
 existing clamp helper. Byte-loading and clamp-boundary regressions were added.
 Static checks passed; runtime/native checks remain queued and the patch is not
 landed or included in the frozen 7734 build.
+
+### 2026-10-03 native manager classifier verified; full manager still unverified
+
+The temporary bootstrap handoff completed with both Job trees quiescent.
+Phase3 LLVM now has 29 completed attempts: 14 PASS, 13 ordinary compile
+failures (1), and two RSS-cap failures (88). Module28 stopped during parsing;
+module29 reached HIR. Phase4 LLVM's interrupted module1 remains pending.
+The reviewed resume2 route preserves those results and both producer-scoped
+caches, starts the Phase3 suffix at original30, and requeues Phase4 module1.
+Its result-sealing AWK precedence error is fixed; empty and one-row fixtures
+passed. Resume2 is held for the manager/streaming diagnostic window, not lost.
+
+The real manager classifier has passed all ten native assertions using the
+hello-qualified `2f3d16f...f0384` bootstrap compiler and PR2255 source `54c030180e`.
+This was the third and final actual classifier attempt. Attempt1 was rejected
+before compilation because the archived source was not an admitted Git
+worktree and used an unsupported source selector. Attempt2 used a genuine
+worktree, compiled both modules, then failed runtime C compilation because its
+sparse checkout omitted the tracked counterpart SDK header. Neither counted
+as a test execution. Attempt3 materialized and pinned that header, preserved
+the genuine warm SCV inventory/native cache, and used cold initialization 0.
+
+Evidence is under
+`D:/dev/manager-shared-cache-deployment-20261002/primitive-regression/attempt3-plan/`.
+The child result records compile/run exit0; exact stdout is
+`MANAGER-PRIMITIVE failure-policy PASS checks=10`, with empty run stderr.
+Executable SHA256 is
+`f4bb28e4f62ae8e3e234ad28fef03e2f30fe7e66b232569c764b93e0ae26e508`.
+Source/runtime/control checks passed before and after execution. The enforced
+Job completed quiescent, with peak RSS 5,149,320 KiB; measured D growth was
+317,079,552 bytes. Its 7 GB/2 GiB reservations are released. Do not rerun this
+passing classifier criterion. Canonical admission remains 0 and the producer's
+source relation is still unproven; this is diagnostic cross-source evidence.
+
+Six scheduler primitive cases, actual grouped dispatch/recovery, the complete
+managed phase queues, and Windows/WSL shared-cache qualification remain
+unverified. PR2255 remains draft. Review of the missing header also found a
+production gap: canonical source admission/runtime pinning omit the exact
+owned `tools/counterpart/sdk/c/simple_counterpart_abi.h` input. An isolated
+follow-up is correcting its materialization and verification without admitting
+the whole tools tree. Separately, a native array-slice lowering gap affecting
+manager contracts is being fixed in an isolated compiler worktree.
+
+The pinned, opt-in streaming FullCLI diagnostic has the next resource slot.
+It does not change production defaults or establish a qualified test runner
+until an actual compile and subsequent execution checks pass. Linux's
+provider-bound parse crash and all incomplete phase inventories remain open.
