@@ -91,6 +91,23 @@ fn compile_registry_fixture() -> text:
         return "MIR_LOWERING_ERRORS:\n" + errors
     MirToLlvm.create("test.llvm.text_abi_registry", CodegenTarget.X86_64, nil).translate_module(mir)
 
+fn compile_real_directory_extern_fixture() -> text:
+    val source = "extern fn rt_dir_is_real_no_follow(path: text) -> bool\n\n" +
+        "fn path_result(root: text) -> text:\n    root + \"/real\"\n\n" +
+        "fn forwarded(path: text) -> bool:\n    rt_dir_is_real_no_follow(path)\n\n" +
+        "fn produced(root: text) -> bool:\n    val path: text = path_result(root)\n    rt_dir_is_real_no_follow(path)\n"
+    val ast = parse_full_frontend(source, "real_dir_text_abi_fixture.spl",
+        "real_dir_text_abi_fixture.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("real_dir_text_abi_fixture.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "": return "MIR_LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.real_dir_text_abi", CodegenTarget.X86_64, nil).translate_module(mir)
+
 describe "pure-Simple compiler: text-extern-ABI registry fix (end-to-end)":
     it "splits a non-literal text arg to a registry-listed extern into (ptr, len)":
         val output = compile_registry_fixture()
@@ -118,6 +135,22 @@ describe "pure-Simple compiler: text-extern-ABI registry fix (end-to-end)":
         # THE fix assertion: rt_panic is text_arg_indices([0]), so its single
         # (non-literal) text argument must arrive as the (ptr, len) pair.
         assert_equal(2, arg_count, "registry split did not fire: rt_panic call emitted " + arg_count.to_text() + " argument(s), expected 2 (ptr, len) -- line: " + call_line)
+
+    it "splits forwarded and call-produced real-directory paths to ptr and len":
+        val output = compile_real_directory_extern_fixture()
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"),
+            "real-directory fixture failed to lower: " + output)
+        assert_true(find_call_line(output, "rt_string_data(") != "",
+            "real-directory call did not extract a text data pointer")
+        assert_true(find_call_line(output, "rt_string_len(") != "",
+            "real-directory call did not extract a text length")
+        var calls_seen = 0
+        for line in output.split("\n"):
+            if line.contains("call ") and line.contains("rt_dir_is_real_no_follow("):
+                calls_seen = calls_seen + 1
+                assert_equal(2, top_level_call_arg_count(line, "rt_dir_is_real_no_follow("),
+                    "real-directory call must receive (path_ptr, path_len): " + line)
+        assert_equal(2, calls_seen, "expected both forwarded and call-produced real-directory calls")
 
     it "leaves an unregistered extern's text arg untouched (no over-application)":
         # Guard against the split firing for names NOT in the registry --

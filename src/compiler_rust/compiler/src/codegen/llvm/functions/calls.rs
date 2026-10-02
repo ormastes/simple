@@ -214,7 +214,8 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         // Directory operations
         "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir"
-        | "rt_dir_exists" => Some(&[0]),
+        | "rt_dir_exists"
+        | "rt_dir_is_real_no_follow" => Some(&[0]),
         "rt_dir_glob" => Some(&[0, 1]),
         "rt_file_find" => Some(&[0, 1]),
 

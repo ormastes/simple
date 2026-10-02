@@ -194,6 +194,11 @@ mod tests {
     }
 
     #[test]
+    fn real_directory_probe_expands_text_to_path_pointer_and_length() {
+        assert_eq!(text_arg_indices("rt_dir_is_real_no_follow"), Some(&[0][..]));
+    }
+
+    #[test]
     fn owned_process_v3_start_expands_only_command_text() {
         assert_eq!(
             super::process_c_runtime_arg_indices("rt_process_owned_v3_start_value"),
@@ -2806,7 +2811,8 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         // Directory operations
         "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir"
-        | "rt_dir_exists" => Some(&[0]),
+        | "rt_dir_exists"
+        | "rt_dir_is_real_no_follow" => Some(&[0]),
         // rt_dir_glob takes (dir, pattern) — the ONLY implementation
         // (runtime/src/value/sffi/file_io/directory.rs:199) has four params.
         "rt_dir_glob" => Some(&[0, 1]),
