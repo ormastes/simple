@@ -4,8 +4,11 @@
 
 use std.spec
 use std.common.spec.scenario_helpers.{capture_api_protocol_fields, capture_exec_detailed}
-use std.nogc_sync_mut.io.file_ops.{file_write}
-use std.process.{run}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{get_temp_dir, is_windows}
+use std.env.variables.{env_get}
 
 fn mcp_msg(body: text) -> text:
     "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
@@ -55,16 +58,68 @@ fn has_valid_content_length_frames(output: text) -> bool:
     val parts = output.split("Content-Length:")
     parts.len() >= 3 and not output.contains("Content-Length: 2305843009213693951")
 
+# Keep shell metacharacters inside a single pathname argument. Windows cmd
+# expands percent variables even inside quotes, so those paths fail closed.
+fn mcp_stdin_command(server: text, input_path: text, windows: bool) -> Result<text, text>:
+    if server.len() <= 0 or input_path.len() <= 0:
+        return Err("MCP executable and input paths must be nonempty")
+    if server.contains("\r") or server.contains("\n") or input_path.contains("\r") or input_path.contains("\n"):
+        return Err("MCP paths must not contain line breaks")
+    if windows:
+        if server.contains("\"") or server.contains("%") or input_path.contains("\"") or input_path.contains("%"):
+            return Err("MCP Windows paths contain unsupported command expansion")
+        return Ok("\"\"" + server + "\" < \"" + input_path + "\"\"")
+    val quoted_server = "'" + server.replace("'", "'\"'\"'") + "'"
+    val quoted_input = "'" + input_path.replace("'", "'\"'\"'") + "'"
+    Ok("exec " + quoted_server + " < " + quoted_input)
+
 fn send_mcp(messages: text) -> text:
-    val tmp = "/tmp/mcp_protocol_runtime_input_" + messages.len().to_string() + ".txt"
-    file_write(tmp, messages)
-    # Phase verification supplies a receipt-bound owner. Ordinary integration
-    # callers retain the deployed wrapper default for their local pipeline.
-    val mcp_server = env_get("SIMPLE_MCP_TEST_BINARY") ?? "bin/simple_mcp_server"
-    val result = run("/bin/sh", ["-c", "cat " + tmp + " | \"" + mcp_server + "\" 2>/dev/null"])
-    result.stdout
+    val scope = match secure_temp_dir(get_temp_dir(), "simple-mcp-stdio-"):
+        Ok(path): path
+        Err(reason): return "error: MCP temporary scope: " + reason
+    val input_path = scope + "/input.txt"
+    if not file_create_exclusive(input_path, messages):
+        val removed = dir_remove_all(scope)
+        return "error: MCP input creation failed; cleanup=" + removed.to_string()
+    # Qualification supplies the actual receipt-bound native MCP executable.
+    val server = env_get("SIMPLE_MCP_TEST_BINARY") ?? "bin/simple_mcp_server"
+    val windows = is_windows()
+    val command = match mcp_stdin_command(server, input_path, windows):
+        Ok(value): value
+        Err(reason):
+            val removed = dir_remove_all(scope)
+            return "error: " + reason + "; cleanup=" + removed.to_string()
+    val shell = if windows: env_get("ComSpec") ?? "cmd.exe" else: "/bin/sh"
+    val args = if windows: ["/d", "/v:off", "/s", "/c", command] else: ["-c", command]
+    val (stdout, stderr, status) = process_run_bounded(shell, args, 120000, 16777216)
+    val removed = dir_remove_all(scope)
+    if status != 0 or not removed:
+        return "error: MCP process status=" + status.to_string() + "; cleanup=" + removed.to_string() + "; " + stderr
+    stdout
 
 describe "MCP Protocol Runtime":
+    it "quotes Windows stdin paths with spaces and command metacharacters":
+        val command = match mcp_stdin_command("C:/Program Files/MCP & Tools/server.exe", "C:/private scope/input.txt", true):
+            Ok(value): value
+            Err(reason): reason
+        expect(command).to_equal("\"\"C:/Program Files/MCP & Tools/server.exe\" < \"C:/private scope/input.txt\"\"")
+
+    it "rejects Windows variable expansion and injected command delimiters":
+        val expansion_rejected = match mcp_stdin_command("C:/%MCP%/server.exe", "C:/input.txt", true):
+            Ok(value): false
+            Err(reason): reason.contains("expansion")
+        val newline_rejected = match mcp_stdin_command("C:/server.exe\nwhoami", "C:/input.txt", true):
+            Ok(value): false
+            Err(reason): reason.contains("line breaks")
+        expect(expansion_rejected).to_equal(true)
+        expect(newline_rejected).to_equal(true)
+
+    it "quotes apostrophes in POSIX stdin paths":
+        val command = match mcp_stdin_command("/private/MCP's/server", "/private/input.txt", false):
+            Ok(value): value
+            Err(reason): reason
+        expect(command).to_equal("exec '/private/MCP'\"'\"'s/server' < '/private/input.txt'")
+
     # @inline
     # @capture(protocol)
     slow_it "handles initialize, tools/list, and unknown-tool MCP startup flows":
