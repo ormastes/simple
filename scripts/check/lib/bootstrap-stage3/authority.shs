@@ -1270,6 +1270,40 @@ bootstrap_stage3_rust_toolchain_trace() {
 # Bind the executable's bytes around each launch; publish only successful stdout
 # and retain both attempt statuses/stderr when recovery is needed. This helper
 # must not wrap builds or other commands with side effects.
+bootstrap_stage3_native_windows_metadata() (
+    [ "$#" -ge 2 ] || return 126
+    bsnm_root=${SIMPLE_PROJECT_ROOT:-}
+    if [ -z "$bsnm_root" ]; then
+        bsnm_root=$(CDPATH= cd -- "${BOOTSTRAP_STAGE3_FACADE_PATH%/*}/../../.." && pwd -P) || return 126
+    fi
+    [ -f "$bsnm_root/scripts/bootstrap/bootstrap-logged-process.shs" ] || return 126
+    . "$bsnm_root/scripts/bootstrap/bootstrap-logged-process.shs"
+    command -v cygpath >/dev/null 2>&1 || return 126
+    bsnm_tool=$(cygpath -w "$1") || return 126
+    shift
+    bsnm_path=$(cygpath -wp "$PATH") || return 126
+    bsnm_evidence=${SIMPLE_WORKTREE_STORAGE_ROOT:-$bsnm_root/build}/native_probe/metadata
+    mkdir -p "$bsnm_evidence" || return 126
+    bsnm_capture=$(mktemp -d "$bsnm_evidence/native-metadata.XXXXXX") || return 126
+    bsnm_status=0
+    BOOTSTRAP_LOGGED_PROCESS_TIMEOUT_SECONDS=30 \
+    BOOTSTRAP_LOGGED_PROCESS_MAX_BYTES=1048576 \
+        bootstrap_logged_windows_cargo "$bsnm_root" "$bsnm_capture/adapter.log" \
+        env -i PATH="$bsnm_path" LC_ALL=C LANG=C "$bsnm_tool" "$@" || bsnm_status=$?
+    printf 'bootstrap-native-metadata-receipt=%s shell-status=%s\n' \
+        "$bsnm_capture/adapter.log" "$bsnm_status" >&2
+    bsnm_receipt=$(sed -n 's/^process_receipt=//p' "$bsnm_capture/adapter.log")
+    [ -n "$bsnm_receipt" ] || return 126
+    bsnm_native_log=${bsnm_receipt%.env}.log
+    [ -f "$bsnm_native_log" ] || return 126
+    if [ "$bsnm_status" -eq 0 ]; then
+        cat "$bsnm_native_log"
+    else
+        head -c 4096 "$bsnm_native_log" >&2
+    fi
+    return "$bsnm_status"
+)
+
 bootstrap_stage3_native_metadata_probe() (
     [ "$#" -ge 3 ] || return 1
     bootstrap_stage3_probe_label=$1
@@ -1292,6 +1326,23 @@ bootstrap_stage3_native_metadata_probe() (
     bootstrap_stage3_probe_tmp=$(mktemp -d \
         "${TMPDIR:-/tmp}/bootstrap-native-probe.XXXXXX") || return 1
     trap 'rm -rf -- "$bootstrap_stage3_probe_tmp"' EXIT HUP INT TERM
+    # Native Windows owns the child status through the existing Job collector;
+    # env.exe's MSYS status125 is not evidence of the native tool's exit.
+    case "$(bootstrap_stage3_host_platform):$bootstrap_stage3_probe_tool" in
+        *-windows-*:*.exe)
+            bootstrap_stage3_probe_status=0
+            bootstrap_stage3_native_windows_metadata "$@" \
+                >"$bootstrap_stage3_probe_tmp/stdout" || bootstrap_stage3_probe_status=$?
+            bootstrap_stage3_probe_current=$(bootstrap_stage3_hash_file "$bootstrap_stage3_probe_tool") || return 1
+            [ "$bootstrap_stage3_probe_current" = "$bootstrap_stage3_probe_sha" ] || {
+                printf 'bootstrap-native-metadata-probe=%s result=binary-changed\n' \
+                    "$bootstrap_stage3_probe_label" >&2
+                return 1
+            }
+            [ "$bootstrap_stage3_probe_status" -ne 0 ] || cat "$bootstrap_stage3_probe_tmp/stdout" || return 1
+            return "$bootstrap_stage3_probe_status"
+            ;;
+    esac
     # Attempts 3..5 exist only for shell-status=125, which is `env` itself
     # failing to exec -- on MSYS a fork/exec transiently fails under memory
     # pressure and the tool never runs. Measured 2026-09-26 on
@@ -1315,7 +1366,7 @@ bootstrap_stage3_native_metadata_probe() (
             >"$bootstrap_stage3_probe_tmp/stdout" \
             2>"$bootstrap_stage3_probe_tmp/stderr" || bootstrap_stage3_probe_status=$?
         if [ "$bootstrap_stage3_probe_status" -ne 0 ] ||
-            [ "$bootstrap_stage3_probe_attempt" -eq 5 ]; then
+            [ "$bootstrap_stage3_probe_attempt" -gt 1 ]; then
             printf 'bootstrap-native-metadata-probe=%s attempt=%s shell-status=%s\n' \
                 "$bootstrap_stage3_probe_label" "$bootstrap_stage3_probe_attempt" \
                 "$bootstrap_stage3_probe_status" >&2
