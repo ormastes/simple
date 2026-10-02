@@ -870,3 +870,31 @@ is selected via explicit runtime-authority/runtime path. It records2compiled,
 1116reused,0failed and is linking; no terminal verdict yet. Log and receipt:
 `build/native_probe/stage2-retry8.log` and `stage2-retry8.rss.env` under the
 same6b9 Debian checkout. Original failed runtime/link evidence is preserved.
+
+### 2026-10-02 guarded native failures and branch candidate
+
+Windows hello2 terminated before producing an executable: parse1/1 reached
+HIR preparation, whose diagnostic sink failed with
+`SIMPLE_MEM_SNAPSHOT_FILE could not be established safely`. Job exit1,
+quiescent1,peak3,500,324KiB: the7GB memory cap was not hit. A direct C probe
+of the exact runtime function on the same D: parent succeeded (handle204,
+closePASS); an independent Simple call-boundary investigation is assigned.
+A changed hello3 setup may omit only that optional internal sink while retaining
+external Job/RSS sampling and the same candidate/cache; no success is implied.
+
+Linux stopped after3native attempts, all at link and below its RSS cap.
+Initial attempt missed3providers; retry8 missed rt_string_new; retry8-final
+selected the provider-only archive as complete native-all authority and missed
+broad core runtime symbols. Both partial archives are invalid runtime authorities.
+Audit: D:/dev/linux-memory-fix-validation-20261002/linux-native-validation-final.md,
+SHA25648ad48155ac2b498a5bfc34eb627e6b0ee703db9cd8cbfa75c1a1b90044384ae.
+No Linux hello or Phase3/4 execution occurred. Complete runtime-bundle repair
+remains outstanding; do not repeat the partial-archive attempt.
+
+Requested main-on-release rebase completed in an isolated worktree. All133
+nonmerge main commits are exact equivalents or reviewed adaptations already
+on release;38merge commits showed no separate resolution delta. Candidate is
+exactly3d021ee9bc6456857a1450928fd6aff127aba13f. Remote named originals and
+work/main-on-release-20261002 preserve evidence. Public main remains unchanged:
+GitHub rules allow existing admin bypass only through PRs. User choice about a
+temporary actor-specific bypass change is pending; elapsed time is not approval.
