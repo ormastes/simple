@@ -1,0 +1,56 @@
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.test_runner_new.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_types.{TestExecutionMode}
+use std.test_runner.test_runner_execute.{native_test_request_error, native_test_compile_args}
+use std.test_runner.test_executor_parsing.{build_child_args, make_result_from_output}
+
+describe "Explicit native backend test contract":
+    it "selects LLVM and prevents reuse of backendless result evidence":
+        step("Select the LLVM native executable contract")
+        val options = parse_test_args(["--native-backend=llvm", "fixture.spl"])
+        expect(options.native_backend).to_equal("llvm")
+        expect(options.no_cache).to_equal(true)
+        expect(options.assert_ran).to_equal(true)
+        expect(options.mode).to_equal(TestExecutionMode.Native)
+
+    it "preserves SMF compile semantics without an explicit backend":
+        step("Keep the existing compile mode compatible")
+        val options = parse_test_args(["--mode=compile"])
+        expect(options.native_backend).to_equal("")
+        expect(options.mode).to_equal(TestExecutionMode.Compile)
+
+    it "constructs independent Cranelift executable compilation arguments":
+        step("Build the selected backend with a private artifact cache")
+        val args = native_test_compile_args("fixture.spl", "fixture.exe", "cranelift")
+        expect(args[0]).to_equal("native-build")
+        expect(args[2]).to_equal("cranelift")
+        expect(args).to_contain("fixture.exe.cache")
+        expect(args).to_contain("fixture.exe")
+        expect(args).to_contain("--threads")
+
+    it "propagates native backend to a sequential child rather than interpreting source":
+        step("Preserve the selected backend across a parallel worker boundary")
+        val options = parse_test_args(["--native-backend", "cranelift"])
+        val args = build_child_args("fixture.spl", options)
+        expect(args[0]).to_equal("test")
+        expect(args).to_contain("--native-backend=cranelift")
+        expect(args).to_contain("--sequential")
+        expect(args).to_contain("--assert-ran")
+
+    it "rejects unknown backends and unqualified Cranelift coverage":
+        step("Reject requests that cannot provide the selected backend evidence")
+        expect(native_test_request_error("llvm", false)).to_equal("")
+        expect(native_test_request_error("cranelift", false)).to_equal("")
+        expect(native_test_request_error("unknown", false)).to_contain("Unsupported")
+        expect(native_test_request_error("cranelift", true)).to_contain("refusing LLVM fallback")
+        expect(native_test_request_error("llvm", false, true)).to_contain("cannot be combined")
+
+    it "preserves positive and failing assertion counts from native executable output":
+        step("Check real assertion outcomes cannot be replaced by an exit code")
+        val passing = make_result_from_output("fixture.spl", "Results: 1 total, 1 passed, 0 failed", "", 0, 1, 60)
+        val failing = make_result_from_output("fixture.spl", "Results: 1 total, 0 passed, 1 failed", "", 1, 1, 60)
+        expect(passing.passed).to_equal(1)
+        expect(passing.failed).to_equal(0)
+        expect(failing.passed).to_equal(0)
+        expect(failing.failed).to_equal(1)
