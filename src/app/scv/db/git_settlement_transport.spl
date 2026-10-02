@@ -1,0 +1,126 @@
+# codex-impl
+# Read-only Git settlement transport. The caller owns authenticated Git
+# credentials and semantic receipt verification; this module never publishes.
+# A remote URL contains no credential bytes. Git's configured credential helper
+# may authenticate an HTTPS read without exposing that credential here.
+
+use app.io.mod (is_dir, process_run_timeout)
+
+struct DbGitSettlementHead:
+    code: text
+    oid: text
+
+struct DbGitSettlementReadback:
+    code: text
+    observed_head: text
+
+fn _db_git_local_path(path: text) -> bool:
+    if path.starts_with("/"):
+        return not path.starts_with("//")
+    if path.len() < 3 or path[1:2] != ":" or (path[2:3] != "/" and path[2:3] != "\\"):
+        return false
+    val drive = path.char_code_at(0)
+    (drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)
+
+fn _db_git_remote_allowed(remote: text) -> bool:
+    for index in 0..remote.len():
+        val code = remote.char_code_at(index)
+        if code < 32 or code == 127:
+            return false
+    if _db_git_local_path(remote):
+        return is_dir(remote)
+    if not remote.starts_with("https://github.com/"):
+        return false
+    val tail = remote[19:]
+    val parts = tail.split("/")
+    if parts.len() != 2 or parts[0] == "" or parts[1] == "":
+        return false
+    for part in parts:
+        if part == "." or part.contains(".."):
+            return false
+        for index in 0..part.len():
+            val code = part.char_code_at(index)
+            if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 45 or code == 46 or code == 95):
+                return false
+    true
+
+fn _db_git_oid_valid(oid: text, object_format: text) -> bool:
+    val width = if object_format == "sha1": 40 else: if object_format == "sha256": 64 else: 0
+    if width == 0 or oid.len() != width:
+        return false
+    for index in 0..oid.len():
+        val code = oid.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn _db_git_run(root: text, args: [text]) -> (text, bool):
+    var argv: [text] = ["--no-replace-objects", "-C", root]
+    for arg in args:
+        argv.push(arg)
+    val (out, _err, code) = process_run_timeout("git", argv, 30000)
+    # Git stderr may contain credential-helper diagnostics or remote URLs.
+    # Return only classified status and bounded stdout to the caller.
+    if code != 0 or out.len() > 65536:
+        return ("", false)
+    (out.trim(), true)
+
+fn _db_git_object_format(source: text) -> text:
+    val (out, ok) = _db_git_run(source, ["rev-parse", "--show-object-format"])
+    if ok and (out == "sha1" or out == "sha256"):
+        return out
+    ""
+
+fn db_git_settlement_ref_head(source: text, remote: text) -> DbGitSettlementHead:
+    if not _db_git_local_path(source) or not is_dir(source) or not _db_git_remote_allowed(remote):
+        return DbGitSettlementHead(code: "SCVDB_REMOTE_SCOPE", oid: "")
+    val format = _db_git_object_format(source)
+    if format == "":
+        return DbGitSettlementHead(code: "SCVDB_GIT_FORMAT", oid: "")
+    val (out, ok) = _db_git_run(source, ["ls-remote", "--exit-code", "--refs", remote, "refs/heads/settled"])
+    if not ok:
+        return DbGitSettlementHead(code: "SCVDB_READBACK_UNAVAILABLE", oid: "")
+    if out.len() > 1024:
+        return DbGitSettlementHead(code: "SCVDB_READBACK_MALFORMED", oid: "")
+    val lines = out.split("\n")
+    if lines.len() != 1:
+        return DbGitSettlementHead(code: "SCVDB_READBACK_MALFORMED", oid: "")
+    val parts = lines[0].split("\t")
+    if parts.len() != 2 or parts[1] != "refs/heads/settled" or not _db_git_oid_valid(parts[0], format):
+        return DbGitSettlementHead(code: "SCVDB_READBACK_MALFORMED", oid: "")
+    DbGitSettlementHead(code: "ok", oid: parts[0])
+
+fn db_git_settlement_reconcile(source: text, remote: text, expected_old_oid: text, candidate_oid: text) -> DbGitSettlementReadback:
+    if not _db_git_local_path(source) or not is_dir(source):
+        return DbGitSettlementReadback(code: "SCVDB_REMOTE_SCOPE", observed_head: "")
+    val format = _db_git_object_format(source)
+    if not _db_git_oid_valid(expected_old_oid, format) or not _db_git_oid_valid(candidate_oid, format):
+        return DbGitSettlementReadback(code: "SCVDB_GIT_OID", observed_head: "")
+    # The candidate must be the actual one-parent child of the expected head.
+    # This check precedes all status decisions, including a lost acknowledgement.
+    val (kind, kind_ok) = _db_git_run(source, ["cat-file", "-t", candidate_oid])
+    val (commit, commit_ok) = _db_git_run(source, ["cat-file", "-p", candidate_oid])
+    var parent = ""
+    var parent_count = 0
+    if commit_ok:
+        for line in commit.split("\n"):
+            if line == "":
+                break
+            if line.starts_with("parent "):
+                parent_count = parent_count + 1
+                parent = line[7:]
+    if not kind_ok or kind != "commit" or not commit_ok or parent_count != 1 or parent != expected_old_oid:
+        return DbGitSettlementReadback(code: "SCVDB_PARENT_MISMATCH", observed_head: "")
+    val head = db_git_settlement_ref_head(source, remote)
+    if head.code != "ok":
+        return DbGitSettlementReadback(code: head.code, observed_head: "")
+    if head.oid == candidate_oid:
+        return DbGitSettlementReadback(code: "published", observed_head: head.oid)
+    if head.oid == expected_old_oid:
+        return DbGitSettlementReadback(code: "not_published", observed_head: head.oid)
+    # A successor could contain the candidate, or be a competing settlement.
+    # Neither case permits a new allocation until canonical history is fetched.
+    DbGitSettlementReadback(code: "SCVDB_HISTORY_REQUIRED", observed_head: head.oid)
+
+export DbGitSettlementHead, DbGitSettlementReadback
+export db_git_settlement_ref_head, db_git_settlement_reconcile
