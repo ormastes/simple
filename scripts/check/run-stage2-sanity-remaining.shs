@@ -1,0 +1,61 @@
+#!/bin/sh
+# Execute only the two missing criteria of the audited archived LLVM profile.
+# Run this owner under the canonical 7200s/128MiB Windows Job collector. A
+# successful component is provisional until its actual Job receipt is sealed.
+set -eu
+[ "$#" = 12 ] || exit 64
+owner=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 126
+candidate=$1 source_root=$2 history=$3 history_display=$4 history_caller=$5 history_owner=$6
+base=$7 display=$8 source_snapshot=$9 runtime_snapshot=${10} tool_snapshot=${11} runtime_authority=${12}
+BOOTSTRAP_STAGE3_FACADE_PATH=$owner/scripts/check/lib/bootstrap-stage3-provenance.shs
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$owner/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+for binding in \
+    "$source_snapshot:10b375d10c1ca158080db51571ec9b9fc2652bfd95a21bb9deda22f56347ff6c" \
+    "$runtime_snapshot:1e7d11ef841f75a6c40f92fb2804a8a8ac16293e7b7e087af8232704c1460590" \
+    "$tool_snapshot:775bc0a83a51a3e74f045b578952942f77baaa38ce158b42c960c8d6ee2f253b"; do
+    snapshot=${binding%:*} expected=${binding##*:}
+    bootstrap_stage3_sanity_safe_regular "$snapshot" || exit 126
+    [ "$(bootstrap_stage3_hash_file "$snapshot")" = "$expected" ] || exit 126
+done
+bootstrap_stage3_normalized_absolute "$base" || exit 126
+bootstrap_stage3_sanity_display_absolute "$display" || exit 126
+[ -d "${base%/*}" ] && [ ! -L "${base%/*}" ] || exit 126
+for stage in before after; do
+    for role in source runtime tool; do
+        [ ! -e "$base.$role-$stage.txt" ] && [ ! -L "$base.$role-$stage.txt" ] || exit 126
+    done
+done
+snapshot_inputs() {
+    stage=$1
+    bootstrap_stage3_source_snapshot "$base.source-$stage.txt" "$source_root" || return 1
+    bootstrap_stage3_directory_snapshot "$base.runtime-$stage.txt" "$runtime_authority" || return 1
+    bootstrap_stage3_tool_authority_snapshot "$base.tool-$stage.txt" "$PATH" "$owner" || return 1
+    cmp "$source_snapshot" "$base.source-$stage.txt" &&
+        cmp "$runtime_snapshot" "$base.runtime-$stage.txt" &&
+        cmp "$tool_snapshot" "$base.tool-$stage.txt"
+}
+bootstrap_stage3_verify_frontend_prior_inputs "$candidate" "$source_root" \
+    "$history/stage2-sanity.env" "$history_display" "$history" "$history/launch.env" \
+    "$history_caller" llvm "$history_owner" || exit 126
+snapshot_inputs before || exit 126
+cd -- "$source_root" || exit 126
+CANDIDATE_FRONTEND_ROOT=$source_root
+CANDIDATE_FRONTEND_BACKEND=llvm
+CANDIDATE_FRONTEND_BOOTSTRAP=1
+CANDIDATE_FRONTEND_LOG_PATH=$base.remaining.log
+CANDIDATE_FRONTEND_LOG_DISPLAY_PATH=$display.remaining.log
+CANDIDATE_FRONTEND_STATUS_PATH=$base.remaining.status.env
+COMPILER_BUILD_TIMEOUT_SECONDS=1200
+COMPILER_CHECK_KILL_GRACE_SECONDS=1
+COMPILER_EXEC_TIMEOUT_SECONDS=5
+CANDIDATE_FRONTEND_MAX_LOG_BYTES=4194304
+candidate_frontend_remaining_smoke "$candidate" "$source_root" \
+    "$history/stage2-sanity.env" "$history_display" "$history" "$history/launch.env" \
+    "$history_caller" llvm "$history_owner" "$owner" || exit $?
+snapshot_inputs after || exit 126
+status_sha=$(bootstrap_stage3_hash_file "$base.remaining.status.env") || exit 126
+bootstrap_stage3_verify_frontend_remaining_receipt "$base.remaining.status.env" \
+    "$display.remaining.status.env" "$base.remaining.log" "$display.remaining.log" \
+    1 llvm "$status_sha" "$owner/scripts/bootstrap/run-process-group-bounded-log-windows.py" || exit 126
+printf 'remaining-criteria: checks=2 status_sha256=%s\n' "$status_sha"

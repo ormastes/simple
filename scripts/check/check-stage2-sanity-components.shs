@@ -1,0 +1,154 @@
+#!/bin/sh
+# Parser/ownership regressions only. Synthetic fixture rows below are not
+# compiler execution evidence or admission receipts.
+set -eu
+profile=${1:-all}
+case "$profile" in primary|owner|all) ;; *) exit 64 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/sanity-components.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+bootstrap_stage3_hash_file() { sha256sum "$1" | cut -d' ' -f1; }
+bootstrap_stage3_hash_stream() { sha256sum | cut -d' ' -f1; }
+bootstrap_stage3_manifest_value() {
+    [ "$(grep -c "^${1}=" "$2" || true)" = 1 ] || return 1
+    sed -n "s/^${1}=//p" "$2"
+}
+. "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+COMPILER_BUILD_TIMEOUT_SECONDS=1200
+COMPILER_CHECK_KILL_GRACE_SECONDS=1
+CANDIDATE_FRONTEND_MAX_LOG_BYTES=4194304
+collector=$work/collector.py
+printf '# fixture collector identity; never executed\n' >"$collector"
+log=$work/component.log
+status=$work/component.status.env
+fixture() {
+    for suffix in stage2-module-path-naming hello-world-positional; do
+        file=$log.$suffix
+        printf 'fixture=%s\n' "$suffix" >"$file"
+        {
+            echo schema=simple-bounded-process-log-v1
+            echo status=complete; echo reason=child-exit; echo raw_status=0; echo native_exit_status=0
+            echo max_bytes=4194304; echo "bytes_captured=$(wc -c <"$file" | tr -d ' ')"
+            echo timeout_seconds=1200; echo term_grace_seconds=1
+            echo combined_stream=stdout-stderr; echo process_group=windows-job
+            echo termination=job-terminate; echo artifact_limit=none
+            echo "log_leaf=${file##*/}"; echo "log_sha256=$(bootstrap_stage3_hash_file "$file")"
+            echo "helper_sha256=$(bootstrap_stage3_hash_file "$collector")"
+        } >"$file.bounded.env"
+    done
+    status_fixture
+}
+status_fixture() {
+    {
+        echo schema=simple-candidate-frontend-remaining-status-v1
+        echo result=pass; echo probe=complete; echo raw_status=0
+        echo bootstrap_mode=1; echo backend=llvm; echo "log_path=$log"
+        echo checks_run=2; echo naming_run_status=0; echo positional_run_status=0
+        echo "naming_output_sha256=$(printf 'app.cli.bootstrap_main\ncompiler.driver.driver\napp.cli.main' | bootstrap_stage3_hash_stream)"
+        echo "positional_output_sha256=$(printf hello | bootstrap_stage3_hash_stream)"
+        for probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+            case "$probe" in
+              p2_add|stage2_mir_retention)
+                echo "${probe}_raw_status=not-run"
+                for field in log_path log_sha256 collector_receipt_path collector_receipt_sha256; do
+                    echo "${probe}_$field=-"
+                done ;;
+              *)
+                file=$log.$(printf '%s' "$probe" | tr _ -)
+                echo "${probe}_raw_status=0"; echo "${probe}_log_path=$file"
+                echo "${probe}_log_sha256=$(bootstrap_stage3_hash_file "$file")"
+                echo "${probe}_collector_receipt_path=$file.bounded.env"
+                echo "${probe}_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$file.bounded.env")" ;;
+            esac
+        done
+    } >"$status"
+}
+verify() (
+    bootstrap_stage3_sanity_frontend_seen=' '
+    bootstrap_stage3_verify_frontend_remaining_receipt "$status" "$status" "$log" "$log" \
+        1 llvm "$(bootstrap_stage3_hash_file "$status")" "$collector"
+)
+reject() {
+    if verify >"$work/rejection.log" 2>&1; then
+        printf 'FAIL: accepted %s\n' "$1" >&2
+        exit 1
+    fi
+    printf 'PASS: rejects %s\n' "$1"
+}
+replace() {
+    sed "s/^$1=.*/$1=$2/" "$3" >"$work/changed"
+    mv "$work/changed" "$3"
+}
+if [ "$profile" != owner ]; then
+fixture
+verify || { echo 'FAIL: valid two-component fixture rejected' >&2; exit 1; }
+echo 'PASS: valid two-component parser fixture'
+replace checks_run 0 "$status"; reject zero-count
+status_fixture; replace naming_run_status 1 "$status"; reject failed-native-output-run
+status_fixture; replace positional_output_sha256 wrong "$status"; reject wrong-native-output
+status_fixture; replace p2_add_raw_status 0 "$status"; reject silently-replayed-old-criterion
+fixture; replace process_group setsid "$log.stage2-module-path-naming.bounded.env"
+status_fixture; reject non-Windows-component-owner
+fixture; replace status aborted "$log.stage2-module-path-naming.bounded.env"
+status_fixture; reject aborted-collector
+fixture; replace helper_sha256 wrong "$log.hello-world-positional.bounded.env"
+status_fixture; reject mismatched-collector-identity
+fixture; replace bytes_captured 0 "$log.hello-world-positional.bounded.env"
+status_fixture; reject truncated-log
+fixture; rm "$log.hello-world-positional"; reject missing-positional-artifact
+fixture; replace schema simple-candidate-frontend-status-v2 "$status"; reject legacy-schema-substitution
+fi
+if [ "$profile" != primary ]; then
+fixture
+sed '/^naming_run_status=/d' "$status" >"$work/changed"; mv "$work/changed" "$status"
+reject missing-native-runtime-status
+status_fixture
+sed '/^positional_output_sha256=/d' "$status" >"$work/changed"; mv "$work/changed" "$status"
+reject missing-native-runtime-output
+job=$work/job.env job_log=$work/job.log
+printf 'fixture-only Job log\n' >"$job_log"
+job_fixture() {
+    {
+        echo schema=simple-bounded-process-log-v1
+        echo status=complete; echo reason=child-exit; echo raw_status=0; echo native_exit_status=0
+        echo max_bytes=134217728; echo "bytes_captured=$(wc -c <"$job_log" | tr -d ' ')"
+        echo timeout_seconds=7200; echo term_grace_seconds=5
+        echo process_group=windows-job; echo combined_stream=stdout-stderr
+        echo termination=job-terminate; echo artifact_limit=none
+        echo root_exit_policy=wait-job; echo job_remnants_terminated=no
+        echo "helper_sha256=$(bootstrap_stage3_hash_file "$collector")"
+        echo "log_leaf=${job_log##*/}"; echo "log_sha256=$(bootstrap_stage3_hash_file "$job_log")"
+    } >"$job"
+}
+job_reject() {
+    if bootstrap_stage3_verify_remaining_job "$job" "$job_log" "$collector" >"$work/rejection.log" 2>&1; then
+        printf 'FAIL: accepted %s\n' "$1" >&2; exit 1
+    fi
+    printf 'PASS: rejects %s\n' "$1"
+}
+job_fixture
+bootstrap_stage3_verify_remaining_job "$job" "$job_log" "$collector" || exit 1
+echo 'PASS: finalized Job parser fixture'
+replace status aborted "$job"; job_reject aborted-remaining-Job
+job_fixture; replace native_exit_status 1 "$job"; job_reject failed-native-Job
+job_fixture; replace root_exit_policy terminate-job "$job"; job_reject incomplete-Job-closure-policy
+job_fixture; printf tampered >>"$job_log"; job_reject Job-log-tamper
+composed=$work/composed.env
+printf 'schema=simple-bootstrap-sanity-components-v1\nprofile=unreviewed-owner\n' >"$composed"
+if bootstrap_stage3_verify_composed_sanity_receipt "$composed" "$composed" "$work" "$work/missing" "$work/missing" \
+    >"$work/rejection.log" 2>&1; then exit 1; fi
+grep -F "field 'profile' was 'unreviewed-owner'" "$work/rejection.log" >/dev/null || exit 1
+echo 'PASS: unknown archived-owner profile rejected before host-specific authority'
+replace schema unknown-component-schema "$composed"
+if bootstrap_stage3_verify_composed_sanity_receipt "$composed" "$composed" "$work" "$work/missing" "$work/missing" \
+    >"$work/rejection.log" 2>&1; then exit 1; fi
+grep -F "field 'schema' was 'unknown-component-schema'" "$work/rejection.log" >/dev/null || exit 1
+echo 'PASS: unknown component schema rejected'
+for role in source runtime tool; do
+    printf 'changed %s snapshot\n' "$role" >"$work/$role.txt"
+    if bootstrap_stage3_verify_composed_snapshot "$role" "$work/$role.txt" "$composed"; then exit 1; fi
+    printf 'PASS: rejects changed %s snapshot\n' "$role"
+done
+fi
+echo 'PASS: requested component parser matrix; no candidate or collector executed'

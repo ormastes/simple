@@ -148,8 +148,169 @@ bootstrap_stage3_sanity_expect() {
         return 1
 }
 
-bootstrap_stage3_verify_frontend_status_receipt() {
+bootstrap_stage3_frontend_reject() {
+    printf 'stage2-sanity-error: frontend-status role=%s failure=%s\n' \
+        "$1" "$2" >&2
+    return 1
+}
+
+# Shared artifact validation for full legacy status and authenticated components.
+# The collector authority is caller-owned, never a path chosen by proof contents.
+bootstrap_stage3_verify_frontend_probe_artifacts() {
     [ "$#" = 7 ] || return 1
+    bootstrap_stage3_frontend_status_file=$1
+    bootstrap_stage3_probe_status_sha=$2
+    bootstrap_stage3_frontend_log=$3
+    bootstrap_stage3_frontend_log_display=$4
+    bootstrap_stage3_frontend_probe=$5
+    bootstrap_stage3_probe_collector_authority=$6
+    bootstrap_stage3_probe_required_group=$7
+    case "$bootstrap_stage3_frontend_probe" in
+      p2_add|stage2_mir_retention|stage2_module_path_naming|hello_world_positional) ;;
+      *) return 1 ;;
+    esac
+    bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_frontend_status_file" || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_frontend_status_file")" =         "$bootstrap_stage3_probe_status_sha" ] || return 1
+    bootstrap_stage3_sanity_frontend_seen=${bootstrap_stage3_sanity_frontend_seen:-' '}
+    bootstrap_stage3_probe_log=$(bootstrap_stage3_manifest_value \
+        "${bootstrap_stage3_frontend_probe}_log_path" \
+        "$bootstrap_stage3_frontend_status_file") || return 1
+    bootstrap_stage3_probe_log_sha=$(bootstrap_stage3_manifest_value \
+        "${bootstrap_stage3_frontend_probe}_log_sha256" \
+        "$bootstrap_stage3_frontend_status_file") || return 1
+    bootstrap_stage3_probe_receipt=$(bootstrap_stage3_manifest_value \
+        "${bootstrap_stage3_frontend_probe}_collector_receipt_path" \
+        "$bootstrap_stage3_frontend_status_file") || return 1
+    bootstrap_stage3_probe_receipt_sha=$(bootstrap_stage3_manifest_value \
+        "${bootstrap_stage3_frontend_probe}_collector_receipt_sha256" \
+        "$bootstrap_stage3_frontend_status_file") || return 1
+    bootstrap_stage3_probe_raw=$(bootstrap_stage3_manifest_value \
+        "${bootstrap_stage3_frontend_probe}_raw_status" \
+        "$bootstrap_stage3_frontend_status_file") || return 1
+    [ "$bootstrap_stage3_probe_raw" = 0 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" raw-status || return 1
+    case "$bootstrap_stage3_frontend_probe" in
+      p2_add)
+        bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display
+        bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log ;;
+      stage2_mir_retention)
+        bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.stage2-mir-retention
+        bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.stage2-mir-retention ;;
+      stage2_module_path_naming)
+        bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.stage2-module-path-naming
+        bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.stage2-module-path-naming ;;
+      hello_world_positional)
+        bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.hello-world-positional
+        bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.hello-world-positional ;;
+    esac
+    bootstrap_stage3_expected_probe_receipt=$bootstrap_stage3_expected_probe_log.bounded.env
+    bootstrap_stage3_probe_receipt_authority=$bootstrap_stage3_probe_log_authority.bounded.env
+    [ "$bootstrap_stage3_probe_log" = "$bootstrap_stage3_expected_probe_log" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" canonical-log || return 1
+    [ "$bootstrap_stage3_probe_receipt" = \
+        "$bootstrap_stage3_expected_probe_receipt" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" canonical-receipt || return 1
+    for bootstrap_stage3_frontend_artifact in \
+        "$bootstrap_stage3_probe_log" "$bootstrap_stage3_probe_receipt"; do
+        if [ "$bootstrap_stage3_frontend_artifact" = \
+            "$bootstrap_stage3_probe_log" ]; then
+            bootstrap_stage3_frontend_artifact_role=log
+        else
+            bootstrap_stage3_frontend_artifact_role=receipt
+        fi
+        case "$bootstrap_stage3_sanity_frontend_seen" in
+          *" $bootstrap_stage3_frontend_artifact "*) bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" "uniqueness-$bootstrap_stage3_frontend_artifact_role"; return 1 ;;
+        esac
+        bootstrap_stage3_sanity_frontend_seen=\
+"$bootstrap_stage3_sanity_frontend_seen$bootstrap_stage3_frontend_artifact "
+    done
+    bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_probe_log_authority" ||
+        bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" safe-regular-log || return 1
+    bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_probe_receipt_authority" ||
+        bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" safe-regular-receipt || return 1
+    for bootstrap_stage3_frontend_sha in \
+        "$bootstrap_stage3_probe_log_sha" \
+        "$bootstrap_stage3_probe_receipt_sha"; do
+        printf '%s\n' "$bootstrap_stage3_frontend_sha" |
+            grep -Eq '^[0-9a-f]{64}$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" sha-syntax || return 1
+    done
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_probe_log_authority")" = "$bootstrap_stage3_probe_log_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" log-sha-mismatch || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_receipt_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" receipt-sha-mismatch || return 1
+    for bootstrap_stage3_collector_key in schema status reason raw_status \
+        max_bytes bytes_captured timeout_seconds term_grace_seconds \
+        combined_stream process_group artifact_limit log_leaf log_sha256; do
+        bootstrap_stage3_manifest_value "$bootstrap_stage3_collector_key" \
+            "$bootstrap_stage3_probe_receipt_authority" >/dev/null || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" "bounded-missing-$bootstrap_stage3_collector_key" || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_probe_receipt_authority")" = simple-bounded-process-log-v1 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-schema || return 1
+    [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_probe_receipt_authority")" = complete ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-status || return 1
+    [ "$(bootstrap_stage3_manifest_value reason "$bootstrap_stage3_probe_receipt_authority")" = child-exit ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-reason || return 1
+    [ "$(bootstrap_stage3_manifest_value raw_status "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_raw" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-raw || return 1
+    [ "$(bootstrap_stage3_manifest_value log_sha256 "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_log_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-log-sha || return 1
+    [ "$(bootstrap_stage3_manifest_value log_leaf "$bootstrap_stage3_probe_receipt_authority")" = \
+        "${bootstrap_stage3_probe_log##*/}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-leaf || return 1
+    [ "$(bootstrap_stage3_manifest_value combined_stream "$bootstrap_stage3_probe_receipt_authority")" = stdout-stderr ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-stream || return 1
+    case "$(bootstrap_stage3_manifest_value process_group "$bootstrap_stage3_probe_receipt_authority")" in
+      setsid) ;;
+      setpgid)
+        [ -n "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" ] &&
+          [ -n "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" ] &&
+          "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-session-contract || return 1
+        ;;
+      windows-job)
+        bootstrap_stage3_collector_helper=$bootstrap_stage3_probe_collector_authority
+        [ -f "$bootstrap_stage3_collector_helper" ] && [ ! -L "$bootstrap_stage3_collector_helper" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-helper-authority || return 1
+        [ "$(bootstrap_stage3_manifest_value helper_sha256 "$bootstrap_stage3_probe_receipt_authority")" = \
+            "$(bootstrap_stage3_hash_file "$bootstrap_stage3_collector_helper")" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-helper-sha || return 1
+        [ "$(bootstrap_stage3_manifest_value native_exit_status "$bootstrap_stage3_probe_receipt_authority")" = 0 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-native-exit || return 1
+        [ "$(bootstrap_stage3_manifest_value termination "$bootstrap_stage3_probe_receipt_authority")" = job-terminate ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-termination || return 1
+        ;;
+      *) bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-group; return 1 ;;
+    esac
+    [ "$(bootstrap_stage3_manifest_value artifact_limit "$bootstrap_stage3_probe_receipt_authority")" = none ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-artifact-limit || return 1
+    bootstrap_stage3_collector_max=$(bootstrap_stage3_manifest_value \
+        max_bytes "$bootstrap_stage3_probe_receipt_authority") || return 1
+    bootstrap_stage3_collector_bytes=$(bootstrap_stage3_manifest_value \
+        bytes_captured "$bootstrap_stage3_probe_receipt_authority") || return 1
+    bootstrap_stage3_collector_timeout=$(bootstrap_stage3_manifest_value \
+        timeout_seconds "$bootstrap_stage3_probe_receipt_authority") || return 1
+    bootstrap_stage3_collector_grace=$(bootstrap_stage3_manifest_value \
+        term_grace_seconds "$bootstrap_stage3_probe_receipt_authority") || return 1
+    for bootstrap_stage3_positive in "$bootstrap_stage3_collector_max" \
+        "$bootstrap_stage3_collector_timeout"; do
+        printf '%s\n' "$bootstrap_stage3_positive" |
+            grep -Eq '^[1-9][0-9]*$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-positive-syntax || return 1
+    done
+    for bootstrap_stage3_nonnegative in \
+        "$bootstrap_stage3_collector_bytes" \
+        "$bootstrap_stage3_collector_grace"; do
+        printf '%s\n' "$bootstrap_stage3_nonnegative" |
+            grep -Eq '^[0-9]+$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-nonnegative-syntax || return 1
+    done
+    [ "$bootstrap_stage3_collector_max" = \
+        "${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-4194304}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-max-config || return 1
+    [ "$bootstrap_stage3_collector_timeout" = \
+        "${COMPILER_BUILD_TIMEOUT_SECONDS:-180}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-timeout-config || return 1
+    [ "$bootstrap_stage3_collector_grace" = \
+        "${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-grace-config || return 1
+    [ "$bootstrap_stage3_collector_bytes" -le \
+        "$bootstrap_stage3_collector_max" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-over-cap || return 1
+    # `$(( ))` normalises wc's output before comparing. BSD/macOS `wc -c <f`
+    # right-pads its count ("     653"), so the string compare this used to
+    # be was false for EVERY probe on macOS even when the numbers matched --
+    # the byte equality itself is unchanged and still fails closed on a
+    # truncated or substituted log. GNU wc does not pad, which is why this
+    # only ever fired here. See doc/08_tracking/bug/
+    # stage2_sanity_receipt_bounded_bytes_authority_path_2026-09-13.md
+    bootstrap_stage3_probe_log_actual_bytes=$((
+        $(wc -c <"$bootstrap_stage3_probe_log_authority")
+    )) || return 1
+    [ "$bootstrap_stage3_collector_bytes" = \
+        "$bootstrap_stage3_probe_log_actual_bytes" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-bytes || return 1
+    if [ -n "$bootstrap_stage3_probe_required_group" ]; then
+        [ "$(bootstrap_stage3_manifest_value process_group "$bootstrap_stage3_probe_receipt_authority")" =             "$bootstrap_stage3_probe_required_group" ] || return 1
+    fi
+}
+
+bootstrap_stage3_verify_frontend_group_status() {
+    [ "$#" = 9 ] || return 1
     bootstrap_stage3_frontend_status_file=$1
     bootstrap_stage3_frontend_status_display=$2
     bootstrap_stage3_frontend_log=$3
@@ -157,17 +318,22 @@ bootstrap_stage3_verify_frontend_status_receipt() {
     bootstrap_stage3_frontend_mode=$5
     bootstrap_stage3_frontend_backend=$6
     bootstrap_stage3_frontend_expected_sha=$7
-    bootstrap_stage3_frontend_reject() {
-        printf 'stage2-sanity-error: frontend-status role=%s failure=%s\n' \
-            "$1" "$2" >&2
-        return 1
-    }
+    bootstrap_stage3_frontend_profile=$8
+    bootstrap_stage3_frontend_collector_authority=$9
+    case "$bootstrap_stage3_frontend_profile" in
+      full|full-windows) bootstrap_stage3_frontend_schema=simple-candidate-frontend-status-v2 ;;
+      progress) bootstrap_stage3_frontend_schema=simple-candidate-frontend-status-v2 ;;
+      remaining) bootstrap_stage3_frontend_schema=simple-candidate-frontend-remaining-status-v1 ;;
+      *) return 1 ;;
+    esac
     [ -f "$bootstrap_stage3_frontend_status_file" ] &&
         [ ! -L "$bootstrap_stage3_frontend_status_file" ] ||
         bootstrap_stage3_frontend_reject outer status-authority || return 1
+    if [ "$bootstrap_stage3_frontend_profile" != remaining ]; then
     [ -f "$bootstrap_stage3_frontend_log" ] &&
         [ ! -L "$bootstrap_stage3_frontend_log" ] ||
         bootstrap_stage3_frontend_reject outer log-authority || return 1
+    fi
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_frontend_status_file")" = \
         "$bootstrap_stage3_frontend_expected_sha" ] ||
         bootstrap_stage3_frontend_reject outer status-sha-mismatch || return 1
@@ -179,13 +345,27 @@ bootstrap_stage3_verify_frontend_status_receipt() {
     done
     [ "$(bootstrap_stage3_manifest_value schema \
         "$bootstrap_stage3_frontend_status_file")" = \
-        simple-candidate-frontend-status-v2 ] || bootstrap_stage3_frontend_reject outer schema || return 1
+        "$bootstrap_stage3_frontend_schema" ] || bootstrap_stage3_frontend_reject outer schema || return 1
+    case "$bootstrap_stage3_frontend_profile" in
+      progress)
+        [ "$bootstrap_stage3_frontend_mode" = 1 ] || return 1
+        [ "$(bootstrap_stage3_manifest_value result "$bootstrap_stage3_frontend_status_file")" = fail ] || return 1
+        [ "$(bootstrap_stage3_manifest_value probe "$bootstrap_stage3_frontend_status_file")" = stage2-module-path-naming-build ] || return 1
+        bootstrap_stage3_frontend_failure=$(bootstrap_stage3_manifest_value raw_status "$bootstrap_stage3_frontend_status_file") || return 1
+        printf '%s\n' "$bootstrap_stage3_frontend_failure" | grep -Eq '^[1-9][0-9]*$' || return 1
+        [ "$bootstrap_stage3_frontend_failure" -le 255 ] || return 1
+        [ "$(bootstrap_stage3_manifest_value stage2_module_path_naming_raw_status "$bootstrap_stage3_frontend_status_file")" = "$bootstrap_stage3_frontend_failure" ] || return 1
+        [ "$(bootstrap_stage3_manifest_value hello_world_positional_raw_status "$bootstrap_stage3_frontend_status_file")" = not-run ] || return 1
+        ;;
+      *)
     [ "$(bootstrap_stage3_manifest_value result \
         "$bootstrap_stage3_frontend_status_file")" = pass ] || bootstrap_stage3_frontend_reject outer result || return 1
     [ "$(bootstrap_stage3_manifest_value probe \
         "$bootstrap_stage3_frontend_status_file")" = complete ] || bootstrap_stage3_frontend_reject outer probe || return 1
     [ "$(bootstrap_stage3_manifest_value raw_status \
         "$bootstrap_stage3_frontend_status_file")" = 0 ] || bootstrap_stage3_frontend_reject outer raw-status || return 1
+        ;;
+    esac
     [ "$(bootstrap_stage3_manifest_value bootstrap_mode \
         "$bootstrap_stage3_frontend_status_file")" = \
         "$bootstrap_stage3_frontend_mode" ] || bootstrap_stage3_frontend_reject outer mode || return 1
@@ -195,147 +375,361 @@ bootstrap_stage3_verify_frontend_status_receipt() {
     [ "$(bootstrap_stage3_manifest_value log_path \
         "$bootstrap_stage3_frontend_status_file")" = \
         "$bootstrap_stage3_frontend_log_display" ] || bootstrap_stage3_frontend_reject outer legacy-log || return 1
+    case "$bootstrap_stage3_frontend_profile" in
+      full) ;;
+      *) case "$bootstrap_stage3_frontend_backend" in llvm|cranelift) ;; *) return 1 ;; esac ;;
+    esac
     bootstrap_stage3_sanity_frontend_seen=${bootstrap_stage3_sanity_frontend_seen:-' '}
-    for bootstrap_stage3_frontend_probe in p2_add stage2_mir_retention \
-        stage2_module_path_naming hello_world_positional; do
-        bootstrap_stage3_probe_log=$(bootstrap_stage3_manifest_value \
-            "${bootstrap_stage3_frontend_probe}_log_path" \
-            "$bootstrap_stage3_frontend_status_file") || return 1
-        bootstrap_stage3_probe_log_sha=$(bootstrap_stage3_manifest_value \
-            "${bootstrap_stage3_frontend_probe}_log_sha256" \
-            "$bootstrap_stage3_frontend_status_file") || return 1
-        bootstrap_stage3_probe_receipt=$(bootstrap_stage3_manifest_value \
-            "${bootstrap_stage3_frontend_probe}_collector_receipt_path" \
-            "$bootstrap_stage3_frontend_status_file") || return 1
-        bootstrap_stage3_probe_receipt_sha=$(bootstrap_stage3_manifest_value \
-            "${bootstrap_stage3_frontend_probe}_collector_receipt_sha256" \
-            "$bootstrap_stage3_frontend_status_file") || return 1
-        bootstrap_stage3_probe_raw=$(bootstrap_stage3_manifest_value \
-            "${bootstrap_stage3_frontend_probe}_raw_status" \
-            "$bootstrap_stage3_frontend_status_file") || return 1
-        [ "$bootstrap_stage3_probe_raw" = 0 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" raw-status || return 1
-        case "$bootstrap_stage3_frontend_probe" in
-          p2_add)
-            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display
-            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log ;;
-          stage2_mir_retention)
-            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.stage2-mir-retention
-            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.stage2-mir-retention ;;
-          stage2_module_path_naming)
-            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.stage2-module-path-naming
-            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.stage2-module-path-naming ;;
-          hello_world_positional)
-            bootstrap_stage3_expected_probe_log=$bootstrap_stage3_frontend_log_display.hello-world-positional
-            bootstrap_stage3_probe_log_authority=$bootstrap_stage3_frontend_log.hello-world-positional ;;
-        esac
-        bootstrap_stage3_expected_probe_receipt=$bootstrap_stage3_expected_probe_log.bounded.env
-        bootstrap_stage3_probe_receipt_authority=$bootstrap_stage3_probe_log_authority.bounded.env
-        [ "$bootstrap_stage3_probe_log" = "$bootstrap_stage3_expected_probe_log" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" canonical-log || return 1
-        [ "$bootstrap_stage3_probe_receipt" = \
-            "$bootstrap_stage3_expected_probe_receipt" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" canonical-receipt || return 1
-        for bootstrap_stage3_frontend_artifact in \
-            "$bootstrap_stage3_probe_log" "$bootstrap_stage3_probe_receipt"; do
-            if [ "$bootstrap_stage3_frontend_artifact" = \
-                "$bootstrap_stage3_probe_log" ]; then
-                bootstrap_stage3_frontend_artifact_role=log
-            else
-                bootstrap_stage3_frontend_artifact_role=receipt
-            fi
-            case "$bootstrap_stage3_sanity_frontend_seen" in
-              *" $bootstrap_stage3_frontend_artifact "*) bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" "uniqueness-$bootstrap_stage3_frontend_artifact_role"; return 1 ;;
-            esac
-            bootstrap_stage3_sanity_frontend_seen=\
-"$bootstrap_stage3_sanity_frontend_seen$bootstrap_stage3_frontend_artifact "
+    bootstrap_stage3_frontend_required_group=windows-job
+    case "$bootstrap_stage3_frontend_profile" in
+      full) bootstrap_stage3_frontend_required_group= ;;
+      remaining)
+        [ "$bootstrap_stage3_frontend_mode" = 1 ] || return 1
+        [ "$(bootstrap_stage3_manifest_value checks_run "$bootstrap_stage3_frontend_status_file")" = 2 ] || return 1
+        for bootstrap_stage3_frontend_skipped in p2_add stage2_mir_retention; do
+            bootstrap_stage3_sanity_expect "${bootstrap_stage3_frontend_skipped}_raw_status" \
+                "$bootstrap_stage3_frontend_status_file" not-run || return 1
+            for bootstrap_stage3_frontend_skipped_field in log_path log_sha256 collector_receipt_path collector_receipt_sha256; do
+                bootstrap_stage3_sanity_expect "${bootstrap_stage3_frontend_skipped}_${bootstrap_stage3_frontend_skipped_field}" \
+                    "$bootstrap_stage3_frontend_status_file" - || return 1
+            done
         done
-        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_probe_log_authority" ||
-            bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" safe-regular-log || return 1
-        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_probe_receipt_authority" ||
-            bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" safe-regular-receipt || return 1
-        for bootstrap_stage3_frontend_sha in \
-            "$bootstrap_stage3_probe_log_sha" \
-            "$bootstrap_stage3_probe_receipt_sha"; do
-            printf '%s\n' "$bootstrap_stage3_frontend_sha" |
-                grep -Eq '^[0-9a-f]{64}$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" sha-syntax || return 1
+        for bootstrap_stage3_frontend_run in naming positional; do
+            [ "$(bootstrap_stage3_manifest_value "${bootstrap_stage3_frontend_run}_run_status" "$bootstrap_stage3_frontend_status_file")" = 0 ] || return 1
         done
-        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_probe_log_authority")" = "$bootstrap_stage3_probe_log_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" log-sha-mismatch || return 1
-        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_receipt_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" receipt-sha-mismatch || return 1
-        for bootstrap_stage3_collector_key in schema status reason raw_status \
-            max_bytes bytes_captured timeout_seconds term_grace_seconds \
-            combined_stream process_group artifact_limit log_leaf log_sha256; do
-            bootstrap_stage3_manifest_value "$bootstrap_stage3_collector_key" \
-                "$bootstrap_stage3_probe_receipt_authority" >/dev/null || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" "bounded-missing-$bootstrap_stage3_collector_key" || return 1
-        done
-        [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_probe_receipt_authority")" = simple-bounded-process-log-v1 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-schema || return 1
-        [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_probe_receipt_authority")" = complete ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-status || return 1
-        [ "$(bootstrap_stage3_manifest_value reason "$bootstrap_stage3_probe_receipt_authority")" = child-exit ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-reason || return 1
-        [ "$(bootstrap_stage3_manifest_value raw_status "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_raw" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-raw || return 1
-        [ "$(bootstrap_stage3_manifest_value log_sha256 "$bootstrap_stage3_probe_receipt_authority")" = "$bootstrap_stage3_probe_log_sha" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-log-sha || return 1
-        [ "$(bootstrap_stage3_manifest_value log_leaf "$bootstrap_stage3_probe_receipt_authority")" = \
-            "${bootstrap_stage3_probe_log##*/}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-leaf || return 1
-        [ "$(bootstrap_stage3_manifest_value combined_stream "$bootstrap_stage3_probe_receipt_authority")" = stdout-stderr ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-stream || return 1
-        case "$(bootstrap_stage3_manifest_value process_group "$bootstrap_stage3_probe_receipt_authority")" in
-          setsid) ;;
-          setpgid)
-            [ -n "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" ] &&
-              [ -n "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" ] &&
-              "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-session-contract || return 1
-            ;;
-          windows-job)
-            bootstrap_stage3_collector_helper=${bootstrap_stage3_sanity_root:-${BOOTSTRAP_STAGE3_VERSION_ROOT:-}}/scripts/bootstrap/run-process-group-bounded-log-windows.py
-            [ -f "$bootstrap_stage3_collector_helper" ] && [ ! -L "$bootstrap_stage3_collector_helper" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-helper-authority || return 1
-            [ "$(bootstrap_stage3_manifest_value helper_sha256 "$bootstrap_stage3_probe_receipt_authority")" = \
-                "$(bootstrap_stage3_hash_file "$bootstrap_stage3_collector_helper")" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-helper-sha || return 1
-            [ "$(bootstrap_stage3_manifest_value native_exit_status "$bootstrap_stage3_probe_receipt_authority")" = 0 ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-native-exit || return 1
-            [ "$(bootstrap_stage3_manifest_value termination "$bootstrap_stage3_probe_receipt_authority")" = job-terminate ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-termination || return 1
-            ;;
-          *) bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-group; return 1 ;;
-        esac
-        [ "$(bootstrap_stage3_manifest_value artifact_limit "$bootstrap_stage3_probe_receipt_authority")" = none ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-artifact-limit || return 1
-        bootstrap_stage3_collector_max=$(bootstrap_stage3_manifest_value \
-            max_bytes "$bootstrap_stage3_probe_receipt_authority") || return 1
-        bootstrap_stage3_collector_bytes=$(bootstrap_stage3_manifest_value \
-            bytes_captured "$bootstrap_stage3_probe_receipt_authority") || return 1
-        bootstrap_stage3_collector_timeout=$(bootstrap_stage3_manifest_value \
-            timeout_seconds "$bootstrap_stage3_probe_receipt_authority") || return 1
-        bootstrap_stage3_collector_grace=$(bootstrap_stage3_manifest_value \
-            term_grace_seconds "$bootstrap_stage3_probe_receipt_authority") || return 1
-        for bootstrap_stage3_positive in "$bootstrap_stage3_collector_max" \
-            "$bootstrap_stage3_collector_timeout"; do
-            printf '%s\n' "$bootstrap_stage3_positive" |
-                grep -Eq '^[1-9][0-9]*$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-positive-syntax || return 1
-        done
-        for bootstrap_stage3_nonnegative in \
-            "$bootstrap_stage3_collector_bytes" \
-            "$bootstrap_stage3_collector_grace"; do
-            printf '%s\n' "$bootstrap_stage3_nonnegative" |
-                grep -Eq '^[0-9]+$' || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-nonnegative-syntax || return 1
-        done
-        [ "$bootstrap_stage3_collector_max" = \
-            "${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-4194304}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-max-config || return 1
-        [ "$bootstrap_stage3_collector_timeout" = \
-            "${COMPILER_BUILD_TIMEOUT_SECONDS:-180}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-timeout-config || return 1
-        [ "$bootstrap_stage3_collector_grace" = \
-            "${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-grace-config || return 1
-        [ "$bootstrap_stage3_collector_bytes" -le \
-            "$bootstrap_stage3_collector_max" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-over-cap || return 1
-        # `$(( ))` normalises wc's output before comparing. BSD/macOS `wc -c <f`
-        # right-pads its count ("     653"), so the string compare this used to
-        # be was false for EVERY probe on macOS even when the numbers matched --
-        # the byte equality itself is unchanged and still fails closed on a
-        # truncated or substituted log. GNU wc does not pad, which is why this
-        # only ever fired here. See doc/08_tracking/bug/
-        # stage2_sanity_receipt_bounded_bytes_authority_path_2026-09-13.md
-        bootstrap_stage3_probe_log_actual_bytes=$((
-            $(wc -c <"$bootstrap_stage3_probe_log_authority")
-        )) || return 1
-        [ "$bootstrap_stage3_collector_bytes" = \
-            "$bootstrap_stage3_probe_log_actual_bytes" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-bytes || return 1
+        bootstrap_stage3_frontend_naming_sha=$(printf 'app.cli.bootstrap_main\ncompiler.driver.driver\napp.cli.main' | bootstrap_stage3_hash_stream) || return 1
+        [ "$(bootstrap_stage3_manifest_value naming_output_sha256 "$bootstrap_stage3_frontend_status_file")" = "$bootstrap_stage3_frontend_naming_sha" ] || return 1
+        [ "$(bootstrap_stage3_manifest_value positional_output_sha256 "$bootstrap_stage3_frontend_status_file")" = "$(printf hello | bootstrap_stage3_hash_stream)" ] || return 1
+        ;;
+    esac
+    case "$bootstrap_stage3_frontend_profile" in
+      progress) bootstrap_stage3_frontend_probes='p2_add stage2_mir_retention' ;;
+      remaining) bootstrap_stage3_frontend_probes='stage2_module_path_naming hello_world_positional' ;;
+      *) bootstrap_stage3_frontend_probes='p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional' ;;
+    esac
+    for bootstrap_stage3_frontend_probe in $bootstrap_stage3_frontend_probes; do
+        bootstrap_stage3_verify_frontend_probe_artifacts \
+            "$bootstrap_stage3_frontend_status_file" "$bootstrap_stage3_frontend_expected_sha" \
+            "$bootstrap_stage3_frontend_log" "$bootstrap_stage3_frontend_log_display" \
+            "$bootstrap_stage3_frontend_probe" "$bootstrap_stage3_frontend_collector_authority" \
+            "$bootstrap_stage3_frontend_required_group" || return 1
     done
-    [ "$(bootstrap_stage3_manifest_value p2_add_log_path "$bootstrap_stage3_frontend_status_file")" = "$bootstrap_stage3_frontend_log_display" ] || return 1
+    if [ "$bootstrap_stage3_frontend_profile" != remaining ]; then
+        [ "$(bootstrap_stage3_manifest_value p2_add_log_path "$bootstrap_stage3_frontend_status_file")" = "$bootstrap_stage3_frontend_log_display" ] || return 1
+    fi
+
 }
+
+bootstrap_stage3_verify_frontend_status_receipt() {
+    [ "$#" = 7 ] || return 1
+    bootstrap_stage3_verify_frontend_group_status "$@" full \
+        "${bootstrap_stage3_sanity_root:-${BOOTSTRAP_STAGE3_VERSION_ROOT:-}}/scripts/bootstrap/run-process-group-bounded-log-windows.py"
+}
+
+# A failed aggregate is not promoted. Only the two completed progress rows
+# are eligible for reuse, after the enclosing owner authenticates its tuple.
+bootstrap_stage3_verify_frontend_progress_receipt() {
+    [ "$#" = 8 ] || return 1
+    bootstrap_stage3_progress_collector=${8}
+    bootstrap_stage3_verify_frontend_group_status \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" progress "$bootstrap_stage3_progress_collector"
+}
+
+bootstrap_stage3_verify_frontend_remaining_receipt() {
+    [ "$#" = 8 ] || return 1
+    bootstrap_stage3_remaining_collector=${8}
+    bootstrap_stage3_verify_frontend_group_status \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" remaining "$bootstrap_stage3_remaining_collector"
+}
+
+# The remaining owner validates original history before skipping a criterion.
+# This function never marks the failed aggregate as passed.
+bootstrap_stage3_verify_frontend_prior_inputs() (
+    [ "$#" = 9 ] || return 1
+    COMPILER_BUILD_TIMEOUT_SECONDS=1200
+    COMPILER_CHECK_KILL_GRACE_SECONDS=1
+    CANDIDATE_FRONTEND_MAX_LOG_BYTES=4194304
+    bootstrap_stage3_prior_candidate=$1
+    bootstrap_stage3_prior_root=$2
+    bootstrap_stage3_prior_file=$3
+    bootstrap_stage3_prior_display=$4
+    bootstrap_stage3_prior_parent=$5
+    bootstrap_stage3_prior_launch=$6
+    bootstrap_stage3_prior_caller=$7
+    bootstrap_stage3_prior_backend=$8
+    bootstrap_stage3_prior_owner=$9
+    # Archived adapted owner profile, not receipt-selected trust policy. These
+    # anchors identify the independently reviewed historical execution whose
+    # failed aggregate is retained. No other historical owner is admitted here.
+    [ "$bootstrap_stage3_prior_backend" = llvm ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_file")" = \
+        658b0633f9f0ba46c7ea5f3b494ad76372c88119a98feff8617ce761e6526f9b ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_caller")" = \
+        f85e857ce0b7965f646d54e5c5d81fe7637e4ad540b0ce96aae3e406673829a3 ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_launch")" = \
+        0c02f7177a4ec46dbd12f211a87eb28e7f01076bb6d65ae0e9f5a379197367ae ] || return 1
+    for bootstrap_stage3_prior_owner_binding in \
+        canonical-functions.shs:aa38b14ee2b299c643d6b39db985b12af9e979781507ad8f832437a4561998a6 \
+        run-sanity.sh:26143862099e60b885404df48e6d1e083cac8a1c384ad6c866ce4db4b842b7e6 \
+        verify-version-proof.py:659a1261e5f79d302b2f15bdcde78f295a0dbde1c0e6ec4d70e5a8e000064bf8; do
+        bootstrap_stage3_prior_owner_file=$bootstrap_stage3_prior_owner/${bootstrap_stage3_prior_owner_binding%%:*}
+        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_prior_owner_file" || return 1
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_owner_file")" = \
+            "${bootstrap_stage3_prior_owner_binding#*:}" ] || return 1
+    done
+    bootstrap_stage3_sanity_display_absolute "$bootstrap_stage3_prior_display" || return 1
+    for bootstrap_stage3_prior_owned in "$bootstrap_stage3_prior_candidate" \
+        "$bootstrap_stage3_prior_file" "$bootstrap_stage3_prior_launch" "$bootstrap_stage3_prior_caller"; do
+        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_prior_owned" || return 1
+    done
+    bootstrap_stage3_prior_candidate_sha=$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_candidate") || return 1
+    bootstrap_stage3_prior_head=$(git -C "$bootstrap_stage3_prior_root" rev-parse HEAD) || return 1
+    [ "$bootstrap_stage3_prior_head" = c9fb6afdd4f11febdd78a7398df3543324cd5300 ] || return 1
+    [ "$bootstrap_stage3_prior_candidate_sha" = \
+        b54b12f3b504e062f65482da58a488f94dad337a8e53aeec596731bab16ecd98 ] || return 1
+    bootstrap_stage3_prior_collector=$bootstrap_stage3_prior_root/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    bootstrap_stage3_prior_frontend=$bootstrap_stage3_prior_root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs
+    for bootstrap_stage3_prior_module in "$bootstrap_stage3_prior_collector" "$bootstrap_stage3_prior_frontend"; do
+        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_prior_module" || return 1
+        bootstrap_stage3_prior_relative=${bootstrap_stage3_prior_module#"$bootstrap_stage3_prior_root/"}
+        bootstrap_stage3_prior_committed_sha=$(git -C "$bootstrap_stage3_prior_root" show \
+            "$bootstrap_stage3_prior_head:$bootstrap_stage3_prior_relative" | bootstrap_stage3_hash_stream) || return 1
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_module")" = "$bootstrap_stage3_prior_committed_sha" ] || return 1
+    done
+    for bootstrap_stage3_prior_binding in \
+        "schema:llvm-phase2-canonical-sanity-v1" \
+        "source_head:$bootstrap_stage3_prior_head" \
+        "candidate_sha256:$bootstrap_stage3_prior_candidate_sha" \
+        "helper_sha256:$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_collector")" \
+        "caller_sha256:$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_caller")"; do
+        bootstrap_stage3_sanity_expect "${bootstrap_stage3_prior_binding%%:*}" \
+            "$bootstrap_stage3_prior_launch" "${bootstrap_stage3_prior_binding#*:}" || return 1
+    done
+    bootstrap_stage3_prior_version=$(bootstrap_stage3_canonical_version "$bootstrap_stage3_prior_root") || return 1
+    for bootstrap_stage3_prior_binding in \
+        "schema:simple-bootstrap-sanity-evidence-v1" "status:fail" \
+        "candidate_sha256_before:$bootstrap_stage3_prior_candidate_sha" \
+        "candidate_sha256_after:$bootstrap_stage3_prior_candidate_sha" \
+        "version_status:0" "version_expect_status:0" "version_match_status:0" \
+        "version_expected:$bootstrap_stage3_prior_version" \
+        "version_output:simple-bootstrap $bootstrap_stage3_prior_version" \
+        "unsupported_status:1" "unsupported_match_status:0" \
+        "frontend_smoke_bootstrap0_raw_status:0" "frontend_smoke_bootstrap1_ran:true" \
+        "frontend_smoke_backend:$bootstrap_stage3_prior_backend"; do
+        bootstrap_stage3_sanity_expect "${bootstrap_stage3_prior_binding%%:*}" \
+            "$bootstrap_stage3_prior_file" "${bootstrap_stage3_prior_binding#*:}" || return 1
+    done
+    bootstrap_stage3_prior_base=$bootstrap_stage3_prior_parent/${bootstrap_stage3_prior_display##*/}
+    bootstrap_stage3_prior_outer=$bootstrap_stage3_prior_parent/sanity.receipt.env
+    bootstrap_stage3_prior_outer_log=$bootstrap_stage3_prior_parent/sanity.log
+    for bootstrap_stage3_prior_owned in "$bootstrap_stage3_prior_outer" "$bootstrap_stage3_prior_outer_log"; do
+        bootstrap_stage3_sanity_safe_regular "$bootstrap_stage3_prior_owned" || return 1
+    done
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_outer")" = \
+        0175927bdb88fdbf78bddd8739dba8c391bd05fc012554d2e22f55d30dac08c9 ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_prior_outer_log")" = \
+        65d2c4a60d0932aff33ae50f02a48973260517c19a7de80dc8e8d16f005ef39b ] || return 1
+    [ "$(( $(wc -c <"$bootstrap_stage3_prior_outer_log") ))" = 3356 ] || return 1
+    for bootstrap_stage3_prior_binding in \
+        schema:simple-bounded-process-log-v1 status:complete reason:child-exit \
+        raw_status:1 native_exit_status:1 process_group:windows-job \
+        combined_stream:stdout-stderr root_exit_policy:wait-job job_remnants_terminated:no \
+        max_bytes:134217728 bytes_captured:3356 timeout_seconds:7200 term_grace_seconds:5 \
+        helper_sha256:611d5d19ec6b6176ae6314b7789cadbff74d2690ef3f5697ed622bd626608822 \
+        log_leaf:sanity.log \
+        log_sha256:65d2c4a60d0932aff33ae50f02a48973260517c19a7de80dc8e8d16f005ef39b; do
+        bootstrap_stage3_sanity_expect "${bootstrap_stage3_prior_binding%%:*}" \
+            "$bootstrap_stage3_prior_outer" "${bootstrap_stage3_prior_binding#*:}" || return 1
+    done
+    for bootstrap_stage3_prior_mode in 0 1; do
+        bootstrap_stage3_prior_status=$bootstrap_stage3_prior_base.frontend-bootstrap-$bootstrap_stage3_prior_mode.status.env
+        bootstrap_stage3_prior_log=$bootstrap_stage3_prior_base.frontend-bootstrap-$bootstrap_stage3_prior_mode.log
+        bootstrap_stage3_prior_status_display=$bootstrap_stage3_prior_display.frontend-bootstrap-$bootstrap_stage3_prior_mode.status.env
+        bootstrap_stage3_prior_log_display=$bootstrap_stage3_prior_display.frontend-bootstrap-$bootstrap_stage3_prior_mode.log
+        bootstrap_stage3_sanity_expect "frontend_smoke_bootstrap${bootstrap_stage3_prior_mode}_status_path" \
+            "$bootstrap_stage3_prior_file" "$bootstrap_stage3_prior_status_display" || return 1
+        bootstrap_stage3_sanity_expect "frontend_smoke_bootstrap${bootstrap_stage3_prior_mode}_log_path" \
+            "$bootstrap_stage3_prior_file" "$bootstrap_stage3_prior_log_display" || return 1
+        bootstrap_stage3_prior_status_sha=$(bootstrap_stage3_manifest_value \
+            "frontend_smoke_bootstrap${bootstrap_stage3_prior_mode}_status_sha256" "$bootstrap_stage3_prior_file") || return 1
+        if [ "$bootstrap_stage3_prior_mode" = 0 ]; then bootstrap_stage3_prior_profile=full-windows
+        else bootstrap_stage3_prior_profile=progress; fi
+        bootstrap_stage3_verify_frontend_group_status \
+            "$bootstrap_stage3_prior_status" "$bootstrap_stage3_prior_status_display" \
+            "$bootstrap_stage3_prior_log" "$bootstrap_stage3_prior_log_display" \
+            "$bootstrap_stage3_prior_mode" "$bootstrap_stage3_prior_backend" \
+            "$bootstrap_stage3_prior_status_sha" "$bootstrap_stage3_prior_profile" \
+            "$bootstrap_stage3_prior_collector" || return 1
+    done
+)
+
+# Physical Windows facade authority, independent of the frozen compiler source.
+# Descriptor relocation is intentionally not an authority for this Windows-only
+# archived profile. Ordinary legacy sanity retains its descriptor contract.
+bootstrap_stage3_remaining_owner_root() (
+    [ "${bootstrap_stage3_facade_descriptor_mode:-1}" = 0 ] || return 1
+    case "$(uname -s 2>/dev/null || echo unknown)" in MSYS*|MINGW*|CYGWIN*) ;; *) return 1 ;; esac
+    CDPATH= cd -- "$bootstrap_stage3_facade_dir/../../.." && pwd -P
+)
+
+bootstrap_stage3_verify_remaining_job() (
+    [ "$#" = 3 ] || return 1
+    receipt=$1 log=$2 collector=$3
+    for owned in "$receipt" "$log" "$collector"; do
+        bootstrap_stage3_sanity_safe_regular "$owned" || return 1
+    done
+    for binding in schema:simple-bounded-process-log-v1 status:complete reason:child-exit \
+        raw_status:0 native_exit_status:0 process_group:windows-job combined_stream:stdout-stderr \
+        termination:job-terminate artifact_limit:none root_exit_policy:wait-job \
+        job_remnants_terminated:no max_bytes:134217728 timeout_seconds:7200 term_grace_seconds:5 \
+        "helper_sha256:$(bootstrap_stage3_hash_file "$collector")" \
+        "log_leaf:${log##*/}" "log_sha256:$(bootstrap_stage3_hash_file "$log")"; do
+        bootstrap_stage3_sanity_expect "${binding%%:*}" "$receipt" "${binding#*:}" || return 1
+    done
+    bytes=$(bootstrap_stage3_manifest_value bytes_captured "$receipt") || return 1
+    printf '%s\n' "$bytes" | grep -Eq '^[0-9]+$' || return 1
+    [ "$bytes" -le 134217728 ] && [ "$bytes" = "$(( $(wc -c <"$log") ))" ] || return 1
+)
+
+# The 21-argument admission APIs keep their existing path roles. Component
+# evidence additionally binds their supplied immutable input snapshots; it
+# cannot be combined with a different compiler/runtime/tool/build command.
+bootstrap_stage3_verify_composed_snapshot() (
+    [ "$#" = 3 ] || return 1
+    role=$1 file=$2 composed=$3
+    case "$role" in
+      source) expected=10b375d10c1ca158080db51571ec9b9fc2652bfd95a21bb9deda22f56347ff6c ;;
+      runtime) expected=1e7d11ef841f75a6c40f92fb2804a8a8ac16293e7b7e087af8232704c1460590 ;;
+      tool) expected=775bc0a83a51a3e74f045b578952942f77baaa38ce158b42c960c8d6ee2f253b ;;
+      *) return 1 ;;
+    esac
+    bootstrap_stage3_sanity_safe_regular "$file" || return 1
+    [ "$(bootstrap_stage3_hash_file "$file")" = "$expected" ] || return 1
+    for stage in before after; do
+        bootstrap_stage3_sanity_expect "${role}_snapshot_sha256_$stage" "$composed" "$expected" || return 1
+    done
+)
+
+bootstrap_stage3_verify_composed_sanity_input_tuple() (
+    [ "$#" = 5 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-components-v1 ] || return 0
+    bootstrap_stage3_verify_composed_snapshot source "$2" "$1" || return 1
+    bootstrap_stage3_verify_composed_snapshot runtime "$3" "$1" || return 1
+    bootstrap_stage3_verify_composed_snapshot tool "$4" "$1" || return 1
+    [ "$5" = c7a214d46cfcfea36b2793299d52410dc2b70b28411ce20a1870b733f092ea07 ] || return 1
+    bootstrap_stage3_sanity_expect build_args_sha256 "$1" "$5"
+)
+
+bootstrap_stage3_verify_composed_sanity_receipt() (
+    [ "$#" = 5 ] || return 1
+    composed=$1 display=$2 parent=$3 candidate=$4 source_root=$5
+    bootstrap_stage3_sanity_safe_regular "$composed" || return 1
+    bootstrap_stage3_sanity_display_absolute "$display" || return 1
+    bootstrap_stage3_sanity_expect schema "$composed" simple-bootstrap-sanity-components-v1 || return 1
+    bootstrap_stage3_sanity_expect profile "$composed" archived-llvm-sanity-c9fb-v1 || return 1
+    owner=$(bootstrap_stage3_remaining_owner_root) || return 1
+    collector=$owner/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    frontend=$owner/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs
+    runner=$owner/scripts/check/run-stage2-sanity-remaining.shs
+    for owned in "$collector" "$frontend" "$runner" "$bootstrap_stage3_sanity_module"; do
+        bootstrap_stage3_sanity_safe_regular "$owned" || return 1
+    done
+    [ "$(bootstrap_stage3_hash_file "$collector")" = cfec29958e4e2b1ad07fed80326a0df9ce07f3cbf0f5aaefcf65fa5fa40b3b27 ] || return 1
+    for binding in schema:simple-bootstrap-sanity-components-v1 status:pass \
+        profile:archived-llvm-sanity-c9fb-v1 backend:llvm remaining_checks_run:2 \
+        old_aggregate_status:fail \
+        "owner_sanity_sha256:$(bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_module")" \
+        "owner_frontend_sha256:$(bootstrap_stage3_hash_file "$frontend")" \
+        "owner_runner_sha256:$(bootstrap_stage3_hash_file "$runner")" \
+        owner_collector_sha256:cfec29958e4e2b1ad07fed80326a0df9ce07f3cbf0f5aaefcf65fa5fa40b3b27 \
+        candidate_sha256_before:b54b12f3b504e062f65482da58a488f94dad337a8e53aeec596731bab16ecd98 \
+        candidate_sha256_after:b54b12f3b504e062f65482da58a488f94dad337a8e53aeec596731bab16ecd98 \
+        old_sanity_sha256:658b0633f9f0ba46c7ea5f3b494ad76372c88119a98feff8617ce761e6526f9b; do
+        bootstrap_stage3_sanity_expect "${binding%%:*}" "$composed" "${binding#*:}" || return 1
+    done
+    history_display=$(bootstrap_stage3_manifest_value old_sanity_display "$composed") || return 1
+    bootstrap_stage3_verify_frontend_prior_inputs "$candidate" "$source_root" \
+        "$parent/history/stage2-sanity.env" "$history_display" "$parent/history" \
+        "$parent/history/launch.env" "$parent/history-caller.shs" llvm "$parent/history-owner" || return 1
+    base=$parent/${display##*/}
+    for stage in before after; do
+        bootstrap_stage3_verify_composed_sanity_input_tuple "$composed" \
+            "$base.source-$stage.txt" "$base.runtime-$stage.txt" "$base.tool-$stage.txt" \
+            c7a214d46cfcfea36b2793299d52410dc2b70b28411ce20a1870b733f092ea07 || return 1
+    done
+    remaining=$base.remaining.status.env
+    remaining_sha=$(bootstrap_stage3_manifest_value remaining_status_sha256 "$composed") || return 1
+    bootstrap_stage3_verify_frontend_remaining_receipt "$remaining" "$display.remaining.status.env" \
+        "$base.remaining.log" "$display.remaining.log" 1 llvm "$remaining_sha" "$collector" || return 1
+    for binding in prior_sanity_sha256:658b0633f9f0ba46c7ea5f3b494ad76372c88119a98feff8617ce761e6526f9b \
+        candidate_sha256_before:b54b12f3b504e062f65482da58a488f94dad337a8e53aeec596731bab16ecd98 \
+        candidate_sha256_after:b54b12f3b504e062f65482da58a488f94dad337a8e53aeec596731bab16ecd98; do
+        bootstrap_stage3_sanity_expect "${binding%%:*}" "$remaining" "${binding#*:}" || return 1
+    done
+    bootstrap_stage3_verify_remaining_job "$base.remaining-job.env" "$base.remaining-job.log" "$collector" || return 1
+    bootstrap_stage3_sanity_expect remaining_job_receipt_sha256 "$composed" \
+        "$(bootstrap_stage3_hash_file "$base.remaining-job.env")" || return 1
+    bootstrap_stage3_sanity_expect remaining_job_log_sha256 "$composed" \
+        "$(bootstrap_stage3_hash_file "$base.remaining-job.log")" || return 1
+    marker="remaining-criteria: checks=2 status_sha256=$remaining_sha"
+    [ "$(grep -Fxc "$marker" "$base.remaining-job.log")" = 1 ] || return 1
+)
+
+# Publish a distinct aggregate only after authenticated historical components,
+# two actual remaining criteria, and their finalized native Job have passed.
+# Snapshot authorities are the independently measured before/after files made
+# by the canonical remaining runner, never receipt-selected expected policy.
+bootstrap_stage3_write_composed_sanity_receipt() (
+    [ "$#" = 13 ] || return 1
+    output=$1 display=$2 parent=$3 candidate=$4 source_root=$5 history_display=$6
+    source_before=$7 runtime_before=$8 tool_before=$9
+    source_after=${10} runtime_after=${11} tool_after=${12} args_sha=${13}
+    bootstrap_stage3_sanity_display_absolute "$display" || return 1
+    bootstrap_stage3_sanity_display_absolute "$history_display" || return 1
+    [ ! -e "$output" ] && [ ! -L "$output" ] || return 1
+    owner=$(bootstrap_stage3_remaining_owner_root) || return 1
+    base=$parent/${display##*/}
+    tmp=$output.tmp.$$
+    [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
+    trap 'rm -f "$tmp"' EXIT
+    {
+        echo schema=simple-bootstrap-sanity-components-v1
+        echo status=pass
+        echo profile=archived-llvm-sanity-c9fb-v1
+        echo backend=llvm
+        echo remaining_checks_run=2
+        echo old_aggregate_status=fail
+        echo "old_sanity_display=$history_display"
+        echo old_sanity_sha256=658b0633f9f0ba46c7ea5f3b494ad76372c88119a98feff8617ce761e6526f9b
+        echo "owner_sanity_sha256=$(bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_module")"
+        echo "owner_frontend_sha256=$(bootstrap_stage3_hash_file "$owner/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs")"
+        echo "owner_runner_sha256=$(bootstrap_stage3_hash_file "$owner/scripts/check/run-stage2-sanity-remaining.shs")"
+        echo "owner_collector_sha256=$(bootstrap_stage3_hash_file "$owner/scripts/bootstrap/run-process-group-bounded-log-windows.py")"
+        echo "candidate_sha256_before=$(bootstrap_stage3_hash_file "$candidate")"
+        echo "candidate_sha256_after=$(bootstrap_stage3_hash_file "$candidate")"
+        echo "source_snapshot_sha256_before=$(bootstrap_stage3_hash_file "$source_before")"
+        echo "source_snapshot_sha256_after=$(bootstrap_stage3_hash_file "$source_after")"
+        echo "runtime_snapshot_sha256_before=$(bootstrap_stage3_hash_file "$runtime_before")"
+        echo "runtime_snapshot_sha256_after=$(bootstrap_stage3_hash_file "$runtime_after")"
+        echo "tool_snapshot_sha256_before=$(bootstrap_stage3_hash_file "$tool_before")"
+        echo "tool_snapshot_sha256_after=$(bootstrap_stage3_hash_file "$tool_after")"
+        echo "build_args_sha256=$args_sha"
+        echo "remaining_status_sha256=$(bootstrap_stage3_hash_file "$base.remaining.status.env")"
+        echo "remaining_job_receipt_sha256=$(bootstrap_stage3_hash_file "$base.remaining-job.env")"
+        echo "remaining_job_log_sha256=$(bootstrap_stage3_hash_file "$base.remaining-job.log")"
+    } >"$tmp" || return 1
+    bootstrap_stage3_verify_composed_sanity_input_tuple "$tmp" "$source_before" "$runtime_before" "$tool_before" "$args_sha" || return 1
+    bootstrap_stage3_verify_composed_sanity_input_tuple "$tmp" "$source_after" "$runtime_after" "$tool_after" "$args_sha" || return 1
+    bootstrap_stage3_verify_composed_sanity_receipt "$tmp" "$display" "$parent" "$candidate" "$source_root" || return 1
+    ln "$tmp" "$output" || return 1
+)
 
 bootstrap_stage3_verify_sanity_evidence_receipt() (
     [ "$#" = 5 ] || return 1
+    if [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-components-v1 ]; then
+        bootstrap_stage3_verify_composed_sanity_receipt "$@"
+        return $?
+    fi
     bootstrap_stage3_sanity_file=$1
     bootstrap_stage3_sanity_display=$2
     bootstrap_stage3_sanity_companion_parent=$3
@@ -647,6 +1041,9 @@ bootstrap_stage3_write_stage2_admission_receipt() (
         "$bootstrap_stage3_admission_sanity_companion_parent" \
         "$bootstrap_stage3_admission_candidate" \
         "$bootstrap_stage3_admission_root" || return 1
+    bootstrap_stage3_verify_composed_sanity_input_tuple "$bootstrap_stage3_admission_sanity" \
+        "$bootstrap_stage3_admission_source" "$bootstrap_stage3_admission_runtime" \
+        "$bootstrap_stage3_admission_tool" "$bootstrap_stage3_admission_args_sha" || return 1
     bootstrap_stage3_verify_receiver_evidence_receipt \
         "$bootstrap_stage3_admission_receiver" "$bootstrap_stage3_admission_receiver_display" \
         "$bootstrap_stage3_admission_candidate" "$bootstrap_stage3_admission_candidate_display" \
@@ -766,6 +1163,9 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
         "$bootstrap_stage3_admission_sanity_companion_parent" \
         "$bootstrap_stage3_admission_candidate" \
         "$bootstrap_stage3_admission_root" || return 1
+    bootstrap_stage3_verify_composed_sanity_input_tuple "$bootstrap_stage3_admission_sanity" \
+        "$bootstrap_stage3_admission_source" "$bootstrap_stage3_admission_runtime" \
+        "$bootstrap_stage3_admission_tool" "$bootstrap_stage3_admission_args_sha" || return 1
     bootstrap_stage3_verify_receiver_evidence_receipt \
         "$bootstrap_stage3_admission_receiver" "$bootstrap_stage3_admission_receiver_display" \
         "$bootstrap_stage3_admission_candidate" "$bootstrap_stage3_admission_candidate_display" \
