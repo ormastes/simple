@@ -29,6 +29,63 @@ fn safe_collection_facts() -> CollectionPlanFacts:
     )
 
 describe "guarded collection physical plan selection":
+    it "rejects static sizes contradicting a hard bound before attributes or profiles":
+        for policy in ["moderate", "strict", "robust", "critical"]:
+            for attribute in ["auto", "linear", "hash", "ordered"]:
+                var facts = safe_collection_facts()
+                facts.policy = policy
+                facts.attribute = attribute
+                facts.static_size = 100
+                facts.hard_size_bound = 2
+                facts.profile_admitted = true
+                facts.profile_size_p95 = 2
+                facts.profile_lookups_p95 = 3
+                val decision = collection_plan_select(facts)
+                expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+                expect(decision.reason).to_equal("contradictory-size-bound")
+                expect(decision.evidence).to_equal("none")
+
+    it "rejects admitted profile sizes above a hard bound":
+        for policy in ["moderate", "strict", "robust", "critical"]:
+            for attribute in ["auto", "linear", "hash", "ordered"]:
+                var facts = safe_collection_facts()
+                facts.policy = policy
+                facts.attribute = attribute
+                facts.static_size = 2
+                facts.hard_size_bound = 2
+                facts.profile_admitted = true
+                facts.profile_size_p95 = 100
+                facts.profile_lookups_p95 = 3
+                val decision = collection_plan_select(facts)
+                expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+                expect(decision.reason).to_equal("contradictory-size-bound")
+
+    it "accepts exact and zero hard bounds with consistent evidence":
+        for size in [0, 2]:
+            var facts = safe_collection_facts()
+            facts.policy = "critical"
+            facts.static_size = size
+            facts.static_lookups = 3
+            facts.hard_size_bound = size
+            facts.profile_admitted = true
+            facts.profile_size_p95 = size
+            facts.profile_lookups_p95 = 3
+            val decision = collection_plan_select(facts)
+            expect(decision.selected).to_equal(CollectionPlanAlgorithm.Linear)
+            expect(decision.reason).to_equal("small-quiet-collection")
+
+    it "ignores stale unadmitted profile sizes when validating the hard bound":
+        var facts = safe_collection_facts()
+        facts.policy = "critical"
+        facts.static_size = 2
+        facts.static_lookups = 3
+        facts.hard_size_bound = 2
+        facts.profile_size_p95 = 100
+        facts.profile_lookups_p95 = 1000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Linear)
+        expect(decision.evidence).to_equal("static")
+
     it "refuses all substitutions before P0 correctness gates":
         var facts = safe_collection_facts()
         facts.p0_correctness_ready = false

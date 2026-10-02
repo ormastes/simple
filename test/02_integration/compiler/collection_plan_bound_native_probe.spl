@@ -1,0 +1,54 @@
+# Standalone diagnostic probe: invokes the real selector, not a copied model.
+# This proves selector admission only, not physical lowering or execution.
+use compiler.mir_opt.mir_opt.collection_plan_selection.{
+    CollectionPlanAlgorithm, collection_plan_unproven_facts, collection_plan_select
+}
+
+extern fn rt_exit(code: i32)
+
+fn require(condition: bool, message: text):
+    if not condition:
+        print "FAIL: {message}"
+        rt_exit(1)
+
+var facts = collection_plan_unproven_facts()
+facts.collection_kind = "set"
+facts.equality_pure = true
+facts.duplicate_semantics_preserved = true
+facts.order_insensitive = true
+facts.mutation_epoch_stable = true
+facts.key_hashable = true
+facts.key_orderable = true
+facts.target_has_hash = true
+facts.target_has_ordered = true
+facts.ordered_update_bound_proven = true
+facts.p0_correctness_ready = true
+facts.policy = "critical"
+facts.static_size = 100
+facts.hard_size_bound = 2
+facts.profile_admitted = true
+facts.profile_size_p95 = 2
+facts.profile_lookups_p95 = 3
+val contradictory_static = collection_plan_select(facts)
+require(contradictory_static.selected == CollectionPlanAlgorithm.Original, "contradictory static size must keep original")
+require(contradictory_static.reason == "contradictory-size-bound", "static contradiction reason")
+
+facts.static_size = 2
+facts.profile_size_p95 = 100
+val contradictory_profile = collection_plan_select(facts)
+require(contradictory_profile.selected == CollectionPlanAlgorithm.Original, "contradictory admitted profile must keep original")
+require(contradictory_profile.reason == "contradictory-size-bound", "profile contradiction reason")
+
+facts.profile_size_p95 = 2
+val exact_boundary = collection_plan_select(facts)
+require(exact_boundary.selected == CollectionPlanAlgorithm.Linear, "consistent exact boundary remains eligible")
+
+facts.profile_admitted = false
+facts.profile_size_p95 = 100
+facts.static_lookups = 3
+val stale_profile = collection_plan_select(facts)
+require(stale_profile.selected == CollectionPlanAlgorithm.Linear, "unadmitted stale profile is ignored")
+require(stale_profile.evidence == "static", "unadmitted profile supplies no evidence")
+
+print "PASS: collection selector rejects contradictory bounds"
+rt_exit(0)
