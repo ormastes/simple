@@ -39,6 +39,7 @@ use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir_lowering_types.{MirLowering}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 fn find_call_line(output: text, marker: text) -> text:
     for line in output.split("\n"):
@@ -109,6 +110,40 @@ fn compile_real_directory_extern_fixture() -> text:
     MirToLlvm.create("test.llvm.real_dir_text_abi", CodegenTarget.X86_64, nil).translate_module(mir)
 
 describe "pure-Simple compiler: text-extern-ABI registry fix (end-to-end)":
+    it "expands both driver snapshot declarations from 1 and 17 to 2 and 20 words":
+        # Use the real declarations: changing either owner back to raw pairs
+        # must fail frontend/lowering or the physical argument assertions.
+        for path in ["src/compiler/80.driver/driver_mem_snapshot.spl", "src/compiler/80.driver/driver_log_helpers.spl"]:
+            val owner = file_read(path)
+            val open_start = owner.index_of("extern fn rt_mem_snapshot_open(")
+            val record_start = owner.index_of("extern fn rt_mem_snapshot_record(")
+            assert_true(open_start >= 0 and record_start > open_start, "snapshot declarations missing: " + path)
+            val record_end = owner.substring(record_start).index_of(") -> bool")
+            assert_true(record_end > 0, "snapshot record declaration incomplete: " + path)
+            val declarations = owner.substring(open_start, record_start + record_end + ") -> bool".len())
+            val source = declarations + "\n\nfn probe(path: text, event: text, phase: text, source_path: text) -> bool:\n    val fd = rt_mem_snapshot_open(path)\n    rt_mem_snapshot_record(fd, 1, event, phase, 7, source_path, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)\n"
+            val ast = parse_full_frontend(source, "snapshot_abi_fixture.spl", "snapshot_abi_fixture.spl", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("snapshot_abi_fixture.spl")
+            val hir = hir_lowering.lower_module(ast)
+            var mir_lowering = MirLowering.new(hir.symbols)
+            val mir = mir_lowering.lower_module(hir)
+            var errors = ""
+            for err in mir_lowering.errors:
+                errors = errors + err.message + "\n"
+            assert_equal("", errors, "snapshot fixture must lower: " + path)
+            val output = MirToLlvm.create("test.llvm.snapshot_abi", CodegenTarget.X86_64, nil).translate_module(mir)
+            val open_call = find_call_line(output, "rt_mem_snapshot_open(")
+            val record_call = find_call_line(output, "rt_mem_snapshot_record(")
+            assert_equal(2, top_level_call_arg_count(open_call, "rt_mem_snapshot_open("), "one semantic text must become two words: " + path)
+            assert_equal(20, top_level_call_arg_count(record_call, "rt_mem_snapshot_record("), "17 semantic arguments must become 20 words: " + path)
+            var data_calls = 0
+            var len_calls = 0
+            for line in output.split("\n"):
+                if line.contains("call ") and line.contains("rt_string_data("): data_calls = data_calls + 1
+                if line.contains("call ") and line.contains("rt_string_len("): len_calls = len_calls + 1
+            assert_equal(4, data_calls, "each of four text values must expand exactly once")
+            assert_equal(4, len_calls, "each of four text lengths must expand exactly once")
+
     it "splits a non-literal text arg to a registry-listed extern into (ptr, len)":
         val output = compile_registry_fixture()
         print("[text_extern_abi_registry] mir_lowering_errors_guard = " + (if output.starts_with("MIR_LOWERING_ERRORS:"): output else: "none"))

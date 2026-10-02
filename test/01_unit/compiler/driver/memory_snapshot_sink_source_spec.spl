@@ -33,7 +33,7 @@ describe "durable Stage3 memory snapshot ownership":
         val lookup = begin.index_of("val path = env_get_opt(")
         val empty_guard = begin.index_of("if path == \"\"")
         val enable = begin.index_of("_mem_snapshot_enabled = true")
-        val open = begin.index_of("rt_mem_snapshot_open(rt_string_data(path), rt_string_len(path))")
+        val open = begin.index_of("rt_mem_snapshot_open(path)")
         expect(lookup).to_be_greater_than(already_open_guard)
         expect(begin).to_contain(
             "if _mem_snapshot_fd >= 0:\n" +
@@ -65,29 +65,29 @@ describe "durable Stage3 memory snapshot ownership":
         val owner = file_read("src/compiler/80.driver/driver_mem_snapshot.spl")
         expect(owner).to_contain("Formatting is deliberately runtime-owned")
         expect(owner).to_contain("rt_mem_snapshot_record(")
-        expect(owner).to_contain("rt_string_data(event), rt_string_len(event)")
-        expect(owner).to_contain("rt_string_data(phase), rt_string_len(phase)")
-        expect(owner).to_contain("rt_string_data(source_path), rt_string_len(source_path)")
+        expect(owner).to_contain("event, phase, source_index, source_path,")
+        expect(owner.contains("rt_string_data(")).to_equal(false)
+        expect(owner.contains("rt_string_len(")).to_equal(false)
         expect(owner.contains("heap_live_bytes={")).to_equal(false)
 
     it "binds phase records to the same durable schema and run identity":
         # @req REQ-SSPEC-COMPILER
         step("binds phase records to the same durable schema and run identity")
         val source = file_read("src/compiler/80.driver/driver_log_helpers.spl")
-        expect(source).to_contain("rt_mem_snapshot_open(rt_string_data(sink), rt_string_len(sink))")
+        expect(source).to_contain("rt_mem_snapshot_open(sink)")
         expect(source).to_contain("_g_phase_profile_seq")
-        expect(source).to_contain("rt_string_data(\"phase\"), rt_string_len(\"phase\")")
-        expect(source).to_contain("rt_string_data(msg), rt_string_len(msg)")
+        expect(source).to_contain("\"phase\", msg, -1, \"\",")
         expect(source).to_contain("SIMPLE_EVIDENCE_RUN_ID")
         expect(source.contains("file_append(sink, line")).to_equal(false)
 
-    it "passes raw text data and length to every snapshot provider call":
+    it "leaves text expansion to the compiler for both snapshot owners":
         # @req: REQ-COMPILER-DRIVER-001
-        step("Verify: snapshot open uses the raw SFFI ABI")
+        step("Verify: both owners declare the semantic text ABI")
         val owner = file_read("src/compiler/80.driver/driver_mem_snapshot.spl")
-        expect(owner).to_contain("extern fn rt_mem_snapshot_open(path_ptr: i64, path_len: i64) -> i64")
-        expect(owner).to_contain("rt_mem_snapshot_open(rt_string_data(path), rt_string_len(path))")
-        expect(owner).to_contain("rt_string_data(event), rt_string_len(event)")
-        expect(owner).to_contain("rt_string_data(phase), rt_string_len(phase)")
-        expect(owner).to_contain("rt_string_data(source_path), rt_string_len(source_path)")
-        expect(owner).not_to_contain("rt_mem_snapshot_open(path)")
+        val phase = file_read("src/compiler/80.driver/driver_log_helpers.spl")
+        for source in [owner, phase]:
+            expect(source).to_contain("extern fn rt_mem_snapshot_open(path: text) -> i64")
+            expect(source).to_contain("fd: i64, seq: i64, event: text, phase: text, source_index: i64,")
+            expect(source).to_contain("source_path: text,")
+            expect(source.contains("rt_string_data(")).to_equal(false)
+            expect(source.contains("rt_string_len(")).to_equal(false)
