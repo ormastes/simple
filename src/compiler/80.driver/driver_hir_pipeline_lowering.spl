@@ -51,7 +51,9 @@ use compiler.driver.driver_hir_pipeline_support.{
     driver_dict_entry_count,
     driver_validate_value_struct_layouts,
     driver_rollback_flat_hir_row_or_abort,
-    driver_finish_failed_parse_scope
+    driver_finish_failed_parse_scope,
+    driver_abort_reverse_reference_parse_scope_v1,
+    driver_publish_reverse_reference_parse_scope_v1
 }
 use compiler.driver.driver_hir_pipeline_passes.{
     run_typecheck_warn_pass,
@@ -68,7 +70,7 @@ use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_diges
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
-    reverse_reference_owner_register_source_alias_v1
+    reverse_reference_owner_register_source_alias_v1, reverse_reference_module_begin_v1
 }
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
@@ -319,40 +321,44 @@ impl CompilerDriver:
     me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient HIR scope unavailable for {source_path}")
+        val reverse_token = reverse_reference_module_begin_v1()
+        if reverse_token < 0:
+            val _ended = driver_end_transient_parse_scope()
+            return Err("transient HIR scope reverse-reference owner unavailable for {source_path}")
         val flat_row_count_before = bootstrap_hir_module_count()
         val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("transient HIR scope pause failed for {source_path}")
         if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR ownership promotion failed for {source_path}")
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR diagnostic ownership promotion failed for {source_path}")
         if not lowering.promote_phase_memo_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR phase memo ownership promotion failed for {source_path}")
         if not lowering.promote_symbol_table_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR symbol table ownership promotion failed for {source_path}")
         val flat_row_count_after = bootstrap_hir_module_count()
         if flat_row_count_after != flat_row_count_before:
             if (flat_row_count_after != flat_row_count_before + 1 or
                 not bootstrap_hir_modules_promote_last()):
                 driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-                val _ended = driver_end_transient_parse_scope()
+                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
                 return Err("flat HIR row ownership promotion failed for {source_path}")
         if not driver_promote_frontend_registry_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("frontend registry promotion failed during retained HIR lowering for {source_path}")
-        if not driver_end_transient_parse_scope():
+        if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient HIR scope end failed for {source_path}")
         Ok(hir_module)
@@ -361,25 +367,29 @@ impl CompilerDriver:
         val parser_generation = parser_initialization_generation_v1()
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
+        val reverse_token = reverse_reference_module_begin_v1()
+        if reverse_token < 0:
+            val _ended = driver_end_transient_parse_scope()
+            return Err("transient parser scope reverse-reference owner unavailable for {source.path}")
         # Reparse under the exact policy/provider/cache identity used to build
         # the surface. Reference policy is not an implicit fallback here.
         val selected = self.parse_full_frontend_in_borrowed_scope_selected_v1(
             source.content, source.path, source.module_name)
         if selected.is_err():
             if not rt_transient_array_scope_pause():
-                val _ended = driver_end_transient_parse_scope()
+                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
                 return Err("transient parser scope pause failed for {source.path}")
             val error_ok = rt_transient_heap_promote(selected)
             val owners_ok = driver_promote_retained_frontend_owners_v1(
                 parser_initialization_generation_v1() != parser_generation)
-            val ended = driver_end_transient_parse_scope()
+            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             if not (error_ok and owners_ok and ended):
                 return Err("transient parser scope error ownership failed for {source.path}")
             return Err(selected.unwrap_err())
         val module = selected.unwrap()
         driver_register_parser_module_source_aliases_v1(module, source.path)
         if par_had_error_get():
-            return Err(driver_finish_failed_parse_scope(source.path))
+            return Err(driver_finish_failed_parse_scope(source.path, reverse_token))
         val flat_row_count_before = bootstrap_hir_module_count()
         val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
         # Keep the scope active through the complete lowering. The reparsed AST
@@ -387,37 +397,37 @@ impl CompilerDriver:
         # its diagnostics, and frontend registries escape this file boundary.
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("transient parser scope pause failed for {source.path}")
         if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR ownership promotion failed for {source.path}")
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR diagnostic ownership promotion failed for {source.path}")
         if not lowering.promote_phase_memo_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR phase memo ownership promotion failed for {source.path}")
         if not lowering.promote_symbol_table_transient_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR symbol table ownership promotion failed for {source.path}")
         val flat_row_count_after = bootstrap_hir_module_count()
         if flat_row_count_after != flat_row_count_before:
             if (flat_row_count_after != flat_row_count_before + 1 or
                 not bootstrap_hir_modules_promote_last()):
                 driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-                val _ended = driver_end_transient_parse_scope()
+                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
                 return Err("flat HIR row ownership promotion failed for {source.path}")
         if not driver_promote_retained_frontend_owners_v1(
                 parser_initialization_generation_v1() != parser_generation):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-            val _ended = driver_end_transient_parse_scope()
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("frontend registry promotion failed during HIR reparse for {source.path}")
-        if not driver_end_transient_parse_scope():
+        if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient parser scope end failed for {source.path}")
         Ok(hir_module)
