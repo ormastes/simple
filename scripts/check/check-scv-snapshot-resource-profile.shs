@@ -1,0 +1,128 @@
+#!/bin/sh
+# Measure a precompiled native fixture, or consume the Windows owner's typed
+# measurements. This script never builds a compiler or substitutes a seed.
+set -eu
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT_DIR"
+fail() { printf 'SCV snapshot profile: %s\n' "$*" >&2; exit 1; }
+diagnostic=0
+receipts=0
+for arg in "$@"; do
+    case "$arg" in
+        --diagnostic-only) diagnostic=1 ;;
+        --receipts) receipts=1 ;;
+        --help) printf '%s\n' 'Provide SCV_PROFILE_COMPILER, SCV_SNAPSHOT_PROFILE_BINARY, SCV_SNAPSHOT_PROFILE_BUILD_RECEIPT, SCV_SNAPSHOT_PROFILE_SOURCE_SHA256.' \
+            'Default: replay canonical Stage2 admission, then run four fresh native processes on Linux/macOS.' \
+            '--diagnostic-only: also require pinned SCV_PROFILE_COMPILER_SHA256 and SCV_SNAPSHOT_PROFILE_HELLO_RECEIPT; emits admission=provisional.' \
+            '--receipts: consume four typed measurements in SCV_SNAPSHOT_PROFILE_EVIDENCE_DIR (Windows owner uses its existing sampler).' \
+            'See doc/06_spec/05_perf/scv/compile_snapshot_resource_profile_spec.md for exact receipt schemas.'; exit 0 ;;
+        *) fail "unknown option $arg" ;;
+    esac
+done
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+    else sha256sum "$1" | awk '{print $1}'; fi
+}
+value() {
+    [ -f "$1" ] || fail "missing receipt $1"
+    awk -F= -v key="$2" '{sub(/\r$/, "")} $1==key {n++; v=substr($0,length($1)+2)} END {if(n!=1 || v=="")exit 1; print v}' "$1" || fail "missing/duplicate $2 in $1"
+}
+hash_valid() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
+positive() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -gt 0 ]; }
+COMPILER=${SCV_PROFILE_COMPILER:?SCV_PROFILE_COMPILER is required}
+BINARY=${SCV_SNAPSHOT_PROFILE_BINARY:?SCV_SNAPSHOT_PROFILE_BINARY is required}
+BUILD=${SCV_SNAPSHOT_PROFILE_BUILD_RECEIPT:?SCV_SNAPSHOT_PROFILE_BUILD_RECEIPT is required}
+SOURCE_HASH=${SCV_SNAPSHOT_PROFILE_SOURCE_SHA256:?SCV_SNAPSHOT_PROFILE_SOURCE_SHA256 is required}
+[ -x "$COMPILER" ] && [ -x "$BINARY" ] || fail 'missing executable producer or fixture'
+hash_valid "$SOURCE_HASH" || fail 'invalid source pin'
+COMPILER_HASH=$(sha256_file "$COMPILER")
+BINARY_HASH=$(sha256_file "$BINARY")
+[ "$(value "$BUILD" schema)" = simple-scv-snapshot-profile-build-v1 ] || fail 'build schema'
+[ "$(value "$BUILD" producer_sha256)" = "$COMPILER_HASH" ] || fail 'fixture producer mismatch'
+[ "$(value "$BUILD" binary_sha256)" = "$BINARY_HASH" ] || fail 'fixture binary mismatch'
+[ "$(value "$BUILD" source_sha256)" = "$SOURCE_HASH" ] || fail 'fixture source mismatch'
+[ "$(sha256_file "$(value "$BUILD" source_manifest)")" = "$SOURCE_HASH" ] || fail 'source manifest mismatch'
+[ "$(value "$BUILD" fixture_sha256)" = "$(sha256_file test/fixtures/scv_snapshot_memory/main.spl)" ] || fail 'fixture source mismatch'
+[ "$(value "$BUILD" build_exit_status)" = 0 ] && [ "$(value "$BUILD" complete)" = yes ] || fail 'fixture compilation incomplete'
+if [ "$diagnostic" = 1 ]; then
+    [ "${SCV_PROFILE_COMPILER_SHA256:-}" = "$COMPILER_HASH" ] || fail 'diagnostic producer pin mismatch'
+    HELLO=${SCV_SNAPSHOT_PROFILE_HELLO_RECEIPT:?diagnostic hello receipt is required}
+    [ "$(value "$HELLO" schema)" = simple-scv-snapshot-profile-hello-v1 ] || fail 'hello schema'
+    [ "$(value "$HELLO" producer_sha256)" = "$COMPILER_HASH" ] || fail 'hello producer mismatch'
+    [ "$(value "$HELLO" source_sha256)" = "$SOURCE_HASH" ] || fail 'hello source mismatch'
+    [ "$(awk '{sub(/\r$/, ""); print}' "$(value "$HELLO" compile_exit_code_path)")" = 0 ] || fail 'hello compile did not pass'
+    [ "$(awk '{sub(/\r$/, ""); print}' "$(value "$HELLO" run_exit_code_path)")" = 0 ] || fail 'hello execution did not pass'
+    [ "$(awk '{sub(/\r$/, ""); print}' "$(value "$HELLO" run_stdout_path)")" = hello ] || fail 'hello output mismatch'
+    [ "$(sha256_file "$(value "$HELLO" binary_path)")" = "$(value "$HELLO" binary_sha256)" ] || fail 'hello binary mismatch'
+    [ "$(value "$HELLO" complete)" = yes ] || fail 'hello evidence incomplete'
+    admission=provisional
+else
+    sh scripts/check/check-scv-inventory-resource-profile.shs --admission-only >/dev/null
+    admission=canonical
+fi
+if [ "$receipts" = 1 ]; then
+    EVIDENCE=${SCV_SNAPSHOT_PROFILE_EVIDENCE_DIR:?measurement directory is required}
+    [ -d "$EVIDENCE" ] || fail 'measurement directory absent'
+else
+    case "$(uname -s)" in Linux) time_style=linux ;; Darwin) time_style=darwin ;;
+        *) fail 'Windows: collect typed receipts with the owned sampler, then use --receipts' ;; esac
+    if command -v timeout >/dev/null 2>&1; then timeout_bin=$(command -v timeout);
+    elif command -v gtimeout >/dev/null 2>&1; then timeout_bin=$(command -v gtimeout);
+    else fail 'bounded timeout tool required'; fi
+    mkdir -p build
+    EVIDENCE=$(mktemp -d "$ROOT_DIR/build/scv-snapshot-profile.XXXXXX")
+fi
+printf 'SCV snapshot evidence: %s\n' "$EVIDENCE" >&2
+printf 'admission=%s\ncompiler_sha256=%s\nsource_sha256=%s\nfixture_binary_sha256=%s\n' "$admission" "$COMPILER_HASH" "$SOURCE_HASH" "$BINARY_HASH"
+if [ "$diagnostic" = 1 ]; then printf 'qualification=pending\n'; else printf 'qualification=canonical-producer\n'; fi
+seen_roots='|'
+for mode in scoped baseline; do
+    for size in n double; do
+        row=${mode}_${size}
+        out=$EVIDENCE/$row.out
+        receipt=$EVIDENCE/$row.env
+        if [ "$receipts" = 0 ]; then
+            data=$EVIDENCE/$row-data
+            mkdir "$data"
+            set -- "$BINARY" "--$mode" --root "$data"
+            if [ "$size" = double ]; then set -- "$@" --double; fi
+            if [ "$time_style" = linux ]; then
+                "$timeout_bin" -k 3 60 /usr/bin/time -f 'RSS_KIB=%M' "$@" >"$out" 2>"$EVIDENCE/$row.time" || fail "$row failed"
+                rss=$(awk -F= '$1=="RSS_KIB" {n++; v=$2*1024} END {if(n!=1)exit 1; printf "%.0f",v}' "$EVIDENCE/$row.time")
+            else
+                "$timeout_bin" -k 3 60 /usr/bin/time -lp "$@" >"$out" 2>"$EVIDENCE/$row.time" || fail "$row failed"
+                rss=$(awk '/maximum resident set size/ {n++; v=$1} END {if(n!=1)exit 1; print v}' "$EVIDENCE/$row.time")
+            fi
+            printf 'schema=simple-scv-snapshot-profile-measurement-v1\nproducer_sha256=%s\nsource_sha256=%s\nbinary_sha256=%s\nmode=%s\nsize=%s\nfresh_process=yes\nfixture_root=%s\nexit_status=0\npeak_rss_bytes=%s\nstdout_sha256=%s\npeak_kind=kernel-process-high-water\n' \
+                "$COMPILER_HASH" "$SOURCE_HASH" "$BINARY_HASH" "$mode" "$size" "$data" "$rss" "$(sha256_file "$out")" >"$receipt"
+        fi
+        [ "$(value "$receipt" schema)" = simple-scv-snapshot-profile-measurement-v1 ] || fail "$row schema"
+        [ "$(value "$receipt" producer_sha256)" = "$COMPILER_HASH" ] && [ "$(value "$receipt" source_sha256)" = "$SOURCE_HASH" ] || fail "$row producer/source mismatch"
+        [ "$(value "$receipt" binary_sha256)" = "$BINARY_HASH" ] || fail "$row binary mismatch"
+        [ "$(value "$receipt" mode)" = "$mode" ] && [ "$(value "$receipt" size)" = "$size" ] || fail "$row mode/size mismatch"
+        [ "$(value "$receipt" fresh_process)" = yes ] && [ "$(value "$receipt" exit_status)" = 0 ] || fail "$row incomplete process"
+        [ "$(value "$receipt" peak_kind)" = kernel-process-high-water ] || fail "$row requires kernel high-water RSS, not interval samples or commit bytes"
+        data=$(value "$receipt" fixture_root)
+        case "$data" in *'|'*) fail 'invalid fixture root' ;; esac
+        case "$seen_roots" in *"|$data|"*) fail 'fixture directory reused' ;; esac
+        seen_roots=$seen_roots$data'|'
+        [ "$(value "$receipt" stdout_sha256)" = "$(sha256_file "$out")" ] || fail "$row stdout mismatch"
+        [ "$(awk '{sub(/\r$/, "")} $0=="SCV_SNAPSHOT_PROFILE_DONE" {n++} END {print n+0}' "$out")" = 1 ] || fail "$row missing native completion"
+        [ "$(value "$out" mode)" = "$mode" ] || fail "$row native mode mismatch"
+        for field in cold_first_scope high_water_prelude; do [ "$(value "$out" "$field")" = yes ] || fail "$row missing $field"; done
+        [ "$(value "$out" chunk_state)" = empty-at-start ] || fail "$row chunk state mismatch"
+        rss=$(value "$receipt" peak_rss_bytes)
+        positive "$rss" || fail "$row invalid RSS"
+        printf '%s_peak_rss_bytes=%s\n' "$row" "$rss"
+        for field in count elapsed_us live_allocations large_bytes small_bytes; do
+            metric=$(value "$out" "$field")
+            positive "$metric" || fail "$row invalid $field"
+            printf '%s_%s=%s\n' "$row" "$field" "$metric"
+        done
+        digest=$(value "$out" digest)
+        hash_valid "$digest" || fail "$row invalid digest"
+        printf '%s_digest=%s\n' "$row" "$digest"
+    done
+done
+[ "$(sha256_file "$COMPILER")" = "$COMPILER_HASH" ] && [ "$(sha256_file "$BINARY")" = "$BINARY_HASH" ] || fail 'binary changed during collection'
+printf 'complete=yes\n'
