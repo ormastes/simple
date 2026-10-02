@@ -161,6 +161,17 @@ pub(crate) fn strip_erased_receiver_qualifier(lookup_name: &str) -> &str {
     }
 }
 
+/// Match the complete owner component, never a substring such as Read in
+/// ShbReader. Exact import aliases are resolved before this suffix fallback.
+fn qualified_method_owner_matches(owner: &str, candidate: &str, method: &str) -> bool {
+    let normalized = candidate.replace("_dot_", ".");
+    let Some((candidate_owner, candidate_method)) = normalized.rsplit_once('.') else {
+        return false;
+    };
+    candidate_method == method
+        && (candidate_owner == owner || candidate_owner.ends_with(&format!("__{owner}")))
+}
+
 // `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact
 // same builtin-collision name set for its own defense-in-depth guard (bug
 // simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision) instead
@@ -1038,12 +1049,11 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 .collect();
 
             if let Some(tq) = type_qualifier {
-                // Prefer candidate whose name contains the type qualifier
-                let tq_dot = format!("{}_dot_", tq);
-                let tq_dunder = format!("__{}", tq);
+                // A trait name is not proof that an arbitrary implementation
+                // owns the receiver (Read must not select ShbReader).
                 if let Some((_, &v)) = candidates
                     .iter()
-                    .find(|(k, _)| k.contains(&tq_dot) || k.contains(&tq_dunder) || k.contains(tq))
+                    .find(|(k, _)| qualified_method_owner_matches(tq, k, method_part))
                 {
                     return Some(v);
                 }
@@ -1273,6 +1283,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // One predicate for all the unqualified rebinding scans below: either
         // family is a name whose qualifier must not be discarded.
         let no_rebind = enum_helper || bare_builtin_collision;
+        // Once a scan proves ambiguity, a lossy bare-name map must not undo
+        // that refusal later in this resolution chain.
+        let mut ambiguous_unqualified = false;
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
         //
         // AMBIGUITY IS REFUSAL, NOT A COIN FLIP (2026-09-13). These scans used
@@ -1297,6 +1310,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     hits.push(mangled.as_str());
                 }
             }
+            ambiguous_unqualified |= hits.len() > 1;
             resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
         }
         // Also check import_map for qualified entries where type is imported
@@ -1311,11 +1325,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     }
                 }
             }
+            ambiguous_unqualified |= hits.len() > 1;
             resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
         }
         // Final fallback: import_map bare name (may pick wrong overload)
         if resolved_name.is_none() && !no_rebind {
-            resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
+            if !ambiguous_unqualified {
+                resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
+            }
         }
 
         // If not found and func_name contains '.', try additional name variants.
@@ -1356,16 +1373,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         .map(|s| s.as_str());
                 }
 
-                // Last resort: bare method name. Never for the enum helpers --
-                // discarding the qualifier here is exactly how a qualified
-                // `T.unwrap` reached an unrelated type's `unwrap` (2026-09-13).
-                if resolved_name.is_none() && !enum_helper {
-                    resolved_name = ctx
-                        .use_map
-                        .get(method)
-                        .or_else(|| ctx.import_map.get(method))
-                        .map(|s| s.as_str());
-                }
+                // Never discard an unresolved receiver qualifier: a trait
+                // Read.read_all cannot select a concrete ShbReader.read_all.
             }
         }
 
@@ -1385,10 +1394,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
 
         let suffix_resolved_storage;
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !ambiguous_unqualified {
             suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
             resolved_name = suffix_resolved_storage.as_deref();
         }
+
+        // The same bare-name recursion guard must cover cross-module aliases.
+        // Delegating self.inner.read_all() is not recursion on self.
+        resolved_name = resolved_name.filter(|name| !ambiguous_unqualified && !is_self(name));
 
         // The cross-module branch binds by NAME ALONE, exactly like the
         // `func_ids` suffix scan on the other branch — but until 2026-09-13 only
@@ -1501,6 +1514,15 @@ pub(crate) fn compile_method_call_static<M: Module>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_receiver_matches_complete_owner_not_trait_substring() {
+        assert!(qualified_method_owner_matches("Reader", "module__Reader_dot_read_all", "read_all"));
+        assert!(qualified_method_owner_matches("Reader", "Reader.read_all", "read_all"));
+        assert!(!qualified_method_owner_matches("Read", "module__ShbReader_dot_read_all", "read_all"));
+        assert!(!qualified_method_owner_matches("Write", "module__SmfWriter_dot_write", "write"));
+        assert!(!qualified_method_owner_matches("Reader", "module__Reader_dot_read_exact", "read_all"));
+    }
 
     #[test]
     fn erased_receiver_ambiguity_falls_through() {
