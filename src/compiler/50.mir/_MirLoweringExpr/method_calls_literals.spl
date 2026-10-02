@@ -1167,6 +1167,119 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, ws_recv)
         ws_result
 
+    fn array_slice_bound_is_integer(value: HirExpr, local: LocalId) -> bool:
+        # The flat/native HIR path leaves MethodResolution.Unresolved and
+        # does not validate its argument types. Do not reinterpret tagged Any
+        # words, text handles, bools or floats through an integer cast.
+        # Typed array reads already use decode_runtime_value (including the
+        # wide-integer unbox); integer fields and len produce raw MIR scalars.
+        # Those results are not runtime_value_locals. A still-tagged word
+        # needs its producer's type-directed decode, not an opaque cast here.
+        if self.is_runtime_value_local(local.id): return false
+        if val declared = self.find_local_hir_type(local.id):
+            match declared.kind:
+                case HirTypeKind.Int(_, _) | HirTypeKind.Infer(_, _): ()
+                case _: return false
+        if value.has_type_:
+            if val expression_type = value.type_:
+                match expression_type.kind:
+                    case HirTypeKind.Int(_, _) | HirTypeKind.Infer(_, _): ()
+                    case _: return false
+        if val lowered_type = self.local_mir_type_of(local):
+            match lowered_type.kind:
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 |
+                     MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+                    return true
+                case _: ()
+        false
+
+    me reject_runtime_array_slice(message: text, span: Span?) -> LocalId:
+        self.error_fatal(message, span)
+        # Match the existing unresolved-method fail-closed path even for
+        # bootstrap routes that historically failed to collect MIR errors.
+        var b = self.builder
+        val reason = b.emit_const_str(message)
+        val panic_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                return_type: MirType.unit(), is_variadic: false)))))
+        b.emit_call(panic_op, [mir_operand_copy(reason)], MirType.unit())
+        val dead_value = b.emit_const_int(0)
+        self.builder = b
+        dead_value
+
+    me lower_runtime_array_slice(receiver_local: LocalId, args: [HirCallArg]) -> LocalId:
+        # local_is_runtime_array also accepts a bare MIR Array/Slice type,
+        # including GPU/fixed-storage forms. Only producer-owned runtime
+        # metadata proves the handle/header ABI required by rt_slice.
+        if not self.runtime_array_locals.contains(receiver_local.id):
+            return self.reject_runtime_array_slice("array slice requires a proven runtime array handle", nil)
+        if args.len() != 1 and args.len() != 2:
+            return self.reject_runtime_array_slice("array slice requires one or two integer bounds", nil)
+        # rt_slice already owns fresh shallow array storage in both runtimes,
+        # including byte/u64-packed flags and signed, clamped bounds. Its ABI
+        # is four raw i64 words -> i64 handle; this API always uses step=1.
+        val start_local = self.lower_expr(args[0].value)
+        if not self.array_slice_bound_is_integer(args[0].value, start_local):
+            return self.reject_runtime_array_slice("array slice bound must be an integer", Some(args[0].value.span))
+        var end_local: LocalId = 0
+        if args.len() == 2:
+            end_local = self.lower_expr(args[1].value)
+            if not self.array_slice_bound_is_integer(args[1].value, end_local):
+                return self.reject_runtime_array_slice("array slice bound must be an integer", Some(args[1].value.span))
+        else:
+            var b_len = self.builder
+            end_local = b_len.emit_call_value(self.rt_array_len_operand(),
+                [mir_operand_copy(receiver_local)], MirType.i64())
+            self.builder = b_len
+        var b_slice = self.builder
+        val handle = b_slice.emit_cast(mir_operand_copy(receiver_local), MirType.i64())
+        val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
+        val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
+        val step = b_slice.emit_const_int(1)
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_slice"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64()],
+                return_type: MirType.i64(), is_variadic: false)))))
+        var operands: [MirOperand] = []
+        operands.push(mir_operand_copy(handle))
+        operands.push(mir_operand_copy(start))
+        operands.push(mir_operand_copy(finish))
+        operands.push(mir_operand_copy(step))
+        val result = b_slice.emit_call_value(callee, operands, MirType.i64())
+        self.builder = b_slice
+        self.runtime_array_locals[result.id] = true
+        self.mark_runtime_value_local(result.id)
+        # Keep the element type/owner, but never copy the source's fixed
+        # extent: the new array may be shorter or empty. As in array-copy
+        # lowering, keep HirType aggregates inside this owner's metadata.
+        self.copy_local_hir_type_metadata(receiver_local.id, result.id)
+        var index = 0
+        while index < self.local_hir_type_ids.len():
+            if self.local_hir_type_ids[index] == result.id:
+                val source_type = self.local_hir_type_values[index]
+                match source_type.kind:
+                    case HirTypeKind.Array(element, _):
+                        self.local_hir_type_values[index] = HirType(
+                            kind: HirTypeKind.Array(element, nil), span: source_type.span)
+                    case HirTypeKind.Slice(element):
+                        self.local_hir_type_values[index] = HirType(
+                            kind: HirTypeKind.Array(element, nil), span: source_type.span)
+                    case _: ()
+                break
+            index = index + 1
+        if val element_type = self.noted_runtime_elem_type(receiver_local):
+            self.runtime_elem_value_type[result.id] = element_type
+        elif val array_type = self.local_mir_type_of(receiver_local):
+            match array_type.kind:
+                case MirTypeKind.Array(element, _):
+                    self.runtime_elem_value_type[result.id] = element
+                case MirTypeKind.Slice(element):
+                    self.runtime_elem_value_type[result.id] = element
+                case _: ()
+        val element_owner = self.array_element_struct_syms.get(receiver_local.id)
+        if element_owner != nil and element_owner != "":
+            self.array_element_struct_syms[result.id] = element_owner ?? ""
+        result
 
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
         """Lower method call based on resolution.
@@ -2377,12 +2490,17 @@ impl MirLowering:
         # `rt_interp_cstr`'d and passed to `spl_str_slice` as if it were a
         # string pointer, treating live array element words as if they were
         # string byte data -- silently wrong output (or worse, an
-        # out-of-bounds/garbage read) instead of a clean error. There is no
-        # dedicated array-slice runtime helper implemented, so exclude a
-        # positively-known array/slice receiver here and let it fall through
-        # to the ordinary `case Unresolved:` path's loud "unresolved method
-        # call: slice" build failure (matching .pop()/.first()/.last()/
-        # array.contains()) instead of a silent wrong answer.
+        # out-of-bounds/garbage read) instead of a clean error. Only a proven
+        # runtime array may enter rt_slice; custom/static resolutions remain
+        # owned by their normal method dispatch. Evaluate receiver once even
+        # when it is a call, field or nested slice rather than a variable.
+        if method == "slice" and (args.len() == 1 or args.len() == 2) and
+                resolution_is_unresolved and static_receiver_name == "":
+            if not has_prelowered_method_receiver:
+                prelowered_method_receiver = self.lower_expr(receiver)
+                has_prelowered_method_receiver = true
+            if self.runtime_array_locals.contains(prelowered_method_receiver.id):
+                return self.lower_runtime_array_slice(prelowered_method_receiver, args)
         var slice_recv_is_array = false
         if method == "substring" or method == "slice":
             if val slice_recv_ty = receiver.type_:
@@ -2393,12 +2511,20 @@ impl MirLowering:
             if not slice_recv_is_array:
                 match receiver.kind:
                     case Var(_) | NamedVar(_, _):
-                        val slice_recv_probe = self.lower_expr(receiver)
+                        var slice_recv_probe: LocalId = 0
+                        if has_prelowered_method_receiver:
+                            slice_recv_probe = prelowered_method_receiver
+                        else:
+                            slice_recv_probe = self.lower_expr(receiver)
                         if self.local_is_runtime_array(slice_recv_probe):
                             slice_recv_is_array = true
                     case _: ()
         if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and resolution_is_unresolved and not slice_recv_is_array:
-            val sub_recv_tagged = self.lower_expr(receiver)
+            var sub_recv_tagged: LocalId = 0
+            if has_prelowered_method_receiver:
+                sub_recv_tagged = prelowered_method_receiver
+            else:
+                sub_recv_tagged = self.lower_expr(receiver)
             val strdata_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_interp_cstr"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
@@ -3689,12 +3815,11 @@ impl MirLowering:
                 # `index_of`, and `contains` on text/dict receivers, keep
                 # falling through to the loud failure below -- fail CLOSED.
                 #
-                # `slice` is likewise NOT handled: rt_slice returns a fresh
-                # collection HANDLE that would also need registering in the
-                # lowering's runtime-value bookkeeping for a downstream
-                # `.len()`/index read to work. `merge` (the single remaining
-                # unresolved name in the whole AES native build) is declined for
-                # the same reason. Both stay loud-failing and are filed in
+                # Proven runtime-array `slice` is handled above with fresh
+                # array and element metadata. Unknown/custom receivers still
+                # fail here. `merge` is declined because its returned handle
+                # has no corresponding collection metadata registration.
+                # Remaining gaps are filed in
                 # native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md.
                 val poly_recv_is_handle = self.local_is_runtime_array(unresolved_receiver_local)
                 if poly_recv_is_handle and args.len() == 1 and method == "contains":
