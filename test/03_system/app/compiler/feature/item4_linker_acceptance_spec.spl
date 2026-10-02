@@ -1,0 +1,192 @@
+"""
+# Item 4: internal linker image and admission acceptance
+
+Purpose: QA and linker maintainers exercise production ELF/COFF engines with
+checked-in compiler-produced objects. This is portable image evidence only;
+native ELF/PE execution, Mach-O, full-compiler workloads and timing/RSS need
+their separate host receipts. No completion predicate is asserted here.
+
+Research: doc/01_research/compiler/linker/mold_mdsocpp_linker_2026-09-15.md
+Plan: doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md
+Design: doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md
+Fixtures: test/fixtures/linker/elf/RECIPE.md; test/fixtures/linker/coff/RECIPE.md
+
+TDD status at authoring: NOT RUN. Selected ET_EXEC/ET_DYN archive regressions
+are RED-intent, not an observed RED result. An admitted self-hosted runtime
+must execute this spec before any GREEN or generated-manual evidence claim.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.archive_parser.{ar_parse}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
+use compiler.backend.linker.pe_inspect.{pe_inspect}
+
+fn item4_load_elf_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/elf/" + name)
+    expect(raw.len()).to_be_greater_than(0)
+    var bytes: [i64] = []
+    for byte in raw:
+        bytes = bytes.push(byte as i64)
+    bytes
+
+fn item4_static_link_error(objects: [[i64]], entry: text, target: RelocArch) -> text:
+    val linked = elf_static_link(objects, [], entry, target)
+    expect(linked.is_err()).to_equal(true)
+    linked.unwrap_err()
+
+fn item4_archive_with_member_type(name: text, elf_type: i64) -> [i64]:
+    var bytes = item4_load_elf_fixture("libchain_a64.a")
+    val archive = ar_parse(bytes).unwrap()
+    var found = false
+    for member in archive.members:
+        if member.name == name:
+            expect(member.data_size).to_be_greater_than(18)
+            expect(bytes[member.data_offset + 16]).to_equal(1)
+            expect(bytes[member.data_offset + 17]).to_equal(0)
+            bytes[member.data_offset + 16] = elf_type
+            bytes[member.data_offset + 17] = 0
+            found = true
+    expect(found).to_equal(true)
+    bytes
+
+describe "Item 4 internal linker acceptance":
+    # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
+    it "emits deterministic x86_64 ELF ET_EXEC from LLVM objects":
+        step("Load the clang x86_64 entry and provider objects")
+        val objects = [item4_load_elf_fixture("start_x64.o"), item4_load_elf_fixture("lib_x64.o")]
+        step("Link twice through the internal ELF engine")
+        val first = elf_static_link(objects, [], "_start", RelocArch.X86_64).unwrap()
+        val second = elf_static_link(objects, [], "_start", RelocArch.X86_64).unwrap()
+        step("Check exact output bytes and executable target header")
+        expect(first).to_equal(second)
+        val image = elf_parse_object(first).unwrap()
+        expect(image.header.e_type).to_equal(2)
+        expect(image.header.e_machine).to_equal(62)
+        expect(image.header.e_entry).to_be_greater_than(0)
+        expect(image.header.e_phoff).to_be_greater_than(0)
+        expect(image.header.e_shnum).to_be_greater_than(0)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
+    it "emits deterministic AArch64 ELF ET_EXEC from direct LLVM objects":
+        step("Load the clang AArch64 entry and provider objects")
+        val objects = [item4_load_elf_fixture("start_a64.o"), item4_load_elf_fixture("lib_a64.o")]
+        step("Link twice through the internal ELF engine")
+        val first = elf_static_link(objects, [], "_start", RelocArch.AArch64).unwrap()
+        val second = elf_static_link(objects, [], "_start", RelocArch.AArch64).unwrap()
+        step("Check exact output bytes and executable target header")
+        expect(first).to_equal(second)
+        val image = elf_parse_object(first).unwrap()
+        expect(image.header.e_type).to_equal(2)
+        expect(image.header.e_machine).to_equal(183)
+        expect(image.header.e_entry).to_be_greater_than(0)
+        expect(image.header.e_phoff).to_be_greater_than(0)
+        expect(image.header.e_shnum).to_be_greater_than(0)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
+    it "links the AArch64 archive fixpoint into deterministic ET_EXEC":
+        step("Load clang AArch64 entry and llvm-ar dependency chain")
+        val objects = [item4_load_elf_fixture("start_a64.o")]
+        val archives = [item4_load_elf_fixture("libchain_a64.a")]
+        step("Resolve first-pass and second-pass members through the internal ELF engine")
+        val first = elf_static_link(objects, archives, "_start", RelocArch.AArch64).unwrap()
+        val second = elf_static_link(objects, archives, "_start", RelocArch.AArch64).unwrap()
+        step("Check exact output bytes and AArch64 executable header")
+        expect(first).to_equal(second)
+        val image = elf_parse_object(first).unwrap()
+        expect(image.header.e_type).to_equal(2)
+        expect(image.header.e_machine).to_equal(183)
+        expect(image.header.e_entry).to_be_greater_than(0)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
+    it "rejects a selected ET_EXEC archive member by name and ELF type":
+        step("Change only mid_a64.o ELF type from ET_REL to ET_EXEC")
+        val archive = item4_archive_with_member_type("mid_a64.o", 2)
+        step("Link the AArch64 entry requiring the mutated member")
+        val linked = elf_static_link([item4_load_elf_fixture("start_a64.o")], [archive], "_start", RelocArch.AArch64)
+        step("Require a named non-relocatable archive member rejection")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("archive member mid_a64.o: not a relocatable object (e_type 2)")
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
+    it "rejects ET_DYN discovered on the second archive extraction pass":
+        step("Change only leaf_a64.o ELF type from ET_REL to ET_DYN")
+        val archive = item4_archive_with_member_type("leaf_a64.o", 3)
+        step("Link the entry whose selected mid member requires the leaf")
+        val linked = elf_static_link([item4_load_elf_fixture("start_a64.o")], [archive], "_start", RelocArch.AArch64)
+        step("Require the late-selected member name and actual ELF type")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("archive member leaf_a64.o: not a relocatable object (e_type 3)")
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-006
+    it "does not admit or reject an unselected ET_DYN member":
+        step("Change only the unused archive member ELF type")
+        val archive = item4_archive_with_member_type("unused_a64.o", 3)
+        val objects = [item4_load_elf_fixture("start_a64.o")]
+        step("Link with the mutated and original archives")
+        val linked = elf_static_link(objects, [archive], "_start", RelocArch.AArch64).unwrap()
+        val original = elf_static_link(objects, [item4_load_elf_fixture("libchain_a64.a")], "_start", RelocArch.AArch64).unwrap()
+        step("Require identical bytes because the unused member is never selected")
+        expect(linked).to_equal(original)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-007
+    it "names the unresolved symbol and preserves deterministic diagnostics":
+        step("Load an AArch64 entry without its provider")
+        val objects = [item4_load_elf_fixture("start_a64.o")]
+        step("Link the same incomplete request twice")
+        val first = item4_static_link_error(objects, "_start", RelocArch.AArch64)
+        val second = item4_static_link_error(objects, "_start", RelocArch.AArch64)
+        step("Require identical diagnostics naming the unresolved dependency")
+        expect(first).to_equal(second)
+        expect(first).to_contain("undefined symbol")
+        expect(first).to_contain("add_val")
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-007
+    it "rejects duplicate strong provider definitions":
+        step("Load the AArch64 entry with the same provider twice")
+        val provider = item4_load_elf_fixture("lib_a64.o")
+        step("Link through the production symbol resolver")
+        val error = item4_static_link_error([item4_load_elf_fixture("start_a64.o"), provider, provider], "_start", RelocArch.AArch64)
+        step("Require the duplicate symbol name")
+        expect(error).to_contain("duplicate symbol: add_val")
+
+    # @req ITEM4-REQ-006
+    it "rejects an x86_64 input requested for AArch64":
+        step("Load an x86_64 object for an AArch64 link request")
+        val objects = [item4_load_elf_fixture("start_x64.o")]
+        step("Ask the internal linker to validate the target")
+        val error = item4_static_link_error(objects, "_start", RelocArch.AArch64)
+        step("Require the machine mismatch diagnostic")
+        expect(error).to_contain("does not match target")
+
+    # @req ITEM4-REQ-006
+    it "rejects a truncated ELF input before emitting an image":
+        step("Provide only ELF magic without a header")
+        val truncated: [i64] = [0x7f, 0x45, 0x4c, 0x46]
+        step("Link malformed input through the internal ELF engine")
+        val linked = elf_static_link([truncated], [], "_start", RelocArch.X86_64)
+        step("Require an error instead of image bytes")
+        expect(linked.is_err()).to_equal(true)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-005 ITEM4-REQ-006 ITEM4-REQ-007
+    it "emits deterministic AMD64 PE32+ with the corpus unwind directory":
+        step("Load the real clang-cl entry and provider COFF fixtures")
+        val main_object = file_read_bytes("test/fixtures/linker/coff/windows_corpus_main.obj")
+        val provider = file_read_bytes("test/fixtures/linker/coff/windows_corpus_provider.obj")
+        expect(main_object.len()).to_be_greater_than(0)
+        expect(provider.len()).to_be_greater_than(0)
+        val request = CoffLinkRequest(objects: [main_object, provider], archives: [], entry: "_start")
+        step("Link twice through the internal COFF engine")
+        val first = coff_link_amd64(request).unwrap()
+        val second = coff_link_amd64(request).unwrap()
+        step("Check exact bytes, AMD64 PE32+ entry and the corpus unwind directory")
+        expect(first).to_equal(second)
+        val image = pe_inspect(first).unwrap()
+        expect(image.header.machine).to_equal(0x8664)
+        expect(image.header.optional_magic).to_equal(0x20b)
+        expect(image.header.entry_point_rva).to_equal(0x1000)
+        expect(image.data_directories[3].size).to_equal(12)
