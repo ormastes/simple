@@ -164,3 +164,25 @@ or GREEN execution evidence. After runtime admission, execute the defect cases
 against the recorded base and then the implementation once each, retaining
 commands and results. Regenerate the manual with admitted docgen; the companion
 manual is currently an authored inventory, not a generated/passing report.
+
+### Additional executable column and proof-inventory coverage
+
+`test/03_system/app/compiler/feature/collection_planner_columns_spec.spl`
+adds seven direct synchronous TypedSeries acceptance subcases:
+CP-001-A-map, CP-001-A-roundtrip, CP-001-B-all-missing, CP-001-C-index,
+CP-001-C-constructor, CP-001-C-read-transform, and CP-001-C-dtype.
+Their 40 assertions check real values/masks, signed integers beyond f64's exact
+range, absent predicate execution, malformed objects, index boundaries and
+inconsistent dtype metadata. Panic callbacks detect forbidden invocation; they
+do not measure the number of successful callbacks on present values.
+
+The mirrored columns manual is authored and unexecuted. Numeric joins,
+signed-zero/NaN key behavior, the async family, exact positive callback counts,
+distinct error variants and cross-engine evidence still require implementation
+or execution. These subcases do not close full CP-001-A/B/C or REQ-001.
+
+The logical-plan unit spec now deliberately removes bindings for its
+missing-proof cases and checks that supplied bindings are not reported absent.
+This repairs contradictory test setup; no production behavior changed. Its
+authored companion is `doc/06_spec/01_unit/compiler/semantics/collection_plan_spec.md`.
+Neither these tests nor the column scenarios have runtime PASS evidence yet.

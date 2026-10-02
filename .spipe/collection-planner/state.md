@@ -51,6 +51,20 @@ unadmitted profiles retain their existing semantics. Independent source review
 found no P0/P1; runtime correctness remains unverified. No full REQ is closed
 by this focused guard.
 
+The continuation adds seven synchronous typed-column acceptance subcases
+(CP-001-A/B/C suffixes) with 40 real assertions and an authored companion.
+It also fixes logical-plan negative fixtures that inadvertently supplied their
+supposedly missing bindings, with positive controls and a companion manual.
+Both changes received independent source review without P0/P1 findings.
+They remain unexecuted; no complete REQ or cross-engine gate is closed.
+
+Read-only diagnosis established that cold admission inventories all `src` and
+`test` before entry closure; the earlier 120-second budget was shorter than its
+300-second Git subprocess limit. `SIMPLE_CACHE_DIR` did not configure the native
+cache; the report now records the actual default and supported `--cache-dir`
+flag. The final bounded diagnostic is tracked in the same report and cannot
+qualify as RED unless the before-fix executable reaches its intended assertion.
+
 ## Remaining work and stop conditions
 
 1. Obtain an admitted self-hosted CLI and execute the test-first regressions;
