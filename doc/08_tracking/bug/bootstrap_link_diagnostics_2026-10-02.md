@@ -47,8 +47,9 @@ entries and D finalized globals, rather than rebuilding S entries D times.
 - Existing artifact inspection: PASS, both retained COFF objects identified.
 - GNU ld 2.42 read-only capability check: `i386pep` and `i386pe` supported.
 - Source whitespace check: PASS.
-- Independent source review: requested; initial quadratic implementation
-  finding corrected to one batch compaction per module.
+- Independent source review: completed on `829d89e72a`; initial quadratic
+  implementation finding corrected to one batch compaction per module. No
+  further scoped P0/P1 source finding; approved for draft publication only.
 - Added executable specs cover replacement identity, batch finalization,
   an actual ANY_CLASSES frontend-to-LLVM definition count, and linker plans.
   They are UNRUN pending an admitted compiler/test slot.
