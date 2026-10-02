@@ -48,10 +48,12 @@ static RtLinuxGroup rt_linux_group = {0};
  * Only this fresh parent's subtree_control may be changed. */
 static struct {
     int active, root_fd, parent_fd;
+    int64_t token;
     dev_t device;
     ino_t inode;
     char name[80], identity[65], attempt[4096];
 } rt_lg_delegation;
+static int64_t rt_lg_next_parent_token;
 
 static int rt_lg_copy_text(const char *data, uint64_t len, char *out, size_t cap) {
     if (!data || !out || len == 0 || len >= cap || memchr(data, 0, (size_t)len))
@@ -295,6 +297,7 @@ SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t at
     struct statfs fs;
     struct stat status;
     if (rt_lg_delegation.active || rt_linux_group.active ||
+        rt_lg_next_parent_token == INT64_MAX ||
         !rt_lg_copy_text(attempt_data, attempt_len, attempt, sizeof(attempt)) ||
         attempt[0] != '/' || !rt_lg_hex_digest(identity_data, identity_len, identity))
         goto done;
@@ -314,29 +317,46 @@ SplArray *rt_linux_group_parent_acquire_v1(const char *attempt_data, uint64_t at
     created = 1;
     parent = openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int populated = 1;
-    if (parent < 0 || fstat(parent, &status) ||
-        !rt_lg_populated(parent, &populated) || populated ||
+    memset(&status, 0, sizeof(status));
+    if (parent < 0 || fstat(parent, &status)) {
+        answer[0] = errno ? errno : EIO; goto done;
+    }
+    if (!rt_lg_populated(parent, &populated) || populated ||
         !rt_lg_write_at(parent, "cgroup.subtree_control", "+memory") ||
         !rt_lg_memory_delegated(parent)) {
         answer[0] = errno ? errno : ENOTSUP; goto done;
     }
     rt_lg_delegation.active = 1;
+    rt_lg_delegation.token = ++rt_lg_next_parent_token;
     rt_lg_delegation.root_fd = root; rt_lg_delegation.parent_fd = parent;
     rt_lg_delegation.device = status.st_dev; rt_lg_delegation.inode = status.st_ino;
     strcpy(rt_lg_delegation.name, name); strcpy(rt_lg_delegation.identity, identity);
     strcpy(rt_lg_delegation.attempt, attempt);
-    answer[0] = 0; answer[1] = 1;
+    answer[0] = 0; answer[1] = rt_lg_delegation.token;
     answer[2] = (int64_t)status.st_dev; answer[3] = (int64_t)status.st_ino;
     return owned_adapter_values(answer, 4);
 done:
+    /* A positive token with a nonzero status is retained ownership, NOT proof
+     * of no allocation. Never discard an unremoved parent after rollback. */
+    if (created && unlinkat(root, name, AT_REMOVEDIR)) {
+        answer[0] = errno ? errno : EIO;
+        rt_lg_delegation.active = 1;
+        rt_lg_delegation.token = ++rt_lg_next_parent_token;
+        rt_lg_delegation.root_fd = root; rt_lg_delegation.parent_fd = parent;
+        rt_lg_delegation.device = status.st_dev; rt_lg_delegation.inode = status.st_ino;
+        strcpy(rt_lg_delegation.name, name); strcpy(rt_lg_delegation.identity, identity);
+        strcpy(rt_lg_delegation.attempt, attempt);
+        answer[1] = rt_lg_delegation.token;
+        answer[2] = (int64_t)status.st_dev; answer[3] = (int64_t)status.st_ino;
+        return owned_adapter_values(answer, 4);
+    }
     if (parent >= 0) close(parent);
-    if (created && unlinkat(root, name, AT_REMOVEDIR)) answer[0] = errno;
     if (root >= 0) close(root);
     return owned_adapter_values(answer, 4);
 }
 
 int64_t rt_linux_group_parent_release_v1(int64_t token) {
-    if (token != 1 || !rt_lg_delegation.active) return EINVAL;
+    if (!rt_lg_delegation.active || token != rt_lg_delegation.token) return EINVAL;
     if (rt_linux_group.active && !rt_linux_group.collected) return EBUSY;
     int pinned = rt_lg_delegation_fd();
     if (pinned < 0) return errno;

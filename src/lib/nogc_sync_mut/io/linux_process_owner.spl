@@ -27,6 +27,12 @@ struct LinuxCgroupParentV1:
     device: i64
     inode: i64
 
+enum LinuxCgroupParentAdmissionV1:
+    Acquired(parent: LinuxCgroupParentV1)
+    Rejected(reason: text)
+    CleanupPending(parent: LinuxCgroupParentV1, reason: text)
+    Unknown(reason: text)
+
 struct LinuxProcessPollV1:
     terminal: bool
     leader_reaped: bool
@@ -60,14 +66,27 @@ extern fn rt_linux_group_parent_acquire_v1(attempt: text, identity: text) -> [i6
 extern fn rt_linux_group_parent_release_v1(token: i64) -> i64
 
 fn linux_cgroup_parent_acquire_v1(attempt: text, identity: text) -> Result<LinuxCgroupParentV1, text>:
+    match linux_cgroup_parent_admit_v1(attempt, identity):
+        LinuxCgroupParentAdmissionV1.Acquired(parent): Ok(parent)
+        LinuxCgroupParentAdmissionV1.Rejected(reason): Err(reason)
+        LinuxCgroupParentAdmissionV1.CleanupPending(parent, reason):
+            val _released = linux_cgroup_parent_release_v1(parent)?
+            Err(reason)
+        LinuxCgroupParentAdmissionV1.Unknown(reason): Err(reason)
+
+fn linux_cgroup_parent_admit_v1(attempt: text, identity: text) -> LinuxCgroupParentAdmissionV1:
     if not linux_process_absolute_v1(attempt) or not builder_digest_valid_v1(identity):
-        return Err("invalid Linux parent acquisition request")
+        return LinuxCgroupParentAdmissionV1.Rejected("invalid Linux parent acquisition request")
     val fields = unsafe(capabilities: [ffi]): rt_linux_group_parent_acquire_v1(attempt, identity)
-    if fields.len() != 4: return Err("Linux parent acquisition receipt layout differs")
-    if fields[0] != 0: return Err("Linux owned parent acquisition rejected: " + str(fields[0]))
+    if fields.len() != 4: return LinuxCgroupParentAdmissionV1.Unknown("Linux parent acquisition receipt layout differs")
+    val reason = "Linux owned parent acquisition rejected: " + str(fields[0])
+    if fields[0] != 0 and fields[1] == 0:
+        return LinuxCgroupParentAdmissionV1.Rejected(reason)
     if fields[1] <= 0 or fields[2] < 0 or fields[3] <= 0:
-        return Err("Linux parent acquisition receipt invalid")
-    Ok(LinuxCgroupParentV1(fields[1], "/sys/fs/cgroup/simple-parent-" + identity, fields[2], fields[3]))
+        return LinuxCgroupParentAdmissionV1.Unknown("Linux parent acquisition receipt invalid; cleanup unproven")
+    val parent = LinuxCgroupParentV1(fields[1], "/sys/fs/cgroup/simple-parent-" + identity, fields[2], fields[3])
+    if fields[0] != 0: return LinuxCgroupParentAdmissionV1.CleanupPending(parent, reason)
+    LinuxCgroupParentAdmissionV1.Acquired(parent)
 
 fn linux_cgroup_parent_release_v1(parent: LinuxCgroupParentV1) -> Result<bool, text>:
     val code = unsafe(capabilities: [ffi]): rt_linux_group_parent_release_v1(parent.token)
@@ -185,3 +204,4 @@ export linux_process_cancel_v1, linux_process_peak_memory_v1, linux_process_coll
 export linux_available_capacity_v1, linux_process_request_valid_v1
 export linux_process_launch_broker_v1
 export LinuxCgroupParentV1, linux_cgroup_parent_acquire_v1, linux_cgroup_parent_release_v1
+export LinuxCgroupParentAdmissionV1, linux_cgroup_parent_admit_v1

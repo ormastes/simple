@@ -9,7 +9,8 @@ use app.bootstrap_builder.link_inputs.{builder_link_inputs_stage_v1,
     builder_regular_input_parents_safe_v1, builder_link_inputs_match_v1}
 use std.common.build_manager.no_child_started.{builder_no_child_started_decode_v1}
 use std.common.build_manager.capacity_request.{BuilderCapacityRequestV1,
-    builder_capacity_request_encode_v1, builder_linux_parent_receipt_decode_v1}
+    builder_capacity_request_encode_v1, builder_linux_parent_receipt_decode_v1,
+    builder_capacity_settlement_decode_v1}
 use app.io.file_ops.{file_exists, file_is_regular_no_follow, file_hash_sha256,
     file_copy, file_delete, file_create_exclusive, file_atomic_write,
     file_read_regular_no_follow_bounded, path_absolute}
@@ -295,9 +296,13 @@ pub fn builder_transport_reaped_v1(attempt: BuilderAttemptV1) -> bool:
     builder_transport_capacity_released_v1(attempt)
 
 fn builder_transport_capacity_released_v1(attempt: BuilderAttemptV1) -> bool:
+    val settlement = match builder_capacity_settlement_decode_v1(
+            builder_transport_read_control_v1(attempt, "capacity.settled"),
+            attempt.identity_digest, attempt.host.id):
+        Ok(value): value
+        Err(_): return false
+    if settlement.disposition != "linux-parent-released": return true
     val acquired = builder_transport_read_control_v1(attempt, "capacity.receipt")
-    # Windows owns a JobObject, and a rejected acquisition owns no Linux parent.
-    if acquired == "": return true
     match builder_linux_parent_receipt_decode_v1(acquired, attempt.identity_digest, attempt.host.id):
         Ok(_): pass
         Err(_): return false

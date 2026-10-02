@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/syscall.h>
 #include <openssl/sha.h>
 
 static void owned_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
@@ -43,7 +44,24 @@ int64_t rt_array_get(SplArray *array, int64_t index) {
 int64_t rt_string_len(int64_t value) { (void)value; return -1; }
 const uint8_t *rt_string_data(int64_t value) { (void)value; return NULL; }
 
+static int fail_delegation, fail_rollback;
+static ssize_t probe_write(int fd, const void *data, size_t size) {
+    if (fail_delegation && size == 7 && memcmp(data, "+memory", 7) == 0) {
+        fail_delegation = 0; errno = EPERM; return -1;
+    }
+    return syscall(SYS_write, fd, data, size);
+}
+static int probe_unlinkat(int fd, const char *name, int flags) {
+    if (fail_rollback && flags == AT_REMOVEDIR && strncmp(name, "simple-parent-", 14) == 0) {
+        fail_rollback = 0; errno = EBUSY; return -1;
+    }
+    return (int)syscall(SYS_unlinkat, fd, name, flags);
+}
+#define write probe_write
+#define unlinkat probe_unlinkat
 #include "runtime_linux_group_owner_impl.h"
+#undef write
+#undef unlinkat
 
 static int64_t field(SplArray *array, int i) {
     assert(array && i < array->len); return array->items[i].as_int;
@@ -59,7 +77,30 @@ static void digest_path(const char *path, char digest[65]) {
     for (int i = 0; i < 32; i++) sprintf(digest + i * 2, "%02x", bytes[i]);
 }
 
+static int lifecycle_probe(const char *path) {
+    const char *first = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const char *second = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    SplArray *a = rt_linux_group_parent_acquire_v1(path, strlen(path), first, 64);
+    assert(field(a, 0) == 0); int64_t first_token = field(a, 1);
+    assert(rt_linux_group_parent_release_v1(first_token) == 0);
+    SplArray *b = rt_linux_group_parent_acquire_v1(path, strlen(path), second, 64);
+    assert(field(b, 0) == 0 && field(b, 1) > first_token);
+    assert(rt_linux_group_parent_release_v1(first_token) == EINVAL);
+    int retained = rt_lg_delegation_fd(); assert(retained >= 0); close(retained);
+    assert(rt_linux_group_parent_release_v1(field(b, 1)) == 0);
+    fail_delegation = 1; fail_rollback = 1;
+    SplArray *pending = rt_linux_group_parent_acquire_v1(path, strlen(path), first, 64);
+    assert(field(pending, 0) == EBUSY && field(pending, 1) > field(b, 1));
+    assert(field(pending, 2) >= 0 && field(pending, 3) > 0 && rt_lg_delegation.active);
+    retained = rt_lg_delegation_fd(); assert(retained >= 0); close(retained);
+    assert(rt_linux_group_parent_release_v1(field(pending, 1)) == 0);
+    assert(!rt_lg_delegation.active);
+    puts("PASS: nonreused lease rejects stale release; failed acquisition rollback retains exact owner until cleanup");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[2], "lifecycle") == 0) return lifecycle_probe(argv[1]);
     assert(argc == 2 && argv[1][0] == '/');
     const char *identity = "cafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00d";
     const char *other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
