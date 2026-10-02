@@ -177,11 +177,10 @@ pub(crate) fn compile_builtin_method<M: Module>(
             }
             return Ok(());
         }
-        // The MIR can erase the type of a text value produced by `??`.
-        // Treating that i64-shaped handle as an already-converted integer
-        // sends its address across typed calls. The runtime parses strings
-        // and preserves genuine integer receivers.
-        if matches!(method, "to_i64" | "to_int") && from_ty == TypeId::I64 {
+        // A nullable text value can retain Pointer<text> after `??`.
+        // Runtime dispatch parses its string handle and preserves genuine
+        // integer receivers; known primitive casts keep their width rules.
+        if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
             let converted = call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val);
             if let Some(d) = dest {
                 ctx.vreg_values.insert(*d, converted);
