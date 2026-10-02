@@ -6,6 +6,8 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 work=$(mktemp -d "${TMPDIR:-/tmp}/stage2-sanity-binding.XXXXXX") || exit 2
 trap 'rm -rf "$work"' EXIT
 
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
 bootstrap_stage3_hash_file() { sha256sum "$1" | cut -d' ' -f1; }
 bootstrap_stage3_hash_stream() { sha256sum | cut -d' ' -f1; }
 bootstrap_stage3_manifest_value() {
@@ -26,6 +28,11 @@ printf '#!/bin/sh\nexit 0\n' >"$candidate"
 chmod +x "$candidate"
 candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
 receipt=$work/stage2-sanity.env
+display=$receipt
+if [ "${SIMPLE_TEST_SANITY_NATIVE_DISPLAY:-0}" = 1 ]; then
+  command -v cygpath >/dev/null 2>&1 || exit 2
+  display=$(cygpath -am "$receipt") || exit 2
+fi
 driver=$receipt.frontend-driver.log
 : >"$driver"
 
@@ -52,12 +59,12 @@ for mode in 0 1; do
     echo raw_status=0
     echo bootstrap_mode="$mode"
     echo backend=llvm
-    echo log_path="$log"
+    echo log_path="$display.frontend-bootstrap-$mode.log"
     for probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
       case "$probe" in p2_add) probe_log=$log ;; *) probe_log=$log.$(printf '%s' "$probe" | tr _ -) ;; esac
-      echo "${probe}_log_path=$probe_log"
+      echo "${probe}_log_path=$display${probe_log#"$receipt"}"
       echo "${probe}_log_sha256=$(bootstrap_stage3_hash_file "$probe_log")"
-      echo "${probe}_collector_receipt_path=$probe_log.bounded.env"
+      echo "${probe}_collector_receipt_path=$display${probe_log#"$receipt"}.bounded.env"
       echo "${probe}_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$probe_log.bounded.env")"
       echo "${probe}_raw_status=0"
     done
@@ -79,43 +86,51 @@ done
   echo frontend_smoke_backend=llvm
   echo frontend_smoke_bootstrap_mode_status=0
   echo frontend_smoke_bootstrap0_raw_status=0
-  echo frontend_smoke_bootstrap0_log_path="$receipt.frontend-bootstrap-0.log"
+  echo frontend_smoke_bootstrap0_log_path="$display.frontend-bootstrap-0.log"
   echo frontend_smoke_bootstrap0_log_sha256="$(bootstrap_stage3_hash_file "$receipt.frontend-bootstrap-0.log")"
-  echo frontend_smoke_bootstrap0_status_path="$receipt.frontend-bootstrap-0.status.env"
+  echo frontend_smoke_bootstrap0_status_path="$display.frontend-bootstrap-0.status.env"
   echo frontend_smoke_bootstrap0_status_sha256="$(bootstrap_stage3_hash_file "$receipt.frontend-bootstrap-0.status.env")"
   echo frontend_smoke_bootstrap1_ran=true
   echo frontend_smoke_bootstrap1_raw_status=0
-  echo frontend_smoke_bootstrap1_log_path="$receipt.frontend-bootstrap-1.log"
+  echo frontend_smoke_bootstrap1_log_path="$display.frontend-bootstrap-1.log"
   echo frontend_smoke_bootstrap1_log_sha256="$(bootstrap_stage3_hash_file "$receipt.frontend-bootstrap-1.log")"
-  echo frontend_smoke_bootstrap1_status_path="$receipt.frontend-bootstrap-1.status.env"
+  echo frontend_smoke_bootstrap1_status_path="$display.frontend-bootstrap-1.status.env"
   echo frontend_smoke_bootstrap1_status_sha256="$(bootstrap_stage3_hash_file "$receipt.frontend-bootstrap-1.status.env")"
   echo frontend_smoke_output_sha256="$(bootstrap_stage3_hash_file "$driver")"
-  echo frontend_smoke_driver_log_path="$driver"
+  echo frontend_smoke_driver_log_path="$display.frontend-driver.log"
   echo frontend_smoke_driver_log_sha256="$(bootstrap_stage3_hash_file "$driver")"
   echo candidate_sha256_after="$candidate_sha"
 } >"$receipt"
 
 failures=0
-bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$receipt" "$(dirname -- "$receipt")" "$candidate" "$repo" || {
+bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$display" "$(dirname -- "$receipt")" "$candidate" "$repo" || {
   echo 'FAIL: valid bound receipt rejected'; failures=$((failures + 1));
+}
+
+# Separate owned authority may be relocated while immutable display stays original.
+mkdir "$work/relocated"
+cp "$receipt" "$receipt".* "$work/relocated/"
+bootstrap_stage3_verify_sanity_evidence_receipt \
+  "$work/relocated/${receipt##*/}" "$display" "$work/relocated" "$candidate" "$repo" || {
+  echo 'FAIL: relocated authority rejected'; failures=$((failures + 1));
 }
 
 cp "$candidate" "$work/candidate.saved"
 printf '# candidate changed after sanity\n' >>"$candidate"
-if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$receipt" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
+if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$display" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
   echo 'FAIL: mutated candidate admitted'; failures=$((failures + 1))
 fi
 mv "$work/candidate.saved" "$candidate"
 
 mv "$receipt.frontend-bootstrap-0.log" "$work/log0.saved"
-if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$receipt" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
+if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$display" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
   echo 'FAIL: deleted per-pass log admitted'; failures=$((failures + 1))
 fi
 mv "$work/log0.saved" "$receipt.frontend-bootstrap-0.log"
 
 cp "$receipt.frontend-bootstrap-1.log" "$work/log1.saved"
 printf 'tamper\n' >>"$receipt.frontend-bootstrap-1.log"
-if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$receipt" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
+if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$display" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
   echo 'FAIL: tampered per-pass log admitted'; failures=$((failures + 1))
 fi
 mv "$work/log1.saved" "$receipt.frontend-bootstrap-1.log"
@@ -133,7 +148,7 @@ tampered_status_sha=$(bootstrap_stage3_hash_file \
   "$receipt.frontend-bootstrap-0.status.env")
 sed "s/^frontend_smoke_bootstrap0_status_sha256=.*/frontend_smoke_bootstrap0_status_sha256=$tampered_status_sha/" \
   "$work/receipt.saved" >"$receipt"
-if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$receipt" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
+if bootstrap_stage3_verify_sanity_evidence_receipt "$receipt" "$display" "$(dirname -- "$receipt")" "$candidate" "$repo" >/dev/null 2>&1; then
   echo 'FAIL: hash-consistent nonzero raw status admitted'; failures=$((failures + 1))
 fi
 
