@@ -2032,10 +2032,9 @@ fn try_compile_builtin_method_call<M: Module>(
             return Ok(Some(converted));
         }
 
-        // `??` can leave a text receiver with an erased i64-shaped MIR type.
-        // Dispatch on the runtime value so typed integer receivers still pass
-        // through unchanged while text is parsed before an i64 call.
-        if matches!(method, "to_i64" | "to_int") && from_ty == TypeId::I64 {
+        // `??` can leave a text handle typed as Pointer<text> in MIR.
+        // Dispatch opaque receivers by runtime type before an i64 call.
+        if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
             return Ok(Some(call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val)));
         }
 
