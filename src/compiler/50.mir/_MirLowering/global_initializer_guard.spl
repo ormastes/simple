@@ -54,10 +54,15 @@ impl MirLowering:
         val is_active = builder.emit_binop(MirBinOp.Eq, mir_operand_copy(current), mir_operand_copy(active), MirType.bool())
         builder.terminate_if(mir_operand_copy(is_active), cycle, start)
         builder.switch_to_block(cycle)
-        val message = builder.emit_const_str("cyclic module-global initialization: {init_name}")
+        val message_text = "cyclic module-global initialization: {init_name}"
+        val message = builder.emit_const_str(message_text)
+        # Direct builder calls bypass expression-level text ABI expansion.
+        # rt_panic consumes the raw pointer and byte length as separate words.
+        val message_length = builder.emit_const_int(message_text.len())
+        val message_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
         val panic_fn = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_panic"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))))
-        builder.emit_call(panic_fn, [mir_operand_copy(message)], MirType.unit())
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [message_type, MirType.i64()], return_type: MirType.unit(), is_variadic: false)))))
+        builder.emit_call(panic_fn, [mir_operand_copy(message), mir_operand_copy(message_length)], MirType.unit())
         builder.terminate_return(nil)
         builder.switch_to_block(start)
         val begun = builder.emit_const_int(1)
