@@ -1026,7 +1026,7 @@ active; the unstarted third-job dispatcher was paused to reserve a4GiB manager
 rebuild slot. Linux coordinator184 is running only the reviewed serialized SCV
 cold/warm admission probe, never automatic full parallel dispatch in this attempt.
 
-### 2026-10-02 user stop and release landing (latest authoritative checkpoint)
+### 2026-10-02 user stop and release landing (historical checkpoint)
 
 The user instructed: stop further items1/5 work, push fixes/update docs, then
 land on release and stop. All session-owned Windows/Linux builds are stopped.
@@ -1058,3 +1058,46 @@ remain in D:/wk-ordinary-parser-retention-20261002; unfinished discard assignmen
 work remains in D:/wk-hir-discard-assignment-20261002. Do not include those dirty
 changes in a future release without review and verification. Public main was
 not rebased or force-updated; earlier ruleset-change question was not approved.
+
+### 2026-10-02 resumed bootstrap checkpoint
+
+The user resumed the original goal, fixes, release integration and stale-temp
+cleanup. The goal tracker is active. The earlier stop is historical; items 1/5
+remain stopped at partial umbrella scope, not marked complete.
+
+The integration owner verified release `d6b569ace4c3ab7b463eab81ac9b2921f032d936`
+after PR2170,2177,2178 merged externally following conflict resolution. Earlier
+PR2169,2171–2176,2179,2180 also landed. Source merges do not establish deployment
+or erase known failed/unrun verification. Mail CI/native-helper proof, imported
+global executable tests, and parser retention/performance gates remain open.
+
+Windows producer `70da44fb` built 1,118 modules without failures and compiled/ran
+hello. Its source is immutable and predates current release. The direct
+Phase3/4 coordinator PID39524 was verified live by process command line; latest
+owner counts were 135/13,746 and 60/13,746 LLVM module rows, respectively.
+Rows are attempts, not successes. Six Phase4 LLVM app-binary attempts failed;
+Cranelift is not started. Both backends still require one actual test runner
+executing the compiler, interpreter and loader suites. Receipts and caches:
+`D:/dev/windows-parser-08e1-validation/phase34-direct-v2`.
+
+Linux producer `7cc8409e` built 1,122 modules without failures. Pattern-presence
+native regression passed. Loader now completes 11 MIR modules without the old
+crash, but fails with 36 diagnostics in 12 groups and 18 placeholder warnings.
+Evidence: `D:/dev/linux-mir-crash-20261002/pattern-loader-7cc/evidence.json`.
+Remaining errors have fix owners; full bootstrap is not passing.
+
+Manager worker admission exposed a Rust signature-table text ABI truncation.
+Reviewed fix `252d70dc9e` is landed; a new guarded producer build from release
+`70e835667a` is running under a 4 GiB cgroup. Native ABI, actual worker/compiler
+task, settlement and both-host go-to-end qualification remain required before
+switching bootstrap scripts to the manager.
+
+Shared-cache tests landed, but actual bidirectional frontend reuse/private
+isolation remains unverified. Windows `_fullpath` is lexical, not proof of
+physical directory alias isolation. A SOSIX identity/ancestry fix is assigned.
+Do not infer deployment from merges or cache HIT traces alone.
+
+Preserve active worktrees, producer-bound caches, pinned runtimes and evidence.
+Apply fixes to new immutable candidates, never running snapshots. Cleanup only
+confirmed stale disposable files. Rerun affected failed criteria after fixes,
+not unchanged green checks. Placeholder output cannot establish semantic PASS.
