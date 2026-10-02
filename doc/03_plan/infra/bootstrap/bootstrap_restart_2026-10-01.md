@@ -810,3 +810,31 @@ Log: `build/native_probe/stage2.log`; resource receipt:
 Aggregate RSS guard is 4,718,592 KiB. Physical D: free space is 122.89 GiB,
 independent of WSL's apparent 932 GiB free. Effective worker-count diagnostics
 and terminal results remain pending. Phase3/4 still require the real hello gate.
+
+### 2026-10-02 Linux object completion and handoff review
+
+The exact-6b9 Debian Phase2 attempt reached `compiled=1118 reused=0 failed=0`,
+then failed at link with missing `rt_dir_is_real_no_follow`,
+`rt_shared_parse_cell_read_v1`, and `spl_thread_current_id`. No Phase2 producer
+or hello executable was produced. Guard receipt reports exit1, quiescent1,
+peak1,850,480KiB against4,718,592KiB. Retained objects:
+`/root/linux-bootstrap-ext4/spawn-abi-9e89-run1/memoryfix-source-6b9edd328/build/bootstrap/native-objects-IhVRke`.
+The Linux owner is repairing actual runtime linking with the1118-object cache
+preserved. This supersedes the earlier live-PID244 checkpoint.
+
+The cross-host audit is saved at
+`D:/dev/bootstrap-crosshost-apply-verify-20261002/evidence-matrix.md`.
+It found prelaunch handoff defects, including Linux hello/producer binding,
+cache isolation and module coverage, and a Windows manager-only gate without
+the authorized direct fallback. Owners are repairing launchers before execution.
+Calling a bootstrap_main native build Phase3 MIR is insufficient: full inventory
+and actual MIR-pipeline evidence are required. Manager dispatch is still unproven;
+three corrected setup attempts ended before worker execution. Native diagnostic
+work is pending; no admission check was waived.
+
+User requested more cores. Next substantive builds target8 workers per host
+under unchanged memory/disk guards. Windows remains at4 for the current compile:
+810 objects had already been cached when the request arrived, so replaying its
+frontend was judged slower than finishing. Direct measurement previously showed
+3.99 active Windows cores and Linux386% averageCPU, establishing actual parallel
+execution but not absence of a performance regression. Phase3/4 have not started.
