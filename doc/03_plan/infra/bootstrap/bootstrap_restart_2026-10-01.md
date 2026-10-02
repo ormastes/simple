@@ -1243,3 +1243,28 @@ The full objective remains open: Phase2-built manager deployment on both hosts,
 actual shared-cache hydration, and complete Phase3/4 module and executable/test
 builds require separate evidence. Preserve all producer-bound caches and the
 17,147-module routes; the narrow disk policy above does not admit those queues.
+
+### 2026-10-02 Windows Phase2 candidate linked
+
+Windows fa703 Phase2 completed at 10:07 UTC: 1,130 compiled, zero cached and
+zero failed, with 797.0 seconds compilation plus 38.7 seconds linking. Candidate
+`D:/dev/windows-phase2-release-next-20261002/phase2/stage2-fa703.exe` has SHA-256
+`c82956eb610fadd603533fb4eb61e30236b895ff665b1bf05997edfdbe3ecac1`.
+Owned-process supervision reports exit zero, quiescence and peak RSS
+1,915,728 KiB. This was sampled RSS enforcement with Job Object containment;
+the receipt explicitly records `hard_memory_limit=0`. Disk admission and final
+samples were 26,905,067,520 and 26,395,930,624 bytes respectively, without a disk
+stop. Provider-bound hello and canonical Stage2 admission remain unproven.
+
+The next diagnostic manager qualification requires three Phase2-built images
+under one cumulative 2 GiB disk-growth guard after actual hello. It does not
+replace the canonical eight-image preparation or its typed admission receipt.
+The existing grouped-native manager already restores its complete manifest
+ledger; retain that ledger and the full 17,147-module inventory when planning
+bounded resource admission. No partial inventory is a completion substitute.
+
+Review of the downstream direct runner found both repeated per-module source
+scans and an old four-root source-check scope. The proposed correction performs
+checks at inventory boundaries and covers all source and relevant test paths.
+Focused rejection tests and independent review must finish before that runner
+is used; no full Phase3/4 queue is claimed started here.
