@@ -22,8 +22,9 @@ PR merge are authorized. Background mail notifications are outside this change.
 - REQ-006: No retry of ambiguous SMTP timeout/send/receive failures, no automatic
   mail deletion, no plaintext fallback if encryption fails.
 - REQ-007: User additionally requires configurable mail config file/directory
-  and a shared dev-hub account file. Dev-hub reads shared JSON and forwards the
-  identical location; legacy SDN remains a compatibility fallback.
+  and a shared dev-hub account file. Dev-hub and mail-cli read one shared SDN file through the canonical
+  parser and forward the identical location. Legacy JSON requires an explicit
+  file selection; import is separately opt-in.
 - REQ-008: Run the shared client on Windows/Linux/macOS/BSD with documented
   host dependencies and a Windows launcher. Native Simple helper builds and
   actual host execution must be separately verified; no implied cross-host PASS.

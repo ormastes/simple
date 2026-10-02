@@ -6,7 +6,7 @@ dependencies and a native credential-helper build; Linux tests do not certify
 Windows, macOS, or BSD runtime behavior.
 
 Use `mail auth login --protocol pop3 --account work` to configure a TLS POP3
-maildrop plus SMTP sending. POP3 defaults to port 995. Mandatory STLS is
+maildrop plus SMTP sending. POP3 defaults to port 995 for implicit TLS and 110 for STARTTLS. Mandatory STLS is
 available through the `starttls` setting; certificate checks remain enabled.
 
 `mail inbox --account work --json --limit 25` lists messages. `mail read 1
@@ -27,7 +27,7 @@ New saved passwords use Simple's `encrypted:v2:` format and the existing
 `{home}/.simple/credential_key`. The key itself is stored locally, and CBC records
 lack an authentication tag. This is not an OS credential vault; see the
 [hardening TODO](../../08_tracking/todo/credential_storage_hardening_2026-09-29.md).
-Existing plaintext account records remain readable; `auth password` rewrites
+Existing plaintext account records are readable only with an explicit legacy JSON file; `auth password` rewrites
 the selected password in encrypted form after successful authentication.
 
 `mail auth password --account work --password-file /private/password.txt`
@@ -71,10 +71,24 @@ IMAP accounts use `imap_server`/`imap_port`. A Graph account specifies
 `protocol: graph` and its Graph identity fields; its authentication remains
 separate. Do not forward Graph accounts to direct mail-cli operations.
 
-When `email.sdn` is absent, DevHub can still read its former `email.json`.
-mail-cli imports that file, or its older `~/.config/mail-cli/config.json`,
-into `email.sdn` on first configuration initialization. The source JSON file
-is left untouched for review.
+SDN is the default in both clients. Legacy JSON requires an explicit
+`--config-file /private/email.json`; automatic fallback is disabled. Set
+`MAIL_IMPORT_LEGACY=1` to deliberately import an existing JSON configuration.
+The import rejects plaintext passwords; migrate those to credential references
+first. The source JSON remains untouched.
+
+Install the rebuilt compiled `simple-mail-credentials` helper, including
+`config-json PATH`, before using the shell SDN reader. `MAIL_CONFIG_BIN` selects
+that executable independently from `MAIL_CREDENTIAL_BIN`; otherwise the
+credential helper also provides the parser. Production startup never compiles
+source. The helper and DevHub use the same canonical SDN parser and stable
+`MAIL_CONFIG_*` errors without input values. Do not log the helper JSON output:
+it contains credential references and encrypted envelopes.
+
+`--account` overrides `default_account`; missing selected accounts fail closed
+without selecting a sibling. `--password-file` and `--password-cmd` retain their
+existing invocation precedence. Duplicate keys, malformed SDN, plaintext shared
+passwords, unsupported TLS/protocols and out-of-range ports are rejected.
 
 `devhub email auth password --account work --password-file /private/password.txt`
 updates the shared file after validation. Credential flags also work on other
