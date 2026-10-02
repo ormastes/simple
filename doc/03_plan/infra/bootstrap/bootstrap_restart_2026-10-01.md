@@ -898,3 +898,50 @@ exactly3d021ee9bc6456857a1450928fd6aff127aba13f. Remote named originals and
 work/main-on-release-20261002 preserve evidence. Public main remains unchanged:
 GitHub rules allow existing admin bypass only through PRs. User choice about a
 temporary actor-specific bypass change is pending; elapsed time is not approval.
+
+### 2026-10-02 hello gate and independent phase attempts
+
+Windows hello3 is PASS: compile.exit-code.txt=0, run.exit-code.txt=0,
+run.stdout.log=`hello`, under
+D:/dev/bootstrap-memory-fix-validation-20261002/hello3. The producer is the
+same e7ec89c1f106353cc8fdc792d5d41359336c72287f410aa039b57d8f6101dfdf
+candidate. Only the optional SIMPLE_MEM_SNAPSHOT_FILE sink was disabled;
+external Job/RSS enforcement remained enabled. Peak Job commit was
+5,130,432KiB. This is a hello gate, not full bootstrap or diagnostic-sink PASS.
+
+Independent Phase3 and Phase4 attempts use frozen source ba066da503e50a386294e27f9e09ecbd27373add.
+Phase3 LLVM bootstrap and Phase4 LLVM bootstrap both hit the 7GB Job cap
+(exit88). The first loader module also exceeded that cap with one compiler.
+Do not repeat unchanged binary attempts or count resource termination as PASS.
+Phase4 interpreter closure failed at missing std.args. A release-based isolated
+agent is replacing that import with the existing argument facade for both hosts.
+
+The Windows module collector is being corrected to guard each compiler
+individually, allowing a contained failure row before trying the next module.
+Nested Jobs were rejected by the helper; the coordinator now stays outside
+compiler Jobs. Deep receipt paths also exceeded the helper MAX_PATH limit;
+receipts now use D:/dev/bootstrap-module-jobs-20261002. The v5 Phase3 first
+module was reported launched as PID40880; this is historical launch evidence,
+not a persistent liveness claim. All previous attempts and caches are retained.
+
+Linux Astra repair found the initial run selected a complete seed native-all
+archive, not merely generated core C. Preserve that corrected diagnosis alongside
+the earlier failure audit. Full original authority SHA256
+4cde5db743726158a0f4c9de7e5153c969ff5165ba0d0301ba2343c6e47197eb
+plus three isolated current C providers yields SHA256
+d0c9cd0be5ad8635868289de61acaebc526213d92044b684608c64df2f3675bd.
+All 43,782 original export names/counts remain; exactly three exports are added.
+Root reviewed provider symbols and nonempty relocations: no duplicate allocator
+or private runtime state. Evidence:
+D:/dev/linux-runtime-binding-20261002/provider-audit.json.
+Native validation is authorized after the behavioral harness; success remains
+unproven. The Linux downstream launcher is prepared for independent Phase3/4,
+LLVM then Cranelift, fourteen binary jobs and four complete module inventories.
+A single producer hello receipt should be shared across the two coordinators.
+
+Draft PR2164 contains the shared snapshot semantic-text ABI correction;
+PR2163 contains manager admission diagnostics. Neither draft proves native
+acceptance or manager dispatch. Direct guarded scripts remain the active route
+until the manager actually passes admission/worker execution. Common source
+fixes must be reviewed on release and applied to new frozen host lanes, never
+mutated beneath an active build.
