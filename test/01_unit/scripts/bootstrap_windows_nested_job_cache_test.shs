@@ -12,6 +12,10 @@ if [ "${1:-}" = --inner ]; then
     tmp=$2
     [ "$SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE" = "$tmp/cache" ] ||
         fail 'native boundary changed POSIX helper-cache path'
+    "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check >"$tmp/outer-job-check.log" 2>&1 ||
+        fail 'inner workload is not a member of the outer Windows Job'
+    printf '%s\n' "$SIMPLE_BOOTSTRAP_SESSION_ID" >"$tmp/inherited-session-id"
+    printf '%s\n' "$SIMPLE_BOOTSTRAP_SESSION_EXEC" >"$tmp/inherited-session-helper"
     case ";${MSYS2_ENV_CONV_EXCL:-};" in
         *';CL=;'*) ;; *) fail 'CL exclusion lost at native boundary' ;;
     esac
@@ -53,6 +57,15 @@ for mode in outer inner; do
 done
 grep -Fxq 'session_mode=new' "$tmp/outer.env" || fail 'outer session mode drift'
 grep -Fxq 'session_mode=inherit' "$tmp/inner.env" || fail 'inner session mode drift'
-grep -Eq '^parent_session_admission_sha256=[0-9a-f]{64}$' "$tmp/inner.env" ||
-    fail 'inner admission did not bind the outer session'
+outer_id=$(sed -n 's/^session_id=//p' "$tmp/outer.env")
+outer_helper=$(sed -n 's/^session_helper=//p' "$tmp/outer.env")
+[ -n "$outer_id" ] && [ "$outer_id" = "$(cat "$tmp/inherited-session-id")" ] ||
+    fail 'inherited Job ID differs from outer receipt'
+[ -n "$outer_helper" ] && [ "$outer_helper" = "$(cat "$tmp/inherited-session-helper")" ] ||
+    fail 'inherited helper differs from outer receipt'
+helper_sha=$(shasum -a 256 "$outer_helper" | awk '{print $1}')
+grep -Fxq "session_helper_sha256=$helper_sha" "$tmp/outer.env" ||
+    fail 'outer helper bytes differ from receipt'
+grep -Fxq 'parent_session_admission_sha256=' "$tmp/inner.env" ||
+    fail 'Windows Job inheritance unexpectedly claims a POSIX admission file'
 echo 'PASS: nested Windows Jobs preserve POSIX cache and both reap quiescently'
