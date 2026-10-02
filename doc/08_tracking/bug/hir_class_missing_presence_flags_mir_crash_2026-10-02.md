@@ -17,7 +17,9 @@ This is a HIR presence/payload inconsistency, not an unresolved runtime provider
 The small native fixture
 `test/01_unit/compiler/codegen/class_optional_metadata_native.spl` independently
 reproduced exit 139 at MIR entry after 77 ms using the same compiler. It contains
-one ordinary class with one field and no imports or export annotation.
+one ordinary class with one field and no imports or export annotation. After
+that reproduction, the fixture was extended with a documented, explicitly
+exported class to cover positive metadata presence in after-fix validation.
 The fixture was copied under the frozen checkout's ignored `build/native_probe`
 directory; no frozen source files were changed. The guard reported quiescence.
 
