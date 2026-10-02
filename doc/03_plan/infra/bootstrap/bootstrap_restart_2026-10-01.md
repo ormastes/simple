@@ -32,6 +32,21 @@ the terminal guard receipt and compile/run result before advancing. Only a
 compiled-and-executed hello PASS enables the authorized Phase3/4 continuation.
 Linux and manager retry limits are unchanged by this Windows cap exception.
 
+Hello7 is now terminal: `rss-cap-exceeded`, exit 88, Job peak 6,836,856 KiB
+against 6,835,937 KiB, with `quiescent=1`. The last external sample at
+23:34:47 UTC recorded parent 2,168,168,448 B and HIR preparation child
+4,534,685,696 B; the Job guard caught a higher peak before termination.
+No hello executable, compile/run exit receipt or phase-profile output was
+produced. Physical D still had 128.519 GiB free. All owned candidate, child
+and sampler processes are gone. Preserve hello7's resource receipts and
+CSV; this authorized attempt is consumed, and Phase3/4 did not start.
+
+PR #2161 is ready for review, but immediate landing was refused by the
+release ruleset: required `SPipe Self Review Admission` is missing. Its
+structural check passed. Do not describe it as merged or manufacture the
+missing review admission. The ruleset allows merge commits only, and the
+repository rejected the attempt to enable automatic merge. The PR is open.
+
 ### Subsequent recovery: Windows Phase2 linked
 
 Physical D recovered to about 58.97 GiB. The deleted shared Git admin made

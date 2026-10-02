@@ -5,6 +5,16 @@ compiler defect. No passing hello result was available at this observation.
 
 ## Terminal result
 
+The later user-authorized 7 GB comparison, hello7, also failed before
+producing a hello executable. Job peak was 6,836,856 KiB against 6,835,937 KiB,
+exit 88, `quiescent=1`. The last sampled parent RSS was 2,168,168,448 B;
+its `--hir-shard=0/1` child reached 4,534,685,696 B in that sample. No final
+worker, phase-profile output or compile/run result was recorded. D had
+128.519 GiB free. Receipts are in
+`D:/dev/bootstrap-phase2-selective-windows/hello7/`. Raising aggregate
+headroom by 1 GB did not resolve admission; the underlying allocation stage
+remains unproven. Preserve the candidate and caches without another retry.
+
 The third attempt terminated before its 1200-second timeout with
 `rss-cap-exceeded`: aggregate process-tree peak 5,865,692 KiB against a
 5,859,375 KiB cap. The outer resource receipt records child exit 88 and
