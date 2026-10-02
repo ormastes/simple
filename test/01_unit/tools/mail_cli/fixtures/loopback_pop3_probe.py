@@ -32,9 +32,10 @@ def main():
         stop = threading.Event()
         commands = []
         failures = []
+        state = {"tls": "implicit", "mode": "normal"}
         message = (b"From: sender@example.test\r\nTo: alice@example.test\r\n"
                    b"Subject: Loopback TLS message\r\nContent-Type: text/plain\r\n"
-                   b"\r\nLoopback body.\r\n")
+                   b"\r\nLoopback body.\r\n..Leading dot\r\n..\r\n")
 
         def serve():
             while not stop.is_set():
@@ -43,7 +44,8 @@ def main():
                 except socket.timeout:
                     continue
                 try:
-                    with context.wrap_socket(connection, server_side=True) as tls:
+                    secured = state["tls"] == "implicit"
+                    with context.wrap_socket(connection, server_side=True) if secured else connection as tls:
                         tls.settimeout(5)
                         stream = tls.makefile("rwb", buffering=0)
                         stream.write(b"+OK disposable POP3 fixture ready\r\n")
@@ -54,10 +56,25 @@ def main():
                             argument = pieces[1] if len(pieces) > 1 else ""
                             commands.append(verb)  # never record credentials
                             if verb == "CAPA":
-                                stream.write(b"+OK capabilities\r\nUSER\r\n.\r\n")
+                                capabilities = b"USER\r\n"
+                                if not secured and state["mode"] != "no_stls":
+                                    capabilities += b"STLS\r\n"
+                                stream.write(b"+OK capabilities\r\n" + capabilities + b".\r\n")
+                            elif verb == "STLS" and not secured:
+                                if state["mode"] == "reject_stls":
+                                    stream.write(b"-ERR TLS unavailable\r\n")
+                                    continue
+                                stream.write(b"+OK begin TLS\r\n")
+                                stream.close()
+                                tls = context.wrap_socket(tls, server_side=True)
+                                tls.settimeout(5)
+                                stream = tls.makefile("rwb", buffering=0)
+                                secured = True
                             elif verb == "USER":
+                                assert secured, "credentials sent before TLS"
                                 stream.write(b"+OK user\r\n")
                             elif verb == "PASS":
+                                assert secured, "credentials sent before TLS"
                                 authenticated = argument == "loopback-fixture-password"
                                 stream.write(b"+OK authenticated\r\n" if authenticated else b"-ERR rejected\r\n")
                             elif verb == "QUIT":
@@ -66,14 +83,25 @@ def main():
                             elif not authenticated:
                                 stream.write(b"-ERR authenticate first\r\n")
                             elif verb == "LIST":
-                                stream.write(f"+OK listing\r\n1 {len(message)}\r\n.\r\n".encode())
+                                if state["mode"] == "empty":
+                                    stream.write(b"+OK listing\r\n.\r\n")
+                                elif state["mode"] == "reject_list":
+                                    stream.write(b"-ERR listing unavailable\r\n")
+                                else:
+                                    stream.write(f"+OK listing\r\n1 {len(message)}\r\n.\r\n".encode())
                             elif verb == "RETR" and argument == "1":
-                                stream.write(b"+OK message\r\n" + message + b".\r\n")
+                                stream.write(b"+OK message\r\n" + message)
+                                if state["mode"] == "truncated":
+                                    stream.close()
+                                    break
+                                stream.write(b".\r\n")
                             elif verb == "NOOP":
                                 stream.write(b"+OK\r\n")
                             else:
                                 failures.append(verb)
                                 stream.write(b"-ERR unsupported\r\n")
+                        stream.close()
+                        tls.close()
                 except (ssl.SSLError, ConnectionError):
                     # Expected when testing certificate distrust and rejection.
                     connection.close()
@@ -98,7 +126,7 @@ def main():
             '    pop3_server: "127.0.0.1"\n'
             f'    pop3_port: "{port}"\n'
             '    tls: implicit\n'
-            '    password: "loopback-fixture-password"\n'
+            '    password_cmd: "printf loopback-fixture-password"\n'
         )
         config.chmod(0o600)
         env = {name: value for name, value in os.environ.items()
@@ -121,9 +149,25 @@ def main():
             print("actual_curl_tls_pop3_list: PASS")
             result = run("read", "1", "--raw")
             assert result.returncode == 0 and "Loopback body." in result.stdout
+            assert "\n.Leading dot\n.\n" in result.stdout
+            assert "..Leading dot" not in result.stdout
             assert "LIST" in commands and commands.count("RETR") == 2
             assert "DELE" not in commands and "STORE" not in commands
             print("actual_curl_tls_pop3_retrieve_without_mutation: PASS")
+            print("actual_curl_pop3_dot_unstuffing: PASS")
+            state["mode"] = "empty"
+            result = run("inbox", "--json")
+            assert result.returncode == 0 and json.loads(result.stdout) == []
+            print("actual_curl_pop3_empty_mailbox: PASS")
+            state["mode"] = "reject_list"
+            result = run("inbox", "--json")
+            assert result.returncode != 0 and not result.stdout
+            print("actual_curl_pop3_list_error_propagated: PASS")
+            state["mode"] = "truncated"
+            result = run("read", "1", "--raw")
+            assert result.returncode != 0 and not result.stdout
+            print("actual_curl_pop3_truncated_message_rejected: PASS")
+            state["mode"] = "normal"
             before = commands.count("PASS")
             password = work / "wrong-password"
             password.write_text("wrong-fixture-password\n")
@@ -134,6 +178,22 @@ def main():
             result = run("read", "1", "--raw", overrides={"CURL_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt"})
             assert result.returncode == 60, f"untrusted certificate exit {result.returncode}"
             print("actual_curl_untrusted_certificate_rejected: PASS")
+            state["tls"] = "starttls"
+            config.write_text(config.read_text().replace("tls: implicit", "tls: starttls"))
+            before = len(commands)
+            result = run("read", "1", "--raw")
+            assert result.returncode == 0 and "Loopback body." in result.stdout
+            exchange = commands[before:]
+            assert exchange.index("STLS") < exchange.index("USER") < exchange.index("PASS") < exchange.index("RETR")
+            print("actual_curl_pop3_starttls_before_credentials: PASS")
+            for mode in ("no_stls", "reject_stls"):
+                state["mode"] = mode
+                before = len(commands)
+                result = run("read", "1", "--raw")
+                assert result.returncode != 0 and not result.stdout
+                assert "USER" not in commands[before:] and "PASS" not in commands[before:]
+            print("actual_curl_pop3_starttls_failure_no_credentials: PASS")
+            assert "DELE" not in commands and "STORE" not in commands
             assert not failures, f"server failures: {failures}"
         finally:
             stop.set()
