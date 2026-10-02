@@ -202,6 +202,14 @@ void rt_dir_list_free(const char** entries, int64_t count) {
 /* Helper: Recursively remove directory contents */
 static bool rt_dir_remove_all_impl(const char* path) {
     if (!path) return false;
+    /* Remove a directory link itself; never enumerate a reparse target. This
+       applies at every recursive entry, including nested junctions. */
+    DWORD attributes = GetFileAttributesA(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES) return false;
+    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        return (attributes & FILE_ATTRIBUTE_DIRECTORY)
+            ? RemoveDirectoryA(path) : DeleteFileA(path);
+    }
 
     /* Build search pattern */
     size_t path_len = strlen(path);

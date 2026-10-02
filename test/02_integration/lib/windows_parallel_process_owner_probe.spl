@@ -3,7 +3,7 @@
 use std.nogc_sync_mut.io.process_ops.{process_spawn_redirected, process_wait, process_is_running, process_kill}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE}
 use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text, file_exists}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
@@ -72,6 +72,8 @@ fn main() -> i64:
             executed = executed + 1
             failed = failed + check(output.contains("HOME=" + private_root + "/home") and output.contains("TMP=" + private_root + "/tmp"), "private child environment {wave}/{index}")
             executed = executed + 1
+            failed = failed + check(not is_dir(private_root), "collected scope removed {wave}/{index}")
+            executed = executed + 1
             failed = failed + check(process_wait(tokens[index], 1) == -1 and not process_is_running(tokens[index]), "consumed token {wave}/{index}")
         if wave == 0: stale = tokens[0]
         executed = executed + 1
@@ -85,6 +87,7 @@ fn main() -> i64:
         val token = process_spawn_redirected(child, ["fast", lifetime, identity, quote],
             lifetime + "/" + identity + ".out", lifetime + "/" + identity + ".err", 30000, 1048576)
         if token < WINDOWS_REDIRECTED_TOKEN_BASE or process_wait(token, 30000) != 0: break
+        if is_dir(lifetime + "/" + identity + ".out.scope"): break
         lifetime_completed = lifetime_completed + 1
     executed = executed + 1
     failed = failed + check(lifetime_completed == 1025, "historical starts cross former 1024 bound")
@@ -104,6 +107,8 @@ fn main() -> i64:
     failed = failed + check(process_spawn_redirected(root + "/missing.exe", [], root + "/missing.out", root + "/missing.err", 1000, 65536) == -1, "missing executable refuses before native start")
     executed = executed + 1
     failed = failed + check(process_spawn_redirected(child, ["bad\0argument"], root + "/nul.out", root + "/nul.err", 1000, 65536) == -1, "NUL argument refuses before native start")
+    executed = executed + 1
+    failed = failed + check(not is_dir(root + "/missing.out.scope") and not is_dir(root + "/nul.out.scope"), "rejected admission scopes removed")
     val overflow = process_spawn_redirected(child, ["overflow", root, "overflow", quote], root + "/overflow.out", root + "/overflow.err", 30000, 65536)
     executed = executed + 1
     failed = failed + check(overflow >= WINDOWS_REDIRECTED_TOKEN_BASE and process_wait(overflow, 30000) == -1 and not process_is_running(overflow), "oversized capture cannot produce a passing result")
@@ -114,7 +119,7 @@ fn main() -> i64:
     val historical_starts = 160 + lifetime_completed + (if tree_token >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if overflow >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if timeout >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0)
     print "parent_peak_rss_kib={rss} historical_starts={historical_starts} slot_bound=100000"
     executed = executed + 1
-    failed = failed + check(rss > 0, "native parent peak RSS available")
+    failed = failed + check(rss > 0 and rss <= 524288, "1188-start parent qualification budget at most 512 MiB")
     val passed = executed - failed
     print "Results: {passed} passed, {failed} failed, {executed} executed"
     if failed > 0: return 1
