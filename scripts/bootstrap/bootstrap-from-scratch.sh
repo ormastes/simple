@@ -4218,6 +4218,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # nothing. Fail closed, exactly like the resume side -- a cache already
     # stamped by a FOREIGN lane is still refused, which is the property the
     # guard exists for.
+    bootstrap_cache_scope_guard="${repo_root}/scripts/check/check-cache-scope-ownership.shs"
     if [ -f "${bootstrap_cache_scope_guard}" ]; then
       sh "${bootstrap_cache_scope_guard}" "${stage2_cache_absolute}" stage2 || {
         echo "error: Stage 2 native cache belongs to a foreign lane scope" >&2
