@@ -1568,3 +1568,73 @@ remain unrun. Capture-only tool configuration must not activate strict
 compiler discovery until sealed authority selectors exist. Shared Windows/
 Linux parse-cache qualification is still pending; no deployment or complete
 module traversal is established by these source and shell checks.
+
+### 2026-10-02 cold inventory completed; explicit entry collection failed
+
+The second actual diagnostic compiler invocation used the same preserved
+Stage2 image with explicit first-checkout SCV initialization. It completed
+inventory/snapshot admission, then exited 1 during HIR source loading:
+the snapshot entry `test/04_smoke/windows_native_hello.spl` collected zero
+source files. The entry actually exists, is 65 bytes, and matches the original
+fixture digest. There is still no hello binary or run result. Evidence is in
+`D:/dev/windows-release-7734-build-20261002/rejected-hello-cycle3/`; the directory
+suffix is not the actual invocation count. The terminal supervisor confirms
+quiescence and peak RSS 3,510,724 KiB, below the sampled 7 GB cap. No memory or
+disk stop occurred.
+
+Preserve `build/scv/source-inventory/CURRENT` generation 1 and snapshot
+`scv-revision-v1-9c659e8cdbf3f63f6c95a79c7d3992cf46e59bd19514b0f0d3bd8f4ea04ee831`.
+Any justified subsequent attempt must acquire genuine warm authority with
+cold initialization disabled; do not rebuild or fabricate these receipts.
+
+Exact-source review ruled out adding `--source test/04_smoke` as a supported
+fix: entry-closure collection seeds the explicit entry independently. The
+collector can return no files after nullable read/tuple handling or after
+module-name/alias-array construction. The current diagnostic does not separate
+those cases. Astra owns bounded native artifact/ABI diagnosis before the
+third and final attempt; no speculative unchanged retry is authorized.
+
+The manager aggregate verifier and strict tool/runtime corrections are frozen
+for a combined draft checkpoint. Focused corrected-source review found no
+remaining P0/P1 in strict binding; native/SPL validation, complete module runs,
+and cross-host cache qualification remain unrun. Phase3/Phase4 on this candidate
+remain held pending actual hello success.
+
+### 2026-10-03 diagnostic hello passed; direct queues require infrastructure resume
+
+The third and final actual invocation of the retained `2f3d16f...f0384`
+compiler compiled and ran the existing
+`src/compiler/bootstrap_admission/hello_world.spl`: compile/run exit 0, exact
+`hello` plus newline, empty stderr. The guarded Job was quiescent, with peak
+RSS 5,380,808 KiB. Evidence is `rejected-hello-cycle5/result.env` under the same
+7734 build root; cycle4 was a setup-only cursor-hash refusal, not a compiler
+invocation. Canonical Stage2 admission remains absent. The producer's recorded
+entry is `src/app/cli/bootstrap_main.spl`; it has no general `test` command.
+
+Source inspection corrected the zero-source hypothesis: the native CLI does
+not publish `compiler_source_entry`, so the requested `test/` entry takes the
+dependency filter and is discarded before reading. Draft PR #2262 fixes that
+configuration propagation; behavioral execution remains pending. An isolated
+native ABI probe passed all 13 source-loading observations and reproduced a
+separate duplicate `??` evaluation bug. Its fix landed through PR #2261 as
+`e233efd3ee`, after three HIR/MIR and Cranelift JIT regressions passed. That is
+not a rebuilt LLVM/COFF producer qualification.
+
+The reviewed diagnostic Phase3/Phase4 pair then ran. Phase3 LLVM completed
+28 guarded module attempts: 14 passed, 14 failed; module29 was interrupted.
+The full inventory remains 17,154. Phase4 LLVM attempted six binary tasks:
+bootstrap, full CLI and test runner hit the 7 GB cap; interpreter, MCP and LSP
+failed compilation. No required executable suite passed.
+
+The pair is now terminal and quiescent, not still running: the compiler-suite
+launcher could not find bare `pwsh.exe`, causing infrastructure exit74 and
+cancellation of Phase3 (143). It was not a disk-floor stop. The resume owner
+is pinning the absolute PowerShell path and preparing a new, reviewed route
+that preserves the first28 module receipts, requeues interrupted29, and
+continues the 17,126 pending entries. Preserve all old claims, logs and caches.
+The other two LLVM suites were never scheduled, not failed tests.
+
+Manager implementation is checkpointed in draft PR #2255 (`54c030180e`),
+with shell/static checks but no native deployment proof. Actual manager
+primitive execution, full-CLI streaming qualification, remaining inventories,
+six suites and Windows/WSL shared-cache qualification remain outstanding.
