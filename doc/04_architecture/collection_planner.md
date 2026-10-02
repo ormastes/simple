@@ -102,3 +102,40 @@ reason, generated loop count and intermediate allocations. Cold startup, warm
 startup, request latency and max RSS are measured on realistic fixtures using
 the selected balanced NFR profile. `/verify` must reject placeholder tests and
 unsupported REQ claims before release.
+
+## 2026-10-03 production admission refinement (Codex)
+
+The existing physical selector remains an advisory collection-storage policy.
+Its Original/Linear/Hash/Ordered choices must not be silently renamed into
+logical fusion or join operators. Introduce an explicit adapter only after the
+typed plan supplies operation-specific proofs, output bounds, target support
+and memory estimates. Until then the original HIR region remains authoritative.
+
+A production receipt has three distinct stages: **analyzed**, **lowered**, and
+**executed**. Analysis records the source/function hash and candidate decision;
+lowering binds that decision to emitted MIR and the exact registry/backend/
+policy/profile identities; execution records the compiled artifact identity and
+observed fixture counters. Only the lowering owner may issue a lowered receipt,
+and a test harness must not manufacture one from a selector result. Corrupt,
+stale or absent lowering evidence selects original execution.
+
+Before selecting a candidate, estimate build + probe + output work and peak
+live memory, including buckets, duplicate chains, temporary buffers and output
+builders. Checked arithmetic must reject overflow. Unknown output size is
+explicit; it cannot be replaced by zero. Memory admission precedes allocation
+and lowering. A measured profile may refine estimates but cannot remove an
+effect, equality, ordering, duplicate or mutation witness.
+
+Fusion legality must compare observable traces. An eager map followed by a
+filter can invoke all map callbacks before any predicate, whereas a fused loop
+interleaves them. Preserve original execution when that difference is
+observable, including exceptions and allocation observation. Pure callbacks
+still require alias/escape/target evidence; purity alone is insufficient.
+
+Registry/cache ownership remains per compilation service/request as above.
+Include profile epoch in the cache key as required by NFR-006. Registry reload,
+callee edits, target capability changes and profile replacement invalidate
+affected receipts. Collection diagnostics and lowering consume the same
+snapshot; neither may reload files during a hot request. Evidence must measure
+warm startup and request latency separately, retaining the five-run medians,
+cold-start measurement and peak RSS required by the selected NFR profile.

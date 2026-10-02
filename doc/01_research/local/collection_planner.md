@@ -52,3 +52,41 @@ no exact `collection_planner` feature route. Longest-prefix routes select the
 compiler-pipeline and runtime-memory-I/O layer bases. Selection is recorded in
 `.spipe/collection_planner/knowledge_selection.sdn`; the missing feature route
 is a research/configuration gap.
+
+## 2026-10-03 release-lane re-audit (Codex)
+
+Baseline: `origin/release/1.0`, commit
+`e9cd3153c881c55f59eaaa2573b4b8a5e803023a`. This supplement preserves the
+September inventory as history; it does not claim executable verification.
+
+| Evidence at baseline | Consequence for the next TDD slice |
+|---|---|
+| Both `nogc_sync_mut/df/typed_series.spl` and `nogc_async_mut/df/typed_series.spl` define `TypedSeries<T>`, numeric adapters, missing-mask validation, map/filter and short-circuit methods. | The older statement that columns have no typed facade is stale. Assert facade semantics and adapter failures before extending it; generic typed DataFrame schema and richer errors still need evidence. |
+| `35.semantics/perf_facts/builtin_collection.spl` admits unary array lambda map and capture-free filter by typed builtin identity. | This is dispatch admission, not callback purity, arbitrary collection coverage, or five-engine parity. Named callbacks, any/all/flat-map and captures need separate fixtures. |
+| `CollectionOperationRegistry` stores summaries by resolved symbol and tracks ambiguous symbols; the planned `config/compiler/collection_operations.sdn` is absent. | In-memory metadata types do not meet REQ-003's production, versioned registry contract. Test duplicate IDs, wrong receiver/signature, backend symbol absence and cache invalidation. |
+| `extract_unary_collection_plan` rejects chains longer than 128 and unknown metadata; callback/alias/escape/profitability facts start unproven. | Preserve this bound and fail-closed behavior. Add loop extraction only with typed equivalence evidence; method spelling cannot authorize rewrites. |
+| `collection_plan_selection.spl` explicitly calls itself advisory; its algorithms are Original/Linear/Hash/Ordered. | These collection-storage choices are not yet the architecture's fusion/nested/hash/merge/direct-index execution operators. Keep those meanings distinct. |
+| `collection_plan_explain.spl` prints `extra_memory_bytes=unproven` for selected alternatives and `memory_budget=not-modeled`. | Add numeric peak-memory and output-work admission before claiming REQ-009/NFR-004. Explain text alone cannot prove a selected plan executed. |
+| Compiler reference search finds selector/renderer definitions and exports, but no invocation from driver or MIR lowering. | Production pipeline wiring, generated MIR and observed execution are separate mandatory gates, not satisfied by selector unit tests. |
+
+Research result: retain selected REQ-001–011 without adding unselected scope.
+The concrete acceptance matrix is appended to the detail design. The first
+integration failure should distinguish unavailable runner, unsupported engine,
+unwired planner and semantic mismatch; none may be counted as a passing case.
+The September Linux runner blocker is historical until rechecked on the current
+host. No runtime pass or current host failure is inferred from that report.
+
+Parallel planner-lane inspection additionally identified distinct logical and
+physical `CollectionPlanFacts` types with no established bridge, absent
+explicit-loop extraction, and operation summaries without the full
+worst-cost/backend/key contract. These are integration tasks, not safe field
+renames. The lane also flagged bare-method-name pure-query caching and coarse
+Array/Tuple/Struct constant keys in `collection_opt_core.spl` for a targeted
+collision reproducer; this is a reported risk pending reproduction, not a
+verified regression or authorization to expand the present rewrite scope.
+
+Host admission update from the integration lane: the available stage2 binary
+supports diagnostic compilation but has no test/run CLI. A full self-hosted
+runner has not been admitted for this work. Consequently, this dated audit and
+its focused guard implementation cannot report runtime PASS; five-engine
+parity, generated manuals and retained NFR measurement remain open gates.
