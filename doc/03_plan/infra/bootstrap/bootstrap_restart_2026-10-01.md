@@ -47,6 +47,16 @@ structural check passed. Do not describe it as merged or manufacture the
 missing review admission. The ruleset allows merge commits only, and the
 repository rejected the attempt to enable automatic merge. The PR is open.
 
+Subsequently, an exact-head Astra high-effort review returned PASS with zero
+P0/P1 findings. The canonical SPipe admission workflow run36948315912 passed,
+and PR #2161 merged into `release/1.0` at
+`b0dc12441573040246e48df294e438b28df6dd38` on 2026-10-02 00:55:54 UTC.
+The review is retained at
+`D:/dev/bootstrap-phase2-selective-windows/guard-7g-probe/pr2161-astra-review.md`.
+This lands the supervisor cap-alignment fix only; hello7 already used the
+same tested helper source and failed at its correctly enforced cap. Landing
+the fix is not a reason to repeat hello7 or a claim that Phase3/4 is admitted.
+
 ### Subsequent recovery: Windows Phase2 linked
 
 Physical D recovered to about 58.97 GiB. The deleted shared Git admin made
