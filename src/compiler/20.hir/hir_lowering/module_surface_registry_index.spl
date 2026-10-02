@@ -7,6 +7,42 @@ use std.common.crypto.sha256.{sha256_text}
 
 val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v2"
 
+# Stable bottom-up merge sort: each pass appends every row once instead of
+# rebuilding an ever-longer prefix for every insertion. Keep text `<` and
+# retain equal rows in their original order; these bytes define cache identity.
+pub(package) fn module_surface_resolution_rows_sorted_v1(rows: [text]) -> [text]:
+    val count = rows.len()
+    var sorted = rows
+    var width = 1
+    while width < count:
+        var next: [text] = []
+        var start = 0
+        while start < count:
+            val middle = if width > count - start: count else: start + width
+            val end = if width > count - middle: count else: middle + width
+            var left = start
+            var right = middle
+            while left < middle and right < end:
+                if sorted[right] < sorted[left]:
+                    next.push(sorted[right])
+                    right = right + 1
+                else:
+                    next.push(sorted[left])
+                    left = left + 1
+            while left < middle:
+                next.push(sorted[left])
+                left = left + 1
+            while right < end:
+                next.push(sorted[right])
+                right = right + 1
+            start = end
+        sorted = next
+        # Avoid overflowing width on the final doubling, even for a large input.
+        if width >= count - width:
+            break
+        width = width * 2
+    sorted
+
 fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName) -> text:
     var rows: [text] = []
     var index = 0
@@ -16,17 +52,7 @@ fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName
             rows.push(registry.ordered_names[index] + "=" +
                 registry.surfaces[surface_index].canonical_path)
         index = index + 1
-    var sorted: [text] = []
-    for row in rows:
-        var inserted = false
-        var next: [text] = []
-        for current in sorted:
-            if not inserted and row < current:
-                next.push(row)
-                inserted = true
-            next.push(current)
-        if not inserted: next.push(row)
-        sorted = next
+    val sorted = module_surface_resolution_rows_sorted_v1(rows)
     sha256_text(sorted.join("\n"))
 
 pub(package) fn module_surfaces_validate_index_alignment(
