@@ -44,6 +44,8 @@ val FLAT_POOL_BOUNDED_NODE_BYTES: i64 = 4096
 # --- escaping ---------------------------------------------------------------
 
 pub fn flat_pool_escape(value: text) -> text:
+    if not value.contains("\\") and not value.contains("\n"):
+        return value
     value.replace("\\", "\\\\").replace("\n", "\\n")
 
 # Decode is on the cache-hit path and also accepts untrusted canonical HIR
@@ -410,45 +412,92 @@ pub fn flat_pool_parse_i64(raw: text) -> i64:
 
 # --- encoders ---------------------------------------------------------------
 
-# Encoders accumulate into a parts array joined once. `out = out + piece` in a
-# loop rebuilds the whole prefix per element, which is quadratic in the pool's
-# size and showed up on the cache-MISS (store) path of every module. The bytes
-# produced are unchanged -- join("") over the same pieces, in the same order.
-pub fn flat_pool_enc_i64(pool: [i64]) -> text:
-    var parts: [text] = ["{pool.len()}\n"]
+# One runtime builder owns the output buffer even for nested pools. The old
+# parts-array encoders registered one temporary string per element and called
+# rt_string_join at every nesting level. A Stage-2 cache miss reached the
+# legal RSS cap while serializing a small module's type pools. Appending into
+# one buffer keeps encoder working memory proportional to the final blob.
+@unsafe(reason: "bounded flat-pool cache serialization through the runtime string builder", capabilities: [ffi])
+extern fn rt_string_builder_new() -> i64
+@unsafe(reason: "bounded flat-pool cache serialization through the runtime string builder", capabilities: [ffi])
+extern fn rt_string_builder_push(handle: i64, value: text) -> i64
+@unsafe(reason: "bounded flat-pool cache serialization through the runtime string builder", capabilities: [ffi])
+extern fn rt_string_builder_finish(handle: i64) -> text
+
+fn flat_pool_builder_push(handle: i64, value: text):
+    val appended =
+        unsafe(capabilities: [ffi]):
+            rt_string_builder_push(handle, value)
+    if appended != 1:
+        panic("flat pool encoder string builder append failed")
+
+fn flat_pool_builder_new() -> i64:
+    val handle =
+        unsafe(capabilities: [ffi]):
+            rt_string_builder_new()
+    if handle == 0:
+        panic("flat pool encoder string builder allocation failed")
+    handle
+
+fn flat_pool_builder_finish(handle: i64) -> text:
+    val result =
+        unsafe(capabilities: [ffi]):
+            rt_string_builder_finish(handle)
+    if result == nil:
+        panic("flat pool encoder string builder finish failed")
+    result
+
+fn flat_pool_enc_i64_into(handle: i64, pool: [i64]):
+    flat_pool_builder_push(handle, "{pool.len()}\n")
     for v in pool:
-        parts = parts.push("{v}\n")
-    parts.join("")
+        flat_pool_builder_push(handle, "{v}\n")
+
+fn flat_pool_enc_text_into(handle: i64, pool: [text]):
+    flat_pool_builder_push(handle, "{pool.len()}\n")
+    for v in pool:
+        flat_pool_builder_push(handle, flat_pool_escape(v))
+        flat_pool_builder_push(handle, "\n")
+
+fn flat_pool_enc_text_list_into(handle: i64, pool: [[text]]):
+    flat_pool_builder_push(handle, "{pool.len()}\n")
+    for inner in pool:
+        flat_pool_enc_text_into(handle, inner)
+
+pub fn flat_pool_enc_i64(pool: [i64]) -> text:
+    val handle = flat_pool_builder_new()
+    flat_pool_enc_i64_into(handle, pool)
+    flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_bool(pool: [bool]) -> text:
-    var parts: [text] = ["{pool.len()}\n"]
+    val handle = flat_pool_builder_new()
+    flat_pool_builder_push(handle, "{pool.len()}\n")
     for v in pool:
-        parts = parts.push(if v: "1\n" else: "0\n")
-    parts.join("")
+        flat_pool_builder_push(handle, if v: "1\n" else: "0\n")
+    flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text(pool: [text]) -> text:
-    var parts: [text] = ["{pool.len()}\n"]
-    for v in pool:
-        parts = parts.push(flat_pool_escape(v) + "\n")
-    parts.join("")
+    val handle = flat_pool_builder_new()
+    flat_pool_enc_text_into(handle, pool)
+    flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
-    var parts: [text] = ["{pool.len()}\n"]
+    val handle = flat_pool_builder_new()
+    flat_pool_builder_push(handle, "{pool.len()}\n")
     for inner in pool:
-        parts = parts.push(flat_pool_enc_i64(inner))
-    parts.join("")
+        flat_pool_enc_i64_into(handle, inner)
+    flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text_list(pool: [[text]]) -> text:
-    var parts: [text] = ["{pool.len()}\n"]
-    for inner in pool:
-        parts = parts.push(flat_pool_enc_text(inner))
-    parts.join("")
+    val handle = flat_pool_builder_new()
+    flat_pool_enc_text_list_into(handle, pool)
+    flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
-    var parts: [text] = ["{pool.len()}\n"]
+    val handle = flat_pool_builder_new()
+    flat_pool_builder_push(handle, "{pool.len()}\n")
     for inner in pool:
-        parts = parts.push(flat_pool_enc_text_list(inner))
-    parts.join("")
+        flat_pool_enc_text_list_into(handle, inner)
+    flat_pool_builder_finish(handle)
 
 # --- decoders ---------------------------------------------------------------
 
