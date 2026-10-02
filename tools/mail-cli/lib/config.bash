@@ -357,7 +357,7 @@ _mail_config_valid_name() {
 # Canonical Simple SDN parser; the installed helper never compiles at startup.
 _mail_config_query() {
   local mode="$1" name="${2:-}" key="${3:-}" helper document
-  [ -f "$MAIL_CONFIG_FILE" ] || return 0
+  [ -f "$MAIL_CONFIG_FILE" ] || { echo "MAIL_CONFIG_MISSING" >&3; return 2; }
   helper=$(mail_expand_path "${MAIL_CONFIG_BIN:-${MAIL_CREDENTIAL_BIN:-simple-mail-credentials}}") || return $?
   command -v "$helper" >/dev/null 2>&1 || { echo "error: compiled shared SDN helper unavailable" >&3; return 2; }
   document=$("$helper" config-json "$MAIL_CONFIG_FILE") || return $?
