@@ -15,6 +15,7 @@ use std.test_runner.resource_governor.{ResourceGovernor, governor_create, govern
 use std.nogc_sync_mut.io.signal_handlers.{install_signal_handlers}
 use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers, proc_slot_active, proc_slot_max}
+use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_failure_reason}
 
 use std.io_runtime.{thread_sleep, getpid}
 
@@ -223,6 +224,8 @@ fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_exp
         match read_bounded_temp_output(run.stderr_file):
             case Ok(value): stderr = value
             case Err(message): capture_error = message
+    if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE and (not file_exists(run.stdout_file) or not file_exists(run.stderr_file)):
+        capture_error = "owned Windows capture file missing"
 
     # Cleanup temp files
     cleanup_temp_files(stdout_file: run.stdout_file, stderr_file: run.stderr_file)
@@ -244,8 +247,12 @@ fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_exp
         )
 
     if capture_error != "":
-        stderr = stderr + "\n[ERROR: {capture_error}]"
-        exit_code = -1
+        return _parallel_admission_failure(run.file_path,
+            "bounded child capture failure: " + capture_error + "\n" + stderr, duration_ms)
+    if host_os() == "windows" and (run.pid == -1 or (run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE and exit_code < 0)):
+        val reason = if run.pid >= WINDOWS_REDIRECTED_TOKEN_BASE: windows_redirected_failure_reason(run.pid) else: "child admission refused"
+        return _parallel_admission_failure(run.file_path,
+            "owned Windows child admission or collection failed: " + reason + "\n" + stderr, duration_ms)
 
     # Build normal completions using the same logic as sync execution.
     make_result_from_output(

@@ -19,6 +19,7 @@ struct WindowsRedirectedState:
     stderr_path: text
     capture_limit: i64
     failed: bool
+    failure_reason: text
     closed: bool
 
 struct WindowsRedirectedImage:
@@ -109,7 +110,7 @@ fn windows_redirected_spawn(cmd: text, args: [text], stdout_path: text,
             val slot = _windows_redirected_states.len()
             _windows_redirected_states.push(WindowsRedirectedState(lease: lease,
                 stdout_path: output, stderr_path: error, capture_limit: capture_limit,
-                failed: false, closed: false))
+                failed: false, failure_reason: "", closed: false))
             return WINDOWS_REDIRECTED_TOKEN_BASE + slot
 
 fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
@@ -120,11 +121,13 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
         var state = _windows_redirected_states[slot]
         if file_size(state.stdout_path) > state.capture_limit or file_size(state.stderr_path) > state.capture_limit:
             state.failed = true
+            state.failure_reason = "output exceeded configured capture limit"
             _windows_redirected_states[slot] = state
             val cancelled = windows_process_cancel_v1(state.lease)
         match windows_process_poll_v1(state.lease):
             case Err(reason):
                 state.failed = true
+                state.failure_reason = reason
                 if windows_process_collected_proof_v1(state.lease):
                     val cleaned = _windows_redirected_cleanup(state.stdout_path)
                     state.closed = true
@@ -141,6 +144,7 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
                     match windows_process_collect_v1(state.lease):
                         case Err(reason):
                             state.failed = true
+                            state.failure_reason = reason
                             if windows_process_collected_proof_v1(state.lease):
                                 val cleaned = _windows_redirected_cleanup(state.stdout_path)
                                 state.closed = true
@@ -153,7 +157,11 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
                             val cancelled = windows_process_cancel_v1(state.lease)
                             return -2
                         case Ok(collected):
-                            if not _windows_redirected_cleanup(state.stdout_path): state.failed = true
+                            if not _windows_redirected_cleanup(state.stdout_path):
+                                state.failed = true
+                                state.failure_reason = "private child scope cleanup failed; further admission blocked"
+                            if collected.timed_out: state.failure_reason = "owned child deadline exceeded"
+                            elif collected.cancelled and state.failure_reason == "": state.failure_reason = "owned child cancelled"
                             state.closed = true
                             state.stdout_path = ""
                             state.stderr_path = ""
@@ -171,6 +179,11 @@ fn windows_redirected_is_running(token: i64) -> bool:
     # This facade reports retained ownership, not OS liveness. Even a terminal
     # receipt must be collected before a tracked admission can be released.
     true
+
+fn windows_redirected_failure_reason(token: i64) -> text:
+    val slot = windows_redirected_token_slot(token, _windows_redirected_states.len())
+    if slot < 0: return "unknown owned Windows token"
+    _windows_redirected_states[slot].failure_reason
 
 fn windows_redirected_kill(token: i64) -> bool:
     val slot = windows_redirected_token_slot(token, _windows_redirected_states.len())
@@ -192,9 +205,12 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
     -1
 fn windows_redirected_is_running(token: i64) -> bool:
     false
+fn windows_redirected_failure_reason(token: i64) -> text:
+    "Windows redirected owner unavailable on this platform"
 fn windows_redirected_kill(token: i64) -> bool:
     false
 @end
 
 export WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait
 export windows_redirected_is_running, windows_redirected_kill, windows_redirected_token_slot
+export windows_redirected_failure_reason
