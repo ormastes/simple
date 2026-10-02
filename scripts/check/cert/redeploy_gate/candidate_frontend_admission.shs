@@ -227,6 +227,10 @@ candidate_frontend_collect() {
 
 candidate_frontend_bounded_build() {
     bounded_probe=$1; shift
+    if [ "${candidate_profile:-full}" = remaining ]; then
+        [ "$#" -ge 2 ] && [ "$2" = native-build ] || return 126
+        set -- "$@" --threads 80
+    fi
     bounded_parent=${build_log%/*}
     bounded_base=${build_log##*/}
     [ "$bounded_parent/$bounded_base" = "$build_log" ] || return 126
@@ -309,8 +313,47 @@ candidate_frontend_bounded_build() {
 # operator dropped entirely). So the gate certified a configuration Stage 3
 # never uses. See
 # doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
-candidate_frontend_smoke() (
+candidate_frontend_smoke() {
+    [ "$#" = 1 ] || return 126
+    candidate_frontend_smoke_profile "$1" full
+}
+
+# Candidate, frozen source root, failed sanity authority/display/companion,
+# original launch/caller authorities, backend, archived continuation owner,
+# and repaired collector owner.
+# Validation precedes every candidate command. This endpoint never changes the
+# failed aggregate or replays its successful p2_add/MIR checks.
+candidate_frontend_remaining_smoke() {
+    [ "$#" = 10 ] || return 126
+    candidate_frontend_smoke_profile "$1" remaining "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
+}
+
+candidate_frontend_smoke_profile() (
     candidate=$1
+    candidate_profile=$2
+    shift 2
+    candidate_checks_run=0
+    case "$candidate_profile" in
+      full) [ "$#" = 0 ] || exit 126 ;;
+      remaining)
+        [ "$#" = 9 ] || exit 126
+        command -v bootstrap_stage3_verify_frontend_prior_inputs >/dev/null 2>&1 || exit 126
+        bootstrap_stage3_verify_frontend_prior_inputs "$candidate" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" || exit 126
+        [ "$CANDIDATE_FRONTEND_ROOT" = "$1" ] || exit 126
+        [ "${CANDIDATE_FRONTEND_BOOTSTRAP:-}" = 1 ] || exit 126
+        [ "${CANDIDATE_FRONTEND_BACKEND:-}" = "$7" ] || exit 126
+        candidate_prior_sha=$(candidate_frontend_hash_file "$2") || exit 126
+        candidate_before_sha=$(candidate_frontend_hash_file "$candidate") || exit 126
+        candidate_repaired_owner=$9
+        candidate_repaired_collector=$candidate_repaired_owner/scripts/bootstrap/run-process-group-bounded-log-windows.py
+        bootstrap_stage3_sanity_safe_regular "$candidate_repaired_collector" || exit 126
+        candidate_repaired_head=$(git -C "$candidate_repaired_owner" rev-parse HEAD) || exit 126
+        candidate_repaired_committed_sha=$(git -C "$candidate_repaired_owner" show \
+            "$candidate_repaired_head:scripts/bootstrap/run-process-group-bounded-log-windows.py" | bootstrap_stage3_hash_stream) || exit 126
+        [ "$(candidate_frontend_hash_file "$candidate_repaired_collector")" = "$candidate_repaired_committed_sha" ] || exit 126
+        ;;
+      *) exit 126 ;;
+    esac
     candidate_backend=${CANDIDATE_FRONTEND_BACKEND:-cranelift}
     candidate_bootstrap=${CANDIDATE_FRONTEND_BOOTSTRAP:-0}
     # SIMPLE_EXECUTION_MODE must be UNSET, not set-to-empty, for the probes
@@ -344,6 +387,15 @@ candidate_frontend_smoke() (
     build_log=${CANDIDATE_FRONTEND_LOG_PATH:-$probe_dir/build.log}
     build_log_display=${CANDIDATE_FRONTEND_LOG_DISPLAY_PATH:-$build_log}
     status_path=${CANDIDATE_FRONTEND_STATUS_PATH:-}
+    if [ "$candidate_profile" = remaining ]; then
+        [ -n "$status_path" ] || exit 126
+        candidate_frontend_capture_setup "${build_log%/*}" || exit 126
+        [ "$CANDIDATE_FRONTEND_CAPTURE_KIND" = windows-job ] || exit 126
+        BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR=$candidate_repaired_collector
+        BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA=$candidate_repaired_committed_sha
+        SIMPLE_NATIVE_BUILD_THREADS=80
+        export SIMPLE_NATIVE_BUILD_THREADS
+    fi
     p2_add_log=$build_log
     stage2_mir_retention_log=$build_log.stage2-mir-retention
     stage2_module_path_naming_log=$build_log.stage2-module-path-naming
@@ -362,7 +414,19 @@ candidate_frontend_smoke() (
         candidate_frontend_capture_leaf "$status_path" || return 126
         status_tmp="${status_path}.tmp.$$"
         {
-            echo schema=simple-candidate-frontend-status-v2
+            if [ "$candidate_profile" = remaining ]; then
+                echo schema=simple-candidate-frontend-remaining-status-v1
+                echo checks_run="$candidate_checks_run"
+                echo prior_sanity_sha256="$candidate_prior_sha"
+                echo candidate_sha256_before="$candidate_before_sha"
+                echo candidate_sha256_after="$(candidate_frontend_hash_file "$candidate")"
+                echo naming_run_status="${naming_run_status:-not-run}"
+                echo positional_run_status="${positional_run_status:-not-run}"
+                echo naming_output_sha256="${naming_output_sha:-not-run}"
+                echo positional_output_sha256="${positional_output_sha:-not-run}"
+            else
+                echo schema=simple-candidate-frontend-status-v2
+            fi
             echo result="$result"
             echo probe="$probe"
             echo raw_status="$raw_status"
@@ -420,6 +484,7 @@ candidate_frontend_smoke() (
         candidate_frontend_finish fail setup-failure 126 || :
         exit 126
     fi
+    if [ "$candidate_profile" = full ]; then
     probe_output=$(candidate_frontend_executable_path "$probe_dir/p2_add")
     probe_build_status=0
     SIMPLE_BINARY="$candidate" \
@@ -523,6 +588,7 @@ candidate_frontend_smoke() (
         candidate_frontend_fail stage2-mir-retention-run "$retention_run_status"
     [ "$retention_stdout" = 3 ] || candidate_frontend_fail stage2-mir-retention-output 1
 
+    fi
     # Stage-3 module-identity guard. Stage 2 previously admitted even though
     # its native lowering turned both of these source paths into the empty
     # module name. Compile and execute the canonical helper through the exact
@@ -580,6 +646,11 @@ candidate_frontend_smoke() (
         echo "candidate_frontend_smoke: Stage-2 module naming mismatch: '$naming_stdout'" >&2
         candidate_frontend_fail stage2-module-path-naming-output 1
     }
+    if [ "$candidate_profile" = remaining ]; then
+        naming_output_sha=$(printf '%s' "$naming_stdout" | bootstrap_stage3_hash_stream) ||
+            candidate_frontend_fail stage2-module-path-naming-output-hash 126
+        candidate_checks_run=$((candidate_checks_run + 1))
+    fi
 
     # Positional-entry no-crash probe (2026-08-25). Both probes above name the
     # entry with the `--entry` FLAG, and that flag form is the ONLY form this
@@ -666,6 +737,13 @@ candidate_frontend_smoke() (
             [ "$positional_run_status" -ne 0 ] || positional_run_status=1
             candidate_frontend_fail hello-world-positional-run "$positional_run_status"
         fi
+    fi
+    if [ "$candidate_profile" = remaining ]; then
+        positional_output_sha=$(printf '%s' "$positional_stdout" | bootstrap_stage3_hash_stream) ||
+            candidate_frontend_fail hello-world-positional-output-hash 126
+        candidate_checks_run=$((candidate_checks_run + 1))
+        [ "$(candidate_frontend_hash_file "$candidate")" = "$candidate_before_sha" ] ||
+            candidate_frontend_fail candidate-identity-changed 126
     fi
     candidate_frontend_finish pass complete 0
 )
