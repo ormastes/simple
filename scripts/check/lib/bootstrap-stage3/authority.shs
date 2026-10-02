@@ -4216,8 +4216,19 @@ public static class Stage3MaterializedConsumer {
     static Exception Error(string predicate) {
         return new IOException(predicate + ":win32=" + Marshal.GetLastWin32Error());
     }
+    // Keep lexical paths in receipts and containment checks. Only the Win32
+    // boundary needs the extended namespace: Windows PowerShell is not
+    // longPathAware, including for a 260-character generated runtime archive.
+    static string NativePath(string path) {
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) return path;
+        if (path.StartsWith(@"\\", StringComparison.Ordinal))
+            return @"\\?\UNC\" + path.Substring(2);
+        if (path.Length >= 3 && Char.IsLetter(path[0]) && path[1] == ':' && path[2] == '\\')
+            return @"\\?\" + path;
+        throw new IOException("path.native-not-absolute");
+    }
     static SafeFileHandle Open(string p, bool raw, uint access) {
-        var h = CreateFileW(p, access, 1, IntPtr.Zero, 3,
+        var h = CreateFileW(NativePath(p), access, 1, IntPtr.Zero, 3,
             0x02000000u | (raw ? 0x00200000u : 0), IntPtr.Zero);
         if (h.IsInvalid) { h.Dispose(); throw Error("api.open:" + p); }
         return h;
@@ -4257,7 +4268,7 @@ public static class Stage3MaterializedConsumer {
                     if ((dir.Attributes & 0x410u) != 0x10u || src.Volume != dir.Volume)
                         throw new IOException("publication.parent-or-volume");
                     bool replace = false;
-                    uint attrs = GetFileAttributesW(destination);
+                    uint attrs = GetFileAttributesW(NativePath(destination));
                     int error = Marshal.GetLastWin32Error();
                     if (attrs != 0xFFFFFFFFu) {
                         using (var previous = Open(destination, true, 0)) {
@@ -4305,10 +4316,10 @@ public static class Stage3MaterializedConsumer {
         int n;
         for (n = -1; n < parts.Length; n++) {
             string candidate = n >= 0 ? Path.Combine(current, parts[n]) : current;
-            uint attrs = GetFileAttributesW(candidate);
+            uint attrs = GetFileAttributesW(NativePath(candidate));
             if (attrs != 0xFFFFFFFFu && (attrs & 0x400u) != 0)
                 throw new IOException("ancestor.reparse:" + candidate);
-            var h = CreateFileW(candidate, 0, 1, IntPtr.Zero, 3, 0x02200000u, IntPtr.Zero);
+            var h = CreateFileW(NativePath(candidate), 0, 1, IntPtr.Zero, 3, 0x02200000u, IntPtr.Zero);
             if (h.IsInvalid) {
                 int error = Marshal.GetLastWin32Error(); h.Dispose();
                 if (n >= 0 && error == 2) {
@@ -4720,7 +4731,7 @@ public static class Stage3MaterializedConsumer {
         return value;
     }
     static void AuthorityAbsent(string path) {
-        uint attrs = GetFileAttributesW(path); int error = Marshal.GetLastWin32Error();
+        uint attrs = GetFileAttributesW(NativePath(path)); int error = Marshal.GetLastWin32Error();
         if (attrs != 0xFFFFFFFFu || (error != 2 && error != 3)) throw new IOException("authority.transaction");
     }
     static void CheckGeneratedAuthority(string root, string link, List<SafeFileHandle> held) {
@@ -4844,7 +4855,7 @@ public static class Stage3MaterializedConsumer {
         }
         foreach (string target in targets) {
             Parents(target, false, held);
-            uint attr = GetFileAttributesW(target); int error = Marshal.GetLastWin32Error();
+            uint attr = GetFileAttributesW(NativePath(target)); int error = Marshal.GetLastWin32Error();
             if (attr != 0xFFFFFFFFu || (error != 2 && error != 3)) throw new IOException("pending.not-absent-at-use");
         }
     }
@@ -5002,7 +5013,7 @@ public static class Stage3MaterializedConsumer {
                         if (fields[key] != "-") throw new IOException("receipt.pending-metadata");
                     string policy = Decode(fields["path_hex"]) + "\t" + relative;
                     if (Array.IndexOf(policyRows, policy) < 0) throw new IOException("pending.policy");
-                    uint pendingAttributes = GetFileAttributesW(target);
+                    uint pendingAttributes = GetFileAttributesW(NativePath(target));
                     int pendingError = Marshal.GetLastWin32Error();
                     if (pendingAttributes != 0xFFFFFFFFu || (pendingError != 2 && pendingError != 3)) throw new IOException("pending.not-absent");
                     pending.Add(target);
@@ -5052,7 +5063,7 @@ public static class Stage3MaterializedConsumer {
             // new entries. No new path may appear after the audit.
             foreach (var pair in gitlinks) {
                 string path = Path.Combine(root, pair.Key.Replace('/','\\'));
-                uint attr = GetFileAttributesW(path);
+                uint attr = GetFileAttributesW(NativePath(path));
                 int error = Marshal.GetLastWin32Error();
                 bool present = attr != 0xFFFFFFFFu;
                 if (!present && error != 2 && error != 3) throw new IOException("path.gitlink-absence");
