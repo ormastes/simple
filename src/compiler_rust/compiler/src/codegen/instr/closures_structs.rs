@@ -2010,6 +2010,13 @@ fn try_compile_builtin_method_call<M: Module>(
             return Ok(Some(converted));
         }
 
+        // `??` can leave a text receiver with an erased i64-shaped MIR type.
+        // Dispatch on the runtime value so typed integer receivers still pass
+        // through unchanged while text is parsed before an i64 call.
+        if matches!(method, "to_i64" | "to_int") && from_ty == TypeId::I64 {
+            return Ok(Some(call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val)));
+        }
+
         // Mirrors the STRING->int branch just above: without this, a STRING
         // receiver falls into the generic from/to conversion below, which
         // assumes `receiver_val` is already a raw numeric register and emits
