@@ -1497,3 +1497,20 @@ The same canonical run completed `rust-native-all-build` in 7m16s with
 supervisor/native status zero, then entered `rust-rust-runtime-nolto-build`.
 Fresh Cargo/rustc children were observed; no restart or Stage2 admission is
 implied by this intermediate runtime-build milestone.
+
+### 2026-10-02 replacement candidate entered Stage2 compilation
+
+All four Rust Cargo steps completed with native/shell status zero. The final
+compiler backfill took 1m12s; the post-build source fingerprint completed
+naturally. Preflight then passed five checks with zero failures and zero skips.
+The same guarded run entered `milestone=stage2` with an actual seed-backed
+`native-build` child and `logs/x86_64-pc-windows-msvc/stage2-native-build.log`.
+Its seed reports that dynload is unsupported and emits a single native
+artifact. Stage2 completion, admission and planner receipts are still pending.
+
+The proposed shared-cache qualification requires unlanded physical-directory
+owner/runtime exports from `D:/dev/shared-cache-root-identity-20261002`.
+Read-only comparison with release `8aa06c7ffc` confirmed they are absent;
+configuration files alone cannot enable or qualify that API. Prepare the
+reviewed source change for a subsequent candidate rather than patch this live
+source or claim generated-Simple cross-host reuse from native C tests.
