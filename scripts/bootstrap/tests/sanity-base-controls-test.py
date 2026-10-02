@@ -85,7 +85,8 @@ class ControlTests(unittest.TestCase):
             root=pathlib.Path(root)
             for schema,profile,expected in [('unknown','',1),
                 ('simple-bootstrap-sanity-evidence-v1',m.PROFILE,1),
-                ('simple-bootstrap-sanity-evidence-v1','',42)]:
+                ('simple-bootstrap-sanity-evidence-v1','',42),
+                ('simple-bootstrap-sanity-components-v1','',42)]:
                 receipt=root/'sanity.env'
                 receipt.write_text('schema='+schema+'\n'+('base_control_profile='+profile+'\n' if profile else ''))
                 script='''set -eu
