@@ -1,0 +1,47 @@
+# Native-only acceptance of the actual driver owners, not a C substitute.
+# Run in a fresh process with one absolute, absent sink path argument.
+use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_record,
+    mem_snapshot_finish}
+use compiler.driver.driver_log_helpers.{log_phase}
+use std.nogc_sync_mut.io_runtime.{env_set_process}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.len() != 2: return 10
+    val sink = args[1]
+    val phase_sink = sink + ".phase"
+    if file_exists(sink) or file_exists(phase_sink): return 11
+    if not env_set_process("SIMPLE_MEM_SNAPSHOT_FILE", ""): return 12
+    if mem_snapshot_begin() != 0: return 13
+    if not env_set_process("SIMPLE_EVIDENCE_RUN_ID", "snapshot-abi-native"): return 14
+    if not env_set_process("SIMPLE_MEM_SNAPSHOT_FILE", sink): return 15
+    if mem_snapshot_begin() != 1: return 16
+    if not mem_snapshot_record("abi-boundary", 7, "src/probe.spl",
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21): return 17
+    if not mem_snapshot_finish(): return 18
+    val records = file_read(sink).split("\n")
+    if records.len() != 4: return 19
+    if not records[0].contains("seq=0 ") or not records[0].contains("event=open phase=hir "): return 20
+    if not records[1].contains("seq=1 "): return 21
+    if not records[1].contains("event=snapshot phase=abi-boundary source_index=7 source_path_kind=recorded source_path=src/probe.spl "): return 22
+    if not records[1].contains("retained_modules=11 validation_keys=12 validation_values=13 shared_traits=14 hir_names=15 hir_symbols=16 hir_functions=17 hir_constants=18 hir_enums=19 hir_structs=20 hir_classes=21 "): return 23
+    if not records[2].contains("seq=2 ") or not records[2].contains("event=terminal phase=hir-complete "): return 24
+    for record in [records[0], records[1], records[2]]:
+        if not record.starts_with("schema=simple.compiler.mem_snapshot.v1 run_id=snapshot-abi-native "): return 25
+    # Existing leaf refusal must leave the completed evidence intact.
+    val complete = file_read(sink)
+    if mem_snapshot_begin() != -1: return 26
+    if file_read(sink) != complete: return 27
+    if not env_set_process("SIMPLE_COMPILER_PHASE_PROFILE", "1"): return 28
+    if not env_set_process("SIMPLE_COMPILER_PHASE_PROFILE_FILE", phase_sink): return 29
+    log_phase("abi-phase")
+    val phase_records = file_read(phase_sink).split("\n")
+    if phase_records.len() != 2: return 30
+    if not phase_records[0].contains("seq=0 "): return 31
+    if not phase_records[0].contains("event=phase phase=abi-phase source_index=-1 source_path_kind=none source_path=- "): return 32
+    if not phase_records[0].contains("retained_modules=0 validation_keys=0 validation_values=0 shared_traits=0 hir_names=0 hir_symbols=0 hir_functions=0 hir_constants=0 hir_enums=0 hir_structs=0 hir_classes=0 "): return 33
+    print "NATIVE_MEMORY_SNAPSHOT_ABI_PASS"
+    0
