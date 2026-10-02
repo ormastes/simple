@@ -999,3 +999,29 @@ and dynamic-directory regression cases; corrected producer and real manager
 worker dispatch remain pending. Shared Linux runtime repair is draft PR2166;
 Windows archive symbol-format inspection passed, while a native Windows nm DLL
 loading issue remains a tooling compatibility check before deployment.
+
+### 2026-10-02 correction: whole seven-item scope is not coding-complete
+
+The original seven-item authority is
+ doc/03_plan/seven_plans_host_completion_2026-09-29.md:
+platform unification, SCV/text database, typed collections, linker, optional
+provider size/startup, compile optimization, and profile/proof dispatch.
+Merged portions of items1/5 must not be described as their entire planned
+implementation. The earlier conversation figure2/7 coding-complete was too broad
+and is withdrawn. No whole item is currently certified implementation-complete;
+this is not a claim that zero code has been written.
+
+Fresh release-head audit still identifies code gaps: general parser/provider
+execution and platform support (item1), cache settlement/publication (item2),
+collection-selection/identity-map integration (item3), linker completion (item4),
+general first-demand provider packaging, release-small/no-unwind proof and dual
+provider dispatch (item5), full graph/scan-free warm/concurrent builds (item6),
+and remaining profile-chain/selection integration (item7). Native verification
+is additionally outstanding. Exact requirements must be recounted at current
+release before quoting per-item coding percentages; Oct1 bf28063 requirement
+counts are historical and cannot serve as current code-volume percentages.
+
+Current runtime work continues separately: two Windows LLVM collectors remain
+active; the unstarted third-job dispatcher was paused to reserve a4GiB manager
+rebuild slot. Linux coordinator184 is running only the reviewed serialized SCV
+cold/warm admission probe, never automatic full parallel dispatch in this attempt.
