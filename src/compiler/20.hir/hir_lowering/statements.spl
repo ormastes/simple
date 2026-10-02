@@ -42,6 +42,31 @@ fn _ast_tuple_lit_elements(e: Expr) -> [Expr]:
     []
 
 impl HirLowering:
+    # A discard is an assignment target, never a variable read. Keep this
+    # shared by structured statements and the flat parser's expression form.
+    me lower_hir_assignment_kind(target: Expr, op: AssignOp?, value: Expr, span: Span) -> HirStmtKind:
+        val discard = match target.kind:
+            case ExprKind.Ident(name): name == "_"
+            case _: false
+        if discard:
+            if op.?:
+                self.error("discard assignment does not support a compound operator", span)
+                return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span))
+            # Lower exactly once. A unit block retains the RHS effects but
+            # cannot accidentally promote a final discard to a value tail.
+            val rhs = self.lower_hir_expr(value)
+            val unit_type = HirType(kind: HirTypeKind.Unit, span: span)
+            val unit_value = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: unit_type, span: span)
+            val discard_block = HirBlock(
+                stmts: [HirStmt(kind: HirStmtKind.Expr(rhs), span: span)],
+                has: false, value: unit_value, span: span)
+            return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Block(discard_block),
+                has_type_: true, type_: unit_type, span: span))
+        val hir_op = self.lower_hir_assign_op_opt(op)
+        val lhs = self.lower_hir_expr(target)
+        val rhs = self.lower_hir_expr(value)
+        HirStmtKind.Assign(lhs, hir_op, rhs)
+
     # True only for the parser's encoded `val/var (a, b) = ...` statement
     # shape. Keep the marker test identical to lower_hir_stmt_multi: the flat
     # parser guarantees the closing `)`, while callers that construct a
@@ -596,8 +621,7 @@ impl HirLowering:
                     avalue
                 case _:
                     sk_dummy
-            val as_hir_op = self.lower_hir_assign_op_opt(as_op)
-            return HirStmt(kind: HirStmtKind.Assign(self.lower_hir_expr(as_target), as_hir_op, self.lower_hir_expr(as_value)), span: s.span)
+            return HirStmt(kind: self.lower_hir_assignment_kind(as_target, as_op, as_value, s.span), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Expr(sk_dummy)):
             # ROOT FIX (stage2 gate: StmtKind.Expr misroute): the multi-arm
             # `match stmt_kind_value` below mis-routes on stage4/native-build
@@ -634,7 +658,6 @@ impl HirLowering:
             # (including bitfield field-write synthesis) sees it.
             match expr_t.kind:
                 case ExprKind.Assign(assign_target, assign_op, assign_value):
-                    val hir_assign_op = self.lower_hir_assign_op_opt(assign_op)
                     # `(a, b) = <expr>` -- destructuring assignment to
                     # already-declared variables. This is THE path it arrives
                     # on (the flat parser emits every `target = value` as an
@@ -644,11 +667,8 @@ impl HirLowering:
                     val ea_tuple_elems: [Expr] = _ast_tuple_lit_elements(assign_target)
                     if ea_tuple_elems.len() > 0 and not assign_op.?:
                         return self.lower_hir_tuple_destructure_assign(ea_tuple_elems, assign_value, s.span)
-                    return HirStmt(kind: HirStmtKind.Assign(
-                        self.lower_hir_expr(assign_target),
-                        hir_assign_op,
-                        self.lower_hir_expr(assign_value)
-                    ), span: s.span)
+                    return HirStmt(kind: self.lower_hir_assignment_kind(
+                        assign_target, assign_op, assign_value, s.span), span: s.span)
                 case _:
                     return HirStmt(kind: HirStmtKind.Expr(self.lower_hir_expr(expr_t)), span: s.span)
 
@@ -699,8 +719,7 @@ impl HirLowering:
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
-                val hir_op = self.lower_hir_assign_op_opt(op)
-                HirStmtKind.Assign(self.lower_hir_expr(target), hir_op, self.lower_hir_expr(value))
+                self.lower_hir_assignment_kind(target, op, value, s.span)
 
             case StmtKind.For(var_, iter, body):
                 self.symbols.push_scope(ScopeKind.Loop)
