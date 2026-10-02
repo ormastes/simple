@@ -52,6 +52,19 @@ claiming that generic constructor-default behavior is repaired.
 
 ## Validation status
 
-Before-fix native reproduction is confirmed. After-fix native compiler rebuild,
-class fixture execution, loader closure, and downstream Phase 3/4 remain pending.
-No full production verification PASS is claimed.
+Before-fix native reproduction is confirmed. The corrected release seed
+`4ad9c9f7444e625b384f5ceb6ea3144b126e5fc892a6e14e811313ba6f7c2992`
+built source `623b7943f1c8b61aa2d33144847c8d75c64b8fb7` into Phase 2 producer
+`184d1be492926713d19bfb95ba2705cb31a2fb6affe8ebea9e1874185d6ef921`:
+1,118 compiled, zero failed, 1,436,796 KiB peak aggregate RSS under the enforced
+2 GiB watchdog, exit zero and quiescent. This was one-binary emission; the seed
+explicitly skipped unsupported dynload mode.
+
+The combined ordinary and documented/exported class fixture now passes MIR,
+including its former crash location. LLVM subsequently rejects
+`declare ptr @rt_alloc(nil)`, caused by the distinct parameter-array method
+binding bug recorded in
+`llvm_external_parameter_array_join_receiver_2026-10-02.md`.
+The executable was not produced, so class execution, the original loader
+closure, and downstream Phase 3/4 remain pending. No native regression or full
+production verification PASS is claimed.
