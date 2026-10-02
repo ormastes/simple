@@ -24,7 +24,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_hash_sha256_or_empty, dir_remove_all}
+use std.io_runtime.{file_hash_sha256_or_empty, dir_create, dir_remove_all}
 use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.process_ops.{ProcessResult}
@@ -918,7 +918,9 @@ fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_pat
     if not cache_clean and quarantine_path != "":
         file_write(quarantine_path, "NATIVE-CACHE-CLEANUP-FAILED|" + native_cache_path)
     if not cache_clean:
-        print "error: NATIVE-CACHE-CLEANUP-FAILED private cache {native_cache_path}"
+        val cache_reason = native_cache_path.replace("\n", " ").replace("\r", " ")
+        val bounded_cache_reason = if cache_reason.len() > 512: cache_reason[0:512] else: cache_reason
+        print "error: NATIVE-CACHE-CLEANUP-FAILED: private cache {bounded_cache_reason}"
     cache_clean
 
 # Graceful MC/DC-on / coverage-on degradation path: run the spec directly via
@@ -1144,6 +1146,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         compile_args.push("--verbose")
         print "[native] Compiling {file_path} to {smf_path}"
 
+    # Establish the owned cache before invoking the compiler. A compiler error
+    # before its first cache write must not be mistaken for cleanup failure.
+    if explicit_aot and not dir_create(smf_path + ".cache", false):
+        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
+            error: "Native backend private cache creation failed", timed_out: false, cached: false)
     val compile_started = time_now_unix_micros()
     val compile_scoped = _run_scoped_child(test_resource_class(file_path), binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
     val compile_ms = (time_now_unix_micros() - compile_started) / 1000
