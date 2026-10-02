@@ -6,14 +6,28 @@ dependencies and a native credential-helper build; Linux tests do not certify
 Windows, macOS, or BSD runtime behavior.
 
 Use `mail auth login --protocol pop3 --account work` to configure a TLS POP3
-maildrop plus SMTP sending. POP3 defaults to port 995 for implicit TLS and 110 for STARTTLS. Mandatory STLS is
-available through the `starttls` setting; certificate checks remain enabled.
+maildrop plus SMTP sending. Use `tls: implicit` with port 995, or
+`tls: starttls` with port 110. STARTTLS requires a successful POP3 STLS
+upgrade before authentication; missing or rejected STLS fails the request.
+Certificate verification remains enabled, and plaintext POP3 is rejected.
 
 `mail inbox --account work --json --limit 25` lists messages. `mail read 1
 --account work` retrieves message number 1 without deleting it. Message numbers
 may change between sessions. POP3 does not support mail-cli folders, search,
 flags, archive, delete, move or drafts. Reply/forward reuse message retrieval
 and SMTP. Inbox header display retrieves whole messages, capped at 16 MiB each.
+
+```bash
+mail inbox --config-file "{home}/.config/devhub/email.sdn" --account work --json --limit 25
+mail read 1 --config-file "{home}/.config/devhub/email.sdn" --account work --raw
+```
+
+Select a message number from the current listing. Numbers are positive decimal
+integers without leading zeros (`1`, not `01`) and are not persistent IMAP UIDs.
+Inbox results use descending message-number order, limited by `--limit` (1–1000).
+A malformed LIST row or duplicate message number fails before any message is
+retrieved. An empty maildrop returns `[]` with `--json`; server failures and
+truncated retrievals return a nonzero status instead of an empty-inbox success.
 
 ## Password storage
 
@@ -105,3 +119,17 @@ Path arguments accept a leading literal `{home}`. Quote it even in launch
 examples, such as `devhub email inbox --config-file "{home}/.config/devhub/email.sdn"`.
 The application expands it from the host home-directory environment; neither
 Bash nor PowerShell needs to interpret the placeholder.
+
+## Local protocol verification
+
+The executable scenarios live in
+`test/03_system/app/mail_cli/feature/mail_pop3_credentials_spec.spl`.
+Their local TLS fixture runs the real Bash mail CLI and curl against a disposable
+loopback POP3 server. It checks implicit TLS, STLS before credentials, missing or
+rejected STLS, certificate rejection, authentication rejection, dot unstuffing,
+empty listings, server errors, and truncated messages. It does not contact an
+external account, send mail, or delete messages. Synthetic transport scenarios
+separately check LIST validation, ordering, credential precedence, and redaction.
+
+This remains the Bash/curl transport adapter. These checks do not establish a
+native SOSIX transport migration or certify another host platform.
