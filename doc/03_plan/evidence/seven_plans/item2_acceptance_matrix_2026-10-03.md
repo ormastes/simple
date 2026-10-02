@@ -3,7 +3,7 @@
 Date: 2026-10-03. Baseline: release/1.0 at `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`.
 Selected scope remains Authority A / Adapters A / Operating B / Retention A.
 
-This is a test contract, not a passing receipt. Every full requirement below is **RED: not proved**. The 153 existing executable happy/boundary/failure cases retain explicit fail-fast checks. New pure candidate-map cases exercise production code but do not establish disk atomicity, replica identity generation, protected publication, or recovery. No source inventory counts as runtime evidence.
+This is a test contract, not a passing receipt. Every full requirement below is **UNPROVED; execution blocked**. The 153 existing executable happy/boundary/failure cases retain explicit fail-fast checks. New pure candidate-map cases call production code but remain unexecuted and do not establish disk atomicity, replica identity generation, protected publication, or recovery. No source inventory counts as runtime evidence. See the [execution report](item2_dev_execution_2026-10-03.md) for the runtime blocker and remaining gates.
 
 ## Shared deterministic fixtures and ownership
 
@@ -94,10 +94,10 @@ Frozen interface: `db_git_settlement_reconcile_history(source, remote, expected_
 |---|---|---|
 | T1 published ancestor | H0 -> candidate C -> remote H2, C sole parent H0; reconcile H0/C | `published`, observed head H2; no source/common-dir writes |
 | T2 competing branch | Remote H0 -> D -> H2, candidate C absent; walk reaches H0 | `not_published`, observed head H2; no guessed acceptance |
-| T3 wrong parent | C present but parent differs from expected H0, or merge encountered | Conservative history-required typed result; never `published` |
+| T3 wrong parent | C present but parent differs from expected H0; separately encounter a merge during history traversal | Wrong candidate parent: `SCVDB_PARENT_MISMATCH`; merge in traversed history: `SCVDB_HISTORY_REQUIRED`; never `published` |
 | T4 moving authority | First authority read H2; advance remote before final read to H3 | `SCVDB_READBACK_MOVED`; caller retries from newly fetched head; no allocation here |
-| T5 history bound | Candidate/expected-old not found within configured walk limit | History-required typed result; bounded work; never infer absence beyond inspected range |
+| T5 history bound | Candidate/expected-old not found within 32 cursor inspections after depth-33 fetch | `SCVDB_HISTORY_REQUIRED`; bounded walk; never infer absence beyond inspected range; transfer/storage bounds require separate proof |
 | T6 invalid scratch scope | Scratch inside source/common-dir, alias escape, unsupported secure path resolution | `SCVDB_SCRATCH_SCOPE`; no scratch or source mutation; Windows capability rejection stays explicit |
-| T7 missing history | Fetch object unavailable or malformed/unreadable parent record | Conservative history-required typed result; scratch cleaned; source unchanged |
+| T7 missing history | Fetch object unavailable; separately inspect malformed/unreadable fetched parent record | Fetch failure: `SCVDB_READBACK_UNAVAILABLE`; unreadable fetched history: `SCVDB_HISTORY_REQUIRED`; scratch cleaned; source unchanged |
 
 All seven cases remain unexecuted in this lane. Root and transport owner own the actual focused integration specs and runtime evidence. Windows safe capability rejection is not Windows durable feature qualification.

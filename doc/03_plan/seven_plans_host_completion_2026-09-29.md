@@ -110,6 +110,12 @@ References: [research](../01_research/app/tools/scv/simple_distributed_textual_d
 [architecture](../04_architecture/simple_distributed_textual_databases.md),
 [system test plan](sys_test/simple_distributed_textual_databases.md).
 
+2026-10-03: [concrete 51-row acceptance matrix](evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md)
+and [isolated development/evidence report](evidence/seven_plans/item2_dev_execution_2026-10-03.md).
+Research/design and a bounded Git history-readback candidate are updated. Full
+acceptance remains incomplete: no executed self-hosted RED/GREEN evidence, 153
+broad fail-fast scenarios, and open durable/host/provider/performance gates.
+
 - Finish schema validation, stable record identity, deterministic serialization,
   indexing/query behavior, and transactional local updates.
 - Complete SCV integration with jj history and GitHub synchronization using the
