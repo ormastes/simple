@@ -103,6 +103,50 @@ a **360-second total outer budget**, observed in intervals no longer than 60
 seconds. That budget can outlive a single 300-second inner Git timeout, but
 does not guarantee that full cold admission finishes: hashing has no matching
 total deadline. `--timeout 90` controls the later worker, not parent admission.
-No such third attempt has been run by this agent. On the current fixed head,
-even a successful probe would be diagnostic GREEN only; observing RED requires
-an explicitly owned pre-fix source state corresponding to `944e1fe7644`.
+On a fixed head, even a successful probe would be diagnostic GREEN only;
+observing RED requires an explicitly owned pre-fix source state corresponding
+to `944e1fe7644`.
+
+## Final authorized diagnostic outcome
+
+The parent authorized exactly one final attempt with that larger bounded
+budget. Only the owned selector file was temporarily restored from the
+test-first commit `944e1fe7644`; both its tree blob and working-file hash were
+`99e74bd2243ea1a7e6faab6ca5f349c7c6c23308`. The current native probe remained
+unchanged and its first assertion required the contradiction to select Original.
+
+The command above gained `--cache-dir build/item3-planner-tdd/native-cache
+--timeout 90`. `SIMPLE_CACHE_DIR` was removed, while
+`SIMPLE_SCV_INVENTORY_COLD_INIT=1` and `SIMPLE_NO_STUB_FALLBACK=1` remained.
+No admission receipts or locks were copied, deleted, or bypassed. Logs are
+`build/item3-planner-tdd/red-final-build.stdout.log` and
+`red-final-build.stderr.log`; the recorded process ID was 28872.
+
+The process remained live and CPU-active, with these parent-process samples:
+
+| Elapsed seconds | CPU seconds | Working set bytes |
+|---|---|---|
+| 30 | 2.609375 | 35287040 |
+| 91 | 61.328125 | 38449152 |
+| 150 | 118.9375 | 40960000 |
+| 240 | 206.734375 | 44122112 |
+| 301 | 266.890625 | 49790976 |
+| 330 | 296.03125 | 52486144 |
+
+At 360 seconds the watchdog terminated only the owned process tree: compiler
+PID 28872 and its console child PID 30172. The wrapper observed terminal exit
+1, and the expected executable was absent. Stderr still contained only the
+workaround-coverage note. Post-termination process lookup found neither PID;
+SCV still contained only the zero-byte refresh lock and no published inventory.
+This is a **cold-inventory timeout**, not a failing selector assertion.
+The substantial CPU use after the initial wait supports in-process inventory
+work rather than a continuously blocked Git child; the exact hashing/assembly
+hotspot remains unmeasured.
+
+After terminal status, the selector was restored from `6437b1e340c`; its tree
+blob and working-file hash both matched
+`db8e4cbb92795d67372244cf46cb4e556be1820f`. No pre-fix source remains in the
+working tree. Three total compile attempts have now exhausted this session's
+diagnostic cap. No executable was run and no fourth compile was attempted.
+There is still no observed semantic RED, GREEN, admitted runtime evidence,
+or release PASS.
