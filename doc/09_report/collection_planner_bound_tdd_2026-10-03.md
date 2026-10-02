@@ -62,3 +62,47 @@ assertions with the fix, then run compiler/core/MCP and environment guards
 required by AGENTS.md. Production planner invocation and executed MIR,
 cross-engine semantic parity, profiling, memory, and performance acceptance
 remain outstanding. This report does not authorize release or a PASS claim.
+
+## Read-only timeout diagnosis (2026-10-03 addendum)
+
+The earlier `SIMPLE_CACHE_DIR` setting had **no effect on this native-build
+route**. `src/app/io/_CliCompile/native_build.spl:437` defaults native artifacts
+to the worktree-local `build/native_cache`; `--cache-dir` is the supported
+override. `native_build_main.spl:356` also derives the frontend cache from that
+explicit flag. SCV admission independently fixes its cache at
+`<checkout>/build/scv` (`compile_source_inventory_core.spl:227`). Thus the prior
+environment assignment must not be interpreted as verified cache isolation.
+
+`compiler_source_authority_acquire_v1` expands a cold inventory to **both
+complete `src` and `test` families**, even with `--source src/compiler` and
+`--entry-closure` (`source_authority.spl:103`). Inventory refresh precedes source
+snapshot construction and entry closure. Cold refresh lists tracked and
+untracked paths, filters to admitted sources, then reads/hashes each source
+(`inventory_events.spl:311`). The Git subprocess timeout is 300 seconds
+(`inventory_events.spl:134`), longer than the diagnostic's 120-second outer
+limit. The existing Windows cold-inventory bug report documents the substantial
+enumeration cost, but does not measure this specific attempt.
+
+Post-attempt inspection found only `build/scv/compile-events/refresh.lock`
+(zero bytes); no inventory pointer, event cursor, or snapshot had been
+published. This locates the interruption **before inventory publication**;
+there is insufficient evidence to distinguish lock acquisition, Git listing,
+source hashing, or inventory assembly. No exact hotspot is claimed.
+
+The Windows runtime lock uses `CreateFileA(OPEN_ALWAYS)` plus `LockFileEx`,
+and unlock closes its handle (`src/runtime/platform/platform_win.h:307` and
+`src/runtime/runtime_host_file_exports.c:95`). The file's continued existence
+does not indicate an active lock. The prior process is terminal; no lock-file
+deletion, cache deletion, copied admission receipt, or admission bypass is
+needed for a later authorized attempt.
+
+A materially different final diagnostic attempt could keep the same admitted
+source path but add `--cache-dir build/item3-planner-tdd/native-cache --timeout
+90`, retain `SIMPLE_SCV_INVENTORY_COLD_INIT=1` and strict no-stub mode, and allow
+a **360-second total outer budget**, observed in intervals no longer than 60
+seconds. That budget can outlive a single 300-second inner Git timeout, but
+does not guarantee that full cold admission finishes: hashing has no matching
+total deadline. `--timeout 90` controls the later worker, not parent admission.
+No such third attempt has been run by this agent. On the current fixed head,
+even a successful probe would be diagnostic GREEN only; observing RED requires
+an explicitly owned pre-fix source state corresponding to `944e1fe7644`.
