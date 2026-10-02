@@ -1786,3 +1786,11 @@ array-slice patch does not establish their repair. The classifier's ten native
 assertions remain PASS and must not be rerun. Grouped scheduling, full managed
 queues, Linux recovery, and bidirectional Windows/WSL cache qualification still
 require actual runtime evidence.
+
+Frontend source review also found four imported owners absent from both the
+frozen 7734 tracked source and manager PR2255's exact `54c030180e` source:
+`managed_parse_run_contract.spl`, `managed_parse_group_contract.spl`,
+`manager_contract.spl`, and `parser_simd_execution_capability_v1.spl`.
+PR2255 alone therefore does not supply the complete dependency graph. This is
+remaining implementation/dependency work, not merely missing verification;
+source investigation is ongoing and no replacement definitions are assumed.
