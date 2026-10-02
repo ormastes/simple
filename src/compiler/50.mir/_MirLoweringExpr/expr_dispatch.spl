@@ -3,6 +3,7 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
+use compiler.mir._MirLoweringExpr.text_index_ranges.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -1421,6 +1422,7 @@ impl MirLowering:
            heap-box POINTER).
         """
         var dict_result_type = MirType.i64()
+        var dict_value_hir_type: HirType? = nil
         var resolved_from_local = false
         var resolved_dict_mir_type = MirType.i64()
         val has_dict_mir_type = if val type_ = self.builder.local_type(base_local):
@@ -1439,7 +1441,29 @@ impl MirLowering:
             match base.type_.kind:
                 case Dict(_, value_type):
                     dict_result_type = self.lower_type(value_type)
+                    dict_value_hir_type = Some(value_type)
+                    resolved_from_local = true
                 case _: ()
+        # Global storage and projected fields can use an i64 handle while
+        # their semantic Dict type lives in the declaration/local metadata.
+        # Never decode a nominal value as an integer just because the handle
+        # erased the builder's Dict(K,V) type.
+        if not resolved_from_local:
+            if val remembered_dict = self.find_local_hir_type(base_local.id):
+                match remembered_dict.kind:
+                    case Dict(_, value_type):
+                        dict_result_type = self.lower_type(value_type)
+                        dict_value_hir_type = Some(value_type)
+                        resolved_from_local = true
+                    case _: ()
+        if not resolved_from_local:
+            if val declared_dict = self.receiver_declared_type(base):
+                match declared_dict.kind:
+                    case Dict(_, value_type):
+                        dict_result_type = self.lower_type(value_type)
+                        dict_value_hir_type = Some(value_type)
+                        resolved_from_local = true
+                    case _: ()
         # Store-side refinement: an empty `{}` literal fixes the declared
         # value type at the i64 default, so an f64 stored later would decode
         # via the integer `>>3` arm and leak the heap-box POINTER. Use the
@@ -1481,6 +1505,9 @@ impl MirLowering:
             val guardable_value_type = self.mir_type_is_integer(dict_result_type) or self.mir_type_is_str(dict_result_type)
             if as_option and guardable_value_type:
                 decoded = self.dict_get_preserve_flat_nil(get_local, decoded, dict_result_type)
+            if not as_option:
+                if val value_hir_type = dict_value_hir_type:
+                    self.remember_local_hir_type(decoded.id, value_hir_type, 0, 0)
             # Bug #189 (struct-valued Dict read misread): a struct-typed dict
             # result decodes via decode_runtime_value's default raw-passthrough
             # arm (no shift, correct bits), but that arm does not register the
@@ -1502,10 +1529,8 @@ impl MirLowering:
                 case MirTypeKind.Struct(struct_symbol):
                     dbg_arm_taken = true
                     dbg_sym_id = struct_symbol.id
-                    if val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id):
-                        dbg_sym_found = true
-                        if struct_type_sym.name != "":
-                            dict_struct_name = struct_type_sym.name
+                    dict_struct_name = self.mir_struct_symbol_name(struct_symbol)
+                    dbg_sym_found = dict_struct_name != ""
                 case _: ()
             # Bug #189, second half. The `Struct(symbol)` resolution above gets
             # the TYPE right -- decode_runtime_value takes the correct
@@ -2125,7 +2150,9 @@ impl MirLowering:
         # convention in lower_array_lit) instead of emitting IR that
         # crashes at runtime.
         match index.kind:
-            case Range(_, _, _, _):
+            case Range(range_start, range_end, range_inclusive, range_step):
+                if val text_slice = self.try_lower_text_range_index(base, range_start, range_end, range_inclusive, range_step):
+                    return text_slice
                 # NAME THE FORM THAT ACTUALLY FAILED, and declare fatality at
                 # the SITE. This arm fires only on a RANGE index (`a[i..]`,
                 # `a[i..j]`) -- `case Range` above is the whole guard. The

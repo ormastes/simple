@@ -1,0 +1,41 @@
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+describe "dictionary nominal receiver provenance":
+    it "decodes an erased handle using retained Dict value type and canonical owner":
+        val span = Span.empty()
+        var symbols = SymbolTable.new()
+        val owner = symbols.define("Cell", SymbolKind.Class, nil, span, Visibility.Public, false, Some("provider"))
+        val container = symbols.define("values", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
+        var mir = MirLowering.new(symbols)
+        mir.class_type_names["provider.Cell"] = true
+        val canonical = mir.canonical_mir_type_symbol(owner)
+        expect(canonical.id >= 1000000000).to_equal(true)
+        val key_type = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        val value_type = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+        val dict_type = HirType(kind: HirTypeKind.Dict(key_type, value_type), span: span)
+        var builder = mir.builder
+        builder.begin_function(SymbolId(id: 99999), "dictionary_receiver_probe",
+            MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), span)
+        val handle = builder.emit_const_int(0)
+        val key = builder.emit_const_int(7)
+        mir.builder = builder
+        mir.remember_local_hir_type(handle.id, dict_type, 0, 0)
+        val base = HirExpr(kind: HirExprKind.NamedVar(container, "values"), has_type_: false,
+            type_: key_type, span: span)
+        val result = mir.lower_dict_runtime_get(base, handle, key)
+        expect(mir.struct_value_syms[result.id]).to_equal("provider.Cell")
+        var canonical_value = false
+        if val type_ = mir.builder.local_type(result):
+            match type_.kind:
+                case MirTypeKind.Struct(id): canonical_value = id.id == canonical.id
+                case _: ()
+        expect(canonical_value).to_equal(true)
+        expect(mir.errors.len()).to_equal(0)
