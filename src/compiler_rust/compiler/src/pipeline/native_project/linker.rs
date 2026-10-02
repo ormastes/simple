@@ -2069,12 +2069,13 @@ int main(int argc, char** argv) {
                                 imports,
                             )?;
                             if bootstrap_mutex_runtime.is_some() {
-                                // The projected core-C supplement retains weak
-                                // array-byte fallbacks. Pull the strong Rust
-                                // array owner first so SOSIX path checks read
-                                // the seed runtime's `[u8]` representation.
+                                // Pull Rust-owned providers before the
+                                // projected core-C supplement: fd-stat is
+                                // private there, and SOSIX path checks must
+                                // use the Rust `[u8]` array representation.
                                 let owned = Self::read_defined_symbol_set(runtime_lib)?;
                                 for symbol in [
+                                    "rt_fd_stat_snapshot_v1",
                                     "rt_array_bytes_validate",
                                     "rt_array_bytes_copy_checked",
                                 ] {

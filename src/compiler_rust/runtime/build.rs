@@ -20,6 +20,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_fd_stat_rust_bridge.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_bootstrap_linux_provider.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
@@ -293,6 +294,7 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_file_view.c",
+        "runtime_fd_stat_rust_bridge.c",
         "runtime_font.c",
         "runtime_memtrack.c",
         // Shared capture state uses this runtime owner's text and builder ABI.
