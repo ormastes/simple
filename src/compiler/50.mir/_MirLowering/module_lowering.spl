@@ -46,8 +46,15 @@ use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAt
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_mark_known_v1,
-    reverse_reference_register_initializer_v1
+    reverse_reference_register_initializer_v1,
+    reverse_reference_module_begin_v1, reverse_reference_module_seal_v1,
+    reverse_reference_module_publish_v1, reverse_reference_module_abort_v1
 }
+
+fn mir_abort_reverse_reference_scope_v1(token: i64) -> bool:
+    val aborted = reverse_reference_module_abort_v1(token)
+    val ended = transient_array_scope_end_v1()
+    aborted and ended
 
 pub fn module_lowering_publish_initializer_dependency_v1(subject: text,
         consumer: text, evidence: text):
@@ -1387,8 +1394,9 @@ impl MirLowering:
            and nested carriers can predate the scope, so promoting `self`
            cannot traverse their new children. The boundary gate compares
            the inventory with the owner declarations to catch field drift;
-        3. module-level mutable globals. On the NON-ambient-bootstrap path
-           there are none reachable from here: 50.mir's only non-bootstrap
+        3. reverse-reference facts are captured in a per-module batch, promoted
+           independently and published only after this scope ends. Other
+           module-level mutable globals: 50.mir's non-bootstrap
            heap-typed globals are `mir_data.spl:_mir_trace_scope_slot` (an
            i64 array whose writes store no heap value) and
            `mir_bitfield.spl:BITFIELD_REGISTRY` (read-only — it has no write
@@ -1428,27 +1436,38 @@ impl MirLowering:
         # falls back to exactly today's unscoped behaviour.
         if not transient_array_scope_begin_v1():
             return Ok(self.lower_module(module, providers, is_entry_module))
+        val reverse_token = reverse_reference_module_begin_v1()
+        if reverse_token < 0:
+            val _ended = transient_array_scope_end_v1()
+            return Err("transient MIR scope reverse-reference owner unavailable for {module.name}")
         val lowered: MirModule = self.lower_module(module, providers, is_entry_module)
         # From here every exit path must close the scope. `end` frees the
         # arena, so any path that ends WITHOUT a successful promotion must
         # also refuse to hand `lowered` back.
         if not transient_array_scope_pause_v1():
-            val _ended_pause = transient_array_scope_end_v1()
+            val _ended_pause = mir_abort_reverse_reference_scope_v1(reverse_token)
             return Err("transient MIR scope pause failed for {module.name}")
         if not transient_heap_promote_v1(lowered):
-            val _ended_module = transient_array_scope_end_v1()
+            val _ended_module = mir_abort_reverse_reference_scope_v1(reverse_token)
             return Err("MIR module ownership promotion failed for {module.name}")
         if not self.promote_transient_owner():
-            val _ended_owner = transient_array_scope_end_v1()
+            val _ended_owner = mir_abort_reverse_reference_scope_v1(reverse_token)
             return Err("MIR lowering owner promotion failed for {module.name}")
         if not bootstrap_mir_registries_promote():
-            val _ended_mir_registries = transient_array_scope_end_v1()
+            val _ended_mir_registries = mir_abort_reverse_reference_scope_v1(reverse_token)
             return Err("bootstrap MIR registry promotion failed for {module.name}")
         if not bootstrap_fn_registries_promote():
-            val _ended_fn_registries = transient_array_scope_end_v1()
+            val _ended_fn_registries = mir_abort_reverse_reference_scope_v1(reverse_token)
             return Err("bootstrap fn registry promotion failed for {module.name}")
+        if not reverse_reference_module_seal_v1(reverse_token):
+            val _ended_reverse = mir_abort_reverse_reference_scope_v1(reverse_token)
+            return Err("reverse-reference ownership promotion failed for {module.name}")
         if not transient_array_scope_end_v1():
+            val _aborted = reverse_reference_module_abort_v1(reverse_token)
             return Err("transient MIR scope end failed for {module.name}")
+        if not reverse_reference_module_publish_v1(reverse_token):
+            val _aborted = reverse_reference_module_abort_v1(reverse_token)
+            return Err("reverse-reference publication failed for {module.name}")
         Ok(lowered)
 
     me lower_module(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true) -> MirModule:
