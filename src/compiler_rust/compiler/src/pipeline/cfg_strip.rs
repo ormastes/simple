@@ -32,8 +32,67 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use simple_common::target::TargetArch;
+use simple_common::target::{TargetArch, TargetOS};
 use simple_parser::ast::{Attribute, Node};
+
+/// Apply the module-level OS branch used by the pure-Simple preprocessor before
+/// the Rust seed parses imports. Preserve line numbers for parser diagnostics.
+/// Unsupported conditions fail closed instead of compiling both branches.
+pub(crate) fn strip_os_when_blocks(source: &str, target_os: TargetOS) -> Result<String, String> {
+    if !source.contains("@when")
+        && !source.contains("@elif")
+        && !source.contains("@else")
+        && !source.contains("@end")
+    {
+        return Ok(source.to_owned());
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut stack: Vec<(bool, bool, bool)> = Vec::new();
+    let mut active = true;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        let directive = line.trim();
+        if directive.starts_with("@when(") {
+            let selected = match directive {
+                "@when(os=\"windows\"):" => target_os == TargetOS::Windows,
+                _ => return Err(format!("unsupported @when condition at line {}", index + 1)),
+            };
+            stack.push((active, selected, false));
+            active &= selected;
+        } else if directive.starts_with("@when") {
+            return Err(format!("malformed @when at line {}", index + 1));
+        } else if directive.starts_with("@elif") {
+            return Err(format!("unsupported @elif at line {}", index + 1));
+        } else if directive == "@else:" || directive == "@else" {
+            let Some((parent, selected, seen_else)) = stack.last_mut() else {
+                return Err(format!("@else without @when at line {}", index + 1));
+            };
+            if *seen_else {
+                return Err(format!("duplicate @else at line {}", index + 1));
+            }
+            *seen_else = true;
+            active = *parent && !*selected;
+        } else if directive.starts_with("@else") {
+            return Err(format!("malformed @else at line {}", index + 1));
+        } else if directive == "@end" {
+            let Some((parent, _, _)) = stack.pop() else {
+                return Err(format!("@end without @when at line {}", index + 1));
+            };
+            active = parent;
+        } else if directive.starts_with("@end") {
+            return Err(format!("malformed @end at line {}", index + 1));
+        } else if active {
+            out.push_str(line);
+            continue;
+        }
+        if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    if !stack.is_empty() {
+        return Err("unterminated @when block".to_owned());
+    }
+    Ok(out)
+}
 
 /// Resolve a `@cfg(...)` condition name to an architecture, if it names one.
 ///
@@ -412,6 +471,42 @@ pub fn strip_inactive_cfg_arch_fns_for_host(module: &mut simple_parser::ast::Mod
 mod tests {
     use super::*;
 
+    #[test]
+    fn os_when_blocks_select_one_parseable_branch_and_keep_line_numbers() {
+        let source = "val TOKEN = 7\n@when(os=\"windows\"):\nuse std.io_runtime.{thread_sleep}\nfn selected() -> i64:\n    11\n@else:\nfn selected() -> i64:\n    22\n@end\nexport TOKEN, selected\n";
+        for (os, expected, excluded) in [
+            (TargetOS::Windows, "    11", "    22"),
+            (TargetOS::Linux, "    22", "    11"),
+        ] {
+            let filtered = super::strip_os_when_blocks(source, os).expect("supported OS block");
+            assert_eq!(filtered.lines().count(), source.lines().count());
+            assert!(filtered.contains(expected));
+            assert!(!filtered.contains(excluded));
+            assert!(simple_parser::Parser::new(&filtered).parse().is_ok());
+        }
+        assert!(super::strip_os_when_blocks("@when(os=\"unknown\"):\n@end\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@else:\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@end\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n@else:\n@else:\n@end\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@elif(os=\"windows\"):\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@when typo\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n@else: typo\n@end\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n@end typo\n", TargetOS::Linux).is_err());
+        assert!(super::strip_os_when_blocks(
+            "@when(os=\"windows\"):\nval A = 1\n@elif(os=\"linux\"):\nval A = 2\n@else:\nval A = 3\n@end\n",
+            TargetOS::Linux,
+        ).is_err());
+        let nested = "@when(os=\"windows\"):\n@when(os=\"windows\"):\nval SELECTED = 11\n@else:\nval SELECTED = 22\n@end\n@else:\nval SELECTED = 33\n@end\n";
+        let windows = super::strip_os_when_blocks(nested, TargetOS::Windows).expect("nested Windows branch");
+        let linux = super::strip_os_when_blocks(nested, TargetOS::Linux).expect("nested Linux fallback");
+        assert!(windows.contains("val SELECTED = 11"));
+        assert!(!windows.contains("val SELECTED = 22"));
+        assert!(linux.contains("val SELECTED = 33"));
+        assert!(!linux.contains("val SELECTED = 11"));
+        assert!(simple_parser::Parser::new(&windows).parse().is_ok());
+        assert!(simple_parser::Parser::new(&linux).parse().is_ok());
+    }
     #[test]
     fn cfg_globals_select_aarch64_and_riscv64_before_hir_lowering() {
         let source = "\
