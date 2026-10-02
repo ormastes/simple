@@ -32,6 +32,8 @@ use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
 use std.platform.{get_host_os, get_host_arch}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+use compiler.driver.native_relocatable_link.{native_relocatable_link_plan}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2}
 use compiler.driver.driver_backend_plugin_selection.{
@@ -2559,14 +2561,13 @@ impl CompilerDriver:
                 if not _sffi_file_copy(object_files[0], output):
                     return CompileResult.CodegenError("emit-object failed to copy {object_files[0]} to {output}")
             else:
-                var args: [text] = ["-r"]
-                for obj in object_files:
-                    args = args.push(obj)
-                args = args.push("-o")
-                args = args.push(output)
-                val (_stdout, stderr, code) = process_run("ld.lld", args)
-                if code != 0:
-                    return CompileResult.CodegenError("emit-object relocatable link failed: {stderr}")
+                val plan = match native_relocatable_link_plan(
+                    native_target, get_host_os(), get_host_arch(), object_files, output):
+                    case Ok(value): value
+                    case Err(reason): return CompileResult.CodegenError(reason)
+                val result = sosix_run(plan.program, plan.args)
+                if result.exit_code != 0:
+                    return CompileResult.CodegenError("emit-object relocatable link failed ({plan.program}): {result.stderr}")
             driver_log_info(log, "Native object written to {output}")
             return driver_native_success_with_launch_metadata(ctx, output)
 

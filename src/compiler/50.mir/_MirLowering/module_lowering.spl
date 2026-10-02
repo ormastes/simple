@@ -52,6 +52,7 @@ pub fn module_lowering_publish_initializer_dependency_v1(subject: text,
     reverse_reference_owner_mark_known_v1("initializer-dependent")
     reverse_reference_register_initializer_v1(subject, consumer, evidence)
 use compiler.mir.mir_types.{MirConstant, MirFieldDef, MirStatic, MirTypeDefKind}
+use compiler.mir.mir_static_storage.{mir_static_storage_finalize}
 use std.io_runtime.{env_get_opt}
 
 # The canonical runtime contract yields nil for both unset and explicitly empty
@@ -2176,6 +2177,7 @@ impl MirLowering:
         bldr.begin_function(init_symbol, init_name, signature, Span.empty())
         self.builder = bldr
 
+        var finalized_statics: [MirStatic] = []
         for const_ in dynamic:
             val value = self.lower_expr(const_.value)
             var value_type = self.lookup_local_type(value)
@@ -2209,6 +2211,7 @@ impl MirLowering:
                 is_mutable: const_.is_mutable
             )
             statics[const_.symbol] = runtime_static
+            finalized_statics = finalized_statics.push(runtime_static)
             # Same mirror contract as `lower_static` above: this pass
             # OVERWRITES the static with the type of the lowered initializer,
             # so the i64 index must be re-pointed at the new entry or
@@ -2225,6 +2228,10 @@ impl MirLowering:
         finish.terminate_return(nil)
         val init_function = finish.end_function()
         var result_module = finish.module
+        # Compact provisional/replacement struct keys once per module, not
+        # once per initializer: work stays linear in static storage count.
+        result_module.statics = mir_static_storage_finalize(
+            result_module.statics, finalized_statics)
         var functions = result_module.functions
         functions[init_function.symbol] = init_function
         result_module.functions = functions
