@@ -1,0 +1,33 @@
+#!/bin/sh
+# Bootstrap repair probe: compile and execute both public pure-Simple hash aliases.
+set -eu
+unset MSYS2_ARG_CONV_EXCL MSYS_NO_PATHCONV
+producer=${1:?usage: $0 producer runtime-directory}
+runtime=${2:?usage: $0 producer runtime-directory}
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+work=${SIMPLE_HASH_ALIAS_PROBE_WORK:-$(mktemp -d "${root}/build/native_probe/hash-alias.XXXXXX")}
+cat > "$work/main.spl" <<'SPL'
+use std.hash.{rt_hash_text as facade_hash}
+use std.nogc_sync_mut.src.hash.{rt_hash_text as direct_hash}
+extern fn rt_hash_text(value: text) -> i64
+fn main():
+    val empty = -3750763034362895579
+    val hello = -6615550055289275125
+    print "facade_empty={facade_hash("")} direct_empty={direct_hash("")}"
+    print "facade_hello={facade_hash("hello")} direct_hello={direct_hash("hello")} runtime_hello={rt_hash_text("hello")}"
+    assert facade_hash("") == empty
+    assert direct_hash("") == empty
+    assert facade_hash("hello") == hello
+    assert direct_hash("hello") == hello
+    assert facade_hash("hellp") == direct_hash("hellp")
+    assert direct_hash("hello") != direct_hash("hellp")
+    print "Results: 6 passed, 0 failed"
+SPL
+export SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1
+"$producer" native-build --backend cranelift --runtime-bundle core-c-bootstrap \
+    --source "$root/src/lib" --source "$work" --entry-closure \
+    --entry "$work/main.spl" --runtime-path "$runtime" --threads 80 --timeout 1200 \
+    --cache-dir "$work/cache" -o "$work/probe.exe" > "$work/build.log" 2>&1
+"$work/probe.exe" > "$work/results.log" 2>&1
+grep -Fx 'Results: 6 passed, 0 failed' "$work/results.log"
+echo "evidence=$work"
