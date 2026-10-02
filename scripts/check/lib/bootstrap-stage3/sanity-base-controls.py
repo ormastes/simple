@@ -101,6 +101,10 @@ def records(path):
         result[key] = value
     return result
 
+def composition_records(path):
+    digest(path)  # composition authority uses the same no-follow ancestor gate
+    return records(path)
+
 def controls(sanity, job):
     required = {'schema': 'simple-bootstrap-sanity-evidence-v1', 'status': 'fail',
         'candidate_sha256_before': CANDIDATE, 'candidate_sha256_after': CANDIDATE,
@@ -154,7 +158,7 @@ def main():
         require(bool(a.fresh_display), 'fresh display absent')
         output = composition(*args,a.fresh_sanity,a.fresh_display)
         if a.verify_composed:
-            actual = records(a.verify_composed)
+            actual = composition_records(a.verify_composed)
             require(actual == output, 'composition record mismatch')
         if a.write_composed:
             require(not a.verify_composed, 'write and verify are separate operations')

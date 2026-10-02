@@ -16,6 +16,20 @@ OWNER = pathlib.Path('C:/Users/user/.simple/worktrees/simple/runtime/llvm-patche
 CANDIDATE = pathlib.Path('C:/Users/user/.simple/worktrees/simple-windows-phase2/build/native_probe/llvm-patched-native-46557-attempt2/stage2-resume.uAm9eH/stage2/x86_64-pc-windows-msvc/simple.exe')
 
 class ControlTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='nt','Windows composed-authority junction case')
+    def test_composed_receipt_junction_guard(self):
+        with tempfile.TemporaryDirectory() as owned:
+            root=pathlib.Path(owned).absolute(); external=root/'external';external.mkdir()
+            receipt=external/'composed.env';receipt.write_text('schema=external-sentinel\n')
+            junction=root/'junction'
+            result=subprocess.run(['cmd.exe','/c','mklink','/J',str(junction),str(external)],capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            try:
+                with self.assertRaisesRegex(ValueError,'proof authority reparse point'):
+                    m.composition_records(junction/'composed.env')
+                self.assertEqual(receipt.read_text(),'schema=external-sentinel\n')
+            finally:
+                os.rmdir(junction)
     def test_composition_guards(self):
         # Synthetic envelope only: the shell API separately requires every
         # real frontend collector, artifact and execution-output criterion.
