@@ -16,6 +16,26 @@ use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
+#[test]
+fn bootstrap_native_all_rejects_provider_only_authority() {
+    use super::config::bootstrap_native_all_has_runtime_owners;
+    let mut symbols = ["rt_dir_is_real_no_follow", "rt_shared_parse_cell_read_v1", "spl_thread_current_id"]
+        .iter().map(|s| s.to_string()).collect::<std::collections::HashSet<_>>();
+    assert!(!bootstrap_native_all_has_runtime_owners(&symbols));
+    // Reproduces the second failed helper archive: adding the string constructor
+    // still does not make the supplement a complete authority.
+    symbols.insert("rt_string_new".to_string());
+    assert!(!bootstrap_native_all_has_runtime_owners(&symbols));
+    symbols.extend(["rt_native_build", "rt_set_args", "rt_alloc", "rt_free",
+        "rt_string_free", "rt_array_new", "rt_string_new_literal"].iter().map(|s| s.to_string()));
+    assert!(bootstrap_native_all_has_runtime_owners(&symbols));
+    for required in ["rt_native_build", "rt_alloc", "rt_free", "rt_string_free"] {
+        let mut incomplete = symbols.clone();
+        incomplete.remove(required);
+        assert!(!bootstrap_native_all_has_runtime_owners(&incomplete));
+    }
+}
+
 fn repo_root_for_native_project_tests() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

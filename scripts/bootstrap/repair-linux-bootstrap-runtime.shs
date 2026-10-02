@@ -1,0 +1,72 @@
+#!/bin/sh
+# Derive a complete authority from a pinned seed archive, never a helper-only one.
+# Only these three stateless providers may be backfilled. Their retained runtime
+# calls must resolve against the original authority (including its string owner).
+set -eu
+source_root=${1:?source root required}
+authority=${2:?complete native-all archive required}
+expected_sha=${3:?pinned authority sha256 required}
+output=${4:?new output directory required}
+[ "$(uname -s)" = Linux ] || { echo 'Linux ELF repair only' >&2; exit 1; }
+[ ! -e "$output" ] || { echo 'output must not exist' >&2; exit 1; }
+[ "$(sha256sum "$authority" | cut -d ' ' -f 1)" = "$expected_sha" ] || exit 1
+mkdir -p "$output/runtime" "$output/objects"
+nm -g --defined-only "$authority" 2>/dev/null > "$output/original.nm"
+for symbol in rt_native_build rt_set_args rt_alloc rt_free rt_string_new rt_string_free rt_array_new rt_string_new_literal; do
+    count=$(awk -v s="$symbol" '$NF==s {n++} END {print n+0}' "$output/original.nm")
+    [ "$count" -eq 1 ] || { echo "incomplete authority: $symbol count=$count" >&2; exit 1; }
+done
+: > "$output/providers.nm"
+: > "$output/source.sha256"
+for pair in runtime_native:rt_dir_is_real_no_follow runtime_secure_staging:rt_shared_parse_cell_read_v1 runtime_thread:spl_thread_current_id; do
+    unit=${pair%%:*}; symbol=${pair#*:}
+    if awk -v s="$symbol" '$NF==s {found=1} END {exit !found}' "$output/original.nm"; then
+        echo "authority already owns $symbol; source-specific review required" >&2; exit 1
+    fi
+    sha256sum "$source_root/src/runtime/$unit.c" >> "$output/source.sha256"
+    # Explicit C mode is mandatory even if CC is a C++ driver.
+    "${CC:-cc}" -x c -std=gnu11 -fPIC -O3 -ffunction-sections -fdata-sections \
+        -I"$source_root/src/runtime" -c "$source_root/src/runtime/$unit.c" \
+        -o "$output/objects/$unit.full.o" > "$output/objects/$unit.compile.log" 2>&1
+    # Hide unrelated definitions BEFORE section collection: no private string
+    # cache/registry or allocator copy is allowed to survive into the supplement.
+    nm -g --defined-only "$output/objects/$unit.full.o" | \
+        awk -v s="$symbol" 'NF>=3 && $NF!=s {print $NF}' > "$output/objects/$unit.localize"
+    objcopy --localize-symbols="$output/objects/$unit.localize" \
+        "$output/objects/$unit.full.o" "$output/objects/$unit.localized.o"
+    ld -r --gc-sections --undefined="$symbol" -o "$output/objects/$unit.o" \
+        "$output/objects/$unit.localized.o"
+    # ld -r leaves undefined symbol-table entries from discarded sections.
+    # Strip those entries so the closure audit sees retained relocations only.
+    objcopy --strip-unneeded "$output/objects/$unit.o"
+    nm -g --defined-only "$output/objects/$unit.o" >> "$output/providers.nm"
+    readelf -Wr "$output/objects/$unit.o" > "$output/objects/$unit.relocations"
+    nm -u "$output/objects/$unit.o" > "$output/objects/$unit.undefined"
+    [ "$(nm -g --defined-only "$output/objects/$unit.o" | awk 'NF>=3 {n++} END {print n+0}')" -eq 1 ] || exit 1
+    # Disallow every private runtime owner, not only exported duplicates.
+    if nm --defined-only "$output/objects/$unit.o" | awk -v s="$symbol" '$NF!=s && $NF ~ /^(rt_|spl_)/ {bad=1} END {exit !bad}'; then
+        echo "retained private runtime owner in $unit" >&2; exit 1
+    fi
+    if nm --defined-only "$output/objects/$unit.o" | awk 'NF>=3 && $2 ~ /^[bBdDgGsScC]$/ {bad=1} END {exit !bad}'; then
+        echo "retained private mutable state in $unit" >&2; exit 1
+    fi
+    case "$unit" in
+        runtime_native) allowed='^(lstat|memcpy)$' ;;
+        runtime_secure_staging) allowed='^(close|free|fstat|malloc|memchr|memcpy|open|read|rt_string_new)$' ;;
+        runtime_thread) allowed='^pthread_self$' ;;
+    esac
+    if awk -v allowed="$allowed" 'NF && $NF !~ allowed {bad=1} END {exit !bad}' "$output/objects/$unit.undefined"; then
+        echo "unexpected provider dependency in $unit" >&2; exit 1
+    fi
+done
+cp "$authority" "$output/runtime/libsimple_native_all.a"
+ar r "$output/runtime/libsimple_native_all.a" "$output/objects/runtime_native.o" \
+    "$output/objects/runtime_secure_staging.o" "$output/objects/runtime_thread.o"
+ranlib "$output/runtime/libsimple_native_all.a"
+# Preserve the entire original export multiset, including weak definitions.
+# This also catches an accidental archive-member replacement by ar.
+cat "$output/original.nm" "$output/providers.nm" | awk 'NF==3 {print $2, $3}' | LC_ALL=C sort > "$output/expected.exports"
+nm -g --defined-only "$output/runtime/libsimple_native_all.a" 2>/dev/null | awk 'NF==3 {print $2, $3}' | LC_ALL=C sort > "$output/actual.exports"
+cmp "$output/expected.exports" "$output/actual.exports"
+sha256sum "$authority" "$output/runtime/libsimple_native_all.a" > "$output/archive.sha256"
+printf '%s\n' 'Prepared complete authority; native validation still required.'
