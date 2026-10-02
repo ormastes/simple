@@ -5,6 +5,15 @@ It records incomplete work, not build admission or permission to publish.
 
 ## Latest checkpoint: 2026-10-02 cached builds resumed
 
+Provider state checked again: PRs #2156 (SDK links), #2157 (Item5 metadata
+tests), #2158 (Item2 transport), #2159 (Item6 warm binding), and #2160 (Item1
+follow-up) are now merged. Earlier draft/unlanded descriptions below are
+historical. This establishes landing of those slices, not full implementation
+or native acceptance of each item. Item3/4 prerequisite gaps and Item7's
+remaining profile chain are still open. Memory fix PR #2162 remains a draft
+pending native checks; its performance fixture and collector are committed
+as `e50bad2c`, with no product-source change after the frozen implementation.
+
 ### Memory repair after the 7 GB failure
 
 The user requested fixing the memory bug without introducing performance
