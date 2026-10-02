@@ -17,6 +17,12 @@ Status: **BLOCKED / NOT DEPLOYED**. Candidate base: `0d722af3d62e3b693af8bef475c
 | REQ-007 | Keep private frontend/HIR state, native objects/executables, runtime handles, processes, session guards and local paths outside cross-OS sharing. | Distinct host/producer/backend cache roots and scope witnesses; production rejection of foreign private entries; inspect actual artifacts and target formats. |
 | REQ-008 | Deploy only after both native directions and all negative/isolation cases pass through the SOSIX capacity owner. | Complete matrix, independent review, immutable candidate/config, deployment receipt and one post-deployment bounded smoke per host. |
 
+REQ-004/007 include physical shared/private directory separation through
+Windows SUBST/junction and Linux bind/mount aliases, cold private creation,
+and replacement revalidation. The native directory sub-gate now has C host
+evidence; its generated Simple and full frontend gates remain unrun. See
+`doc/03_plan/sys_test/shared_cache_directory_roots_v1_evidence.md`.
+
 ## Ownership and compatibility
 
 The shared boundary carries **frozen encoded payloads**, never pointers, loans,

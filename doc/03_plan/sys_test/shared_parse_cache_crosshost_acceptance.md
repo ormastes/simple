@@ -41,8 +41,11 @@ The user authorized deployment once both hosts verify; that condition remains un
    SOSIX's root receipts must prove canonical non-overlap, including mount and
    reparse aliases. The probe checks lexical slash/case/nesting and every
    ancestor with the production no-follow directory owner. Native Windows
-   `_fullpath` still cannot establish mount/SUBST identity; see the blocker
-   below. A capacity receipt alone is not filesystem root authority.
+   `_fullpath` still cannot establish mount/SUBST identity. The candidate SOSIX
+   native directory owner now supplies physical identity and revalidation;
+   its C host matrix passes, while compiled Simple ABI and frontend integration
+   remain unrun. See `shared_cache_directory_roots_v1_evidence.md`.
+   A capacity receipt alone is not filesystem root authority.
 5. Require producer STORE and consumer HIT for the exact same key, immutable
    cell SHA and payload SHA. The compiled probe additionally validates the
    target receipt and actual AST literal 73. Producer parser-call delta must be

@@ -14599,6 +14599,47 @@ int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
+/* SOSIX directory admission uses two encoded byte-array values. This keeps
+ * the machine boundary scalar on already-admitted self-hosted producers;
+ * no newly named text extern can accidentally collapse a pointer/length pair.
+ */
+#include "runtime_sosix_directory_roots_v1.h"
+
+static int rt_sdr_values_paths_v1(int64_t shared_bytes, int64_t private_bytes,
+                                char *shared, char *private_root) {
+    int64_t shared_length = rt_array_bytes_validate(shared_bytes);
+    int64_t private_length = rt_array_bytes_validate(private_bytes);
+    if (shared_length <= 0 || shared_length >= RT_SDR_PATH_V1 ||
+        private_length <= 0 || private_length >= RT_SDR_PATH_V1 ||
+        rt_array_bytes_copy_checked(shared_bytes, (uint8_t*)shared, shared_length) != shared_length ||
+        rt_array_bytes_copy_checked(private_bytes, (uint8_t*)private_root, private_length) != private_length ||
+        memchr(shared, 0, (size_t)shared_length) || memchr(private_root, 0, (size_t)private_length))
+        return -EINVAL;
+    shared[shared_length] = 0; private_root[private_length] = 0;
+    return 0;
+}
+int64_t rt_sosix_directory_pair_open_v1(int64_t shared_bytes, int64_t private_bytes) {
+    char shared[RT_SDR_PATH_V1], private_root[RT_SDR_PATH_V1];
+    int status = rt_sdr_values_paths_v1(shared_bytes, private_bytes, shared, private_root);
+    if (status) return status;
+    return rt_sdr_open_v1(shared, private_root);
+}
+int64_t rt_sosix_directory_pair_check_v1(int64_t shared_bytes, int64_t private_bytes) {
+    char shared[RT_SDR_PATH_V1], private_root[RT_SDR_PATH_V1];
+    int status = rt_sdr_values_paths_v1(shared_bytes, private_bytes, shared, private_root);
+    if (status) return status;
+    return rt_sdr_check_v1(shared, private_root);
+}
+int64_t rt_sosix_directory_pair_revalidate_v1(int64_t token) {
+    return rt_sdr_revalidate_v1(token);
+}
+int64_t rt_sosix_directory_pair_snapshot_v1(int64_t token, int64_t output, int64_t bytes) {
+    return rt_sdr_snapshot_v1(token, (uint64_t*)(uintptr_t)output, bytes);
+}
+int64_t rt_sosix_directory_pair_close_v1(int64_t token) {
+    return rt_sdr_close_v1(token);
+}
+
 /* ----------------------------------------------------------------
  * std.io_runtime fs/shell externs that the core-C archive never defined.
  *

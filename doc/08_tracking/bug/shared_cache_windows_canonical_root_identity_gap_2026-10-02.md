@@ -3,6 +3,12 @@
 Status: **BLOCKS cross-host deployment**; found while resuming the native cache
 acceptance lane. This is source evidence, not a completed exploit or host test.
 
+Update: candidate `runtime_sosix_directory_roots_v1.h` now implements the
+handle/fd owner and passes actual Windows SUBST/junction/rename and Linux
+bind/mount/replacement C checks. Compiled Simple ABI, production frontend
+integration and deployment remain unverified, so this issue is not closed.
+See `doc/03_plan/sys_test/shared_cache_directory_roots_v1_evidence.md`.
+
 `src/runtime/runtime_native.c:12155`, `rt_path_absolute`, uses `_fullpath` on
 Windows and `realpath` on POSIX. `_fullpath` makes an absolute lexical path; it
 does not resolve directory handles to their physical targets. The production
