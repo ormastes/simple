@@ -1388,3 +1388,20 @@ verification. An independent Cargo-cache copy preserves the old cache; canonical
 Cargo freshness checks are still required. Its native bootstrap remains held
 while the two diagnostic Windows queues own their resource reservations. Linux
 and canonical manager admission remain incomplete; no earlier failure was reset.
+
+### 2026-10-02 first parallel binary results: HIR memory limits
+
+Both first LLVM bootstrap-entry jobs exited 88 after their sampled RSS caps
+were exceeded; their Job receipts confirm quiescence. Phase3 peaked at
+5,864,184 KiB against 5,859,375 KiB; Phase4 peaked at 6,891,708 KiB against
+6,835,937 KiB. Phase3's last bounded progress marker was HIR module 80/1,084.
+These results establish memory-limit failures, not successful binaries or
+source-parser failures. Preserve the task rows and process-tree receipts under
+`D:/dev/windows-phase2-release-next-20261002/phase34-full/receipts/`.
+
+The coordinator continued independent work without retrying either failed
+binary: Phase3 advanced to its complete LLVM module inventory, and Phase4 to
+its LLVM full-CLI binary. No live source or guard was edited. A source-only
+memory investigation is comparing the retained evidence with existing fixes.
+The corrected seed's separate nested-supervisor fixture also exposed a helper
+cache path-conversion failure; its narrow environment fix remains unverified.
