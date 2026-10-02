@@ -1,0 +1,117 @@
+#!/bin/sh
+# Caller operations return 0 for verified success, 1 only for a qualified
+# compiler failure, and 2 (or another nonzero status) for an owner abort.
+# Scheduling evidence is not a completion/admission receipt.
+managed_attempt() {
+  managed_key=$1
+  shift
+  managed_stop_check
+  if ("$@"); then
+    managed_code=0
+    managed_outcome=SUCCEEDED
+  else
+    managed_code=$?
+    case "$managed_code" in
+      1) managed_outcome=FAILED ;;
+      *) managed_outcome=ABORTED ;;
+    esac
+  fi
+  printf '%s\t%s\t%s\n' "$managed_key" "$managed_outcome" "$managed_code" >>"$statuses" || return 2
+  case "$managed_code" in
+    0) return 0 ;;
+    1) managed_failed=1; return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+managed_stop_check() {
+  if [ -n "${SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE:-}" ] &&
+      [ -e "$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE" ]; then
+    echo 'managed schedule: owner stop requested' >&2
+    exit 143
+  fi
+  if [ -n "${SIMPLE_MODULE_SYSTEMIC_STOP_FILE:-}" ] &&
+      [ -e "$SIMPLE_MODULE_SYSTEMIC_STOP_FILE" ]; then
+    echo 'managed schedule: systemic stop requested' >&2
+    exit 74
+  fi
+}
+
+managed_attempt_binary() {
+  managed_phase=$1 managed_backend=$2 managed_id=$3
+  if managed_attempt "${managed_phase}_${managed_backend}_${managed_id}" \
+      build_binary "$managed_id" "$4" "$5" "$managed_phase" "$managed_backend"; then
+    return 0
+  else
+    managed_result=$?
+    [ "$managed_result" -eq 1 ] || return 2
+  fi
+}
+
+managed_attempt_modules() {
+  managed_phase=$1 managed_backend=$2
+  if managed_attempt "${managed_phase}_${managed_backend}_index" build_index "$1" "$2" "$3"; then
+    # Preparation is authority admission, never an ordinary compiler failure.
+    managed_stop_check
+    if (prepare_backend "$managed_phase" "$managed_backend"); then :; else return 2; fi
+    if managed_attempt "${managed_phase}_${managed_backend}_group" \
+        run_module_backend "$managed_phase" "$managed_backend"; then
+      return 0
+    else
+      managed_result=$?
+      [ "$managed_result" -eq 1 ] || return 2
+    fi
+  else
+    managed_result=$?
+    [ "$managed_result" -eq 1 ] || return 2
+    printf '%s\tBLOCKED\t1\n' "${managed_phase}_${managed_backend}_group" >>"$statuses" || return 2
+  fi
+}
+
+managed_dispatch_phase() {
+  case "$1" in phase3|phase4) ;; *) return 2 ;; esac
+  managed_failed=0
+  if [ "$1" = phase4 ]; then
+    for managed_backend in llvm cranelift; do
+    managed_attempt_binary phase4 "$managed_backend" bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" || return 2
+    managed_attempt_binary phase4 "$managed_backend" full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" || return 2
+    managed_cli_ready=$managed_code
+    managed_attempt_binary phase4 "$managed_backend" interpreter src/app/interpreter/main.spl "bin/simple_interpreter$exe_suffix" || return 2
+    managed_interpreter_ready=$managed_code
+    managed_attempt_binary phase4 "$managed_backend" mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" || return 2
+    managed_attempt_binary phase4 "$managed_backend" lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" || return 2
+    managed_attempt_binary phase4 "$managed_backend" test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" || return 2
+    for managed_suite in compiler loader interpreter; do
+      if [ "$managed_cli_ready" -ne 0 ] || [ "$managed_interpreter_ready" -ne 0 ]; then
+        printf '%s\tBLOCKED\t1\n' "phase4_${managed_backend}_test_${managed_suite}" >>"$statuses" || return 2
+        managed_failed=1
+      elif managed_attempt "phase4_${managed_backend}_test_${managed_suite}" \
+          run_test_suite "$managed_backend" "$managed_suite"; then :; else
+        managed_result=$?
+        [ "$managed_result" -eq 1 ] || return 2
+      fi
+    done
+    case "$managed_backend" in llvm) managed_config=$llvm_index_config ;; cranelift) managed_config=$cranelift_index_config ;; esac
+    managed_attempt_modules phase4 "$managed_backend" "$managed_config" || return 2
+    done
+  else
+    for managed_backend in llvm cranelift; do
+    managed_attempt_binary phase3 "$managed_backend" phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" || return 2
+    case "$managed_backend" in llvm) managed_config=$phase3_llvm_index_config ;; cranelift) managed_config=$phase3_cranelift_index_config ;; esac
+    managed_attempt_modules phase3 "$managed_backend" "$managed_config" || return 2
+    done
+  fi
+  [ "$managed_failed" -eq 0 ]
+}
+
+managed_dispatch_tasks() {
+  managed_overall=0
+  for managed_selected_phase in phase4 phase3; do
+    if managed_dispatch_phase "$managed_selected_phase"; then :; else
+      managed_phase_status=$?
+      [ "$managed_phase_status" -eq 1 ] || return 2
+      managed_overall=1
+    fi
+  done
+  return "$managed_overall"
+}

@@ -16,6 +16,7 @@ use std.nogc_sync_mut.io.sysinfo_ops.{cpu_count_checked}
 use app.io.file_ops.{file_copy, file_rename}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use app.bootstrap_builder.failure_policy.{builder_failure_class_v1}
 
 struct NativeGroupedRunOutcomeV1:
     exit_code: i64
@@ -325,6 +326,7 @@ fn native_group_reap_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
                     if not observed.leader_reaped or not observed.tree_empty or observed.active_processes != 0:
                         return Err("group process tree cleanup unproven")
                     val _receipt = group_process_collect_reap_v1(owner, native_group_lease_v1(run, manifest))?
+                    if observed.cancelled: return Err("native group owner cancelled the worker")
                     return Ok((observed.exit_code, observed.memory_peak_bytes, observed.timed_out))
             Err(reason):
                 observation_failures = observation_failures + 1
@@ -431,6 +433,17 @@ fn native_group_recover_result_v1(run: NativeGroupRunV1, manifest: NativeGroupMa
         val invalid = native_group_files_valid_v1(run, manifest, result)
         if invalid != "": return Err(invalid)
         return Ok(result)
+    val modules = native_group_recover_progress_v1(root, manifest, code, timed_out)?
+    val result = NativeGroupResultV1(native_group_manifest_identity_v1(manifest),
+        manifest.group_id, manifest.generation, manifest.attempt, modules, 0, peak)
+    val invalid = native_group_files_valid_v1(run, manifest, result)
+    if invalid != "": return Err(invalid)
+    Ok(result)
+
+# Production missing-result recovery, kept separate so filesystem failure
+# fixtures exercise the same progress/start-marker path as the owned runner.
+pub fn native_group_recover_progress_v1(root: text, manifest: NativeGroupManifestV1,
+        code: i64, timed_out: bool) -> Result<[NativeModuleResultV1], text>:
     var modules: [NativeModuleResultV1] = []
     for member in manifest.members:
         val path = root + "/progress/" + sha256_text(member.module_id) + ".sdn"
@@ -456,12 +469,7 @@ fn native_group_recover_result_v1(run: NativeGroupRunV1, manifest: NativeGroupMa
                 member.output_kind, "", "", false, ""))
     # Progress is evidence of completed members, not an SCC commit. If a tree
     # dies after one peer succeeds, retry the entire affected SCC together.
-    modules = native_group_normalize_crashed_sccs_v1(manifest.members, modules, code)
-    val result = NativeGroupResultV1(native_group_manifest_identity_v1(manifest),
-        manifest.group_id, manifest.generation, manifest.attempt, modules, 0, peak)
-    val invalid = native_group_files_valid_v1(run, manifest, result)
-    if invalid != "": return Err(invalid)
-    Ok(result)
+    Ok(native_group_normalize_crashed_sccs_v1(manifest.members, modules, code))
 
 fn native_group_result_for_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1) -> NativeGroupResultV1?:
     for result in run.results:
@@ -487,9 +495,31 @@ fn native_group_latest_rows_v1(run: NativeGroupRunV1) -> NativeGroupLatestV1:
                 attempts[row.module_id] = manifest
     NativeGroupLatestV1(rows, attempts)
 
+fn native_group_has_compile_failure_v1(rows: [NativeModuleResultV1]) -> bool:
+    for row in rows:
+        if row.status == "ERROR" and row.exit_code == 1: return true
+    false
+
+fn native_group_failure_class_v1(rows: [NativeModuleResultV1],
+        code: i64, timed_out: bool) -> text:
+    if rows.len() == 0 or timed_out or (code != 0 and code != 1): return "infrastructure-abort"
+    for row in rows:
+        if code == 0 and (row.status != "OK" or row.exit_code != 0):
+            return "infrastructure-abort"
+        if row.status == "BLOCKED" or row.status == "NOT_RUN":
+            if row.exit_code != 0 and row.exit_code != 1: return "infrastructure-abort"
+        elif builder_failure_class_v1(row.status, row.exit_code, true) == "infrastructure-abort":
+            return "infrastructure-abort"
+    if native_group_has_compile_failure_v1(rows): return "compile-failure"
+    if code == 1: return "infrastructure-abort"
+    "complete"
+
 fn native_group_retry_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
         result: NativeGroupResultV1) -> Result<NativeGroupManifestV1?, text>:
     if manifest.attempt >= run.max_attempts: return Ok(nil)
+    # A completed deterministic rejection cannot improve with identical bytes.
+    # Continue independent groups; preserve the complete SCC result as failed.
+    if native_group_has_compile_failure_v1(result.modules): return Ok(nil)
     var members: [NativeGroupMemberV1] = []
     for member in manifest.members:
         for row in result.modules:
@@ -603,6 +633,8 @@ fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
         return Err("compiler exit status differs from typed group result")
     next.results = next.results.push(result)
     if not native_group_save_v1(next): return Err("cannot persist reaped native group result")
+    if native_group_failure_class_v1(result.modules, code, timed_out) == "infrastructure-abort":
+        return Err("native group resource, containment or unknown worker failure")
     Ok(next)
 
 fn native_group_accounted_v1(run: NativeGroupRunV1) -> i64:
@@ -855,6 +887,9 @@ fn native_group_check_receipt_v1(run: NativeGroupRunV1,
         observed.exit_code, observed.memory_peak_bytes, observed.timed_out)?
     if native_group_result_encode_v1(reconstructed) != native_group_result_encode_v1(result):
         return Err("ledger result differs from reaped worker evidence")
+    if observed.cancelled or native_group_failure_class_v1(result.modules,
+            observed.exit_code, observed.timed_out) == "infrastructure-abort":
+        return Err("retained native group resource, containment or unknown worker failure")
     Ok(true)
 
 fn native_group_effective_threads_v1(manifest: NativeGroupManifestV1,
@@ -885,7 +920,10 @@ fn native_group_active_charges_v1(run: NativeGroupRunV1,
 
 fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
         initial_groups: [text], first_index: i64,
-        capacity: NativeGroupedCapacityV1) -> Result<NativeGroupRunV1, text>:
+        capacity: NativeGroupedCapacityV1, single_group: bool = false) -> Result<NativeGroupRunV1, text>:
+    # An enclosing managed phase owns one full compiler cap. Its host probe
+    # cannot infer the enclosing Windows Job headroom, so never prestart peers.
+    if single_group: return Ok(run)
     val host_cpus = match cpu_count_checked():
         case Ok(value): value
         case Err(_): 1
@@ -1067,7 +1105,7 @@ fn native_group_fail_with_cleanup_v1(run: NativeGroupRunV1,
         native_group_accounted_v1(latest))
 
 fn native_group_run_locked_v1(input: NativeGroupRunV1,
-        capacity: NativeGroupedCapacityV1) -> NativeGroupedRunOutcomeV1:
+        capacity: NativeGroupedCapacityV1, single_group: bool = false) -> NativeGroupedRunOutcomeV1:
     var run = match native_group_restore_v1(input):
         Ok(value): value
         Err(reason): return NativeGroupedRunOutcomeV1(2, reason, input.inventory_count, 0)
@@ -1092,7 +1130,7 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
             return NativeGroupedRunOutcomeV1(2,
                 "initial native group manifest missing", run.inventory_count,
                 native_group_accounted_v1(run))
-        match native_group_prestart_wave_v1(run, initial_groups, group_index, capacity):
+        match native_group_prestart_wave_v1(run, initial_groups, group_index, capacity, single_group):
             Ok(updated): run = updated
             Err(reason):
                 return native_group_fail_with_cleanup_v1(run, initial_groups,
@@ -1149,6 +1187,12 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
                 native_group_accounted_v1(run))
         Ok(_): pass
     val passed = native_group_complete_v1(run) and native_group_promotions_valid_v1(run)
+    var compiler_failure = false
+    for result in run.results:
+        if native_group_has_compile_failure_v1(result.modules): compiler_failure = true
+    if not passed and not compiler_failure:
+        return native_group_fail_with_cleanup_v1(run, initial_groups, 0,
+            "incomplete grouped run has no admitted compiler rejection")
     if not native_group_publish_completion_v1(run, true):
         return NativeGroupedRunOutcomeV1(2, "cannot publish native group completion", run.inventory_count,
             native_group_accounted_v1(run))
@@ -1157,7 +1201,7 @@ fn native_group_run_locked_v1(input: NativeGroupRunV1,
         run.inventory_count, native_group_accounted_v1(run))
 
 fn native_group_run_v1(input: NativeGroupRunV1,
-        capacity: NativeGroupedCapacityV1) -> NativeGroupedRunOutcomeV1:
+        capacity: NativeGroupedCapacityV1, single_group: bool = false) -> NativeGroupedRunOutcomeV1:
     val invalid = native_group_run_validate_v1(input)
     if invalid != "": return NativeGroupedRunOutcomeV1(2, invalid, input.inventory_count, 0)
     if input.resources.len() != 0 or input.results.len() != 0:
@@ -1171,7 +1215,7 @@ fn native_group_run_v1(input: NativeGroupRunV1,
         return NativeGroupedRunOutcomeV1(2, "cannot create native group output root", input.inventory_count, 0)
     val lock = file_lock(input.state_root + "/manager.lock", 1)
     if lock < 0: return NativeGroupedRunOutcomeV1(2, "another native group manager owns state", input.inventory_count, 0)
-    val outcome = native_group_run_locked_v1(input, capacity)
+    val outcome = native_group_run_locked_v1(input, capacity, single_group)
     val _unlocked = file_unlock(lock)
     outcome
 

@@ -1,0 +1,105 @@
+#!/bin/sh
+# Orchestration only. The compiled owner is responsible for atomic aggregate
+# host/commit/disk/CPU admission and real process leases. A sampled RSS value
+# is not a reservation. Missing owner operations refuse before any launch.
+#
+# Owner callbacks (phase, private root): start=0 started,75 capacity pending;
+# poll=0 running,10 succeeded,11 qualified compiler failure,other abort;
+# cancel/collect/release=0 only on verified success. collect must prove both
+# leader reap and an empty tree. release must retain charge on any uncertainty.
+# All three must be idempotent for the exact owned lease: a signal can arrive
+# after native release but before its shell journal row is recorded.
+# validate(root) checks pinned policy, executable authority and enforcement.
+# wait(seconds) is bounded by dispatch's explicit poll limit.
+managed_phase_run() (
+  case "$1" in phase3|phase4) ;; *) return 2 ;; esac
+  [ "$#" -eq 2 ] || return 2
+  managed_phase=$1
+  managed_phase_root=$2
+  statuses="$managed_phase_root/task-outcomes.tsv"
+  hashes="$managed_phase_root/binary-hashes.env"
+  scratch="$managed_phase_root/scratch"
+  mkdir -p "$scratch" || return 2
+  : >"$statuses" && : >"$hashes" || return 2
+  managed_dispatch_phase "$managed_phase"
+)
+
+managed_parallel_dispatch() (
+  [ "$#" -eq 3 ] || return 2
+  mp_root=$1 mp_limit=$2 mp_delay=$3
+  case "$mp_root" in /*|[A-Za-z]:/*) ;; *) return 2 ;; esac
+  for mp_n in "$mp_limit" "$mp_delay"; do
+    case "$mp_n" in ''|0|0*|*[!0-9]*) return 2 ;; esac
+    [ "$mp_n" -le 86400 ] || return 2
+  done
+  for mp_hook in validate start poll cancel collect release wait; do
+    command -v "managed_phase_owner_$mp_hook" >/dev/null 2>&1 || {
+      echo "managed parallel: enforcing owner operation unavailable: $mp_hook" >&2
+      return 78
+    }
+  done
+  managed_phase_owner_validate "$mp_root" || return 78
+  mkdir -p "$mp_root/phase3" "$mp_root/phase4" || return 2
+  mp3=PENDING mp4=PENDING mp_failed=0 mp_finished=0 mp_tick=0
+  mp_record() {
+    case "$1" in phase3) mp3=$2 ;; phase4) mp4=$2 ;; *) return 2 ;; esac
+    printf '%s\t%s\n' "$1" "$2" >>"$mp_root/dispatch.tsv"
+  }
+  mp_state() { case "$1" in phase3) printf '%s' "$mp3" ;; phase4) printf '%s' "$mp4" ;; esac; }
+  mp_cleanup() {
+    for mp_p in phase3 phase4; do
+      case "$(mp_state "$mp_p")" in
+        ADMITTING|RUNNING|REAP_PENDING|OWNERSHIP_UNKNOWN)
+          # A failed cancel does not license releasing an unobserved tree.
+          if managed_phase_owner_cancel "$mp_p" "$mp_root/$mp_p" &&
+             managed_phase_owner_collect "$mp_p" "$mp_root/$mp_p" &&
+             managed_phase_owner_release "$mp_p" "$mp_root/$mp_p"; then
+            mp_record "$mp_p" CANCELLED || :
+          else
+            mp_record "$mp_p" OWNERSHIP_UNKNOWN || :
+          fi ;;
+      esac
+    done
+  }
+  trap 'mp_cleanup; exit 2' HUP INT TERM
+  trap '[ "$mp_finished" -eq 1 ] || mp_cleanup' EXIT
+  : >"$mp_root/dispatch.tsv" || return 2
+  while [ "$mp_tick" -lt "$mp_limit" ]; do
+    mp_tick=$((mp_tick + 1))
+    # Observe/reap before admitting more work. A terminal shell is not proof.
+    for mp_p in phase3 phase4; do
+      [ "$(mp_state "$mp_p")" = RUNNING ] || continue
+      if managed_phase_owner_poll "$mp_p" "$mp_root/$mp_p"; then mp_rc=0; else mp_rc=$?; fi
+      case "$mp_rc" in
+        0) ;;
+        10|11)
+          mp_record "$mp_p" REAP_PENDING || return 2
+          managed_phase_owner_collect "$mp_p" "$mp_root/$mp_p" || return 2
+          managed_phase_owner_release "$mp_p" "$mp_root/$mp_p" || return 2
+          if [ "$mp_rc" -eq 11 ]; then mp_failed=1; mp_record "$mp_p" FAILED || return 2
+          else mp_record "$mp_p" SUCCEEDED || return 2; fi ;;
+        *) return 2 ;;
+      esac
+    done
+    for mp_p in phase3 phase4; do
+      case "$(mp_state "$mp_p")" in PENDING|RESOURCE_WAIT) ;; *) continue ;; esac
+      mp_record "$mp_p" ADMITTING || return 2
+      if managed_phase_owner_start "$mp_p" "$mp_root/$mp_p"; then mp_rc=0; else mp_rc=$?; fi
+      case "$mp_rc" in
+        0) mp_record "$mp_p" RUNNING || return 2 ;;
+        75) mp_record "$mp_p" RESOURCE_WAIT || return 2 ;;
+        *) mp_record "$mp_p" OWNERSHIP_UNKNOWN || :; return 2 ;;
+      esac
+    done
+    case "$mp3:$mp4" in
+      SUCCEEDED:SUCCEEDED|SUCCEEDED:FAILED|FAILED:SUCCEEDED|FAILED:FAILED)
+        mp_finished=1
+        return "$mp_failed" ;;
+    esac
+    # No worker is active: leave both pending for the external owner to retry.
+    case "$mp3:$mp4" in *RUNNING*) ;; *) mp_finished=1; return 75 ;; esac
+    managed_phase_owner_wait "$mp_delay" || return 2
+  done
+  echo 'managed parallel: bounded observation deadline reached' >&2
+  return 2
+)

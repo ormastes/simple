@@ -16,6 +16,9 @@ use app.bootstrap_builder.codec.{builder_read_run_v1, builder_read_result_v1, bu
     builder_encode_result_v1}
 use app.bootstrap_builder.manager.{BuilderManagerV1, builder_manager_start, builder_manager_ready, builder_manager_dependencies_ready, builder_manager_host_slots, builder_manager_dispatch, builder_manager_reap, builder_manager_unresolved, builder_manager_accept, builder_manager_resume, builder_manager_done, builder_manager_succeeded, builder_manager_output_error, builder_manager_encode_v1, builder_manager_decode_v1}
 use app.bootstrap_builder.worker.{builder_worker_execute_v1}
+use app.bootstrap_builder.failure_policy.{builder_failure_class_v1}
+use app.bootstrap_builder.phase_admission.{managed_phase_cli_v1}
+use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1}
 use app.bootstrap_builder.link_inputs.{builder_link_inputs_match_v1,
     builder_regular_input_parents_safe_v1}
 use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_start_v1,
@@ -185,6 +188,36 @@ fn builder_cli_prune_failure_v1(task: BuildTaskV1, receipt: BuildResultV1,
 fn builder_cli_failure_v1(task: BuildTaskV1, host: text, status: text, code: i64) -> BuildResultV1:
     BuildResultV1(task_id: task.id, attempt: task.attempt, identity_digest: builder_task_identity_v1(task), host_id: host, status: status, exit_code: code, outputs: [], cache_hits: -1, cache_misses: -1, cache_stores: -1)
 
+fn builder_cli_readmit_failures_v1(state: BuilderManagerV1, config: BuilderCliV1,
+        source_root: text, process: BuilderProcessPortV1) -> i64:
+    var admitted_failures = 0
+    for index in 0..state.tasks.len():
+        if state.statuses[index] == "UNRESOLVED": return -1
+        if state.statuses[index] != "FAILED": continue
+        val task = state.tasks[index]
+        if not builder_cli_inputs_match_v1(task, source_root): return -1
+        val retained = match builder_read_result_v1(config.state + "/receipts/" + task.id + ".sdn"):
+            Ok(value): value
+            Err(_): return -1
+        if builder_validate_result_v1(task, retained) != "": return -1
+        var admitted_failure = false
+        for host in state.run.hosts:
+            if host.id != state.host_ids[index] or host.id != retained.host_id: continue
+            val root = config.state + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
+            val attempt = BuilderAttemptV1(task_id: task.id, attempt: task.attempt,
+                host: host, pid: 0, local_root: root, remote_root: "", error: "",
+                identity_digest: builder_task_identity_v1(task), process: process)
+            if host.transport != "local" or builder_failure_class_v1(retained.status,
+                    retained.exit_code, builder_transport_reaped_v1(attempt)) != "compile-failure": return -1
+            val collected = match builder_transport_collect_v1(attempt):
+                Ok(value): value
+                Err(_): return -1
+            if builder_encode_result_v1(collected) != builder_encode_result_v1(retained): return -1
+            admitted_failure = true
+        if not admitted_failure: return -1
+        admitted_failures = admitted_failures + 1
+    admitted_failures
+
 fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1) -> i64:
     var state = builder_manager_start(run)
     if state.error != "":
@@ -256,6 +289,12 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         val cleaned = builder_cli_cancel_v1(active)
         print "builder: recovery journal write failed; cleanup={cleaned}"
         return 2
+    # Recover owned live attempts first so an invalid retained failure can
+    # cancel them. No new task may launch until this replay gate succeeds.
+    if builder_cli_readmit_failures_v1(state, config, source_root, process) < 0:
+        val cleaned = builder_cli_cancel_v1(active)
+        print "builder: retained failure authority invalid; cleanup={cleaned}"
+        return 2
     while not builder_manager_done(state):
         if file_exists(config.state + "/cancel.request"):
             val cleaned = builder_cli_cancel_v1(active)
@@ -274,6 +313,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                 # Retain the reserved RUNNING slot but stop polling this handle
                 # repeatedly. Independent tasks may use other available slots.
                 unknown = unknown.push(attempt)
+                state.error = "worker observation authority unresolved"
                 print "builder: {attempt.task_id} observation unresolved; retaining owned attempt"
             else:
                 state = builder_manager_reap(state, attempt.task_id, attempt.attempt)
@@ -294,6 +334,8 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                             # A transport/receipt fetch error is not compiler
                             # failure. Preserve this attempt for later recovery.
                             state = builder_manager_unresolved(state, task.id, task.attempt)
+                            unknown = unknown.push(attempt)
+                            state.error = "worker result collection authority unresolved"
                             print "builder: {task.id} result collection unresolved: {message}"
                     if collected_ok:
                         if not builder_cli_inputs_match_v1(task, source_root):
@@ -307,6 +349,9 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                                 state.error = "cannot publish verified task output"
                         if state.error == "" and not builder_write_result_v1(config.state + "/receipts/" + task.id + ".sdn", receipt):
                             state.error = "cannot persist admitted result"
+                        if state.error == "" and builder_failure_class_v1(receipt.status,
+                                receipt.exit_code, builder_transport_reaped_v1(attempt)) == "infrastructure-abort":
+                            state.error = "worker admission, resource or containment failure for " + task.id
                         if state.error == "" and receipt.status == "OK":
                             val prune_error = builder_cli_prune_success_v1(task, receipt,
                                 run, config.state, source_root, output_root, process)
@@ -325,8 +370,9 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         active = remaining
         if state.error != "":
             val cleaned = builder_cli_cancel_v1(active)
+            val unknown_cleaned = builder_cli_cancel_v1(unknown)
             val saved = builder_cli_persist_v1(state, config.state)
-            print "builder: {state.error}; cleanup={cleaned}; journal={saved}"
+            print "builder: {state.error}; cleanup={cleaned}; unknown cleanup={unknown_cleaned}; journal={saved}"
             return 2
         # Dispatch only after dependencies have been admitted and published.
         for index in builder_manager_ready(state):
@@ -379,6 +425,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                             if state.error == "" and not builder_write_result_v1(config.state + "/receipts/" + task.id + ".sdn", failed):
                                 state.error = "cannot persist launch failure"
                             print "builder: {task.id} launch failed: {attempt.error}"
+                            state.error = "transport launch failed for " + task.id + ": " + attempt.error
                         else:
                             active = active.push(attempt)
                             print "builder: {task.id} dispatched host={host.id} attempt={task.attempt}"
@@ -400,9 +447,11 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         if active.len() > 0: sleep_ms(100)
     val succeeded = builder_manager_succeeded(state)
     print "builder: completed success={succeeded} verified_cache_hits={reused}"
-    if succeeded and prune_failed: return 2
+    if prune_failed: return 2
     if succeeded: return 0
-    1
+    # Recheck the actual terminal evidence before exit 1 permits continuation.
+    val admitted_failures = builder_cli_readmit_failures_v1(state, config, source_root, process)
+    if admitted_failures > 0: 1 else: 2
 
 fn builder_cli_private_path_v1(path: text) -> bool:
     if path == "" or path.contains("\\") or path.contains("\0") or
@@ -557,13 +606,19 @@ fn builder_cli_verify_v1(run: BuildRunV1, config: BuilderCliV1, process: Builder
     print "builder: verified tasks={state.tasks.len()}"
     0
 
-fn builder_cli_main_v1(process: BuilderProcessPortV1) -> i64:
+fn builder_cli_main_v1(process: BuilderProcessPortV1,
+        phase_capacity: NativeGroupedCapacityV1? = nil) -> i64:
     # Compiled native application argv; avoid the general CLI command facade,
     # which links unrelated compiler/formatter command providers into this tool.
     val raw_args = get_args()
     var args: [text] = []
     for index in 1..raw_args.len():
         args = args.push(raw_args[index])
+    if args.len() > 0 and (args[0] == "managed-phases" or args[0] == "managed-phases-verify"):
+        if phase_capacity == nil:
+            print "builder: composed phase capacity authority is unavailable"
+            return 2
+        return managed_phase_cli_v1(args, process, phase_capacity!)
     val config = builder_cli_parse_v1(args)
     if config.error != "":
         print "builder: {config.error}"

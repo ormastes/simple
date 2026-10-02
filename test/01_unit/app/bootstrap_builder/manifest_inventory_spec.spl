@@ -167,6 +167,53 @@ describe "bootstrap inventory backed job manifest":
                     case Err(reason): fail(reason)
             case Err(reason): fail(reason)
 
+        # Exercise the actual emitter: changing a nonfirst member must change
+        # source_digest even though the inventory path list is byte-identical.
+        var source_digests: [text] = []
+        for version in ["same-one", "same-two", "changed-member"]:
+            if version == "changed-member":
+                expect(file_atomic_write(root + "/nested/b.txt", "changed beta\n")).to_equal(true)
+            val emitted = bootstrap_manifest_job_from_inventory_v1([
+                "--job-from-inventory", root + "/template.sdn", producer, root,
+                "digest-task", "phase4", "out.txt", "inventory.txt", "--memory-limit-bytes",
+                "2147483648", "--links-inventory", "links.txt", "--manifest",
+                private_root + "/" + version + ".sdn", "--", "--group", "one"]).unwrap()
+            val emitted_run = builder_read_run_v1(emitted).unwrap()
+            source_digests = source_digests.push(emitted_run.tasks[0].source_digest)
+        expect(source_digests[0]).to_equal(source_digests[1])
+        expect(source_digests[0] == source_digests[2]).to_equal(false)
+        expect(file_atomic_write(root + "/nested/c.txt", "changed beta\n")).to_equal(true)
+        expect(file_atomic_write(root + "/inventory.txt", "a.txt\nnested/c.txt\n")).to_equal(true)
+        val renamed_manifest = bootstrap_manifest_job_from_inventory_v1([
+            "--job-from-inventory", root + "/template.sdn", producer, root,
+            "digest-task", "phase4", "out.txt", "inventory.txt", "--memory-limit-bytes",
+            "2147483648", "--links-inventory", "links.txt", "--manifest",
+            private_root + "/changed-member-path.sdn", "--", "--group", "one"]).unwrap()
+        val renamed_digest = builder_read_run_v1(renamed_manifest).unwrap().tasks[0].source_digest
+        expect(renamed_digest == source_digests[2]).to_equal(false)
+        expect(snapshot_symlink_create_nofollow_v1(root, root + "/alias1", "nested/c.txt", 1)).to_equal(true)
+        expect(snapshot_symlink_create_nofollow_v1(root, root + "/alias2", "nested/c.txt", 1)).to_equal(true)
+        var linked_digests: [text] = []
+        for alias in [("alias1", "616c69617331"), ("alias2", "616c69617332")]:
+            val link = "link-hex:{alias.1}:6e65737465642f632e747874:6e65737465642f632e747874:" +
+                file_hash_sha256(root + "/nested/c.txt") + "\n"
+            expect(file_atomic_write(root + "/links.txt", link)).to_equal(true)
+            val linked_manifest = bootstrap_manifest_job_from_inventory_v1([
+                "--job-from-inventory", root + "/template.sdn", producer, root,
+                "digest-task", "phase4", "out.txt", "inventory.txt", "--memory-limit-bytes",
+                "2147483648", "--links-inventory", "links.txt", "--manifest",
+                private_root + "/" + alias.0 + ".sdn", "--", "--group", "one"]).unwrap()
+            linked_digests = linked_digests.push(builder_read_run_v1(linked_manifest).unwrap().tasks[0].source_digest)
+        expect(linked_digests[0] == renamed_digest).to_equal(false)
+        expect(linked_digests[0] == linked_digests[1]).to_equal(false)
+        val suite_manifest = bootstrap_manifest_job_from_inventory_v1([
+            "--suite-from-inventory", root + "/template.sdn", producer, root,
+            "suite-task", "phase4", "suite/result.env", "inventory.txt", "--memory-limit-bytes",
+            "2147483648", "--links-inventory", "links.txt", "--manifest",
+            private_root + "/suite.sdn", "--", "--managed-suite"]).unwrap()
+        expect(builder_read_run_v1(suite_manifest).unwrap().tasks[0].outputs).to_equal([
+            "suite/result.env", "suite/stdout.log", "suite/stderr.log", "suite/invocations.log"])
+
         # The small copy smoke uses --job. Keep its task program, host worker,
         # and source identities distinct so a swapped digest fails this spec.
         match bootstrap_manifest_job_v1(["--job", root + "/template.sdn",

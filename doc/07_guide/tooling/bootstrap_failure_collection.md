@@ -22,6 +22,53 @@ production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
 
+## Canonical managed Phase 3 and Phase 4
+
+The grouped canonical wrapper schedules fourteen binary tasks, six three-case
+compiler/loader/interpreter suites, and four index/module pairs across both
+phases and LLVM/Cranelift. A verified compiler
+`ERROR` with exit 1 continues independent tasks; a failed index blocks only its
+own module group. The task-outcomes TSV is scheduling evidence, not an admission
+receipt. Any failed or blocked task prevents the canonical PASS receipt.
+
+Continuation requires the updated compiled manager: exit 1 is reserved for an
+identity-checked compiler failure with actual tree reap and a retained matching
+result. Launch rejection, timeout, cancellation, unknown crash, capacity,
+integrity, and cleanup errors abort with exit 2. Retained failures are admitted
+again on resume. The owner stop and systemic stop paths are
+`SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE` and
+`SIMPLE_MODULE_SYSTEMIC_STOP_FILE`; they stop the next scheduling boundary.
+They do not replace process-owner cancellation of an already active task.
+
+The canonical resource policy defaults to one attempt. Deterministic compiler
+`ERROR/1` is terminal even with a larger explicit attempt budget; unrelated
+groups continue. The shell regression is
+`scripts/bootstrap/tests/managed-task-schedule-test.shs`. Native policy and
+manager tests remain required before qualification.
+
+The aggregate phase owner queues two isolated phase tasks, reserving their
+full memory caps, disk growth and CPU demand before staging/spawn. Each phase
+runs only one native module group at a time, leaving space for its managers.
+Unknown cleanup retains its reservation and blocks recovery. Phase journals,
+scratch snapshots and hash files are private; the parent merges after both
+owned trees are reaped. Source and native enforcement are still unqualified
+until the rebuilt manager passes actual overlap, cancellation and recovery
+tests. Shell spy tests do not prove native enforcement.
+
+The aggregate lifetime covers both execution and resource waiting. The default
+six-hour parent lease is the effective upper bound for a phase started under
+it, even though generic task manifests permit up to twenty-four hours. A late
+phase receives only the remaining parent lifetime. Parent expiry cancels and
+reaps the owned trees; it does not promise twenty-four hours or authorize a
+fresh attempt. Timeout recovery needs preserved, validated checkpoint progress
+and a presealed attempt budget; absent that proof the run remains aborted.
+
+Do not deploy the new shell around old manager images. The canonical image
+preparer compares its full source snapshot to the admitted Stage 2 snapshot;
+there is no independent tool-source closure authority. Rebuild and admit a
+candidate containing the manager changes, then prepare all eight manager
+images from that same authority. Do not rewrite an older admission receipt.
+
 ## Module diagnostics after a tool binary fails
 
 The full phase verification profile runs `run_module_compile_inventory` after

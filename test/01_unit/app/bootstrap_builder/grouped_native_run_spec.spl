@@ -1,8 +1,78 @@
 use std.spec.{describe, it, expect}
-use std.common.build_manager.grouped_native_contract.{NativeGroupMemberV1, NativeModuleResultV1}
+use std.common.build_manager.grouped_native_contract.{NativeGroupMemberV1, NativeModuleResultV1,
+    NativeGroupManifestV1, native_group_scc_set_id_v1, native_module_result_encode_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.env_ops.{cwd}
+use app.io.dir_ops.{dir_create_all}
+use app.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use app.bootstrap_builder.grouped_native_run.{native_group_normalize_crashed_sccs_v1,
     native_group_demote_unqualified_smf_v1, native_group_blocked_payload_v1,
-    native_group_blocked_marker_matches_v1}
+    native_group_blocked_marker_matches_v1, native_group_has_compile_failure_v1,
+    native_group_failure_class_v1, native_group_recover_progress_v1}
+
+describe "grouped native terminal failure classification":
+    it "retains a deterministic compiler rejection without retrying the same group":
+        val rows = [NativeModuleResultV1("bad", "ERROR", 1, "SMF", "", "", false, "")]
+        expect(native_group_has_compile_failure_v1(rows)).to_equal(true)
+        expect(native_group_failure_class_v1(rows, 1, false)).to_equal("compile-failure")
+
+    it "stops a resource or containment failure even when a peer reports a compiler error":
+        var rows = [NativeModuleResultV1("bad", "ERROR", 1, "SMF", "", "", false, "")]
+        expect(native_group_failure_class_v1(rows, 1, true)).to_equal("infrastructure-abort")
+        expect(native_group_failure_class_v1(rows, 137, false)).to_equal("infrastructure-abort")
+        rows = rows.push(NativeModuleResultV1("peer", "TIMEOUT", 124, "SMF", "", "", false, ""))
+        expect(native_group_failure_class_v1(rows, 1, false)).to_equal("infrastructure-abort")
+
+    it "rejects unclassified worker errors and unstarted members after a signal":
+        val error_rows = [NativeModuleResultV1("bad", "ERROR", 2, "SMF", "", "", false, "")]
+        expect(native_group_has_compile_failure_v1(error_rows)).to_equal(false)
+        expect(native_group_failure_class_v1(error_rows, 1, false)).to_equal("infrastructure-abort")
+        val pending = [NativeModuleResultV1("pending", "NOT_RUN", 143, "SMF", "", "", false, "")]
+        expect(native_group_failure_class_v1(pending, 1, false)).to_equal("infrastructure-abort")
+
+    it "allows success and requires a real compiler failure beside dependent blocking":
+        var rows = [NativeModuleResultV1("ok", "OK", 0, "SMF", "a.smf", "", true, "")]
+        expect(native_group_has_compile_failure_v1(rows)).to_equal(false)
+        expect(native_group_failure_class_v1(rows, 0, false)).to_equal("complete")
+        rows = rows.push(NativeModuleResultV1("blocked", "BLOCKED", 1, "SMF", "", "", false, ""))
+        expect(native_group_failure_class_v1(rows, 1, false)).to_equal("infrastructure-abort")
+        rows = rows.push(NativeModuleResultV1("bad", "ERROR", 1, "SMF", "", "", false, ""))
+        expect(native_group_failure_class_v1(rows, 1, false)).to_equal("compile-failure")
+
+    it "rejects exit one without any compiler rejection witness":
+        val pending = [NativeModuleResultV1("pending", "NOT_RUN", 1, "SMF", "", "", false, "")]
+        expect(native_group_failure_class_v1(pending, 1, false)).to_equal("infrastructure-abort")
+        val blocked = [NativeModuleResultV1("blocked", "BLOCKED", 1, "SMF", "", "", false, "")]
+        expect(native_group_failure_class_v1(blocked, 1, false)).to_equal("infrastructure-abort")
+        expect(native_group_failure_class_v1([], 0, false)).to_equal("infrastructure-abort")
+        val empty_success = [NativeModuleResultV1("pending", "NOT_RUN", 0, "SMF", "", "", false, "")]
+        expect(native_group_failure_class_v1(empty_success, 0, false)).to_equal("infrastructure-abort")
+        val inconsistent = [NativeModuleResultV1("bad", "ERROR", 1, "SMF", "", "", false, "")]
+        expect(native_group_failure_class_v1(inconsistent, 0, false)).to_equal("infrastructure-abort")
+
+    it "recovers missing worker evidence through the filesystem without inventing compiler failure":
+        val root = cwd().replace("\\", "/") + "/build/group-missing-result-" + str(getpid())
+        expect(dir_create_all(root + "/progress")).to_equal(true)
+        val digest = "a".repeat(64)
+        val member = NativeGroupMemberV1("missing", "scc", "src/missing.spl", digest,
+            "SMF", "smf/llvm/missing.smf")
+        val manifest = NativeGroupManifestV1(digest, digest, digest, digest,
+            root + "/route.sdn", digest, digest, digest, "phase4", "llvm",
+            "x86_64-pc-windows-msvc", "group-1", native_group_scc_set_id_v1([member]),
+            1, 1, digest, 1, 1073741824, 1, [member])
+        match native_group_recover_progress_v1(root, manifest, 1, false):
+            Ok(rows):
+                expect(rows.len()).to_equal(1)
+                expect(rows[0].status).to_equal("NOT_RUN")
+                expect(native_group_failure_class_v1(rows, 1, false)).to_equal("infrastructure-abort")
+            Err(reason): expect(reason).to_equal("recover missing worker rows")
+        val progress = root + "/progress/" + sha256_text("missing") + ".sdn"
+        expect(file_atomic_write(progress, native_module_result_encode_v1(
+            NativeModuleResultV1("missing", "ERROR", 1, "SMF", "", "", false, "")))).to_equal(true)
+        match native_group_recover_progress_v1(root, manifest, 1, false):
+            Ok(rows): expect(native_group_failure_class_v1(rows, 1, false)).to_equal("compile-failure")
+            Err(reason): expect(reason).to_equal("recover exact compiler progress")
 
 describe "grouped native dependency decision binding":
     it "rejects a stale blocked marker from another run, inventory, or state root":

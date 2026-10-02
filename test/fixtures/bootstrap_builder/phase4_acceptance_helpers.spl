@@ -1,0 +1,136 @@
+use std.spec.{expect}
+use app.io.mod.{env_get, file_exists, file_is_regular_no_follow, file_hash_sha256, file_read_text, file_append, is_dir, process_run_timeout}
+
+struct Phase4Binding:
+    cli: text
+    interpreter: text
+    backend: text
+    evidence_root: text
+    fixture_root: text
+    source_root: text
+    cli_sha256: text
+    interpreter_sha256: text
+    source_authority_path: text
+    source_authority_sha256: text
+
+# @inline
+fn require_phase4_binding() -> Phase4Binding:
+    val binding = Phase4Binding(
+        cli: env_get("SIMPLE_MANAGED_PHASE4_CLI"),
+        interpreter: env_get("SIMPLE_MANAGED_PHASE4_INTERPRETER"),
+        backend: env_get("SIMPLE_MANAGED_PHASE4_BACKEND"),
+        evidence_root: env_get("SIMPLE_MANAGED_PHASE4_EVIDENCE_ROOT"),
+        fixture_root: env_get("SIMPLE_MANAGED_PHASE4_FIXTURE_ROOT"),
+        source_root: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT"),
+        cli_sha256: env_get("SIMPLE_MANAGED_PHASE4_CLI_SHA256"),
+        interpreter_sha256: env_get("SIMPLE_MANAGED_PHASE4_INTERPRETER_SHA256"),
+        source_authority_path: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH"),
+        source_authority_sha256: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256")
+    )
+    assert(binding.backend == "llvm" or binding.backend == "cranelift")
+    assert(binding.source_root != "" and is_dir(binding.source_root))
+    assert(binding.fixture_root != "" and is_dir(binding.fixture_root))
+    assert(binding.evidence_root != "" and is_dir(binding.evidence_root))
+    assert(binding.fixture_root == "{binding.source_root}/test/fixtures/bootstrap_builder/phase4_acceptance")
+    assert(binding.evidence_root != binding.source_root)
+    assert(not binding.evidence_root.starts_with("{binding.source_root}/"))
+    assert(binding.cli != binding.interpreter)
+    verify_phase4_binding(binding)
+    binding
+
+# Pins the admission receipt, not the entire source tree. The manager must
+# verify its immutable source snapshot before/after the suite independently.
+# @inline
+fn verify_phase4_binding(binding: Phase4Binding):
+    assert(file_is_regular_no_follow(binding.cli))
+    assert(file_is_regular_no_follow(binding.interpreter))
+    assert(file_is_regular_no_follow(binding.source_authority_path))
+    assert(binding.cli_sha256.len() == 64)
+    assert(binding.interpreter_sha256.len() == 64)
+    assert(binding.source_authority_sha256.len() == 64)
+    assert(file_hash_sha256(binding.cli) == binding.cli_sha256)
+    assert(file_hash_sha256(binding.interpreter) == binding.interpreter_sha256)
+    assert(file_hash_sha256(binding.source_authority_path) == binding.source_authority_sha256)
+
+# @inline
+fn phase4_output(binding: Phase4Binding, kind: text) -> text:
+    assert(kind == "compiled-positive" or kind == "compiled-edge" or kind == "compiled-invalid" or kind == "loaded-positive" or kind == "loaded-edge" or kind == "loaded-invalid")
+    val suffix = if binding.cli.ends_with(".exe"): ".exe" else: ""
+    "{binding.evidence_root}/{kind}{suffix}"
+
+# @inline
+fn run_bound_tool(binding: Phase4Binding, kind: text, args: [text]) -> (text, text, i32):
+    verify_phase4_binding(binding)
+    var program = ""
+    if kind == "cli":
+        program = binding.cli
+    elif kind == "interpreter":
+        program = binding.interpreter
+    else:
+        assert(kind == "compiled-positive" or kind == "compiled-edge" or kind == "loaded-positive" or kind == "loaded-edge")
+        program = phase4_output(binding, kind)
+    assert(file_is_regular_no_follow(program))
+    val program_sha = file_hash_sha256(program)
+    assert(program_sha.len() == 64)
+    val result = process_run_timeout(program, args, 120000)
+    verify_phase4_binding(binding)
+    assert(file_hash_sha256(program) == program_sha)
+    val arguments = args.join("\n")
+    val trace = "tool={kind}\npath={program}\nsha256={program_sha}\nbackend={binding.backend}\nargs:\n{arguments}\nexit={result.2}\nstdout:\n{result.0}\nstderr:\n{result.1}\n"
+    assert(file_append("{binding.evidence_root}/invocations.log", trace))
+    result
+
+# @inline
+fn compile_phase4_fixture(binding: Phase4Binding, fixture: text, output_kind: text) -> (text, text, i32):
+    assert(fixture == "compiler_positive" or fixture == "compiler_edge" or fixture == "compiler_invalid" or fixture == "loader_positive" or fixture == "loader_edge" or fixture == "loader_invalid")
+    val fixture_dir = "{binding.fixture_root}/{fixture}"
+    val entry = "{fixture_dir}/main.spl"
+    assert(file_is_regular_no_follow(entry))
+    var inputs: [text] = [entry]
+    if fixture == "loader_positive":
+        inputs = inputs.push("{fixture_dir}/phase4_answer.spl")
+    elif fixture == "loader_edge":
+        inputs = inputs.push("{fixture_dir}/phase4_outer.spl")
+        inputs = inputs.push("{fixture_dir}/phase4_inner.spl")
+    var input_hashes: [text] = []
+    for path in inputs:
+        assert(file_is_regular_no_follow(path))
+        val digest = file_hash_sha256(path)
+        assert(digest.len() == 64)
+        input_hashes = input_hashes.push(digest)
+    val output = phase4_output(binding, output_kind)
+    assert(not file_exists(output))
+    val result = run_bound_tool(binding, "cli", [
+        "native-build", "--backend", binding.backend,
+        "--source", fixture_dir, "--entry-closure", "--entry", entry,
+        "--threads", "1", "--cache-dir", "{binding.evidence_root}/cache-{fixture}",
+        "--output", output
+    ])
+    for index in 0..inputs.len():
+        assert(file_hash_sha256(inputs[index]) == input_hashes[index])
+    result
+
+# @inline
+fn eval_phase4_fixture(binding: Phase4Binding, fixture: text) -> (text, text, i32):
+    assert(fixture == "interpreter_positive" or fixture == "interpreter_edge" or fixture == "interpreter_invalid")
+    val path = "{binding.fixture_root}/{fixture}/main.spl"
+    assert(file_is_regular_no_follow(path))
+    val before = file_hash_sha256(path)
+    val source = file_read_text(path).trim()
+    assert(source != "")
+    val result = run_bound_tool(binding, "interpreter", ["--eval", source])
+    assert(file_hash_sha256(path) == before)
+    result
+
+# @inline
+fn assert_success_output(result: (text, text, i32), expected: text):
+    expect(result.2).to_equal(0)
+    expect(result.0.replace("\r\n", "\n").trim()).to_equal(expected)
+    expect(result.1.trim()).to_equal("")
+
+# @inline
+fn assert_failure_diagnostic(result: (text, text, i32), expected: text):
+    # A crash, timeout, resource denial or arbitrary nonzero exit is not the
+    # requested language error. Require the interpreter/compiler's error exit.
+    expect(result.2).to_equal(1)
+    expect(result.0 + result.1).to_contain(expected)

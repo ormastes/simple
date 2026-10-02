@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+scripts=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase-evidence.XXXXXX")
+case "$tmp" in "${TMPDIR:-/tmp}"/simple-phase-evidence.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/parallel/manifests" "$tmp/parallel/owner/phase3" "$tmp/parallel/owner/phase4" "$tmp/driver-inputs"
+for path in phase-policy.sdn parallel/manifests/phase3.sdn parallel/manifests/phase4.sdn parallel/owner/phase3/result.sdn parallel/owner/phase4/result.sdn; do
+  printf '%s\n' "$path" >"$tmp/$path"
+done
+cat >"$tmp/builder" <<'SH'
+#!/bin/sh
+[ "$1" = managed-phases-verify ] && [ "$#" -eq 21 ] || exit 72
+shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in --state) state=$2 ;; esac
+  shift 2
+done
+root=${state%/parallel/owner}
+printf 'readonly verifier invoked\n' >>"$root/calls"
+if [ -f "$root/reject" ]; then exit 2; fi
+if [ -f "$root/change" ]; then printf 'changed while checking\n' >>"$root/phase-policy.sdn"; fi
+exit 0
+SH
+chmod +x "$tmp/builder"
+check() { sh "$scripts/lib/managed-phase-evidence.shs" "$tmp" "$tmp/builder" 1000 6000; }
+check >"$tmp/fields"
+[ "$(wc -l <"$tmp/fields" | tr -d ' ')" -eq 5 ]
+grep -q '^phase3_phase_result_sha256=' "$tmp/fields"
+mv "$tmp/parallel/owner/phase4/result.sdn" "$tmp/saved"
+if check >"$tmp/failed"; then echo 'FAIL missing sibling receipt admitted' >&2; exit 1; fi
+[ "$(wc -l <"$tmp/calls" | tr -d ' ')" -eq 1 ]
+mv "$tmp/saved" "$tmp/parallel/owner/phase4/result.sdn"
+: >"$tmp/reject"
+if check >"$tmp/failed"; then echo 'FAIL rejected owner accepted' >&2; exit 1; fi
+[ ! -s "$tmp/failed" ]
+rm "$tmp/reject"
+: >"$tmp/change"
+if check >"$tmp/failed"; then echo 'FAIL raced policy accepted' >&2; exit 1; fi
+[ ! -s "$tmp/failed" ]
+echo 'PASS: read-only aggregate verifier required, both results bound, rejection and changed policy fail closed; native authority untested'

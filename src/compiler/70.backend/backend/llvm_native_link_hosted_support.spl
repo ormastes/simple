@@ -28,7 +28,8 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
-use compiler.backend.backend.simpleos_native_guards.{simpleos_module_init_symbols}
+use compiler.backend.backend.simpleos_native_guards.{simpleos_module_init_symbols, simpleos_module_init_symbols_checked_v1}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -108,7 +109,12 @@ pub fn entry_point_c_target_args(target_triple: text) -> [text]:
 
 fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "", target_triple: text = "") -> Result<text, text>:
     """Compile entry point as C source (no llc needed)."""
-    val cc = if compiler != "": compiler else: find_c_compiler()
+    val cc = if native_tool_strict_requested_v1():
+        native_tool_strict_resolve_v1("cc")?
+    elif compiler != "": compiler
+    else: find_c_compiler()
+    if native_tool_strict_requested_v1() and compiler != "" and compiler != cc:
+        return Err("entry C compiler differs from admitted tool")
     if cc == "":
         return Err("No C compiler found")
     val tmp_dir = _get_temp_dir()
@@ -121,7 +127,9 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
     dir_create_all(entry_dir)
     val entry_c = "{entry_dir}/simple_entry.c"
     val entry_o = "{entry_dir}/simple_entry{ext}"
-    val init_names = simpleos_module_init_symbols(user_objects)
+    val init_names = if native_tool_strict_requested_v1():
+        simpleos_module_init_symbols_checked_v1(user_objects)?
+    else: simpleos_module_init_symbols(user_objects)
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
     # The startup owner is optional until a native artifact carries a decoded
     # manifest.  Keeping this a weak ABI lets ordinary native binaries retain

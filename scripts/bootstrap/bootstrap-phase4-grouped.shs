@@ -2,7 +2,7 @@
 # Independent Phase 3 and Phase 4 lanes use the admitted Phase 2 compiler.
 # All post-readiness compilation happens inside a compiled manager.
 set -eu
-die() { echo "phase3-phase4-grouped: $*" >&2; exit 1; }
+die() { echo "phase3-phase4-grouped: $*" >&2; exit 2; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
@@ -30,6 +30,7 @@ authority_program= authority_receipt= authority_digest= image_receipt=
 llvm_index_config= cranelift_index_config= phase3_llvm_index_config= phase3_cranelift_index_config=
 threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
 estimated_group_disk_bytes= minimum_free_disk_bytes=
+phase_only= phase_output= finalize_only=0
 for arg in "$@"; do
   case "$arg" in
     --producer-receipt=*) producer_receipt=${arg#*=} ;;
@@ -70,9 +71,18 @@ for arg in "$@"; do
     --lifetime-ms=*) lifetime_ms=${arg#*=} ;;
     --estimated-group-disk-bytes=*) estimated_group_disk_bytes=${arg#*=} ;;
     --minimum-free-disk-bytes=*) minimum_free_disk_bytes=${arg#*=} ;;
+    --phase-only=*) phase_only=${arg#*=} ;;
+    --phase-output=*) phase_output=${arg#*=} ;;
+    --finalize-only) finalize_only=1 ;;
     *) die "unknown option: $arg" ;;
   esac
 done
+case "$phase_only" in ''|phase3|phase4) ;; *) die "invalid isolated phase" ;; esac
+if [ -n "$phase_only" ]; then
+  [ "$finalize_only" -eq 0 ] && [ "$phase_output" = "phase-output/$phase_only/completion.env" ] || die "isolated phase output differs"
+else
+  [ -z "$phase_output" ] || die "phase output requires isolated phase"
+fi
 for path in "$producer_receipt" "$scv_receipt" "$source_root" "$source_inventory" "$source_links" \
     "$module_inventory" "$excluded_inventory" "$module_role_policy" "$shared_parse_cas_root" \
     "$root" "$template" "$manifest_program" "$builder_program" \
@@ -109,7 +119,7 @@ for inventory in "$source_inventory" "$module_inventory"; do
   [ "$(LC_ALL=C sort -u "$inventory" | wc -l | tr -d ' ')" = "$(wc -l <"$inventory" | tr -d ' ')" ] || die "duplicate inventory row"
   LC_ALL=C sort "$inventory" | cmp -s - "$inventory" || die "unsorted inventory: $inventory"
 done
-awk 'length($0)==0 || index($0,"\r") || ($0 !~ /^src\// && $0 !~ /^examples\/10_tooling\//) || $0 ~ /(^|\/)\.\.?($|\/)/ { bad=1 } END { exit bad }' "$source_inventory" || die "invalid source inventory"
+awk 'length($0)==0 || index($0,"\r") || ($0 !~ /^src\// && $0 !~ /^examples\/10_tooling\// && $0 !~ /^scripts\/bootstrap\// && $0 !~ /^scripts\/check\/lib\// && $0 !~ /^test\/03_system\/app\/bootstrap_builder\/feature\// && $0 !~ /^test\/fixtures\/bootstrap_builder\//) || $0 ~ /(^|\/)\.\.?($|\/)/ { bad=1 } END { exit bad }' "$source_inventory" || die "invalid source inventory"
 module_inventory_count=$(wc -l <"$module_inventory" | tr -d ' ')
 positive "$module_inventory_count" || die "module inventory count invalid"
 case "$excluded_inventory_count" in ''|*[!0-9]*|0[0-9]*) die "excluded inventory count invalid" ;; esac
@@ -132,6 +142,12 @@ regular "$shared_parse_root_check" || die "shared parse root checker unavailable
 regular "$shared_parse_source_check" || die "shared parse source checker unavailable"
 mkdir -p "$root" || die "managed phase root unavailable"
 receipt="$root/completion.env"
+scratch="$root/driver-${phase_only:-parent}"
+mkdir -p "$scratch" || die "private phase scratch unavailable"
+if [ -n "$phase_only" ]; then
+  mkdir -p "$root/$phase_only" || die "private phase output unavailable"
+  receipt="$root/$phase_only/completion.env"
+fi
 
 # Preparation replays the canonical Stage 2 admission before any manager task
 # can start. Its SCV check is compiled and refuses absent warm source metadata.
@@ -163,7 +179,7 @@ prepare_backend() {
 # The compiled verifier checks complete regular/link inventories and SCV;
 # the canonical emitter additionally preserves Stage 2 executable-bit parity.
 verify_shared_source() {
-  observed="$root/source-canonical.$$.txt"
+  observed="$scratch/source-canonical.$$.txt"
   bootstrap_stage3_source_snapshot "$observed" "$source_root" \
     || die "private source snapshot failed; evidence retained: $observed"
   cmp -s "$observed" "$source_authority" \
@@ -236,16 +252,71 @@ build_binary() {
   SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$job_root/state" --source-root "$source_root" \
-    --output-root "$job_root" || die "$id manager task failed"
+    --output-root "$job_root" || {
+      manager_status=$?
+      verify_shared_source
+      verify_image_set
+      [ "$manager_status" -eq 1 ] || die "$id manager ownership/admission aborted: $manager_status"
+      return 1
+    }
   verify_shared_source
   "$builder_program" verify --manifest "$job_root/manifest.sdn" \
     --state "$job_root/state" --source-root "$source_root" \
     --output-root "$job_root" || die "$id receipt/output verification failed"
   regular "$job_root/$output" && regular "$job_root/state/receipts/$task_id.sdn" \
     || die "$id has no published output and terminal receipt"
-  printf '%s=%s\n' "${task_phase}_${backend}_${id}" "$(hash_file "$job_root/$output")" >>"$root/binary-hashes.tmp.$$"
+  printf '%s=%s\n' "${task_phase}_${backend}_${id}" "$(hash_file "$job_root/$output")" >>"$hashes"
   printf '%s=%s\n' "${task_phase}_${backend}_${id}_manager_receipt_sha256" \
-    "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$root/binary-hashes.tmp.$$"
+    "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$hashes"
+}
+
+# Full CLI owns `test` and its `run` children. The standalone runner remains a
+# required binary, but cannot be substituted for the invoking CLI identity.
+run_test_suite() {
+  backend=$1 suite=$2
+  case "$backend:$suite" in llvm:compiler|llvm:loader|llvm:interpreter|cranelift:compiler|cranelift:loader|cranelift:interpreter) ;; *) die "invalid suite" ;; esac
+  cli_job="$root/phase4/binaries/$backend/full-cli"
+  interpreter_job="$root/phase4/binaries/$backend/interpreter"
+  cli="$cli_job/bin/simple$exe_suffix"
+  interpreter="$interpreter_job/bin/simple_interpreter$exe_suffix"
+  for dependency in "$cli_job" "$interpreter_job"; do
+    "$builder_program" verify --manifest "$dependency/manifest.sdn" --state "$dependency/state" \
+      --source-root "$source_root" --output-root "$dependency" >/dev/null \
+      || die "$backend suite tool dependency lacks exact manager admission"
+  done
+  task_id="test-$suite-$backend"
+  job_root="$root/phase4/tests/$backend/$suite"
+  mkdir -p "$job_root/suite" "$job_root/state" || die "suite directories unavailable"
+  verify_shared_source
+  disk_preflight "$job_root"
+  if [ ! -f "$job_root/manifest.sdn" ]; then
+    "$manifest_program" --suite-from-inventory "$template" "$manifest_program" "$source_root" \
+      "$task_id" phase4 "suite/result.env" "$source_inventory_relative" \
+      --memory-limit-bytes "$memory_bytes" --links-inventory "$source_links_relative" \
+      --manifest "$job_root/manifest.sdn" -- \
+      --managed-suite "$suite" "$backend" "$source_root" \
+      "$cli" "$(hash_file "$cli")" "$interpreter" "$(hash_file "$interpreter")" \
+      "$source_authority" "$source_authority_digest" suite/result.env \
+      "$runtime_authority" "$runtime_snapshot" "$runtime_snapshot_digest" \
+      "$tool_authority" "$tool_authority_digest" || die "suite manifest blocked"
+  fi
+  require_current_manifest "$job_root/manifest.sdn"
+  SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((memory_bytes + reserve_bytes))" \
+  "$builder_program" run --manifest "$job_root/manifest.sdn" --state "$job_root/state" \
+    --source-root "$source_root" --output-root "$job_root" || {
+      manager_status=$?
+      verify_shared_source
+      [ "$manager_status" -eq 1 ] || die "$backend/$suite test owner aborted: $manager_status"
+      return 1
+    }
+  verify_shared_source
+  "$builder_program" verify --manifest "$job_root/manifest.sdn" --state "$job_root/state" \
+    --source-root "$source_root" --output-root "$job_root" || die "$backend/$suite test output rejected"
+  regular "$job_root/suite/result.env" || die "$backend/$suite produced no test result"
+  printf '%s=%s\n' "phase4_${backend}_test_${suite}_result_sha256" \
+    "$(hash_file "$job_root/suite/result.env")" >>"$hashes"
+  printf '%s=%s\n' "phase4_${backend}_test_${suite}_manager_receipt_sha256" \
+    "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$hashes"
 }
 
 # The complete V2 index is a post-readiness build task. Its only staged input
@@ -308,7 +379,13 @@ build_index() {
   SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest" \
   "$builder_program" run --manifest "$job_root/manifest.sdn" \
     --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
-    || die "$backend managed index build failed"
+    || {
+      manager_status=$?
+      verify_shared_source
+      verify_image_set
+      [ "$manager_status" -eq 1 ] || die "$backend managed index ownership/admission aborted: $manager_status"
+      return 1
+    }
   "$builder_program" verify --manifest "$job_root/manifest.sdn" \
     --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
     || die "$backend managed index receipt verification failed"
@@ -339,32 +416,27 @@ run_module_backend() {
   manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
   regular "$manifest" || die "$task_phase/$backend group manifest unavailable"
   verify_image_set
-  "$group_program" native-groups-run --manifest "$manifest" \
-    || die "$task_phase/$backend module run failed or produced only diagnostic objects"
+  "$group_program" native-groups-run-single --manifest "$manifest" \
+    --state "$root/$task_phase/modules/$backend/state" \
+    || {
+      manager_status=$?
+      verify_shared_source
+      verify_image_set
+      [ "$manager_status" -eq 1 ] || die "$task_phase/$backend group ownership/admission aborted: $manager_status"
+      return 1
+    }
   verify_image_set
   "$group_program" native-groups-verify --manifest "$manifest" \
     --state "$root/$task_phase/modules/$backend/state" \
     || die "$task_phase/$backend ledger is incomplete or lacks qualified SMF outputs"
 }
 
-build_backend_modules() {
-  task_phase=$1 backend=$2 config=$3
-  build_index "$task_phase" "$backend" "$config"
-  prepare_backend "$task_phase" "$backend"
-  run_module_backend "$task_phase" "$backend"
-}
-build_phase4_binaries() {
-  backend=$1
-  build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4 "$backend"
-  build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4 "$backend"
-  build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4 "$backend"
-  build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4 "$backend"
-  build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4 "$backend"
-}
-
 # Read the exact producer from the verified admission receipt; never use the
 # Stage 3 output or ambient `bin/simple` as a Phase 4 producer.
-. "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=0
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
 producer=$(bootstrap_stage3_manifest_value candidate_path "$producer_receipt") || die "Stage 2 producer absent"
 regular "$producer" || die "Stage 2 producer missing"
 producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "$producer_receipt") || die "Stage 2 producer hash absent"
@@ -375,8 +447,10 @@ regular "$source_authority" || die "Stage 2 source authority missing"
 sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" \
   || die "Stage 2 source authority bytes differ before manager dispatch"
 runtime_snapshot=$(bootstrap_stage3_manifest_value runtime_snapshot_path "$producer_receipt") || die "runtime authority absent"
+runtime_snapshot_digest=$(bootstrap_stage3_manifest_value runtime_snapshot_sha256 "$producer_receipt") || die "runtime authority digest absent"
 runtime_authority=$(bootstrap_stage3_manifest_value runtime_authority_path "$producer_receipt") || die "runtime root absent"
 tool_authority=$(bootstrap_stage3_manifest_value tool_authority_path "$producer_receipt") || die "tool authority absent"
+tool_authority_digest=$(bootstrap_stage3_manifest_value tool_authority_sha256 "$producer_receipt") || die "tool authority digest absent"
 args_digest=$(bootstrap_stage3_manifest_value build_args_sha256 "$producer_receipt") || die "build args absent"
 sanity=$(bootstrap_stage3_manifest_value sanity_evidence_path "$producer_receipt") || die "sanity receipt absent"
 receiver=$(bootstrap_stage3_manifest_value receiver_evidence_path "$producer_receipt") || die "receiver receipt absent"
@@ -388,7 +462,7 @@ bootstrap_stage3_verify_stage2_admission_receipt \
   "$args_digest" "$sanity" "$sanity" "$(dirname -- "$sanity")" \
   "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$repo_root" \
   || die "Stage 2 admission replay failed"
-expected_inventory="$root/source-authority-inventory.tmp.$$"
+expected_inventory="$scratch/source-authority-inventory.tmp.$$"
 hashes=
 trap 'rm -f "$expected_inventory" "$hashes"' EXIT HUP INT TERM
 perl -e '
@@ -405,7 +479,7 @@ perl -e '
     my $relative = pack("H*", $2);
     length($relative) == $1 or die "source authority path length differs\n";
     $relative !~ /[\r\n\\]/ or die "source authority path unsafe\n";
-    print "$relative\n" if $relative =~ m{^(?:src/|examples/10_tooling/)};
+    print "$relative\n" if $relative =~ m{^(?:src/|examples/10_tooling/|scripts/bootstrap/|scripts/check/lib/|test/03_system/app/bootstrap_builder/feature/|test/fixtures/bootstrap_builder/)};
   }
 ' "$source_authority" | LC_ALL=C sort >"$expected_inventory" \
   || die "Stage 2 source inventory decode failed"
@@ -414,29 +488,36 @@ cmp -s "$expected_inventory" "$source_inventory" \
 rm -f "$expected_inventory"
 verify_shared_source
 
-hashes="$root/binary-hashes.tmp.$$"
+hashes="$scratch/verified-hashes.tmp.$$"
 trap 'rm -f "$hashes"' EXIT HUP INT TERM
 : >"$hashes"
-phase4_status=0
-(
-  build_phase4_binaries llvm
-  build_backend_modules phase4 llvm "$llvm_index_config"
-  build_phase4_binaries cranelift
-  build_backend_modules phase4 cranelift "$cranelift_index_config"
-) || phase4_status=$?
-
-# Host memory limits make these two independent Phase 2 children serial here.
-# Phase 4 runs first; Phase 3 is attempted even if Phase 4 fails. Each phase
-# owns its index, grouped module ledger, and outputs independently.
-phase3_status=0
-(
-  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3 llvm
-  build_backend_modules phase3 llvm "$phase3_llvm_index_config"
-  build_binary phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix" phase3 cranelift
-  build_backend_modules phase3 cranelift "$phase3_cranelift_index_config"
-) || phase3_status=$?
-[ "$phase4_status" -eq 0 ] && [ "$phase3_status" -eq 0 ] || \
-  die "managed children incomplete: phase4=$phase4_status phase3=$phase3_status"
+statuses="$scratch/task-outcomes.$$.tsv"
+: >"$statuses" || die "task outcome journal unavailable"
+. "$repo_root/scripts/bootstrap/lib/managed-task-schedule.shs" || die "managed scheduler unavailable"
+dispatch_selected() {
+  if [ "$finalize_only" -eq 1 ]; then
+    for phase in phase3 phase4; do
+      phase_receipt="$root/$phase/completion.env"
+      regular "$phase_receipt" && regular "$root/$phase/verified-hashes.env" || die "$phase completion absent"
+      [ "$(bootstrap_stage3_manifest_value format "$phase_receipt")" = SIMPLE-MANAGED-PHASE-COMPLETION-1 ] &&
+        [ "$(bootstrap_stage3_manifest_value phase "$phase_receipt")" = "$phase" ] &&
+        [ "$(bootstrap_stage3_manifest_value status "$phase_receipt")" = PASS ] &&
+        [ "$(bootstrap_stage3_manifest_value producer_sha256 "$phase_receipt")" = "$producer_sha" ] &&
+        [ "$(bootstrap_stage3_manifest_value source_authority_sha256 "$phase_receipt")" = "$source_authority_digest" ] &&
+        [ "$(bootstrap_stage3_manifest_value verified_hashes_sha256 "$phase_receipt")" = "$(hash_file "$root/$phase/verified-hashes.env")" ] || die "$phase completion authority differs"
+      cat "$root/$phase/verified-hashes.env" >>"$hashes" || return 2
+    done
+  elif [ -n "$phase_only" ]; then
+    managed_dispatch_phase "$phase_only"
+  else
+    managed_dispatch_tasks
+  fi
+}
+if dispatch_selected; then :; else
+  schedule_status=$?
+  echo "phase3-phase4-grouped: managed children incomplete; schedule=$schedule_status outcomes=$statuses" >&2
+  exit "$schedule_status"
+fi
 verify_shared_source
 [ "$("$authority_program" phase2-native-authority-field --receipt "$authority_receipt" --digest "$authority_digest" --field excluded_inventory_path)" = "$excluded_inventory" ] &&
   [ "$("$authority_program" phase2-native-authority-field --receipt "$authority_receipt" --digest "$authority_digest" --field excluded_inventory_digest)" = "$excluded_inventory_digest" ] &&
@@ -451,9 +532,27 @@ verify_shared_source
 
 tmp="$receipt.tmp.$$"
 {
-  printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-4' 'status=PASS' \
+  if [ -n "$phase_only" ]; then
+    phase_hashes="$root/$phase_only/verified-hashes.env"
+    if [ -e "$phase_hashes" ]; then
+      regular "$phase_hashes" && cmp -s "$hashes" "$phase_hashes" || die "retained phase digest journal differs"
+    else
+      cp "$hashes" "$phase_hashes" || die "phase digest journal publication failed"
+    fi
+    printf '%s\n' 'format=SIMPLE-MANAGED-PHASE-COMPLETION-1' 'status=PASS' "phase=$phase_only" \
+      "verified_hashes_sha256=$(hash_file "$root/$phase_only/verified-hashes.env")"
+  else
+    aggregate_evidence=$(sh "$repo_root/scripts/bootstrap/lib/managed-phase-evidence.shs" \
+      "$root" "$builder_program" "$poll_ms" "$lifetime_ms") || die "aggregate phase ownership verification failed"
+    printf '%s\n' 'format=SIMPLE-PHASE3-PHASE4-MANAGED-COMPLETION-5' 'status=PASS' \
     'phase3_status=PASS' 'phase4_status=PASS' \
+    'binary_count=14' 'suite_count=6'
+    printf '%s\n' "$aggregate_evidence" "phase_admission_poll_ms=$poll_ms" "phase_admission_lifetime_ms=$lifetime_ms"
+  fi
+  printf '%s\n' \
     "producer_sha256=$producer_sha" "authority_receipt_sha256=$authority_digest" \
+    "source_authority_sha256=$source_authority_digest" \
+    "runtime_snapshot_sha256=$runtime_snapshot_digest" "tool_authority_sha256=$tool_authority_digest" \
     "manager_images_sha256=$(hash_file "$image_receipt")" \
     "source_inventory_sha256=$(hash_file "$source_inventory")" \
     "source_links_sha256=$(hash_file "$source_links")" \
@@ -465,7 +564,7 @@ tmp="$receipt.tmp.$$"
     "phase3_module_inventory_count=$module_inventory_count" \
     "phase4_module_inventory_count=$module_inventory_count"
   cat "$hashes"
-  for task_phase in phase3 phase4; do
+  for task_phase in ${phase_only:-phase3 phase4}; do
     for backend in llvm cranelift; do
       index_receipt="$root/$task_phase/index/$backend/output/index-output/receipt.sdn"
       index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
@@ -491,6 +590,10 @@ if [ -e "$receipt" ]; then
   rm -f "$tmp"
 else
   mv "$tmp" "$receipt" || die "completion receipt publish failed"
+fi
+if [ -n "$phase_only" ]; then
+  mkdir -p "$(dirname -- "$phase_output")" || die "owned task output unavailable"
+  cp "$receipt" "$phase_output" || die "owned task completion publication failed"
 fi
 rm -f "$hashes"
 trap - EXIT HUP INT TERM
