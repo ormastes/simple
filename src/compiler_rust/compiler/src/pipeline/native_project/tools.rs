@@ -2415,7 +2415,6 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         "rt_file_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
-        "rt_fd_stat_snapshot_v1",
         "rt_sosix_directory_pair_check_v1",
     ]
     .into_iter()
