@@ -1,0 +1,45 @@
+"""
+Generated facade origin owners belong to a native entry closure even when a
+bare export has no use/import declaration. This keeps frozen HIR origins from
+pointing at modules omitted by the closure walk.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.driver.driver_source_loading.{_driver_entry_sibling_module_paths,
+    _driver_resolve_entry_import}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "generated facade origin closure":
+    it "includes the declaration owner behind a bare export":
+        val source = "# Re-exported from dir_ops.spl\nexport dir_create, dir_list\n"
+        expect(_driver_entry_sibling_module_paths(source)).to_equal([".dir_ops"])
+
+    it "follows a nested generated owner path":
+        val source = "# Re-exported from _Items/module_lowering.spl\nexport lower_module\n"
+        expect(_driver_entry_sibling_module_paths(source)).to_equal(["._Items.module_lowering"])
+
+    it "does not follow a comment without an export":
+        val source = "# Re-exported from absent.spl\nfn local() -> i64:\n    1\n"
+        expect(_driver_entry_sibling_module_paths(source)).to_equal([])
+
+    it "rejects parent traversal in a generated owner hint":
+        val source = "# Re-exported from ../outside.spl\nexport escaped\n"
+        expect(_driver_entry_sibling_module_paths(source)).to_equal([])
+
+    it "rejects absolute and malformed generated owner hints":
+        val source = "# Re-exported from /outside.spl\nexport escaped\n" +
+            "# Re-exported from safe//outside.spl\nexport escaped2\n" +
+            "# Re-exported from safe/./outside.spl\nexport escaped3\n" +
+            "# Re-exported from safe/.outside.spl\nexport escaped4\n"
+        expect(_driver_entry_sibling_module_paths(source)).to_equal([])
+
+    it "finds the real file-system facade owners":
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/file_system/__init__.spl") ?? ""
+        val siblings = _driver_entry_sibling_module_paths(source)
+        expect(siblings).to_contain(".dir_ops")
+        expect(siblings).to_contain(".metadata")
+        expect(siblings).to_contain(".path_ops")
+        expect(_driver_resolve_entry_import(
+            ".dir_ops", "src/lib/nogc_sync_mut/file_system"))\
+            .to_equal("src/lib/nogc_sync_mut/file_system/dir_ops.spl")
