@@ -1101,3 +1101,49 @@ Preserve active worktrees, producer-bound caches, pinned runtimes and evidence.
 Apply fixes to new immutable candidates, never running snapshots. Cleanup only
 confirmed stale disposable files. Rerun affected failed criteria after fixes,
 not unchanged green checks. Placeholder output cannot establish semantic PASS.
+
+### 2026-10-02 uncapped diagnostic and manager checkpoint
+
+This checkpoint supersedes the live-process observations above. Windows v2 is
+closed as a partial diagnostic: 143 Phase3 and 82 Phase4 actual module attempts
+are preserved. Later blocked rows were not compilations. The reviewed v3 resume
+route is prepared but has not launched; its old producer is not current release.
+
+The separate Windows LLVM full-CLI diagnostic had no process or Job memory
+limit. It processed 2,493 source files, then reported 130 parse failures and
+exited 1. Processed is not parsed successfully. Peak RSS was 8,281,864 KiB;
+peak Job commit was 8,558,700 KiB. There was no host-pressure stop or exception,
+and the owned process tree is quiescent. Source hashes matched before and after.
+No executable was produced. Detailed parser messages are missing despite the
+aggregator's reference to earlier output; the frontend owner is investigating.
+Evidence: `D:/dev/uncapped-logic-build-20261002/full-cli-llvm/result.json`.
+The separate Astra memory lane still targets a real 7 GB qualification; removing
+the diagnostic cap is not a memory fix.
+
+Linux's exact `d6b569ace4` Phase2 attempt compiled 1,129 modules without compile
+failures but failed linking `unreachable_hir_variant` and `hir_visit_nothing`.
+The 2 GiB guard completed quiescently, peak RSS 1,621,452 KiB. There is no new
+producer or hello gate. Generator/import repair and a separate wrong-method
+dispatch investigation have owners. Evidence and retained object classification:
+`D:/dev/bootstrap-failure-catalog-20261002/currentd6/classification.json`.
+
+The corrected Linux seed, compiled capacity ABI probe and matching native-all
+archive passed. The diagnostic manager manifest and builder images compiled;
+builder SHA-256 is
+`da68d514bde637ff5794bc977fe05675488582e7c13e4d51819d4729cc8f561c`.
+The worker image is the next guarded stage. Actual worker/compiler execution,
+failure isolation, Windows qualification and Phase2-built deployment are still
+unproven. Diagnostic seed-built images do not satisfy canonical deployment.
+
+SOSIX directory identity native C tests passed on both hosts and source review
+found no remaining P0/P1. The generated Simple ABI attempt failed earlier in
+the old producer's library MIR closure, so directory ABI execution and actual
+bidirectional frontend cache hydration remain unverified. Evidence:
+`D:/dev/shared-cache-root-proof-20261002/linux-native-abi-run1`.
+
+Canonical scope is broader than the four-root diagnostic inventory. On d6,
+the latter contains 13,752 files; repository module-role policy yields 17,147
+static production candidates after three explicit fixture exclusions. OS
+modules are required and `src/unit` contains measurement classes. Actual
+snapshot/role receipts must qualify this inventory before claiming completion.
+See `D:/dev/bootstrap-crosshost-apply-verify-20261002/linux-d6-draft/CANONICAL-SCOPE.md`.
