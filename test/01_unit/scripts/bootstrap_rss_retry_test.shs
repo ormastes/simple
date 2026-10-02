@@ -1,13 +1,25 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-tmp=$(mktemp -d)
+if [ -n "${1:-}" ]; then
+    tmp=$(mktemp -d "$1/bootstrap-rss-retry.XXXXXX")
+else
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fi
 tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 mkdir "$tmp/home" "$tmp/tmp"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+awk '/^    cp "\$\{stage2_native_log\}" / { active=1 }
+     active { print }
+     active && /exit 89/ { exit }' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/archive.shs"
+[ -s "$tmp/archive.shs" ] || fail 'actual retry archive block missing'
+test_path=/usr/bin:/bin
+windows=false
+case "$(uname -s)" in MSYS*|MINGW*|CYGWIN*) test_path=$PATH; windows=true ;; esac
 # Run the actual transcription/execution boundary twice, as the cache retry does.
 # The second attempt deliberately hits the lowered cap before executing work.
 for attempt in first retry; do
@@ -15,23 +27,64 @@ for attempt in first retry; do
         SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=65536
         expected=7
     else
-        cp "$tmp/build.log.rss.env" "$tmp/before-cache-retry.log.rss.env"
+        stage2_native_log=$tmp/build.log
+        stage2_tmp_absolute=$tmp
+        . "$tmp/archive.shs"
         SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1
         expected=88
     fi
     status=0
-    bootstrap_stage3_run_transcribed "$tmp/$attempt.transcript" "$root" \
-        "$tmp/build.log" "$tmp/home" "$tmp/tmp" /usr/bin:/bin \
-        -- /bin/sh -c 'exit 7' || status=$?
+    # The guard must resolve its compiler from the pinned worker PATH, even
+    # when the ambient caller PATH contains no native compiler.
+    PATH=/usr/bin:/bin bootstrap_stage3_run_transcribed "$tmp/$attempt.transcript" "$root" \
+        "$tmp/build.log" "$tmp/home" "$tmp/tmp" "$test_path" \
+        -- /bin/sh -c 'printf "path=%s\nsystemroot=%s\n" "$PATH" "${SystemRoot:-}" > "$1"; exit 7' \
+        sh "$tmp/body.env" || status=$?
     [ "$status" -eq "$expected" ] || { cat "$tmp/build.log"; fail "$attempt got $status expected $expected"; }
     grep -Fxq "max_rss_kib=$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" \
         "$tmp/build.log.rss.env" || fail "$attempt missing independent RSS receipt"
+    if "$windows"; then
+        grep -Fxq 'observer_backend=win32-job-object' "$tmp/build.log.rss.env" || fail 'Windows selected POSIX sampler'
+        grep -Fxq 'containment_scope=win32-job-object-no-breakaway' "$tmp/build.log.rss.env" || fail 'Windows Job containment missing'
+    fi
+    if [ "$attempt" = first ]; then
+        grep -Fxq "path=$test_path" "$tmp/body.env" || fail 'worker PATH changed'
+        if "$windows"; then grep -Fxq "systemroot=${SystemRoot:-${SYSTEMROOT:-}}" "$tmp/body.env" || fail 'Windows SystemRoot changed'; fi
+    else
+        grep -Fxq 'status=rss-cap-exceeded' "$tmp/build.log.rss.env" || fail 'retry did not enforce actual RSS limit'
+    fi
 done
-grep -Fxq 'max_rss_kib=65536' "$tmp/before-cache-retry.log.rss.env" || fail 'retry overwrote first receipt'
+grep -Fxq 'max_rss_kib=65536' "$tmp/stage2-native-build.before-cache-retry.log.rss.env" || fail 'retry overwrote first receipt'
+# Receipt I/O errors and absent receipts must refuse the retry on every host.
+mkdir "$tmp/copy-error" "$tmp/missing-receipt"
+status=0
+(
+    stage2_native_log=$tmp/build.log
+    stage2_tmp_absolute=$tmp/copy-error
+    cp() { case "$1" in *.rss.env) return 73 ;; *) command cp "$@" ;; esac; }
+    . "$tmp/archive.shs"
+) || status=$?
+[ "$status" -eq 89 ] || fail 'receipt copy I/O failure did not stop retry'
+cmp "$tmp/build.log" "$tmp/copy-error/stage2-native-build.before-cache-retry.log" || fail 'copy error lost native diagnostic'
+mv "$tmp/build.log.rss.env" "$tmp/retry.rss.env"
+status=0
+(
+    stage2_native_log=$tmp/build.log
+    stage2_tmp_absolute=$tmp/missing-receipt
+    . "$tmp/archive.shs"
+) || status=$?
+[ "$status" -eq 89 ] || fail 'missing mandatory receipt did not stop retry'
+mv "$tmp/retry.rss.env" "$tmp/build.log.rss.env"
 grep -Fq 'stage2-native-build.before-cache-retry.log.rss.env' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" || fail 'bootstrap does not archive retry receipt'
 [ "$(grep -c '^  *bootstrap_run_stage2_native$' "$root/scripts/bootstrap/bootstrap-from-scratch.sh")" -eq 2 ] || fail 'Stage2 initial/retry execution boundary changed'
-grep -Fq 'bootstrap_stage3_run_transcribed "$stage3_transcript"' \
-    "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" || fail 'resume bypasses shared guard'
+grep -Fq 'worker="$root/scripts/bootstrap/lib/stage3-native-build-worker.sh"' \
+    "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" || fail 'resume bypasses admitted worker'
+grep -Fq 'bootstrap_stage3_run_transcribed "$transcript"' \
+    "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh" || fail 'resume worker bypasses shared guard'
 grep -Fq 'stage4-native-build.log.rss.env' \
     "$root/scripts/bootstrap/bootstrap-from-scratch.sh" || fail 'Stage4 guard missing'
 echo 'PASS: transcribed initial/retry executions each produce RSS evidence; resume/Stage4 wiring retained'
+if "$windows"; then
+    sh "$root/test/01_unit/scripts/bootstrap_windows_transcribed_rss_inherit_test.shs" "$tmp"
+fi
+[ -z "${1:-}" ] || echo "evidence=$tmp"
