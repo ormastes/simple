@@ -18,12 +18,15 @@ compiled=1134 reused=0 failed=1 scope=scope-ea2af62ecac16dee
 src/app/io/mod.spl: timeout (1200s)
 ```
 
-This is one real compilation timeout. The frozen Rust native compiler starts
+This is one compilation failure reported as a timeout. The frozen Rust native compiler starts
 the per-file compilation thread and waits with `recv_timeout(1200s)` in
 `native_project/compiler.rs`; expiration returns the timeout error and drops
 the thread's `JoinHandle`, so the worker may continue until enclosing process
 containment terminates it. No per-file CPU or phase metadata was available to
-identify which operation consumed that interval. The app/io export facade has
+identify which operation consumed that interval. The receiver maps any wait
+error to the timeout label, including channel disconnection; normal caught
+compilation panics send completion and report their panic separately. The
+retained log alone does not distinguish the wait error subtype. The app/io export facade has
 78 export lines, below the existing 256-line contention mitigation threshold;
 that classification is not proof of the timeout's cause. File-index progress markers arrived out
 of order and do not provide cumulative success counts. The bootstrap recognized
