@@ -1,0 +1,40 @@
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.main.{builder_cli_input_error_v1}
+use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, path_absolute}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+
+fn input_admission_task_v1(program: text, program_digest: text,
+        input_path: text, input_digest: text) -> BuildTaskV1:
+    BuildTaskV1(id: "copy-one", attempt: 1, phase: "smoke",
+        producer_digest: program_digest, source_digest: input_digest,
+        toolchain_digest: program_digest, dependencies: [], program: program,
+        args: [input_path, "output.txt"],
+        inputs: [BuildInputV1(path: input_path, digest: input_digest)],
+        outputs: ["output.txt"], cache_key: program_digest,
+        timeout_ms: 30000, memory_limit_bytes: 268435456, links: [])
+
+describe "bootstrap manager source admission diagnostics":
+    it "reports the exact failing guard without accepting changed bytes":
+        val root = path_absolute(".") + "/build/builder-input-admission-" +
+            str(getpid()) + "-" + str(time_now_unix_micros())
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_atomic_write(root + "/program.bin", "distinct program bytes\n")).to_equal(true)
+        expect(file_atomic_write(root + "/input.txt", "source bytes\n")).to_equal(true)
+        val program_digest = file_hash_sha256(root + "/program.bin")
+        val input_digest = file_hash_sha256(root + "/input.txt")
+        expect(program_digest == input_digest).to_equal(false)
+        expect(builder_cli_input_error_v1(input_admission_task_v1("program.bin",
+            program_digest, "input.txt", input_digest), root)).to_equal("")
+        expect(builder_cli_input_error_v1(input_admission_task_v1("missing.bin",
+            program_digest, "input.txt", input_digest), root)).to_contain("producer is missing")
+        expect(builder_cli_input_error_v1(input_admission_task_v1("program.bin",
+            "a".repeat(64), "input.txt", input_digest), root)).to_contain("producer hash differs")
+        expect(builder_cli_input_error_v1(input_admission_task_v1("program.bin",
+            program_digest, "missing.txt", input_digest), root)).to_contain("declared input is missing")
+        expect(builder_cli_input_error_v1(input_admission_task_v1("program.bin",
+            program_digest, "input.txt", "b".repeat(64)), root)).to_contain("declared input hash differs")
+        expect(builder_cli_input_error_v1(input_admission_task_v1("program.bin",
+            program_digest, "absent/input.txt", input_digest), root)).to_contain("input parent is missing")

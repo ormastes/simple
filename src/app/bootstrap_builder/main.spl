@@ -36,17 +36,25 @@ fn builder_cli_hash_outputs_v1(task: BuildTaskV1, root: text,
         observed = observed.push(BuildInputV1(path: path, digest: digest))
     observed
 
-fn builder_cli_inputs_match_v1(task: BuildTaskV1, root: text) -> bool:
-    if not builder_regular_input_parents_safe_v1(task, root): return false
+fn builder_cli_input_error_v1(task: BuildTaskV1, root: text) -> text:
+    if not builder_regular_input_parents_safe_v1(task, root):
+        return "input parent is missing or unsafe"
     var program = task.program
     if not program.starts_with("/") and not program.contains(":"): program = root + "/" + program
-    if not file_is_regular_no_follow(program): return false
-    if file_hash_sha256(program) != task.producer_digest: return false
+    if not file_is_regular_no_follow(program):
+        return "producer is missing or not a no-follow regular file"
+    if file_hash_sha256(program) != task.producer_digest:
+        return "producer hash differs from task producer digest"
     for input in task.inputs:
         val path = root + "/" + input.path
-        if not file_is_regular_no_follow(path): return false
-        if file_hash_sha256(path) != input.digest: return false
-    builder_link_inputs_match_v1(task, root) == ""
+        if not file_is_regular_no_follow(path):
+            return "declared input is missing or not a no-follow regular file: " + input.path
+        if file_hash_sha256(path) != input.digest:
+            return "declared input hash differs: " + input.path
+    builder_link_inputs_match_v1(task, root)
+
+fn builder_cli_inputs_match_v1(task: BuildTaskV1, root: text) -> bool:
+    builder_cli_input_error_v1(task, root) == ""
 
 fn builder_cli_parent_directory_v1(path: text) -> text:
     var offset = path.len() - 1
@@ -323,8 +331,9 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         # Dispatch only after dependencies have been admitted and published.
         for index in builder_manager_ready(state):
             val task = state.tasks[index]
-            if not builder_cli_inputs_match_v1(task, source_root):
-                state.error = "producer/input digest mismatch for " + task.id
+            val input_error = builder_cli_input_error_v1(task, source_root)
+            if input_error != "":
+                state.error = "producer/input digest mismatch for " + task.id + ": " + input_error
                 break
             val cached_path = config.state + "/receipts/" + task.id + ".sdn"
             var cache_hit = false
@@ -502,8 +511,9 @@ fn builder_cli_verify_v1(run: BuildRunV1, config: BuilderCliV1, process: Builder
         if fields[2] != "SUCCEEDED":
             print "builder: task is not completed: {task.id}"
             return 1
-        if not builder_cli_inputs_match_v1(task, resolved.source_root):
-            print "builder: source input differs: {task.id}"
+        val input_error = builder_cli_input_error_v1(task, resolved.source_root)
+        if input_error != "":
+            print "builder: source input differs: {task.id}: {input_error}"
             return 1
         val cached = match builder_read_result_v1(resolved.state + "/receipts/" + task.id + ".sdn"):
             case Ok(value): value
