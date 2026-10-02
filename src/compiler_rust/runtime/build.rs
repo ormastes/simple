@@ -647,9 +647,13 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_collection_capture_impl.h",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
+        "runtime_bootstrap_linux_provider.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
+            continue;
+        }
+        if *source == "runtime_bootstrap_linux_provider.c" && target_os != "linux" {
             continue;
         }
         let path = root.join(source);
