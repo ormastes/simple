@@ -42,6 +42,7 @@ use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_erro
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort}
 use compiler.driver.driver_hir_pipeline_support.{
     driver_stage3_surface_identity_matches,
+    driver_stage3_surface_identity_matches_receipt,
     driver_stage3_surface_content_matches,
     driver_stage3_surface_identity_mismatch,
     driver_hir_mem_snapshot,
@@ -1365,22 +1366,56 @@ impl CompilerDriver:
             # declarations on this frame. Passing any of them through a value
             # parameter duplicates the no-GC Stage-3 ownership graph.
             var validation_surface_index: i64 = -1
-            val validation_content_length: i64 = src.content.len()
-            val validation_content_hash: i64 = hash_text(src.content)
+            # --low-memory clears SourceFile.content after phase 2, while the
+            # frozen surface still carries the original bytes' identity. The
+            # phase-1 scalar receipts survive eviction, but contain resolver
+            # aliases and cannot be indexed by this physical source_index.
+            val validation_source_evicted = self.ctx.options.low_memory and src.content == ""
+            var validation_receipt_index: i64 = -1
+            if validation_source_evicted:
+                val receipt_count = self.ctx.source_paths_owner.len()
+                if (self.ctx.source_module_names_owner.len() == receipt_count and
+                    self.ctx.source_byte_lengths_owner.len() == receipt_count and
+                    self.ctx.source_content_hashes_owner.len() == receipt_count):
+                    var receipt_index: i64 = 0
+                    while receipt_index < receipt_count:
+                        if (self.ctx.source_paths_owner[receipt_index] == src.path and
+                            self.ctx.source_module_names_owner[receipt_index] == name):
+                            # Phase 1 includes resolver aliases. A second
+                            # exact row or a missing hash is not authority.
+                            if (validation_receipt_index >= 0 or
+                                self.ctx.source_content_hashes_owner[receipt_index] == 0):
+                                validation_receipt_index = -1
+                                break
+                            validation_receipt_index = receipt_index
+                        receipt_index = receipt_index + 1
+            if validation_source_evicted and validation_receipt_index < 0:
+                eprint("[hir-source-receipt-missing] source_idx={source_idx} path={src.path} module={name}")
+                self.ctx.add_error("Missing immutable source receipt for {name}")
+                return (self.ctx, false)
+            val validation_content_length: i64 = if validation_source_evicted:
+                self.ctx.source_byte_lengths_owner[validation_receipt_index]
+            else:
+                src.content.len()
+            val validation_content_hash: i64 = if validation_source_evicted:
+                self.ctx.source_content_hashes_owner[validation_receipt_index]
+            else:
+                hash_text(src.content)
             var validation_alias_index: i64 = 0
             while validation_alias_index < retained_module_surfaces.ordered_names.len() and
                   validation_alias_index < retained_module_surfaces.ordered_indices.len():
                 if retained_module_surfaces.ordered_names[validation_alias_index] == name:
                     val candidate_index: i64 = retained_module_surfaces.ordered_indices[validation_alias_index]
                     if candidate_index >= 0 and candidate_index < retained_module_surfaces.surfaces.len():
-                        if driver_stage3_surface_identity_matches(
+                        if driver_stage3_surface_identity_matches_receipt(
                             retained_module_surfaces.surfaces[candidate_index].source_index,
                             retained_module_surfaces.surfaces[candidate_index].canonical_path,
                             retained_module_surfaces.surfaces[candidate_index].module_name,
                             retained_module_surfaces.surfaces[candidate_index].content_length,
                             retained_module_surfaces.surfaces[candidate_index].content_hash,
                             source_idx, src.path, name,
-                            validation_content_length, validation_content_hash):
+                            validation_content_length, validation_content_hash,
+                            validation_source_evicted):
                             validation_surface_index = candidate_index
                     break
                 validation_alias_index = validation_alias_index + 1
@@ -1393,14 +1428,15 @@ impl CompilerDriver:
                 while validation_physical_index < retained_module_surfaces.surfaces.len():
                     val physical_source_index: i64 = retained_module_surfaces.surfaces[validation_physical_index].source_index
                     if physical_source_index == source_idx:
-                        if driver_stage3_surface_identity_matches(
+                        if driver_stage3_surface_identity_matches_receipt(
                             physical_source_index,
                             retained_module_surfaces.surfaces[validation_physical_index].canonical_path,
                             retained_module_surfaces.surfaces[validation_physical_index].module_name,
                             retained_module_surfaces.surfaces[validation_physical_index].content_length,
                             retained_module_surfaces.surfaces[validation_physical_index].content_hash,
                             source_idx, src.path, name,
-                            validation_content_length, validation_content_hash):
+                            validation_content_length, validation_content_hash,
+                            validation_source_evicted):
                             validation_surface_index = validation_physical_index
                             break
                     validation_physical_index = validation_physical_index + 1
