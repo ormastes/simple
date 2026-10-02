@@ -45,6 +45,18 @@ All 43,782 original exported names and their counts are preserved; exactly
 three names are added. This recipe is Linux-specific, while the admission and
 C-linkage fixes are shared across hosts.
 
+Archive admission requires a working `llvm-nm`; `nm_command()` supports an
+explicit `SIMPLE_NM` path and otherwise selects LLVM tools from PATH. On this
+Windows host the MSYS2 PATH copy failed to load with `0xc0000135`. The native
+MSVC LLVM 23.1.1 tool at
+`C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin/llvm-nm.exe`
+successfully read the pinned Windows native-all archive and found each of the
+eight required names exactly once, without decoration. Windows launchers must
+pin that working tool (or another verified LLVM tool), rather than relying on
+the broken PATH copy. Windows authority SHA-256 was
+`2dff45ba14c7d0c24263c51628a4602e688c8f3ae04909f14f702bb0b5018470`.
+This read-only native-tool check does not claim a rebuilt Windows Rust seed.
+
 ## Focused evidence
 
 - Admission unit test rejects both historical partial-archive shapes and
