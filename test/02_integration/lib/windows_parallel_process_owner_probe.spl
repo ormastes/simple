@@ -1,10 +1,10 @@
 # Build this probe and its child fixture with an admitted pure-Simple producer.
 # No assertions are substituted by source inspection or a bootstrap seed.
 use std.nogc_sync_mut.io.process_ops.{process_spawn_redirected, process_wait, process_is_running, process_kill}
-use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, _windows_redirected_owner_lease}
+use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, _windows_redirected_owner_lease, windows_redirected_admission_count}
 use std.nogc_sync_mut.io.windows_process_owner.{windows_process_poll_v1, windows_process_collect_v1, windows_process_collected_proof_v1}
 use std.test_runner.runner_lifecycle.{spawn_tracked_redirected_process, poll_tracked_process}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text, file_exists}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -68,6 +68,20 @@ fn main() -> i64:
     for index in range(0, reserved): proc_slot_release()
     executed = executed + 1
     failed = failed + check(proc_slot_active() == before, "reservation ownership balanced after starvation")
+    # Native child exits zero and presents green text plus a cleanup marker.
+    # Entry81 must remain pending beyond the80-worker active bound.
+    val old_binary = env_get("SIMPLE_BINARY") ?? ""
+    val override_set = env_set("SIMPLE_BINARY", child)
+    var quarantine_files = ["owner-quarantine-trigger.spl"]
+    for index in range(0, 79): quarantine_files.push("owner-quarantine-wait-" + str(index) + ".spl")
+    quarantine_files.push("owner-quarantine-never-start.spl")
+    val quarantine_options = parse_test_args(["--parallel", "--max-workers=80", "--timeout=5", "--no-db"])
+    val quarantine_results = run_tests_parallel_with_monitoring(quarantine_files, quarantine_options, 80)
+    val override_restored = env_set("SIMPLE_BINARY", old_binary)
+    executed = executed + 1
+    failed = failed + check(override_set and override_restored and quarantine_results.len() == 81 and quarantine_results[0].failed == 1 and quarantine_results[0].passed == 0 and quarantine_results[0].error.contains("NATIVE-CACHE-CLEANUP-FAILED"), "zero-exit green text cannot erase cleanup quarantine")
+    executed = executed + 1
+    failed = failed + check(quarantine_results.len() == 81 and quarantine_results[80].failed == 1 and quarantine_results[80].error.contains("NATIVE-CACHE-CLEANUP-FAILED") and not file_exists(root + "/quarantine-later-started"), "pending inventory cannot start after real child quarantine")
     val quote = "한글 \"quoted\" C:\\trailing\\ & $ < >"
     var stale: i64 = -1
     for wave in range(0, 2):
@@ -190,7 +204,7 @@ fn main() -> i64:
     executed = executed + 1
     failed = failed + check(timeout >= WINDOWS_REDIRECTED_TOKEN_BASE and process_wait(timeout, 30000) == -1 and not process_is_running(timeout), "owned deadline cancels and reaps the tree")
     val rss = process_peak_rss_kb()
-    val historical_starts = 160 + lifetime_completed + (if alias_token >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if tree_token >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if overflow >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if timeout >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0)
+    val historical_starts = windows_redirected_admission_count()
     print "parent_peak_rss_kib={rss} historical_starts={historical_starts} slot_bound=100000"
     executed = executed + 1
     failed = failed + check(rss > 0 and rss <= 524288, "native parent qualification budget at most 512 MiB")
