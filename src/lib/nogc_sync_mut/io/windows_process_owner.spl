@@ -1,7 +1,7 @@
 # Windows x64 owner. Direct documented kernel32 calls; no replacement C runtime.
 # Ownership is represented by a nonreused slot, not an OS PID. Copied leases
 # refer to the same slot, so collecting one invalidates every copy before handles
-# can be recycled. This owner is single-threaded and bounded to 1024 starts.
+# can be recycled. This owner is single-threaded and bounded to 100000 starts.
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
@@ -361,7 +361,7 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
         return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows pre-spawn memory requirement invalid")
     val invalid = windows_process_request_valid_v1(request)
     if invalid != "": return WindowsProcessAdmissionV1.RejectedBeforeStart(invalid)
-    if _windows_process_slots_v1.len() >= 1024: return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows owner slot lifetime bound reached")
+    if _windows_process_slots_v1.len() >= 100000: return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows owner slot lifetime bound reached")
     val heap = GetProcessHeap()
     if heap == 0: return WindowsProcessAdmissionV1.RejectedBeforeStart("GetProcessHeap failed")
     var pins: [i64] = []
@@ -569,12 +569,27 @@ fn windows_process_collect_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsPro
     if HeapFree(state.heap, 0u32, state.accounting) == 0: released = false
     if HeapFree(state.heap, 0u32, state.exit_slot) == 0: released = false
     if not released: return Err("terminal Windows owner cleanup failed")
+    # Keep the nonreused tombstone, release historical payload. Registry growth
+    # is lazy and indexed directly; the lifetime bound is not active capacity.
+    state.pins = []
+    state.process = 0
+    state.job = 0
+    state.accounting = 0
+    state.exit_slot = 0
+    _windows_process_slots_v1[lease.slot] = state
     Ok(receipt)
 
 export WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessPollV1, WindowsProcessLeaseV1
 export windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1
 export windows_process_quote_arg_v1, windows_process_path_valid_v1, windows_process_request_valid_v1
 export windows_process_file_digest_v1
+
+fn windows_process_collected_proof_v1(lease: WindowsProcessLeaseV1) -> bool:
+    # closed alone invalidates aliases before release and is not cleanup proof.
+    if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return false
+    val state = _windows_process_slots_v1[lease.slot]
+    state.closed and state.process == 0 and state.job == 0 and state.accounting == 0 and state.exit_slot == 0 and state.pins.len() == 0
+export windows_process_collected_proof_v1
 # Shared only with the sibling Windows launcher platform owner. The caller owns
 # the returned allocation/file handle; application facades never expose these.
 export _windows_process_wide_v1, _windows_process_pin_v1

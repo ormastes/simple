@@ -3,6 +3,7 @@
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
+use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
     ObservedProcessPollStatusV1, ObservedProcessResultStatusV1,
@@ -2027,6 +2028,16 @@ fn process_spawn_async(cmd: text, args: [text]) -> i64:
     """
     _process_spawn_async_raw(cmd, args)
 
+fn process_spawn_redirected(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
+    """Windows exact argv/file capture with owned JobObject lifecycle.
+
+    Returns a nonreused tagged token accepted by wait/is_running/kill. Off
+    Windows this platform-specific operation refuses without starting a child.
+    """
+    if not host_is_windows_host(): return -1
+    windows_redirected_spawn(cmd, args, stdout_path, stderr_path, timeout_ms, capture_limit)
+
 fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     """
     Wait for a process to complete.
@@ -2042,6 +2053,8 @@ fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     """
     if pid <= 0:
         return -1
+    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
+        return windows_redirected_wait(pid, timeout_ms)
     _process_wait_raw(pid, timeout_ms)
 
 fn process_is_running(pid: i64) -> bool:
@@ -2050,6 +2063,8 @@ fn process_is_running(pid: i64) -> bool:
 
     Returns: true if running, false if exited or invalid pid
     """
+    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
+        return windows_redirected_is_running(pid)
     _process_is_running_raw(pid)
 
 fn process_kill(pid: i64) -> bool:
@@ -2063,6 +2078,8 @@ fn process_kill(pid: i64) -> bool:
     """
     if pid <= 1:
         return false
+    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
+        return windows_redirected_kill(pid)
     _process_kill_raw(pid)
 
 # ============================================================================

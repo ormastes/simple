@@ -1,0 +1,214 @@
+# Build this probe and its child fixture with an admitted pure-Simple producer.
+# No assertions are substituted by source inspection or a bootstrap seed.
+use std.nogc_sync_mut.io.process_ops.{process_spawn_redirected, process_wait, process_is_running, process_kill}
+use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, _windows_redirected_owner_lease, windows_redirected_admission_count}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_poll_v1, windows_process_collect_v1, windows_process_collected_proof_v1}
+use std.test_runner.runner_lifecycle.{spawn_tracked_redirected_process, poll_tracked_process}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text, file_exists}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
+use std.nogc_sync_mut.io.windows_resource_owner.{windows_resource_snapshot}
+use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers, proc_slot_try_acquire, proc_slot_release, proc_slot_active, proc_slot_max}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring, AsyncTestRun, collect_async_result}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host, host_path_native}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.io_runtime.{thread_sleep}
+
+fn check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print "FAIL: {label}"
+    1
+
+fn await_file(path: text, timeout_ms: i64) -> bool:
+    val started = time_now_unix_micros()
+    while not file_exists(path):
+        if (time_now_unix_micros() - started) / 1000 >= timeout_ms: return false
+        thread_sleep(10)
+    true
+
+fn main() -> i64:
+    if not host_is_windows_host():
+        print "BLOCKED: Windows native owner probe requires Windows"
+        return 77
+    val child = env_get("SIMPLE_WINDOWS_PARALLEL_CHILD_EXE")
+    val root = env_get("SIMPLE_WINDOWS_PARALLEL_PROBE_DIR")
+    if child == "" or root == "":
+        print "BLOCKED: explicit native child and private probe directory required"
+        return 78
+    var failed: i64 = 0
+    var executed: i64 = 0
+    # Real admission starvation with no active child in this pool. Resource
+    # probes cannot consume slots while all slots belong to another owner.
+    proc_slot_configure_requested_workers(80)
+    val before = proc_slot_active()
+    var reserved: i64 = 0
+    while proc_slot_try_acquire(): reserved = reserved + 1
+    val sample_start = time_now_unix_micros()
+    val (initial_total, initial_used, initial_cpu) = windows_resource_snapshot()
+    thread_sleep(120)
+    val (sample_total, sample_used, sample_cpu) = windows_resource_snapshot()
+    val warm_start = time_now_unix_micros()
+    for index in range(0, 1000):
+        val sample = windows_resource_snapshot()
+    val warm_ms = (time_now_unix_micros() - warm_start) / 1000
+    executed = executed + 1
+    failed = failed + check(sample_total > 0 and sample_used >= 0 and sample_used <= sample_total and sample_cpu >= 0.0 and sample_cpu <= 100.0 and warm_ms < 500, "full-slot direct resource samples truthful and warm bounded")
+    print "resource_warm_samples=1000 elapsed_ms={warm_ms} total_mb={sample_total} used_mb={sample_used} cpu_percent={sample_cpu}"
+    val admission_start = time_now_unix_micros()
+    val admission_options = parse_test_args(["--parallel", "--max-workers=80", "--timeout=1", "--no-db"])
+    val denied = run_tests_parallel_with_monitoring(["admission-must-not-start.spl"], admission_options, 80)
+    val admission_elapsed = (time_now_unix_micros() - admission_start) / 1000
+    executed = executed + 1
+    failed = failed + check(denied.len() == 1 and denied[0].failed > 0 and denied[0].error.contains("admission deadline") and admission_elapsed >= 1000 and admission_elapsed < 10000, "full-slot admission is finite and failed")
+    executed = executed + 1
+    failed = failed + check(proc_slot_active() == proc_slot_max(), "denied pool cannot release another owner slot")
+    for index in range(0, reserved): proc_slot_release()
+    executed = executed + 1
+    failed = failed + check(proc_slot_active() == before, "reservation ownership balanced after starvation")
+    # Native child exits zero and presents green text plus a cleanup marker.
+    # Entry81 must remain pending beyond the80-worker active bound.
+    val old_binary = env_get("SIMPLE_BINARY") ?? ""
+    val override_set = env_set("SIMPLE_BINARY", child)
+    var quarantine_files = ["owner-quarantine-trigger.spl"]
+    for index in range(0, 79): quarantine_files.push("owner-quarantine-wait-" + str(index) + ".spl")
+    quarantine_files.push("owner-quarantine-never-start.spl")
+    val quarantine_options = parse_test_args(["--parallel", "--max-workers=80", "--timeout=5", "--no-db"])
+    val quarantine_results = run_tests_parallel_with_monitoring(quarantine_files, quarantine_options, 80)
+    val override_restored = env_set("SIMPLE_BINARY", old_binary)
+    executed = executed + 1
+    failed = failed + check(override_set and override_restored and quarantine_results.len() == 81 and quarantine_results[0].failed == 1 and quarantine_results[0].passed == 0 and quarantine_results[0].error.contains("NATIVE-CACHE-CLEANUP-FAILED"), "zero-exit green text cannot erase cleanup quarantine")
+    executed = executed + 1
+    failed = failed + check(quarantine_results.len() == 81 and quarantine_results[80].failed == 1 and quarantine_results[80].error.contains("NATIVE-CACHE-CLEANUP-FAILED") and not file_exists(root + "/quarantine-later-started"), "pending inventory cannot start after real child quarantine")
+    val quote = "한글 \"quoted\" C:\\trailing\\ & $ < >"
+    var stale: i64 = -1
+    for wave in range(0, 2):
+        val directory = root + "/wave-" + str(wave)
+        if not dir_create_all(directory): return 79
+        var tokens: [i64] = []
+        for index in range(0, 80):
+            val identity = str(index)
+            val output = directory + "/" + identity + ".out"
+            val error = directory + "/" + identity + ".err"
+            val token = process_spawn_redirected(child,
+                ["hold", directory, identity, quote], output, error, 180000, 1048576)
+            executed = executed + 1
+            failed = failed + check(token >= WINDOWS_REDIRECTED_TOKEN_BASE, "owned admission {wave}/{index}")
+            tokens.push(token)
+        var live: i64 = 0
+        for index in range(0, tokens.len()):
+            if await_file(directory + "/ready-" + str(index), 30000) and process_is_running(tokens[index]):
+                live = live + 1
+        print "wave={wave} simultaneously_live={live} requested=80"
+        executed = executed + 1
+        failed = failed + check(live == 80, "80 barrier children live in wave {wave}")
+        if not file_write(directory + "/release", "release"): return 80
+        for index in range(0, tokens.len()):
+            val code = process_wait(tokens[index], 30000)
+            val expected = if index == 79: 7 else: 0
+            executed = executed + 1
+            failed = failed + check(code == expected, "exact exit {wave}/{index}")
+            val output = file_read_text(directory + "/" + str(index) + ".out")
+            val error = file_read_text(directory + "/" + str(index) + ".err")
+            executed = executed + 1
+            failed = failed + check(output.contains("ARGV=" + quote) and not output.contains("STDERR="), "exact quoted Unicode argv/stdout {wave}/{index}")
+            executed = executed + 1
+            failed = failed + check(error.contains("STDERR=" + str(index)) and not error.contains("ARGV="), "separate stderr {wave}/{index}")
+            val private_root = host_path_native(path_absolute(directory + "/" + str(index) + ".out")) + ".scope"
+            executed = executed + 1
+            failed = failed + check(output.contains("HOME=" + private_root + "/home") and output.contains("TMP=" + private_root + "/tmp"), "private child environment {wave}/{index}")
+            executed = executed + 1
+            failed = failed + check(not is_dir(private_root), "collected scope removed {wave}/{index}")
+            executed = executed + 1
+            failed = failed + check(process_wait(tokens[index], 1) == -1 and not process_is_running(tokens[index]), "consumed token {wave}/{index}")
+        if wave == 0: stale = tokens[0]
+        executed = executed + 1
+        failed = failed + check(process_wait(stale, 1) == -1 and not process_kill(stale), "stale token cannot affect later wave")
+
+    val lifetime = root + "/lifetime"
+    if not dir_create_all(lifetime): return 81
+    var lifetime_completed: i64 = 0
+    for index in range(0, 1025):
+        val identity = "life-" + str(index)
+        val token = process_spawn_redirected(child, ["fast", lifetime, identity, quote],
+            lifetime + "/" + identity + ".out", lifetime + "/" + identity + ".err", 30000, 1048576)
+        if token < WINDOWS_REDIRECTED_TOKEN_BASE or process_wait(token, 30000) != 0: break
+        if is_dir(lifetime + "/" + identity + ".out.scope"): break
+        lifetime_completed = lifetime_completed + 1
+    executed = executed + 1
+    failed = failed + check(lifetime_completed == 1025, "historical starts cross former 1024 bound")
+    print "lifetime_completed={lifetime_completed} previous_bound=1024"
+
+    # Real observation Err: a copied genuine owner lease is collected first.
+    # No forged slot/closed flag and no corrupted native HANDLE are involved.
+    val owned_before = proc_slot_active()
+    val alias_token = spawn_tracked_redirected_process(child, ["fast", lifetime, "alias", quote],
+        lifetime + "/alias.out", lifetime + "/alias.err", 30000)
+    match _windows_redirected_owner_lease(alias_token):
+        case Err(reason):
+            executed = executed + 1
+            failed = failed + check(false, "genuine retained lease unavailable")
+        case Ok(lease):
+            executed = executed + 1
+            failed = failed + check(not windows_process_collected_proof_v1(lease), "live/terminal lease is not closure proof")
+            val alias_started = time_now_unix_micros()
+            var collected = false
+            while not collected and (time_now_unix_micros() - alias_started) / 1000 < 30000:
+                match windows_process_poll_v1(lease):
+                    case Err(reason): break
+                    case Ok(receipt):
+                        if receipt.terminal:
+                            match windows_process_collect_v1(lease):
+                                case Err(reason): break
+                                case Ok(terminal): collected = true
+                if not collected: thread_sleep(1)
+            executed = executed + 1
+            failed = failed + check(collected and windows_process_collected_proof_v1(lease), "copied lease has real release proof")
+            executed = executed + 1
+            failed = failed + check(process_is_running(alias_token) and proc_slot_active() == owned_before + 1, "terminal owner Err cannot release retained facade admission early")
+            val alias_result = poll_tracked_process(alias_token)
+            executed = executed + 1
+            failed = failed + check(alias_result == -1 and not process_is_running(alias_token) and proc_slot_active() == owned_before and not is_dir(lifetime + "/alias.out.scope"), "real already-collected Err releases only after proof and scope cleanup")
+            val stale_reserved = proc_slot_try_acquire()
+            val stale_result = poll_tracked_process(alias_token)
+            executed = executed + 1
+            failed = failed + check(stale_reserved and stale_result == -1 and proc_slot_active() == owned_before + 1, "stale polling cannot double-release another process admission")
+            if stale_reserved: proc_slot_release()
+
+    val tree = root + "/tree"
+    if not dir_create_all(tree): return 82
+    val tree_token = process_spawn_redirected(child, ["tree", tree, "tree", quote],
+        tree + "/tree.out", tree + "/tree.err", 180000, 1048576)
+    executed = executed + 1
+    failed = failed + check(tree_token >= WINDOWS_REDIRECTED_TOKEN_BASE and await_file(tree + "/leaf-ready", 30000), "real descendant entered owned JobObject")
+    executed = executed + 1
+    failed = failed + check(process_kill(tree_token) and not process_is_running(tree_token), "cancel proves process tree empty and releases lease")
+    executed = executed + 1
+    failed = failed + check(process_wait(WINDOWS_REDIRECTED_TOKEN_BASE + 99999, 1) == -1 and not process_kill(WINDOWS_REDIRECTED_TOKEN_BASE + 99999), "unknown tagged identity never reaches HANDLE owner")
+    executed = executed + 1
+    failed = failed + check(process_spawn_redirected(root + "/missing.exe", [], root + "/missing.out", root + "/missing.err", 1000, 65536) == -1, "missing executable refuses before native start")
+    executed = executed + 1
+    failed = failed + check(process_spawn_redirected(child, ["bad\0argument"], root + "/nul.out", root + "/nul.err", 1000, 65536) == -1, "NUL argument refuses before native start")
+    executed = executed + 1
+    failed = failed + check(not is_dir(root + "/missing.out.scope") and not is_dir(root + "/nul.out.scope"), "rejected admission scopes removed")
+    val overflow = process_spawn_redirected(child, ["overflow", root, "overflow", quote], root + "/overflow.out", root + "/overflow.err", 30000, 65536)
+    executed = executed + 1
+    failed = failed + check(overflow >= WINDOWS_REDIRECTED_TOKEN_BASE and process_wait(overflow, 30000) == -1 and not process_is_running(overflow), "oversized capture cannot produce a passing result")
+    val overflow_result = collect_async_result(AsyncTestRun(pid: overflow, file_path: "owned-overflow",
+        start_time: time_now_unix_micros(), stdout_file: root + "/overflow.out", stderr_file: root + "/overflow.err", timeout_ms: 30000), -1)
+    executed = executed + 1
+    failed = failed + check(overflow_result.failed == 1 and overflow_result.passed == 0 and overflow_result.error != "", "owned overflow mapper retains explicit failure and diagnostic")
+    val timeout = process_spawn_redirected(child, ["hold", root, "timeout", quote], root + "/timeout.out", root + "/timeout.err", 50, 65536)
+    executed = executed + 1
+    failed = failed + check(timeout >= WINDOWS_REDIRECTED_TOKEN_BASE and process_wait(timeout, 30000) == -1 and not process_is_running(timeout), "owned deadline cancels and reaps the tree")
+    val rss = process_peak_rss_kb()
+    val historical_starts = windows_redirected_admission_count()
+    print "parent_peak_rss_kib={rss} historical_starts={historical_starts} slot_bound=100000"
+    executed = executed + 1
+    failed = failed + check(rss > 0 and rss <= 524288, "native parent qualification budget at most 512 MiB")
+    val passed = executed - failed
+    print "Results: {passed} passed, {failed} failed, {executed} executed"
+    if failed > 0: return 1
+    0
