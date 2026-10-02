@@ -3,9 +3,7 @@
 # Config: ~/.config/devhub/config.sdn
 # Auth:   ~/.config/devhub/auth.sdn
 
-use std.nogc_sync_mut.env.{env_get, env_has}
-use std.nogc_sync_mut.io.process_ops.{process_run}
-use app.io.mod.{file_read, file_exists, file_atomic_write, dir_create_all}
+use std.nogc_async_mut.sosix.host_facade.{sosix_env_get, sosix_process_run, sosix_file_read, sosix_file_exists, sosix_file_atomic_write, sosix_dir_create_all}
 use std.json.{json_parse, json_object_get, json_serialize}
 use app.devhub.errors.{ItfError}
 use app.devhub.auth_token_store.{load_auth_token_from, save_auth_token_to}
@@ -86,9 +84,9 @@ class ItfConfig:
 
 fn config_dir() -> text:
     """Get config directory path."""
-    val home = env_get("HOME")
+    val home = sosix_env_get("HOME")
     if home == "":
-        val userprofile = env_get("USERPROFILE")
+        val userprofile = sosix_env_get("USERPROFILE")
         if userprofile != "":
             return "{userprofile}/.config/devhub"
     "{home}/.config/devhub"
@@ -96,9 +94,9 @@ fn config_dir() -> text:
 
 fn legacy_config_dir() -> text:
     """Read-only compatibility path for installations created as ITF."""
-    val home = env_get("HOME")
+    val home = sosix_env_get("HOME")
     if home == "":
-        val userprofile = env_get("USERPROFILE")
+        val userprofile = sosix_env_get("USERPROFILE")
         if userprofile != "":
             return "{userprofile}/.config/itf"
     "{home}/.config/itf"
@@ -116,14 +114,14 @@ fn auth_path() -> text:
 
 fn config_read_path() -> text:
     val path = config_path()
-    if file_exists(path):
+    if sosix_file_exists(path):
         return path
     "{legacy_config_dir()}/config.sdn"
 
 
 fn auth_read_path() -> text:
     val path = auth_path()
-    if file_exists(path):
+    if sosix_file_exists(path):
         return path
     "{legacy_config_dir()}/auth.sdn"
 
@@ -131,10 +129,10 @@ fn auth_read_path() -> text:
 fn load_config() -> ItfConfig:
     """Load config from SDN file, returning defaults if not found."""
     val path = config_read_path()
-    if not file_exists(path):
+    if not sosix_file_exists(path):
         return ItfConfig.default()
 
-    val content = file_read(path)
+    val content = sosix_file_read(path)
     if content == nil:
         return ItfConfig.default()
 
@@ -149,10 +147,10 @@ fn load_config_for_target(target: text) -> ItfConfig:
     `confluence.default_target`, then the first `confluence.<name>` section;
     legacy singleton configuration remains the final fallback."""
     val path = config_read_path()
-    if not file_exists(path):
+    if not sosix_file_exists(path):
         val empty = ItfConfig.default()
         return if target != "": _with_confluence_target(empty, target) else: empty
-    val content = file_read(path)
+    val content = sosix_file_read(path)
     if content == nil:
         val empty = ItfConfig.default()
         return if target != "": _with_confluence_target(empty, target) else: empty
@@ -658,7 +656,7 @@ fn save_confluence_target(config: ItfConfig) -> bool:
         return save_config(config)
     val path = config_path()
     val read_path = config_read_path()
-    val existing = if file_exists(read_path): file_read(read_path) else: ""
+    val existing = if sosix_file_exists(read_path): sosix_file_read(read_path) else: ""
     var content = _without_sdn_section(existing, "confluence.{config.confluence_target}")
     content = content + "\nconfluence.{config.confluence_target}:\n"
     content = content + _sdn_kv("url", config.confluence_url) + _sdn_kv("user", config.confluence_user)
@@ -666,15 +664,15 @@ fn save_confluence_target(config: ItfConfig) -> bool:
     content = content + _sdn_kv("deployment", config.confluence_deployment) + _sdn_kv("auth", config.confluence_auth)
     content = content + _sdn_kv("gateway_url", config.confluence_gateway_url)
     content = content + _sdn_headers(config.confluence_headers)
-    val _created = dir_create_all(config_dir())
-    file_atomic_write(path, content)
+    val _created = sosix_dir_create_all(config_dir())
+    sosix_file_atomic_write(path, content)
 
 
 fn save_config(config: ItfConfig) -> bool:
     """Save config to SDN file."""
     val dir = config_dir()
     val read_path = config_read_path()
-    val old_content = if file_exists(read_path): file_read(read_path) else: ""
+    val old_content = if sosix_file_exists(read_path): sosix_file_read(read_path) else: ""
     var content = "# ITF Configuration\n\nconfluence:\n    url: {config.confluence_url}\n    user: {config.confluence_user}\n    default_space: {config.confluence_default_space}\n\njira:\n    url: {config.jira_url}\n    acli_path: {config.jira_acli_path}\n    email: {config.jira_email}\n\nwiki:\n    default_backend: {config.wiki_default_backend}\n\ntasks:\n    default_backend: {config.tasks_default_backend}\n    jira_done_status: {config.tasks_jira_done_status}\n\noutput:\n    format: {config.default_output}\n    color: {config.color_mode}\n\neditor: {config.editor_override}\npager: {config.pager_override}\n"
     # Atlassian deployment-shape keys are appended only when set, so a config
     # that never used them round-trips byte-identically. (Section headers are
@@ -705,8 +703,8 @@ fn save_config(config: ItfConfig) -> bool:
         if entry.0 == "confluence" and entry.1 == "default_target":
             content = content + "\nconfluence:\n" + _sdn_kv("default_target", entry.2)
     content = content + "\n" + _named_confluence_blocks(old_content)
-    val _created = dir_create_all(dir)
-    file_atomic_write(config_path(), content)
+    val _created = sosix_dir_create_all(dir)
+    sosix_file_atomic_write(config_path(), content)
 
 
 fn load_auth_token(provider: text) -> text:
@@ -721,9 +719,9 @@ fn save_auth_token(provider: text, token: text) -> bool:
     """
     val path = auth_path()
     val read_path = auth_read_path()
-    val _created = dir_create_all(config_dir())
-    if read_path != path and file_exists(read_path):
-        if not file_atomic_write(path, file_read(read_path)):
+    val _created = sosix_dir_create_all(config_dir())
+    if read_path != path and sosix_file_exists(read_path):
+        if not sosix_file_atomic_write(path, sosix_file_read(read_path)):
             return false
     save_auth_token_to(path, provider, token)
 
@@ -776,12 +774,12 @@ fn resolve_auth_token_from(config: ItfConfig, provider: text, path: text) -> tex
     val scoped_provider = if provider == "confluence" and config.confluence_target != nil and config.confluence_target != "": "confluence.{config.confluence_target}" else: provider
     val scoped_env = _token_env_for(config, scoped_provider)
     if scoped_env != "":
-        val from_env = env_get(scoped_env)
+        val from_env = sosix_env_get(scoped_env)
         if from_env != "":
             return from_env.trim()
     val scoped_cmd = _token_cmd_for(config, scoped_provider)
     if scoped_cmd != "":
-        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", scoped_cmd])
+        val (stdout, _stderr, code) = sosix_process_run("/bin/sh", ["-c", scoped_cmd])
         if code == 0 and stdout.trim() != "":
             return stdout.trim()
     load_auth_token_from(path, scoped_provider)
@@ -791,16 +789,16 @@ fn resolve_editor(config: ItfConfig) -> text:
     """Resolve editor from config/env vars. ITF_EDITOR > GH_EDITOR > EDITOR > VISUAL > vi"""
     if config.editor_override != "":
         return config.editor_override
-    val itf_editor = env_get("ITF_EDITOR")
+    val itf_editor = sosix_env_get("ITF_EDITOR")
     if itf_editor != "":
         return itf_editor
-    val gh_editor = env_get("GH_EDITOR")
+    val gh_editor = sosix_env_get("GH_EDITOR")
     if gh_editor != "":
         return gh_editor
-    val editor = env_get("EDITOR")
+    val editor = sosix_env_get("EDITOR")
     if editor != "":
         return editor
-    val visual = env_get("VISUAL")
+    val visual = sosix_env_get("VISUAL")
     if visual != "":
         return visual
     "vi"
