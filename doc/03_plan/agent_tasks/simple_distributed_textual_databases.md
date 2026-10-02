@@ -304,3 +304,18 @@ Astra reviews the integrated candidate rather than isolated lane claims. The rev
 - whether the generated manual is usable and every REQ/NFR has direct proof.
 
 Any P0/P1 finding returns the candidate to its owning lane within the remaining three-cycle cap. Final acceptance requires zero unresolved P0/P1 findings and a repository verification result of `STATUS: PASS`.
+
+## 2026-10-03 isolated implementation assignments
+
+All lanes start at release/1.0 commit `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`; none directly updates the protected release branch or tags. Private Git session records bind lane ownership. Root reviews and integrates lane commits.
+
+| Lane | Worktree / branch | Exclusive scope | Final integration reviewer |
+|---|---|---|---|
+| Root | Root session-owned worktree | Runtime discovery, integrated verification, guarded PR landing | Primary capable reviewer; required Astra review remains a separate unfulfilled gate |
+| item2_specs | `C:/dev/simple-item2-specs-20261003` / `work/item2-specs-20261003` | Acceptance matrix, test/task plans, system spec and companion manual | Root |
+| item2_tdd | Separate session-owned transport worktree | Additive settlement-history read-back implementation and focused integration tests | Root |
+| Research/design | Separate session-owned research worktree | Current domain/local evidence and architecture/detail-design reconciliation | Root |
+
+Shared public identity/map and Git transport signatures remain frozen. The additive transport function is `db_git_settlement_reconcile_history(source, remote, expected_old_oid, candidate_oid, scratch_parent) -> DbGitSettlementReadback`; existing reconciliation stays conservative. New test helpers use `setup_item2_*` and `check_item2_*`. Existing full-contract fail-fast checkers are preserved until production-backed durable evidence exists. Pure map prerequisites cannot close REQ-004; transport inclusion cannot close signed settlement/receipt requirements.
+
+The concrete acceptance authority is [the 51-row matrix](../evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md). Root owns runtime discovery; no sidecar launches long bootstrap builds. At this update no admitted self-hosted runtime has executed the new cases, so RED/GREEN receipts and generated-manual execution remain missing. Historical named sidecar roles above are planning roles, not claims that those models have run or approved this revision.

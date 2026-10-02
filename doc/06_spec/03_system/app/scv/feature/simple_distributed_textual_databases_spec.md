@@ -928,3 +928,15 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 ```
 
 </details>
+
+## 2026-10-03 executable supplement and evidence status
+
+The executable now also contains three pure production-map prerequisites:
+
+1. Allocate identity A as 1, tombstone A, allocate B as 2, and resolve sequence 1 back to A with high-water 2.
+2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
+3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
+
+These supplement the existing 153 full-contract fail-fast scenarios. They establish no disk, process-crash, replica, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
+
+Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.

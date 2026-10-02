@@ -4,6 +4,52 @@
 # is replaced by a production-owner fixture and durable receipt validation.
 
 use std.spec.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional, entity_ref_canonical}
+use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse}
+
+# Pure prerequisites only: these assertions do not prove durable REQ-004.
+fn setup_item2_uid(counter: u64) -> EntityUid:
+    EntityUid(database_namespace: "11111111111111111111111111111111", entity_kind: "bug", actor: ActorIncarnation(hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), counter: counter)
+
+describe "Item 2 pure identity-map prerequisites (not durable acceptance)":
+    it "keeps reverse identity and advances past a tombstoned sequence":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val second = setup_item2_uid(2)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        expect(allocated.code).to_equal("allocated")
+        expect(allocated.sequence).to_equal(1)
+        val deleted = identity_map_tombstone(allocated.state, first)
+        val next = identity_map_allocate(deleted.state, second)
+        expect(next.code).to_equal("allocated")
+        expect(next.sequence).to_equal(2)
+        expect(next.state.high_water[0].sequence).to_equal(2)
+        expect(next.state.bindings[0].tombstoned).to_equal(true)
+        expect(identity_map_reverse(next.state, "bug", 1)).to_equal(entity_ref_canonical(entity_ref_provisional(first)))
+
+    it "replays a tombstoned identity without resurrecting it or advancing the allocator":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        val deleted = identity_map_tombstone(allocated.state, first)
+        val replay = identity_map_allocate(deleted.state, first)
+        expect(replay.code).to_equal("tombstoned")
+        expect(replay.sequence).to_equal(1)
+        expect(replay.state.bindings.len()).to_equal(1)
+        expect(replay.state.bindings[0].tombstoned).to_equal(true)
+        expect(replay.state.high_water[0].sequence).to_equal(1)
+
+    it "rejects a foreign namespace without changing candidate bindings or high-water":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        val foreign = EntityUid(database_namespace: "22222222222222222222222222222222", entity_kind: first.entity_kind, actor: first.actor, counter: 2)
+        val rejected = identity_map_allocate(allocated.state, foreign)
+        expect(rejected.code).to_equal("SCVDB_NAMESPACE_MISMATCH")
+        expect(rejected.sequence).to_equal(0)
+        expect(rejected.state.bindings.len()).to_equal(1)
+        expect(rejected.state.high_water[0].sequence).to_equal(1)
+        expect(identity_map_reverse(rejected.state, "bug", 1)).to_equal(entity_ref_canonical(entity_ref_provisional(first)))
 
 # @inline
 fn check_replica_contract(requirement: String, oracle: String, failure_sequence: String):
