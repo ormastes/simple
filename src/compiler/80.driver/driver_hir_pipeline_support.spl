@@ -1,6 +1,7 @@
 # Scalar support boundaries for the CompilerDriver HIR pipeline.
 
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_record, mem_snapshot_record_promotion}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{
@@ -74,16 +75,19 @@ pub fn driver_finish_failed_parse_scope(source_path: text, reverse_token: i64 = 
     if not rt_transient_array_scope_pause():
         val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
         reset_frontend_registries_after_scope()
-        return "parse error in {source_path} (see [parser_error] output above); transient parser scope pause failed"
+        return "parse error in {source_path}; transient parser scope pause failed before diagnostic capture"
+    # Allocate the retained message only after pausing the scratch arena.
+    # Later cleanup must not free the message returned to the driver.
+    val parse_error = driver_parse_error_message(source_path)
     if not driver_promote_retained_frontend_owners_v1(true):
         val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
         reset_frontend_registries_after_scope()
         rt_exit(1)
-        return "parse error in {source_path} (see [parser_error] output above); frontend registry promotion failed"
+        return "{parse_error}; frontend registry promotion failed"
     if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
         reset_frontend_registries_after_scope()
-        return "parse error in {source_path} (see [parser_error] output above); transient parser scope end failed"
-    "parse error in {source_path} (see [parser_error] output above)"
+        return "{parse_error}; reverse-reference parse-scope publication failed"
+    parse_error
 
 fn driver_normalized_source_path(source_path: text) -> text:
     # The surface side of every identity/content comparison below stores

@@ -1,0 +1,72 @@
+"""
+# Parser failure receipts survive module transitions
+
+The driver must retain the actual parser message instead of referring to stdout
+that may be suppressed. A first-error receipt belongs to one parse, and captured
+text must remain unchanged when the next module replaces parser-owned state.
+"""
+use std.spec.{describe, it, expect, step}
+use compiler.core.parser.{parse_module, parse_module_silent_checked, parser_first_error_get}
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module,
+    flat_pool_capture_arm, flat_pool_capture_take, build_module_from_flat_pool_blob}
+use compiler.driver.driver_parse_diagnostic.{driver_format_parse_error, driver_parse_error_message}
+
+describe "parser diagnostic receipts":
+    it "includes the source path and actual error when stdout is suppressed":
+        step("Parse a malformed annotation through the silent checked owner")
+        expect(parse_module_silent_checked("val broken: = 1\n", "bad_annotation.spl")).to_equal(true)
+        val message = driver_parse_error_message("bad_annotation.spl")
+        expect(message).to_start_with("parse error in bad_annotation.spl: ")
+        expect(message).to_contain("expected type annotation")
+
+    it "does not carry an earlier first error into an ordinary successful parse":
+        step("Follow a malformed module with a normal non-silent parse")
+        expect(parse_module_silent_checked("val broken: = 1\n", "first_bad.spl")).to_equal(true)
+        expect(parser_first_error_get().len()).to_be_greater_than(0)
+        parse_module("val answer: i64 = 42\n", "next_valid.spl")
+        expect(parser_first_error_get()).to_equal("")
+        step("Parse a second malformed module after the successful module")
+        expect(parse_module_silent_checked("val other: i64 2\n", "second_bad.spl")).to_equal(true)
+        val second_error = driver_parse_error_message("second_bad.spl")
+        expect(second_error).to_start_with("parse error in second_bad.spl: ")
+        expect(second_error).to_contain("expected =")
+
+    it "retains a captured message while the next module replaces parser state":
+        step("Capture the diagnostic before parsing the next module")
+        expect(parse_module_silent_checked("val broken: = 1\n", "retained_bad.spl")).to_equal(true)
+        val captured = driver_parse_error_message("retained_bad.spl")
+        expect(parse_module_silent_checked("val answer: i64 = 42\n", "later_valid.spl")).to_equal(false)
+        expect(captured).to_start_with("parse error in retained_bad.spl: ")
+        expect(captured).to_contain("expected type annotation")
+
+    it "reports missing diagnostic evidence explicitly without inventing stdout":
+        step("Format an error flag for which no parser receipt was retained")
+        expect(driver_format_parse_error("flag_only.spl", "")).to_equal(
+            "parse error in flag_only.spl (parser reported failure without a diagnostic receipt)")
+        expect(driver_format_parse_error("located.spl", "7:4:expected type annotation")).to_equal(
+            "parse error in located.spl: 7:4:expected type annotation")
+
+    it "keeps cold errors out of the cache and clears their receipt on a warm good hit":
+        step("Capture a successful cold parse using the real flat-pool cache boundary")
+        val good_source = "val answer: i64 = 42\n"
+        flat_pool_capture_arm()
+        parse_and_build_module(good_source, "cached_good.spl")
+        val good_blob = flat_pool_capture_take()
+        expect(parser_has_errors()).to_equal(false)
+        expect(good_blob.len()).to_be_greater_than(0)
+        step("Reject a malformed cold parse without publishing an error cache blob")
+        flat_pool_capture_arm()
+        parse_and_build_module("val broken: = 1\n", "cold_bad.spl")
+        val rejected_blob = flat_pool_capture_take()
+        expect(parser_has_errors()).to_equal(true)
+        expect(rejected_blob).to_equal("")
+        expect(driver_parse_error_message("cold_bad.spl")).to_contain("expected type annotation")
+        step("Restore the good cache entry after the failed module")
+        val warm = build_module_from_flat_pool_blob(good_blob, good_source, "cached_good.spl")
+        expect(warm.?).to_equal(true)
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_first_error_get()).to_equal("")
+        step("Capture a different error after the warm cache hit")
+        expect(parse_module_silent_checked("val other: i64 2\n", "warm_then_bad.spl")).to_equal(true)
+        expect(driver_parse_error_message("warm_then_bad.spl")).to_contain("expected =")
