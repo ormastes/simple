@@ -321,7 +321,7 @@ mail_config_init() {
       (umask 077; printf '{"default_account":"","accounts":{}}\n' > "$MAIL_CONFIG_FILE")
       return
     fi
-    if [ -f "$MAIL_LEGACY_CONFIG_FILE" ] && ! jq -e '.accounts | type == "object"' "$MAIL_LEGACY_CONFIG_FILE" >/dev/null 2>&1; then
+    if [ "${MAIL_IMPORT_LEGACY:-0}" = 1 ] && [ -f "$MAIL_LEGACY_CONFIG_FILE" ] && ! jq -e '.accounts | type == "object"' "$MAIL_LEGACY_CONFIG_FILE" >/dev/null 2>&1; then
       echo "${C_RED}error:${C_RESET} cannot import invalid legacy config: ${MAIL_LEGACY_CONFIG_FILE}" >&2
       return 1
     fi
@@ -333,7 +333,7 @@ EOF
     chmod 600 "$MAIL_CONFIG_FILE"
     # Import once. Leave the old file untouched so the user can inspect or
     # remove it after verifying the shared SDN configuration.
-    if [ -f "$MAIL_LEGACY_CONFIG_FILE" ]; then
+    if [ "${MAIL_IMPORT_LEGACY:-0}" = 1 ] && [ -f "$MAIL_LEGACY_CONFIG_FILE" ]; then
       local name account_json old_default
       while IFS= read -r name; do
         _mail_config_valid_name "$name" || continue

@@ -62,7 +62,8 @@ values, duplicate keys, invalid field types and malformed port/TLS settings
 with stable `MAIL_CONFIG_*` diagnostics that contain no input values.
 Use `password_cmd` for a credential reference or the existing encrypted password
 store. Explicit `.json` paths retain legacy compatibility; SDN parsing never
-silently falls back to JSON. Account selection is `--account` then
+silently falls back to JSON. One-time JSON import requires
+`MAIL_IMPORT_LEGACY=1` and rejects plaintext credentials. Account selection is `--account` then
 `default_account`; credential overrides retain `--password-file` then
 `--password-cmd` precedence. An unknown selected account never uses a sibling.
 POP3 defaults to port 995 for implicit TLS and port 110 for STARTTLS.
