@@ -771,3 +771,42 @@ The root serializes source freeze/integration and Windows restart ownership.
 At most three fix/verify cycles per concrete failure; never repeat green
 checks without a new change or unresolved concern. Report a remaining failure
 with durable evidence instead of spinning or weakening admission.
+
+### 2026-10-02 Windows four-worker memory-fix validation
+
+Selective memory repair uses commit `6b9edd328cc2fd3d7372c2c685a1b2256999fa1c`
+(tree `fab322d37cdeefac46f3b547868fc707aa32ee58`) in
+`D:/dev/windows-memory-fix-selective-source-20261002`.
+The initial single-worker job was intentionally interrupted for the requested
+parallelism: exit 143, guard status `interrupted`, Job `quiescent=1`.
+All 191 completed object files and original logs/receipts were preserved.
+This was a concurrency reconfiguration, not a compiler failure.
+
+The replacement uses the same producer, source, runtime and object cache with
+separate logs/output under `D:/dev/bootstrap-memory-fix-validation-20261002/phase2-parallel4`.
+Its stderr confirms four effective LLVM workers; seed PID 18120 was created
+at 10:48:34 KST, exec session 29138. The 7GB process-tree cap and D: disk guard
+remain enforced. Objects increased from 191 to 265 at the first checkpoint;
+a subsequent live process sample showed CPU 886.625 seconds and RSS 1.22 GiB.
+These observations establish active compilation, not a completed candidate.
+The candidate, compiled-and-executed hello gate, Phase3 and Phase4 remain pending.
+Reconfiguration evidence is `phase2-parallel4/reconfiguration.env`.
+Resume-v2 SHA256: `9cf6c30452b0baed014d67d82af3f739d794843833c2d95b3202983341912ec8`.
+
+Linux has the same clean selective source and pinned SPipe submodule prepared.
+Its owner is launching a four-worker guarded build; no live compiler PID has
+been confirmed at this checkpoint. Manager producer-binding investigation has
+resumed separately; no unchanged dispatch retry or manager acceptance is claimed.
+
+Linux launch subsequently confirmed live by `ps`: PID 244, exec session 15229,
+47 seconds elapsed, CPU 169%, RSS 1,028,280 KiB at the first root observation.
+This Phase2 seed build uses Cranelift, requested `--threads 4`, the exact 6b9
+source, and `core-c-bootstrap` from that checkout's `src/runtime`.
+The seed reports that `dynload` emits one native artifact; this is not evidence
+of a completed module build. Source/cache/log/output root:
+`/root/linux-bootstrap-ext4/spawn-abi-9e89-run1/memoryfix-source-6b9edd328`.
+Log: `build/native_probe/stage2.log`; resource receipt:
+`build/native_probe/stage2.rss.env`; cache: `build/bootstrap/native_cache`.
+Aggregate RSS guard is 4,718,592 KiB. Physical D: free space is 122.89 GiB,
+independent of WSL's apparent 932 GiB free. Effective worker-count diagnostics
+and terminal results remain pending. Phase3/4 still require the real hello gate.
