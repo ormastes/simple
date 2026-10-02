@@ -24,7 +24,12 @@ PR merge are authorized. Background mail notifications are outside this change.
 - REQ-007: User additionally requires configurable mail config file/directory
   and a shared dev-hub account file. Dev-hub and mail-cli read one shared SDN file through the canonical
   parser and forward the identical location. Legacy JSON requires an explicit
-  file selection; import is separately opt-in.
+  file selection; import is separately opt-in. An explicit DevHub SDN path
+  selects only its `email` section, containing the same default/account schema.
+  Other provider sections are ignored; missing or invalid email settings fail
+  without merging defaults or falling back to another file. Standalone
+  `email.sdn` remains supported. Combined documents are read-only in mail-cli's
+  settings writer so unrelated sections cannot be overwritten.
 - REQ-008: Run the shared client on Windows/Linux/macOS/BSD with documented
   host dependencies and a Windows launcher. Native Simple helper builds and
   actual host execution must be separately verified; no implied cross-host PASS.
