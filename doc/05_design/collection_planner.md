@@ -92,7 +92,10 @@ engine/edge matrix details.
 ## 2026-10-03 concrete TDD and evidence contract (Codex)
 
 The canonical scenario IDs and executable acceptance list belong to
-`doc/03_plan/sys_test/collection_planner.md`. IDs CP-001-A/B/C through CP-011-A/B/C map to the corresponding requirement's normal, edge and rejection cases; CP-GUARD-01–06 are focused selector/explain checks and do not establish production completion. Preserve the existing helper
+`doc/03_plan/sys_test/collection_planner.md`. IDs CP-001-A/B/C through
+CP-011-A/B/C map to the corresponding requirement's normal, edge and rejection
+cases; CP-GUARD-01–06 are focused selector/explain checks and do not establish
+production completion. Preserve the existing helper
 names above across isolated worktrees. Every helper calls production behavior
 or explicitly fails; fixture strings, expected arrays and hand-authored
 receipts cannot substitute for compilation and execution.
@@ -106,7 +109,7 @@ receipts cannot substitute for compilation and execution.
 | REQ-003 | Register duplicate symbol IDs and mismatched receiver/signature/version/backend symbols; assert rejection and source-located diagnostics. Compile twice with an unchanged registry to observe one load; change its version to require invalidation. |
 | REQ-004 | Input [3,1,3,2,1] gives unique [3,1,2] and groups in first-seen key order with original member order. Count key/hash work at the four selected sizes; explicit unsupported-hash fallback must preserve results. |
 | REQ-005 | Text, integer, enum, tuple and interned-symbol keys: deliberately colliding unequal keys remain separately retrievable, equal keys overwrite according to contract, absent keys stay absent, and resize retains entries. Run the same fixtures across engines. |
-| REQ-006 | Equivalent nested-loop and functional membership programs report the same cost class and source span. Bounded intentional loops state their bound; unresolved receiver/effect evidence reports unknown instead of an indexed claim. |
+| REQ-006 | Equivalent nested-loop and functional membership programs report the same cost class, each with its own correct source span. Bounded intentional loops state their bound; unresolved receiver/effect evidence reports unknown instead of an indexed claim. |
 | REQ-007 | Equivalent typed loop and unary chain normalize to equivalent operation/fact DAGs. Invalid source IDs, forward edges, disconnected output, unknown key type and chain bound overflow are rejected with reasons. Same-spelled user methods are not builtin operations. |
 | REQ-008 | Eligible pure map/filter pipeline produces the baseline result with one generated MIR loop, no intermediate collection and no closure allocation. Mutating/throwing/suspending/aliasing callbacks preserve the original callback/error trace through fallback; eager map/filter interleaving must not change. |
 | REQ-009 | Left keys [2,1,2], right keys [2,2,3]: semi yields both original left rows with key 2; anti yields key 1; all-match join yields four pairs in declared original order. Distinct/frequency/intersection and first/last policies get independent oracles. NaN never matches and signed zeros match. Test nested/hash/merge/direct-index eligibility and each rejected alternative. |
