@@ -1539,7 +1539,8 @@ helper's POSIX path into `D:/...`; the sanity gate then returned 125 before
 creating its frontend logs. PR #2251 preserves this environment path and adds
 explicit diagnostics for the early 125/126 failures. Its third and final
 focused regression passed with a quiescent Job; do not repeat those fixtures.
-Release landing remains pending the new test script's CI registration fix.
+PR #2251 landed on release/1.0 as `e996ee19b6` after the test's operator
+qualification registration and required checks passed.
 This proves the wrapper defect, not a successful compiler sanity invocation.
 
 One actual diagnostic invocation of the preserved `2f3d16f...f0384` compiler
