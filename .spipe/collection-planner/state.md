@@ -64,6 +64,12 @@ Read-only diagnosis established that cold admission inventories all `src` and
 cache; the report now records the actual default and supported `--cache-dir`
 flag. The final bounded diagnostic is tracked in the same report and cannot
 qualify as RED unless the before-fix executable reaches its intended assertion.
+That final attempt timed out at 360 seconds before inventory publication,
+without an executable. The owned process tree was terminated and the fixed
+selector restored with its blob identity verified. All three diagnostic
+attempts are exhausted; another identical retry is not the next step.
+Admission profiling or a supplied admitted runner is required to unblock
+execution. No semantic RED/GREEN or production-ready verification was obtained.
 
 ## Remaining work and stop conditions
 
