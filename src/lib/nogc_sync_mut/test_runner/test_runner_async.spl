@@ -14,7 +14,7 @@ use std.test_runner.runner_lifecycle.{spawn_tracked_process, spawn_tracked_redir
 use std.test_runner.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn}
 use std.nogc_sync_mut.io.signal_handlers.{install_signal_handlers}
 use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
-use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers}
+use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers, proc_slot_active, proc_slot_max}
 
 use std.io_runtime.{thread_sleep, getpid}
 
@@ -304,6 +304,21 @@ fn run_tests_parallel_with_monitoring(
     # Subprocess parallelism with N workers is faster than sequential fork
     # even with the per-test startup overhead.
 
+    if options.max_workers > 0:
+        proc_slot_configure_requested_workers(max_workers)
+    # Windows resource probes themselves need process admission. Do not enter
+    # those synchronous probes while another owner holds every slot.
+    while proc_slot_active() >= proc_slot_max():
+        signal_dispatch_pending()
+        if (time_now_unix_micros() - admission_started) / 1000 >= admission_timeout_ms:
+            var denied: [TestFileResult] = []
+            for file in files:
+                denied.push(make_result_from_output(file, "", "process admission deadline exceeded", -1,
+                    admission_timeout_ms, options.timeout))
+            return denied
+        thread_sleep(_wait_poll_sleep_ms(poll_iteration))
+        poll_iteration = poll_iteration + 1
+
     # Create resource governor (default 75%, overridable via options)
     var gov = governor_create(options.resource_limit_pct)
     if options.max_workers > 0:
@@ -315,6 +330,7 @@ fn run_tests_parallel_with_monitoring(
         signal_dispatch_pending()
         # Spawn new tests (respecting both max_workers and resource governor)
         while not admission_blocked and active_runs.len() < max_workers and next_file_idx < files.len():
+            if proc_slot_active() >= proc_slot_max(): break
             # Check resource governor before spawning
             if not governor_can_spawn(gov, active_runs.len()):
                 break

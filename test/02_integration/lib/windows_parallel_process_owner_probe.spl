@@ -7,6 +7,9 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text, file_exists}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
+use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers, proc_slot_try_acquire, proc_slot_release, proc_slot_active, proc_slot_max}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host, host_path_native}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 use std.io_runtime.{thread_sleep}
@@ -34,6 +37,23 @@ fn main() -> i64:
         return 78
     var failed: i64 = 0
     var executed: i64 = 0
+    # Real admission starvation with no active child in this pool. Resource
+    # probes cannot consume slots while all slots belong to another owner.
+    proc_slot_configure_requested_workers(80)
+    val before = proc_slot_active()
+    var reserved: i64 = 0
+    while proc_slot_try_acquire(): reserved = reserved + 1
+    val admission_start = time_now_unix_micros()
+    val admission_options = parse_test_args(["--parallel", "--max-workers=80", "--timeout=1", "--no-db"])
+    val denied = run_tests_parallel_with_monitoring(["admission-must-not-start.spl"], admission_options, 80)
+    val admission_elapsed = (time_now_unix_micros() - admission_start) / 1000
+    executed = executed + 1
+    failed = failed + check(denied.len() == 1 and denied[0].failed > 0 and denied[0].error.contains("admission deadline") and admission_elapsed >= 1000 and admission_elapsed < 10000, "full-slot admission is finite and failed")
+    executed = executed + 1
+    failed = failed + check(proc_slot_active() == proc_slot_max(), "denied pool cannot release another owner slot")
+    for index in range(0, reserved): proc_slot_release()
+    executed = executed + 1
+    failed = failed + check(proc_slot_active() == before, "reservation ownership balanced after starvation")
     val quote = "한글 \"quoted\" C:\\trailing\\ & $ < >"
     var stale: i64 = -1
     for wave in range(0, 2):
