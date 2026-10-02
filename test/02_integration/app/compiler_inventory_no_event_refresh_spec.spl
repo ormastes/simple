@@ -1,0 +1,166 @@
+# @req REQ-SCV-WARM-NO-EVENT-REFRESH
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, file_write, file_read, process_run}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_read_pointer_content_v1,
+    compile_source_inventory_read_current_v1,
+    compile_source_inventory_revalidate_pointer_v1,
+    compile_source_inventory_encode_v1
+}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+extern fn rt_getpid() -> i64
+
+fn prepare_no_event_checkout(label: text) -> text:
+    val root = "build/test-artifacts/scv-no-event-{label}-{rt_getpid()}"
+    dir_remove(root, true)
+    expect(dir_create_all(root + "/src")).to_equal(true)
+    expect(file_write(root + "/src/main.spl", "export fn main(): 1\n")).to_equal(true)
+    val (_, _, init_code) = process_run("git", ["-C", root, "init", "-q"])
+    expect(init_code).to_equal(0)
+    val (_, _, add_code) = process_run("git", ["-C", root, "add", "src/main.spl"])
+    expect(add_code).to_equal(0)
+    val (_, _, commit_code) = process_run("git", ["-C", root,
+        "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-qm", "seed"])
+    expect(commit_code).to_equal(0)
+    expect(compiler_inventory_refresh_v1(root, root + "/build/scv", ["src"], true).valid).to_equal(true)
+    root
+
+fn no_event_pointer(cache: text) -> text:
+    val pointer = compile_source_inventory_read_pointer_content_v1(cache) ?? ""
+    expect(pointer).to_contain("simple-compile-event-cursor-v3")
+    pointer
+
+describe "SCV warm refresh skips unchanged publication without skipping admission":
+    it "preserves an empty refresh and admits a later dirty event while refusing its stale pointer":
+        step("Create a committed source and capture its admitted generation")
+        val root = prepare_no_event_checkout("dirty")
+        val cache = root + "/build/scv"
+        val before = compile_source_inventory_read_current_v1(cache)
+        expect(before.valid).to_equal(true)
+        val before_rows = compile_source_inventory_encode_v1(before.inventory!)
+        val pointer = no_event_pointer(cache)
+
+        step("Refresh with no Git or journal events and retain identical authority")
+        val unchanged = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(unchanged.valid).to_equal(true)
+        expect(unchanged.inventory_digest).to_equal(before.digest)
+        expect(unchanged.inventory_generation).to_equal(before.inventory!.generation)
+        expect(no_event_pointer(cache)).to_equal(pointer)
+        val confirmed = compile_source_inventory_revalidate_pointer_v1(cache, pointer)
+        expect(confirmed.valid).to_equal(true)
+        expect(compile_source_inventory_encode_v1(confirmed.inventory!)).to_equal(before_rows)
+
+        step("Modify a tracked file and publish the newly observed content")
+        val changed_source = "export fn main(): 2\n"
+        expect(file_write(root + "/src/main.spl", changed_source)).to_equal(true)
+        val changed = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(changed.valid).to_equal(true)
+        expect(changed.inventory_digest == before.digest).to_equal(false)
+        expect(changed.inventory_generation > before.inventory!.generation).to_equal(true)
+        val current = compile_source_inventory_read_current_v1(cache)
+        expect(current.valid).to_equal(true)
+        expect(current.inventory!.entries.len()).to_equal(1)
+        expect(current.inventory!.entries[0].content_digest).to_equal(sha256_text(changed_source))
+
+        step("Present the captured old pointer after publication and fail closed")
+        val changed_pointer = no_event_pointer(cache)
+        val stale = compile_source_inventory_revalidate_pointer_v1(cache, pointer)
+        expect(stale.valid).to_equal(false)
+        expect(stale.reason).to_equal("publish-cursor-superseded")
+        expect(no_event_pointer(cache)).to_equal(changed_pointer)
+        # A second acquisition also proves the rejected owner released its lock.
+        expect(compile_source_inventory_revalidate_pointer_v1(cache, changed_pointer).valid).to_equal(true)
+
+        step("Reject a pointer changed after an embedded NUL, preserving complete-byte binding")
+        val nul_pointer = changed_pointer + "\0unexpected-current-suffix"
+        expect(file_write(cache + "/source-inventory/CURRENT", nul_pointer)).to_equal(true)
+        val nul_changed = compile_source_inventory_revalidate_pointer_v1(cache, changed_pointer)
+        expect(nul_changed.valid).to_equal(false)
+        expect(nul_changed.reason).to_equal("publish-cursor-superseded")
+        expect(sha256_text(file_read(cache + "/source-inventory/CURRENT"))).to_equal(sha256_text(nul_pointer))
+        expect(file_write(cache + "/source-inventory/CURRENT", changed_pointer)).to_equal(true)
+        expect(compile_source_inventory_revalidate_pointer_v1(cache, changed_pointer).valid).to_equal(true)
+        dir_remove(root, true)
+
+    it "rejects a tampered generation even when the captured pointer is unchanged":
+        step("Capture valid authority before changing only its immutable blob")
+        val root = prepare_no_event_checkout("tamper")
+        val cache = root + "/build/scv"
+        val pointer = no_event_pointer(cache)
+        val current = compile_source_inventory_read_current_v1(cache)
+        expect(current.valid).to_equal(true)
+        val blob = cache + "/source-inventory/generations/" + current.digest + ".inventory"
+        val saved = file_read(blob)
+        expect(file_write(blob, saved + "\ncorrupted")).to_equal(true)
+
+        step("Reject corruption both at the publication boundary and during full refresh")
+        val locked = compile_source_inventory_revalidate_pointer_v1(cache, pointer)
+        expect(locked.valid).to_equal(false)
+        expect(locked.reason).to_equal("inventory-generation-invalid")
+        val refreshed = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(refreshed.valid).to_equal(false)
+        expect(refreshed.reason).to_contain("compile-event-inventory-binding-mismatch")
+        expect(no_event_pointer(cache)).to_equal(pointer)
+        expect(file_read(blob)).to_equal(saved + "\ncorrupted")
+
+        step("Restore the blob and confirm the failure left no publication lock behind")
+        expect(file_write(blob, saved)).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache, ["src"], false).valid).to_equal(true)
+        dir_remove(root, true)
+
+    it "publishes a new journal checkpoint and rejects a rewritten consumed prefix":
+        step("Append a checkpoint with no source events")
+        val root = prepare_no_event_checkout("journal")
+        val cache = root + "/build/scv"
+        val original = no_event_pointer(cache)
+        expect(dir_create_all(root + "/.scv/journal")).to_equal(true)
+        val journal = root + "/.scv/journal/events.log"
+        val checkpoint = "op=first kind=snapshot refs=x sha=x utc=1\n"
+        expect(file_write(journal, checkpoint)).to_equal(true)
+        val advanced = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(advanced.valid).to_equal(true)
+        val advanced_pointer = no_event_pointer(cache)
+        expect(advanced_pointer == original).to_equal(false)
+        expect(advanced_pointer).to_contain("filesystem_rows=1")
+        expect(advanced_pointer).to_contain("filesystem_digest=" + sha256_text(checkpoint))
+        expect(compiler_inventory_refresh_v1(root, cache, ["src"], false).valid).to_equal(true)
+        expect(no_event_pointer(cache)).to_equal(advanced_pointer)
+
+        step("Rewrite the consumed checkpoint without changing its row count")
+        expect(file_write(journal, "op=other kind=snapshot refs=x sha=x utc=2\n")).to_equal(true)
+        val rewritten = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(rewritten.valid).to_equal(false)
+        expect(rewritten.reason).to_contain("filesystem-event-journal-rewritten")
+        expect(no_event_pointer(cache)).to_equal(advanced_pointer)
+        dir_remove(root, true)
+
+    it "preserves cursor canonicalization and refreshes a changed HEAD without source events":
+        step("Normalize a valid noncanonical cursor through the original publication path")
+        val root = prepare_no_event_checkout("head")
+        val cache = root + "/build/scv"
+        val pointer = no_event_pointer(cache)
+        val before = compile_source_inventory_read_current_v1(cache)
+        expect(before.valid).to_equal(true)
+        expect(pointer).to_contain("filesystem_rows=0")
+        expect(file_write(cache + "/source-inventory/CURRENT",
+            pointer.replace("filesystem_rows=0", "filesystem_rows=00"))).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache, ["src"], false).valid).to_equal(true)
+        expect(no_event_pointer(cache)).to_equal(pointer)
+
+        step("Advance Git with an empty commit after capturing the source generation")
+        val (_, _, commit_code) = process_run("git", ["-C", root,
+            "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "checkpoint"])
+        expect(commit_code).to_equal(0)
+
+        step("Preserve the inventory but publish the fresh Git cursor")
+        val advanced = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(advanced.valid).to_equal(true)
+        expect(advanced.inventory_digest).to_equal(before.digest)
+        expect(advanced.inventory_generation).to_equal(before.inventory!.generation)
+        expect(no_event_pointer(cache) == pointer).to_equal(false)
+        dir_remove(root, true)

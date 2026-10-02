@@ -514,6 +514,32 @@ fn compile_source_inventory_read_current_v1(
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
 
+fn compile_source_inventory_revalidate_pointer_v1(
+    cache_root: text, expected_pointer_content: text
+) -> CompileSourceInventoryReadV1:
+    """Admit an unchanged refresh under the same lock used by publication.
+
+    The event owner must first validate fresh Git, journal and membership state.
+    Matching CURRENT bytes do not authorize a cached inventory: reread and
+    validate the complete immutable blob while publication remains excluded.
+    """
+    if not compile_source_inventory_cache_root_valid_v1(cache_root):
+        return CompileSourceInventoryReadV1(false, "publish-cache-root-invalid", "", nil)
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val publication_lock = file_lock("{root}/publication.lock", 5)
+    if publication_lock < 0:
+        return CompileSourceInventoryReadV1(false, "publish-lock-unavailable", "", nil)
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    # Preserve publication's complete-byte binding. Native text equality may
+    # stop at an embedded NUL; a changed CURRENT must still be rejected.
+    if sha256_text(pointer_content) != sha256_text(expected_pointer_content):
+        val _unlocked = file_unlock(publication_lock)
+        return CompileSourceInventoryReadV1(false, "publish-cursor-superseded", "", nil)
+    val current = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    if not file_unlock(publication_lock):
+        return CompileSourceInventoryReadV1(false, "publish-unlock-failed", "", nil)
+    current
+
 fn compile_source_inventory_read_at_pointer_v1(
     cache_root: text, pointer_content: text
 ) -> CompileSourceInventoryReadV1:
@@ -592,6 +618,7 @@ export compile_source_inventory_encode_v1, compile_source_inventory_decode_v1
 export compile_source_inventory_digest_v1
 export compile_source_inventory_publish_v1, compile_source_inventory_publish_reasoned_v1, compile_source_inventory_read_current_v1
 export compile_source_inventory_read_pointer_content_v1, compile_source_inventory_read_at_pointer_v1
+export compile_source_inventory_revalidate_pointer_v1
 export compile_source_inventory_publication_readback_v1
 export compile_source_inventory_recover_v1
 export compile_source_inventory_snapshot_rows_v1
