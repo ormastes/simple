@@ -473,6 +473,20 @@ fn _one_call(mode: text, type_name: text, v: text) -> text:
 fn _recurse_lines(u: DeclUniverse, type_text: text, v: text, indent: text, mode: text, idx: i64) -> text:
     """Emit the traversal for one field value `v`, for visit/children/hash."""
     val c = u.classify(type_text)
+    if type_text.trim().ends_with("?") and (c.cat == "node" or c.cat == "list" or c.cat == "pair" or (c.cat == "prim" and mode == "hash")):
+        val trimmed = type_text.trim()
+        val bare = trimmed.substring(0, trimmed.len() - 1).trim()
+        val inner = _recurse_lines(u, bare, "opt{idx}", indent + "        ", mode, idx)
+        var out = indent + "match " + v + ":\n"
+        out = out + indent + "    case Some(opt{idx}):\n"
+        if mode == "hash":
+            out = out + indent + "        h = _hir_mix_i64(h, 1)\n"
+        out = out + inner
+        if mode == "hash":
+            out = out + indent + "    case nil: h = _hir_mix_i64(h, 0)\n"
+        else:
+            out = out + indent + "    case nil: pass\n"
+        return out
     if c.cat == "node":
         return indent + _one_call(mode, c.a, v) + "\n"
     if c.cat == "list":
@@ -498,6 +512,14 @@ fn _recurse_frame_lines_reverse(
 ) -> text:
     """Push one field in reverse so a LIFO consumer observes schema order."""
     val c = u.classify(type_text)
+    if type_text.trim().ends_with("?") and (c.cat == "node" or c.cat == "list" or c.cat == "pair"):
+        val trimmed = type_text.trim()
+        val bare = trimmed.substring(0, trimmed.len() - 1).trim()
+        var out = indent + "match " + v + ":\n"
+        out = out + indent + "    case Some(opt{idx}):\n"
+        out = out + _recurse_frame_lines_reverse(u, bare, "opt{idx}", indent + "        ", idx)
+        out = out + indent + "    case nil: pass\n"
+        return out
     if c.cat == "node":
         return indent + _one_frame_call(c.a, v) + "\n"
     if c.cat == "list":

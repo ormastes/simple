@@ -1,0 +1,78 @@
+"""Generated HIR walkers unwrap optional enum payloads before visiting nodes."""
+
+use std.spec
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirPattern}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.generated.hir_children.{
+    HirNode, HirChildFrame, HirChildFrameSink, hir_children_of_expr,
+    hir_expand_expr_child_frames_reverse}
+use compiler.hir.generated.hir_visit.{HirVisitor, hir_visit_expr}
+use compiler.hir.generated.hir_hash.{hir_hash_expr}
+
+class TypeVisitor:
+    seen: i64
+
+impl TypeVisitor:
+    static fn new() -> TypeVisitor:
+        TypeVisitor(seen: 0)
+
+impl HirVisitor for TypeVisitor:
+    me on_expr(node: HirExpr):
+        pass
+    me on_stmt(node: HirStmt):
+        pass
+    me on_type(node: HirType):
+        self.seen = self.seen + 1
+    me on_pattern(node: HirPattern):
+        pass
+
+class FrameSink:
+    frames: [HirChildFrame]
+
+impl FrameSink:
+    static fn new() -> FrameSink:
+        FrameSink(frames: [])
+
+impl HirChildFrameSink for FrameSink:
+    me push_hir_child_frame(frame: HirChildFrame):
+        self.frames.push(frame)
+
+fn array_expr(type_: HirType?) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.ArrayLit([], type_),
+        has_type_: false,
+        type_: HirType(kind: HirTypeKind.Error, span: Span.empty()),
+        span: Span.empty())
+
+describe "generated HIR optional child traversal [importance=critical; importance_weight=3]":
+    it "unwraps Some(HirType) in child enumeration and reverse frames":
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val expr = array_expr(Some(scalar))
+        val children = hir_children_of_expr(expr)
+        expect(children.len()).to_equal(1)
+        match children[0]:
+            case HirNode.Type_(found):
+                expect(found == scalar).to_equal(true)
+            case _:
+                fail("optional array element type was not a HirType child")
+        val sink = FrameSink.new()
+        hir_expand_expr_child_frames_reverse(expr, sink)
+        expect(sink.frames.len()).to_equal(1)
+        match sink.frames[0]:
+            case HirChildFrame.Type_(found):
+                expect(found == scalar).to_equal(true)
+            case _:
+                fail("optional array element type was not a HirType frame")
+
+    it "visits and hashes Some(HirType) while nil has no type child":
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val some_expr = array_expr(Some(scalar))
+        val nil_expr = array_expr(nil)
+        val visitor = TypeVisitor.new()
+        hir_visit_expr(some_expr, visitor)
+        expect(visitor.seen).to_equal(1)
+        hir_visit_expr(nil_expr, visitor)
+        expect(visitor.seen).to_equal(1)
+        expect(hir_children_of_expr(nil_expr).len()).to_equal(0)
+        expect(hir_hash_expr(some_expr) == hir_hash_expr(nil_expr)).to_equal(false)
