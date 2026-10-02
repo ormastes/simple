@@ -5,6 +5,26 @@ It records incomplete work, not build admission or permission to publish.
 
 ## Latest checkpoint: 2026-10-02 cached builds resumed
 
+### Memory repair after the 7 GB failure
+
+The user requested fixing the memory bug without introducing performance
+regressions and explicitly requested Astra. The scoped source fix is in
+draft PR #2162, implementation commit
+`0543aa7b69350d396a140d00540c56187813fcd1` on
+`fix/bootstrap-memory-retention-20261002`. It publishes complete parent
+snapshot authority once, preserves that generation through warm preparation,
+and reclaims snapshot materialization scratch after each file. Astra source
+review found zero P0/P1 issues. Native allocation, compiler and timing checks
+remain pending; this is not a verified memory or performance fix yet.
+
+Validation uses a new selective-on-5831 checkout at
+`D:/dev/windows-memory-fix-selective-source-20261002`, preserving the proven
+Rust/runtime subtree identities and old caches. The guarded route and baseline
+are in `D:/dev/bootstrap-memory-fix-validation-20261002/validation-plan.md`.
+The source edit is a new bounded repair; do not restart the unchanged failed
+candidate. Keep the 7 GB aggregate limit and 1200-second hello timeout. Only
+compiled-and-executed hello success may advance the Phase3/4 route.
+
 ### User-authorized 7 GB Windows attempt
 
 After hello5, the user explicitly changed the cap to 7 GB. The aggregate
