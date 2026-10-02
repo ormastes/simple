@@ -22,6 +22,7 @@ All workloads ran through the canonical owned process watchdog with an enforced
 | Bind alias and moved backing-directory ancestry rejected | N/A | PASS cycle2 private mount namespace |
 | Nested separate tmpfs and mount replacement rejected | N/A | PASS cycle2 private mount namespace |
 | Valid WSL D: roots accepted | N/A | PASS cycle2 |
+| Literal POSIX backslash symlink versus normalized sibling | N/A | PASS focused native check; generated helper UNRUN |
 | Generated Simple byte-array ABI + identity output | UNRUN | BLOCKED: diagnostic producer MIR failure |
 | Production frontend post-replacement rejection | UNRUN | UNRUN |
 | Bidirectional immutable cell reuse + hydrated semantics | UNRUN | UNRUN |
@@ -63,3 +64,24 @@ did not run. No C result is substituted for it and no retry started.
 `compile.log`, `guard.env`, `input.sha256`, `source-head.txt` and
 `admission.json` retain the exact attempt. Production source remains identical
 to the reviewed manifest.
+
+## Second review: preserve pathname bytes
+
+Independent review of commit `06a14de77c` found a P1 above the native owner:
+the compiler helper replaced backslashes on Linux, while actual cache I/O used
+the original path. A literal `shared\\alias` symlink could therefore address
+private storage after a distinct normalized `shared/alias` passed validation.
+This was a validation/use mismatch, not a mutation race.
+
+The helper now preserves both root and cwd bytes. Native Windows performs its
+own separator handling; POSIX receives the exact original name. Drive-shaped
+non-POSIX roots may fail closed on Linux and never alias a normalized name.
+The earlier 13-file manifest describes the pre-correction review, not this fix.
+
+The focused new native regression under `linux-backslash-regression` created
+the real POSIX symlink on WSL ext4. It accepted the normalized sibling and
+rejected the original literal symlink through both open and cached check.
+The 256 MiB guarded workload exited zero. It did not rerun the earlier suites.
+`shared_cache_backslash_guard_native_probe.spl` is the separate generated
+compiler-helper regression and remains **UNRUN**. C evidence is not substituted
+for that generated call path. No new compiler qualification was attempted.

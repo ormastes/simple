@@ -29,6 +29,21 @@ static void *concurrent_check(void *input) {
 }
 int main(int argc, char **argv) {
 #if defined(__linux__)
+    if (argc == 3 && !strcmp(argv[1], "--linux-backslash")) {
+        assert(make_directory(argv[2]) == 0);
+        char shared[RT_SDR_PATH_V1], private_root[RT_SDR_PATH_V1];
+        char normalized[RT_SDR_PATH_V1], literal[RT_SDR_PATH_V1];
+        path(shared, argv[2], "shared"); path(private_root, argv[2], "private");
+        path(normalized, shared, "alias"); path(literal, argv[2], "shared\\alias");
+        assert(make_directory(shared) == 0 && make_directory(private_root) == 0);
+        assert(make_directory(normalized) == 0 && symlink(private_root, literal) == 0);
+        int64_t token = rt_sdr_open_v1(normalized, private_root); assert(token > 0);
+        assert(rt_sdr_close_v1(token) == 0);
+        assert(rt_sdr_open_v1(literal, private_root) < 0);
+        assert(rt_sdr_check_v1(literal, private_root) < 0);
+        puts("directory-pair backslash PASS: normalized sibling accepted, original literal symlink rejected");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "--linux-mounts")) {
         assert(make_directory(argv[2]) == 0);
         char shared[RT_SDR_PATH_V1], backing[RT_SDR_PATH_V1], alias[RT_SDR_PATH_V1];
