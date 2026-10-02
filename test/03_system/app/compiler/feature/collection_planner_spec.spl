@@ -1,0 +1,125 @@
+"""
+Collection planner selector/explanation acceptance slice.
+This calls real production functions, but does not prove compiler invocation,
+MIR lowering, runtime execution, engine parity or performance. CP-001-A through
+CP-011-C remain the full system acceptance list in the system test plan.
+"""
+# @req REQ-009 REQ-010 REQ-011
+# @cover src/compiler/60.mir_opt/mir_opt/collection_plan_selection.spl
+# @cover src/compiler/60.mir_opt/mir_opt/collection_plan_explain.spl
+
+use std.spec.*
+use compiler.mir_opt.mir_opt.collection_plan_selection.{
+    CollectionPlanAlgorithm, CollectionPlanFacts, collection_plan_select,
+    collection_plan_unproven_facts
+}
+use compiler.mir_opt.mir_opt.collection_plan_explain.collection_plan_explain
+
+fn collection_guard_fixture() -> CollectionPlanFacts:
+    var facts = collection_plan_unproven_facts()
+    facts.collection_kind = "set"
+    facts.equality_pure = true
+    facts.duplicate_semantics_preserved = true
+    facts.order_insensitive = true
+    facts.mutation_epoch_stable = true
+    facts.key_hashable = true
+    facts.key_orderable = true
+    facts.target_has_hash = true
+    facts.target_has_ordered = true
+    facts.ordered_update_bound_proven = true
+    facts.p0_correctness_ready = true
+    facts.static_size = 2
+    facts.static_lookups = 3
+    facts.hard_size_bound = 2
+    facts.policy = "critical"
+    facts
+
+describe "collection planner guarded selection and explanation":
+    it "CP-GUARD-01 rejects a static size contradicting its hard bound":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.static_size = 100
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 2
+        facts.profile_lookups_p95 = 3
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.evidence).to_equal("none")
+        val report = collection_plan_explain("guard/static-bound", "generic", facts, decision)
+        expect(report).to_contain("selected=original\n")
+        expect(report).to_contain("reason=contradictory-size-bound\n")
+        expect(report).to_contain("fallback=original-on-rejection\n")
+
+    it "CP-GUARD-02 rejects an admitted profile exceeding its hard bound":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 3
+        facts.profile_lookups_p95 = 3
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.evidence).to_equal("none")
+        val report = collection_plan_explain("guard/profile-bound", "generic", facts, decision)
+        expect(report).to_contain("reason=contradictory-size-bound\n")
+        expect(report).to_contain("rejected.linear=not-evaluated\n")
+        expect(report).to_contain("rejected.hash=not-evaluated\n")
+        expect(report).to_contain("rejected.ordered=not-evaluated\n")
+
+    it "CP-GUARD-03 accepts a small quiet workload exactly at its bound":
+        step("prepare typed collection fixtures")
+        val facts = collection_guard_fixture()
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Linear)
+        val report = collection_plan_explain("guard/exact-bound", "generic", facts, decision)
+        expect(report).to_contain("selected=linear\n")
+        expect(report).to_contain("evidence=static\n")
+        expect(report).to_contain("reason=small-quiet-collection\n")
+
+    it "CP-GUARD-04 does not use an unadmitted profile as cost evidence":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.profile_size_p95 = 1000
+        facts.profile_lookups_p95 = 10000
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Linear)
+        expect(decision.evidence).to_equal("static")
+        val report = collection_plan_explain("guard/unadmitted", "generic", facts, decision)
+        expect(report).to_contain("profile.status=not-admitted\n")
+        expect(report).to_contain("profile.size_p95=unknown\n")
+        expect(report).to_contain("profile.lookups_p95=unknown\n")
+
+    it "CP-GUARD-05 an explicit hash request cannot bypass semantic proofs":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.policy = "moderate"
+        facts.attribute = "hash"
+        facts.mutation_epoch_stable = false
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        val report = collection_plan_explain("guard/mutation", "generic", facts, decision)
+        expect(report).to_contain("reason=semantic-proof-missing\n")
+        expect(report).to_contain("rejected.hash=semantic-proof-missing\n")
+
+    it "CP-GUARD-06 exposes measured collision rejection without execution claims":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.policy = "moderate"
+        facts.hard_size_bound = -1
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 100
+        facts.profile_lookups_p95 = 1000
+        facts.profile_hash_probes_p95 = 100
+        facts.profile_hash_collisions_p95 = 40
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        val report = collection_plan_explain("guard/collisions", "generic", facts, decision)
+        expect(report).to_contain("selected=ordered\n")
+        expect(report).to_contain("rejected.hash=profile-hash-collisions\n")
+        expect(report).to_contain("extra_memory_bytes=unproven\n")
+        expect(report).to_contain("memory_budget=not-modeled\n")
