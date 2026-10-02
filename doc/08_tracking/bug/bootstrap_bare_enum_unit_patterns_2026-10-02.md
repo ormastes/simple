@@ -4,7 +4,10 @@ Source review links the Windows Phase 4 lifecycle closure's B5b duplicate-defaul
 diagnostic to `MemoryOrdering` alternatives in `std.nogc_sync_mut.atomic`.
 The imported module is present. Flat AST conversion deliberately represents bare
 identifiers as bindings; HIR previously accepted every binding as irrefutable.
-Exact native diagnostic provenance remains to be confirmed with the reproducer.
+MIR already repairs a name owned by exactly one known enum, but leaves a name
+shared by multiple enums as a binding. Its global uniqueness test does not use
+the scrutinee's declared owner. This missing distinction, rather than all bare
+patterns unconditionally failing, is the source defect.
 
 The repair indexes nullary variants by consumer-local enum symbol identity before
 function bodies lower. Match lowering uses the scrutinee's expression type or its
@@ -22,12 +25,15 @@ Regression artifacts:
 - `test/fixtures/compiler/bare_enum_duplicate_defaults_invalid.spl`: compilation
   must still reject two genuine default arms.
 
-Validation status: source review only; executable tests and native bootstrap
-verification are pending. The available self-hosted Windows compiler e7ec89c1
-predates this patch, and the bootstrap manager owns the host's bounded memory
-slot. Do not report a native PASS until a compiler containing the patch builds and
-runs the fixture and required compiler/MCP checks.
+Pre-fix Linux producer 184d1be492926713d19bfb95ba2705cb31a2fb6affe8ebea9e1874185d6ef921
+reproduces exact B5b multiple wildcard/binding defaults when two enums both own
+Relaxed/Acquire. Evidence: classfix-source-623b7943f1/build/atomic-receiver-discriminator-20261002/bare-enum-collision.log
+and its process-tree receipt. The unique-owner control compiled but panicked on
+an enum discriminant at runtime; the full catch-all fixture failed on unresolved
+`remaining`. These are additional pre-fix failures, not a successful execution.
+Three bounded baseline attempts exhausted this session's enum iteration cap.
+Post-fix executable tests and required compiler/MCP checks remain pending.
 
-Separate failure group: unresolved AtomicI64 `load` / `compare_exchange` remains
-unfixed. Its local/global discriminator must run after memory admission. Existing
-global Struct provenance registration already exists and must not be duplicated.
+The separate global AtomicI64 `load` / `compare_exchange` source defect is fixed
+by commit 2bbeac34c3; see bootstrap_global_receiver_canonical_identity_2026-10-02.md.
+Its post-fix native verification also remains pending.
