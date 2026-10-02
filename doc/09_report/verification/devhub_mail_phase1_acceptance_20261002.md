@@ -25,6 +25,8 @@ example counts were observed, rather than inferred from file loading.
 | Final Confluence SOSIX SSpec (`confluence-sosix`) | 17 | 17 | 0 | 639754240 | PASS, exit 0 |
 | DevHub config regression (`confluence-config-regression`) | 32 | 32 | 0 | 539357184 | PASS, exit 0 |
 | Shared SDN first attempt (`shared-sdn`) | 6 | 3 | 3 | 600821760 | FAIL, exit 1 |
+| Corrected shared account/CLI cases (`shared-sdn-corrected`) | 6 | 2 | 4 | 654364672 | FAIL, exit 1 |
+| POP3 system scenarios (`mail-pop3`) | 10 | 7 | 3 | 558972928 | FAIL, exit 1 |
 
 The first SDN run found a real JSON constructor defect: an array of key/value
 pairs was passed to a dictionary-taking constructor. The three account scenarios
@@ -57,8 +59,8 @@ are excluded.
 
 - Compile the real config-json helper from the final nested-email parser revision,
   retain its producer/source identity, and supply MAIL_CONFIG_BIN to mail fixtures.
-- Execute corrected shared account scenarios and the 10-scenario POP3 system spec,
-  including real curl loopback TLS/STLS, strict LIST IDs, and credential redaction.
+- Resolve the four failing shared account/CLI scenarios and three failing POP3
+  scenarios after provisioning the compiled helper; retain the already-green checks.
 - Finish required broader compiler/core/lib and MCP smoke checks for the SOSIX
   facade change before any blanket production-readiness PASS.
 - Root final review and release-branch landing; this report never authorizes
@@ -79,3 +81,29 @@ A failed prior admission attempt lacked an SCV journal and also produced no
 executable. Neither attempt counts as native compilation or shared-CLI evidence.
 No identical full-closure retry was launched; the correction cycle is reserved
 for a supported narrower build if the compiler owner supplies one.
+## Final targeted scenario outcomes
+
+Across the current distinct scenario bodies, 68 were exercised: 61 passed and
+7 failed. This includes the three unchanged SDN rejection bodies moved after
+their first successful run; it excludes superseded Confluence and failed
+pre-correction account runs from the distinct total. All recorded runner verdicts
+reported zero skipped and dropped examples.
+
+The corrected shared run passed explicit personal-account isolation and unknown
+account rejection. The four cross-client checks failed: standalone and nested
+success checks received empty CLI fields; missing/malformed email checks reported
+`error: compiled shared SDN helper unavailable` instead of parser diagnostics.
+The producer's corrected account/default handling no longer raised the original
+JSON-array `keys` error. These partial observations do not constitute shared-CLI PASS.
+
+The POP3 run passed seven scenarios: protocol validation (including malformed and
+duplicate LIST rejection and descending order), credential precedence/orchestration,
+secret-free curl arguments and bounded failures, one-shot recovery policy, repair,
+environment configuration selection, and portable attachments. Three failed at
+missing expected markers: shared configuration, literal-home-placeholder paths,
+and real TLS/STLS loopback. No real TLS/STLS success or cryptographic implementation
+validation is claimed. Fixture subprocess stdout/stderr is captured by the SSpec
+runner; only failed assertion summaries are present in its aggregate log.
+
+No green scenario was rerun to improve these totals. The remaining compile and
+seven scenario failures keep this PR in draft and prevent release admission.
