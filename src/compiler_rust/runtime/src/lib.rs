@@ -450,6 +450,14 @@ fn runtime_symbol_table_contains_vulkan_discard_command() {
         .any(|entry| entry.name == "rt_vulkan_discard_command" && !entry.ptr.is_null()));
 }
 
+#[cfg(all(test, feature = "runtime-symbol-table", target_os = "linux"))]
+#[test]
+fn runtime_symbol_table_contains_bootstrap_directory_provider() {
+    assert!(RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .any(|entry| entry.name == "rt_dir_is_real_no_follow" && !entry.ptr.is_null()));
+}
+
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
 fn runtime_symbol_table_contains_processing_wire_helpers() {

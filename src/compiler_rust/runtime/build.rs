@@ -21,6 +21,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_bootstrap_linux_provider.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -407,6 +408,9 @@ fn compile_c_runtime_sources() {
     // only the spl_driver vtable and backend implementation.
     let linux_uring = target_os == "linux";
     if linux_uring {
+        // The Rust seed cannot include runtime_native.c/runtime_thread.c:
+        // both carry other rt_* owners. Stage 2 still needs these two calls.
+        c_sources.push("runtime_bootstrap_linux_provider.c");
         c_sources.push("platform/async_driver.c");
         c_sources.push("platform/async_linux_uring.c");
         c_sources.push("vendor/liburing/src/queue.c");
@@ -643,9 +647,13 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_collection_capture_impl.h",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
+        "runtime_bootstrap_linux_provider.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
+            continue;
+        }
+        if *source == "runtime_bootstrap_linux_provider.c" && target_os != "linux" {
             continue;
         }
         let path = root.join(source);
