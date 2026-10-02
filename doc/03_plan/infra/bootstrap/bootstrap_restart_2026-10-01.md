@@ -1292,3 +1292,28 @@ emergency floor. Old receipts remain immutable; actual warm admission and hello
 execution are still unverified. The three manager-image scripts are reviewed
 but unlaunched, pending a genuine hello PASS. Evidence:
 `D:/dev/windows-phase2-release-next-20261002/hello/cold-admission-observation.md`.
+
+### 2026-10-02 Windows hello PASS and manager image batch started
+
+The second Windows hello attempt passed compile and execution with exact
+`hello\n` output. The Phase2 producer remains `c82956eb610fadd603533fb4eb61e30236b895ff665b1bf05997edfdbe3ecac1`;
+the executable SHA-256 is `484939a1496802ebd20c68f330cd699440280ae502e710006f2dfd75bf7f051f`.
+Warm inventory validation reached snapshot construction and actual worker
+execution. Source/runtime identities were rechecked afterward. The guard
+reported completed/zero exit, quiescence, and peak RSS 5,369,848 KiB under the
+unchanged sampled limit. This is a diagnostic hello PASS, not canonical Stage2
+admission. Evidence: `D:/dev/windows-phase2-release-next-20261002/hello/attempt2/binding.env`.
+
+The copied 23 GiB host threshold included historical Linux, manager and parser
+reservations. Those jobs had ended; the reviewed admission formula now requires
+7,000,000,000 bytes plus an 8 GiB host reserve plus explicit other reservations,
+against both available physical memory and commit headroom. Runtime RSS
+enforcement was not reduced. D free space increased externally during hello;
+this lane claims no cleanup or reclaimed-space attribution.
+
+One reviewed Phase2-built diagnostic manager batch has now started, sequentially
+building manifest, Windows builder and Windows worker within one cumulative
+2 GiB disk budget. The canonical eight-image preparation, actual manager task
+qualification, full Phase3/4 queues, and cross-host cache proof remain pending.
+Linux remains stopped at its three-attempt hello limit. All prior cache and
+failure evidence remain retained.
