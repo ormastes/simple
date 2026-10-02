@@ -17,7 +17,7 @@
 # builds request tuples), so no request was ever sent.
 
 use app.io.mod.{process_run}
-use std.json.{json_parse, json_serialize, json_object_get, json_array_get, json_array_length, json_get_type}
+use std.json.{json_parse, json_serialize, json_object_get, json_array_get, json_array_length, json_get_type, json_to_string}
 use app.devhub.config.{ItfConfig}
 use app.devhub.auth.{confluence_auth_header, confluence_api_base}
 use app.devhub.request_headers.{configured_target_headers}
@@ -133,10 +133,19 @@ fn _confluence_request(config: ItfConfig, method: text, path: text, payload: tex
                 headers = configured
     val argv = _confluence_configured_argv(confluence_auth_header(config), method, "{root}{path}", payload, query, headers)
     val (stdout, stderr, exit_code) = process_run("curl", argv)
+    confluence_response_result(stdout, stderr, exit_code)
+
+
+fn confluence_response_result(stdout: text, stderr: text, exit_code: i64) -> (i64, text):
+    """Interpret one transport result. Failed responses are diagnostics and
+    must be redacted; successful page content stays byte-for-byte intact.
+    No automatic retries: write operations must never be replayed here."""
     val (body, status) = _confluence_split_response(stdout)
     if exit_code != 0 or status == 0:
         val detail = if stderr.trim() != "": stderr.trim() else: "curl exit {exit_code}"
         return (0, redact_devhub_diagnostic("transport error: {detail}"))
+    if not _ok(status):
+        return (status, redact_devhub_diagnostic(body))
     (status, body)
 
 
@@ -187,8 +196,8 @@ fn _parse_results(body: text) -> (bool, [PageListItem], text):
     if parsed == nil:
         return (false, [], "invalid JSON response")
     val results_arr = json_object_get(parsed, "results")
-    if results_arr == nil:
-        return (true, [], body)
+    if results_arr == nil or json_get_type(results_arr) != "array":
+        return (false, [], "invalid Confluence response: results must be an array")
     var items: [PageListItem] = []
     val arr_len = json_array_length(results_arr)
     var i = 0
@@ -207,11 +216,7 @@ fn _json_str(obj: any, key: text) -> text:
         return ""
     val vtype = json_get_type(value)
     if vtype == "string":
-        # json_serialize wraps in quotes, strip them
-        val s = json_serialize(value)
-        if s.starts_with("\"") and s.ends_with("\""):
-            return s[1:s.len() - 1]
-        return s
+        return json_to_string(value)
     json_serialize(value)
 
 
@@ -318,10 +323,11 @@ fn confluence_delete_page(config: ItfConfig, page_id: text) -> (bool, text):
 
 fn confluence_search_cql(query: text, space_key: text) -> text:
     """CQL for a title search, optionally scoped to a space."""
-    val q = query.replace("\"", "\\\"")
+    val q = query.replace("\\", "\\\\").replace("\"", "\\\"")
     var cql = "type=page and title~\"{q}\""
     if space_key != "":
-        cql = cql + " and space=\"{space_key}\""
+        val space = space_key.replace("\\", "\\\\").replace("\"", "\\\"")
+        cql = cql + " and space=\"{space}\""
     cql
 
 

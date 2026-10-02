@@ -747,6 +747,11 @@ fn _token_env_for(config: ItfConfig, provider: text) -> text:
 
 
 fn resolve_auth_token(config: ItfConfig, provider: text) -> text:
+    """Resolve credentials using the configured auth document path."""
+    resolve_auth_token_from(config, provider, auth_read_path())
+
+
+fn resolve_auth_token_from(config: ItfConfig, provider: text, path: text) -> text:
     """Resolve a provider's auth token: run its configured `token_cmd` (from
     the [token_cmd] config section) if set, otherwise fall back to the
     plaintext token in auth.sdn via load_auth_token(). Never prints the
@@ -762,9 +767,11 @@ fn resolve_auth_token(config: ItfConfig, provider: text) -> text:
          variable's NAME, so it is safe in a git-tracked file.
       2. [token_cmd] <provider>: CMD  — run CMD, use its stdout.
       3. auth.sdn plaintext.
-    A configured token_env whose variable is unset falls through rather than
-    failing, so a developer with a token_cmd and a CI job with an env var can
-    share one config file.
+      A configured token_env whose variable is unset falls through rather than
+      failing, so a developer with a token_cmd and a CI job with an env var can
+      share one config file.
+      Named Confluence targets resolve only their own credentials. Missing
+      target credentials must never borrow the legacy default target's token.
     """
     val scoped_provider = if provider == "confluence" and config.confluence_target != nil and config.confluence_target != "": "confluence.{config.confluence_target}" else: provider
     val scoped_env = _token_env_for(config, scoped_provider)
@@ -777,23 +784,7 @@ fn resolve_auth_token(config: ItfConfig, provider: text) -> text:
         val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", scoped_cmd])
         if code == 0 and stdout.trim() != "":
             return stdout.trim()
-    val scoped_token = load_auth_token(scoped_provider)
-    if scoped_token != "":
-        return scoped_token
-    if scoped_provider == provider:
-        return ""
-
-    val fallback_env = _token_env_for(config, provider)
-    if fallback_env != "":
-        val fallback = env_get(fallback_env)
-        if fallback != "":
-            return fallback.trim()
-    val fallback_cmd = _token_cmd_for(config, provider)
-    if fallback_cmd != "":
-        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", fallback_cmd])
-        if code == 0 and stdout.trim() != "":
-            return stdout.trim()
-    load_auth_token(provider)
+    load_auth_token_from(path, scoped_provider)
 
 
 fn resolve_editor(config: ItfConfig) -> text:
