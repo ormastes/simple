@@ -1426,3 +1426,25 @@ HIR and diagnostic fixes. Materialization and the corrected nested-supervisor
 fixture are proceeding under fresh resource admission. This candidate has not
 built yet. Complete source inventories, both backends, canonical manager
 admission and Windows/Linux cache qualification remain required and unfinished.
+
+### 2026-10-02 replacement canonical bootstrap entered Rust seed compilation
+
+The frozen release `7734f947be` passed materialization and fresh source-consumer
+verification, then entered the guarded canonical bootstrap. At 12:32 UTC its
+progress state advanced to Rust seed compilation; an actual `rustc` child was
+observed compiling `cranelift_codegen`. The seed build uses locked/offline Cargo
+and the independently copied configuration-keyed cache, with normal freshness
+validation. This is build progress, not seed or Stage2 admission.
+
+The launch retains a decimal 7 GB sampled Job RSS cap, 8 GiB host reserve,
+8 GiB cumulative D-volume growth budget and 8.5 GiB disk floor. Cargo and native
+jobs are explicitly one. The actual canonical arguments request both genuine
+Stage3 and managed Stage4 planner receipts after Stage2 admission, using
+`verify-landed-compiler-fix` and `self-host-convergence-check` respectively.
+Evidence and live progress: `D:/dev/windows-release-7734-build-20261002/`.
+
+The Windows nested-supervisor fixture passed with actual new/inherited Jobs;
+its corrected test landed in PR2240. Collector cancellation, including the last
+partial batch, passed focused regressions and landed in PR2242. Neither result
+proves manager deployment or cross-host compiler-cache reuse. Those integration
+lanes remain active, with no changes to this frozen compiler source.
