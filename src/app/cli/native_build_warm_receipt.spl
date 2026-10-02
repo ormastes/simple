@@ -8,10 +8,13 @@
 # hit restores the cached artifact atomically and does not start the worker.
 
 use app.io.env_ops.{env_get, env_set, cwd}
+use app.io.file_ops.{path_absolute}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_open_published_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
 use app.cli.native_build_collection_profile_digest.{native_build_warm_collection_profile_digest}
 use compiler.common.structural_contracts.frontend_offload_switch.{frontend_offload_rows}
 use std.scv.compile_snapshot.{
-    scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1
+    scv_compile_snapshot_acquire_v1
 }
 use std.io_runtime.{
     dir_create_all, dir_exists, dir_list, file_copy, file_delete, file_exists,
@@ -311,17 +314,14 @@ fn _warm_scv_binding() -> text:
             return ""
     revision + "|" + commit + "|" + tree + "|" + inventory
 
-fn _warm_scv_prepare(args: [text]) -> bool:
+fn _warm_scv_prepare(args: [text], checkout: text = ".") -> bool:
     val inputs = _warm_scv_explicit_inputs(args)
     val inherited_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
-    if (inputs.0 == "" or inputs.1.len() == 0) and inherited_root != "":
-        val opened = scv_compile_snapshot_open_v1(
-            ".", inherited_root,
-            env_get("SIMPLE_SCV_REVISION_ID") ?? "",
-            env_get("SIMPLE_SCV_COMMIT_ID") ?? "",
-            env_get("SIMPLE_SCV_TREE_ID") ?? "",
-            env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "")
-        return opened.valid
+    if inherited_root != "":
+        # Explicit entry/source flags do not authorize rebinding the parent's
+        # immutable generation to a newer CURRENT during cache preparation.
+        val root = compile_source_inventory_plain_checkout_v1(path_absolute(checkout))
+        return compiler_source_authority_open_published_v1(root).valid
     if inputs.0 == "" or inputs.1.len() == 0:
         return false
     var inventory_roots = inputs.1
