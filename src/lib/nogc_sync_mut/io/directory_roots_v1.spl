@@ -1,0 +1,74 @@
+"""Owned SOSIX directory-pair admission; mutable filesystem I/O is a separate transaction.
+
+Positive tokens own native directory handles until close. Callers must revalidate
+before each admitted operation and must not mistake a preflight for an anchored
+write transaction. Failed revalidation never permits a cache hit or publication.
+"""
+use std.common.contracts.sosix.descriptor_stat_v1.{DescriptorFileIdentityV1}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64}
+
+@unsafe(reason: "bounded encoded root paths transferred to owned OS directory handles", capabilities: [ffi])
+extern fn rt_sosix_directory_pair_open_v1(shared: [u8], private_root: [u8]) -> i64
+@unsafe(reason: "mutex-owned cached root admission with sticky replacement rejection", capabilities: [ffi])
+extern fn rt_sosix_directory_pair_check_v1(shared: [u8], private_root: [u8]) -> i64
+@unsafe(reason: "revalidates owned directory token without dereferencing a caller pointer", capabilities: [ffi])
+extern fn rt_sosix_directory_pair_revalidate_v1(token: i64) -> i64
+@unsafe(reason: "exact caller-owned 64-byte identity output buffer", capabilities: [ffi, raw_ptr])
+extern fn rt_sosix_directory_pair_snapshot_v1(token: i64, output: i64, bytes: i64) -> i64
+@unsafe(reason: "consumes an owned directory token; stale tokens fail closed", capabilities: [ffi])
+extern fn rt_sosix_directory_pair_close_v1(token: i64) -> i64
+
+pub struct DirectoryPairIdentityV1:
+    shared: DescriptorFileIdentityV1
+    private_root: DescriptorFileIdentityV1
+    generation: i64
+
+pub fn directory_pair_open_v1(shared: text, private_root: text) -> i64:
+    if shared == "" or private_root == "" or shared.contains("\0") or private_root.contains("\0"):
+        return -22
+    val encoded_shared = shared.bytes()
+    val encoded_private = private_root.bytes()
+    if encoded_shared.len() >= 4096 or encoded_private.len() >= 4096: return -22
+    unsafe(capabilities: [ffi]):
+        rt_sosix_directory_pair_open_v1(encoded_shared, encoded_private)
+
+pub fn directory_pair_revalidate_v1(token: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_sosix_directory_pair_revalidate_v1(token)
+
+pub fn directory_pair_check_v1(shared: text, private_root: text) -> i64:
+    if shared == "" or private_root == "" or shared.contains("\0") or private_root.contains("\0"):
+        return -22
+    val encoded_shared = shared.bytes()
+    val encoded_private = private_root.bytes()
+    if encoded_shared.len() >= 4096 or encoded_private.len() >= 4096: return -22
+    unsafe(capabilities: [ffi]):
+        rt_sosix_directory_pair_check_v1(encoded_shared, encoded_private)
+
+pub fn directory_pair_close_v1(token: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_sosix_directory_pair_close_v1(token)
+
+pub fn directory_pair_identity_v1(token: i64) -> Result<DirectoryPairIdentityV1, i64>:
+    val output = unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(64)
+    if output == 0: return Err(-12)
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_sosix_directory_pair_snapshot_v1(token, output, 64)
+    if status != 0:
+        unsafe(capabilities: [ffi, raw_ptr]): rt_free(output)
+        return Err(status)
+    val result = unsafe(capabilities: [ffi, raw_ptr]):
+        DirectoryPairIdentityV1(
+            shared: DescriptorFileIdentityV1(filesystem_id: rt_ptr_read_i64(output, 0) as u64,
+                object_id_low: rt_ptr_read_i64(output, 8) as u64,
+                object_id_high: rt_ptr_read_i64(output, 16) as u64),
+            private_root: DescriptorFileIdentityV1(filesystem_id: rt_ptr_read_i64(output, 24) as u64,
+                object_id_low: rt_ptr_read_i64(output, 32) as u64,
+                object_id_high: rt_ptr_read_i64(output, 40) as u64),
+            generation: rt_ptr_read_i64(output, 48))
+    unsafe(capabilities: [ffi, raw_ptr]): rt_free(output)
+    Ok(result)
+
+export DirectoryPairIdentityV1, directory_pair_open_v1, directory_pair_revalidate_v1
+export directory_pair_close_v1, directory_pair_identity_v1
+export directory_pair_check_v1

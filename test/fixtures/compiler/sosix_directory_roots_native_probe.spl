@@ -1,0 +1,30 @@
+# Compile with an admitted self-hosted producer and the candidate runtime.
+# Avoid assert(...) until the independently tracked native assert ABI is fixed.
+use std.nogc_async_mut.sosix.directory_roots_v1.{sosix_directory_pair_open_v1,
+    sosix_directory_pair_revalidate_v1, sosix_directory_pair_identity_v1,
+    sosix_directory_pair_close_v1}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+
+fn main() -> i64:
+    val shared = env_get_opt("SIMPLE_DIRECTORY_PROBE_SHARED") ?? ""
+    val private_root = env_get_opt("SIMPLE_DIRECTORY_PROBE_PRIVATE") ?? ""
+    val expected = env_get_opt("SIMPLE_DIRECTORY_PROBE_EXPECT") ?? "accept"
+    val token = sosix_directory_pair_open_v1(shared, private_root)
+    if expected == "overlap":
+        if token != -1001:
+            print "DIRECTORY_PROBE_FAILURE expected_overlap actual={token}"
+            return 1
+        print "DIRECTORY_PROBE overlap-rejected"
+        return 0
+    if token <= 0:
+        print "DIRECTORY_PROBE_FAILURE open={token}"
+        return 2
+    if sosix_directory_pair_revalidate_v1(token) != 0: return 3
+    val identity = sosix_directory_pair_identity_v1(token).unwrap()
+    if identity.generation != token or identity.shared.object_id_low == 0u64 or
+            identity.private_root.object_id_low == 0u64:
+        return 4
+    print "DIRECTORY_PROBE shared_fs={identity.shared.filesystem_id} shared_object={identity.shared.object_id_low} private_fs={identity.private_root.filesystem_id} private_object={identity.private_root.object_id_low} generation={identity.generation}"
+    if sosix_directory_pair_close_v1(token) != 0: return 5
+    if sosix_directory_pair_revalidate_v1(token) != -9: return 6
+    0
