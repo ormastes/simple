@@ -25,6 +25,19 @@ The source edit is a new bounded repair; do not restart the unchanged failed
 candidate. Keep the 7 GB aggregate limit and 1200-second hello timeout. Only
 compiled-and-executed hello success may advance the Phase3/4 route.
 
+The Windows selective candidate source is now frozen at
+`6b9edd328cc2fd3d7372c2c685a1b2256999fa1c`, tree
+`fab322d37cdeefac46f3b547868fc707aa32ee58`. Materialization completed with
+61 links created, zero pending/failed; receipt SHA256 is
+`0674217af447de6d04010752c288edbc8b641a90ca54883cfc6271e1e20c56cd`.
+The guarded Phase2 rebuild launched as seed PID41912 / exec session90286;
+the initial root observation confirmed CPU61.25s and RSS908,976,128B.
+This is build activity, not a produced or admitted compiler. Its logs are
+under `D:/dev/bootstrap-memory-fix-validation-20261002/phase2/`.
+Before hello starts, its wrapper must explicitly override inherited frontend
+and HIR cache environment variables with the new producer's private paths;
+`--cache-dir` alone does not override those environment variables.
+
 ### User-authorized 7 GB Windows attempt
 
 After hello5, the user explicitly changed the cap to 7 GB. The aggregate
