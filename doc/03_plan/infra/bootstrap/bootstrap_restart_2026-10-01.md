@@ -1448,3 +1448,39 @@ its corrected test landed in PR2240. Collector cancellation, including the last
 partial batch, passed focused regressions and landed in PR2242. Neither result
 proves manager deployment or cross-host compiler-cache reuse. Those integration
 lanes remain active, with no changes to this frozen compiler source.
+
+### 2026-10-02 managed continuation candidate and outstanding scope
+
+The isolated `D:/dev/managed-go-to-end-20261002` candidate distinguishes a
+reaped compiler ERROR/1 from transport, admission, timeout, cancellation and
+unknown failures. Its shell scheduling regression passed; compiled Simple
+acceptance tests and independent review are still outstanding. This is not a
+deployed manager or evidence of complete module traversal.
+
+Root review found that the initial scheduler's 20 outcomes cover 12 binaries,
+four indexes and four module groups. Source review confirmed that the requested
+interpreter binary and six later compiler/loader/interpreter suites are absent
+from this canonical schedule; prerequisite Stage2 tests do not cover them.
+Phase3/Phase4 are serial with no outer parallel scheduler. Implementation and
+admission design are assigned; do not equate 20 outcomes with complete scope.
+
+Manager preparation compares the full tool source snapshot with the admitted
+Stage2 source. Therefore this patched manager cannot be attached to the running
+`7734f947be` candidate's receipts. Build it through a subsequent candidate that
+contains the fixes; retain the current build and its cache meanwhile.
+
+The proposed shared parse CAS aliases are `D:/dev/simple-shared-parse-cas-v1`
+and `/mnt/d/dev/simple-shared-parse-cas-v1`. Configuration alone is not cross-host
+reuse proof. Keep native outputs and writable producer/backend caches isolated;
+actual Windows/Linux identity and reuse qualification remain outstanding.
+
+The live replacement candidate subsequently completed `rust-seed-build` in
+11m26s with supervisor and native process status zero. It advanced to
+`rust-rust-native-all-build`, with new Cargo/rustc children observed. This proves
+the seed build step, not Stage2 admission or a Phase3/Phase4 executable.
+
+Independent review identified two continuation safety gaps in the manager
+candidate: restored FAILED receipts must be re-admitted before any new dispatch,
+and unknown transport/poll/collection outcomes must stop new dispatch while
+existing children are cleaned up. Both are assigned for correction; the patch
+is not approved for deployment yet.
