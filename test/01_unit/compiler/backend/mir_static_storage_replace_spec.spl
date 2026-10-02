@@ -1,0 +1,77 @@
+use std.spec
+use std.spec.step
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirStatic, MirType}
+use compiler.mir.mir_static_storage.{mir_static_storage_finalize}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn static_slot(id: i64, name: text, mutable: bool) -> MirStatic:
+    MirStatic(symbol: SymbolId(id: id), name: name, type_: MirType.i64(),
+        init: nil, is_mutable: mutable)
+
+describe "runtime module static storage replacement":
+    it "inserts a runtime-only static into an empty module":
+        step("Create a runtime-only static slot")
+        val result = mir_static_storage_finalize({}, [static_slot(7, "items", false)])
+        expect(result.values().len()).to_equal(1)
+        expect(result.values()[0].name).to_equal("items")
+
+    it "replaces every provisional entry with the finalized slot by numeric identity":
+        step("Model duplicate struct-key entries retained by a bootstrap producer")
+        var statics: Dict<SymbolId, MirStatic> = {}
+        statics[SymbolId(id: 1)] = static_slot(7, "items", true)
+        statics[SymbolId(id: 2)] = static_slot(7, "items", true)
+        statics[SymbolId(id: 3)] = static_slot(8, "other", true)
+        val result = mir_static_storage_finalize(statics, [static_slot(7, "items", false)])
+        var items_count = 0
+        var other_count = 0
+        for slot in result.values():
+            if slot.symbol.id == 7:
+                items_count = items_count + 1
+                expect(slot.is_mutable).to_equal(false)
+            elif slot.symbol.id == 8:
+                other_count = other_count + 1
+                expect(slot.name).to_equal("other")
+        expect(result.values().len()).to_equal(2)
+        expect(items_count).to_equal(1)
+        expect(other_count).to_equal(1)
+
+    it "keeps different symbols even when their names conflict":
+        step("Preserve distinct identity so backend duplicate diagnostics remain possible")
+        var statics: Dict<SymbolId, MirStatic> = {}
+        statics[SymbolId(id: 1)] = static_slot(1, "same", true)
+        val result = mir_static_storage_finalize(statics, [static_slot(2, "same", false)])
+        expect(result.values().len()).to_equal(2)
+
+    it "applies a batch of finalized slots without retaining older replacements":
+        step("Finalize two globals and replace a provisional value twice")
+        val result = mir_static_storage_finalize({}, [
+            static_slot(7, "items", true),
+            static_slot(8, "other", true),
+            static_slot(7, "items", false)])
+        expect(result.values().len()).to_equal(2)
+        for slot in result.values():
+            if slot.symbol.id == 7:
+                expect(slot.is_mutable).to_equal(false)
+
+describe "public array global LLVM storage", tag: ["only-compiled"]:
+    it "emits exactly one storage definition for ANY_CLASSES":
+        step("Lower the recorded classifier global through HIR, MIR, and LLVM")
+        val source = "pub val ANY_CLASSES: [text] = [\"param\", \"ret\", \"field\", \"local\", \"generic\", \"cast\", \"match\"]\n"
+        val ast = parse_full_frontend(source, "classify.spl", "classify.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("classify.spl")
+        val hir = hir_lowering.lower_module(ast)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        var emitter = MirToLlvm.create("classify", CodegenTarget.X86_64, nil)
+        val ir = emitter.translate_module_with_entry(mir, false)
+        var definitions = 0
+        for line in ir.split("\n"):
+            if line.starts_with("@g_") and line.contains("ANY_CLASSES = "):
+                definitions = definitions + 1
+        expect(definitions).to_equal(1)
