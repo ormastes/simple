@@ -1,7 +1,27 @@
 use std.spec.{describe, it, expect, step}
-use app.io.mod (cwd, dir_create, file_write, process_run)
+use app.io.mod (cwd, dir_create, dir_list, file_read, file_write, process_run)
+use app.io.env_ops.{host_os}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
-use app.scv.db.git_settlement_transport.{db_git_settlement_ref_head, db_git_settlement_reconcile}
+use app.scv.db.git_settlement_transport.{db_git_settlement_ref_head, db_git_settlement_reconcile, db_git_settlement_reconcile_history}
+
+fn setup_item2_history_paths(source: text) -> (text, text):
+    val root = source[0:source.len() - 7]
+    val writer = "{root}/writer"
+    val scratch = "{root}/scratch"
+    settlement_git(["clone", "-q", source, writer])
+    settlement_git(["-C", writer, "config", "user.name", "Second settlement writer"])
+    settlement_git(["-C", writer, "config", "user.email", "fixture@example.invalid"])
+    expect(dir_create(scratch, true)).to_be(true)
+    (writer, scratch)
+
+fn check_item2_source_state(source: text) -> text:
+    val head = settlement_git(["-C", source, "rev-parse", "HEAD"])
+    val refs = settlement_git(["-C", source, "show-ref"])
+    val status = settlement_git(["-C", source, "status", "--porcelain"])
+    val objects = settlement_git(["-C", source, "count-objects", "-v"])
+    val index = settlement_git(["-C", source, "hash-object", ".git/index"])
+    val contents = file_read("{source}/state.txt")
+    "{head}\n{refs}\n{status}\n{objects}\n{index}\n{contents}"
 
 fn settlement_git(args: [text]) -> text:
     val (out, _err, code) = process_run("git", args)
@@ -33,6 +53,122 @@ fn settlement_candidate(source: text, content: text) -> text:
     settlement_git(["-C", source, "rev-parse", "HEAD"])
 
 describe "Git settlement read-back transport":
+    it "finds transport inclusion in remote-only history without changing source Git state":
+        # @req REQ-007 REQ-008 REQ-022
+        step("Publish a candidate, then advance the authority from another writer")
+        val (source, remote, genesis) = settlement_paths()
+        val candidate = settlement_candidate(source, "accepted\n")
+        settlement_git(["-C", source, "push", "-q", remote, "{candidate}:refs/heads/settled"])
+        val (writer, scratch) = setup_item2_history_paths(source)
+        val later = settlement_candidate(writer, "later\n")
+        settlement_git(["-C", writer, "push", "-q", remote, "{later}:refs/heads/settled"])
+        expect(file_write("{source}/.git/FETCH_HEAD", "sentinel\n")).to_be(true)
+        val before = check_item2_source_state(source)
+
+        step("Inspect canonical raw history in an independently owned object store")
+        val result = db_git_settlement_reconcile_history(source, remote, genesis, candidate, scratch)
+        if host_os() == "windows":
+            expect(result.code).to_equal("SCVDB_SCRATCH_SCOPE")
+        else:
+            expect(result.code).to_equal("published")
+            expect(result.observed_head).to_equal(later)
+        expect(check_item2_source_state(source)).to_equal(before)
+        expect(file_read("{source}/.git/FETCH_HEAD")).to_equal("sentinel\n")
+        expect(dir_list(scratch).len()).to_equal(0)
+
+    it "distinguishes a competing canonical successor from the uncertain candidate":
+        # @req REQ-008 REQ-022
+        step("Fork two candidates from the same expected authority head")
+        val (source, remote, genesis) = settlement_paths()
+        val (writer, scratch) = setup_item2_history_paths(source)
+        val candidate = settlement_candidate(source, "uncertain\n")
+        val competing = settlement_candidate(writer, "competing\n")
+        val later = settlement_candidate(writer, "successor\n")
+        settlement_git(["-C", writer, "push", "-q", remote, "{later}:refs/heads/settled"])
+        val before = check_item2_source_state(source)
+
+        step("Prove absence on the one-parent canonical chain back to the expected head")
+        val result = db_git_settlement_reconcile_history(source, remote, genesis, candidate, scratch)
+        if host_os() == "windows":
+            expect(result.code).to_equal("SCVDB_SCRATCH_SCOPE")
+        else:
+            expect(result.code).to_equal("not_published")
+            expect(result.observed_head).to_equal(later)
+        expect(check_item2_source_state(source)).to_equal(before)
+        expect(dir_list(scratch).len()).to_equal(0)
+
+    it "rejects scratch storage inside the checkout or Git common directory":
+        # @req REQ-007 REQ-008
+        step("Keep the checkout and Git owner storage out of scratch scope")
+        val (source, remote, genesis) = settlement_paths()
+        val candidate = settlement_candidate(source, "candidate\n")
+        val before = check_item2_source_state(source)
+        expect(db_git_settlement_reconcile_history(source, remote, genesis, candidate, source).code).to_equal("SCVDB_SCRATCH_SCOPE")
+        expect(db_git_settlement_reconcile_history(source, remote, genesis, candidate, "{source}/.git").code).to_equal("SCVDB_SCRATCH_SCOPE")
+        expect(check_item2_source_state(source)).to_equal(before)
+
+    it "rejects checkout aliases and linked-worktree common storage for scratch":
+        # @req REQ-007 REQ-008
+        step("Create a linked checkout whose Git directory lives in another owner")
+        val (source, remote, genesis) = settlement_paths()
+        val candidate = settlement_candidate(source, "candidate\n")
+        val root = source[0:source.len() - 7]
+        val linked = "{root}/linked"
+        settlement_git(["-C", source, "worktree", "add", "--detach", linked, candidate])
+        val before = check_item2_source_state(source)
+        expect(db_git_settlement_reconcile_history(linked, remote, genesis, candidate, "{source}/.git").code).to_equal("SCVDB_SCRATCH_SCOPE")
+        if host_os() != "windows":
+            step("Resolve a symlink before deciding whether scratch belongs to the checkout")
+            val (out, err, code) = process_run("ln", ["-s", source, "{root}/alias"])
+            expect(code).to_equal(0)
+            expect(db_git_settlement_reconcile_history(source, remote, genesis, candidate, "{root}/alias").code).to_equal("SCVDB_SCRATCH_SCOPE")
+        expect(check_item2_source_state(source)).to_equal(before)
+
+    it "holds allocation for merge history instead of guessing candidate exclusion":
+        # @req REQ-008 REQ-022
+        step("Create a competing branch and a merge in the authority history")
+        val (source, remote, genesis) = settlement_paths()
+        val (writer, scratch) = setup_item2_history_paths(source)
+        val candidate = settlement_candidate(source, "uncertain\n")
+        settlement_git(["-C", writer, "checkout", "-q", "-b", "side"])
+        expect(file_write("{writer}/side.txt", "side\n")).to_be(true)
+        settlement_git(["-C", writer, "add", "side.txt"])
+        settlement_git(["-C", writer, "commit", "-q", "-m", "side"])
+        settlement_git(["-C", writer, "checkout", "-q", "--detach", genesis])
+        val competing = settlement_candidate(writer, "competing\n")
+        settlement_git(["-C", writer, "merge", "-q", "--no-ff", "-m", "ambiguous merge", "side"])
+        val merged = settlement_git(["-C", writer, "rev-parse", "HEAD"])
+        settlement_git(["-C", writer, "push", "-q", remote, "{merged}:refs/heads/settled"])
+        val result = db_git_settlement_reconcile_history(source, remote, genesis, candidate, scratch)
+        if host_os() == "windows":
+            expect(result.code).to_equal("SCVDB_SCRATCH_SCOPE")
+        else:
+            expect(result.code).to_equal("SCVDB_HISTORY_REQUIRED")
+            expect(result.observed_head).to_equal(merged)
+        expect(dir_list(scratch).len()).to_equal(0)
+
+    it "holds allocation when the bounded history cannot reach the uncertain candidate":
+        # @req REQ-008 NFR-013
+        step("Place thirty-three successors after the candidate on the authority")
+        val (source, remote, genesis) = settlement_paths()
+        val candidate = settlement_candidate(source, "candidate\n")
+        val (writer, scratch) = setup_item2_history_paths(source)
+        var later = candidate
+        for index in 0..33:
+            later = settlement_candidate(writer, "successor {index}\n")
+        settlement_git(["-C", writer, "push", "-q", remote, "{later}:refs/heads/settled"])
+        val before = check_item2_source_state(source)
+
+        step("Return an unresolved status at the work bound and clean scratch")
+        val result = db_git_settlement_reconcile_history(source, remote, genesis, candidate, scratch)
+        if host_os() == "windows":
+            expect(result.code).to_equal("SCVDB_SCRATCH_SCOPE")
+        else:
+            expect(result.code).to_equal("SCVDB_HISTORY_REQUIRED")
+            expect(result.observed_head).to_equal(later)
+        expect(check_item2_source_state(source)).to_equal(before)
+        expect(dir_list(scratch).len()).to_equal(0)
+
     it "reconciles a lost acknowledgement from the actual authority ref":
         # @req REQ-008 REQ-022
         step("Prepare a local Git authority and a one-parent candidate")

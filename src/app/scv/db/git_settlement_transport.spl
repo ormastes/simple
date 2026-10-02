@@ -4,7 +4,10 @@
 # A remote URL contains no credential bytes. Git's configured credential helper
 # may authenticate an HTTPS read without exposing that credential here.
 
-use app.io.mod (is_dir, process_run_timeout)
+use app.io.mod (is_dir, dir_remove_all, process_run_timeout)
+use app.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
 
 struct DbGitSettlementHead:
     code: text
@@ -124,3 +127,101 @@ fn db_git_settlement_reconcile(source: text, remote: text, expected_old_oid: tex
 
 export DbGitSettlementHead, DbGitSettlementReadback
 export db_git_settlement_ref_head, db_git_settlement_reconcile
+
+# This transport-only read-back neither admits signed receipts nor grants an
+# allocation lease. Call it outside SJ leases. The caller supplies an existing
+# scratch parent; only the securely created child is ever removed.
+fn _db_git_path_contains(parent: text, child: text) -> bool:
+    parent == "/" or parent == child or child.starts_with("{parent}/")
+
+fn _db_git_scratch_parent(source: text, scratch_parent: text) -> text:
+    # The current Windows path facade cannot prove junction/symlink identity.
+    # Match app.io.env_access_host's fail-closed policy until it can.
+    if host_os() == "windows":
+        return ""
+    # This process facade inherits the environment. Until it supports a clean
+    # environment, refuse overrides that could redirect scratch Git writes.
+    for key in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH", "GIT_SHALLOW_FILE", "GIT_QUARANTINE_PATH"]:
+        if env_get(key).len() > 0:
+            return ""
+    if not _db_git_local_path(source) or not is_dir(source) or not _db_git_local_path(scratch_parent) or not is_dir(scratch_parent):
+        return ""
+    val (checkout, checkout_ok) = _db_git_run(source, ["rev-parse", "--show-toplevel"])
+    val source_path = path_absolute(if checkout_ok: checkout else: source)
+    val parent_path = path_absolute(scratch_parent)
+    val (common, ok) = _db_git_run(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if not ok or source_path.len() <= 0 or parent_path.len() <= 0 or common.len() <= 0:
+        return ""
+    val common_path = path_absolute(common)
+    if common_path.len() <= 0:
+        return ""
+    if _db_git_path_contains(source_path, parent_path) or _db_git_path_contains(common_path, parent_path):
+        return ""
+    parent_path
+
+fn _db_git_history_status(scratch: text, observed: text, expected: text, candidate: text) -> text:
+    var cursor = observed
+    # Deliberately bound work. Larger history requires a separate sync pass,
+    # never a guessed answer or an unbounded network/history walk under a lease.
+    for depth in 0..32:
+        if cursor == candidate:
+            return "published"
+        if cursor == expected:
+            return "not_published"
+        val (kind, kind_ok) = _db_git_run(scratch, ["cat-file", "-t", cursor])
+        val (commit, commit_ok) = _db_git_run(scratch, ["cat-file", "-p", cursor])
+        if not kind_ok or kind != "commit" or not commit_ok:
+            return "SCVDB_HISTORY_REQUIRED"
+        var parent = ""
+        var parents = 0
+        for line in commit.split("\n"):
+            if line == "":
+                break
+            if line.starts_with("parent "):
+                parent = line[7:]
+                parents = parents + 1
+        if parents != 1:
+            return "SCVDB_HISTORY_REQUIRED"
+        cursor = parent
+    "SCVDB_HISTORY_REQUIRED"
+
+fn _db_git_read_history(scratch: text, source: text, remote: text, expected: text, candidate: text, observed: text) -> DbGitSettlementReadback:
+    val format = _db_git_object_format(source)
+    val (_init_out, initialized) = _db_git_run(scratch, ["init", "--bare", "--template=", "--object-format={format}", "."])
+    if not initialized:
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_UNAVAILABLE", observed_head: observed)
+    # No refspec destination, FETCH_HEAD, tags, source ref, or source object
+    # writes. Fetch the exact advertised OID, then re-read authority for races.
+    val (_fetch_out, fetched) = _db_git_run(scratch, ["-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null", "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=33", remote, observed])
+    if not fetched:
+        return DbGitSettlementReadback(code: "SCVDB_READBACK_UNAVAILABLE", observed_head: observed)
+    val status = _db_git_history_status(scratch, observed, expected, candidate)
+    val current = db_git_settlement_ref_head(source, remote)
+    if current.code != "ok":
+        return DbGitSettlementReadback(code: current.code, observed_head: observed)
+    if current.oid != observed:
+        return DbGitSettlementReadback(code: "SCVDB_READBACK_MOVED", observed_head: current.oid)
+    DbGitSettlementReadback(code: status, observed_head: observed)
+
+fn db_git_settlement_reconcile_history(source: text, remote: text, expected_old_oid: text, candidate_oid: text, scratch_parent: text) -> DbGitSettlementReadback:
+    val parent = _db_git_scratch_parent(source, scratch_parent)
+    if parent.len() <= 0:
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_SCOPE", observed_head: "")
+    val initial = db_git_settlement_reconcile(source, remote, expected_old_oid, candidate_oid)
+    if initial.code != "SCVDB_HISTORY_REQUIRED":
+        return initial
+    val scratch = secure_temp_dir_raw(parent, "scv-readback-")
+    if scratch.len() <= 0:
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_UNAVAILABLE", observed_head: initial.observed_head)
+    if path_absolute(scratch) != scratch or not scratch.starts_with("{parent}/scv-readback-"):
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_SCOPE", observed_head: initial.observed_head)
+    val result = _db_git_read_history(scratch, source, remote, expected_old_oid, candidate_oid, initial.observed_head)
+    # Never follow a replacement alias during cleanup. A changed identity is
+    # reported for caller recovery, not recursively removed on a guessed path.
+    if path_absolute(scratch) != scratch:
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_SCOPE", observed_head: result.observed_head)
+    if not dir_remove_all(scratch):
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_CLEANUP", observed_head: result.observed_head)
+    result
+
+export db_git_settlement_reconcile_history
