@@ -1,23 +1,25 @@
-# Windows Cranelift Phase2 80-worker timeout failure
+# Windows Cranelift Phase2 build with 80 workers: timeout failure
 
-Status: FAIL; no Phase2 compiler or downstream executable tests produced.
-Source: frozen release HEAD1ffaf797bab1b6747d4e24856ed6c1af990e178e.
-Tools: evidenced MSVC LLVM23.1.1. Native jobs80, host CPUs64, explicit-count authority. No stub fallback.
+**Status: FAIL.** No Phase2 compiler or downstream native test executables were produced. The tested source was frozen release commit `1ffaf797bab1b6747d4e24856ed6c1af990e178e`, with the evidenced MSVC LLVM 23.1.1 toolchain. The build requested 80 workers on a host reporting 64 CPUs, using explicit-count authority and `SIMPLE_NO_STUB_FALLBACK=1`.
 
 ## Authoritative results
 
-Additional authorized attempt session96437 terminal exit1. Windows bounded-process receipt reasonchild-exit/native_exit_status1; outer deadline7200seconds was not the failure. Stage2 log reports compiled995, reused0, failed123 over1118source entries;995object files remain in private stage2-native-cache. All123failure rows are timeout300s; no non-timeout failure rows. Groups: compiler101,lib14,app8. Failed bootstrap_main.spl prevented compiler output, so full CLI/test runner/native interpreter-loader-compiler qualification remained BLOCKED. No retry was launched.
+The additional authorized attempt, session `96437`, terminated with exit 1. Its Windows bounded-process receipt records `reason=child-exit` and `native_exit_status=1`. The independent 7,200-second whole-process deadline did not cause the failure.
 
-Paths: C:/Users/user/.simple/worktrees/simple-windows-phase2/evidence/cranelift-attempt4/{producer.log,producer.receipt.env}; build/bootstrap-cranelift80/logs/x86_64-pc-windows-msvc/stage2-native-build.log. Complete123file size/group metadata: runtime/cranelift80-timeout-file-metadata.json.
+The native build reported `compiled=995 reused=0 failed=123` across 1,118 source entries. All 123 failure rows report `timeout (300s)`; none report another failure type. The failures comprise 101 compiler files, 14 library files, and 8 application files. The private Stage2 native cache retains 995 object files. Because `bootstrap_main.spl` also timed out, no Phase2 compiler was emitted; full CLI, test runner, and native interpreter, loader, and compiler qualification remain **BLOCKED**. No retry was launched.
 
-## Exact timeout mechanism
+The [complete failed-file metadata](windows_cranelift_phase2_timeout_files_2026-10-02.json) records all 123 paths, their source sizes, and their groups. Retained process evidence is under `C:/Users/user/.simple/worktrees/simple-windows-phase2/evidence/cranelift-attempt4/`: `producer.log` and `producer.receipt.env`. The native build log is `build/bootstrap-cranelift80/logs/x86_64-pc-windows-msvc/stage2-native-build.log` under the same worktree storage root.
 
-Rust bootstrap-only compiler/src/pipeline/native_project/compiler.rs regular Rayon jobs call compile_file_safe after their queue slot starts(lines479-487). compile_file_safe1038spawns a compiler thread; wait_for_compiler_thread1137uses recv_timeout with wall duration, not CPU time. Therefore pre-dispatch Rayon queue wait is excluded; scheduling starvation and import resolution/codegen after thread spawn count toward300seconds. On timeout the JoinHandle drops without joining/cancellation; that detached worker can continue while Rayon admits further work. This can exceed intended concurrency after timeout waves. No evidence here establishes per-thread CPU contribution or the fraction spent resolving imports.
+## Timeout mechanism
 
-The source already documents facade starvation at32workers and sequentially admits recognized contention-sensitive entries before broad fanout(lines460-477). Failure spans268byte driver_hir_pipeline_impl.spl through247992byte generated/hir_codec.spl, so input byte size alone is not a useful budget.
+The bootstrap-only Rust compiler's `compiler/src/pipeline/native_project/compiler.rs` dispatches regular Rayon jobs to `compile_file_safe` after their queue slot begins. That function spawns a compiler thread; `wait_for_compiler_thread` uses `recv_timeout` with a wall-clock duration. Queue waiting before dispatch is excluded. Scheduling contention, import resolution, and code generation after the compiler thread is spawned count toward the 300-second timeout. Per-thread CPU and phase timing were not measured in this attempt.
 
-## Follow-up and cache policy
+On timeout, the join handle is dropped without joining or cancelling its worker. That detached worker can continue while Rayon admits more work, potentially increasing concurrency beyond the requested pool after timeout waves. The same source already documents facade starvation in a 32-worker build and compiles recognized contention-sensitive entries sequentially before broad fanout.
 
-Existing SIMPLE_NATIVE_FILE_TIMEOUT config and canonical Stage2 --timeout forwarding support a finite larger diagnostic budget; no new configuration owner is needed. Root plans LLVM1200seconds per-file under existing7200seconds overall. Cranelift retry requires explicit additional authorization because its granted attempt is consumed. Preserve995completed objects and all failed frontend/HIR records; a later compatible incremental attempt must report actual reused/rebuilt counts, not infer hits from directory presence.
+Failed input sizes range from the 268-byte `driver_hir_pipeline_impl.spl` to the 247,992-byte generated `hir_codec.spl`. Source byte size alone does not explain or adequately budget this workload.
 
-Suggested runtime investigation: record queue dispatch, actual compiler-thread start/completion, phase timing and CPU metrics; measure detached timed-out workers; make timeout cancellation/concurrency policy explicit without silently permitting unresolved stubs, disabling persistence, or weakening source/runtime identity. No product/seed source edits or unbounded retry made in this diagnostic.
+## Follow-up and cache preservation
+
+Existing `SIMPLE_NATIVE_FILE_TIMEOUT` configuration and canonical Stage2 `--timeout` forwarding support a larger finite diagnostic budget. A new configuration owner is unnecessary. The [reviewable retry proposal](windows_cranelift_phase2_timeout_retry_proposal_2026-10-02.md) specifies 1,200 seconds per file under the existing 7,200-second whole-process bound. Its execution requires fresh user authorization because the additional Cranelift attempt was consumed.
+
+Preserve the 995 completed objects and retained frontend/HIR records. Any later compatible incremental attempt must report actual reuse and rebuild counts. Directory existence does not establish a cache hit. Further performance work should record queue dispatch, compiler-thread start and completion, phase timings, CPU metrics, and detached workers; it must preserve source/runtime identity, persistence, and the prohibition on unresolved stubs. This diagnostic made no product or seed source edits.
