@@ -1638,3 +1638,49 @@ Manager implementation is checkpointed in draft PR #2255 (`54c030180e`),
 with shell/static checks but no native deployment proof. Actual manager
 primitive execution, full-CLI streaming qualification, remaining inventories,
 six suites and Windows/WSL shared-cache qualification remain outstanding.
+
+### 2026-10-03 reviewed diagnostic queues resumed
+
+The replacement route `phase34-diagnostic-resume1` is now running under the
+7734 build root. The old route remains terminal; it was not restarted. Fresh
+pair admission charged two 7 GB reservations, checked physical and commit
+availability, and enforced the disk floor. Windows process inspection confirmed
+two live `simple.exe` descendants of the replacement route. This is a launch
+checkpoint, not a completion receipt; consult its terminal/guard receipts for
+later state.
+
+Phase3 LLVM preserved the first 28 guarded results and resumed the suffix at
+original module 29. Phase4 LLVM retained its six failed binary tasks and recorded
+all three dependent suites as BLOCKED (76), because the required CLI/interpreter
+artifacts are absent. Its independent module inventory is running. No blocked
+suite is counted as a test pass or an executed test failure.
+
+The resume correction preserves nonzero suffix infrastructure statuses and
+returns ordinary failure when the merged inventory contains carried failures.
+Focused source review found no remaining P0/P1. The synthetic merge fixture
+contained both old and new failures; it does not prove the isolated case of an
+old failure followed by an entirely successful suffix.
+
+Standalone manager classifier and scheduler native probes are prepared against
+the pinned PR2255 source, using the hello-qualified bootstrap compiler's
+supported `native-build` command. They remain unrun and need separately charged
+resource admission. Their success would establish primitive behavior only, not
+full managed queues or cross-host cache deployment. The streaming FullCLI
+diagnostic is also queued; it must not silently repeat the capped ordinary path.
+Linux remains held on the unresolved provider-bound parse crash. Neither
+canonical Stage2 admission nor Phase3/Phase4 completion is claimed.
+
+An explicit temporary handoff to the manager probes has subsequently been
+requested through both existing resume1 stop markers. The legacy paired
+coordinator has no graceful pause handshake: a lane stopping at a task boundary
+can cancel the sibling task. Preserve interrupted rows and caches for requeue.
+At this checkpoint the pair session was still live and no pair terminal receipt
+existed, so both 7 GB reservations remained held; the manager must not launch
+until the pair and its Job guards positively prove quiescence.
+
+The first concrete module failure fix is isolated in draft PR #2264, commit
+`728a98d4791425b5ab7227e5af37a5e74afce697`: ten Curve25519 byte accesses now
+call the existing signed-index helper, and the stale clamp probe calls the
+existing clamp helper. Byte-loading and clamp-boundary regressions were added.
+Static checks passed; runtime/native checks remain queued and the patch is not
+landed or included in the frozen 7734 build.
