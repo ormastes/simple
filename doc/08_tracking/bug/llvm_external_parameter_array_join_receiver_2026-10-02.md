@@ -11,3 +11,5 @@ The underlying bootstrap compiler defect remains separately actionable: receiver
 Evidence: `D:/dev/linux-mir-crash-20261002/class-after-184d/{stdout.log,rss.env,external-declare.asm}`. Compile exit 1 was a normal LLVM error, not a crash. The original loader regression was not dispatched after this failed gate. The advertised retained IR path was removed by the driver; the diagnostic log and native disassembly are retained.
 
 Validation of the annotated source is pending a newly pinned Phase 2 build, native class execution, and the original loader closure. No native PASS is claimed yet.
+
+Follow-up evidence: producer `8f817f2b6d5430ab6a18f36e8c9e136857783341adfea8741acfe7a5aea552d4` includes the annotation. The class control now compiles, links, and executes successfully with both expected field values; the invalid allocator declaration is gone. The original loader advances to a separate missing expression-presence crash, so full bootstrap validation remains incomplete. See `D:/dev/linux-mir-crash-20261002/class-control-8f/evidence.json`.

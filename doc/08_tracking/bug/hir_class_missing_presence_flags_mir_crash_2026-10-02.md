@@ -68,3 +68,15 @@ binding bug recorded in
 The executable was not produced, so class execution, the original loader
 closure, and downstream Phase 3/4 remain pending. No native regression or full
 production verification PASS is claimed.
+
+Follow-up producer `8f817f2b6d5430ab6a18f36e8c9e136857783341adfea8741acfe7a5aea552d4`
+from combined source `fcb35f85cdcc27f606b149274fb6f3432b50d24f` includes
+the array annotation. The separate class control now compiles and executes:
+ordinary value 37 and exported/documented value 42 both pass, with exact stdout
+`class-optional-metadata-ok`. Peak compile/run RSS was 253,572/8,192 KiB;
+both guard receipts are complete, exit zero and quiescent. The original
+assert-based fixture remains a failing regression for the separately recorded
+libc assertion ABI bug. The original loader then hit the distinct HIR-expression
+presence defect documented in
+`hir_expression_missing_type_presence_condition_crash_2026-10-02.md`.
+Evidence is sealed in `D:/dev/linux-mir-crash-20261002/class-control-8f/evidence.json`.
