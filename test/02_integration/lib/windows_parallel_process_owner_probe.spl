@@ -1,7 +1,9 @@
 # Build this probe and its child fixture with an admitted pure-Simple producer.
 # No assertions are substituted by source inspection or a bootstrap seed.
 use std.nogc_sync_mut.io.process_ops.{process_spawn_redirected, process_wait, process_is_running, process_kill}
-use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE}
+use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, _windows_redirected_owner_lease}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_poll_v1, windows_process_collect_v1, windows_process_collected_proof_v1}
+use std.test_runner.runner_lifecycle.{spawn_tracked_redirected_process, poll_tracked_process}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text, file_exists}
@@ -125,6 +127,42 @@ fn main() -> i64:
     failed = failed + check(lifetime_completed == 1025, "historical starts cross former 1024 bound")
     print "lifetime_completed={lifetime_completed} previous_bound=1024"
 
+    # Real observation Err: a copied genuine owner lease is collected first.
+    # No forged slot/closed flag and no corrupted native HANDLE are involved.
+    val owned_before = proc_slot_active()
+    val alias_token = spawn_tracked_redirected_process(child, ["fast", lifetime, "alias", quote],
+        lifetime + "/alias.out", lifetime + "/alias.err", 30000)
+    match _windows_redirected_owner_lease(alias_token):
+        case Err(reason):
+            executed = executed + 1
+            failed = failed + check(false, "genuine retained lease unavailable")
+        case Ok(lease):
+            executed = executed + 1
+            failed = failed + check(not windows_process_collected_proof_v1(lease), "live/terminal lease is not closure proof")
+            val alias_started = time_now_unix_micros()
+            var collected = false
+            while not collected and (time_now_unix_micros() - alias_started) / 1000 < 30000:
+                match windows_process_poll_v1(lease):
+                    case Err(reason): break
+                    case Ok(receipt):
+                        if receipt.terminal:
+                            match windows_process_collect_v1(lease):
+                                case Err(reason): break
+                                case Ok(terminal): collected = true
+                if not collected: thread_sleep(1)
+            executed = executed + 1
+            failed = failed + check(collected and windows_process_collected_proof_v1(lease), "copied lease has real release proof")
+            executed = executed + 1
+            failed = failed + check(process_is_running(alias_token) and proc_slot_active() == owned_before + 1, "terminal owner Err cannot release retained facade admission early")
+            val alias_result = poll_tracked_process(alias_token)
+            executed = executed + 1
+            failed = failed + check(alias_result == -1 and not process_is_running(alias_token) and proc_slot_active() == owned_before and not is_dir(lifetime + "/alias.out.scope"), "real already-collected Err releases only after proof and scope cleanup")
+            val stale_reserved = proc_slot_try_acquire()
+            val stale_result = poll_tracked_process(alias_token)
+            executed = executed + 1
+            failed = failed + check(stale_reserved and stale_result == -1 and proc_slot_active() == owned_before + 1, "stale polling cannot double-release another process admission")
+            if stale_reserved: proc_slot_release()
+
     val tree = root + "/tree"
     if not dir_create_all(tree): return 82
     val tree_token = process_spawn_redirected(child, ["tree", tree, "tree", quote],
@@ -148,10 +186,10 @@ fn main() -> i64:
     executed = executed + 1
     failed = failed + check(timeout >= WINDOWS_REDIRECTED_TOKEN_BASE and process_wait(timeout, 30000) == -1 and not process_is_running(timeout), "owned deadline cancels and reaps the tree")
     val rss = process_peak_rss_kb()
-    val historical_starts = 160 + lifetime_completed + (if tree_token >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if overflow >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if timeout >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0)
+    val historical_starts = 160 + lifetime_completed + (if alias_token >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if tree_token >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if overflow >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0) + (if timeout >= WINDOWS_REDIRECTED_TOKEN_BASE: 1 else: 0)
     print "parent_peak_rss_kib={rss} historical_starts={historical_starts} slot_bound=100000"
     executed = executed + 1
-    failed = failed + check(rss > 0 and rss <= 524288, "1188-start parent qualification budget at most 512 MiB")
+    failed = failed + check(rss > 0 and rss <= 524288, "native parent qualification budget at most 512 MiB")
     val passed = executed - failed
     print "Results: {passed} passed, {failed} failed, {executed} executed"
     if failed > 0: return 1

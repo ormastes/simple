@@ -4,7 +4,7 @@
 val WINDOWS_REDIRECTED_TOKEN_BASE = 4611686018427387904
 
 @when(os="windows"):
-use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, windows_process_start_v1, windows_process_poll_v1, windows_process_collect_v1, windows_process_cancel_v1, windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, windows_process_start_v1, windows_process_poll_v1, windows_process_collect_v1, windows_process_cancel_v1, windows_process_file_digest_v1, windows_process_collected_proof_v1}
 use std.nogc_sync_mut.io.env_ops.{env_vars, cwd}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_is_real_no_follow, is_dir}
 use std.nogc_sync_mut.io.file_ops.{file_size}
@@ -55,6 +55,16 @@ fn windows_redirected_token_slot(token: i64, count: i64) -> i64:
     val slot = token - WINDOWS_REDIRECTED_TOKEN_BASE
     if slot < 0 or slot >= count: return -1
     slot
+
+fn _windows_redirected_owner_lease(token: i64) -> Result<WindowsProcessLeaseV1, text>:
+    # Sibling-owner observation receives the retained lease; callers cannot
+    # substitute a slot index or a legacy HANDLE for this token lookup.
+    val slot = windows_redirected_token_slot(token, _windows_redirected_states.len())
+    if slot < 0 or _windows_redirected_states[slot].closed:
+        return Err("no retained Windows redirected lease")
+    val lease = _windows_redirected_states[slot].lease
+    Ok(WindowsProcessLeaseV1(slot: lease.slot))
+export _windows_redirected_owner_lease
 
 fn windows_redirected_spawn(cmd: text, args: [text], stdout_path: text,
         stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
@@ -115,6 +125,14 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
         match windows_process_poll_v1(state.lease):
             case Err(reason):
                 state.failed = true
+                if windows_process_collected_proof_v1(state.lease):
+                    val cleaned = _windows_redirected_cleanup(state.stdout_path)
+                    state.closed = true
+                    state.stdout_path = ""
+                    state.stderr_path = ""
+                    state.capture_limit = 0
+                    _windows_redirected_states[slot] = state
+                    return -1
                 _windows_redirected_states[slot] = state
                 val cancelled = windows_process_cancel_v1(state.lease)
                 return -2
@@ -123,6 +141,14 @@ fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
                     match windows_process_collect_v1(state.lease):
                         case Err(reason):
                             state.failed = true
+                            if windows_process_collected_proof_v1(state.lease):
+                                val cleaned = _windows_redirected_cleanup(state.stdout_path)
+                                state.closed = true
+                                state.stdout_path = ""
+                                state.stderr_path = ""
+                                state.capture_limit = 0
+                                _windows_redirected_states[slot] = state
+                                return -1
                             _windows_redirected_states[slot] = state
                             val cancelled = windows_process_cancel_v1(state.lease)
                             return -2
