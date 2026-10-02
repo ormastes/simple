@@ -46,6 +46,13 @@ overlap, redirected Git environments and unproved Windows canonical paths are
 rejected before scratch creation. Only a successfully created, identity-checked
 scratch child may be removed.
 
+Positive history assertions require their specified result on every supported
+host. The integrated tests do not accept `SCVDB_SCRATCH_SCOPE` as an alternative
+passing outcome on Windows; that current capability gap must make those cases
+fail when executed. Invalid-scratch rejection tests remain separate negative
+oracles. This keeps the desired final behavior intact instead of qualifying
+an unsupported host through an easier assertion.
+
 ## Evidence and limitations
 
 | Check | Observed result | What it proves |
