@@ -1317,3 +1317,31 @@ building manifest, Windows builder and Windows worker within one cumulative
 qualification, full Phase3/4 queues, and cross-host cache proof remain pending.
 Linux remains stopped at its three-attempt hello limit. All prior cache and
 failure evidence remain retained.
+
+### 2026-10-02 manager image failure and frozen-seed dispatch defect
+
+The first Windows manager-image batch ended with workload exit 1 on its manifest
+image. No image was sealed; builder and worker were not started. The guard
+confirmed quiescence and peak RSS 4,716,072 KiB, without a resource stop.
+The retained worker output reports 32 distinct library parse-failure paths in
+a 50-file closure. Cache counters show 18 hits and 32 misses, but no per-file
+hit association proves that those sets are identical. Neither the outer log
+nor the retained full worker-stdout spill contains actual parser token/line
+payloads. The spill's generic filename says stderr; its capture provenance is
+worker stdout. Preserve both streams and do not infer syntax edits from summaries.
+
+Source review found PR2208 targets a different streaming path. PR2213 would
+restore diagnostics on this ordinary path, but is not a proven parse repair;
+its existing native retry limit remains in force.
+
+A separate bounded codegen review proved the frozen seed lacks landed fix
+`9e190c6642` (PR2205). Retained COFF code calls `SqlBlockDef.kind` on a newly
+constructed `MathBlockDef`. This is a real dispatch defect, but its relationship
+to the manager parser failures is unproven. An isolated bootstrap source with
+only that already-landed seed fix is being prepared; the old fa703 source and
+caches remain unchanged. Evidence: `D:/dev/fa703-seed-dispatch-readonly-review-20261002.md`.
+
+Direct Phase3/4 fallback identities retain all 17,147 modules, but no queue has
+launched. The new paired monitor still requires fixes for cleanup proof and
+bounded timeout handling before resource admission. Canonical manager deployment,
+full module completion and cross-host cache qualification remain incomplete.
