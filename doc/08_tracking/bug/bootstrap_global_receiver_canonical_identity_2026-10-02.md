@@ -29,7 +29,7 @@ This establishes the pre-fix discriminator, not native execution success.
 Focused spec checks the real global-read hook with two canonical class owners.
 Positive native fixtures are `nominal_receiver_local_native.spl` and
 `nominal_receiver_global_native.spl` under `test/fixtures/compiler/`.
-Post-fix compiler rebuild, test execution and native execution remain pending.
+These baseline runs did not execute the fixed compiler.
 
 ## Post-fix MIR discriminator
 
@@ -40,10 +40,34 @@ patch. Both fixtures now pass MIR. The local fixture compiles and runs exit 0.
 The global fixture reaches LLVM and fails on duplicate `@g_...__gate` definitions,
 the independently owned provisional/runtime static-finalization defect
 (commit 829d89e72a). Thus the targeted owner-resolution error is eliminated;
-global native execution and full compiler/MCP verification are still pending.
+global native execution was still blocked at this producer revision.
 
 Evidence: classfix-source-fcb35f85cd/build/global-receiver-proof-20261002 under
 the same Linux bootstrap root. Separate private caches and 512 MiB / 60 s
 watchdogs were used. The local probe briefly overlapped a separate GDB job's
 checkout-wide cold SCV initialization; there were no SCV diagnostics, but these
 results do not claim SCV concurrency validation. Both jobs reached quiescence.
+
+## Native global receiver acceptance
+
+Reviewed Linux producer
+`7cc8409e930a6d818016efdbf4df2c1ad575716e6553a3ce41c5a8aba656df29`
+from `classfix-source-4e33ca888f` includes this receiver repair and static
+finalization `829d89e72a`, together with the reviewed HIR presence repairs.
+The previously blocked global fixture compiled exit 0 and executed exit 0,
+with the expected empty stdout. Its SHA256 is
+`dca33ffa90e090d9ba1565ed50d975f0a92971e78bbea0a4ce69ecb9da1f277a`.
+The already-passing local control was not rerun.
+
+The producer-bound private cache/output is
+`build/global-receiver-proof-7cc-20261002` in that checkout. Retained copies are
+under `D:/dev/global-receiver-proof-7cc-20261002`: identity hashes, compile/run
+logs, result and watchdog receipt. The enforced 512 MiB / 60-second process-tree
+guard recorded peak RSS 254,884 KiB, exit 0 and `quiescent=1`. It reports
+`hard_memory_limit=0`; enforcement is the sampled process-tree RSS watchdog.
+The checkout-wide cold-SCV writer was released before the next owner's probe.
+
+This is native acceptance of the global receiver fixture with the required
+static-finalization integration. The producer excludes the enum-pattern and
+imported-global-binding candidates, so those are not validated by this run.
+Full compiler/lib/MCP smoke and cross-host qualification remain pending.
