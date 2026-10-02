@@ -1,0 +1,129 @@
+# Tagged Windows redirected children reuse the pure-Simple JobObject owner.
+# Tokens never overlap ordinary HANDLEs and are never recycled. The single
+# calling thread owns all state; child processes receive copied argv/env only.
+val WINDOWS_REDIRECTED_TOKEN_BASE = 4611686018427387904
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, windows_process_start_v1, windows_process_poll_v1, windows_process_collect_v1, windows_process_cancel_v1, windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.env_ops.{env_vars, cwd}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_size}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{thread_sleep}
+
+struct WindowsRedirectedState:
+    lease: WindowsProcessLeaseV1
+    stdout_path: text
+    stderr_path: text
+    capture_limit: i64
+    failed: bool
+    closed: bool
+
+var _windows_redirected_states: [WindowsRedirectedState] = []
+
+fn windows_redirected_token_slot(token: i64, count: i64) -> i64:
+    if token < WINDOWS_REDIRECTED_TOKEN_BASE: return -1
+    val slot = token - WINDOWS_REDIRECTED_TOKEN_BASE
+    if slot < 0 or slot >= count: return -1
+    slot
+
+fn windows_redirected_spawn(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
+    if capture_limit <= 0 or _windows_redirected_states.len() >= 100000: return -1
+    val snapshot = env_vars()
+    if snapshot == nil: return -1
+    val program = host_path_native(path_absolute(cmd))
+    val output = host_path_native(path_absolute(stdout_path))
+    val error = host_path_native(path_absolute(stderr_path))
+    val private_root = output + ".scope"
+    for directory in [private_root, private_root + "/home", private_root + "/tmp", private_root + "/cache"]:
+        if not dir_create_all(directory): return -1
+    var environment: [text] = []
+    for (key, value) in snapshot ?? []:
+        val name = key.lower()
+        # Windows hidden drive assignments are replaced by explicit cwd.
+        if key == "" or key.starts_with("="): continue
+        if ["home", "tmp", "temp", "tmpdir", "simple_cache_dir", "simple_frontend_cache_dir", "simple_native_build_cache_dir"].contains(name): continue
+        environment.push(key + "=" + value)
+    environment.push("HOME=" + private_root + "/home")
+    environment.push("TMP=" + private_root + "/tmp")
+    environment.push("TEMP=" + private_root + "/tmp")
+    environment.push("TMPDIR=" + private_root + "/tmp")
+    environment.push("SIMPLE_CACHE_DIR=" + private_root + "/cache")
+    environment.push("SIMPLE_FRONTEND_CACHE_DIR=" + private_root + "/cache/frontend")
+    environment.push("SIMPLE_NATIVE_BUILD_CACHE_DIR=" + private_root + "/cache/native")
+    val digest = windows_process_file_digest_v1(program)
+    if digest.len() != 64: return -1
+    val request = WindowsProcessRequestV1(program: program, producer_digest: digest,
+        args: args, environment: environment, directory: host_path_native(cwd()),
+        inputs: [], stdout_path: output, stderr_path: error, timeout_ms: timeout_ms)
+    match windows_process_start_v1(request):
+        case Err(reason): return -1
+        case Ok(lease):
+            val slot = _windows_redirected_states.len()
+            _windows_redirected_states.push(WindowsRedirectedState(lease: lease,
+                stdout_path: output, stderr_path: error, capture_limit: capture_limit,
+                failed: false, closed: false))
+            return WINDOWS_REDIRECTED_TOKEN_BASE + slot
+
+fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
+    val slot = windows_redirected_token_slot(token, _windows_redirected_states.len())
+    if slot < 0 or _windows_redirected_states[slot].closed: return -1
+    val started = time_now_unix_micros()
+    while true:
+        var state = _windows_redirected_states[slot]
+        if file_size(state.stdout_path) > state.capture_limit or file_size(state.stderr_path) > state.capture_limit:
+            state.failed = true
+            _windows_redirected_states[slot] = state
+            val cancelled = windows_process_cancel_v1(state.lease)
+        match windows_process_poll_v1(state.lease):
+            case Err(reason): return -1
+            case Ok(receipt):
+                if receipt.terminal:
+                    match windows_process_collect_v1(state.lease):
+                        case Err(reason): return -1
+                        case Ok(collected):
+                            state.closed = true
+                            _windows_redirected_states[slot] = state
+                            if state.failed or collected.timed_out or collected.cancelled: return -1
+                            return collected.exit_code
+        if timeout_ms > 0 and (time_now_unix_micros() - started) / 1000 >= timeout_ms: return -2
+        # Each poll observes one retained JobObject; no filesystem tree scan.
+        thread_sleep(1)
+
+fn windows_redirected_is_running(token: i64) -> bool:
+    val slot = windows_redirected_token_slot(token, _windows_redirected_states.len())
+    if slot < 0 or _windows_redirected_states[slot].closed: return false
+    # Observation failure keeps ownership live for explicit cancellation.
+    match windows_process_poll_v1(_windows_redirected_states[slot].lease):
+        case Err(reason): true
+        case Ok(receipt): not receipt.terminal
+
+fn windows_redirected_kill(token: i64) -> bool:
+    val slot = windows_redirected_token_slot(token, _windows_redirected_states.len())
+    if slot < 0 or _windows_redirected_states[slot].closed: return false
+    match windows_process_cancel_v1(_windows_redirected_states[slot].lease):
+        case Err(reason): return false
+        case Ok(cancelled):
+            val result = windows_redirected_wait(token, 5000)
+            return _windows_redirected_states[slot].closed
+@else:
+# These functions are unreachable off Windows; no foreign Win32 closure leaks
+# into POSIX builds. The POSIX runner retains its argv-safe shell redirect.
+fn windows_redirected_token_slot(token: i64, count: i64) -> i64:
+    -1
+fn windows_redirected_spawn(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
+    -1
+fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
+    -1
+fn windows_redirected_is_running(token: i64) -> bool:
+    false
+fn windows_redirected_kill(token: i64) -> bool:
+    false
+@end
+
+export WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait
+export windows_redirected_is_running, windows_redirected_kill, windows_redirected_token_slot

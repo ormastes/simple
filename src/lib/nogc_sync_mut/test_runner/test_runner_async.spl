@@ -10,12 +10,13 @@ use std.io.sysinfo_ops.{cpu_count}
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
-use std.test_runner.runner_lifecycle.{spawn_tracked_process, wait_tracked_process, poll_tracked_process, cleanup_all_children}
-use std.test_runner.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn, governor_wait_until_ready}
+use std.test_runner.runner_lifecycle.{spawn_tracked_process, spawn_tracked_redirected_process, wait_tracked_process, poll_tracked_process, cleanup_all_children}
+use std.test_runner.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn}
 use std.nogc_sync_mut.io.signal_handlers.{install_signal_handlers}
 use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
+use std.nogc_sync_mut.io.process_governor.{proc_slot_configure_requested_workers}
 
-use std.io_runtime.{thread_sleep}
+use std.io_runtime.{thread_sleep, getpid}
 
 # ============================================================================
 # Async Test Execution State
@@ -28,11 +29,13 @@ struct AsyncTestRun:
     stdout_file: text
     stderr_file: text
     timeout_ms: i64
+    inventory_index: i64 = -1
 
 val _WAIT_POLL_INITIAL_MS = 10
 val _WAIT_POLL_MEDIUM_MS = 50
 val _WAIT_POLL_MAX_MS = 100
 var _runner_signal_handlers_installed: bool = false
+var _temp_file_sequence: i64 = 0
 
 fn _cleanup_tracked_test_children():
     val _ = cleanup_all_children()
@@ -67,13 +70,16 @@ fn _get_temp_dir() -> text:
         return tmpdir
     "/tmp"
 
-fn create_temp_files(file_path: text) -> (text, text):
+fn create_temp_files(file_path: text, initialize: bool = true) -> (text, text):
     """
     Create temp files for stdout/stderr capture.
 
     Returns: (stdout_file, stderr_file)
     """
     val timestamp = time_now_unix_micros()
+    _temp_file_sequence = _temp_file_sequence + 1
+    val sequence = _temp_file_sequence
+    val parent_id = getpid()
 
     # Replace path separators (chained replace breaks in runtime)
     var base = file_path
@@ -97,12 +103,13 @@ fn create_temp_files(file_path: text) -> (text, text):
     var sep = "/"
     if os == "windows":
         sep = "\\"
-    val stdout_file = "{tmp_dir}{sep}simple_test_{base}_{timestamp}_out.txt"
-    val stderr_file = "{tmp_dir}{sep}simple_test_{base}_{timestamp}_err.txt"
+    val stdout_file = "{tmp_dir}{sep}simple_test_{parent_id}_{base}_{timestamp}_{sequence}_out.txt"
+    val stderr_file = "{tmp_dir}{sep}simple_test_{parent_id}_{base}_{timestamp}_{sequence}_err.txt"
 
     # Initialize empty files
-    file_write(stdout_file, "")
-    file_write(stderr_file, "")
+    if initialize:
+        file_write(stdout_file, "")
+        file_write(stderr_file, "")
 
     (stdout_file, stderr_file)
 
@@ -137,7 +144,7 @@ fn _wait_poll_sleep_ms(poll_iteration: i64) -> i64:
 # Async Test Spawning
 # ============================================================================
 
-fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
+fn spawn_async_test(file_path: text, options: TestOptions, inventory_index: i64 = -1) -> AsyncTestRun:
     """
     Spawn test as async process with stdout/stderr redirect.
 
@@ -152,12 +159,14 @@ fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
     val timeout_ms = options.timeout * 1000
 
     # Create temp files for stdout/stderr
-    val (stdout_file, stderr_file) = create_temp_files(file_path)
+    val (stdout_file, stderr_file) = create_temp_files(file_path, initialize: host_os() != "windows")
 
     var pid: i64 = -1
     if host_os() == "windows":
-        # Fail closed until the runtime exposes native redirected argv spawn.
-        file_write(stderr_file, "parallel test capture is unavailable on Windows")
+        pid = spawn_tracked_redirected_process(binary, child_args, stdout_file,
+            stderr_file, timeout_ms)
+        if pid == -1:
+            file_write(stderr_file, "Windows owned redirected child admission failed")
     else:
         val redirect_script = "out=$1; err=$2; shift 2; exec \"$@\" >\"$out\" 2>\"$err\""
         var shell_args = ["-c", redirect_script, "simple-test", stdout_file, stderr_file, binary]
@@ -173,7 +182,8 @@ fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
         start_time: start_time,
         stdout_file: stdout_file,
         stderr_file: stderr_file,
-        timeout_ms: timeout_ms
+        timeout_ms: timeout_ms,
+        inventory_index: inventory_index
     )
 
 # ============================================================================
@@ -280,7 +290,9 @@ fn run_tests_parallel_with_monitoring(
     Returns: List of TestFileResult
     """
     _ensure_runner_signal_handlers()
-    var results: [TestFileResult] = []
+    var results: [TestFileResult?] = []
+    for file in files:
+        results.push(nil)
     var active_runs: [AsyncTestRun] = []
     var next_file_idx = 0
     var poll_iteration = 0
@@ -290,7 +302,10 @@ fn run_tests_parallel_with_monitoring(
     # even with the per-test startup overhead.
 
     # Create resource governor (default 75%, overridable via options)
-    val gov = governor_create(options.resource_limit_pct)
+    var gov = governor_create(options.resource_limit_pct)
+    if options.max_workers > 0:
+        gov.max_cpu_cores = max_workers
+        proc_slot_configure_requested_workers(max_workers)
     print "  [parallel] Resource governor: max {gov.max_cpu_cores} cores, {gov.max_memory_mb}MB memory ({gov.resource_limit_pct}% limit)"
 
     while next_file_idx < files.len() or active_runs.len() > 0:
@@ -299,10 +314,13 @@ fn run_tests_parallel_with_monitoring(
         while active_runs.len() < max_workers and next_file_idx < files.len():
             # Check resource governor before spawning
             if not governor_can_spawn(gov, active_runs.len()):
-                governor_wait_until_ready(gov, active_runs.len())
+                break
 
             val file_path = files[next_file_idx]
-            val run = spawn_async_test(file_path, options)
+            val run = spawn_async_test(file_path, options, next_file_idx)
+            if run.pid == -3:
+                cleanup_temp_files(stdout_file: run.stdout_file, stderr_file: run.stderr_file)
+                break
             active_runs.push(run)
             next_file_idx = next_file_idx + 1
 
@@ -317,14 +335,14 @@ fn run_tests_parallel_with_monitoring(
             val exit_code = poll_tracked_process(run.pid)
             if exit_code != -2:
                 val result = collect_async_result(run, exit_code)
-                results.push(result)
+                results[run.inventory_index] = Some(result)
                 had_completion = true
                 continue
 
             val elapsed_ms = (current_time - run.start_time) / 1000
             if elapsed_ms > run.timeout_ms:
                 val result = collect_async_result(run, -2, true)
-                results.push(result)
+                results[run.inventory_index] = Some(result)
                 had_completion = true
             else:
                 new_runs.push(run)
@@ -338,7 +356,16 @@ fn run_tests_parallel_with_monitoring(
             thread_sleep(_wait_poll_sleep_ms(poll_iteration))
             poll_iteration = poll_iteration + 1
 
-    results
+    var ordered: [TestFileResult] = []
+    var result_index = 0
+    for result in results:
+        match result:
+            case Some(value): ordered.push(value)
+            case nil:
+                ordered.push(make_result_from_output(files[result_index], "",
+                    "owned child completion missing", -1, 0, options.timeout))
+        result_index = result_index + 1
+    ordered
 
 # ============================================================================
 # Helper: CPU Count Detection

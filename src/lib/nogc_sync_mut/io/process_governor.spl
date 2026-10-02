@@ -32,6 +32,7 @@ use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
 
 val _ACQUIRE_WARN_ITERATIONS: i64 = 600
 var _active_procs_handle: i64 = -1
+var _requested_default_limit: i64 = 0
 
 fn _active_procs_h() -> i64:
     if _active_procs_handle < 0:
@@ -69,6 +70,8 @@ fn _proc_slot_limit() -> i64:
         val n = _proc_gov_positive_int_or_zero(env_val)
         if n > 0:
             return n
+    if _requested_default_limit > 0:
+        return _requested_default_limit
     val default_val = _cpu_count() * 4
     if default_val > 64:
         return 64
@@ -116,6 +119,20 @@ fn proc_slot_acquire():
             print "[process-governor] still waiting for a child-process slot"
             iteration = 0
 
+fn proc_slot_configure_requested_workers(count: i64):
+    # An explicit CLI worker request replaces the automatic default only.
+    # A valid SIMPLE_MAX_PROCS remains an explicit independent hard cap.
+    if count > 0 and count <= 100000:
+        _requested_default_limit = count
+
+fn proc_slot_try_acquire() -> bool:
+    # The pool owner must return to polling its children when slots are full;
+    # blocking here would prevent that same owner from releasing any slot.
+    val handle = _active_procs_h()
+    val active = rt_atomic_int_load(handle)
+    if active >= _proc_slot_limit(): return false
+    rt_atomic_int_compare_exchange(handle, active, active + 1)
+
 fn proc_slot_release():
     """
     Free a process slot after the process has exited or been killed.
@@ -154,3 +171,4 @@ export proc_slot_active
 export proc_slot_acquire
 export proc_slot_release
 export proc_slot_reset
+export proc_slot_configure_requested_workers, proc_slot_try_acquire
