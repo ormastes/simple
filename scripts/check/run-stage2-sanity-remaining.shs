@@ -28,12 +28,24 @@ for stage in before after; do
 done
 snapshot_inputs() {
     stage=$1
-    bootstrap_stage3_source_snapshot "$base.source-$stage.txt" "$source_root" || return 1
-    bootstrap_stage3_directory_snapshot "$base.runtime-$stage.txt" "$runtime_authority" || return 1
-    bootstrap_stage3_tool_authority_snapshot "$base.tool-$stage.txt" "$PATH" "$owner" || return 1
-    cmp "$source_snapshot" "$base.source-$stage.txt" &&
-        cmp "$runtime_snapshot" "$base.runtime-$stage.txt" &&
-        cmp "$tool_snapshot" "$base.tool-$stage.txt"
+    printf 'remaining-guard: phase=%s role=source\n' "$stage"
+    bootstrap_stage3_source_snapshot "$base.source-$stage.txt" "$source_root" || {
+        printf 'remaining-guard-error: phase=%s role=source snapshot-failed\n' "$stage" >&2; return 126;
+    }
+    printf 'remaining-guard: phase=%s role=runtime\n' "$stage"
+    bootstrap_stage3_directory_snapshot "$base.runtime-$stage.txt" "$runtime_authority" || {
+        printf 'remaining-guard-error: phase=%s role=runtime snapshot-failed\n' "$stage" >&2; return 126;
+    }
+    printf 'remaining-guard: phase=%s role=tool source_owner=%s\n' "$stage" "$source_root"
+    bootstrap_stage3_tool_authority_snapshot "$base.tool-$stage.txt" "$PATH" "$source_root" || {
+        printf 'remaining-guard-error: phase=%s role=tool snapshot-failed\n' "$stage" >&2; return 126;
+    }
+    for role in source runtime tool; do
+        case "$role" in source) expected=$source_snapshot ;; runtime) expected=$runtime_snapshot ;; tool) expected=$tool_snapshot ;; esac
+        cmp "$expected" "$base.$role-$stage.txt" || {
+            printf 'remaining-guard-error: phase=%s role=%s identity-mismatch\n' "$stage" "$role" >&2; return 125;
+        }
+    done
 }
 bootstrap_stage3_verify_frontend_prior_inputs "$candidate" "$source_root" \
     "$history/stage2-sanity.env" "$history_display" "$history" "$history/launch.env" \
