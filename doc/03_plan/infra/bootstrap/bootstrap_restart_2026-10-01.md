@@ -1209,3 +1209,37 @@ See `D:/dev/manager-bootstrap-verification-20261001/manager-qualification-result
 No Phase2-built manager deployment, Windows manager qualification, shared-cache
 hydration proof, or completed Phase3/4 inventory is claimed. Preserve prepared
 17,147-module routes and all producer-bound caches during the resource stop.
+
+### 2026-10-02 stage disk admission and terminal Linux hello
+
+This checkpoint supersedes the resource hold above for Windows Phase2 and the
+third Linux hello only. Auditing the remaining stages justified a private
+11.5 GiB disk admission threshold, 8.5 GiB emergency floor, and observed
+volume-depletion budgets of 2 GiB for Windows Phase2 and 1 GiB for Linux hello.
+Physical-memory, commit-headroom and RSS checks remain enforced. The new guards
+fail closed on missing probes and sample disk again after owned-process cleanup.
+These are sampled safeguards, not filesystem quotas or full-inventory budgets.
+Historical guards and receipts remain unchanged. Evidence:
+`D:/dev/capacity-admission-verification-20261002/stage-disk-guard-verification.md`.
+
+Linux's third provider-bound hello failed with compile exit 139 during parsing,
+before runtime compilation or linking; executable startup was not attempted.
+Removing `--verbose` did not resolve the crash. Provider hashes stayed unchanged,
+peak RSS was 168,672 KiB, observed disk depletion was zero, and owned processes
+were confirmed quiescent. The three-attempt limit is exhausted: no fourth probe
+is authorized by this checkpoint. Phase2 producer creation remains PASS, but
+provider-qualified hello, Phase2-built manager images, and Phase3/4 are blocked.
+Evidence: `D:/dev/linux-integrated-release-d6-20261002/helper-panic-candidate/hello3-terminal/gate.json`.
+
+Windows Phase2 actually started at 09:53:35 UTC under the revised guard, using
+the unchanged fa703 source and passing runtime snapshot. Root process 43320 and
+compiler process 43156 were subsequently observed live. Current source roots,
+materialized junction targets and pinned receipts were checked before launch;
+passing runtime prerequisites were reused. No Windows Phase2 completion or hello
+PASS is claimed at this checkpoint. Launch identity and admission evidence:
+`D:/dev/windows-phase2-release-next-20261002/launch-v2.json`.
+
+The full objective remains open: Phase2-built manager deployment on both hosts,
+actual shared-cache hydration, and complete Phase3/4 module and executable/test
+builds require separate evidence. Preserve all producer-bound caches and the
+17,147-module routes; the narrow disk policy above does not admit those queues.
