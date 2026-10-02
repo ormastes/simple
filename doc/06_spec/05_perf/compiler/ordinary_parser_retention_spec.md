@@ -32,7 +32,7 @@ directory before executing the SSpec through an admitted runner. Missing or
 duplicate metrics fail closed. No collector/admission framework is added here.
 
 The fixture validates all 128 executable function bodies, function names,
-public flags, statement spans and exact returned values in every retained
+public flags, expression source spans and exact returned values in every retained
 module after later-file allocations and arena closes. It reports live bytes
 after each file, final live bytes/objects and elapsed microseconds. Cold/warm
 mode asserts exact parse-work/cache-hit counts rather than relying on a label.
@@ -45,9 +45,17 @@ These are proposed regression budgets, not measured results. Keep external
 peak-RSS receipts; complete full-module builds below 7 GB are separately
 required before claiming the user goal achieved.
 
-The scoped reference primes a private immutable cache memo and restricts its
-grammar to plain functions. It intentionally does not prove shared authority,
-resource/unsafe/enum metadata, advisory-provider or target-cfg ownership.
-Production scoping is blocked until that escaped-owner audit and appropriate
-native semantic cases are complete. This fixture is a diagnostic
-counterfactual, not a production scope implementation or release PASS.
+The timed reference primes a private immutable cache memo and uses plain
+functions; ordinary AOT deliberately starts that memo cold. Both preserve
+parser slots and semantic owners through the shared promotion helper.
+Post-timing cases require `metadata_ok=yes`, `early_rejection_ok=yes` and
+`shared_memo_ok=yes`: resource/unsafe/enum metadata, diagnostic recovery,
+pre-parser advisory rejection, and scoped shared-authority publication/reuse/
+changed-digest rejection/restoration must all pass before `complete=yes`.
+The shared case publishes real private-cache flat-pool bytes through the
+immutable cache API, not a mocked provider.
+
+The production candidate excludes full-inventory target-cfg selection,
+coverage, MC/DC and non-AOT routes. This fixture does not qualify those
+excluded ownership contracts. Native and SSpec execution remain pending;
+neither the source candidate nor these assertions are a release PASS.
