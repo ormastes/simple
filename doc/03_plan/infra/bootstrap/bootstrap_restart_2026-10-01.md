@@ -1058,3 +1058,30 @@ remain in D:/wk-ordinary-parser-retention-20261002; unfinished discard assignmen
 work remains in D:/wk-hir-discard-assignment-20261002. Do not include those dirty
 changes in a future release without review and verification. Public main was
 not rebased or force-updated; earlier ruleset-change question was not approved.
+
+### 2026-10-02 user resumes bootstrap and cache deployment
+
+This supersedes the earlier session stop for bootstrap/cache work only. The user
+requests separate agents to proceed with build-to-end, Windows/Linux common
+cache deployment and fixes, and explicitly Phase3 and Phase4 using Phase2 in
+parallel while applying completed items. Items1/5 umbrella feature expansion
+remains stopped. No phase completion or cache-sharing success is implied.
+
+Assigned lanes: Windows bootstrap (windows_corrected_bootstrap), Linux MIR
+crash repair/bootstrap (linux_runtime_repair_astra), manager corrected producer
+and worker deployment (grouped_compile_audit), cross-host portable cache
+(win_linux_shared_cache_deploy), and bootstrap parser scratch retention
+(cap_fix_review). All use isolated D-backed work and retain earlier caches.
+Fresh release base is0d722af3d62e3b693af8bef475cf227d7f55d69e.
+
+Apply reviewed fixes through release and new frozen attempts. Never mutate
+sources beneath active jobs. Existing Phase2 hello-qualified producers may be
+used diagnostically with exact lineage; a new compiler fix is effective only
+when included in its producer. Phase3/4 queues remain independent and start
+within shared host reservations (Windows7GB per Job, manager4GiB, Linux4.5GiB
+per guarded task,8GiB host reserve). At this checkpoint no resumed phase worker
+is yet confirmed launched. Manager rebuild has first resource reservation;
+Linux retained backtrace identifies a null unbox in MirLowering.lower_class_type.
+The shared parse cache directory remains empty/unproven pending real cross-host
+publication/read and identity-rejection tests. Native object caches must not be
+shared across incompatible host/producer identities.
