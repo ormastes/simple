@@ -1,0 +1,169 @@
+# Diagnostic native counterfactual. The scoped reference is restricted to this
+# fixture's plain functions; it is NOT a production lifetime repair.
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope,
+    driver_promote_frontend_registry_owners}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope,
+    frontend_parse_cache_hits, frontend_parse_cache_misses}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use std.nogc_sync_mut.io_runtime.{env_set_process, env_get_opt}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+class RetainedParserProbeModule:
+    module: ParserModule
+
+fn probe_hex_identity(value: text, length: i64) -> bool:
+    if value.len() != length: return false
+    for character in value:
+        if not "0123456789abcdef".contains(character): return false
+    true
+
+fn probe_source(index: i64) -> text:
+    var source = ""
+    var function_index = 0
+    while function_index < 128:
+        source = source + "pub fn value_{function_index}() -> i64:\n    return {index * 128 + function_index}\n"
+        function_index = function_index + 1
+    source
+
+fn probe_module_valid(module: ParserModule, index: i64) -> bool:
+    if module.name != "retention.module_{index}" or module.functions.len() != 128:
+        return false
+    var function_index = 0
+    while function_index < 128:
+        val name = "value_{function_index}"
+        if not module.functions.contains_key(name): return false
+        val function = module.functions[name]
+        if function.name != name or function.params.len() != 0 or
+                function.body.stmts.len() != 1 or not function.is_public:
+            return false
+        val statement = function.body.stmts[0]
+        if statement.span.line <= 0 or statement.span.end < statement.span.start:
+            return false
+        match statement.kind:
+            case StmtKind.Return(value):
+                if value == nil: return false
+                match value.unwrap().kind:
+                    case ExprKind.IntLit(actual):
+                        if actual != index * 128 + function_index: return false
+                    case _: return false
+            case _: return false
+        function_index = function_index + 1
+    true
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.len() != 5: return 10
+    val mode = args[1]
+    val cache_state = args[2]
+    val root = args[3]
+    val count = args[4].to_i64() ?? 0
+    if mode != "ordinary" and mode != "scoped-reference" and mode != "prepare": return 11
+    if cache_state != "cold" and cache_state != "warm": return 12
+    if count < 2 or count > 32: return 13
+    val producer_sha = env_get_opt("SIMPLE_ORDINARY_PARSER_PRODUCER_SHA256") ?? ""
+    val producer_source = env_get_opt("SIMPLE_ORDINARY_PARSER_PRODUCER_SOURCE_REVISION") ?? ""
+    val source_revision = env_get_opt("SIMPLE_ORDINARY_PARSER_SOURCE_REVISION") ?? ""
+    if not probe_hex_identity(producer_sha, 64) or
+            not probe_hex_identity(producer_source, 40) or
+            not probe_hex_identity(source_revision, 40): return 28
+    if not env_set_process("SIMPLE_FRONTEND_CACHE", "1") or
+            not env_set_process("SIMPLE_FRONTEND_CACHE_SCOPE", "ordinary-parser-retention-v1") or
+            not env_set_process("SIMPLE_FRONTEND_CACHE_DIR", root + "/cache") or
+            not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_ROOT", ""):
+        return 14
+    # Prime the private immutable memo outside the diagnostic scope. Production
+    # must preserve cold cache/registry owners generally, not rely on priming.
+    if frontend_parse_cache_scope() != "ordinary-parser-retention-v1": return 15
+    var driver = CompilerDriver.create(driver_core_compile_options_default())
+    var sources: [text] = []
+    var boundaries: [i64] = []
+    var retained: [RetainedParserProbeModule] = []
+    var index = 0
+    while index < count:
+        val source = probe_source(index)
+        val path = root + "/module_{index}.spl"
+        if mode == "prepare" or cache_state == "cold":
+            if not file_write(path, source): return 16
+        if file_read(path) != source: return 17
+        sources.push(source)
+        boundaries.push(0)
+        index = index + 1
+    val fixture_digest = sha256_text(sources.join("\n"))
+    val hits_before = frontend_parse_cache_hits()
+    val misses_before = frontend_parse_cache_misses()
+    val parses_before = flat_parse_module_body_calls()
+    val live_before = rt_heap_live_bytes()
+    val objects_before = rt_heap_registry_count()
+    val started = rt_time_now_unix_micros()
+    index = 0
+    while index < count:
+        val path = root + "/module_{index}.spl"
+        val name = "retention.module_{index}"
+        val scoped = mode == "scoped-reference"
+        if scoped and not rt_transient_array_scope_begin(): return 18
+        val parsed = if scoped:
+            driver.parse_full_frontend_in_borrowed_scope_selected_v1(sources[index], path, name)
+        else:
+            driver.parse_full_frontend_selected_v1(sources[index], path, name)
+        if parsed.is_err(): return 19
+        # Box before promotion: the whole returned graph is retained, not just
+        # a checksum or a compact signature substituted for executable bodies.
+        val owner = RetainedParserProbeModule(module: parsed.unwrap())
+        if scoped:
+            if not rt_transient_array_scope_pause(): return 20
+            if not rt_transient_heap_promote(owner): return 21
+            if not driver_promote_frontend_registry_owners(): return 22
+            if not driver_end_transient_parse_scope(): return 23
+        retained.push(owner)
+        boundaries[index] = rt_heap_live_bytes()
+        index = index + 1
+    val elapsed = rt_time_now_unix_micros() - started
+    val live_after = rt_heap_live_bytes()
+    val objects_after = rt_heap_registry_count()
+    val hits = frontend_parse_cache_hits() - hits_before
+    val misses = frontend_parse_cache_misses() - misses_before
+    val parses = flat_parse_module_body_calls() - parses_before
+    # Validate EVERY earlier module, including first and last, after all later
+    # parses and arena closes. Check names, public flags, spans and exact bodies.
+    index = 0
+    while index < count:
+        if not probe_module_valid(retained[index].module, index): return 24
+        index = index + 1
+    if cache_state == "cold" and (hits != 0 or misses != count or parses != count): return 25
+    if cache_state == "warm" and (hits != count or misses != 0 or parses != 0): return 26
+    if live_after < live_before or objects_after < objects_before or elapsed < 0: return 27
+    print "mode={mode}"
+    print "cache_state={cache_state}"
+    print "profile=ordinary-parser-retention-v1"
+    print "producer_sha256={producer_sha}"
+    print "producer_source_revision={producer_source}"
+    print "source_revision={source_revision}"
+    print "fixture_digest={fixture_digest}"
+    print "cache_hits={hits}"
+    print "cache_misses={misses}"
+    print "parse_work={parses}"
+    print "count={count}"
+    print "functions={count * 128}"
+    print "checksum={(count * 128) * (count * 128 - 1) / 2}"
+    print "live_bytes={live_after - live_before}"
+    print "live_allocations={objects_after - objects_before}"
+    print "elapsed_us={elapsed}"
+    index = 0
+    while index < count:
+        print "boundary_{index}_live_bytes={boundaries[index] - live_before}"
+        index = index + 1
+    print "complete=yes"
+    0
