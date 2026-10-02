@@ -1170,3 +1170,42 @@ inventory contains 17,147 compile modules and three explicit exclusions.
 Both host builds are in progress; no new producer/hello PASS is recorded here.
 Separate diagnostic routes may start after actual hello with identity/resource
 checks, as requested, without representing themselves as canonical admission.
+
+### 2026-10-02 disk-admission stop and exact resume state
+
+Linux fa703 Phase2 linked successfully: 1,130 compiled, zero reused or failed;
+producer SHA-256 `079e0afc5478bc28ba9f02b13d563b8f20d2d85e35ac7c780f231cdbdb67cab9`.
+The first hello compiled and ran, but used an unsupported runtime-path variable,
+so it is not a provider-qualified handoff. The changed explicit-provider hello
+attempt crashed during parsing (exit 139); it also newly enabled `--verbose`.
+A third controlled attempt without that flag is prepared, not executed.
+
+The corrected provider contract is explicit `auto`, an immutable directory
+containing only native-all archive `adb88fb1739ddcf73396cd5e6255a9e5474ca61d5f5088d675137f6214c1c4b0`,
+and `SIMPLE_PROJECT_ROOT` identifying the frozen fa703 C-runtime source.
+Manifest `D:/dev/linux-integrated-release-d6-20261002/helper-panic-candidate/runtime-auto-manifest.json`
+has SHA-256 `6bff40ffd11361446302b877ba190d087c9af31792703cb2ef41256cf42acc36`.
+This supersedes the unsuitable named core-C/two-archive contract. Source review
+accepted the corrected selectors; actual provider-bound hello remains unproven.
+
+Windows fa703 native-all, backfill and seed builds all passed. Its launcher
+refused Phase2 before spawning a child because D had less than 27 GiB free.
+The exact stop receipt is
+`D:/dev/windows-phase2-release-next-20261002/resource-stop-phase2.env`.
+After fresh disk and memory admission, `run-fa703-phase2.shs` can resume using
+the verified runtime snapshot without rebuilding those passing prerequisites.
+
+Twelve sealed old trace logs were losslessly archived (3.09 GiB less stored
+data), with decompressed hashes verified; three clean merged source worktrees
+were removed with owner confirmation. Commits, tests and external evidence
+remain preserved. Actual D free space was still about 25.32 GiB afterward;
+do not count logical archive reduction as available disk. Restore manifests
+are under `D:/dev/temp-cleanup-20261002-resume`.
+
+The diagnostic Linux manager also passed the two-task keep-going criterion:
+a compiler parse failure was followed by an independent successful hello build,
+both reaped with capacity settled; overall build status correctly stayed failed.
+See `D:/dev/manager-bootstrap-verification-20261001/manager-qualification-result-20261002.md`.
+No Phase2-built manager deployment, Windows manager qualification, shared-cache
+hydration proof, or completed Phase3/4 inventory is claimed. Preserve prepared
+17,147-module routes and all producer-bound caches during the resource stop.
