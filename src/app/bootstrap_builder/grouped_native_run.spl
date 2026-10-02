@@ -4,7 +4,8 @@ use std.common.build_manager.grouped_native_contract.{NativeGroupRunV1, NativeGr
 use app.bootstrap_builder.grouped_native_worker.{NativeGroupWorkerRequestV1, native_group_worker_request_encode_v1}
 use compiler.driver.driver_build.native_group_warm_route.{native_group_warm_route_publish_retry_v1, native_group_warm_route_read_v1}
 use std.common.build_manager.grouped_native_process_policy.{NativeGroupActiveChargeV1,
-    native_group_process_budget_v1}
+    native_group_process_budget_v1, native_group_disk_required_v1,
+    native_group_disk_budget_v1}
 use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
 use std.common.build_manager.group_process_protocol.{GroupProcessInputV1, GroupProcessRequestV1}
 use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, group_process_start_v1, group_process_recover_v1, group_process_poll_v1, group_process_cancel_v1, group_process_collect_reap_v1}
@@ -524,16 +525,15 @@ fn native_group_capacity_check_v1(run: NativeGroupRunV1,
         state.available_disk_bytes else: output.available_disk_bytes
     val commit = if state.available_commit_bytes < output.available_commit_bytes:
         state.available_commit_bytes else: output.available_commit_bytes
-    val group_disk = source_bytes * 8 + run.estimated_group_disk_bytes
-    val needed_disk = if group_disk > run.minimum_free_disk_bytes:
-        group_disk else: run.minimum_free_disk_bytes
+    val disk_budget = native_group_disk_budget_v1(disk,
+        run.minimum_free_disk_bytes, 0, source_bytes, run.estimated_group_disk_bytes)?
     val needed_memory = manifest.memory_limit_bytes + run.memory_reserve_bytes
     if memory < needed_memory:
         return Err("insufficient available host/cgroup memory for next native group: available={memory} needed={needed_memory}")
     if state.commit_measured and commit < needed_memory:
         return Err("insufficient Windows system commit headroom for next native group: available={commit} needed={needed_memory}")
-    if disk < needed_disk:
-        return Err("insufficient available disk for next native group: available={disk} needed={needed_disk}")
+    if not disk_budget.admitted:
+        return Err("insufficient available disk for next native group: available={disk} needed={disk_budget.required_bytes}")
     Ok(NativeGroupedCapacitySampleV1(memory, disk, commit, state.commit_measured))
 
 fn native_group_prepare_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
@@ -879,8 +879,8 @@ fn native_group_active_charges_v1(run: NativeGroupRunV1,
             charges = charges.push(NativeGroupActiveChargeV1(
                 active.manifest.memory_limit_bytes,
                 observed.memory_current_bytes, active.effective_threads))
-            disk_allowance = disk_allowance + active.source_bytes * 8 +
-                run.estimated_group_disk_bytes
+            disk_allowance = native_group_disk_required_v1(0, disk_allowance,
+                active.source_bytes, run.estimated_group_disk_bytes)?
     Ok((charges, disk_allowance))
 
 fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
@@ -937,12 +937,13 @@ fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
                 next.memory_reserve_bytes, before_sample.available_memory_bytes,
                 before_sample.available_commit_bytes,
                 before_sample.commit_measured, before_charges)?
-            val before_disk_needed = next.minimum_free_disk_bytes + before_disk +
-                source_bytes * 8 + next.estimated_group_disk_bytes
+            val before_disk_budget = native_group_disk_budget_v1(
+                before_sample.available_disk_bytes, next.minimum_free_disk_bytes,
+                before_disk, source_bytes, next.estimated_group_disk_bytes)?
             if not before_budget.admitted or
-                    before_sample.available_disk_bytes < before_disk_needed:
+                    not before_disk_budget.admitted:
                 val reason = if not before_budget.admitted: before_budget.reason else: "wave-disk-headroom"
-                print "native group prestart refused group={manifest.group_id} stage=before-staging reason={reason} available_memory={before_budget.available_memory_bytes} required_host={before_budget.required_host_bytes} available_commit={before_budget.available_commit_bytes} required_commit={before_budget.required_commit_bytes} available_disk={before_sample.available_disk_bytes} required_disk={before_disk_needed}"
+                print "native group prestart refused group={manifest.group_id} stage=before-staging reason={reason} available_memory={before_budget.available_memory_bytes} required_host={before_budget.required_host_bytes} available_commit={before_budget.available_commit_bytes} required_commit={before_budget.required_commit_bytes} available_disk={before_sample.available_disk_bytes} required_disk={before_disk_budget.required_bytes}"
                 break
         val prepared = match native_group_prepare_attempt_v1(next, manifest, capacity):
             Ok(value): value
@@ -955,10 +956,11 @@ fn native_group_prestart_wave_v1(run: NativeGroupRunV1,
         val (charges, active_disk_allowance) = after
         val sample = native_group_capacity_check_v1(next, manifest,
             prepared.source_bytes, capacity)?
-        val wave_disk = next.minimum_free_disk_bytes + active_disk_allowance +
-            prepared.source_bytes * 8 + next.estimated_group_disk_bytes
-        if sample.available_disk_bytes < wave_disk:
-            print "native group prestart refused group={manifest.group_id} reason=wave-disk-headroom available={sample.available_disk_bytes} needed={wave_disk}"
+        val wave_disk_budget = native_group_disk_budget_v1(sample.available_disk_bytes,
+            next.minimum_free_disk_bytes, active_disk_allowance,
+            prepared.source_bytes, next.estimated_group_disk_bytes)?
+        if not wave_disk_budget.admitted:
+            print "native group prestart refused group={manifest.group_id} reason=wave-disk-headroom available={sample.available_disk_bytes} needed={wave_disk_budget.required_bytes}"
             break
         for resource_index in 0..next.resources.len():
             if next.resources[resource_index].group_id == manifest.group_id and

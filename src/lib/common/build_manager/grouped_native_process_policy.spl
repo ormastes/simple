@@ -61,3 +61,41 @@ fn native_group_process_budget_v1(cpu_count: i64, candidate_threads: i64,
 
 export NativeGroupActiveChargeV1, NativeGroupProcessBudgetV1
 export native_group_process_budget_v1
+
+# Disk reserve must remain after all admitted groups consume their estimated
+# growth. Zero active growth is the singleton case, not a different policy.
+fn native_group_disk_required_v1(reserve_bytes: i64, active_growth_bytes: i64,
+        source_bytes: i64, estimated_growth_bytes: i64) -> Result<i64, text>:
+    if reserve_bytes < 0 or active_growth_bytes < 0 or source_bytes < 0 or
+            estimated_growth_bytes < 0:
+        return Err("invalid native group disk budget input")
+    val maximum: i64 = 9223372036854775807
+    if source_bytes > maximum / 8:
+        return Err("native group disk budget overflow")
+    val source_growth = source_bytes * 8
+    if estimated_growth_bytes > maximum - source_growth:
+        return Err("native group disk budget overflow")
+    val candidate_growth = source_growth + estimated_growth_bytes
+    if active_growth_bytes > maximum - candidate_growth:
+        return Err("native group disk budget overflow")
+    val total_growth = candidate_growth + active_growth_bytes
+    if reserve_bytes > maximum - total_growth:
+        return Err("native group disk budget overflow")
+    Ok(reserve_bytes + total_growth)
+
+export native_group_disk_required_v1
+
+struct NativeGroupDiskBudgetV1:
+    admitted: bool
+    required_bytes: i64
+
+fn native_group_disk_budget_v1(available_bytes: i64, reserve_bytes: i64,
+        active_growth_bytes: i64, source_bytes: i64, estimated_growth_bytes: i64
+        ) -> Result<NativeGroupDiskBudgetV1, text>:
+    if available_bytes < 0:
+        return Err("invalid native group disk capacity measurement")
+    val required = native_group_disk_required_v1(reserve_bytes,
+        active_growth_bytes, source_bytes, estimated_growth_bytes)?
+    Ok(NativeGroupDiskBudgetV1(available_bytes >= required, required))
+
+export NativeGroupDiskBudgetV1, native_group_disk_budget_v1
