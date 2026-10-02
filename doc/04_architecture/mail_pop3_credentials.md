@@ -4,9 +4,14 @@ The existing shell mail-cli remains the protocol/UI owner. Its shared curl
 boundary supplies credentials through curl's config stdin, disables curlrc,
 and owns bounded authentication recovery. Protocol-specific code never owns
 cryptography. Dev-hub invokes the same mail-cli account and credential paths.
-Its default shared account file is `~/.config/devhub/email.json`; an explicit
-file or directory selector overrides it and is passed to mail-cli. JSON is
-the shared schema, while legacy `email.sdn` retains the previous separate route.
+Its default shared account file is `~/.config/devhub/email.sdn`; an explicit
+file or directory selector overrides it and is passed to mail-cli. One canonical
+SDN parser in `email_config_sdn.spl` owns decoding and redacted validation.
+DevHub adapts its JSON projection to existing EmailAccount/EmailConfig; the
+compiled helper exposes that projection to mail-cli. In a combined DevHub
+configuration, only the `email` subtree is selected. Present-but-invalid email
+settings never fall back to standalone root accounts or another file. Explicit
+legacy `.json` paths retain compatibility; migration is opt-in.
 `email_support.spl` owns parsing, credential options and subprocess arguments;
 `cmd_email.spl` owns command dispatch. The command module exports the support
 surface for existing callers. An optional DEVHUB_MAIL_SCRIPT argv prefix lets
@@ -18,14 +23,15 @@ semantics (flags, folders, search, drafts and mutations). Message numbers are
 explicitly session-local, not durable UIDs. No DELE is issued by retrieval.
 
 `src/app/mail_credentials/main.spl` is a compiled, narrow stdin/stdout bridge to
-the existing Simple terminal credential store. Only encrypt/decrypt are public
-operations. The bridge cannot select plaintext storage. The shell serializes
+the existing Simple terminal credential store. `config-json PATH` supplements encrypt/decrypt; it reads through the SOSIX
+host facade and returns metadata, credential references and encrypted envelopes. The bridge cannot select plaintext storage. The shell serializes
 key initialization and atomically replaces account config only after success.
 The existing key/cipher security limitations are tracked separately in
 `doc/08_tracking/todo/credential_storage_hardening_2026-09-29.md`.
 
 Runtime compilation and seed fallback are prohibited. Deployment must provide
-the compiled helper via PATH or MAIL_CREDENTIAL_BIN. Its absence is a real
+the compiled helper via PATH or MAIL_CREDENTIAL_BIN. MAIL_CONFIG_BIN can select
+the parser helper separately. Its absence is a real
 error, not permission to save plaintext. A fake helper proves orchestration
 only, never encryption correctness or deployability.
 

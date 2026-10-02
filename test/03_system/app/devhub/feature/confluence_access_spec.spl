@@ -1,0 +1,157 @@
+# @cover src/app/devhub/adapter_confluence.spl
+# @evidence-display: links
+# Offline fixtures invoke the same response boundary used by curl requests.
+
+use std.spec.step
+use std.json.{json_parse}
+use app.io.mod.{file_write, dir_create_all}
+use std.nogc_sync_mut.env.{env_get, env_set, env_has, env_unset}
+use app.devhub.config.{ItfConfig, _apply_config_value, resolve_auth_token_from}
+use app.devhub.atlassian_site.{atlassian_auth_header}
+use app.devhub.adapter_confluence.{confluence_content_root, confluence_search_cql, confluence_response_result, _confluence_curl_argv, _parse_results, _json_str}
+
+describe "Confluence access with offline transport fixtures":
+    describe "REQ-CONFLUENCE-ACCESS-001: deployment routing":
+        it "should retain Cloud wiki and Data Center context paths":
+            step("Load shared configuration")
+            val cloud = _apply_config_value(ItfConfig.default(), "confluence", "url", "https://site.atlassian.net/wiki/")
+            val dc = _apply_config_value(ItfConfig.default(), "confluence", "url", "https://dc.example:8090/confluence/")
+            step("Resolve Confluence access")
+            expect(confluence_content_root(cloud)).to_equal("https://site.atlassian.net/wiki/rest/api/content")
+            expect(confluence_content_root(dc)).to_equal("https://dc.example:8090/confluence/rest/api/content")
+
+        it "should treat the gateway as the complete API prefix":
+            step("Load shared configuration")
+            val config = _apply_config_value(ItfConfig.default(), "confluence", "gateway_url", "https://gateway.example/proxy/wiki/")
+            step("Resolve Confluence access")
+            expect(confluence_content_root(config)).to_equal("https://gateway.example/proxy/wiki/content")
+
+        it "should report missing URL without inventing a target":
+            step("Resolve Confluence access")
+            expect(confluence_content_root(ItfConfig.default())).to_equal("")
+
+    describe "REQ-CONFLUENCE-ACCESS-002: literal search values":
+        it "should build ordinary title and space searches":
+            step("Resolve Confluence access")
+            expect(confluence_search_cql("guide", "ENG")).to_equal("type=page and title~\"guide\" and space=\"ENG\"")
+
+        it "should preserve literal backslashes and quotes in both fields":
+            step("Resolve Confluence access")
+            expect(confluence_search_cql("a\\\"b", "x\\\"y")).to_equal("type=page and title~\"a\\\\\\\"b\" and space=\"x\\\\\\\"y\"")
+
+        it "should keep a quoted space value from becoming a CQL clause":
+            step("Execute the request")
+            val cql = confluence_search_cql("", "ENG\" or type=blogpost or space=\"OPS")
+            val argv = _confluence_curl_argv("", "GET", "https://fixture.invalid/content/search", "", ["cql={cql}"])
+            expect(cql).to_equal("type=page and title~\"\" and space=\"ENG\\\" or type=blogpost or space=\\\"OPS\"")
+            expect(argv).to_contain("cql={cql}")
+            expect(argv).to_contain("--data-urlencode")
+
+    describe "REQ-CONFLUENCE-ACCESS-003: decoded response content":
+        it "should return decoded storage text with quotes and newlines":
+            step("Execute the request")
+            val body = json_parse("\{\"value\":\"<p title=\\\"guide\\\">line1\\nline2</p>\"\}")
+            step("Check response and redaction")
+            expect(_json_str(body, "value")).to_equal("<p title=\"guide\">line1\nline2</p>")
+
+        it "should preserve an empty result page":
+            step("Execute the request")
+            val (ok, items, raw) = _parse_results("\{\"results\":[]\}")
+            step("Check response and redaction")
+            expect(ok).to_equal(true)
+            expect(items.len()).to_equal(0)
+            expect(raw).to_equal("\{\"results\":[]\}")
+
+        it "should reject malformed listing shapes instead of claiming no pages":
+            step("Execute the request")
+            for body in ["\{\}", "\{\"results\":\"unavailable\"\}"]:
+                val (ok, items, message) = _parse_results(body)
+                step("Check response and redaction")
+                expect(ok).to_equal(false)
+                expect(items.len()).to_equal(0)
+                expect(message).to_equal("invalid Confluence response: results must be an array")
+
+    describe "REQ-CONFLUENCE-ACCESS-004: transport response and diagnostics":
+        it "should preserve successful content including words resembling secrets":
+            step("Execute the request")
+            val (status, body) = confluence_response_result("password: documentation example\n200", "", 0)
+            step("Check response and redaction")
+            expect(status).to_equal(200)
+            expect(body).to_equal("password: documentation example")
+
+        it "should redact HTTP failures and preserve their status without retry":
+            step("Execute the request")
+            for code in [401, 429, 503]:
+                val (status, body) = confluence_response_result("Authorization: Bearer fixture-secret\n{code}", "", 0)
+                step("Check response and redaction")
+                expect(status).to_equal(code)
+                expect(body).to_equal("Authorization: ***")
+
+        it "should redact transport failures even when stdout carries a success status":
+            step("Execute the request")
+            val (status, body) = confluence_response_result("partial\n200", "Authorization: Bearer fixture-secret", 7)
+            step("Check response and redaction")
+            expect(status).to_equal(0)
+            expect(body).to_equal("transport error: Authorization: ***")
+
+        it "should reject absent and malformed HTTP status trailers":
+            step("Execute the request")
+            for stdout in ["", "body\nabc", "body\n20"]:
+                val (status, body) = confluence_response_result(stdout, "", 0)
+                step("Check response and redaction")
+                expect(status).to_equal(0)
+                expect(body).to_equal("transport error: curl exit 0")
+
+    describe "REQ-CONFLUENCE-ACCESS-005: target credential isolation":
+        it "should select only the named target token from the auth document":
+            step("Load shared configuration")
+            expect(dir_create_all("build/confluence-access-fixture")).to_equal(true)
+            val path = "build/confluence-access-fixture/auth.sdn"
+            expect(file_write(path, "confluence:\n    token: global-fixture\nconfluence.team:\n    token: team-fixture\n")).to_equal(true)
+            val config = ItfConfig(confluence_target: "team", token_envs: [], token_cmds: [])
+            step("Resolve Confluence access")
+            val token = resolve_auth_token_from(config, "confluence", path)
+            step("Execute the request")
+            val argv = _confluence_curl_argv(atlassian_auth_header("bearer", "", token), "GET", "https://fixture.invalid/content", "", [])
+            step("Check response and redaction")
+            expect(token).to_equal("team-fixture")
+            expect(argv).to_contain("Authorization: Bearer team-fixture")
+            expect(argv.contains("Authorization: Bearer global-fixture")).to_equal(false)
+
+        it "should preserve legacy default credentials when no target is selected":
+            step("Load shared configuration")
+            expect(dir_create_all("build/confluence-access-fixture")).to_equal(true)
+            val path = "build/confluence-access-fixture/legacy-auth.sdn"
+            expect(file_write(path, "confluence:\n    token: legacy-fixture\n")).to_equal(true)
+            step("Resolve Confluence access")
+            expect(resolve_auth_token_from(ItfConfig.default(), "confluence", path)).to_equal("legacy-fixture")
+
+        it "should reject missing named credentials despite a global token":
+            step("Load shared configuration")
+            expect(dir_create_all("build/confluence-access-fixture")).to_equal(true)
+            val path = "build/confluence-access-fixture/missing-auth.sdn"
+            expect(file_write(path, "confluence:\n    token: unrelated-fixture\n")).to_equal(true)
+            val config = ItfConfig(confluence_target: "missing", token_envs: [], token_cmds: [])
+            step("Resolve Confluence access")
+            val token = resolve_auth_token_from(config, "confluence", path)
+            step("Check response and redaction")
+            expect(token).to_equal("")
+            expect(atlassian_auth_header("bearer", "", token)).to_equal("")
+
+        it "should prefer the scoped environment token over the file token":
+            step("Load shared configuration")
+            expect(dir_create_all("build/confluence-access-fixture")).to_equal(true)
+            val path = "build/confluence-access-fixture/env-auth.sdn"
+            expect(file_write(path, "confluence.team:\n    token: file-fixture\n")).to_equal(true)
+            val key = "SIMPLE_CONFLUENCE_ACCESS_FIXTURE_TOKEN"
+            val was_set = env_has(key)
+            val previous = env_get(key)
+            val configured = env_set(key, " scoped-env-fixture ")
+            val config = ItfConfig(confluence_target: "team", token_envs: [("confluence.team", key)], token_cmds: [])
+            step("Resolve Confluence access")
+            val token = resolve_auth_token_from(config, "confluence", path)
+            val restored = if was_set: env_set(key, previous) else: env_unset(key)
+            step("Check response and redaction")
+            expect(configured).to_equal(true)
+            expect(restored).to_equal(true)
+            expect(token).to_equal("scoped-env-fixture")
