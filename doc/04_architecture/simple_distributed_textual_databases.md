@@ -589,3 +589,27 @@ No implementation may call the architecture complete merely because Git accepted
 - `src/lib/scv/lifecycle/sync.spl`
 - `src/lib/nogc_sync_mut/test_runner/test_db_compat.spl`
 - `src/app/sj/client.spl`
+
+## Release-lane architecture refinement — 2026-10-03
+
+This addendum preserves all selected requirements and existing public identity interfaces. Source inspection at `e9cd3153c881c55f59eaaa2573b4b8a5e803023a` establishes pure identity transitions and read-only transport primitives, not a complete settlement service.
+
+### Evidence boundaries
+
+`EntityUid`, `SettledAlias`, `IdentityMap`, `db_git_settlement_ref_head` and `db_git_settlement_reconcile` retain their signatures and meaning. A pure candidate transition is not durable acceptance. A transport result named `published` establishes only the Git fact specified by that operation; authority, accepted batches, signatures, receipt indexing and projection remain the settlement coordinator's responsibility.
+
+The additive `db_git_settlement_reconcile_history(source, remote, expected_old_oid, candidate_oid, scratch_parent) -> DbGitSettlementReadback` resolves conservative read-back uncertainty without making the source checkout a second mutation domain. Its owner creates a private bare repository outside the canonical checkout and Git common directory, fetches the observed authority head, inspects raw commit parents with replacement objects disabled, and removes its own temporary repository. Source, common-directory and scratch identities must be canonicalized; symlink/alias overlap is rejected. If host identity resolution cannot prove separation, return a scope error, not an unsafe fallback.
+
+The history operation walks at most 256 single-parent links and rechecks the remote ref before returning a decision. Candidate inclusion yields transport `published`; reaching the expected parent without the candidate yields transport `not_published`. Multiple parents, missing history or the traversal limit preserve `SCVDB_HISTORY_REQUIRED`; a changed authority tip returns `SCVDB_READBACK_MOVED`. Neither positive classification bypasses the existing receipt-index and semantic-admission protocol. The old conservative operation remains available and unchanged.
+
+### Ownership and delivery order
+
+1. Pure core: preserve identity invariants; add canonical patch, authorization, accepted registry and merge behavior under the selected contracts.
+2. SJ persistence owner: atomically journal state, aliases, dispositions, registry and canonical intent; prove crash/reopen behavior.
+3. Transport adapter: prove remote scope, raw ancestry and bounded read-back. Explicit scratch mutation belongs to the effect adapter, never to pure queries.
+4. Settlement coordinator: validate protected authority capabilities, receipt chain and atomic candidate, then perform publication and recovery through the admitted worker.
+5. Evidence/bridge/retention adapters: implement the remaining selected requirements with durable normalized inputs and honest availability.
+
+These are implementation dependencies, not reduced scope. REQ-001–036 and NFR-001–015 remain the release acceptance boundary. Each parallel lane has one isolated worktree/branch; a single integrating reviewer reconciles interfaces and evidence before protected release-branch integration. Tags/publication remain a separate authorized release action.
+
+Startup opens generation/version/index roots once. Pure identity/status/dedup hot paths perform no subprocess or network I/O. The existing array IdentityMap's pairwise validation is a known scaling gap: million-row acceptance requires an indexed implementation and recorded warm latency/RSS results, not extrapolation from small unit fixtures.

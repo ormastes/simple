@@ -852,3 +852,36 @@ The implementation and system specs must prove:
 10. Existing SCV identities and documented reader paths survive migration.
 
 This design covers REQ-001 through REQ-036 and NFR-001 through NFR-015. Architecture and system-test artifacts provide the requirement-to-scenario matrix; implementation may refine internal field representation but must preserve these named shared interfaces and behavioral contracts or update requirements/design and receive review first.
+
+## 18. Concrete TDD acceptance refinement — 2026-10-03
+
+The selected requirements and the earlier receipt-index protocol remain authoritative. These cases turn the first existing implementation seams into reviewable tests; they do not declare all 36 requirements implemented. Shared helper names for new fixtures are `setup_item2_*` and `check_item2_*`. Existing manual step labels remain `Create offline semantic changes`, `Settle compact identifiers`, and `Drive the boundary state and inspect preserved invariants`. Unimplemented `check_*_contract` paths must still fail explicitly.
+
+| Case | Existing requirement | Concrete stimulus | Independent oracle |
+|---|---|---|---|
+| ID-01 | REQ-002,004 | Allocate A, tombstone A, allocate B of the same kind, replay A. | A's alias remains unchanged/tombstoned; B gets the next high-water value; reverse lookup still identifies A; no resurrection. |
+| ID-02 | REQ-004 | Supply duplicate alias, duplicate allocator mark, inconsistent UID provenance, or exhausted u64 mark. | Exact rejection code and unchanged input bindings/marks; no sequence allocated. |
+| ID-03 | REQ-002,003 | Resolve equal integers in different kind/epoch/namespace contexts. | Context remains part of identity; canonical SCV identity is never rewritten by alias assignment. |
+| GIT-01 | REQ-007,008 | Local bare authority advances H -> candidate -> successor. | Old reconcile remains HISTORY_REQUIRED; new history read-back observes successor and finds candidate using actual fetched raw objects. |
+| GIT-02 | REQ-008 | Authority advances H -> competitor without candidate. | New bounded history read-back reaches H and reports not_published; source refs/index/worktree remain unchanged. |
+| GIT-03 | REQ-007,008 | Candidate has wrong parent or replacement refs forge ancestry. | Raw object validation rejects mismatch before any acceptance decision. |
+| GIT-04 | REQ-008,022 | Remote ref moves between initial observation and final recheck. | READBACK_MOVED, no settled projection or new allocation. |
+| GIT-05 | REQ-008,022 | History contains a merge, missing object, or exceeds 256 inspected links. | HISTORY_REQUIRED; bounded work and no guessed decision. |
+| GIT-06 | REQ-029,036 | Scratch is inside source/common-dir or aliases either through a link; host cannot prove canonical identity. | SCRATCH_SCOPE before mutation; no unsafe platform fallback. |
+| CANON-01 | REQ-011,015 | Equal maps with differing insertion order; framed text containing delimiters; absent/empty; u64 above 2^53; NFC equivalents. | Exact literal canonical bytes/digests under the selected encoding; do not derive expected bytes with the encoder being tested. |
+| REPLAY-01 | REQ-011,015,017 | Deliver same batch/observation twice, then reuse its identity with changed bytes. | One accepted entry/count; changed content quarantined; allocator and accepted state unchanged by rejected replay. |
+| CRASH-01 | REQ-004,007,009 | Crash after each persistence boundary and between settled-ref acceptance and receipt indexing. | Fresh process recovers one complete generation; frozen unacknowledged head admits no new allocation; exactly one receipt-index entry. |
+
+TDD evidence for each implemented case records the command, runtime path/digest, initial failing assertion, production change, passing result and durable fixture evidence. An unavailable runner is a blocked execution result; source inspection or a test listing is not RED or GREEN. Pure helper tests can prove only their stated local invariants. CRASH-01 requires restart/read-back and cannot be replaced by comparing two in-memory values.
+
+### 18.1 Additive history reconciliation detail
+
+Preserve existing APIs. Add `db_git_settlement_reconcile_history(source, remote, expected_old_oid, candidate_oid, scratch_parent) -> DbGitSettlementReadback`. Validate candidate's raw sole parent before history reasoning. Create a securely isolated bare scratch repository only after alias-safe path containment checks; fetch the observed authority head into it and validate the exact fetched OID. Inspect no more than 256 raw single-parent commits, with replace-object rewriting disabled. Re-read authority before classifying a stable result and clean up only the owned scratch repository. Unsupported host canonicalization returns `SCVDB_SCRATCH_SCOPE` and leaves host conformance incomplete; it must not be reported as REQ-036 PASS.
+
+The result `published` means candidate inclusion in inspected Git history, not accepted semantic content. `not_published` requires reaching the expected old head without finding the candidate. `SCVDB_HISTORY_REQUIRED` retains ambiguity; `SCVDB_READBACK_MOVED` requires a fresh observation rather than recursive retry. The coordinator alone may reconcile accepted batches and signed receipts, replan after proven rejection, or advance a projection.
+
+### 18.2 Remaining acceptance order
+
+After the focused identity/transport prerequisites, implement canonical encoding and replay, durable transaction recovery, admission/receipt-index publication, configuration-aware evidence/CI, provider bridge, retention/resnapshot, and Operating B performance/host evidence. Keep all remaining scenarios visibly failing until their production owners and durable oracles exist. Windows/Linux/macOS/FreeBSD support and live GitHub capability proofs are separate evidence cells; one host's local bare-Git fixture does not satisfy them. NFR targets in section 16 are unchanged and unproven by these small fixtures.
+
+Current host blocker: the Windows `path_absolute` implementation cannot prove symlink/final-path identity (`src/app/io/env_access_host.spl:111`). The interim history adapter therefore rejects Windows scratch setup with `SCVDB_SCRATCH_SCOPE`. REQ-036 remains OPEN until the existing host path owner supplies alias-safe final-path resolution and the same containment/history fixtures run on Windows. This is a blocked capability, not an accepted Windows exclusion or a reduction of the one-app-path requirement.
