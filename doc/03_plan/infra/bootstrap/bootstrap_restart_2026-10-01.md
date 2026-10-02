@@ -1731,3 +1731,66 @@ The pinned, opt-in streaming FullCLI diagnostic has the next resource slot.
 It does not change production defaults or establish a qualified test runner
 until an actual compile and subsequent execution checks pass. Linux's
 provider-bound parse crash and all incomplete phase inventories remain open.
+
+### 2026-10-03 resume2 retired; reviewed compiler preparation continues
+
+The streaming FullCLI diagnostic is terminal FAIL, not a usable test runner.
+Its actual native invocation exited 1 after 649 successful scope releases,
+with one recorded phase-2 error whose payload was not printed. Peak RSS was
+1,109,068 KiB; this early failure does not prove full-build memory acceptance.
+The last parse-start named devhub/auth.spl, but that alone does not diagnose a
+grammar defect. Source/runtime checks passed and the Job was quiescent.
+Receipts are in `full-cli-streaming-optin-2` under the 7734 build root.
+
+Resume2 subsequently ran both Windows LLVM inventories. It is now terminal:
+`phase34-diagnostic-resume2/paired-disk-terminal.env` records
+`status=disk-budget-stop`, both lane exits 143, and
+`task_guards_quiescent=1`. Both 7 GB reservations are released. The guard
+observed transient whole-volume depletion; its final free-space sample recovered
+to 29,153,292,288 bytes. The triggering/minimum sample was not retained, so
+neither attribution to a particular build nor an exact peak depletion is proven.
+Future guard evidence must retain that sample without changing sealed receipts.
+
+Phase3 has 45 completed original module attempts: 14 PASS, 26 ordinary
+compile failures (1), and five RSS-cap failures (88). Original module46,
+native_group_linux_main.spl, was interrupted (143) and needs requeue.
+Phase4 has 27 completed module attempts: one PASS, 23 ordinary compile
+failures, two crashes (139), and one RSS-cap failure. Its next module,
+generation_sweeper.spl, was interrupted and needs requeue. Interrupted jobs
+are not additional compiler failures. The six earlier binary failures and
+three BLOCKED suites remain; no completed phase or passing suite is claimed.
+Keep all caches, original task identities, and terminal receipts.
+
+The next isolated compiler candidate is assembled at
+`D:/dev/bootstrap-next-reviewed-source-20261003`, HEAD
+`00b1923fe2e624a26c6b3f1534327d21efc41a83`, tree
+`da00a2d0c88fda613845243f729075274aa8e64e`, based on release
+`49d4c083d82b79249b807b96e5e39f62a3cb603f`. It contains the reviewed
+requested-entry, array-slice, and streaming-error-receipt patches from draft
+PRs #2262, #2268, and #2269. Patch identities match; runtime acceptance is
+still pending. PR2255 and its dependent runtime-header patch are excluded from
+this compiler-only candidate. Do not infer manager deployment from it.
+
+Canonical configuration key `8c66a1d32b8c` was recomputed successfully.
+Full source materialization, SPipe, a private Cargo cache copy, source-consumer
+verification, and final guard admission remain preparation gates at this
+checkpoint. No new compiler has launched. Preparation is bounded to 6 GiB of
+whole-volume depletion while preserving 17,716,740,096 bytes for the next
+stage's growth reservation and emergency floor. Include partial-clone pack
+allocations in that accounting: even metadata commands can fetch missing blobs.
+The intended canonical command is full bootstrap with stop-after-stage2;
+old Stage2 native objects must not cross the changed seed identity.
+
+Manager scheduler blockers `lower` and `verified` remain unresolved; the
+array-slice patch does not establish their repair. The classifier's ten native
+assertions remain PASS and must not be rerun. Grouped scheduling, full managed
+queues, Linux recovery, and bidirectional Windows/WSL cache qualification still
+require actual runtime evidence.
+
+Frontend source review also found four imported owners absent from both the
+frozen 7734 tracked source and manager PR2255's exact `54c030180e` source:
+`managed_parse_run_contract.spl`, `managed_parse_group_contract.spl`,
+`manager_contract.spl`, and `parser_simd_execution_capability_v1.spl`.
+PR2255 alone therefore does not supply the complete dependency graph. This is
+remaining implementation/dependency work, not merely missing verification;
+source investigation is ongoing and no replacement definitions are assumed.
