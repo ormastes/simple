@@ -1954,11 +1954,20 @@ bootstrap_stage_sanity() (
   # Validate before any candidate execution, and preserve presence (including
   # malformed/empty contracts) rather than silently falling back to standalone.
   if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
-    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
-    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
-    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0)
+      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-id raw_status=125' >&2
+      return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *)
+      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-helper raw_status=125' >&2
+      return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || {
+      echo 'bootstrap-sanity-error: phase=session-validation reason=session-check-failed raw_status=125' >&2
+      return 125
+    }
   fi
-  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *)
+    echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-rss-cap-mode raw_status=125' >&2
+    return 125 ;; esac
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
@@ -2085,7 +2094,11 @@ bootstrap_stage_sanity() (
   unsupported_status=$?
   set -e
   frontend_status=0
-  candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || return 1
+  candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || {
+    sanity_capture_status=$?
+    echo "bootstrap-sanity-error: phase=frontend-capture reason=capture-setup-failed raw_status=${sanity_capture_status}" >&2
+    return "${sanity_capture_status}"
+  }
   frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
   # The smoke exercises the FRONTEND through whichever worker binary the lane

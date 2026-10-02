@@ -1,0 +1,69 @@
+#!/bin/sh
+# Run inside the real bounded Windows Job owner. No Simple candidate is run.
+# Usage: sh scripts/check/check-windows-sanity-session-path.shs EVIDENCE-DIR
+set -eu
+PATH=/usr/bin:/bin:$PATH
+export PATH
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+evidence=${1:?new evidence directory required}
+case "$evidence" in /*) ;; *) exit 2 ;; esac
+mkdir "$evidence"
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'ERROR: Windows MSYS required' >&2; exit 2 ;; esac
+[ -n "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" ] || exit 2
+
+# Extract both production gates. A stop collaborator prevents every candidate
+# invocation while the real session checks and real environment scrub execute.
+for owner in bootstrap-from-scratch.sh resume-stage3-from-admitted.sh; do
+  awk '/^bootstrap_stage_sanity\(\) \(/ { active=1 } active { print } active && /^\)$/ { exit }' \
+    "$repo_root/scripts/bootstrap/$owner" > "$evidence/$owner.function"
+  grep -q '^bootstrap_stage_sanity() (' "$evidence/$owner.function"
+  grep -q '^)$' "$evidence/$owner.function"
+done
+cat > "$evidence/child.shs" <<'CHILD'
+#!/bin/sh
+set -eu
+repo_root=$1 evidence=$2
+root=$repo_root os=windows
+export PATH=/usr/bin:/bin
+case "$SIMPLE_BOOTSTRAP_SESSION_EXEC" in /*) ;; *) echo 'FAIL: converted helper path' >&2; exit 1 ;; esac
+case ";${MSYS2_ENV_CONV_EXCL-};" in *';KEEP_EXISTING=;'*) ;; *) echo 'FAIL: lost prior exclusion' >&2; exit 1 ;; esac
+case ";${MSYS2_ENV_CONV_EXCL-};" in *';SIMPLE_BOOTSTRAP_SESSION_EXEC=;'*) ;; *) echo 'FAIL: absent session exclusion' >&2; exit 1 ;; esac
+"$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check
+printf 'session_id=%s\nsession_exec=%s\nhelper_check=pass\nprior_exclusion=preserved\n' "$SIMPLE_BOOTSTRAP_SESSION_ID" "$SIMPLE_BOOTSTRAP_SESSION_EXEC"
+
+# Synthetic collaborators stop at capture setup; none execute a candidate or
+# manufacture an admission receipt. The expected 126 is itself a gate refusal.
+bootstrap_stage2_sanity_output_preflight() { return 0; }
+bootstrap_stage3_hash_file() { printf '%s\n' synthetic; }
+bootstrap_stage3_canonical_version() { printf '%s\n' synthetic; }
+run_timeout() { return 1; }
+candidate_frontend_capture_setup() { return 126; }
+for owner in bootstrap-from-scratch.sh resume-stage3-from-admitted.sh; do
+  . "$evidence/$owner.function"
+  status=0
+  bootstrap_stage_sanity /NO-CANDIDATE "$evidence/$owner.env" "$evidence" "$evidence" "$PATH" \
+    2> "$evidence/$owner.capture.stderr" || status=$?
+  [ "$status" -eq 126 ]
+  grep -qx 'bootstrap-sanity-error: phase=frontend-capture reason=capture-setup-failed raw_status=126' "$evidence/$owner.capture.stderr"
+  for reason in invalid-session-id invalid-session-helper invalid-rss-cap-mode session-check-failed; do
+    status=0
+    (
+      case "$reason" in
+        invalid-session-id) SIMPLE_BOOTSTRAP_SESSION_ID=bad ;;
+        invalid-session-helper) SIMPLE_BOOTSTRAP_SESSION_EXEC=D:/invalid ;;
+        invalid-rss-cap-mode) SIMPLE_BOOTSTRAP_RSS_CAP_MODE=bad ;;
+        session-check-failed) SIMPLE_BOOTSTRAP_SESSION_ID=1 ;;
+      esac
+      export SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+      bootstrap_stage_sanity /NO-CANDIDATE "$evidence/$owner.env" "$evidence" "$evidence" "$PATH"
+    ) 2> "$evidence/$owner.$reason.stderr" || status=$?
+    [ "$status" -eq 125 ]
+    grep -qx "bootstrap-sanity-error: phase=session-validation reason=$reason raw_status=125" "$evidence/$owner.$reason.stderr"
+  done
+  printf 'gate=%s capture126=pass invalid-contract125=pass\n' "$owner"
+done
+printf 'PASS: native wrapper preserves the session path; both gates diagnose early refusals\n'
+CHILD
+export MSYS2_ENV_CONV_EXCL="${MSYS2_ENV_CONV_EXCL:+${MSYS2_ENV_CONV_EXCL};}KEEP_EXISTING="
+exec /usr/bin/perl "$repo_root/scripts/check/lib/portable-session-exec.pl" \
+  /bin/sh "$evidence/child.shs" "$repo_root" "$evidence"
