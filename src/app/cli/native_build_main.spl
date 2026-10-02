@@ -5,7 +5,11 @@ use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_s
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
-use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_publish_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
+    compile_source_inventory_checkout_cache_root_v1}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
 use app.bug.workaround_store.{refresh_workarounds}
 # Unambiguous, non-builtin stderr write for the worker-failure relay path
 # (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
@@ -914,23 +918,23 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
             eprint "error: native-build could not create its internal policy handoff: {reason}"
             return 1
-    # The full CLI publishes the compile-source inventory through
-    # compiler_entrypoint_admit_v1 before native-build; this seed-run entry
-    # skipped it, so the worker's snapshot acquire always failed with
-    # snapshot-inventory-unavailable. Run the same refresh, same cold-init gate.
+    # Publish complete immutable authority once, before any shard is spawned.
+    # A generation alone leaves the child without a snapshot and makes every
+    # child repeat cold inventory admission while the parent retains its work.
     if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") == "":
-        var scv_root = path_absolute(".").replace("\\", "/")
-        if scv_root.starts_with("//?/"):
-            scv_root = scv_root.substring(4)
-        val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
-        val inventory_roots = if cold_init: ["src", "test"] else: ["src"]
-        val refresh = compiler_inventory_refresh_v1(
-            scv_root, scv_root + "/build/scv", inventory_roots, cold_init)
-        if not refresh.valid:
-            eprint "SCV-E-ADMISSION: " + refresh.reason
+        val scv_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+        val source_roots = native_build_authority_source_roots_v1(args, scv_root)
+        if source_roots.len() == 0:
+            eprint "SCV-E-ADMISSION: source-inventory-scope-unsupported"
             return 1
-        if not env_set("SIMPLE_SCV_INVENTORY_GENERATION", str(refresh.inventory_generation)):
-            eprint "SCV-E-ADMISSION: snapshot-generation-env-publish-failed"
+        val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
+        val authority = compiler_source_authority_acquire_v1(scv_root,
+            compile_source_inventory_checkout_cache_root_v1(scv_root), source_roots, cold_init)
+        if not authority.valid:
+            eprint "SCV-E-ADMISSION: " + authority.reason
+            return 1
+        if not compiler_source_authority_publish_v1(authority):
+            eprint "SCV-E-ADMISSION: snapshot-authority-env-publish-failed"
             return 1
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
@@ -1181,6 +1185,8 @@ fn native_build_is_value_consuming_flag(arg: text) -> bool:
         or arg == "--parser-require" or arg == "--host-cpu-max"
         or arg == "--frontend-offload"
         or arg == "--frontend-offload-fallback"
+        or arg == "--collection-profile" or arg == "--collection-workload"
+        or arg == "--collection-target"
 
 fn native_build_has_entry(args: [text]) -> bool:
     var i = 0
@@ -1196,6 +1202,38 @@ fn native_build_has_entry(args: [text]) -> bool:
             return true
         i = i + 1
     false
+
+pub fn native_build_authority_source_roots_v1(args: [text], root: text) -> [text]:
+    # Extract only source selection; the worker remains the CLI validator.
+    # Reuse its default root policy and this coordinator's value-flag table,
+    # so an output path or backend value cannot become a positional entry.
+    var entry = ""
+    var sources: [text] = []
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if native_build_text_eq(arg, "--entry") or native_build_text_eq(arg, "--source"):
+            if index + 1 >= args.len(): return []
+            index = index + 1
+            if native_build_text_eq(arg, "--entry"): entry = args[index]
+            else: sources.push(args[index])
+        elif arg.starts_with("--entry="):
+            entry = arg.substring(8)
+        elif arg.starts_with("--source="):
+            sources.push(arg.substring(9))
+        elif native_build_is_value_consuming_flag(arg):
+            index = index + 1
+        elif not arg.starts_with("-") and entry == "":
+            entry = arg
+        index = index + 1
+    if entry == "" or root == "": return []
+    val absolute = compile_source_inventory_plain_checkout_v1(path_absolute(entry))
+    if not absolute.starts_with(root + "/"): return []
+    val relative = absolute.substring(root.len() + 1)
+    var roots = native_build_snapshot_source_roots_v1(relative, sources)
+    if roots.len() == 0: return []
+    if not roots.contains(relative): roots.push(relative)
+    roots
 
 # Local mirror of compile_targets.spl's `cli_native_build_is_entry_arg`
 # (`arg == "--entry" or arg.starts_with("--entry=")`) -- not imported

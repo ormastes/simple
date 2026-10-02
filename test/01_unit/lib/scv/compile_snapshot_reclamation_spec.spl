@@ -1,0 +1,82 @@
+# Native allocation regression; an interpreter-only pass is not memory evidence.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use std.scv.compile_snapshot.{ScvCompileMaterializedSourceV1,
+    scv_compile_snapshot_materialize_source_v1,
+    scv_compile_snapshot_materialize_source_unscoped_v1}
+use app.io.mod.{dir_create}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_getpid() -> i64
+
+fn snapshot_memory_content() -> text:
+    var rows: [text] = []
+    for index in 0..256:
+        rows.push("# snapshot scratch {index} — 한글\r\n")
+    rows.join("")
+
+fn snapshot_memory_entry(content: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1("src/main.spl", digest, digest, digest,
+        digest, digest, text_to_utf8_bytes(content).len())
+
+fn snapshot_memory_fixture(label: text, content: text) -> text:
+    val root = path_absolute("build/test-artifacts/snapshot-scratch-{rt_getpid()}-{label}").replace("\\", "/")
+    expect(dir_create(root + "/src", true)).to_equal(true)
+    expect(dir_create(root + "/build/scv", true)).to_equal(true)
+    expect(dir_create(root + "/staging", true)).to_equal(true)
+    expect(file_write_bytes(root + "/src/main.spl", text_to_utf8_bytes(content))).to_equal(true)
+    root
+
+fn snapshot_materialization_live_delta(scoped: bool, label: text) -> i64:
+    val content = snapshot_memory_content()
+    val entry = snapshot_memory_entry(content)
+    val root = snapshot_memory_fixture(label, content)
+    val cache = root + "/build/scv"
+    val staging = root + "/staging"
+    var retained: [ScvCompileMaterializedSourceV1] = []
+    val before = rt_heap_registry_count()
+    for index in 0..8:
+        val result = if scoped:
+            scv_compile_snapshot_materialize_source_v1(root, cache, staging, entry)
+        else:
+            scv_compile_snapshot_materialize_source_unscoped_v1(root, cache, staging, entry)
+        retained.push(result)
+    val delta = rt_heap_registry_count() - before
+    # All retained rows must survive later scratch scopes and match exact bytes.
+    val expected = "src/main.spl|sha256_{entry.content_digest}|{entry.byte_count}"
+    for result in retained:
+        expect(result.reason).to_equal("ok")
+        expect(result.row).to_equal(expected)
+        expect(result.source_drifted).to_equal(false)
+    expect(file_read(staging + "/src/main.spl")).to_equal(content)
+    delta
+
+describe "SCV snapshot materialization bounds scratch lifetime":
+    it "retains less than half the unscoped allocations with identical UTF-8 and CRLF output":
+        snapshot_materialization_live_delta(false, "warm-unscoped")
+        snapshot_materialization_live_delta(true, "warm-scoped")
+        val baseline = snapshot_materialization_live_delta(false, "baseline")
+        val scoped = snapshot_materialization_live_delta(true, "scoped")
+        expect(baseline).to_be_greater_than(0)
+        expect(scoped).to_be_greater_than(0)
+        expect(scoped * 2).to_be_less_than(baseline)
+
+    it "preserves a drift refusal and releases its scope before the next file":
+        val content = snapshot_memory_content()
+        val root = snapshot_memory_fixture("refusal", content)
+        val good = snapshot_memory_entry(content)
+        val stale = snapshot_memory_entry(content + "# changed\n")
+        val rejected = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", stale)
+        val accepted = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", good)
+        expect(rejected.reason).to_equal("snapshot-index-drift:src/main.spl")
+        expect(rejected.row).to_equal("")
+        expect(accepted.reason).to_equal("ok")
+        expect(accepted.source_drifted).to_equal(false)

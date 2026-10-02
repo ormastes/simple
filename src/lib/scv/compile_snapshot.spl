@@ -14,6 +14,8 @@ use app.io.file_ops.{path_absolute}
 use app.io.time_ops.{time_now_unix_micros}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
 use std.nogc_sync_mut.io_runtime.{
     dir_list, dir_remove, file_rename,
@@ -267,6 +269,66 @@ fn scv_compile_snapshot_write_chunk_v1(
 fn scv_compile_snapshot_plain_path_v1(path: text) -> text:
     compile_source_inventory_plain_checkout_v1(path)
 
+# Only these compact values survive one file's materialization. In particular,
+# neither its contents nor its byte buffers belong to the snapshot lifetime.
+struct ScvCompileMaterializedSourceV1:
+    reason: text
+    row: text
+    source_drifted: bool
+
+fn scv_compile_snapshot_materialize_source_unscoped_v1(
+    canonical_root: text, cache_root: text, staging: text,
+    entry: CompileSourceInventoryEntryV1
+) -> ScvCompileMaterializedSourceV1:
+    val rel = entry.source_identity
+    if not scv_worktree_path_safe(rel):
+        return ScvCompileMaterializedSourceV1("snapshot-path-unsafe:{rel}", "", false)
+    val path = "{canonical_root}/{rel}"
+    val content = scv_compile_snapshot_read_source_v1(path)
+    if content == nil:
+        return ScvCompileMaterializedSourceV1("snapshot-read-failed:{rel}", "", false)
+    # Keep the byte-packed conversion required by native SHA and binary writes.
+    val bytes = text_to_utf8_bytes(content!)
+    val digest = scv_content_id_for_u8(bytes)
+    if digest != "sha256_{entry.content_digest}" or bytes.len() != entry.byte_count:
+        return ScvCompileMaterializedSourceV1("snapshot-index-drift:{rel}", "", false)
+    if not scv_compile_snapshot_write_chunk_v1(cache_root, digest, content!):
+        return ScvCompileMaterializedSourceV1("snapshot-chunk-publish-failed:{rel}", "", false)
+    val destination = "{staging}/{rel}"
+    scv_create_parent_dir(destination)
+    if not file_write_bytes(destination, bytes):
+        return ScvCompileMaterializedSourceV1("snapshot-materialize-failed:{rel}", "", false)
+    if scv_compile_snapshot_source_digest_v1(destination) != digest:
+        return ScvCompileMaterializedSourceV1("snapshot-materialize-digest:{rel}", "", false)
+    var drifted = false
+    val current = scv_compile_snapshot_read_source_v1(path)
+    if current == nil:
+        drifted = true
+    else:
+        val current_text = current!
+        if scv_content_id_for_u8(text_to_utf8_bytes(current_text)) != digest:
+            drifted = true
+    ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{bytes.len()}", drifted)
+
+fn scv_compile_snapshot_materialize_source_v1(
+    canonical_root: text, cache_root: text, staging: text,
+    entry: CompileSourceInventoryEntryV1
+) -> ScvCompileMaterializedSourceV1:
+    if not transient_scope_begin():
+        return ScvCompileMaterializedSourceV1("snapshot-scratch-begin-failed", "", false)
+    val result = scv_compile_snapshot_materialize_source_unscoped_v1(
+        canonical_root, cache_root, staging, entry)
+    if not transient_scope_pause():
+        transient_scope_end()
+        return ScvCompileMaterializedSourceV1("snapshot-scratch-pause-failed", "", false)
+    # Promote only this new carrier, never the accumulated inventory array.
+    # That keeps promotion work linear in the number of snapshot files.
+    val retained = transient_promote(result)
+    val ended = transient_scope_end()
+    if not retained or not ended:
+        return ScvCompileMaterializedSourceV1("snapshot-scratch-retain-failed", "", false)
+    result
+
 fn scv_compile_snapshot_acquire_v1(
     root: text, cache_root: text, source_roots: [text]
 ) -> ScvCompileSnapshotV1:
@@ -331,48 +393,14 @@ fn scv_compile_snapshot_acquire_v1(
     var source_drifted = false
     val typed_entries: [CompileSourceInventoryEntryV1] = entries!
     for entry in typed_entries:
-        val rel = entry.source_identity
-        val path = "{canonical_root}/{rel}"
-        if not scv_worktree_path_safe(rel):
+        val materialized = scv_compile_snapshot_materialize_source_v1(
+            canonical_root, owned_cache_root, staging, entry)
+        if materialized.reason != "ok":
             dir_remove(staging, true)
-            return scv_compile_snapshot_invalid_v1("snapshot-path-unsafe:{rel}")
-        val content = scv_compile_snapshot_read_source_v1(path)
-        if content == nil:
-            dir_remove(staging, true)
-            return scv_compile_snapshot_invalid_v1("snapshot-read-failed:{rel}")
-        # rt_text_to_bytes (byte-packed), not `.bytes()`: native `.bytes()` built
-        # a slot array the C SHA-256 decoded as tagged ints, so every file
-        # hashed wrong and the snapshot failed snapshot-index-drift on the
-        # first entry (Windows stage-2, 2026-09-25).
-        val bytes = text_to_utf8_bytes(content!)
-        val digest = scv_content_id_for_u8(bytes)
-        if digest != "sha256_{entry.content_digest}" or
-                bytes.len() != entry.byte_count:
-            dir_remove(staging, true)
-            return scv_compile_snapshot_invalid_v1("snapshot-index-drift:{rel}")
-        if not scv_compile_snapshot_write_chunk_v1(
-                owned_cache_root, digest, content!):
-            dir_remove(staging, true)
-            return scv_compile_snapshot_invalid_v1("snapshot-chunk-publish-failed:{rel}")
-        val destination = "{staging}/{rel}"
-        scv_create_parent_dir(destination)
-        if not file_write_bytes(destination, bytes):
-            dir_remove(staging, true)
-            return scv_compile_snapshot_invalid_v1("snapshot-materialize-failed:{rel}")
-        if scv_compile_snapshot_source_digest_v1(destination) != digest:
-            dir_remove(staging, true)
-            return scv_compile_snapshot_invalid_v1("snapshot-materialize-digest:{rel}")
-        inventory_rows = inventory_rows.push("{rel}|{digest}|{bytes.len()}")
-        # `if val`, not `x == nil or f(x!)`: native code hands the Option box
-        # to the unwrap inside an `or` operand (same defect as
-        # compile_source_inventory_read_current_v1).
-        val current = scv_compile_snapshot_read_source_v1(path)
-        if current == nil:
+            return scv_compile_snapshot_invalid_v1(materialized.reason)
+        inventory_rows = inventory_rows.push(materialized.row)
+        if materialized.source_drifted:
             source_drifted = true
-        else:
-            val current_text = current!
-            if scv_content_id_for_u8(text_to_utf8_bytes(current_text)) != digest:
-                source_drifted = true
     val inventory = inventory_rows.join("\n")
     val inventory_digest = sha256_text(inventory)
     val tree_id = "scv-tree-v1-" + inventory_digest
