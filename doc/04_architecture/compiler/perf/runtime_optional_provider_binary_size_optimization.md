@@ -54,3 +54,12 @@ The [dynamic runtime/kernel provider composition design](../dynamic_runtime_kern
 joins this selected policy to bootstrap cdylib authority, sole-owner Cocoa
 exports, existing SCI/KPF interfaces and aspect mapping/lifecycle evidence.
 It preserves the requirements above and adds no completion claim.
+
+## 2026-10-02 current-source activation and closure update
+
+The [item 5 activation and closure architecture](item5_provider_activation_and_closure_2026-10-02.md)
+defines ownership, startup/request paths, cache keys and invalidation against
+current source. Reuse the existing SMF provider loader; metadata admission and
+a call permit do not prove actual activation. The named historical exact
+closure implementation is absent in the inspected baseline. These are open
+implementation/evidence obligations, not architecture scope reductions.

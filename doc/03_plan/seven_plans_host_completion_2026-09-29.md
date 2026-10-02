@@ -151,6 +151,11 @@ with real linker integration and the plan's performance requirements verified.
 
 ## 5. Kernel/extension aspect dynload for Simple size
 
+2026-10-02: [concrete acceptance/TDD plan](sys_test/item5_provider_size_acceptance_2026-10-02.md)
+and [current development evidence](evidence/item5_tdd_progress_2026-10-02.md)
+retain the complete item 5 scope. Member-authority regression tests and a fix
+are authored but not runtime-verified; host certification cells remain TODO.
+
 Related references: [optional provider size architecture](../04_architecture/compiler/perf/runtime_optional_provider_binary_size_optimization.md),
 [executable size architecture](../04_architecture/compiler/optimization/executable_size_reduction.md).
 
