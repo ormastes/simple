@@ -1128,7 +1128,11 @@ bootstrap_stage3_windows_runnable_compiler() {
     if [ -z "$bootstrap_stage3_windows_candidates" ]; then
         bootstrap_stage3_windows_candidate=$(
             command -v "$bootstrap_stage3_windows_name" 2>/dev/null
-        ) || return 1
+        ) || {
+            printf 'bootstrap-windows-c-admission requested=%s result=missing-tool\n' \
+                "$bootstrap_stage3_windows_name" >&2
+            return 1
+        }
         bootstrap_stage3_windows_candidates=$bootstrap_stage3_windows_candidate
     fi
 
@@ -1168,7 +1172,11 @@ $bootstrap_stage3_windows_probe_object
         # Compile a translation unit rather than trusting --version: some
         # broken Windows installations start their driver but fail when the
         # frontend or a runtime DLL is loaded by Cargo's cc-rs.
-        if [ -x "$bootstrap_stage3_windows_candidate" ] &&
+        bootstrap_stage3_windows_probe_stderr="${bootstrap_stage3_windows_probe_source%.c}.stderr"
+        bootstrap_stage3_windows_probe_status=0
+        if [ ! -x "$bootstrap_stage3_windows_candidate" ]; then
+            bootstrap_stage3_windows_probe_status=126
+        else
            env -i PATH="$PATH" LC_ALL=C LANG=C \
                 MSYS2_ARG_CONV_EXCL='*' \
                 INCLUDE="${INCLUDE:-}" LIB="${LIB:-}" \
@@ -1180,15 +1188,29 @@ $bootstrap_stage3_windows_probe_object
                 "$bootstrap_stage3_windows_candidate" \
                 /nologo /c "/Fo$bootstrap_stage3_windows_probe_object_arg" \
                 "$bootstrap_stage3_windows_probe_source_arg" \
-                >/dev/null 2>&1; then
+                >/dev/null 2>"$bootstrap_stage3_windows_probe_stderr" ||
+                bootstrap_stage3_windows_probe_status=$?
+        fi
+        if [ "$bootstrap_stage3_windows_probe_status" -eq 0 ] &&
+           [ -s "$bootstrap_stage3_windows_probe_object" ]; then
             rm -f "$bootstrap_stage3_windows_probe_source" \
-                "$bootstrap_stage3_windows_probe_object"
+                "$bootstrap_stage3_windows_probe_object" \
+                "$bootstrap_stage3_windows_probe_stderr"
             printf '%s\n' "$bootstrap_stage3_windows_candidate"
             IFS=$bootstrap_stage3_windows_old_ifs
             return 0
         fi
+        printf 'bootstrap-windows-c-admission candidate=%s shell-status=%s object-present=%s\n' \
+            "$bootstrap_stage3_windows_candidate" \
+            "$bootstrap_stage3_windows_probe_status" \
+            "$(if [ -s "$bootstrap_stage3_windows_probe_object" ]; then printf yes; else printf no; fi)" >&2
+        if [ -f "$bootstrap_stage3_windows_probe_stderr" ]; then
+            head -c 4096 "$bootstrap_stage3_windows_probe_stderr" >&2
+            printf '\n' >&2
+        fi
         rm -f "$bootstrap_stage3_windows_probe_source" \
-            "$bootstrap_stage3_windows_probe_object"
+            "$bootstrap_stage3_windows_probe_object" \
+            "$bootstrap_stage3_windows_probe_stderr"
         IFS='
 '
     done
