@@ -103,6 +103,31 @@ impl HirLowering:
             return HirUnaryOp.Transpose
         HirUnaryOp.Neg
 
+    me register_enum_unit_patterns(enum_: ParserEnum, local_name: text):
+        val owner = self.symbols.lookup_or_invalid(local_name)
+        if not owner.is_valid():
+            return
+        for variant in enum_.variants:
+            match variant.kind:
+                case VariantKind.Unit:
+                    self.enum_unit_pattern_names["{owner.id}:{variant.name}"] = true
+                case _: ()
+
+    me lower_match_pattern(p: Pattern, subject_type: HirType?) -> HirPattern:
+        # A bare name is a variant only when the subject's enum owns it.
+        # Unrelated enums, mutable bindings and unknown names remain bindings.
+        match p.kind:
+            case PatternKind.Binding(name, mutable):
+                if not mutable:
+                    if val type_ = subject_type:
+                        match type_.kind:
+                            case HirTypeKind.Named(owner, _):
+                                if self.enum_unit_pattern_names.contains_key("{owner.id}:{name}"):
+                                    return HirPattern(kind: HirPatternKind.Enum(type_, name, nil), has_type_: true, type_: type_, span: p.span)
+                            case _: ()
+            case _: ()
+        self.lower_pattern(p)
+
     me lower_pattern(p: Pattern) -> HirPattern:
         val kind = match p.kind:
             case PatternKind.Wildcard:

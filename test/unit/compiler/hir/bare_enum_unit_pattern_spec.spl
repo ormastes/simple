@@ -1,0 +1,56 @@
+# Regression: bare unit variants must not become multiple MIR default arms.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.dependency.visibility.Visibility
+use compiler.common.diagnostics.span.Span
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+
+fn pattern_label(pattern: HirPattern) -> text:
+    match pattern.kind:
+        case HirPatternKind.Enum(_, name, _): name
+        case HirPatternKind.Binding(_, _): "binding"
+        case HirPatternKind.Wildcard: "wildcard"
+        case _: "other"
+
+describe "bare enum unit patterns use the subject owner":
+    it "resolves only unit variants of the declared enum and preserves bindings":
+        val parsed = parse_full_frontend("enum Order:\n    Relaxed\n    Acquire\n    Payload(i64)\nenum Other:\n    Release\n", "pattern.spl", "pattern", Logger(level: 0))
+        var lowerer = HirLowering.with_filename("pattern.spl")
+        val span = Span.empty()
+        val owner = lowerer.symbols.define("Order", SymbolKind.Enum, nil, span, Visibility.Public, false, nil)
+        val other = lowerer.symbols.define("Other", SymbolKind.Enum, nil, span, Visibility.Public, false, nil)
+        lowerer.register_enum_unit_patterns(parsed.enums["Order"], "Order")
+        lowerer.register_enum_unit_patterns(parsed.enums["Other"], "Other")
+        val subject = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+        val relaxed = Pattern(kind: PatternKind.Binding("Relaxed", false), span: span)
+        val acquire = Pattern(kind: PatternKind.Binding("Acquire", false), span: span)
+        expect(pattern_label(lowerer.lower_match_pattern(relaxed, Some(subject)))).to_equal("Relaxed")
+        expect(pattern_label(lowerer.lower_match_pattern(acquire, Some(subject)))).to_equal("Acquire")
+        for name in ["Release", "Payload", "anything"]:
+            val binding = Pattern(kind: PatternKind.Binding(name, false), span: span)
+            expect(pattern_label(lowerer.lower_match_pattern(binding, Some(subject)))).to_equal("binding")
+        expect(pattern_label(lowerer.lower_match_pattern(relaxed, nil))).to_equal("binding")
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        expect(pattern_label(lowerer.lower_match_pattern(acquire, Some(integer)))).to_equal("binding")
+        val mutable = Pattern(kind: PatternKind.Binding("Relaxed", true), span: span)
+        expect(pattern_label(lowerer.lower_match_pattern(mutable, Some(subject)))).to_equal("binding")
+        val wildcard = Pattern(kind: PatternKind.Wildcard, span: span)
+        expect(pattern_label(lowerer.lower_match_pattern(wildcard, Some(subject)))).to_equal("wildcard")
+
+    it "uses the consumer alias identity for imported enum declarations":
+        val parsed = parse_full_frontend("enum Remote:\n    Ready\n", "remote.spl", "remote", Logger(level: 0))
+        var lowerer = HirLowering.with_filename("consumer.spl")
+        val span = Span.empty()
+        val alias = lowerer.symbols.define("LocalAlias", SymbolKind.Enum, nil, span, Visibility.Public, false, nil)
+        lowerer.register_enum_unit_patterns(parsed.enums["Remote"], "LocalAlias")
+        val subject = HirType(kind: HirTypeKind.Named(alias, []), span: span)
+        val pattern = Pattern(kind: PatternKind.Binding("Ready", false), span: span)
+        expect(pattern_label(lowerer.lower_match_pattern(pattern, Some(subject)))).to_equal("Ready")
