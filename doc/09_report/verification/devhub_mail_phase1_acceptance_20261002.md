@@ -1,7 +1,7 @@
 # DevHub and mail Phase 1 acceptance — 2026-10-02
 
-STATUS: WARN — targeted Confluence checks pass; compiled mail helper and remaining
-mail acceptance are pending. This is not release admission.
+STATUS: FAIL — targeted Confluence checks pass, but the compiled mail helper
+build timed out and remaining mail acceptance is blocked. This is not release admission.
 
 ## Producer and execution boundary
 
@@ -66,3 +66,16 @@ are excluded.
 
 Live service access, live email sending/deletion, real account secrets, and
 cryptographic implementation validation are outside these offline fixtures.
+
+## Native bridge blocker
+
+The final nested-email helper build used the same pinned Phase 1 producer, an
+isolated source inventory, a 2 GiB cgroup, and a 300-second wall limit. It exited
+124, reached 344522752 bytes peak memory, had zero OOM events, and produced no
+executable. Logs: `D:/dev/mail-config-native-6db50/evidence-attempt2`.
+The command and exact source identity are retained in
+`doc/08_tracking/bugs/mail_config_native_admission_timeout_2026-10-02.md`.
+A failed prior admission attempt lacked an SCV journal and also produced no
+executable. Neither attempt counts as native compilation or shared-CLI evidence.
+No identical full-closure retry was launched; the correction cycle is reserved
+for a supported narrower build if the compiler owner supplies one.
