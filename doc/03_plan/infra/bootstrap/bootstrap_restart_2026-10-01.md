@@ -1531,3 +1531,40 @@ compiler's runtime failure and actual sanity invocation count are unknown.
 Astra is investigating these gates with a bounded helper-only reproducer;
 there is no hello-world PASS, Stage2 admission or planner receipt. Manager and
 Phase3/Phase4 launches remain held. Preserve the rejected artifact and caches.
+
+### 2026-10-02 sanity wrapper diagnosed; diagnostic hello reached SCV admission
+
+The helper-only reproducer proved that MSYS converted the portable session
+helper's POSIX path into `D:/...`; the sanity gate then returned 125 before
+creating its frontend logs. PR #2251 preserves this environment path and adds
+explicit diagnostics for the early 125/126 failures. Its third and final
+focused regression passed with a quiescent Job; do not repeat those fixtures.
+PR #2251 landed on release/1.0 as `e996ee19b6` after the test's operator
+qualification registration and required checks passed.
+This proves the wrapper defect, not a successful compiler sanity invocation.
+
+One actual diagnostic invocation of the preserved `2f3d16f...f0384` compiler
+then exited 1 at SCV admission: `compile-event-journal-missing`. No hello
+artifact or code generation was reached. Evidence is under
+`D:/dev/windows-release-7734-build-20261002/rejected-hello-cycle2/`; the sibling
+`.resource.env` and `.resource.env.process-tree.env` receipts show workload
+failure, quiescence, and peak RSS 440,172 KiB. The outer status 74 records the
+diagnostic wrapper failure; it must not replace the actual compiler status 1.
+A prior missing `out` shell variable stopped setup before any compiler call.
+Attempt directory names therefore are not compiler invocation counts.
+
+Review first-checkout SCV cold initialization and its disk budget before one
+changed retry. Retain all prior evidence and caches; no unchanged retry or
+canonical admission marker is authorized by this diagnostic result. Phase3
+and Phase4 remain unlaunched on this candidate until actual hello success.
+The old Linux lane remains held after three failed hello attempts.
+
+The manager candidate now declares 28 outcomes: 14 binaries, six meaningful
+acceptance suites, four indexes and four module groups. Its isolated direct
+bootstrap fallback matrix has 24 tasks because it omits manager index tasks.
+Classification, parallel admission, strict tool/runtime binding, and suite
+evidence changes are implemented or under source review; native/SSpec checks
+remain unrun. Capture-only tool configuration must not activate strict
+compiler discovery until sealed authority selectors exist. Shared Windows/
+Linux parse-cache qualification is still pending; no deployment or complete
+module traversal is established by these source and shell checks.
