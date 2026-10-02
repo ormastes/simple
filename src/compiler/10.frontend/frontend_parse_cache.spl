@@ -50,6 +50,16 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v1"
 
 var _fe_cache_scope_memo: text = "@@unset@@"
+var _fe_cache_scope_needs_promotion: bool = false
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+# Called only by a paused parser-scope owner. The immutable memo is walked
+# once after publication, not once for every subsequent module.
+pub fn frontend_parse_cache_promote_transient_owner() -> bool:
+    if not _fe_cache_scope_needs_promotion: return true
+    if not rt_transient_heap_promote(_fe_cache_scope_memo): return false
+    _fe_cache_scope_needs_promotion = false
+    true
 var _fe_cache_hits: i64 = 0
 var _fe_cache_misses: i64 = 0
 # Counts SUCCESSFUL stores. A module must be written exactly once per process:
@@ -71,6 +81,7 @@ pub fn frontend_parse_cache_scope() -> text:
     # doc/08_tracking/bug/frontend_parse_cache_scope_memo_latches_off_2026-08-23.md.
     if published != "":
         _fe_cache_scope_memo = published
+        _fe_cache_scope_needs_promotion = true
     published
 
 pub fn frontend_parse_cache_enabled() -> bool:

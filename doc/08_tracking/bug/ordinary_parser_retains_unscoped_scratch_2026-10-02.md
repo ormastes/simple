@@ -1,7 +1,8 @@
 # Ordinary parsing retains unscoped scratch
 
-Status: concrete source defect and guarded resource failure; regression prepared,
-native counterfactual UNRUN, production repair NOT IMPLEMENTED or accepted.
+Status: partial production candidate implemented for ordinary AOT parsing;
+native counterfactual UNRUN and candidate NOT ACCEPTED or deployed. Coverage,
+MC/DC, full-inventory target-cfg selection and non-AOT retain the prior route.
 
 ## Bound evidence
 
@@ -41,28 +42,38 @@ does not cover these earlier/later allocations.
 
 Retaining all requested executable ParserModules is intentional. Retaining
 discarded scratch from every file is not necessary for that behavior. The
-proposed repair is a driver-owned per-file scope around the existing borrowed
+candidate uses a driver-owned per-file scope around the existing borrowed
 frontend route, promoting the complete result and escaped owners before the
 existing ordered cleanup. It must cover cold and warm parsing without changing
 inventory, cache identity, target decisions, diagnostics or public metadata.
 
-## Escaped-owner audit: not yet complete
+## Candidate ownership and explicit exclusions
 
 | Owner | Required disposition |
 | --- | --- |
 | Result ParserModule or error | Promote complete reachable graph, including spans/text/body metadata |
-| Target cfg receipt | Preserve current source decision and containing map growth |
+| Target cfg receipt | Excluded from the new scope: containing Dict/CompileContext mutation lifetime is unproven; needs preparation then publication after scope end |
 | Aspect/effect/criticality/layer registries | Existing promotion helpers; confirm all pending metadata |
 | Private frontend cache scope memo | First nonempty environment result must outlive a parser scope |
 | Shared parse authority path/digest/rows | Preserve first load and changed-identity publication; avoid repeatedly walking unchanged full inventory |
 | Resource registry names/index/metadata | Reset on each parser init, but last-module public query lifetime must remain valid |
-| Unsafe/enum annotation globals | Audit consumers after parse versus next-file reset before reclaiming |
+| Unsafe/enum annotation globals | Promote last-module metadata; rich declarations retain their own complete graphs |
+| Parser token slots and diagnostics | Promote seven owners; native first-file allocation must survive reuse by the next parser initialization |
 | Advisory correlation slot | Scalar-only, initialized outside parsing; no discovered scoped text payload |
 | Lexer/interner/AST globals | End arena before replacement, using existing cleanup order |
 
-Merely reusing the existing four-registry helper is insufficient to establish
-safety for a new blanket ordinary-parser scope. No production edit is made
-until this audit and native regressions establish valid escaped ownership.
+The candidate preserves these roots through a shared owner helper used by
+production and the reference fixture. A scalar parser initialization generation
+distinguishes errors returned before parsing: those preserve their Result but
+do not try to promote uninitialized native parser/registry globals. A prior
+draft incorrectly promoted target-cfg state only on success; excluding that
+route preserves its existing mutation/error behavior until its containers have
+a proven lifetime. Coverage/MC/DC inventory requires a separate owner contract.
+
+Private/shared cache memo helpers promote only newly published owners. They
+do not repeatedly walk an unchanged complete source-authority dictionary.
+Registry promotion still traverses retained semantic claims; native timing on
+representative input is required before claiming no performance regression.
 
 ## Native counterfactual
 
@@ -70,11 +81,18 @@ until this audit and native regressions establish valid escaped ownership.
 bodies per module. Ordinary and scoped-reference modes run in fresh processes,
 report bytes/objects after each file, and validate every earlier and last
 module after later arenas close. Cold and warm modes assert actual parser work
-and cache hits. The reference primes the immutable private cache memo outside
-its scope, disables shared CAS, and uses plain functions; it is intentionally
-not a safe general production wrapper and cannot qualify annotation/registry
-ownership. Its role is to separate intended retained AST from transient scratch.
+and cache hits. Only the reference primes its private cache memo; ordinary AOT
+starts cold to exercise first allocation. Both retain complete bodies and
+share the escaped-owner promotion helper. Timing uses plain functions and
+private caching to separate retained AST from transient scratch.
 
-Native execution, performance comparison, annotation-owner coverage, full
+Outside the timed region, native cases validate resource/unsafe/enum metadata,
+diagnostics across error recovery, early advisory rejection before parser
+initialization, and shared-authority first publication/reuse/digest rejection/
+restoration across actual scopes. Shared checks use a real cached flat-pool
+payload and the immutable publisher/read APIs. Complete is emitted only after
+all semantic cases pass; native execution of these cases is still pending.
+
+Native execution, performance comparison, full-inventory/coverage ownership, full
 module completion and peak-RSS acceptance remain pending. Do not mark this
 issue fixed based on the source diagnosis or fixture alone.

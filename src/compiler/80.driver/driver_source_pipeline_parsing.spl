@@ -21,6 +21,11 @@ use compiler.core.ast.{ast_reset}
 use std.string_core.{char_code}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
+use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
+use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
+use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
     driver_import_phase2_frontend_v1
@@ -277,6 +282,17 @@ pub fn driver_promote_frontend_registry_owners() -> bool:
     val layer_ok = layer_eq_registry_promote_transient_owner()
     aspect_ok and effect_ok and rt_criticality_ok and layer_ok
 
+# Shared by the production retained-parser boundary and its native reference.
+# Call only after pause, while every escaped root still has a live owner.
+pub fn driver_promote_retained_frontend_owners_v1(parser_entered: bool) -> bool:
+    val registry_ok = if parser_entered: driver_promote_frontend_registry_owners() else: true
+    val parser_ok = if parser_entered: parser_promote_transient_owners() else: true
+    val declaration_ok = if parser_entered: parser_declaration_metadata_promote_transient_owner() else: true
+    val resource_ok = if parser_entered: resource_registry_promote_transient_owner() else: true
+    val cache_ok = frontend_parse_cache_promote_transient_owner()
+    val shared_ok = frontend_shared_parse_promote_transient_owner_v1()
+    registry_ok and parser_ok and declaration_ok and resource_ok and cache_ok and shared_ok
+
 # Marks the one recoverable failure of add_streaming_module_surface: the source
 # did not parse. Every other Err from it is an internal invariant break.
 val _STREAM_PARSE_ERROR_PREFIX: text = "parse error in "
@@ -419,6 +435,40 @@ impl CompilerDriver:
                 Ok(module)
 
     me parse_full_frontend_selected_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        # Ordinary native builds retain full ParserModules, not lexer/flat-AST/
+        # cache-decode scratch. Borrow one per-file scope through preprocessing,
+        # parsing and desugaring, then retain exactly the escaped owners.
+        # Coverage/MC/DC and full-inventory target-cfg decisions have additional
+        # mutable owners. Preserve their existing route until publication can
+        # occur outside the scope and those ownership contracts are covered.
+        val aot = self.ctx.options.mode == CompileMode.Aot or
+            self.ctx.options.cli_mode_text == "aot"
+        if not aot or self.ctx.config.contains_key("coverage") or
+                (self.ctx.config["mcdc_mode"] ?? "off") != "off" or
+                self.ctx.runtime_std_full_inventory_selection != nil:
+            return self.parse_full_frontend_unscoped_selected_v1(
+                source_content, source_path, source_module_name)
+        val parser_generation = parser_initialization_generation_v1()
+        if not _sffi_transient_array_scope_begin():
+            panic("transient retained parser scope unavailable for {source_path}")
+        val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
+            source_content, source_path, source_module_name)
+        if not _sffi_transient_array_scope_pause():
+            val _ended = driver_end_transient_parse_scope()
+            panic("transient retained parser scope pause failed for {source_path}")
+        val result_ok = rt_transient_heap_promote(parsed)
+        # Advisory/target rejection can return before parser initialization.
+        # Native module globals can still be nil in that case; preserve the Err
+        # without asking the runtime to promote owners that were never created.
+        val parser_entered = parser_initialization_generation_v1() != parser_generation
+        val owners_ok = driver_promote_retained_frontend_owners_v1(parser_entered)
+        val ended = driver_end_transient_parse_scope()
+        if not (result_ok and owners_ok and ended):
+            panic("transient retained parser ownership failed for {source_path}")
+        parsed
+
+    me parse_full_frontend_unscoped_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:
         if self.ctx.runtime_std_full_inventory_selection != nil:
             return self.parse_target_cfg_selected_v1(source_content, source_path,

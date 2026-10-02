@@ -2,16 +2,27 @@
 # fixture's plain functions; it is NOT a production lifetime repair.
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_types.{CompileMode}
 use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope,
-    driver_promote_frontend_registry_owners}
+    driver_promote_retained_frontend_owners_v1}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.parser_types_expr.{StmtKind, ExprKind}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope,
-    frontend_parse_cache_hits, frontend_parse_cache_misses}
+    frontend_parse_cache_hits, frontend_parse_cache_misses,
+    frontend_parse_cache_key, frontend_parse_cache_load}
+use compiler.frontend.frontend_shared_parse_cas_v1.{
+    frontend_shared_parse_load_v1, frontend_shared_parse_store_v1,
+    frontend_shared_parse_promote_transient_owner_v1}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.core.parser.{parser_initialization_generation_v1, parser_has_errors, parser_get_errors}
+use compiler.core.parser_decls.{parser_unsafe_annotations_get, parser_enum_open_regions_for}
+use compiler.frontend.resource_registry.{resource_meta_prefix, resource_is_declared}
 use std.nogc_sync_mut.io_runtime.{env_set_process, env_get_opt}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.binary_inspect.{byte_to_hex}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_heap_live_bytes() -> i64
@@ -19,6 +30,7 @@ extern fn rt_heap_registry_count() -> i64
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
 
 class RetainedParserProbeModule:
@@ -38,8 +50,8 @@ fn probe_source(index: i64) -> text:
         function_index = function_index + 1
     source
 
-fn probe_module_valid(module: ParserModule, index: i64) -> bool:
-    if module.name != "retention.module_{index}" or module.functions.len() != 128:
+fn probe_module_valid(module: ParserModule, index: i64, path: text) -> bool:
+    if module.name != path or module.functions.len() != 128:
         return false
     var function_index = 0
     while function_index < 128:
@@ -50,17 +62,147 @@ fn probe_module_valid(module: ParserModule, index: i64) -> bool:
                 function.body.stmts.len() != 1 or not function.is_public:
             return false
         val statement = function.body.stmts[0]
-        if statement.span.line <= 0 or statement.span.end < statement.span.start:
-            return false
         match statement.kind:
             case StmtKind.Return(value):
                 if value == nil: return false
+                val expression = value.unwrap()
+                if expression.span.file != path or expression.span.line <= 0 or
+                        expression.span.end < expression.span.start or
+                        expression.span.length != expression.span.end - expression.span.start:
+                    return false
                 match value.unwrap().kind:
                     case ExprKind.IntLit(actual):
                         if actual != index * 128 + function_index: return false
                     case _: return false
             case _: return false
         function_index = function_index + 1
+    true
+
+fn probe_metadata_source(index: i64) -> text:
+    "@sffi(prefix: \"probe_{index}\", invalid: -1)\nresource Handle{index}\n" +
+        "enum Choice{index}:\n    Value(v: i64)\n    complete:\n    dyn:\n" +
+        "@unsafe(reason: \"probe_{index}\", capabilities: [ffi])\n" +
+        "fn annotated{index}() -> i64:\n    return {index}\n"
+
+fn probe_last_metadata_valid(index: i64) -> bool:
+    if parser_has_errors() or resource_meta_prefix("Handle{index}") != "probe_{index}": return false
+    val annotations = parser_unsafe_annotations_get()
+    if annotations.len() != 1: return false
+    if not annotations[0].starts_with("annotated{index}|") or
+            not annotations[0].contains("probe_{index}") or
+            not annotations[0].ends_with("|ffi"): return false
+    val regions = parser_enum_open_regions_for("Choice{index}")
+    regions[0] and regions[1]
+
+fn probe_retained_metadata(driver: CompilerDriver, root: text) -> bool:
+    val first = driver.parse_full_frontend_selected_v1(
+        probe_metadata_source(1), root + "/metadata_1.spl", "metadata.first")
+    if first.is_err() or not probe_last_metadata_valid(1): return false
+    val first_module = first.unwrap()
+    val second = driver.parse_full_frontend_selected_v1(
+        probe_metadata_source(2), root + "/metadata_2.spl", "metadata.second")
+    if second.is_err() or not probe_last_metadata_valid(2): return false
+    if resource_is_declared("Handle1"): return false
+    # Prior rich metadata survives the later reset and scratch reclamation.
+    for index in [1, 2]:
+        val module = if index == 1: first_module else: second.unwrap()
+        if not module.enums.contains_key("Choice{index}"): return false
+        val enum_ = module.enums["Choice{index}"]
+        if not enum_.complete_open or not enum_.dyn_open or enum_.variants.len() != 1: return false
+        if not module.functions.contains_key("annotated{index}"): return false
+        val function = module.functions["annotated{index}"]
+        if function.body.stmts.len() != 1: return false
+        match function.body.stmts[0].kind:
+            case StmtKind.Return(value):
+                if value == nil: return false
+                match value.unwrap().kind:
+                    case ExprKind.IntLit(actual):
+                        if actual != index: return false
+                    case _: return false
+            case _: return false
+    val invalid = driver.parse_full_frontend_selected_v1(
+        "fn broken(\n", root + "/invalid.spl", "metadata.invalid")
+    if not parser_has_errors(): return false
+    val diagnostics = parser_get_errors()
+    if diagnostics.len() == 0 or diagnostics[0] == "": return false
+    val recovered = driver.parse_full_frontend_selected_v1(
+        probe_metadata_source(3), root + "/metadata_3.spl", "metadata.recovered")
+    if recovered.is_err() or not probe_last_metadata_valid(3): return false
+    # Keep earlier diagnostic text alive across the later valid module too.
+    diagnostics.len() > 0 and diagnostics[0] != ""
+
+fn probe_shared_load(source_sha: text, source: text, target: text,
+        path: text) -> Result<text, text>:
+    if not rt_transient_array_scope_begin(): return Err("shared-scope-begin")
+    val loaded = frontend_shared_parse_load_v1(source_sha, source, target, path)
+    val empty = loaded == ""
+    if not rt_transient_array_scope_pause():
+        val _ended = rt_transient_array_scope_end()
+        return Err("shared-scope-pause")
+    val payload_ok = if empty: true else: rt_transient_heap_promote(loaded)
+    val memo_ok = frontend_shared_parse_promote_transient_owner_v1()
+    val ended = rt_transient_array_scope_end()
+    if not (payload_ok and memo_ok and ended): return Err("shared-scope-retain")
+    if empty: Ok("") else: Ok(loaded)
+
+fn probe_shared_publish(source_sha: text, source: text, target: text,
+        path: text, blob: text) -> bool:
+    if not rt_transient_array_scope_begin(): return false
+    val _published = frontend_shared_parse_store_v1(source_sha, source, target, path, blob)
+    val winner = frontend_shared_parse_load_v1(source_sha, source, target, path)
+    val matched = winner.len() == blob.len() and sha256_text(winner) == sha256_text(blob)
+    if not rt_transient_array_scope_pause():
+        val _ended = rt_transient_array_scope_end()
+        return false
+    val memo_ok = frontend_shared_parse_promote_transient_owner_v1()
+    val ended = rt_transient_array_scope_end()
+    matched and memo_ok and ended
+
+fn probe_shared_memo_valid(root: text, source: text, advisory_identity: text) -> bool:
+    # Use a real private-cache flat-pool payload, not a placeholder blob.
+    val source_key = frontend_parse_cache_key(root + "/module_0.spl")
+    val private_key = if source_key != "" and advisory_identity != "":
+        sha256_text("frontend-advisory-cache-v1|" + source_key + "|" + advisory_identity)
+    else: source_key
+    val blob = frontend_parse_cache_load(private_key)
+    if blob == "": return false
+    val source_sha = sha256_text(source)
+    val target = sha256_text("retention-probe-target-v1")
+    val parser_id = sha256_text("retention-probe-parser-v1")
+    val admitted = root + "/shared/admitted"
+    val cas = root + "/shared/cas"
+    if not dir_create_all(admitted + "/src") or not dir_create_all(cas + "/parse-v1"): return false
+    val logical = "src/retention.spl"
+    if not file_write(admitted + "/" + logical, source): return false
+    var encoded_path = ""
+    for byte in logical.bytes(): encoded_path = encoded_path + byte_to_hex(byte as i64)
+    val authority = "file-hex:{logical.bytes().len()}:{encoded_path}:0:{source_sha}\n"
+    val authority_path = root + "/shared/authority.txt"
+    val wrong_sha = sha256_text(source + "changed")
+    val rejected = "file-hex:{logical.bytes().len()}:{encoded_path}:0:{wrong_sha}\n"
+    val rejected_path = root + "/shared/rejected-authority.txt"
+    if not file_write(authority_path, authority) or not file_write(rejected_path, rejected): return false
+    if not env_set_process("SIMPLE_BOOTSTRAP", "0") or
+            not env_set_process("SIMPLE_SHARED_PARSE_CAS_ROOT", cas) or
+            not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_ROOT", admitted) or
+            not env_set_process("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", parser_id) or
+            not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH", authority_path) or
+            not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST", sha256_text(authority)): return false
+    if not probe_shared_publish(source_sha, source, target, logical, blob): return false
+    # First load constructs authority roots inside a scope; the next must reuse
+    # them after that scope is gone. Then switch generation and back again.
+    for turn in [0, 1, 2, 3]:
+        val deny = turn == 2
+        if not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH",
+                if deny: rejected_path else: authority_path) or
+                not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST",
+                    sha256_text(if deny: rejected else: authority)): return false
+        val loaded = probe_shared_load(source_sha, source, target, logical)
+        if loaded.is_err(): return false
+        if deny:
+            if loaded.unwrap() != "": return false
+        else:
+            if loaded.unwrap().len() != blob.len() or sha256_text(loaded.unwrap()) != sha256_text(blob): return false
     true
 
 fn main() -> i64:
@@ -84,10 +226,19 @@ fn main() -> i64:
             not env_set_process("SIMPLE_FRONTEND_CACHE_DIR", root + "/cache") or
             not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_ROOT", ""):
         return 14
-    # Prime the private immutable memo outside the diagnostic scope. Production
-    # must preserve cold cache/registry owners generally, not rely on priming.
-    if frontend_parse_cache_scope() != "ordinary-parser-retention-v1": return 15
-    var driver = CompilerDriver.create(driver_core_compile_options_default())
+    # The reference primes its immutable memo; the ordinary route deliberately
+    # starts cold so the production owner must preserve its first allocation.
+    if mode == "scoped-reference" and frontend_parse_cache_scope() != "ordinary-parser-retention-v1": return 15
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Aot
+    var driver = CompilerDriver.create(options)
+    val generation = parser_initialization_generation_v1()
+    driver.ctx.frontend_advisory_policy = FrontendAdvisoryPreprocessPolicyV1.RequireSimd
+    val rejected = driver.parse_full_frontend_selected_v1(
+        "fn early() -> i64:\n    return 0\n", root + "/early.spl", "early.rejected")
+    if not rejected.is_err() or parser_initialization_generation_v1() != generation: return 29
+    val rejection_text = rejected.unwrap_err()
+    driver.ctx.frontend_advisory_policy = FrontendAdvisoryPreprocessPolicyV1.Reference
     var sources: [text] = []
     var boundaries: [i64] = []
     var retained: [RetainedParserProbeModule] = []
@@ -125,7 +276,7 @@ fn main() -> i64:
         if scoped:
             if not rt_transient_array_scope_pause(): return 20
             if not rt_transient_heap_promote(owner): return 21
-            if not driver_promote_frontend_registry_owners(): return 22
+            if not driver_promote_retained_frontend_owners_v1(true): return 22
             if not driver_end_transient_parse_scope(): return 23
         retained.push(owner)
         boundaries[index] = rt_heap_live_bytes()
@@ -140,11 +291,14 @@ fn main() -> i64:
     # parses and arena closes. Check names, public flags, spans and exact bodies.
     index = 0
     while index < count:
-        if not probe_module_valid(retained[index].module, index): return 24
+        if not probe_module_valid(retained[index].module, index, root + "/module_{index}.spl"): return 24
         index = index + 1
     if cache_state == "cold" and (hits != 0 or misses != count or parses != count): return 25
     if cache_state == "warm" and (hits != count or misses != 0 or parses != 0): return 26
     if live_after < live_before or objects_after < objects_before or elapsed < 0: return 27
+    if not rejection_text.contains("required environment variant frontend provider unavailable"): return 30
+    if not probe_retained_metadata(driver, root): return 31
+    if not probe_shared_memo_valid(root, sources[0], driver.ctx.environment_variant_frontend_cache_identity): return 32
     print "mode={mode}"
     print "cache_state={cache_state}"
     print "profile=ordinary-parser-retention-v1"
@@ -152,6 +306,9 @@ fn main() -> i64:
     print "producer_source_revision={producer_source}"
     print "source_revision={source_revision}"
     print "fixture_digest={fixture_digest}"
+    print "metadata_ok=yes"
+    print "early_rejection_ok=yes"
+    print "shared_memo_ok=yes"
     print "cache_hits={hits}"
     print "cache_misses={misses}"
     print "parse_work={parses}"
