@@ -10,6 +10,7 @@ use std.io.sysinfo_ops.{cpu_count}
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
+use std.test_runner.child_diagnostics.{native_cleanup_diagnostic}
 use std.test_runner.runner_lifecycle.{spawn_tracked_process, spawn_tracked_redirected_process, wait_tracked_process, poll_tracked_process, cleanup_all_children}
 use std.test_runner.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn}
 use std.nogc_sync_mut.io.signal_handlers.{install_signal_handlers}
@@ -232,9 +233,10 @@ fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_exp
 
     # Cleanup quarantine is authoritative even if a child exits zero and
     # presents green counts. Inspect the bounded raw captures before parsing.
-    if stdout.contains("NATIVE-CACHE-CLEANUP-FAILED") or stderr.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+    val cleanup_diagnostic = native_cleanup_diagnostic(stdout, stderr)
+    if cleanup_diagnostic != "":
         return _parallel_admission_failure(run.file_path,
-            "NATIVE-CACHE-CLEANUP-FAILED: " + stdout + "\n" + stderr, duration_ms)
+            "NATIVE-CACHE-CLEANUP-FAILED: " + cleanup_diagnostic, duration_ms)
 
     # A monitor-enforced deadline is authoritative.  Handle captures first
     # without trusting -1, which also represents a child crash/start failure.
@@ -366,7 +368,7 @@ fn run_tests_parallel_with_monitoring(
             val exit_code = poll_tracked_process(run.pid)
             if exit_code != -2:
                 val result = collect_async_result(run, exit_code)
-                if result.error.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+                if result.error.starts_with("NATIVE-CACHE-CLEANUP-FAILED:"):
                     admission_blocked = true
                 results[run.inventory_index] = Some(result)
                 had_completion = true
@@ -375,7 +377,7 @@ fn run_tests_parallel_with_monitoring(
             val elapsed_ms = (current_time - run.start_time) / 1000
             if elapsed_ms > run.timeout_ms:
                 val result = collect_async_result(run, -2, true)
-                if result.error.contains("NATIVE-CACHE-CLEANUP-FAILED"):
+                if result.error.starts_with("NATIVE-CACHE-CLEANUP-FAILED:"):
                     admission_blocked = true
                 results[run.inventory_index] = Some(result)
                 had_completion = true
