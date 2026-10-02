@@ -38,6 +38,7 @@
 #endif
 
 #include "windows_raw_mapping.h"
+#include "runtime_win_long_path.h"
 
 /* ----------------------------------------------------------------
  * Directory Operations
@@ -47,6 +48,19 @@ static bool win_is_path_sep(char ch) {
     return ch == '\\' || ch == '/';
 }
 
+static bool rt_win_create_directory_utf8(const char* path) {
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return false;
+    bool created = CreateDirectoryW(wide, NULL) != 0;
+    DWORD error = created ? ERROR_SUCCESS : GetLastError();
+    if (!created && error == ERROR_ALREADY_EXISTS) {
+        DWORD attrs = GetFileAttributesW(wide);
+        created = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+    free(wide);
+    return created;
+}
+
 /* C-string worker. The public rt_dir_* entry point lives in runtime.c and
  * converts the compiler's (ptr, len) `text` pair before calling this; a Simple
  * `text` is not NUL-terminated. See rt_text_arg_to_path in runtime.c. */
@@ -54,7 +68,7 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
     if (!path || path[0] == '\0') return false;
 
     if (!recursive) {
-        return CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+        return rt_win_create_directory_utf8(path);
     }
 
     size_t path_len = strlen(path);
@@ -92,13 +106,10 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
         scratch[i] = '\0';
 
         if (scratch[0] != '\0') {
-            if (!CreateDirectoryA(scratch, NULL)) {
-                DWORD err = GetLastError();
-                if (err != ERROR_ALREADY_EXISTS) {
-                    ok = false;
-                    scratch[i] = saved;
-                    break;
-                }
+            if (!rt_win_create_directory_utf8(scratch)) {
+                ok = false;
+                scratch[i] = saved;
+                break;
             }
         }
 
@@ -680,7 +691,10 @@ char* rt_getcwd(void) {
 
 bool rt_is_dir(const char* path) {
     if (!path) return false;
-    DWORD attrs = GetFileAttributesA(path);
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return false;
+    DWORD attrs = GetFileAttributesW(wide);
+    free(wide);
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
