@@ -104,6 +104,13 @@ inspected. A successful link is not a full CLI/test-runner admission. This newer
 evidence supersedes any assumption that the build is still compiling; it does
 not supply the missing Simple test receipts.
 
+A separate bounded probe of that **new** binary exited 0 and printed
+`simple-bootstrap 1.0.0-rc.1`. Its SHA-256 was
+`aaf13da5942425e19b1aba2ed4b6d272687de1d4710ad7200ed0621d96990879`.
+The `bootstrap_main.spl` dispatcher advertises `compile` and `native-build`,
+not the full `test`/`check` CLI. This is useful bootstrap progress and does not
+admit a full SSpec runner or replace the remaining acceptance checks.
+
 Before resuming execution, locate a completed, provenance-verified self-hosted
 runner and its admission receipts. Do not substitute a Rust seed or translate
 the tests into another implementation and call that TDD evidence. Related
