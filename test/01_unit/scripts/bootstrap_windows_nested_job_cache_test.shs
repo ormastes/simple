@@ -1,0 +1,58 @@
+#!/bin/sh
+# Actual Windows Job regression. Run from the configured Git Bash/MSYS toolchain
+# when no other guarded compiler owns the host's native-build slot.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+case "$(uname -s)" in MINGW*|MSYS*) ;; *) fail 'Windows MSYS required' ;; esac
+
+if [ "${1:-}" = --inner ]; then
+    tmp=$2
+    [ "$SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE" = "$tmp/cache" ] ||
+        fail 'native boundary changed POSIX helper-cache path'
+    case ";${MSYS2_ENV_CONV_EXCL:-};" in
+        *';CL=;'*) ;; *) fail 'CL exclusion lost at native boundary' ;;
+    esac
+    case ";${MSYS2_ENV_CONV_EXCL:-};" in
+        *';SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE=;'*) ;;
+        *) fail 'helper-cache exclusion lost at native boundary' ;;
+    esac
+    perl "$guard" --session-mode=inherit --max-rss-kib=1048576 \
+        --timeout-seconds=30 --receipt="$tmp/inner.env" -- \
+        sh -c 'printf "nested-job-ran\n" >"$1"' sh "$tmp/inner.output" \
+        >"$tmp/inner.log" 2>&1
+    exit
+fi
+
+command -v clang-cl >/dev/null 2>&1 || fail 'clang-cl toolchain unavailable'
+evidence_root=${SIMPLE_BOOTSTRAP_NESTED_JOB_EVIDENCE_ROOT:?set an existing D: evidence directory}
+case "$evidence_root" in /[dD]/*) ;; *) fail 'evidence root must be POSIX-absolute on D:' ;; esac
+[ -d "$evidence_root" ] && [ ! -L "$evidence_root" ] || fail 'unsafe evidence root'
+tmp=$(mktemp -d "$evidence_root/simple-nested-job-cache.XXXXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+printf 'evidence=%s\n' "$tmp"
+export SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$tmp/cache"
+MSYS2_ENV_CONV_EXCL=CL=
+export MSYS2_ENV_CONV_EXCL
+
+perl "$guard" --session-mode=new --max-rss-kib=1048576 \
+    --timeout-seconds=60 --receipt="$tmp/outer.env" -- \
+    sh "$0" --inner "$tmp" >"$tmp/outer.log" 2>&1
+
+[ "$(cat "$tmp/inner.output")" = nested-job-ran ] || fail 'nested payload did not execute'
+for mode in outer inner; do
+    receipt=$tmp/$mode.env
+    grep -Fxq 'status=complete' "$receipt" || fail "$mode Job did not complete"
+    grep -Fxq 'exit_status=0' "$receipt" || fail "$mode Job child failed"
+    grep -Fxq 'quiescent=1' "$receipt" || fail "$mode Job not quiescent"
+    grep -Fxq 'observer_backend=win32-job-object' "$receipt" || fail "$mode did not own a Job"
+    grep -Eq '^session_helper=/[^[:space:]]+$' "$receipt" ||
+        fail "$mode published a non-POSIX helper path"
+done
+grep -Fxq 'session_mode=new' "$tmp/outer.env" || fail 'outer session mode drift'
+grep -Fxq 'session_mode=inherit' "$tmp/inner.env" || fail 'inner session mode drift'
+grep -Eq '^parent_session_admission_sha256=[0-9a-f]{64}$' "$tmp/inner.env" ||
+    fail 'inner admission did not bind the outer session'
+echo 'PASS: nested Windows Jobs preserve POSIX cache and both reap quiescently'
