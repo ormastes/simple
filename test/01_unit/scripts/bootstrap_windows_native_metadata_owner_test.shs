@@ -1,0 +1,58 @@
+#!/bin/sh
+# Actual native metadata exit status, bounded capture, and no failure retry.
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+case "$(uname -s)" in MSYS*|MINGW*|CYGWIN*) ;; *) echo 'ERROR: Windows required' >&2; exit 2 ;; esac
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+SIMPLE_PROJECT_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH SIMPLE_PROJECT_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+mkdir -p "$root/build/native_probe"
+work=$(mktemp -d "$root/build/native_probe/native-metadata-test.XXXXXX")
+SIMPLE_WORKTREE_STORAGE_ROOT=$work
+export SIMPLE_WORKTREE_STORAGE_ROOT
+python_bin=$(bootstrap_stage3_canonical_native_command "$(command -v python)")
+cat >"$work/child.py" <<'PY'
+from pathlib import Path
+import sys
+with Path(sys.argv[1]).open("a", encoding="ascii") as marker:
+    marker.write("launch\n")
+print("metadata version 1", flush=True)
+sys.exit(int(sys.argv[2]))
+PY
+script=$(cygpath -w "$work/child.py")
+marker=$(cygpath -w "$work/launches")
+for expected in 0 125; do
+    actual=0
+    bootstrap_stage3_native_metadata_probe native-status "$python_bin" \
+        "$script" "$marker" "$expected" >"$work/stdout-$expected" \
+        2>"$work/stderr-$expected" || actual=$?
+    [ "$actual" = "$expected" ]
+    if [ "$expected" = 0 ]; then
+        grep -Fx 'metadata version 1' "$work/stdout-$expected" >/dev/null
+    else
+        [ ! -s "$work/stdout-$expected" ]
+    fi
+    adapter=$(sed -n 's/^bootstrap-native-metadata-receipt=\(.*\) shell-status=.*/\1/p' "$work/stderr-$expected")
+    receipt=$(sed -n 's/^process_receipt=//p' "$adapter")
+    grep -Fx "native_exit_status=$expected" "$receipt" >/dev/null
+    grep -Fx 'reason=child-exit' "$receipt" >/dev/null
+    grep -Fx 'process_group=windows-job' "$receipt" >/dev/null
+    grep -Fx 'timeout_seconds=30' "$receipt" >/dev/null
+    grep -Fx 'max_bytes=1048576' "$receipt" >/dev/null
+done
+[ "$(wc -l <"$work/launches" | tr -d ' ')" = 2 ]
+# Transport injection isolates the hash-publication boundary. It does not
+# replace the real native status/receipt scenarios above.
+printf '#!/bin/sh\nexit 0\n' >"$work/mutating.exe"
+chmod +x "$work/mutating.exe"
+bootstrap_stage3_native_windows_metadata() {
+    printf '\n# changed executable\n' >>"$1"
+    printf 'must not be published\n'
+}
+if bootstrap_stage3_native_metadata_probe changed-tool "$work/mutating.exe" --version \
+    >"$work/changed.stdout" 2>"$work/changed.stderr"; then
+    echo 'FAIL: changed executable admitted' >&2; exit 1
+fi
+[ ! -s "$work/changed.stdout" ]
+printf 'PASS: native Windows metadata statuses0/125, no retry, verified Job receipts; evidence=%s\n' "$work"
