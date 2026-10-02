@@ -1268,3 +1268,27 @@ scans and an old four-root source-check scope. The proposed correction performs
 checks at inventory boundaries and covers all source and relevant test paths.
 Focused rejection tests and independent review must finish before that runner
 is used; no full Phase3/4 queue is claimed started here.
+
+### 2026-10-02 Windows hello resource stop and retained inventory
+
+The first actual Windows hello workload ended with `disk-budget-stop`, not a
+compiler result: whole-volume depletion was 1,172,066,304 bytes against the
+1 GiB allowance. Owned processes were reaped; peak RSS was 1,890,596 KiB.
+No executable or passing hello binding exists. The hello-local cache was
+empty, but owned SCV state under the frozen source's `build/scv` retained about
+227.5 MiB; the rest of the observed volume loss remains unassigned.
+
+SCV published generation 1 with a valid inline v3 event cursor in
+`source-inventory/CURRENT`; the absence of the legacy separate cursor file
+does not invalidate it. Generation and membership hashes were checked, but
+the snapshot is incomplete. The next attempt will retain these caches and use
+the supported warm-inventory acquire path (`SIMPLE_SCV_INVENTORY_COLD_INIT=0`),
+allowing the compiler to validate and construct its own snapshot. Never promote
+the temporary snapshot or invent authority receipts.
+
+A separately reviewed second-attempt policy is being prepared with a 2 GiB
+aggregate allowance, 10.5 GiB disk admission threshold and unchanged 8.5 GiB
+emergency floor. Old receipts remain immutable; actual warm admission and hello
+execution are still unverified. The three manager-image scripts are reviewed
+but unlaunched, pending a genuine hello PASS. Evidence:
+`D:/dev/windows-phase2-release-next-20261002/hello/cold-admission-observation.md`.
