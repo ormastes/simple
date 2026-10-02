@@ -1,11 +1,10 @@
 # Result-bearing wrapper for interpreter-mode specs.
 
-use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read, file_write, file_create_exclusive}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.io_runtime.{getpid}
-
-extern fn rt_file_create_excl(path: text, content: text) -> bool
 
 fn result_wrapper_path(file_path: text) -> text:
     val slash = file_path.last_index_of("/")
@@ -386,17 +385,19 @@ fn spipe_scenario_helpers_used(body: text, top_level: text) -> bool:
             return true
     false
 
-fn spipe_write_native_wrapper(wrapped: text) -> text:
+fn spipe_write_native_wrapper(wrapped: text, output_root: text) -> text:
+    if output_root.len() <= 0:
+        return ""
     val stamp = time_now_unix_micros()
     var attempt = 0
     while attempt < 16:
-        val path = "/tmp/spipe_native_{stamp}_{attempt}_spec.spl"
-        if rt_file_create_excl(path, wrapped):
+        val path = "{output_root}/spipe_native_{stamp}_{attempt}_spec.spl"
+        if file_create_exclusive(path, wrapped):
             return path
         attempt = attempt + 1
     ""
 
-fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
+fn _preprocess_spipe_file(file_path: text, native_result: bool, output_root: text) -> text:
     """Wrap SPipe file content in fn main() for native compilation.
     Returns path to temporary wrapped file, or original path if not SPipe."""
     if not file_path.ends_with("_spec.spl"):
@@ -576,17 +577,27 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     val main_decl = if native_result: "fn main() -> i64:\n" else: "fn main():\n"
     val wrapped = imports + "\n" + scenario_imports + native_decls + helpers + "\n" + top_level + "\n" + main_decl + native_start + body + native_end
     if native_result:
-        return spipe_write_native_wrapper(wrapped)
+        return spipe_write_native_wrapper(wrapped, output_root)
     val tmp_path = "/tmp/spipe_wrapped_" + getpid().to_text() + "_" + file_path.replace("/", "_")
     if not file_write(tmp_path, wrapped):
         return file_path
     tmp_path
 
 fn preprocess_spipe_file(file_path: text) -> text:
-    _preprocess_spipe_file(file_path, false)
+    _preprocess_spipe_file(file_path, false, "")
 
 fn preprocess_spipe_native_result_file(file_path: text) -> text:
-    _preprocess_spipe_file(file_path, true)
+    _preprocess_spipe_file(file_path, true, get_temp_dir())
+
+fn preprocess_spipe_native_result_file_in(file_path: text, output_root: text) -> text:
+    """Write a native result wrapper in an existing caller-owned directory.
+
+    The caller creates and owns output_root and removes the returned artifact.
+    Empty or unwritable roots fail without falling back to a shared directory.
+    """
+    if output_root.len() <= 0:
+        return ""
+    _preprocess_spipe_file(file_path, true, output_root)
 
 
-export result_wrapper_path, build_interpreter_result_wrapper, preprocess_infix_matchers_only, preprocess_spipe_file, preprocess_spipe_native_result_file
+export result_wrapper_path, build_interpreter_result_wrapper, preprocess_infix_matchers_only, preprocess_spipe_file, preprocess_spipe_native_result_file, preprocess_spipe_native_result_file_in
