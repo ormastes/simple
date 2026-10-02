@@ -5,6 +5,7 @@
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_function_order.{hir_function_symbol_order}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
@@ -137,8 +138,8 @@ fn bootstrap_hir_modules_add(name: text, is_entry: bool, symbols: [HirSymbol], f
 
 # HIR-cache replay of module_build.spl's bootstrap_flat_mode block: a cache
 # hit skips lowering, so the flat rows the bootstrap MIR bridge reads must be
-# published from the decoded module instead. Same flattening, same order
-# (Dict.keys() order), same mode gate; a no-op outside bootstrap_flat_mode.
+# published from the decoded module instead. Same flattening and scalar
+# SymbolId order as module_build.spl; a no-op outside bootstrap_flat_mode.
 fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name: text, is_entry: bool):
     val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
     val bootstrap_flat_mode = bootstrap_mode and (_sffi_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
@@ -151,9 +152,9 @@ fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name
     # only one copy stabilised nothing, which is exactly the partial-fix-to-duplicated-code
     # defect class that 00.common/module_path_naming.spl's own header warns about
     # ("70a29867bc2 changed only one of the four hand-kept copies").
-    # `rt_dict_keys` (src/runtime/runtime_native.c:8652) walks BUCKET order, so an
-    # unsorted `.keys()` here is a per-process ordering. Keys are hoisted, sorted, then
-    # indexed because these were `for k in D.keys():` loops.
+    # `rt_dict_keys` (src/runtime/runtime_native.c:8652) walks BUCKET order.
+    # Aggregate function keys must also avoid a copied-key dictionary lookup;
+    # order the original values by their scalar SymbolIds instead.
     # MEASUREMENT PREREQUISITE ONLY -- this makes error counts comparable between runs. It
     # fixes nothing else; the disc=-1 defect is untouched by it.
     var flat_symbols: [HirSymbol] = []
@@ -164,12 +165,9 @@ fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name
         flat_symbols = flat_symbols.push(module.symbols.symbols[symbol_keys[symbol_i]])
         symbol_i = symbol_i + 1
     var flat_functions: [HirFunction] = []
-    var function_keys = module.functions.keys()
-    function_keys.sort()
-    var function_i = 0
-    while function_i < function_keys.len():
-        flat_functions = flat_functions.push(module.functions[function_keys[function_i]])
-        function_i = function_i + 1
+    val function_values: [HirFunction] = module.functions.values()
+    for function_index in hir_function_symbol_order(function_values):
+        flat_functions = flat_functions.push(function_values[function_index])
     var flat_constants: [HirConst] = []
     var constant_keys = module.constants.keys()
     constant_keys.sort()
