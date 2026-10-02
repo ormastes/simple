@@ -133,6 +133,11 @@ def main():
                if not name.startswith("MAIL_") and name not in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR")}
         env.update(HOME=str(home), CURL_CA_BUNDLE=str(cert), MAIL_NONINTERACTIVE="1",
                    MAIL_CURL_MAX_RETRIES="1", NO_PROXY="127.0.0.1", PATH="/usr/bin:/bin")
+        # Keep the explicit compiled configuration/credential owner executable;
+        # account selection and passwords remain isolated in this fixture.
+        for helper in ("MAIL_CREDENTIAL_BIN", "MAIL_CONFIG_BIN"):
+            if os.environ.get(helper):
+                env[helper] = os.environ[helper]
 
         def run(*args, overrides=None):
             invocation_env = dict(env)
