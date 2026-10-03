@@ -25,6 +25,19 @@ This ownership amendment applies to this test-first wave; the original lane
 table below records the completed research/initial-spec allocation. Runtime
 execution and production fixes remain separate pending work.
 
+## Implementation continuation ownership
+
+On `go impl`, `/root` owns ELF parser bounds and its new input-bounds spec;
+`/root/linker_research` owns shared-object DT_NULL/string termination and the
+dynamic spec; `/root/linker_acceptance` owns the typed native-link result,
+wrapper/adapter threading and engine-receipt spec. `/root/linker_runtime` runs
+bounded diagnostics in the integration worktree's `build/item4-diagnostic/`
+and canonical `build/scv` cache, without editing production files. Root's probe
+source is `test/fixtures/linker/diagnostic/item4_linker_probe.spl`.
+Research independently reviewed result threading; runtime independently reviewed
+the parser bounds. All reviews are source-only unless actual execution receipts
+are explicitly attached. The three-attempt diagnostic cap remains in effect.
+
 | Lane / owner | Isolated worktree and work branch | Exclusive edits |
 |---|---|---|
 | Integration / `/root` | `C:/dev/simple-item4-linker-dev-20261003`; `work/item4-linker-dev-20261003` | Plan/design, acceptance plan, lane ledger, subsequent reviewed production fix |

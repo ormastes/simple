@@ -51,8 +51,11 @@ only with a provenance-admitted runtime. Do not use the seed as a test fallback.
 Until then, RED/GREEN execution, generated manual and verification remain open.
 
 The request adapter currently rejects bounded execution with UnsupportedBudget;
-the bounded composition descriptor alone cannot pass G3. Actual external-engine
-fallback attribution is also an open defect. PE writer tests do not establish
+the bounded composition descriptor alone cannot pass G3. External-engine
+fallback attribution now has source-level result threading and a real fallback
+regression scenario; runtime verification remains open. Parser and shared-object
+input admission also have implemented fixes and dedicated regression scenarios
+listed in the acceptance plan. PE writer tests do not establish
 PE support through the LinkRequest facade. Mach-O/FreeBSD and retained boot and
 board gates remain explicit; no unsupported scope decision is inferred.
 Completion aggregate hash validation does not itself prove transcript semantics

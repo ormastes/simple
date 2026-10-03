@@ -12,6 +12,45 @@ scenarios cover both changes; the interpreter scenario pins the exact error.
 This is test-first authorship followed by source-reviewed implementation, not
 an observed RED/GREEN cycle. Runtime execution and all broader gates remain open.
 
+## Implementation continuation
+
+The user's `go impl` instruction continues source implementation. Added owners
+and executable regression coverage are now:
+
+| Implemented source behavior | Executable regression authority | Evidence status |
+|---|---|---|
+| ELF section-header table and file-backed payload bounds use subtraction before reads, preserving NOBITS/NULL semantics | `item4_linker_input_bounds_spec.spl`: four scenarios, including overflow-sized offsets/sizes and unchanged NOBITS output | Source reviewed; SSpec unexecuted |
+| Section-backed DSO dynamic tables require DT_NULL, matching the sectionless path | `item4_linker_dynamic_acceptance_spec.spl`: original DSO succeeds; mutation removes every dynamic terminator and must fail through reader and linker | Source reviewed; SSpec unexecuted |
+| DSO symbol/version/dependency strings must terminate within their declared string table | Same dynamic spec: mutate the final SONAME terminator while preserving all bounds | Source reviewed; SSpec unexecuted |
+| Native-link success carries actual engine identity through external/internal/driver/SMF routes; legacy output APIs project the same result | `item4_linker_engine_receipt_spec.spl`: result/error projections, exact path identity, and real direct-failure then C-driver fallback control | Source reviewed; Linux integration unexecuted |
+
+The DSO filename `libadd_x64.so.1` contains SONAME `libadd_x64.so`. Acceptance
+expectations now use the embedded value, established from fixture bytes. The
+earlier filename-based expectation was a test-oracle error, not product RED.
+
+`NativeLinkSuccessV1 { output, engine_id }` and `link_to_native_with_engine`
+carry execution identity without re-probing the host after success. `cc` names
+the C-driver route, not its downstream linker. Unknown executable paths remain
+their own identities. Accounting remains NotCertified; result threading alone
+does not certify memory or platform behavior. The request adapter consumes the
+typed result, but a forced-fallback LinkRequest integration scenario remains
+open because its current schema cannot express the driver-only extra flags.
+
+The diagnostic probe `test/fixtures/linker/diagnostic/item4_linker_probe.spl`
+uses production calls and nonzero exit codes for the NUL interpreter and ELF
+table-overflow checks. It is separate from modern SSpec. An unadmitted pure-Simple
+Stage 2 candidate can compile it only as bounded diagnostic work; its command,
+candidate/source hashes, outputs and process receipts live in the session-owned
+`build/item4-diagnostic/`. No diagnostic outcome substitutes for admitted SSpec,
+core/MCP checks, generated manuals or release qualification.
+
+The bounded candidate `--help` succeeded. Three diagnostic build attempts then
+established source-family admission, required first-build inventory initialization,
+and a 120-second cold-init timeout. No probe executable or behavioral result was
+produced. The wrapper reaped the timed-out process and caches were preserved.
+See `doc/08_tracking/bug/item4_source_inventory_cold_init_timeout_2026-10-03.md`;
+no fourth attempt is authorized by this iteration's bounded verification plan.
+
 This is an executable acceptance breakdown of the existing seven-item plan's
 item 4 and the linker research G0-G6 gates. It does not replace the full linker
 scope with the first portable test slice. Existing decisions remain selected;

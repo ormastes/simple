@@ -56,8 +56,12 @@ unexecuted and do not establish observed RED/GREEN or platform certification.
   corpus behavior, boot and resource qualification need separate scenarios.
 - `LinkReceiptV1` must report the actual successful engine. Re-running linker
   discovery after a compiler-driver fallback does not establish that identity;
-  the production execution result must carry it to the adapter. This remains
-  an implementation/TDD gate, not a claim that the current receipt is correct.
+  the production execution result now carries it to the adapter through
+  `NativeLinkSuccessV1 { output, engine_id }` and `link_to_native_with_engine`.
+  Existing output-only entrypoints are compatibility projections of that result.
+  Unix, Windows/MSVC, SMF and internal routes assign identity at successful
+  execution; errors remain errors and strict post-link validation still runs.
+  This source implementation remains an unexecuted integration gate.
 - Schema identity requirements must come from the existing schema authority,
   not the incoming header being validated. Preserve D8 and its owner handoff;
   do not create a parallel linker schema registry to hide placeholder identity.
@@ -88,6 +92,15 @@ scenarios exercise shared-provider identity, strip retention, visibility and
 typed policy. Fixture mutation is permitted only after asserting the original
 field/symbol. None of these authored assertions establishes native execution
 until it is actually run on an admitted runtime and target.
+
+The next implementation adds bounds admission in the existing ELF parser:
+validate section-table offset/count using remaining file length, then validate
+each file-backed section's offset and size without overflow-prone addition.
+NOBITS has no file payload and NULL contributes none; both retain that distinction.
+The shared-object reader separately requires a dynamic-table terminator and a
+NUL terminator inside every consumed string-table entry. These checks run before
+malformed input can silently alter provider identity or reach an invalid read.
+No duplicate parser, new format owner or changed valid-input layout is introduced.
 
 ## 0. Decisions in one screen
 
