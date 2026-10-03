@@ -4369,6 +4369,25 @@ impl MirLowering:
                 # Do not lower the default here: its effects remain lazy.
                 if coalesce_missing_type and self.local_is_str(left_local):
                     result_type = self.bootstrap_text_type()
+                # Arrays crossing an extern boundary are handles, not tagged
+                # integers. Recover their declared type before either arm is
+                # decoded; an i64 default shifts the handle and loses the
+                # element type used by subsequent len/index dispatch.
+                var coalesce_array_type: HirType? = nil
+                var coalesce_left_type = self.enum_match_expr_type(left)
+                if coalesce_left_type == nil:
+                    coalesce_left_type = self.find_local_hir_type(left_local.id)
+                if val declared_left_type = coalesce_left_type:
+                    var payload_type = declared_left_type
+                    match declared_left_type.kind:
+                        case HirTypeKind.Optional(inner): payload_type = inner
+                        case _: ()
+                    match payload_type.kind:
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            coalesce_array_type = Some(payload_type)
+                            if coalesce_missing_type:
+                                result_type = self.lower_type(payload_type)
+                        case _: ()
                 # Struct-typed payload: same gap as ExistsCheck (`.?`) just
                 # below, and proven to reproduce identically here (both
                 # `x ?? default` and its None-branch default silently
@@ -4508,6 +4527,9 @@ impl MirLowering:
                     self.runtime_array_locals[result_local.id] = true
                 if self.runtime_dict_locals.contains(left_value.id) or (not right_terminated and self.runtime_dict_locals.contains(right_value.id)):
                     self.runtime_dict_locals[result_local.id] = true
+                if val array_type = coalesce_array_type:
+                    self.runtime_array_locals[result_local.id] = true
+                    self.remember_local_hir_type(result_local.id, array_type, 0, 0)
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
 
