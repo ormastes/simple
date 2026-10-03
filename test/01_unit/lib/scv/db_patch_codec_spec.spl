@@ -1,0 +1,113 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode}
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, SettledAlias, entity_ref_provisional, entity_ref_settled}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign, pure_ed25519_verify}
+
+fn setup_item2_wire_patch() -> DbPatch:
+    val namespace = "00112233445566778899aabbccddeeff"
+    val actor = "ffeeddccbbaa99887766554433221100"
+    val ref = entity_ref_provisional(EntityUid(database_namespace: namespace, entity_kind: "bug", actor: ActorIncarnation(hex: actor), counter: 18446744073709551615u64))
+    val alias = entity_ref_settled(SettledAlias(database_namespace: namespace, authority_epoch: 1, entity_kind: "bug", sequence: 7))
+    val values = DbValue.List([DbValue.Absent, DbValue.Text("é"), DbValue.Unsigned(18446744073709551615u64), DbValue.Flag(true), DbValue.Set([DbValue.Text("a"), DbValue.Text("b")]), DbValue.Reference(alias), DbValue.ObservedSet([DbSetMember(dot: "dot1", value: DbValue.Reference(ref), removed: true)]), DbValue.CausalSet([DbSetEvent(dot: "add1", value: DbValue.Text("a"), removed: false, observed: [])])])
+    val fields = [DbField(name: "all", value: values)]
+    val condition = RowPrecondition(base_row: "base-row", expected_revision: "row-revision", expected_fields: fields)
+    val operations = [DbOperation.Create(ref, "bug", fields), DbOperation.UpdateFields(ref, [FieldEdit(field: "all", before: values, after: DbValue.Absent)], condition), DbOperation.Tombstone(ref, condition), DbOperation.AddSetMember(ref, "tags", DbValue.Text("x"), "add1"), DbOperation.RemoveObservedSetMember(ref, "tags", ["add1"]), DbOperation.AppendObservation(ref, "bug", fields), DbOperation.AddSetMemberAfterRemoval(ref, "tags", DbValue.Text("x"), "add2", ["remove1"]), DbOperation.RemoveSetMember(ref, "tags", DbValue.Text("x"), "remove1", ["add1"])]
+    var patch = DbPatch(batch_id: "", repository: "repo", namespace: namespace, epoch: 1, actor: actor, actor_counter: 18446744073709551615u64, base_revision: "base-revision", causal_dependencies: ["dependency"], schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "fixture-key", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "signed import")
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([43u8;32])
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+fn setup_item2_wire_replace(encoded: text, position: i64, replacement: [u8]) -> text:
+    val prefix = "SCVDB-PATCH-v1\n"
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1]).unwrap()
+    val domain = db_domain_bytes("patch-wire", []).unwrap()
+    val root = db_read_frame(bytes, domain.len()).unwrap()
+    val fields = db_read_children(root.payload).unwrap()
+    var payload: [u8] = []
+    var index = 0
+    for field in fields:
+        if index == position: payload = payload + replacement
+        else: payload = payload + db_frame(field.tag, field.payload)
+        index = index + 1
+    prefix + db_snapshot_hex(domain + db_frame(97u8, payload)) + "\n"
+
+describe "REQ-010 REQ-011 complete typed signed patch transport":
+    it "roundtrips all operation and value variants without changing Ed25519 signing bytes":
+        step("Encode and decode a signed patch with lossless maximum counters and structured references")
+        val patch = setup_item2_wire_patch()
+        val decoded = db_patch_decode(db_patch_encode(patch).unwrap()).unwrap()
+        expect(decoded).to_equal(patch)
+        expect(decoded.operations.len()).to_equal(8)
+        expect(decoded.actor_counter).to_equal(18446744073709551615u64)
+        val (seed, public_key) = pure_ed25519_keypair_from_seed([43u8;32])
+        expect(pure_ed25519_verify(public_key, db_patch_signing_bytes(decoded).unwrap(), decoded.signature)).to_be(true)
+
+    it "normalizes equivalent Unicode while preserving the original signed identity":
+        step("Transport decomposed semantic text as NFC without resealing or resigning")
+        var patch = setup_item2_wire_patch()
+        val ref = db_operation_ref(patch.operations[0])
+        patch.operations = [DbOperation.Create(ref, "bug", [DbField(name: "é", value: DbValue.Text("é"))])]
+        patch = db_patch_seal(patch).unwrap()
+        val (seed, public_key) = pure_ed25519_keypair_from_seed([43u8;32])
+        patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+        val decoded = db_patch_decode(db_patch_encode(patch).unwrap()).unwrap()
+        expect(decoded.operations).to_equal([DbOperation.Create(ref, "bug", [DbField(name: "é", value: DbValue.Text("é"))])])
+        expect(decoded.batch_id).to_equal(patch.batch_id)
+        expect(decoded.signature).to_equal(patch.signature)
+        expect(pure_ed25519_verify(public_key, db_patch_signing_bytes(decoded).unwrap(), decoded.signature)).to_be(true)
+
+    it "rejects digest tampering and leaves signature authentication to its owner":
+        step("Change signed metadata in the wire image without updating its identity")
+        val patch = setup_item2_wire_patch()
+        val encoded = db_patch_encode(patch).unwrap()
+        val altered = setup_item2_wire_replace(encoded, 18, db_canonical_text("tampered").unwrap())
+        expect(db_patch_decode(altered)).to_equal(Err("SCVDB_BATCH_IDENTITY_COLLISION"))
+        var invalid = patch
+        invalid.provenance = "tampered"
+        expect(db_patch_encode(invalid)).to_equal(Err("SCVDB_BATCH_IDENTITY_COLLISION"))
+        step("A transported signature is data and cannot by itself authorize the decoded patch")
+        val signature_changed = setup_item2_wire_replace(encoded, 17, db_frame(4u8, [0u8;64]))
+        val decoded = db_patch_decode(signature_changed).unwrap()
+        val (seed, public_key) = pure_ed25519_keypair_from_seed([43u8;32])
+        expect(pure_ed25519_verify(public_key, db_patch_signing_bytes(decoded).unwrap(), decoded.signature)).to_be(false)
+
+    it "rejects duplicate field keys and overflowing or nonminimal counter vectors":
+        step("Decode literal malformed integer payloads inside an otherwise valid envelope")
+        val patch = setup_item2_wire_patch()
+        val encoded = db_patch_encode(patch).unwrap()
+        val overflow = setup_item2_wire_replace(encoded, 5, db_frame(2u8, [255u8,255u8,255u8,255u8,255u8,255u8,255u8,255u8,255u8,2u8]))
+        expect(db_patch_decode(overflow)).to_equal(Err("SCVDB_VARINT_OVERFLOW"))
+        expect(db_patch_decode(setup_item2_wire_replace(encoded, 5, db_frame(2u8, [128u8,0u8])))).to_equal(Err("SCVDB_VARINT_NONMINIMAL"))
+        step("Duplicate typed field names are rejected before semantic identity can bless them")
+        val ref = db_snapshot_value_encode(DbValue.Reference(db_operation_ref(patch.operations[0])), 0).unwrap()
+        val field = db_frame(32u8, db_canonical_text("duplicate").unwrap() + db_frame(0u8, []))
+        val duplicate = db_frame(21u8, ref + db_canonical_text("bug").unwrap() + db_frame(6u8, field + field))
+        expect(db_patch_decode(setup_item2_wire_replace(encoded, 10, db_frame(6u8, duplicate)))).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+
+    it "rejects wrong versions truncated frames trailing bytes and unknown operation tags":
+        step("Refuse literal malformed framing before decoding patch metadata")
+        expect(db_patch_decode("SCVDB-PATCH-v2\n00\n")).to_equal(Err("SCVDB_PATCH_WIRE_VERSION"))
+        val domain = db_domain_bytes("patch-wire", []).unwrap()
+        expect(db_patch_decode("SCVDB-PATCH-v1\n" + db_snapshot_hex(domain + [97u8,1u8]) + "\n")).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(db_patch_decode("SCVDB-PATCH-v1\n" + db_snapshot_hex(domain + [97u8,0u8,0u8]) + "\n")).to_equal(Err("SCVDB_PATCH_WIRE_ENCODING"))
+        val encoded = db_patch_encode(setup_item2_wire_patch()).unwrap()
+        expect(db_patch_decode(setup_item2_wire_replace(encoded, 10, db_frame(6u8, db_frame(255u8, []))))).to_equal(Err("SCVDB_PATCH_WIRE_TAG"))
+
+    it "bounds nested values and signature payloads before accepting an import":
+        step("Reject a value whose nesting exceeds the canonical depth limit")
+        val patch = setup_item2_wire_patch()
+        val encoded = db_patch_encode(patch).unwrap()
+        val ref = db_snapshot_value_encode(DbValue.Reference(db_operation_ref(patch.operations[0])), 0).unwrap()
+        var nested = db_frame(0u8, [])
+        for index in 0..66: nested = db_frame(6u8, nested)
+        val field = db_frame(32u8, db_canonical_text("deep").unwrap() + nested)
+        val operation = db_frame(21u8, ref + db_canonical_text("bug").unwrap() + db_frame(6u8, field))
+        expect(db_patch_decode(setup_item2_wire_replace(encoded, 10, db_frame(6u8, operation)))).to_equal(Err("SCVDB_DEPTH_QUOTA"))
+        step("Reject excessive opaque signature bytes even when semantic identity is unchanged")
+        expect(db_patch_decode(setup_item2_wire_replace(encoded, 17, db_frame(4u8, [0u8;4097])))).to_equal(Err("SCVDB_PATCH_WIRE_QUOTA"))
