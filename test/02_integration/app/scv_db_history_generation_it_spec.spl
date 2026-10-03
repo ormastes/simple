@@ -1,0 +1,25 @@
+use std.spec.*
+use app.io.mod.{file_write}
+use app.scv.db.local_store.*
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_apply_fixture.{setup_item2_apply_root}
+
+describe "Read-only retained generation lookup":
+    it "reopens a genuine older generation without relabeling the active state":
+        val root = setup_item2_apply_root()
+        val first = db_store_commit(root, "", sha256_text("history-first"), "older bytes")
+        expect(first.code).to_equal("ok")
+        val second = db_store_commit(root, first.head, sha256_text("history-second"), "newer bytes")
+        expect(second.code).to_equal("ok")
+        expect(db_store_read_generation(root, "semantic", first.head)).to_equal(first)
+        expect(db_store_read_generation(root, "semantic", second.head)).to_equal(second)
+        expect(db_store_read(root)).to_equal(second)
+
+    it "distinguishes absent and corrupt immutable objects and rejects path-like addresses":
+        val root = setup_item2_apply_root()
+        val stored = db_store_commit(root, "", sha256_text("history-corrupt"), "retained bytes")
+        expect(stored.code).to_equal("ok")
+        expect(db_store_read_generation(root, "semantic", "../HEAD").code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
+        expect(db_store_read_generation(root, "semantic", sha256_text("absent")).code).to_equal("SCVDB_STORE_OBJECT_MISSING")
+        expect(file_write(root + "/.scv/db/objects/" + stored.head + ".scvg", "changed bytes")).to_be(true)
+        expect(db_store_read_generation(root, "semantic", stored.head).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")

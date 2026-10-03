@@ -152,14 +152,32 @@ fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
     val head = raw_head.trim()
     if not _db_store_digest(head) or raw_head != "{head}\n":
         return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
+    val generation = db_store_read_generation(root, channel, head)
+    # Preserve the existing HEAD-reader error contract; the address API exposes
+    # IO/scope separately so historical resolution need not call it "missing".
+    if generation.code == "SCVDB_STORE_OBJECT_IO" or generation.code == "SCVDB_STORE_FILE_SCOPE": return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
+    generation
+
+# Read an immutable generation by address. This verifies bytes/context framing,
+# not historical ancestry, producer admission, or caller authority. Historical
+# owners must independently bind the result to a signed catalog/active chain.
+fn db_store_read_generation(root: text, channel: text, head: text) -> DbStoreView:
+    if not is_dir(root): return _db_store_error("SCVDB_STORE_ROOT")
+    val scope = _db_store_scope(root, channel)
+    if scope != "": return _db_store_error(scope)
+    if not _db_store_digest(head): return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
     val path = _db_store_object(root, head, channel)
-    if not file_exists(path):
-        return _db_store_error("SCVDB_STORE_OBJECT_MISSING")
+    val present = match path_entry_present(path):
+        Ok(value): value
+        Err(error): return _db_store_error("SCVDB_STORE_OBJECT_IO")
+    if not present: return _db_store_error("SCVDB_STORE_OBJECT_MISSING")
     var encoded = ""
     val read_limit = if channel == "checkpoint-install": 2048 else: 67108864
     match _db_store_read_bounded(path, read_limit):
         Ok(value): encoded = value
-        Err(error): return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
+        Err(error):
+            if error == "SCVDB_STORE_FILE_SCOPE": return _db_store_error(error)
+            return _db_store_error("SCVDB_STORE_OBJECT_IO")
     if sha256_text(encoded) != head:
         return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
     val fields = encoded.split("\n")
@@ -362,3 +380,4 @@ export DbStoreView, db_store_read, db_store_commit, db_store_commit_held
 export db_store_commit_with_absent_channels
 export db_local_path_scope, db_local_existing_canonical
 export db_store_generation_head, db_store_checkpoint_barrier, db_store_checkpoint_install_held
+export db_store_read_generation
