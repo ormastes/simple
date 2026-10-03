@@ -1,0 +1,70 @@
+# Normalize semantic text after digest validation and before materialization.
+# EntityRef fields remain governed by their existing ASCII identity protocol.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+
+fn db_normalize_text(value: text) -> Result<text, text>:
+    db_read_text(db_read_frame(db_canonical_text(value)?, 0)?)
+
+fn db_normalize_value(value: DbValue, depth: i64) -> Result<DbValue, text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    match value:
+        Text(content): Ok(DbValue.Text(db_normalize_text(content)?))
+        List(values):
+            var normalized: [DbValue] = []
+            for item in values: normalized.push(db_normalize_value(item, depth + 1)?)
+            Ok(DbValue.List(normalized))
+        Set(values):
+            var normalized: [DbValue] = []
+            for item in values: normalized.push(db_normalize_value(item, depth + 1)?)
+            val result = DbValue.Set(normalized)
+            val unique = db_value_bytes(result)?
+            Ok(result)
+        ObservedSet(members):
+            var normalized: [DbSetMember] = []
+            for member in members:
+                normalized.push(DbSetMember(dot: db_normalize_text(member.dot)?, value: db_normalize_value(member.value, depth + 1)?, removed: member.removed))
+            val result = DbValue.ObservedSet(normalized)
+            val unique = db_value_bytes(result)?
+            Ok(result)
+        _: Ok(value)
+
+fn db_normalize_fields(fields: [DbField]) -> Result<[DbField], text>:
+    var normalized: [DbField] = []
+    for field in fields:
+        normalized.push(DbField(name: db_normalize_text(field.name)?, value: db_normalize_value(field.value, 0)?))
+    val unique = db_fields_bytes(normalized)?
+    Ok(normalized)
+
+fn db_normalize_condition(condition: RowPrecondition) -> Result<RowPrecondition, text>:
+    Ok(RowPrecondition(base_row: db_normalize_text(condition.base_row)?, expected_revision: db_normalize_text(condition.expected_revision)?, expected_fields: db_normalize_fields(condition.expected_fields)?))
+
+fn db_normalize_operations(operations: [DbOperation]) -> Result<[DbOperation], text>:
+    var normalized: [DbOperation] = []
+    for operation in operations:
+        match operation:
+            Create(entity, kind, fields): normalized.push(DbOperation.Create(entity, kind, db_normalize_fields(fields)?))
+            AppendObservation(entity, kind, fields): normalized.push(DbOperation.AppendObservation(entity, kind, db_normalize_fields(fields)?))
+            Tombstone(entity, condition): normalized.push(DbOperation.Tombstone(entity, db_normalize_condition(condition)?))
+            UpdateFields(entity, edits, condition):
+                var normalized_edits: [FieldEdit] = []
+                var names: [[u8]] = []
+                for edit in edits:
+                    val name = db_normalize_text(edit.field)?
+                    names.push(db_canonical_text(name)?)
+                    normalized_edits.push(FieldEdit(field: name, before: db_normalize_value(edit.before, 0)?, after: db_normalize_value(edit.after, 0)?))
+                val unique = db_canonical_set(names)?
+                normalized.push(DbOperation.UpdateFields(entity, normalized_edits, db_normalize_condition(condition)?))
+            AddSetMember(entity, field, member, dot): normalized.push(DbOperation.AddSetMember(entity, db_normalize_text(field)?, db_normalize_value(member, 0)?, db_normalize_text(dot)?))
+            RemoveObservedSetMember(entity, field, observed):
+                var dots: [text] = []
+                var encoded: [[u8]] = []
+                for dot in observed:
+                    val name = db_normalize_text(dot)?
+                    dots.push(name)
+                    encoded.push(db_canonical_text(name)?)
+                val unique = db_canonical_set(encoded)?
+                normalized.push(DbOperation.RemoveObservedSetMember(entity, db_normalize_text(field)?, dots))
+    Ok(normalized)
+
+export db_normalize_text, db_normalize_value, db_normalize_fields, db_normalize_operations

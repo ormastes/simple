@@ -3,6 +3,8 @@ use std.scv.db_canonical.*
 use std.scv.db_patch.*
 use std.scv.distributed_identity.{entity_ref_canonical}
 use std.scv.db_schema.*
+use std.scv.db_patch_normalize.{db_normalize_text, db_normalize_operations}
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
 use std.common.crypto.sha256.{sha256_u8_hex}
 
 enum FieldMergeRule:
@@ -58,7 +60,7 @@ fn db_empty_state() -> MaterializedState:
 
 fn db_field_value(fields: [DbField], name: text) -> DbValue:
     for field in fields:
-        if field.name == name: return field.value
+        if field.name == unicode_normalize_nfc(name): return field.value
     DbValue.Absent
 
 fn db_values_equal(left: DbValue, right: DbValue) -> Result<bool, text>:
@@ -78,7 +80,7 @@ fn db_state_digest(state: MaterializedState) -> Result<text, text>:
 
 fn db_schema_rule(policy: MergePolicy, kind: text, field: text) -> Result<FieldMergeRule, text>:
     for schema in policy.fields:
-        if schema.kind == kind and schema.field == field: return Ok(schema.rule)
+        if schema.kind == kind and db_normalize_text(schema.field)? == field: return Ok(schema.rule)
     Err("SCVDB_UNKNOWN_FIELD")
 
 fn db_row_index(rows: [DbRow], entity: text) -> i64:
@@ -152,6 +154,10 @@ fn db_constraint_conflicts(rows: [DbRow], policy: MergePolicy) -> Result<[DbConf
 fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) -> Result<MergePlan, text>:
     """Preview only: caller must obtain cryptographic/ACL admission before persistence."""
     val digest = db_patch_validate(patch)?
+    var schema_names: [[u8]] = []
+    for field in policy.fields:
+        schema_names.push(db_frame(9u8, db_canonical_text(field.kind)? + db_canonical_text(field.field)?))
+    val unique_schema = db_canonical_set(schema_names)?
     if patch.repository != policy.repository or patch.namespace != policy.namespace or patch.epoch != policy.epoch:
         return Err("SCVDB_RESNAPSHOT_REQUIRED")
     if patch.schema_revision != policy.schema_revision or patch.reducer_revision != policy.reducer_revision:
@@ -166,7 +172,8 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
         if not accepted_ids.contains(dependency): return Err("SCVDB_MISSING_DEPENDENCY")
     var rows = state.rows
     var conflicts: [DbConflict] = []
-    for operation in patch.operations:
+    val operations = db_normalize_operations(patch.operations)?
+    for operation in operations:
         match operation:
             Create(ref, kind, fields):
                 val entity = entity_ref_canonical(ref)

@@ -1,0 +1,50 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_patch_normalize.*
+use std.scv.db_reducer.*
+use std.scv.db_schema.*
+use std.scv.db_snapshot.*
+use std.scv.db_admission.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+
+fn setup_item2_unicode_patch() -> DbPatch:
+    val ref = entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1))
+    val value = DbValue.List([DbValue.Text("é"), DbValue.Set([DbValue.Text("가")]), DbValue.ObservedSet([DbSetMember(dot: "é:1", value: DbValue.Text("é"), removed: false)])])
+    val patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: 1, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: [DbOperation.Create(ref, "bug", [DbField(name: "é", value: value)])], payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "fixture-key", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
+    db_patch_seal(patch).unwrap()
+
+fn setup_item2_unicode_policy() -> MergePolicy:
+    MergePolicy(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", fields: [DbFieldSchema(kind: "bug", field: "é", rule: FieldMergeRule.ScalarConflict)], constraints: [DbEntityConstraint(kind: "bug", key_fields: ["é"], unique_fields: ["é"], references: [])])
+
+describe "REQ-011 admitted Unicode values remain canonical through snapshots":
+    it "verifies a decomposed signed patch and durably encodes its normalized state":
+        step("Sign decomposed Unicode using the real Ed25519 admission boundary")
+        val (seed, public_key) = pure_ed25519_keypair_from_seed([1u8;32])
+        val key = DbSignerKey(key_id: "fixture-key", public_key: public_key, role: "user", valid_from: 1, valid_until: 100, revoked: false, permissions: [DbPermission(operation: "create", kind: "bug", field: "*")])
+        var admission = DbAdmissionPolicy(revision: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", keys: [key])
+        admission.revision = db_admission_policy_digest(admission).unwrap()
+        var patch = setup_item2_unicode_patch()
+        patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+        val plan = db_plan_admitted_patch(db_empty_state(), patch, setup_item2_unicode_policy(), admission, 2).unwrap()
+        expect(plan.authorization_status).to_equal("VERIFIED_SIGNATURE_AND_SCOPE")
+        expect(plan.conflicts.len()).to_equal(0)
+        expect(plan.proposed.rows[0].fields[0].name).to_equal("é")
+        val expected = DbValue.List([DbValue.Text("é"), DbValue.Set([DbValue.Text("가")]), DbValue.ObservedSet([DbSetMember(dot: "é:1", value: DbValue.Text("é"), removed: false)])])
+        expect(plan.proposed.rows[0].fields[0].value).to_equal(expected)
+        step("Recover the exact admitted state without changing its semantic identity")
+        val encoded = db_snapshot_encode(plan.proposed).unwrap()
+        val recovered = db_snapshot_decode(encoded).unwrap()
+        expect(recovered.rows).to_equal(plan.proposed.rows)
+        expect(recovered.accepted).to_equal(plan.proposed.accepted)
+        expect(recovered.revision).to_equal(plan.proposed.revision)
+
+    it "rejects normalization collisions in fields values dots and schema lookup":
+        step("Preserve distinct identity errors instead of combining equivalent names")
+        expect(db_normalize_fields([DbField(name: "é", value: DbValue.Absent), DbField(name: "é", value: DbValue.Absent)])).to_equal(Err("SCVDB_DUPLICATE_KEY"))
+        expect(db_normalize_value(DbValue.Set([DbValue.Text("é"), DbValue.Text("é")]), 0)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+        val dots = DbValue.ObservedSet([DbSetMember(dot: "é", value: DbValue.Absent, removed: false), DbSetMember(dot: "é", value: DbValue.Absent, removed: true)])
+        expect(db_normalize_value(dots, 0)).to_equal(Err("SCVDB_DUPLICATE_KEY"))
+        var policy = setup_item2_unicode_policy()
+        policy.fields.push(DbFieldSchema(kind: "bug", field: "é", rule: FieldMergeRule.Derived))
+        expect(db_plan_patch(db_empty_state(), setup_item2_unicode_patch(), policy)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))

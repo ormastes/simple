@@ -61,6 +61,10 @@ struct DbPatch:
     provenance: text
 
 fn db_value_bytes(value: DbValue) -> Result<[u8], text>:
+    db_value_bytes_bounded(value, 0)
+
+fn db_value_bytes_bounded(value: DbValue, depth: i64) -> Result<[u8], text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
     match value:
         Text(content): db_canonical_text(content)
         Unsigned(number): Ok(db_frame(2u8, db_u64_bytes(number)))
@@ -73,18 +77,18 @@ fn db_value_bytes(value: DbValue) -> Result<[u8], text>:
             Ok(db_frame(31u8, db_canonical_text(entity_ref_canonical(entity))?))
         List(values):
             var encoded: [[u8]] = []
-            for item in values: encoded.push(db_value_bytes(item)?)
+            for item in values: encoded.push(db_value_bytes_bounded(item, depth + 1)?)
             Ok(db_canonical_list(encoded))
         Set(values):
             var encoded: [[u8]] = []
-            for item in values: encoded.push(db_value_bytes(item)?)
+            for item in values: encoded.push(db_value_bytes_bounded(item, depth + 1)?)
             db_canonical_set(encoded)
         ObservedSet(members):
             var entries: [DbCanonicalEntry] = []
             for member in members:
                 var removed = 0u8
                 if member.removed: removed = 1u8
-                entries.push(DbCanonicalEntry(key: db_canonical_text(member.dot)?, value: db_frame(25u8, db_value_bytes(member.value)? + db_frame(1u8, [removed]))))
+                entries.push(DbCanonicalEntry(key: db_canonical_text(member.dot)?, value: db_frame(25u8, db_value_bytes_bounded(member.value, depth + 1)? + db_frame(1u8, [removed]))))
             Ok(db_frame(26u8, db_canonical_map(entries)?))
 
 fn db_fields_bytes(fields: [DbField]) -> Result<[u8], text>:
