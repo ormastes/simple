@@ -81,3 +81,19 @@ identity, initialization synchronization, process residency and shared session
 generation/lifetime enforcement before any invocation can be authorized.
 No LLVM function was invoked during this inspection; only export/header/file
 metadata was read. Compiler ABI specs remain authored and unexecuted.
+
+## Native smoke audit, 2026-10-03
+
+The planned real version/context smoke is blocked by local raw-output storage
+and cross-module extern-authority transport. Existing local `&mut` emits a
+value borrow identity, not a writable C output slot. The inspected imported
+free-function path registers a typed caller symbol but does not carry the
+provider's is_extern declaration into the local-only signature registry.
+Appending a consumer to the owner source, as the current ABI tests do, does
+not prove that an actual import preserves fixed arity. The raw declaration
+owner therefore remains unqualified for the requested imported native smoke.
+
+Exact source seams and required storage/import/native acceptance are recorded in
+`doc/08_tracking/bug/llvm_native_abi_smoke_storage_and_import_authority_2026-10-03.md`.
+No context-only substitute, integer-to-pointer workaround or extra compiler
+repair was introduced; this slice performed no native execution.
