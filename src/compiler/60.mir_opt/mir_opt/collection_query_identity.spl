@@ -1,0 +1,109 @@
+# Private identity/effect helpers for block-local collection query CSE.
+# Unknown values and opcodes fail closed; no display string is an identity.
+use compiler.mir.mir_data.*
+
+fn _collection_query_frame(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn _collection_query_type_key(type_: MirType) -> text:
+    match type_.kind:
+        case I8: "i8"
+        case I16: "i16"
+        case I32: "i32"
+        case I64: "i64"
+        case U8: "u8"
+        case U16: "u16"
+        case U32: "u32"
+        case U64: "u64"
+        case Bool: "bool"
+        case Char: "char"
+        case Unit: "unit"
+        case Ptr(inner, mutable):
+            val inner_key = _collection_query_type_key(inner)
+            if inner_key == "":
+                return ""
+            "ptr:{mutable}:" + _collection_query_frame(inner_key)
+        case Ref(inner, mutable):
+            val inner_key = _collection_query_type_key(inner)
+            if inner_key == "":
+                return ""
+            "ref:{mutable}:" + _collection_query_frame(inner_key)
+        case _: ""
+
+fn _collection_query_const_key(value: MirConstValue) -> text:
+    match value:
+        case Int(v): "int:" + _collection_query_frame(v.to_text())
+        case Bool(v): if v: "bool:1" else: "bool:0"
+        case Str(v): "str:" + _collection_query_frame(v)
+        case Zero: "zero"
+        # Decimal floats lose bit identity (signed zero and NaN payloads).
+        # Aggregate value equality does not establish allocation identity.
+        case _: ""
+
+fn _collection_query_operand_key(op: MirOperand, versions: Dict<i64, i64>) -> text:
+    match op.kind:
+        case Copy(local):
+            if local.id < 0:
+                return ""
+            val version = versions[local.id] ?? 0
+            "copy:{local.id}:{version}"
+        case Move(_): ""
+        case Const(value, type_):
+            val type_key = _collection_query_type_key(type_)
+            val value_key = _collection_query_const_key(value)
+            if type_key == "" or value_key == "":
+                return ""
+            "const:" + _collection_query_frame(type_key) + _collection_query_frame(value_key)
+
+fn _collection_query_operand_borrowed(op: MirOperand) -> bool:
+    match op.kind:
+        case Copy(local): local.id >= 0
+        case Const(_, _): true
+        case _: false
+
+fn _collection_query_args_borrowed(args: [MirOperand]) -> bool:
+    for arg in args:
+        if not _collection_query_operand_borrowed(arg):
+            return false
+    true
+
+fn _collection_query_local_only(inst: MirInst) -> bool:
+    match inst.kind:
+        case Const(_, _, _): true
+        case Copy(_, src): src.id >= 0
+        case BinOp(_, _, left, right):
+            _collection_query_operand_borrowed(left) and _collection_query_operand_borrowed(right)
+        case CheckedBinOp(_, _, left, right):
+            _collection_query_operand_borrowed(left) and _collection_query_operand_borrowed(right)
+        case UnaryOp(_, _, value): _collection_query_operand_borrowed(value)
+        case Cast(_, value, _): _collection_query_operand_borrowed(value)
+        case Bitcast(_, value, _): _collection_query_operand_borrowed(value)
+        case GetElementPtr(_, base, indices):
+            _collection_query_operand_borrowed(base) and _collection_query_args_borrowed(indices)
+        case GetField(_, base, _): _collection_query_operand_borrowed(base)
+        case Intrinsic(_, name, args):
+            name == "bounds_check" and _collection_query_args_borrowed(args)
+        # Includes Store, indirect/unknown calls, Move, Drop, transfers and
+        # newly added MIR opcodes until their effects are explicitly reviewed.
+        case _: false
+
+fn _collection_query_written_local(inst: MirInst) -> i64:
+    match inst.kind:
+        case Const(dest, _, _): dest.id
+        case Copy(dest, _): dest.id
+        case BinOp(dest, _, _, _): dest.id
+        case CheckedBinOp(dest, _, _, _): dest.id
+        case UnaryOp(dest, _, _): dest.id
+        case Cast(dest, _, _): dest.id
+        case Bitcast(dest, _, _): dest.id
+        case GetElementPtr(dest, _, _): dest.id
+        case GetField(dest, _, _): dest.id
+        case Call(dest, _, _):
+            if val local = dest: local.id else: -1
+        case Intrinsic(dest, _, _):
+            if val local = dest: local.id else: -1
+        case _: -1
+
+export _collection_query_frame, _collection_query_const_key
+export _collection_query_operand_key, _collection_query_args_borrowed
+export _collection_query_local_only, _collection_query_written_local

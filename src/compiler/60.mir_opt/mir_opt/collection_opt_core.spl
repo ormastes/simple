@@ -17,6 +17,11 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     optimization_rule_provider_builtin_with_contract
 }
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir_opt.mir_opt.collection_query_identity.{
+    _collection_query_frame, _collection_query_const_key,
+    _collection_query_operand_key, _collection_query_args_borrowed,
+    _collection_query_local_only, _collection_query_written_local
+}
 
 # Known pure methods safe to hoist out of loops
 val PURE_METHODS = ["len", "size", "is_empty", "first", "last", "get", "has", "contains", "contains_key", "is_subset", "is_superset", "is_disjoint"]
@@ -35,8 +40,18 @@ class CollectionOptimization:
     pure_queries_reused: i64
     array_index_gets_specialized: i64
     dead_append_arrays_elided: i64
+    admitted_runtime_read_names: Dict<text, bool> = {}
 
 impl CollectionOptimization:
+    me admit_collection_runtime_reads(names: [text]):
+        # Caller owns the proof that these symbols resolve to runtime reads,
+        # not source/foreign functions with the same spelling. Never infer it
+        # from absent local definitions: the linker may supply another owner.
+        self.admitted_runtime_read_names = {}
+        for name in names:
+            if self.is_collection_runtime_read(name):
+                self.admitted_runtime_read_names[name] = true
+
     static fn new() -> CollectionOptimization:
         CollectionOptimization(
             detector: LoopDetector.new(),
@@ -174,32 +189,56 @@ impl CollectionOptimization:
         new_blocks
 
     me canonicalize_collection_pure_queries_block(block: MirBlock) -> MirBlock:
+        self.canonicalize_collection_queries_block(block, false)
+
+    me canonicalize_collection_queries_block(block: MirBlock, lengths_only: bool) -> MirBlock:
         val insts = block.instructions
-        if insts.len() < 2:
+        if insts.len() < 2 or self.admitted_runtime_read_names.len() == 0:
             return block
 
         var seen: Dict<text, i64> = {}
+        var seen_versions: Dict<text, i64> = {}
+        var versions: Dict<i64, i64> = {}
         var new_insts: [MirInst] = []
         var changed = false
+        var position = 0
 
         for inst in insts:
-            val query = self.collection_pure_call_key(inst)
-            if query != "":
-                val dest = self.inst_dest(inst)
-                if val dest_local = dest:
-                    if seen.has(query):
-                        new_insts.push(MirInst(kind: MirInstKind.Copy(dest_local, LocalId(id: seen[query])), span: inst.span))
-                        self.pure_queries_reused = self.pure_queries_reused + 1
-                        changed = true
-                    else:
-                        seen[query] = dest_local.id
-                        new_insts.push(inst)
-                else:
-                    new_insts.push(inst)
+            if self.inst_may_mutate_collection_state(inst):
+                seen = {}
+                seen_versions = {}
+            # Capture operand versions BEFORE the instruction defines its
+            # destination: a query can overwrite its own receiver or index.
+            val query = if not lengths_only or self.collection_len_call_dest_id(inst) >= 0:
+                self.collection_query_call_key(inst, versions)
             else:
-                if self.inst_may_mutate_collection_state(inst):
-                    seen = {}
+                ""
+            val dest_id = _collection_query_written_local(inst)
+            var reused = false
+            if query != "" and dest_id >= 0 and seen.has(query):
+                val canonical_id = seen[query]
+                val current_version = versions[canonical_id] ?? 0
+                if current_version == seen_versions[query]:
+                    new_insts.push(MirInst(kind: MirInstKind.Copy(
+                        LocalId(id: dest_id), LocalId(id: canonical_id)), span: inst.span))
+                    reused = true
+                    changed = true
+                    if lengths_only:
+                        self.len_queries_reused = self.len_queries_reused + 1
+                    else:
+                        self.pure_queries_reused = self.pure_queries_reused + 1
+            if not reused:
                 new_insts.push(inst)
+            position = position + 1
+            if dest_id >= 0:
+                versions[dest_id] = position
+                if query != "" and (not reused or seen[query] == dest_id):
+                    # Keep a still-live canonical result instead of building
+                    # forwarding chains; refresh its version on self-copy.
+                    seen[query] = dest_id
+                    seen_versions[query] = position
+            # Every instruction, including a following length consumer, is
+            # visited once. No cache scan is needed when a local is redefined.
 
         if changed:
             MirBlock(
@@ -212,32 +251,34 @@ impl CollectionOptimization:
             block
 
     fn collection_pure_call_key(inst: MirInst) -> text:
+        self.collection_query_call_key(inst, {})
+
+    fn collection_query_call_key(inst: MirInst, versions: Dict<i64, i64>) -> text:
         match inst.kind:
             case Call(dest, func, args):
-                if not dest.?:
+                if _collection_query_written_local(inst) < 0:
                     return ""
                 val fname = self.get_func_name(func)
-                if not self.is_pure_method(fname) and not self.is_collection_runtime_read(fname):
+                if not self.admitted_runtime_read_names.has(fname) or not self.is_collection_runtime_read(fname):
                     return ""
-                var key = fname
+                var key = _collection_query_frame(fname) + _collection_query_frame(args.len().to_text())
                 for arg in args:
-                    val arg_key = self.collection_operand_key(arg)
+                    val arg_key = _collection_query_operand_key(arg, versions)
                     if arg_key == "":
                         return ""
-                    key = key + ":" + arg_key
+                    key = key + _collection_query_frame(arg_key)
                 key
             case _:
                 ""
 
     fn inst_may_mutate_collection_state(inst: MirInst) -> bool:
         match inst.kind:
-            case Call(_, func, _):
+            case Call(_, func, args):
                 val fname = self.get_func_name(func)
-                not self.is_pure_method(fname) and not self.is_collection_runtime_read(fname)
-            case CallIndirect(_, _, _, _): true
-            case Store(_, _): true
-            case SetField(_, _, _): true
-            case _: false
+                (not self.admitted_runtime_read_names.has(fname) or
+                    not self.is_collection_runtime_read(fname) or
+                    not _collection_query_args_borrowed(args))
+            case _: not _collection_query_local_only(inst)
 
     # ========================================================================
     # Len query canonicalization
@@ -250,64 +291,7 @@ impl CollectionOptimization:
         new_blocks
 
     me canonicalize_collection_len_queries_block(block: MirBlock) -> MirBlock:
-        val insts = block.instructions
-        if insts.len() < 2:
-            return block
-
-        val uses = self.local_use_counts(block)
-        var seen_lens: Dict<text, i64> = {}
-        var new_insts: [MirInst] = []
-        var changed = false
-        var i = 0
-
-        while i < insts.len():
-            val len_dest_id = self.collection_len_call_dest_id(insts[i])
-            if len_dest_id >= 0:
-                val dest = LocalId(id: len_dest_id)
-                val key = self.collection_len_call_key(insts[i])
-                if not seen_lens.has(key):
-                    seen_lens[key] = dest.id
-                    new_insts.push(insts[i])
-                    i = i + 1
-                    continue
-                else:
-                    val canonical = LocalId(id: seen_lens[key])
-                    if i + 1 < insts.len():
-                        val use_count = uses[dest.id] ?? 0
-                        if use_count == 1:
-                            val rewritten = self.rewrite_single_use_len_consumer(insts[i + 1], dest, canonical)
-                            match rewritten:
-                                case Some(rewritten_inst):
-                                    new_insts.push(rewritten_inst)
-                                case _:
-                                    new_insts.push(MirInst(kind: MirInstKind.Copy(dest, canonical), span: insts[i].span))
-                                    new_insts.push(insts[i + 1])
-                            self.len_queries_reused = self.len_queries_reused + 1
-                            changed = true
-                            i = i + 2
-                            continue
-
-                    new_insts.push(MirInst(kind: MirInstKind.Copy(dest, canonical), span: insts[i].span))
-                    self.len_queries_reused = self.len_queries_reused + 1
-                    changed = true
-                    i = i + 1
-                    continue
-
-            if self.inst_may_mutate_collection_state(insts[i]):
-                seen_lens = {}
-
-            new_insts.push(insts[i])
-            i = i + 1
-
-        if changed:
-            MirBlock(
-                id: block.id,
-                label: block.label,
-                instructions: new_insts,
-                terminator: block.terminator
-            )
-        else:
-            block
+        self.canonicalize_collection_queries_block(block, true)
 
     fn collection_len_call_dest_id(inst: MirInst) -> i64:
         match inst.kind:
@@ -315,7 +299,7 @@ impl CollectionOptimization:
                 if args.len() != 1:
                     return -1
                 val fname = self.get_func_name(func)
-                if not self.is_collection_len_runtime(fname):
+                if not self.is_collection_len_runtime(fname) or not self.admitted_runtime_read_names.has(fname):
                     return -1
                 if val dest_local = dest:
                     return dest_local.id
@@ -323,14 +307,9 @@ impl CollectionOptimization:
             case _: -1
 
     fn collection_len_call_key(inst: MirInst) -> text:
-        match inst.kind:
-            case Call(_, func, args):
-                val arg_key = self.collection_operand_key(args[0])
-                if arg_key == "":
-                    return ""
-                "{self.get_func_name(func)}:{arg_key}"
-            case _:
-                ""
+        if self.collection_len_call_dest_id(inst) < 0:
+            return ""
+        self.collection_query_call_key(inst, {})
 
     fn is_collection_len_runtime(name: text) -> bool:
         name == "rt_array_len" or name == "rt_string_len" or name == "rt_dict_len"
@@ -667,30 +646,10 @@ impl CollectionOptimization:
             case _: false
 
     fn collection_operand_key(op: MirOperand) -> text:
-        match op.kind:
-            case Copy(local):
-                val local_id = self.local_id_or_invalid(local)
-                if local_id < 0:
-                    return ""
-                "copy:{local_id}"
-            case Move(local):
-                val local_id = self.local_id_or_invalid(local)
-                if local_id < 0:
-                    return ""
-                "move:{local_id}"
-            case Const(value, _):
-                "const:{self.collection_const_key(value)}"
+        _collection_query_operand_key(op, {})
 
     fn collection_const_key(value: MirConstValue) -> text:
-        match value:
-            case Int(v): "int:{v}"
-            case Float(v): "float:{v}"
-            case Bool(v): "bool:{v}"
-            case Str(v): "str:{v}"
-            case Zero: "zero"
-            case Array(_): "array"
-            case Tuple(_): "tuple"
-            case Struct(_): "struct"
+        _collection_query_const_key(value)
 
     fn get_func_name(op: MirOperand) -> text:
         match op.kind:
