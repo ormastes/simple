@@ -12,7 +12,7 @@ use std.common.linker.link_policy_v1.*
 use compiler.backend.linker.link_engine_external.*
 use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
-use std.io_runtime.{env_get, env_set, file_exists, file_read_bytes, file_write_bytes, dir_create_all, remove_file_if_exists}
+use std.io_runtime.{env_get, env_set, host_os, file_exists, file_read_bytes, file_write_bytes, dir_create_all, remove_file_if_exists}
 
 fn item4_facade_header(id: u64) -> KpfSchemaHeaderV1:
     KpfSchemaHeaderV1(abi_version: KPF_ABI_VERSION_V1,
@@ -46,14 +46,23 @@ fn item4_facade_reject(target: LinkTargetV1):
     expect(receipt.engine_id).to_equal("none")
     expect(receipt.accounting_class.name()).to_equal("NotCertified")
 
+fn item4_facade_no_target_override() -> bool:
+    val build_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get("SIMPLE_TARGET") ?? ""
+    expect(build_target).to_equal("")
+    expect(target).to_equal("")
+    build_target == "" and target == ""
+
 describe "ITEM4-REQ-006 facade target admission":
     it "rejects an unknown architecture before probing a linker":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Submit an unassigned architecture code with otherwise valid PE fields")
         var target = item4_facade_target()
         target.arch = 99
         item4_facade_reject(target)
 
     it "rejects unknown OS and ABI codes instead of guessing GNU":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Submit unknown OS and ABI values independently")
         var target = item4_facade_target()
         target.os = 99
@@ -63,6 +72,7 @@ describe "ITEM4-REQ-006 facade target admission":
         item4_facade_reject(target)
 
     it "rejects incompatible object format and OS pairs":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Try ELF on Windows, PE on Linux, and ELF on macOS")
         var target = item4_facade_target()
         target.object_format = LINK_OBJECT_FORMAT_ELF
@@ -76,6 +86,7 @@ describe "ITEM4-REQ-006 facade target admission":
         item4_facade_reject(target)
 
     it "rejects MSVC ABI on an ELF target":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Keep valid Linux ELF fields but request the Windows ABI")
         var target = item4_facade_target()
         target.os = LINK_OS_LINUX
@@ -83,6 +94,7 @@ describe "ITEM4-REQ-006 facade target admission":
         item4_facade_reject(target)
 
     it "rejects unsupported endian and width without publishing output":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Submit a big-endian PE request and a 32-bit x86_64 request")
         var target = item4_facade_target()
         target.endian = 2
@@ -92,7 +104,42 @@ describe "ITEM4-REQ-006 facade target admission":
         item4_facade_reject(target)
 
 describe "ITEM4-REQ-002 configured request execution":
+    it "rejects a conflicting ambient target before input access":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Select SimpleOS in the environment while requesting Windows PE")
+        val previous = env_get("SIMPLE_TARGET") ?? ""
+        val changed = env_set("SIMPLE_TARGET", "simpleos")
+        expect(changed).to_equal(true)
+        if not changed: return
+        val request = item4_facade_request(item4_facade_target())
+        val receipt = link_request_to_native(request, item4_facade_policy(), [],
+            "build/item4_facade/never_written.exe")
+        val restored = env_set("SIMPLE_TARGET", previous)
+        expect(restored).to_equal(true)
+        expect(receipt.outcome.name()).to_equal("InputError")
+        expect(receipt.engine_id).to_equal("none")
+
+    it "rejects Unix targets that the external wrapper would execute for another host":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Choose a valid Unix target OS different from the host")
+        if not item4_facade_no_target_override(): return
+        var target = item4_facade_target()
+        target.os = if host_os() == "linux": LINK_OS_FREEBSD else: LINK_OS_LINUX
+        target.abi = LINK_ABI_GNU
+        target.object_format = LINK_OBJECT_FORMAT_ELF
+        val previous = env_get("SIMPLE_LINKER") ?? ""
+        val changed = env_set("SIMPLE_LINKER", "")
+        expect(changed).to_equal(true)
+        if not changed: return
+        val receipt = link_request_to_native(item4_facade_request(target),
+            item4_facade_policy(), [], "build/item4_facade/never_written_unix")
+        val restored = env_set("SIMPLE_LINKER", previous)
+        expect(restored).to_equal(true)
+        expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
+        expect(receipt.engine_id).to_equal("none")
+
     it "rejects configuration target disagreement and preserves an existing output":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Create a sentinel output before requesting a mismatched target")
         val created = dir_create_all("build/item4_facade")
         expect(created).to_equal(true)
@@ -120,7 +167,9 @@ describe "ITEM4-REQ-002 configured request execution":
         expect(remove_file_if_exists(output)).to_equal(true)
 
     it "keeps the bounded policy rejection ahead of native execution":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Request a finite bounded execution with missing input")
+        if not item4_facade_no_target_override(): return
         val request = item4_facade_request(item4_facade_target())
         var policy = item4_facade_policy()
         policy.mode = LinkExecutionModeV1.Bounded
@@ -132,7 +181,9 @@ describe "ITEM4-REQ-002 configured request execution":
         expect(receipt.engine_id).to_equal("none")
 
     it "links real COFF fixtures through the request facade and records internal coff":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
         step("Require real input objects and an owned output directory")
+        if not item4_facade_no_target_override(): return
         val objects = ["test/fixtures/linker/coff/windows_corpus_main.obj",
             "test/fixtures/linker/coff/windows_corpus_provider.obj"]
         for path in objects:

@@ -1,28 +1,11 @@
-# External-engine adapter: LinkRequestV1/LinkExecutionPolicyV1 -> the
-# existing NativeLinkConfig/link_to_native path, and back into a LinkReceiptV1.
-#
-# Lane A3 (mold_mdsocpp_linker_plan_2026-09-18.md row A3). RC1 = zero
-# behaviour change (plan §2): this file only PROJECTS the new KPF-style job
-# records onto the argv builders that already exist in
-# `_LinkerWrapper/native_linking.spl`, reached only through the
-# `linker_wrapper` facade, exactly like every other external caller of
-# `link_to_native`.
-#
-# `SIMPLE_LINKER=internal` selects the internal ELF engine (`internal:elf`,
-# lane A7 `elf/elf_static_link.elf_link`). Lane B3
-# (mold_mdsocpp_linker_plan_2026-09-18.md §1/§11) gave `link_to_native` itself
-# the same routing for callers that never go through a `LinkRequestV1`, and
-# factored the actual CRT-discovery/elf_link/write/chmod sequence out into
-# `native_linking.internal_link_native` -- this file (`link_request_internal`
-# below) now delegates to that one shared implementation through the
-# `linker_wrapper` facade rather than keeping its own copy. Supported subset:
-# Linux ELF, target arch == host arch, x86_64/aarch64 (dynamic PIE / exec
-# against the host glibc found by crt_discovery). Anything else is a receipt
-# with `LinkOutcomeV1.UnsupportedFeature` naming the reason -- never a silent
-# fallback to an external linker. `mold.find_linker_path` still rejects the
-# alias by name (it is not a PATH), and `classify_link_error` turns that
-# rejection into `UnsupportedFeature` for callers that bypass this adapter.
-# Default behaviour (override unset) is unchanged.
+# Native request adapter: validate request/policy/target, preserve explicit
+# NativeLinkConfig execution context, and return the executed engine receipt.
+# The legacy API supplies its historical default configuration projection.
+# Internal Linux ELF uses the shared host-sysroot linker; Windows PE uses the
+# existing typed native wrapper for AMD64/ARM64. Unsupported target/format and
+# unimplemented bounded execution fail before input access or publication.
+# Link*V1 remains a plain-struct contract; schema registration, accounting and
+# platform qualification are separate gates, never inferred from this adapter.
 
 use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
 use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1, KPF_ABI_VERSION_V1, KPF_SCHEMA_HEADER_V1_SIZE}
@@ -32,14 +15,14 @@ use std.common.linker.link_policy_v1.{
     link_policy_resolve_mode_v1, link_policy_v1_validate}
 use std.common.linker.link_receipt_v1.{LinkAccountingClassV1, LinkOutcomeV1, LinkReceiptV1}
 
-use std.nogc_sync_mut.io_runtime.{host_os, host_arch}
+use std.nogc_sync_mut.io_runtime.{host_os, host_arch, env_get}
 use std.log.{debug}
 
 # `link_to_native`/`NativeLinkConfig`/`internal_link_native` all come through
 # the facade (`link_to_native` per the original A3 plan row; `internal_link_native`
 # is lane B3's shared SIMPLE_LINKER=internal implementation, reused here
 # instead of duplicated).
-use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native_with_engine, native_linker_abi_for_target, internal_link_native}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native_with_engine, native_linker_abi_for_target}
 
 # Override selection only; successful identity comes from the execution result.
 use compiler.backend.linker.mold.{requested_linker_override}
@@ -80,6 +63,31 @@ pub const LINK_OBJECT_FORMAT_PE: u32 = 3
 
 pub const LINK_ENDIAN_LITTLE: u32 = 1
 
+pub fn link_request_target_error_v1(target: LinkTargetV1) -> text:
+    """Admit only target combinations the native adapter can represent.
+
+    The common wire validator checks shape, not this adapter's vocabulary.
+    In particular an unknown ABI must not silently become Windows GNU.
+    """
+    if target.arch != LINK_ARCH_X86_64 and target.arch != LINK_ARCH_AARCH64:
+        return "unsupported target architecture {target.arch}"
+    if target.endian != LINK_ENDIAN_LITTLE or target.address_width != 64:
+        return "native adapter requires little-endian 64-bit targets"
+    if target.os == LINK_OS_WINDOWS:
+        if target.object_format != LINK_OBJECT_FORMAT_PE:
+            return "Windows target requires PE object format"
+        if target.abi != LINK_ABI_GNU and target.abi != LINK_ABI_MSVC:
+            return "unsupported Windows ABI {target.abi}"
+        return ""
+    if target.os != LINK_OS_LINUX and target.os != LINK_OS_FREEBSD and target.os != LINK_OS_MACOS:
+        return "unsupported target OS {target.os}"
+    if target.abi != LINK_ABI_GNU:
+        return "Unix target requires the native GNU ABI code"
+    val expected = if target.os == LINK_OS_MACOS: LINK_OBJECT_FORMAT_MACHO else: LINK_OBJECT_FORMAT_ELF
+    if target.object_format != expected:
+        return "target OS and object format disagree"
+    ""
+
 pub fn link_target_triple(target: LinkTargetV1) -> text:
     """Rust-triple spelling for a LinkTargetV1, or "" for an unrecognised arch/os.
 
@@ -111,7 +119,7 @@ pub fn link_target_triple(target: LinkTargetV1) -> text:
 pub fn native_host_link_target() -> LinkTargetV1:
     """Best-effort LinkTargetV1 for the process's actual host, from
     host_os()/host_arch() -- used only to fill LinkReceiptV1.host for
-    reporting; never fed back into a link decision."""
+    reporting and host-sysroot admission. Unknown values fail target matching."""
     var arch_code: u32 = 0
     val arch = host_arch()
     if arch == "x86_64":
@@ -269,20 +277,6 @@ fn engine_id_for_outcome(outcome: LinkOutcomeV1) -> text:
 
 val INTERNAL_ELF_ENGINE_ID: text = "internal:elf"
 
-fn link_os_text(os_code: u32) -> text:
-    """Map a LinkTargetV1 os code to the os string `internal_link_native` expects."""
-    if os_code == LINK_OS_LINUX: return "linux"
-    if os_code == LINK_OS_MACOS: return "macos"
-    if os_code == LINK_OS_FREEBSD: return "freebsd"
-    if os_code == LINK_OS_WINDOWS: return "windows"
-    ""
-
-fn link_arch_text(arch_code: u32) -> text:
-    """Map a LinkTargetV1 arch code to the arch string `internal_link_native` expects."""
-    if arch_code == LINK_ARCH_X86_64: return "x86_64"
-    if arch_code == LINK_ARCH_AARCH64: return "aarch64"
-    ""
-
 fn classify_internal_error(message: text) -> LinkOutcomeV1:
     """Map an `internal_link_native`/`elf_link` Err payload to a LinkOutcomeV1."""
     if message.contains("UnsupportedFeature") or message.contains("unsupported") or message.contains("slice 1"):
@@ -292,33 +286,36 @@ fn classify_internal_error(message: text) -> LinkOutcomeV1:
     LinkOutcomeV1.ResourceFailure
 
 fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
-        object_files: [text], output: text) -> LinkReceiptV1:
-    """SIMPLE_LINKER=internal: link with internal:elf or return a named
-    UnsupportedFeature receipt. Never falls back to an external linker.
+        config: NativeLinkConfig, object_files: [text], output: text) -> LinkReceiptV1:
+    """Admit the requested format, then use the canonical native execution path.
 
-    Delegates the actual CRT-discovery/elf_link/write/chmod sequence to
-    `native_linking.internal_link_native` (lane B3), reached through the
-    `linker_wrapper` facade -- the single internal-ELF-link implementation,
-    shared with `link_to_native`'s own SIMPLE_LINKER=internal routing, so
-    there is exactly one place that does this rather than two that could
-    drift. Only the `object_format` check stays local: `internal_link_native`
-    takes a plain (os, arch) pair with no `object_format` concept, and
-    `LinkTargetV1` is the only caller shape whose `object_format` can vary
-    independently of os/arch (e.g. a Mach-O target that otherwise looks like
-    a Linux/aarch64 pair)."""
-    if req.target.object_format != LINK_OBJECT_FORMAT_ELF:
-        val reason = "internal:elf links ELF only (object_format {req.target.object_format})"
-        debug("link-engine-external", "UnsupportedFeature: {reason}")
-        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
-    val config = link_request_to_native_config(req, policy)
-    val linked = internal_link_native(
-        link_os_text(req.target.os), link_arch_text(req.target.arch), config, object_files, output)
+    Both ELF and PE retain wrapper tool/runtime admission and post-link checks.
+    The wrapper must never fall back externally for an explicit internal route.
+    """
+    val pe = req.target.os == LINK_OS_WINDOWS and req.target.object_format == LINK_OBJECT_FORMAT_PE
+    val engine = if pe: "internal:coff" else: INTERNAL_ELF_ENGINE_ID
+    if not pe:
+        val host = native_host_link_target()
+        if req.target.object_format != LINK_OBJECT_FORMAT_ELF or
+                req.target.os != LINK_OS_LINUX or
+                req.target.os != host.os or req.target.arch != host.arch:
+            debug("link-engine-external", "internal ELF requires Linux and the matching host sysroot")
+            return base_receipt(req, policy, engine,
+                LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
+    # SMF embedding is a separate output contract, not an internal native link.
+    for path in object_files:
+        if path.ends_with(".smf") or path.ends_with(".lsm"):
+            debug("link-engine-external", "internal native request cannot embed an SMF bundle")
+            return base_receipt(req, policy, engine,
+                LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
+    val linked = link_to_native_with_engine(object_files, output, config)
     if linked.is_err():
         val message = linked.unwrap_err()
         val outcome = classify_internal_error(message)
-        debug("link-engine-external", "internal:elf failed ({outcome.name()}): {message}")
-        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, outcome, LinkAccountingClassV1.NotCertified)
-    base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
+        debug("link-engine-external", "{engine} failed ({outcome.name()}): {message}")
+        return base_receipt(req, policy, engine, outcome, LinkAccountingClassV1.NotCertified)
+    base_receipt(req, policy, linked.unwrap().engine_id,
+        LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
 
 # ============================================================================
 # Entry point
@@ -332,6 +329,18 @@ pub fn link_request_to_native(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
     `object_files`/`output` are not part of LinkRequestV1 (it names its
     inputs by digest, design §6.2) and are supplied by the caller exactly as
     every other `link_to_native` caller supplies them today."""
+    link_request_to_native_with_config(req, policy,
+        link_request_to_native_config(req, policy), object_files, output)
+
+pub fn link_request_to_native_with_config(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
+        config: NativeLinkConfig, object_files: [text], output: text) -> LinkReceiptV1:
+    """Execute a request with explicit native library/runtime/output options.
+
+    This adds execution context without changing the frozen request schema.
+    The supplied configuration must name exactly the request's target. Its
+    libraries, retained symbols and flags reach the actual execution route;
+    the legacy entrypoint supplies its historical default projection.
+    """
     val req_status = link_request_v1_validate(req, requirement_from_header(req.header))
     if req_status != "":
         debug("link-engine-external", "request rejected: {req_status}")
@@ -341,6 +350,23 @@ pub fn link_request_to_native(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
     if policy_status != "":
         debug("link-engine-external", "policy rejected: {policy_status}")
         return base_receipt(req, policy, "none", LinkOutcomeV1.InputError, LinkAccountingClassV1.NotCertified)
+
+    val target_error = link_request_target_error_v1(req.target)
+    if target_error != "":
+        debug("link-engine-external", "request target rejected: {target_error}")
+        return base_receipt(req, policy, "none", LinkOutcomeV1.UnsupportedFeature,
+            LinkAccountingClassV1.NotCertified)
+    val expected_triple = link_target_triple(req.target)
+    if config.target_triple != expected_triple or config.linker_abi != native_linker_abi_for_target(expected_triple):
+        debug("link-engine-external", "configuration target disagrees with request")
+        return base_receipt(req, policy, "none", LinkOutcomeV1.InputError,
+            LinkAccountingClassV1.NotCertified)
+    for key in ["SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_TARGET"]:
+        val selected_target = env_get(key) ?? ""
+        if selected_target != "" and selected_target != expected_triple:
+            debug("link-engine-external", "{key} disagrees with request target")
+            return base_receipt(req, policy, "none", LinkOutcomeV1.InputError,
+                LinkAccountingClassV1.NotCertified)
 
     # A bounded decision must never fall through to the resident adapter. The
     # A8 working-set primitives exist, but their owned execution/job-scope
@@ -352,10 +378,16 @@ pub fn link_request_to_native(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
         return base_receipt(req, policy, "none", LinkOutcomeV1.UnsupportedBudget,
             LinkAccountingClassV1.NotCertified)
 
-    if requested_linker_override().lower() == "internal":
-        return link_request_internal(req, policy, object_files, output)
+    if requested_linker_override().trim().lower() == "internal":
+        return link_request_internal(req, policy, config, object_files, output)
 
-    val config = link_request_to_native_config(req, policy)
+    # The Unix wrapper dispatches on the host, unlike its target-aware PE
+    # branch. Never label a host image as a different requested Unix target.
+    val host = native_host_link_target()
+    if req.target.os != LINK_OS_WINDOWS and (req.target.os != host.os or req.target.arch != host.arch):
+        debug("link-engine-external", "external Unix cross-target dispatch is unsupported")
+        return base_receipt(req, policy, "none", LinkOutcomeV1.UnsupportedFeature,
+            LinkAccountingClassV1.NotCertified)
     val link_result = link_to_native_with_engine(object_files, output, config)
     if link_result.is_ok():
         return base_receipt(req, policy, link_result.unwrap().engine_id, LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
@@ -371,5 +403,6 @@ export LINK_ABI_GNU, LINK_ABI_MSVC
 export LINK_OBJECT_FORMAT_ELF, LINK_OBJECT_FORMAT_MACHO, LINK_OBJECT_FORMAT_PE
 export LINK_ENDIAN_LITTLE
 export link_target_triple, native_host_link_target
-export link_request_to_native_config, link_request_to_native
+export link_request_to_native_config, link_request_to_native, link_request_to_native_with_config
+export link_request_target_error_v1
 export classify_link_error
