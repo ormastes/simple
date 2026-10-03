@@ -8,7 +8,7 @@ NFRs: `doc/02_requirements/nfr/collection_planner.md`.
 
 This manual distinguishes a real selector/explanation integration slice from
 the full typed-collection/compiler/runtime feature. No passing test or generated
-manual is claimed. Six authored scenarios call `collection_plan_select` and
+manual is claimed. Ten authored scenarios call `collection_plan_select` and
 `collection_plan_explain`; none execute selected MIR or an indexed collection.
 
 | Executable scenario | Fixture | Observable contract |
@@ -18,14 +18,18 @@ manual is claimed. Six authored scenarios call `collection_plan_select` and
 | CP-GUARD-03 | static size 2, hard bound 2, three lookups | Linear; static evidence and small/quiet reason |
 | CP-GUARD-04 | same static fixture, unadmitted p95 size 1000/lookups 10000 | Linear from static facts; profile values rendered unknown |
 | CP-GUARD-05 | explicit hash with unstable mutation epoch | Original; semantic proof failure visible for hash |
-| CP-GUARD-06 | admitted probes 100/collisions 40, ordered capability | Ordered; hash collision rejection; memory still unproven/not modeled |
+| CP-GUARD-06 | admitted probes 100/collisions 40, ordered capability, supplied memory bounds | Ordered; hash collision rejection; selected extra-memory bound 48 within budget 64 |
+| CP-GUARD-07 | hash bound 64, ordered bound 48, budget 48 | Ordered; hash rejected for exceeding budget; exact fit admitted |
+| CP-GUARD-08 | explicit hash attribute with unknown hash memory bound | Original; attribute cannot supply missing memory proof |
+| CP-GUARD-09 | admitted hot profile with unknown budget | Original; profile does not establish a memory budget |
+| CP-GUARD-10 | linear extra-memory bound 0, budget 0 | Linear; a proven zero bound differs from an unknown estimate |
 
 Each scenario visibly prepares typed collection facts and inspects the selected
 collection plan. The two other reserved flows (compile the same program in each
 engine; compare results and operation counts) are intentionally absent until
 real production execution helpers exist. Their absence blocks full acceptance.
 
-REQ-009/010/011 are only partially addressed by the six guards. The full 33-case
+REQ-009/010/011 are only partially addressed by these guards. The full 33-case
 plan requires typed/missing-value semantics, five-engine parity, registry and
 cache identity, stable indexed algorithms, generic collision behavior, typed
 diagnostics, logical DAG validation, fusion effects/error traces, all join
@@ -42,6 +46,11 @@ identities and actual operation counters. The scaling fixture sizes are 1000,
 separate. Five warm runs per case must meet the selected 10% wall-time, 20% RSS
 and 5% startup/request regression limits against same-revision baselines.
 Missing measurements remain missing, never PASS.
+
+Memory values in these fixtures are supplied proof-owner bounds on peak extra
+live bytes above Original, not measured allocations or total RSS. Unknown
+budget/candidate bounds reject selection. The tests do not establish a compiler
+cost producer, actual allocation under the cap, or the NFR-004 RSS target.
 
 After an admitted runner exists, generate this manual from the executable with
 `simple spipe-docgen <spec> --output doc/06_spec --no-index`, inspect the rendered

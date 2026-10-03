@@ -71,6 +71,28 @@ attempts are exhausted; another identical retry is not the next step.
 Admission profiling or a supplied admitted runner is required to unblock
 execution. No semantic RED/GREEN or production-ready verification was obtained.
 
+## Continued logic and tests at user direction
+
+The user requested code logic and tests first despite the execution blocker.
+The memory lane adds per-candidate memory admission to the real selector and
+exposes the same supplied bounds in explanations. Unknown budget or candidate
+bounds reject optimization; attributes and admitted profiles cannot bypass
+them. Zero/exact limits and fitting alternative selection are covered by
+test-first unit, profile-bridge and CP-GUARD-07–10 scenarios.
+
+Selector lane: `work/item3-memory-20261003` in the existing planner worktree;
+caller lane: `work/item3-memory-callers-20261003` in the existing spec worktree.
+Both refreshed their local ownership receipts at base `40730ce2cd9`.
+Selector tests `0131dfae5bf` precede implementation `69043e3fd64`; explanation
+tests `db0b7694c29` precede renderer `0428efd8edb`. Independent review found a
+fixture missing an explicit linear bound; it was corrected and re-reviewed.
+
+Tests are authored, not executed. Supplied peak-extra-byte bounds do not
+implement their compiler producer, actual lowering or measured NFR RSS gates.
+The separate runtime-container CLI does not acquire memory admission through
+this compiler-selector change. No runtime retry was made; the full objective
+and release verification remain incomplete.
+
 ## Remaining work and stop conditions
 
 1. Obtain an admitted self-hosted CLI and execute the test-first regressions;

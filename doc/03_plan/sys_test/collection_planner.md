@@ -186,3 +186,21 @@ missing-proof cases and checks that supplied bindings are not reported absent.
 This repairs contradictory test setup; no production behavior changed. Its
 authored companion is `doc/06_spec/01_unit/compiler/semantics/collection_plan_spec.md`.
 Neither these tests nor the column scenarios have runtime PASS evidence yet.
+
+### Memory admission test-first implementation
+
+CP-GUARD-07–10 extend the selector/explanation slice with over-budget Hash to
+fitting Ordered fallback, explicit attributes with unknown estimates, profiles
+with absent budgets, and zero-byte exact admission. Selector unit tests cover
+all policies/attributes, invalid values, unknown candidates, boundary values
+including i64 max, and rejection of every alternative. Profile bridge tests
+exercise one-off, prepared and prepared-metric routes without replacing supplied
+memory bounds from profile observations.
+
+The four added memory fields default to unknown, so previous non-memory
+fixtures explicitly supply independent bounds when they expect a selection.
+This is an intentional fail-closed API behavior change. No adapter fabricates
+memory evidence for old callers. Test-first commits precede the selector and
+renderer implementation; execution remains unavailable and no RED/GREEN result
+is claimed. CP-009-C and NFR-004 remain partial until actual cost production,
+lowering, allocation evidence and RSS measurements are available.

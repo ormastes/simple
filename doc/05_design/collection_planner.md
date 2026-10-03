@@ -144,3 +144,33 @@ focused green result and affected requirement IDs. Missing executables,
 unsupported syntax and unavailable engines are infrastructure failures until
 diagnosed; they do not establish the intended semantic red. Reuse passing
 checks and stop after the session's bounded repair cycles.
+
+## Candidate memory admission implementation
+
+The advisory physical selector now consumes four additional i64 facts:
+`memory_budget_bytes`, `linear_extra_memory_bytes`, `hash_extra_memory_bytes`,
+and `ordered_extra_memory_bytes`. Each defaults to -1 (unknown); values below
+-1 are invalid. Candidate facts are proof-owner upper bounds on peak EXTRA
+live bytes over the original program for the same site, target and supported
+population. They cannot be inferred from profile p95 cardinality alone.
+
+After existing semantic admission, an unknown budget retains Original.
+Otherwise each candidate needs a known bound no greater than the budget.
+Zero and exact equality are valid. Direct comparisons avoid arithmetic
+overflow. Attributes and profile preferences cannot override these gates;
+when Hash exceeds the cap, an otherwise legal fitting Ordered alternative may
+be selected. Invalid inputs, unknown estimates and exceeded budgets receive
+distinct explain reasons. Original's reported zero means no added optimizer
+allocation, not zero memory consumption by the original program.
+
+The renderer retains `memory_budget` and `extra_memory_bytes` keys and adds
+per-candidate bounds. Numeric bytes, `unknown`, and `invalid` are distinct.
+The profile bridge preserves these facts without deriving or replacing them.
+The separate `collection-runtime-initial-plan-v1` CLI is not this compiler
+selector and has not gained a memory cost producer through this change.
+
+Tests were committed before implementation, including selector policy/attribute
+matrices, profile bridges, explanation output and CP-GUARD-07–10. They remain
+unexecuted. Cost construction, production lowering, allocation evidence and
+NFR-004 RSS verification remain necessary; this admission logic does not close
+REQ-009 or the full feature.
