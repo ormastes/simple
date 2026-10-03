@@ -1,0 +1,169 @@
+# Real disposable filesystem source tests; no runtime qualification claimed.
+use std.spec.*
+use app.io.mod.{dir_create, file_write_bytes, process_run_bounded}
+use app.scv.db.checkpoint_store.*
+use app.scv.db.checkpoint_objects.*
+use app.scv.db.checkpoint_journal.*
+use app.scv.db.checkpoint_validation.*
+use app.scv.db.local_store.*
+use app.scv.db.bridge_store.{db_bridge_store_encode, db_bridge_store_acquire, db_bridge_store_sent}
+use std.scv.db_bridge.*
+use app.scv.db.settlement_queue.{db_settlement_enqueue}
+use app.scv.db.settlement_queue_codec.*
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_reducer.{db_empty_state, db_state_digest}
+use std.scv.db_admission.{db_admission_policy_digest}
+use std.scv.db_admission.{db_plan_admitted_patch}
+use std.scv.db_patch.{DbField, DbValue}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode}
+use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate}
+use std.scv.db_conflict_catalog.{DbConflictCatalog, db_conflict_catalog_encode}
+use std.scv.db_policy_codec.{db_policy_digest}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use test.fixtures.scv.db_checkpoint_fixture.*
+use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+
+fn setup_item2_checkpoint_files() -> (text, DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
+    val root = setup_item2_apply_root()
+    val external = setup_item2_apply_root()
+    val (output, error, status) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+    expect(status).to_equal(0)
+    val (original, original_authority) = setup_item2_checkpoint()
+    var checkpoint = original
+    var authority = original_authority
+    var policy = authority.policy
+    var admission = policy.admission
+    var key = admission.keys[0]
+    key.valid_until = 18446744073709551615u64
+    admission.keys = [key]
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    policy.admission = admission
+    policy.revision = db_policy_digest(policy).unwrap()
+    authority.policy = policy
+    checkpoint.policy_revision = policy.revision
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, public_key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    authority.expected_checkpoint = checkpoint.revision
+    var state = db_empty_state()
+    state.revision = db_state_digest(state).unwrap()
+    val record = db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.revision, 1u64, [], [], sha256_text(db_snapshot_encode(state).unwrap()))).unwrap()
+    val build = db_pages_build([record], checkpoint.metadata.quota).unwrap()
+    expect(build.manifest).to_equal(checkpoint.metadata)
+    expect(dir_create(external + "/scv-checkpoint-pages-v1", false)).to_be(true)
+    for page in build.pages:
+        expect(file_write_bytes(external + "/scv-checkpoint-pages-v1/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_be(true)
+    (root, checkpoint, authority, DbCheckpointPageSource(external_parent: external, maximum_pages: 65536, maximum_bytes: 67108864))
+
+describe "Same-epoch checkpoint installation and immutable pending work":
+    it "rejects an imported undeclared field even when its snapshot digest is internally consistent":
+        val (checkpoint, authority) = setup_item2_checkpoint()
+        val patch = setup_item2_apply_patch(1, "")
+        val plan = db_plan_admitted_patch(db_empty_state(), patch, authority.policy.merge, authority.policy.admission, 10).unwrap()
+        val entity = setup_item2_checkpoint_entity(1)
+        val identities = identity_map_allocate(identity_map_empty(checkpoint.namespace, checkpoint.epoch), entity.provisional.unwrap()).state
+        var imported = checkpoint
+        imported.current_revision = plan.proposed.revision
+        imported.storage = DbCheckpointStorage.Reference(db_snapshot_encode(plan.proposed).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap())
+        expect(db_checkpoint_validate_reference(imported, authority)).to_equal(Ok(true))
+        var changed = plan.proposed
+        var row = changed.rows[0]
+        row.fields.push(DbField(name: "unreviewed", value: DbValue.Text("injected")))
+        changed.rows = [row]
+        changed.revision = db_state_digest(changed).unwrap()
+        imported.current_revision = changed.revision
+        imported.storage = DbCheckpointStorage.Reference(db_snapshot_encode(changed).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap())
+        expect(db_checkpoint_validate_reference(imported, authority)).to_equal(Err("SCVDB_UNKNOWN_FIELD"))
+
+    it "rejects actual pending leased and sent-unconfirmed bridge records before Prepared":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        # Seed already admitted delivery adapter state; this test covers the
+        # install interlock, while enqueue intent admission has its own specs.
+        var intent = DbBridgeIntent(revision: "", provider: DbProviderBindingIdentity(instance: "github.com", project: "123", external_id: "issue-7"), operation: "update", payload_digest: sha256_text("reviewed"), correlation_id: "checkpoint-bridge", causation_id: "", idempotency_key: "checkpoint-bridge")
+        intent.revision = db_bridge_intent_digest(intent).unwrap()
+        val bytes = db_bridge_store_encode([db_bridge_pending(intent).unwrap()]).unwrap()
+        expect(db_store_commit(root, "", sha256_text(bytes), bytes, "bridge").code).to_equal("ok")
+        expect(db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source)).to_equal(Err("SCVDB_CHECKPOINT_BRIDGE_IN_FLIGHT"))
+        val leased = db_bridge_store_acquire(root, intent.revision, "provider-worker", 10, 10).unwrap()
+        expect(db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source)).to_equal(Err("SCVDB_CHECKPOINT_BRIDGE_IN_FLIGHT"))
+        val sent = db_bridge_store_sent(root, intent.revision, "provider-worker", leased.delivery.generation, 11).unwrap()
+        expect(sent.delivery.state).to_equal("sent_unconfirmed")
+        expect(db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source)).to_equal(Err("SCVDB_CHECKPOINT_BRIDGE_IN_FLIGHT"))
+        expect(db_store_read(root, "checkpoint-install").code).to_equal("empty")
+
+    it "keeps original signed queue bytes across Prepared and atomic install":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val patch = setup_item2_apply_patch(1, "")
+        val queued = db_settlement_enqueue(root, "", patch, authority.policy.admission).unwrap()
+        val pending = db_store_read(root, "settlement-work")
+        val prepared = db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap()
+        expect(prepared.phase).to_equal("Prepared")
+        expect(db_store_read(root).code).to_equal("empty")
+        expect(db_store_checkpoint_barrier(root)).to_equal(Ok(true))
+        expect(db_store_commit(root, pending.head, sha256_text("interleaving"), pending.state, "settlement-work").code).to_equal("SCVDB_CHECKPOINT_INSTALL_PENDING")
+        val installed = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+        expect(installed.phase).to_equal("Installed")
+        expect(db_store_read(root, "settlement-work")).to_equal(pending)
+        expect(installed.pending_results).to_equal(["RebaseReady"])
+        expect(db_checkpoint_read_active(root, "semantic", authority)).to_equal(Ok(checkpoint))
+        expect(db_store_read(root).checkpoint_anchor).to_equal(checkpoint.revision)
+        expect(db_checkpoint_resume_install(root, installed.journal_head, authority)).to_equal(Ok(installed))
+
+    it "recovers an actual active CAS before the Installed marker without rewriting queue or allocating again":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val prepared = db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap()
+        val descriptor = db_store_read(root, "checkpoint-install")
+        val fields = descriptor.state.split("\n")
+        val journal = db_checkpoint_journal_decode(db_checkpoint_object_read(root, fields[7], true).unwrap()).unwrap()
+        val holder = "checkpoint-real-crash-fixture"
+        expect(scv_sj_lease_acquire(root, holder).starts_with("ok:")).to_be(true)
+        val active = db_store_checkpoint_install_held(root, holder, descriptor.head, journal.source_head, journal.pending_head, journal.transaction_id, journal.target_state, journal.checkpoint_digest, journal.channel)
+        expect(active.code).to_equal("ok")
+        expect(scv_sj_lease_release(root, holder).starts_with("ok:")).to_be(true)
+        expect(db_store_read(root, "checkpoint-install").head).to_equal(descriptor.head)
+        expect(db_store_checkpoint_barrier(root)).to_equal(Ok(true))
+        val recovered = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+        expect(recovered.active_head).to_equal(active.head)
+        expect(db_store_read(root).parent).to_equal(journal.source_head)
+        expect(db_store_checkpoint_barrier(root)).to_equal(Ok(false))
+
+    it "rejects corrupt or linked external pages before publishing a barrier":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val entry = checkpoint.metadata.entries[0]
+        val path = source.external_parent + "/scv-checkpoint-pages-v1/" + entry.digest + ".page"
+        expect(file_write_bytes(path, [0u8])).to_be(true)
+        expect(db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source).is_err()).to_be(true)
+        expect(db_store_read(root, "checkpoint-install").code).to_equal("empty")
+        val (linked_root, linked, linked_authority, linked_source) = setup_item2_checkpoint_files()
+        val alias_parent = setup_item2_apply_root()
+        expect(setup_item2_filesystem_link(alias_parent, linked_source.external_parent + "/scv-checkpoint-pages-v1", alias_parent + "/scv-checkpoint-pages-v1", true)).to_equal(0)
+        val aliased = DbCheckpointPageSource(external_parent: alias_parent, maximum_pages: 10, maximum_bytes: 1048576)
+        expect(db_checkpoint_prepare_install(linked_root, "", db_checkpoint_encode(linked).unwrap(), linked_authority, aliased)).to_equal(Err("SCVDB_CHECKPOINT_OBJECT_SCOPE"))
+        expect(db_store_read(linked_root).code).to_equal("empty")
+
+    it "rejects independent pin mismatch and aggregate source quota before install":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        var wrong = authority
+        wrong.expected_checkpoint = sha256_text("untrusted self pin")
+        expect(db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), wrong, source)).to_equal(Err("SCVDB_CHECKPOINT_PIN"))
+        var tiny = source
+        tiny.maximum_bytes = 1u64
+        expect(db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, tiny).is_err()).to_be(true)
+        expect(db_store_read(root, "checkpoint-install").code).to_equal("empty")
+
+    it "ordinary postinstall commits inherit the immutable authoritative anchor":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val prepared = db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap()
+        val installed = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+        val current = db_store_read(root)
+        val later = db_store_commit(root, current.head, sha256_text("later trusted-owner generation"), current.state)
+        expect(later.code).to_equal("ok")
+        expect(later.checkpoint_anchor).to_equal(checkpoint.revision)
+        expect(db_checkpoint_read_active(root, "semantic", authority)).to_equal(Ok(checkpoint))
+        expect(db_checkpoint_resume_install(root, installed.journal_head, authority)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))

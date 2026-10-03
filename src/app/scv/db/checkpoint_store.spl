@@ -1,0 +1,289 @@
+# Same-epoch checkpoint effect owner. All network-free validation/staging occurs
+# before Prepared. The shared SJ barrier fences every mutable channel until
+# exact active-generation recovery and Installed marker publication complete.
+use app.scv.db.local_store.*
+use app.scv.db.local_apply.{db_read_local_image}
+use app.scv.db.bridge_store.{db_bridge_store_decode}
+use app.scv.db.settlement_queue.{db_settlement_queue_open}
+use app.scv.db.settlement_queue_codec.*
+use app.scv.db.checkpoint_journal.*
+use app.scv.db.checkpoint_objects.*
+use app.scv.db.checkpoint_validation.*
+use app.scv.db.paged_import.{db_paged_validate_import}
+use app.scv.db.paged_transition.{db_paged_load_proofs}
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_paged_model.*
+use std.scv.db_paged_txn.{db_paged_begin, db_paged_advance}
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_page_records.*
+use std.scv.db_snapshot.{db_snapshot_decode, db_snapshot_encode}
+use std.scv.db_admission.{db_authorize_patch, db_plan_admitted_settled_patch}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_decode}
+use std.scv.db_conflict_catalog.{db_conflict_catalog_decode}
+use std.scv.db_canonical.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_holder, scv_sj_lease_is_held}
+
+struct DbCheckpointInstallView:
+    journal_head: text
+    active_head: text
+    checkpoint_anchor: text
+    phase: text
+    pending_results: [text]
+
+fn _checkpoint_paged_preview(root: text, manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<text, text>:
+    if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
+    var progress = db_paged_begin(manifest, patch, policy, now)?
+    for round in 0..8:
+        match progress:
+            NeedKeys(request, keys): progress = db_paged_advance(progress, db_paged_load_proofs(root, request, keys)?)?
+            Ready(plan): return Ok(if plan.conflict_ids.len() > 0: "Conflict" else: if plan.replay: "AcceptedReplay" else: "RebaseReady")
+    Err("SCVDB_PAGED_PLANNING_BOUND")
+
+fn _checkpoint_target(checkpoint: DbDatabaseCheckpoint) -> Result<(text, text, text), text>:
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts):
+            val context = db_canonical_text(checkpoint.repository)? + db_canonical_text(checkpoint.namespace)? + db_frame(2u8, db_u64_bytes(checkpoint.epoch)) + db_canonical_text(checkpoint.schema_revision)? + db_canonical_text(checkpoint.reducer_revision)?
+            val authority = sha256_u8_hex(db_domain_bytes("local-authority", context)?)
+            val encoded = "SCVDB-LOCAL-v2\n{authority}\n" + snapshot + conflicts
+            Ok(("semantic", sha256_text(encoded), encoded))
+        Paged(manifest): Ok(("paged", manifest.revision, db_paged_manifest_encode(manifest)?))
+
+fn _checkpoint_bridge_quiet(root: text) -> Result<text, text>:
+    val stored = db_store_read(root, "bridge")
+    if stored.code == "empty": return Ok("")
+    if stored.code != "ok": return Err(stored.code)
+    for delivery in db_bridge_store_decode(stored.state)?:
+        if ["pending", "leased", "sent_unconfirmed"].contains(delivery.state): return Err("SCVDB_CHECKPOINT_BRIDGE_IN_FLIGHT")
+    Ok(stored.head)
+
+fn _checkpoint_pending(root: text, checkpoint: DbDatabaseCheckpoint, authority: DbCheckpointAuthority) -> Result<[text], text>:
+    val queue = db_settlement_queue_open(root, authority.policy.admission)?
+    var results: [text] = []
+    val micros = time_sample_unix_micros_or_failure()
+    if micros < 0: return Err("SCVDB_COMMAND_CLOCK")
+    for item in queue.queue.items:
+        if ["prepared", "awaiting-index"].contains(item.phase): return Err("SCVDB_CHECKPOINT_SETTLEMENT_IN_FLIGHT")
+        val patch = item.patch
+        var missing = false
+        var waiting = false
+        for dependency in patch.causal_dependencies:
+            if db_checkpoint_batch(root, checkpoint, dependency)? == nil:
+                var queued = false
+                for candidate in queue.queue.items:
+                    if candidate.patch.batch_id == dependency: queued = true
+                if queued: waiting = true
+                else: missing = true
+        val accepted = db_checkpoint_batch(root, checkpoint, patch.batch_id)?
+        if item.phase == "local-index-observed":
+            if accepted == nil: return Err("SCVDB_CHECKPOINT_TERMINAL_NOT_ACCEPTED")
+            val terminal = accepted.unwrap()
+            if terminal.canonical_digest != patch.payload_digest or terminal.actor != patch.actor or terminal.actor_counter != patch.actor_counter: return Err("SCVDB_CHECKPOINT_PENDING_COLLISION")
+        # Signature/key/ACL validation only. Claimed dependency names are not
+        # admission evidence; actual membership is checked separately above.
+        match db_authorize_patch(patch, authority.policy.admission, patch.causal_dependencies, (micros / 1000000) as u64):
+            Err(reason):
+                if item.phase == "local-index-observed": return Err(reason)
+                results.push("Conflict")
+                continue
+            Ok(authorized): ()
+        if val replay = accepted:
+            if replay.canonical_digest != patch.payload_digest or replay.actor != patch.actor or replay.actor_counter != patch.actor_counter: return Err("SCVDB_CHECKPOINT_PENDING_COLLISION")
+            results.push("AcceptedReplay")
+        elif missing: results.push("ResnapshotRequired")
+        elif waiting: results.push("WaitingForPending")
+        elif patch.base_revision != "" and patch.base_revision != checkpoint.current_revision and db_checkpoint_record(root, checkpoint.metadata, db_checkpoint_history_key(patch.base_revision)?)? == nil: results.push("ResnapshotRequired")
+        else:
+            match checkpoint.storage:
+                Reference(snapshot, identities, conflicts):
+                    match db_plan_admitted_settled_patch(db_snapshot_decode(snapshot)?, patch, authority.policy.merge, authority.policy.admission, db_identity_snapshot_decode(identities)?, (micros / 1000000) as u64):
+                        Ok(plan): results.push(if plan.conflicts.len() == 0: "RebaseReady" else: "Conflict")
+                        Err(reason): results.push(if reason == "SCVDB_BASE_REVISION_MISSING": "ResnapshotRequired" else: "Conflict")
+                Paged(manifest):
+                    match _checkpoint_paged_preview(root, manifest, patch, authority.paged_policy.unwrap(), (micros / 1000000) as u64):
+                        Ok(result): results.push(result)
+                        Err(reason): results.push(if patch.base_revision == "" or reason == "SCVDB_BASE_REVISION_MISSING": "ResnapshotRequired" else: "Conflict")
+    Ok(results)
+
+fn _checkpoint_current_preserved(root: text, current: DbStoreView, checkpoint: DbDatabaseCheckpoint, authority: DbCheckpointAuthority) -> Result<bool, text>:
+    if current.checkpoint_anchor != "":
+        var previous_authority = authority
+        previous_authority.expected_checkpoint = current.checkpoint_anchor
+        # Current active anchor is the independently persisted previous pin.
+        # Removed/rotated verification keys require a separately retained key;
+        # this same-key API conservatively rejects unverifiable old metadata.
+        val previous = db_checkpoint_decode(db_checkpoint_object_read(root, current.checkpoint_anchor, false)?, previous_authority)?
+        db_checkpoint_preserve_metadata(root, previous, checkpoint)?
+        match previous.storage:
+            Reference(snapshot, identities, conflicts): db_checkpoint_preserve_reference(previous, checkpoint)?
+            Paged(manifest): ()
+    elif checkpoint.predecessor_checkpoint != "": return Err("SCVDB_CHECKPOINT_PREDECESSOR")
+    if current.code == "empty": return Ok(true)
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts):
+            # Unanchored legacy projection may contain allocator state that the
+            # semantic image does not carry. Never invent an empty identity map.
+            if current.checkpoint_anchor == "" and db_store_read(root, "pages").code != "empty": return Err("SCVDB_CHECKPOINT_LEGACY_IDENTITY_REQUIRED")
+            val previous = db_read_local_image(root, authority.policy.admission)?
+            val next = db_snapshot_decode(snapshot)?
+            val catalog = db_conflict_catalog_decode(conflicts)?
+            if previous.state.revision != "" and not db_checkpoint_reaches(root, checkpoint, previous.state.revision)?: return Err("SCVDB_CHECKPOINT_HISTORY_REGRESSION")
+            for batch in previous.state.accepted:
+                if not next.accepted.contains(batch): return Err("SCVDB_CHECKPOINT_ACCEPTED_REGRESSION")
+            for old in previous.state.rows:
+                var found = false
+                for row in next.rows:
+                    if row.entity == old.entity:
+                        found = row.kind == old.kind and (not old.tombstoned or row.tombstoned)
+                if not found: return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
+            for record in previous.catalog.records:
+                if not catalog.records.contains(record): return Err("SCVDB_CHECKPOINT_CONFLICT_REGRESSION")
+            for receipt in previous.catalog.resolutions:
+                if not catalog.resolutions.contains(receipt): return Err("SCVDB_CHECKPOINT_CONFLICT_REGRESSION")
+        Paged(manifest):
+            val previous = db_paged_manifest_decode(current.state, authority.paged_policy.unwrap())?
+            if not db_checkpoint_reaches(root, checkpoint, previous.revision)?: return Err("SCVDB_CHECKPOINT_HISTORY_REGRESSION")
+            # Physical records are bounded per page; no flat alias/accepted set.
+            for entry in previous.pages.entries:
+                for old in db_checkpoint_page_read(root, previous.pages, entry)?.records:
+                    match db_typed_page_record_decode(old):
+                        Ok(value):
+                            val next = db_checkpoint_record(root, manifest.pages, old.key)?
+                            if next == nil: return Err("SCVDB_CHECKPOINT_INDEX_REGRESSION")
+                            match value:
+                                CurrentRow(entity, row):
+                                    match db_typed_page_record_decode(next.unwrap())?:
+                                        CurrentRow(found, incoming):
+                                            if found != entity or incoming.kind != row.kind or (row.tombstoned and not incoming.tombstoned): return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
+                                        _: return Err("SCVDB_CHECKPOINT_INDEX_REGRESSION")
+                                HighWater(namespace, epoch, kind, sequence):
+                                    match db_typed_page_record_decode(next.unwrap())?:
+                                        HighWater(ns, ep, k, mark):
+                                            if ns != namespace or ep != epoch or k != kind or mark < sequence: return Err("SCVDB_CHECKPOINT_ALLOCATOR_REGRESSION")
+                                        _: return Err("SCVDB_CHECKPOINT_INDEX_REGRESSION")
+                                _: if next.unwrap() != old: return Err("SCVDB_CHECKPOINT_INDEX_REGRESSION")
+                        Err(reason):
+                            # Immutable historical conflict/evidence records
+                            # are retained exactly, including reviewed receipts.
+                            if old.key.starts_with("scv-db/conflicts/v1/"):
+                                if db_checkpoint_record(root, manifest.pages, old.key)? != Some(old): return Err("SCVDB_CHECKPOINT_CONFLICT_REGRESSION")
+                            # Other derived indexes validated by full import owner.
+    Ok(true)
+
+fn _checkpoint_validate(root: text, checkpoint: DbDatabaseCheckpoint, authority: DbCheckpointAuthority) -> Result<bool, text>:
+    db_checkpoint_authenticate(checkpoint, authority)?
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts): db_checkpoint_validate_reference(checkpoint, authority)?
+        Paged(manifest): db_paged_validate_import(root, manifest, authority.paged_policy.unwrap())?
+    db_checkpoint_validate_metadata(root, checkpoint)
+
+fn _checkpoint_prepare_held(root: text, holder: text, journal: DbCheckpointInstallJournal, expected_barrier: text) -> Result<DbCheckpointInstallView, text>:
+    if db_store_checkpoint_barrier(root)?: return Err("SCVDB_CHECKPOINT_INSTALL_PENDING")
+    val other = if journal.channel == "paged": "semantic" else: "paged"
+    if db_store_read(root, other).code != "empty": return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
+    if journal.channel == "paged" and db_store_read(root, "pages").code != "empty": return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
+    if db_store_read(root, journal.channel).head != journal.source_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val pending = db_store_read(root, "settlement-work")
+    if not ["ok", "empty"].contains(pending.code): return Err(pending.code)
+    if pending.head != journal.pending_head or sha256_text(pending.state) != journal.pending_state_digest: return Err("SCVDB_CHECKPOINT_PENDING_ADVANCED")
+    if _checkpoint_bridge_quiet(root)? != journal.bridge_head: return Err("SCVDB_CHECKPOINT_BRIDGE_ADVANCED")
+    val encoded = db_checkpoint_descriptor(journal, "Prepared")?
+    val saved = db_store_commit_held(root, holder, expected_barrier, sha256_text(encoded), encoded, "checkpoint-install")
+    if saved.code != "ok": return Err(saved.code)
+    Ok(DbCheckpointInstallView(journal_head: saved.head, active_head: journal.source_head, checkpoint_anchor: journal.checkpoint_digest, phase: "Prepared", pending_results: journal.pending_results))
+
+fn db_checkpoint_prepare_install(root: text, expected_head: text, encoded: text, authority: DbCheckpointAuthority, source: DbCheckpointPageSource) -> Result<DbCheckpointInstallView, text>:
+    val checkpoint = db_checkpoint_decode(encoded, authority)?
+    val target = _checkpoint_target(checkpoint)?
+    val current = db_store_read(root, target.0)
+    if not ["ok", "empty"].contains(current.code): return Err(current.code)
+    if current.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val other = if target.0 == "paged": "semantic" else: "paged"
+    if db_store_read(root, other).code != "empty": return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
+    if target.0 == "paged" and db_store_read(root, "pages").code != "empty": return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
+    if db_store_checkpoint_barrier(root)?: return Err("SCVDB_CHECKPOINT_INSTALL_PENDING")
+    val barrier = db_store_read(root, "checkpoint-install")
+    val queue = db_settlement_queue_open(root, authority.policy.admission)?
+    val pending = db_store_read(root, "settlement-work")
+    if pending.head != queue.head: return Err("SCVDB_CHECKPOINT_PENDING_ADVANCED")
+    val bridge = _checkpoint_bridge_quiet(root)?
+    var manifests = [checkpoint.metadata]
+    match checkpoint.storage:
+        Paged(manifest): manifests.push(manifest.pages)
+        _: ()
+    db_checkpoint_stage_pages(root, manifests, source)?
+    _checkpoint_validate(root, checkpoint, authority)?
+    _checkpoint_current_preserved(root, current, checkpoint, authority)?
+    val results = _checkpoint_pending(root, checkpoint, authority)?
+    val journal = DbCheckpointInstallJournal(channel: target.0, source_head: current.head, pending_head: pending.head, pending_state_digest: sha256_text(pending.state), bridge_head: bridge, checkpoint_digest: checkpoint.revision, expected_installed_head: db_store_generation_head(current.head, target.1, target.2, checkpoint.revision)?, transaction_id: target.1, target_state: target.2, pending_results: results)
+    val journal_bytes = db_checkpoint_journal_encode(journal)?
+    db_checkpoint_object_put(root, checkpoint.revision, encoded, false)?
+    db_checkpoint_object_put(root, sha256_text(journal_bytes), journal_bytes, true)?
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_STORE_ENTROPY")
+    val holder = "checkpoint-prepare-{nonce}"
+    if not scv_sj_lease_acquire(root, holder).starts_with("ok:"): return Err("SCVDB_STORE_BUSY")
+    val result = _checkpoint_prepare_held(root, holder, journal, barrier.head)
+    if not scv_sj_lease_release(root, holder).starts_with("ok:") or scv_sj_lease_is_held(root): return Err("SCVDB_STORE_RELEASE_UNCERTAIN")
+    result
+
+fn _checkpoint_resume_held(root: text, holder: text, descriptor: DbStoreView, journal: DbCheckpointInstallJournal) -> Result<DbCheckpointInstallView, text>:
+    val other = if journal.channel == "paged": "semantic" else: "paged"
+    if db_store_read(root, other).code != "empty": return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
+    if journal.channel == "paged" and db_store_read(root, "pages").code != "empty": return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
+    val pending = db_store_read(root, "settlement-work")
+    if pending.head != journal.pending_head or sha256_text(pending.state) != journal.pending_state_digest: return Err("SCVDB_CHECKPOINT_PENDING_ADVANCED")
+    if _checkpoint_bridge_quiet(root)? != journal.bridge_head: return Err("SCVDB_CHECKPOINT_BRIDGE_ADVANCED")
+    val installed = db_store_checkpoint_install_held(root, holder, descriptor.head, journal.source_head, journal.pending_head, journal.transaction_id, journal.target_state, journal.checkpoint_digest, journal.channel)
+    if installed.code != "ok": return Err(installed.code)
+    val encoded = db_checkpoint_descriptor(journal, "Installed")?
+    val saved = db_store_commit_held(root, holder, descriptor.head, sha256_text(encoded), encoded, "checkpoint-install")
+    if saved.code != "ok": return Err(saved.code)
+    Ok(DbCheckpointInstallView(journal_head: saved.head, active_head: installed.head, checkpoint_anchor: installed.checkpoint_anchor, phase: "Installed", pending_results: journal.pending_results))
+
+fn _checkpoint_replay_held(root: text, holder: text, descriptor: DbStoreView, journal: DbCheckpointInstallJournal) -> Result<DbCheckpointInstallView, text>:
+    if db_store_read(root, "checkpoint-install").head != descriptor.head: return Err("SCVDB_CHECKPOINT_JOURNAL_HEAD")
+    val current = db_store_read(root, journal.channel)
+    if current.code != "ok" or current.head != journal.expected_installed_head or current.checkpoint_anchor != journal.checkpoint_digest: return Err("SCVDB_CHECKPOINT_ALREADY_ADVANCED")
+    val durable = db_store_commit_held(root, holder, current.parent, current.transaction_id, current.state, journal.channel)
+    if durable.code != "ok": return Err(durable.code)
+    val marker = db_store_commit_held(root, holder, descriptor.parent, descriptor.transaction_id, descriptor.state, "checkpoint-install")
+    if marker.code != "ok": return Err(marker.code)
+    Ok(DbCheckpointInstallView(journal_head: marker.head, active_head: durable.head, checkpoint_anchor: durable.checkpoint_anchor, phase: "Installed", pending_results: journal.pending_results))
+
+fn db_checkpoint_resume_install(root: text, expected_journal_head: text, authority: DbCheckpointAuthority) -> Result<DbCheckpointInstallView, text>:
+    val barrier = db_store_read(root, "checkpoint-install")
+    if barrier.code != "ok" or barrier.head != expected_journal_head: return Err("SCVDB_CHECKPOINT_JOURNAL_HEAD")
+    val prepared = db_store_checkpoint_barrier(root)?
+    val fields = barrier.state.split("\n")
+    val wire = db_checkpoint_object_read(root, fields[7], true)?
+    if sha256_text(wire) != fields[7]: return Err("SCVDB_CHECKPOINT_JOURNAL_DIGEST")
+    val journal = db_checkpoint_journal_decode(wire)?
+    if db_checkpoint_descriptor(journal, fields[1])? != barrier.state: return Err("SCVDB_CHECKPOINT_JOURNAL_MISMATCH")
+    val checkpoint = db_checkpoint_decode(db_checkpoint_object_read(root, journal.checkpoint_digest, false)?, authority)?
+    val target = _checkpoint_target(checkpoint)?
+    if target != (journal.channel, journal.transaction_id, journal.target_state): return Err("SCVDB_CHECKPOINT_JOURNAL_TARGET")
+    _checkpoint_validate(root, checkpoint, authority)?
+    val current = db_store_read(root, journal.channel)
+    if prepared and current.head == journal.source_head: _checkpoint_current_preserved(root, current, checkpoint, authority)?
+    elif current.head != journal.expected_installed_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_STORE_ENTROPY")
+    val holder = "checkpoint-resume-{nonce}"
+    if not scv_sj_lease_acquire(root, holder).starts_with("ok:"): return Err("SCVDB_STORE_BUSY")
+    val result = if prepared: _checkpoint_resume_held(root, holder, barrier, journal) else: _checkpoint_replay_held(root, holder, barrier, journal)
+    if not scv_sj_lease_release(root, holder).starts_with("ok:") or scv_sj_lease_is_held(root): return Err("SCVDB_STORE_RELEASE_UNCERTAIN")
+    result
+
+fn db_checkpoint_read_active(root: text, channel: text, authority: DbCheckpointAuthority) -> Result<DbDatabaseCheckpoint, text>:
+    if not ["semantic", "paged"].contains(channel): return Err("SCVDB_CHECKPOINT_JOURNAL_CHANNEL")
+    val current = db_store_read(root, channel)
+    if current.code != "ok" or current.checkpoint_anchor == "": return Err("SCVDB_CHECKPOINT_ANCHOR_MISSING")
+    if current.checkpoint_anchor != authority.expected_checkpoint: return Err("SCVDB_CHECKPOINT_PIN")
+    db_checkpoint_decode(db_checkpoint_object_read(root, current.checkpoint_anchor, false)?, authority)
+
+export DbCheckpointInstallView, db_checkpoint_prepare_install, db_checkpoint_resume_install, db_checkpoint_read_active
