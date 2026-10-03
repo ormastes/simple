@@ -1,9 +1,13 @@
 """Lane-local composition of the reusable service base and cache lifecycle."""
 
 use std.service.daemon_base
+use std.nogc_sync_mut.service.daemon_base.{daemon_base_start_owned, daemon_base_stop_owned}
 use compiler.driver.cache.daemon.cache_daemon_lifecycle
 use common.cache_host_authority_v1.{CacheRootAuthorityV1}
 use common.cache_daemon_host_authority_v1
+use compiler.driver.cache.daemon.package_daemon_session.{
+    PackageDaemonSessionV1, PackageDaemonRequestV1, package_daemon_request_denied_v1
+}
 
 struct CacheDaemonAdmission:
     admitted: bool
@@ -39,6 +43,9 @@ fn cache_daemon_try_host_admission(
 class CacheDaemonHost:
     base: DaemonBase
     lifecycle: CacheDaemonLifecycle
+    package_sessions: [PackageDaemonSessionV1] = []
+    package_admission_open: bool = false
+    package_request_sequence: i64 = 0
 
     static fn create(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:
         CacheDaemonHost(
@@ -49,14 +56,85 @@ class CacheDaemonHost:
     me start_after_admission(admission: CacheDaemonAdmission) -> bool:
         if not admission.admitted:
             return false
-        daemon_base_start(self.base)
+        val started = daemon_base_start_owned(self.base)
+        self.base = started.base
+        if started.started:
+            self.package_admission_open = true
+        started.started
+
+    me begin_package_request(
+        workspace_identity: text, cache_root: text, now_ms: i64
+    ) -> PackageDaemonRequestV1:
+        if not self.package_admission_open or not self.lifecycle.admission_open:
+            return package_daemon_request_denied_v1("daemon-not-admitted")
+        if workspace_identity == "" or cache_root == "":
+            return package_daemon_request_denied_v1("session-identity-missing")
+        var index = 0
+        while index < self.package_sessions.len():
+            if self.package_sessions[index].workspace_identity == workspace_identity:
+                break
+            index = index + 1
+        if index == self.package_sessions.len():
+            if self.package_sessions.len() >= 128:
+                return package_daemon_request_denied_v1("workspace-session-limit")
+            self.package_sessions = self.package_sessions.push(
+                PackageDaemonSessionV1.create(workspace_identity, cache_root))
+        var session = self.package_sessions[index]
+        if session.cache_root != cache_root:
+            return package_daemon_request_denied_v1("workspace-root-mismatch")
+        if not session.active:
+            # Sequence values never repeat when a workspace closes/reopens.
+            # A stale end-request token cannot release a new request's lease.
+            session.request_sequence = self.package_request_sequence
+        val request = session.begin_request(workspace_identity)
+        if request.valid and not self.lifecycle.begin_request(now_ms):
+            session.end_request(request.sequence)
+            self.package_sessions[index] = session
+            return package_daemon_request_denied_v1("daemon-draining")
+        self.package_sessions[index] = session
+        if request.valid:
+            self.package_request_sequence = request.sequence
+        request
+
+    me end_package_request(workspace_identity: text, sequence: i64, now_ms: i64) -> bool:
+        var index = 0
+        while index < self.package_sessions.len():
+            var session = self.package_sessions[index]
+            if session.workspace_identity == workspace_identity:
+                if not session.end_request(sequence):
+                    return false
+                self.package_sessions[index] = session
+                self.lifecycle.end_request(now_ms)
+                return true
+            index = index + 1
+        false
+
+    me close_package_workspace(workspace_identity: text) -> bool:
+        var retained: [PackageDaemonSessionV1] = []
+        var found = false
+        for existing in self.package_sessions:
+            var session = existing
+            if session.workspace_identity == workspace_identity:
+                if not session.close():
+                    return false
+                found = true
+            else:
+                retained = retained.push(session)
+        if found:
+            self.package_sessions = retained
+        found
 
     # Called only after the host-authority layer has closed admission, drained
     # work, checkpointed, and released its opaque exclusive-writer receipt.
     me stop_after_authority_release() -> bool:
-        if not self.lifecycle.finish_shutdown():
+        if self.lifecycle.shutdown_state != CACHE_DAEMON_STOPPED:
+            if not self.lifecycle.finish_shutdown():
+                return false
+        self.package_admission_open = false
+        self.base = daemon_base_stop_owned(self.base)
+        if self.base.running:
             return false
-        daemon_base_stop(self.base)
+        self.package_sessions = []
         true
 
 fn cache_daemon_host_new(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:

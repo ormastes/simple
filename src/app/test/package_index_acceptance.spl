@@ -1,0 +1,159 @@
+# Production-owner acceptance driver. Partial observations never imply that
+# the broader PSI scenario (compiler execution and filesystem counters) passed.
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_read, file_write, dir_remove, getpid}
+use std.sffi.cli.{cli_get_args}
+use app.test.package_index_acceptance_invalidation.{
+    package_index_acceptance_invalidation_v1
+}
+use app.test.package_index_acceptance_daemon.{package_index_acceptance_daemon_v1}
+
+struct PackageIndexAcceptanceObservationV1:
+    operation_valid: bool
+    reason: text
+    prior_digest: text
+    observed_digest: text
+    pointer_preserved: bool
+    generation_preserved: bool
+
+fn package_index_acceptance_generation_v1() -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        2, sha256_text("acceptance-producer"), "acceptance-root",
+        "acceptance-revision", "acceptance-commit", "acceptance-tree",
+        sha256_text("acceptance-inventory"), [], sha256_text("acceptance-variant"))
+
+fn package_index_acceptance_persistence_v1(
+    scenario: text, root: text
+) -> PackageIndexAcceptanceObservationV1:
+    if scenario == "missing-index-denied":
+        val missing = package_module_index_read_current_v1(root)
+        return PackageIndexAcceptanceObservationV1(
+            missing.valid, missing.reason, "", missing.digest, false, false)
+    if scenario != "tampered-index-denied" and scenario != "corrupt-metadata-denied":
+        return PackageIndexAcceptanceObservationV1(
+            false, "unsupported-persistence-scenario", "", "", false, false)
+    if not package_module_index_publish_if_current_v1(
+            root, package_index_acceptance_generation_v1(), ""):
+        return PackageIndexAcceptanceObservationV1(
+            false, "fixture-publication-failed", "", "", false, false)
+    val admitted = package_module_index_read_current_v1(root)
+    if not admitted.valid or admitted.generation == nil:
+        return PackageIndexAcceptanceObservationV1(
+            false, "fixture-admission-failed", "", "", false, false)
+    val pointer_path = "{root}/package-module-index-v1/CURRENT"
+    val generation_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+    val prior_pointer = file_read(pointer_path)
+    val prior_generation = file_read(generation_path)
+    if scenario == "tampered-index-denied":
+        val corrupt_generation = prior_generation + "tampered"
+        if not file_write(generation_path, corrupt_generation):
+            return PackageIndexAcceptanceObservationV1(
+                false, "fixture-tamper-failed", admitted.digest, "", false, false)
+        val observed = package_module_index_read_current_v1(root)
+        return PackageIndexAcceptanceObservationV1(
+            observed.valid, observed.reason, admitted.digest, observed.digest,
+            file_read(pointer_path) == prior_pointer,
+            file_read(generation_path) == corrupt_generation)
+    # Rebind CURRENT to the digest of malformed bytes, so this exercises
+    # metadata decoding after the content digest has genuinely been admitted.
+    val corrupt_generation = "not-a-package-index"
+    val corrupt_digest = sha256_text(corrupt_generation)
+    val corrupt_path = "{root}/package-module-index-v1/{corrupt_digest}.index"
+    if not file_write(corrupt_path, corrupt_generation) or
+            not file_write(pointer_path, corrupt_digest):
+        return PackageIndexAcceptanceObservationV1(
+            false, "fixture-corrupt-write-failed", admitted.digest, "", false, false)
+    val observed = package_module_index_read_current_v1(root)
+    PackageIndexAcceptanceObservationV1(
+        observed.valid, observed.reason, admitted.digest, observed.digest,
+        file_read(pointer_path) == corrupt_digest,
+        file_read(generation_path) == prior_generation)
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if (args.len() != 3 and args.len() != 5) or args[1] != "--scenario":
+        print "usage: package_index_acceptance --scenario NAME [--scope owner]"
+        return 2
+    val owner_scope = args.len() == 5 and args[3] == "--scope" and args[4] == "owner"
+    if args.len() == 5 and not owner_scope:
+        return 2
+    val scenario = args[2]
+    val root = "build/test-artifacts/package-index-acceptance-{getpid()}"
+    dir_remove(root, true)
+    if scenario == "daemon-generation-workspace-isolation":
+        val daemon = package_index_acceptance_daemon_v1(root)
+        print "scenario={scenario}"
+        print "owner=PackageDaemonSessionV1"
+        print "owner_valid={daemon.valid}"
+        print "owner_reason={daemon.reason}"
+        print "request_generation_preserved={daemon.request_generation_preserved}"
+        print "active_refresh_rejected={daemon.active_refresh_rejected}"
+        print "foreign_workspace_rejected={daemon.foreign_workspace_rejected}"
+        print "next_request_refreshed={daemon.next_request_refreshed}"
+        print "closed_generation_released={daemon.closed_generation_released}"
+        dir_remove(root, true)
+        if owner_scope:
+            print "acceptance_scope=owner"
+            return if daemon.valid: 0 else: 1
+        print "acceptance_status=incomplete"
+        print "missing_evidence=host-request-workspace-dirty-state,pin-accounting"
+        return 3
+    if scenario == "direct-reverse-invalidation" or
+            scenario == "indirect-reverse-invalidation" or
+            scenario == "private-body-export-early-cutoff":
+        val invalidation = package_index_acceptance_invalidation_v1(scenario, root)
+        print "scenario={scenario}"
+        print "owner=package_module_index_invalidate_changes_v1"
+        print "owner_valid={invalidation.valid}"
+        print "owner_reason={invalidation.reason}"
+        val invalidated = invalidation.dirty_modules.join(",")
+        val scheduled = invalidation.package_schedule.join(",")
+        print "invalidated={invalidated}"
+        print "scheduled={scheduled}"
+        dir_remove(root, true)
+        if owner_scope:
+            print "acceptance_scope=owner"
+            val direct = scenario == "direct-reverse-invalidation" and
+                invalidated == "app,util" and scheduled == "util,app"
+            val indirect = scenario == "indirect-reverse-invalidation" and
+                invalidated == "api,app,model,util" and scheduled == "model,api,util,app"
+            val private_edit = scenario == "private-body-export-early-cutoff" and
+                invalidated == "util" and scheduled == "util"
+            return if invalidation.valid and (direct or indirect or private_edit): 0 else: 1
+        print "acceptance_status=incomplete"
+        print "missing_evidence=source-derived-change-classification,compiler-completion,production-filesystem-observations"
+        return 3
+    val observed = package_index_acceptance_persistence_v1(scenario, root)
+    print "scenario={scenario}"
+    print "owner=package_module_index_read_current_v1"
+    print "owner_valid={observed.operation_valid}"
+    print "owner_reason={observed.reason}"
+    print "prior_generation_digest={observed.prior_digest}"
+    print "observed_generation_digest={observed.observed_digest}"
+    print "pointer_preserved={observed.pointer_preserved}"
+    print "generation_preserved={observed.generation_preserved}"
+    dir_remove(root, true)
+    if owner_scope:
+        print "acceptance_scope=owner"
+        val missing_denied = scenario == "missing-index-denied" and
+            not observed.operation_valid and observed.reason == "missing-or-invalid-generation"
+        val tampered_denied = scenario == "tampered-index-denied" and
+            not observed.operation_valid and observed.reason == "generation-digest-mismatch" and
+            observed.pointer_preserved and observed.generation_preserved
+        val corrupt_denied = scenario == "corrupt-metadata-denied" and
+            not observed.operation_valid and observed.reason == "corrupt-header" and
+            observed.pointer_preserved and observed.generation_preserved
+        return if missing_denied or tampered_denied or corrupt_denied: 0 else: 1
+    # The canonical system contract additionally requires actual compiler
+    # admissions/reads. This owner-only probe must not manufacture those facts.
+    print "acceptance_status=incomplete"
+    print "missing_evidence=compiler-operation,production-filesystem-observations"
+    3
+
+export PackageIndexAcceptanceObservationV1
+export package_index_acceptance_persistence_v1
