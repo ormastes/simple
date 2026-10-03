@@ -33,7 +33,7 @@ summary is explicitly not an original log. No prior native diagnostic is rerun.
 - Integration worktree: `C:/dev/simple-item3-dev-20261003`.
 - Original branch: `work/item3-dev-20261003`; target: `release/1.0`.
 - Follow-up branch after the earlier checkpoint merged:
-  `work/item3-runtime-followup-20261003`, draft PR #2304.
+  `work/item3-runtime-followup-20261003`, PR #2304 (merged externally; see below).
 - Refreshed base and expected target: `cb2f783acf0ea22e8da54ff0d8d18b4fb14c816c`.
 - Research, specifications, and planner agents have separate sibling worktrees
   and `work/item3-{research,spec,planner}-20261003` branches. Their commits are
@@ -257,9 +257,21 @@ Live GitHub inspection at 05:56 UTC found PR #2285 had already merged at
 04:37:30 UTC by `ormastes`, with head `71259ba2326` and merge commit
 `6c905c710c6`. An ancestry check confirms that checkpoint is on `release/1.0`.
 This merge occurred outside this continuation and does not establish feature
-acceptance. The reviewed newer fixes are preserved in draft PR #2304 rather
+acceptance. The reviewed newer fixes were submitted as draft PR #2304 rather
 than attributed to the earlier merge. The refreshed release tip was
 `5742353e641` when creating the follow-up branch.
 
+Subsequent live inspection found PR #2304 was also merged externally at
+06:03:26 UTC, with merge commit `ae932d53f79`. Its remote branch had acquired
+release integration commit `c2011ba7482`, so the next ordinary push correctly
+refused to overwrite it. An ancestry check confirms source and tests through
+`a7ceeef1f99` are on `release/1.0`. No test result or verification status changed
+because of this merge. The separate evidence branch
+`work/item3-evidence-20261003` contains only documentation changes.
+
+Final recovery cycle 3 reached actual Stage 2 compiler execution at
+06:11:55 UTC. This is bootstrap production, not an admitted test-capable CLI.
+The fixed deadline and absence of semantic test results remain unchanged.
+
 Full REQ-001–011, native/backend parity, measured NFRs, generated manuals,
-production verification and landing of the newer fixes remain incomplete.
+and production verification remain incomplete despite both checkpoint merges.
