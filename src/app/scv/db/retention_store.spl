@@ -84,6 +84,32 @@ fn _retention_covers(value: DbRetainedRollup, digest: text) -> bool:
         if input.payload_digest == digest: return true
     false
 
+# Derive the keep set from reopened catalog state and actual digest-verified
+# bytes, never a caller's "safe to delete" boolean. Unknown formats, restricted
+# entries and active observations outside this run's cohort remain exact roots.
+# On resume every active root is retained; only already pending entries are
+# candidates. Unreadable active roots fail closed: their edges are unknown.
+# Synthetic policy pins are ephemeral planning inputs, not saved policy edits.
+fn _retention_plan_owned(nodes: [DbEvidenceNode], catalog: DbRetentionCatalog, pins: [DbEvidencePin], now_day: u64, day: u64?, cohort: text) -> Result<DbRetentionPlan, text>:
+    var effective = pins
+    for index in 0..catalog.entries.len():
+        val entry = catalog.entries[index]
+        if entry.state != "active": continue
+        val node = nodes[index]
+        if node.digest != entry.digest or db_evidence_resolution(node, entry.digest) != "exact":
+            return Err("SCVDB_UNVERIFIED_RETAINED_ROOT")
+        var retain = entry.classification == "restricted"
+        if val selected_day = day:
+            match db_retention_observation_decode(node):
+                Ok(input):
+                    if input.day != selected_day or input.cohort != cohort: retain = true
+                Err(_): retain = true
+        else:
+            retain = true
+        if retain:
+            effective.push(DbEvidencePin(root: entry.digest, reason: "policy", expires_day: 0))
+    db_retention_plan(nodes, effective, now_day)
+
 fn _retention_register_owned(root: text, parent: text, holder: text, expected: text, digest: text, created_day: u64, classification: text) -> Result<DbStoredRetention, text>:
     var current = db_retention_open(root)?
     if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
@@ -107,7 +133,7 @@ fn _retention_pins_owned(root: text, parent: text, holder: text, expected: text,
     if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
     if pins.len() > 256: return Err("SCVDB_RETENTION_QUOTA")
     val nodes = _retention_nodes(root, parent, current.catalog)?
-    val closure = db_retention_plan(nodes, pins, now_day)?
+    val closure = _retention_plan_owned(nodes, current.catalog, pins, now_day, nil, "")?
     current.catalog.pins = pins
     _retention_publish(root, holder, current.head, current.catalog)
 
@@ -123,7 +149,7 @@ fn _retention_resume_owned(root: text, parent: text, holder: text, expected: tex
     if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
     val nodes = _retention_nodes(root, parent, current.catalog)?
     # Current pins are reread under exactly the same writer lease as unlink.
-    val plan = db_retention_plan(nodes, current.catalog.pins, now_day)?
+    val plan = _retention_plan_owned(nodes, current.catalog, current.catalog.pins, now_day, nil, "")?
     # A readable pending HEAD may come from an earlier failed sync. Restore its
     # durability before any unlink, including after a process restart.
     current = _retention_publish(root, holder, current.head, current.catalog)?
@@ -159,7 +185,7 @@ fn _retention_prepare_owned(root: text, parent: text, holder: text, expected: te
     var current = db_retention_open(root)?
     if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
     val nodes = _retention_nodes(root, parent, current.catalog)?
-    val plan = db_retention_plan(nodes, current.catalog.pins, now_day)?
+    val plan = _retention_plan_owned(nodes, current.catalog, current.catalog.pins, now_day, Some(day), cohort)?
     val rollup = _retention_rollup(root, parent, rollup_digest)?
     if rollup.rollup.day != day or rollup.rollup.cohort != cohort: return Err("SCVDB_ROLLUP_CONTEXT")
     for index in 0..current.catalog.entries.len():
@@ -186,7 +212,7 @@ fn db_retention_prepare(root: text, parent: text, expected: text, now_day: u64, 
     val current = db_retention_open(root)?
     if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
     val nodes = _retention_nodes(root, parent, current.catalog)?
-    val plan = db_retention_plan(nodes, current.catalog.pins, now_day)?
+    val plan = _retention_plan_owned(nodes, current.catalog, current.catalog.pins, now_day, Some(day), cohort)?
     var previous = db_rollup_empty(day, cohort, "item2-daily-v1")
     var inputs: [DbRollupInput] = []
     var dependencies: [text] = []

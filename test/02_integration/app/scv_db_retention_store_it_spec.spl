@@ -21,8 +21,8 @@ fn setup_item2_retention_paths() -> (text, text):
     expect(code).to_equal(0)
     (root, parent)
 
-fn setup_item2_retention_node(root: text, parent: text, identity: text, duration: u64, created_day: u64, dependencies: [text] = []) -> DbEvidenceNode:
-    val content = db_retention_observation_encode(identity, 0, "linux", "PASS", duration, [7u8;128]).unwrap()
+fn setup_item2_retention_node(root: text, parent: text, identity: text, duration: u64, created_day: u64, dependencies: [text] = [], cohort: text = "linux", day: u64 = 0) -> DbEvidenceNode:
+    val content = db_retention_observation_encode(identity, day, cohort, "PASS", duration, [7u8;128]).unwrap()
     val node = DbEvidenceNode(digest: db_evidence_digest(content, dependencies).unwrap(), content: content, availability: "available", created_day: created_day, dependencies: dependencies)
     db_evidence_store_put(root, parent, node, db_retention_store_quota()).unwrap()
 
@@ -30,6 +30,71 @@ fn setup_item2_retention_raw(parent: text, digest: text) -> text:
     "{parent}/scv-evidence-v1/{digest}.scve"
 
 describe "Durable evidence retention orchestration":
+    it "retains A27 and its B0 dependency at day28 and permits both to age out at day55":
+        val (root, parent) = setup_item2_retention_paths()
+        val dependency = setup_item2_retention_node(root, parent, "B0", 10, 0)
+        val recent = setup_item2_retention_node(root, parent, "A27", 20, 27, [dependency.digest])
+        val first = db_retention_register(root, parent, "", dependency.digest, 0, "public").unwrap()
+        val second = db_retention_register(root, parent, first.head, recent.digest, 27, "public").unwrap()
+        val retained = db_retention_run(root, parent, second.head, 28, 0, "linux").unwrap()
+        for entry in retained.catalog.entries: expect(entry.state).to_equal("active")
+        expect(db_evidence_store_get(root, parent, recent.digest, 27, db_retention_store_quota()).unwrap().dependencies).to_equal([dependency.digest])
+        expect(db_evidence_store_get(root, parent, dependency.digest, 0, db_retention_store_quota()).unwrap().content).to_equal(dependency.content)
+        val expired = db_retention_run(root, parent, retained.head, 55, 0, "linux").unwrap()
+        for entry in expired.catalog.entries:
+            expect(entry.state).to_equal("deleted")
+            expect(path_entry_present(setup_item2_retention_raw(parent, entry.digest))).to_equal(Ok(false))
+            expect(db_retention_resolve(root, parent, entry.digest)).to_equal(Ok("aggregated"))
+
+    it "retains dependencies of verified unsupported and restricted parent payloads":
+        for classification in ["public", "restricted"]:
+            val (root, parent) = setup_item2_retention_paths()
+            val dependency = setup_item2_retention_node(root, parent, "retained-dependency", 10, 0)
+            val content: [u8] = [8u8, 9u8]
+            var retained = DbEvidenceNode(digest: db_evidence_digest(content, [dependency.digest]).unwrap(), content: content, availability: "available", created_day: 0, dependencies: [dependency.digest])
+            if classification == "restricted":
+                retained = setup_item2_retention_node(root, parent, "restricted-parent", 20, 0, [dependency.digest])
+            db_evidence_store_put(root, parent, retained, db_retention_store_quota()).unwrap()
+            val first = db_retention_register(root, parent, "", dependency.digest, 0, "public").unwrap()
+            val second = db_retention_register(root, parent, first.head, retained.digest, 0, classification).unwrap()
+            val result = db_retention_run(root, parent, second.head, 100, 0, "linux").unwrap()
+            for entry in result.catalog.entries: expect(entry.state).to_equal("active")
+            expect(db_evidence_store_get(root, parent, dependency.digest, 0, db_retention_store_quota()).unwrap().content).to_equal(dependency.content)
+            expect(db_retention_resolve(root, parent, dependency.digest)).to_equal(Ok("exact"))
+            expect(db_retention_resolve(root, parent, retained.digest)).to_equal(Ok(if classification == "restricted": "restricted" else: "exact"))
+
+    it "retains closure of a supported parent outside the selected cohort":
+        val (root, parent) = setup_item2_retention_paths()
+        val dependency = setup_item2_retention_node(root, parent, "linux-dependency", 10, 0)
+        val other = setup_item2_retention_node(root, parent, "windows-parent", 20, 0, [dependency.digest], "windows")
+        val first = db_retention_register(root, parent, "", dependency.digest, 0, "public").unwrap()
+        val second = db_retention_register(root, parent, first.head, other.digest, 0, "public").unwrap()
+        val retained = db_retention_run(root, parent, second.head, 28, 0, "linux").unwrap()
+        for entry in retained.catalog.entries: expect(entry.state).to_equal("active")
+        expect(db_retention_resolve(root, parent, dependency.digest)).to_equal(Ok("exact"))
+        val parent_expired = db_retention_run(root, parent, retained.head, 28, 0, "windows").unwrap()
+        expect(parent_expired.catalog.entries[0].state).to_equal("active")
+        expect(parent_expired.catalog.entries[1].state).to_equal("deleted")
+        val all_expired = db_retention_run(root, parent, parent_expired.head, 28, 0, "linux").unwrap()
+        expect(all_expired.catalog.entries[0].state).to_equal("deleted")
+
+    it "rechecks a newly retained unsupported root before resuming pending unlink":
+        val (root, parent) = setup_item2_retention_paths()
+        val dependency = setup_item2_retention_node(root, parent, "pending-dependency", 10, 0)
+        val first = db_retention_register(root, parent, "", dependency.digest, 0, "public").unwrap()
+        val pending = db_retention_prepare(root, parent, first.head, 28, 0, "linux").unwrap()
+        expect(pending.catalog.entries[0].state).to_equal("delete_pending")
+        val content: [u8] = [4u8, 5u8]
+        val owner = DbEvidenceNode(digest: db_evidence_digest(content, [dependency.digest]).unwrap(), content: content, availability: "available", created_day: 0, dependencies: [dependency.digest])
+        db_evidence_store_put(root, parent, owner, db_retention_store_quota()).unwrap()
+        val added = db_retention_register(root, parent, pending.head, owner.digest, 0, "public").unwrap()
+        val recovered = db_retention_resume(root, parent, added.head, 28).unwrap()
+        expect(recovered.catalog.entries[0].state).to_equal("active")
+        expect(path_entry_present(setup_item2_retention_raw(parent, dependency.digest))).to_equal(Ok(true))
+        expect(file_write_bytes(setup_item2_retention_raw(parent, owner.digest), [0u8])).to_be(true)
+        expect(db_retention_resume(root, parent, recovered.head, 28)).to_equal(Err("SCVDB_UNVERIFIED_RETAINED_ROOT"))
+        expect(path_entry_present(setup_item2_retention_raw(parent, dependency.digest))).to_equal(Ok(true))
+
     it "rejects an SJ directory alias before creating a writer lease outside the root":
         val (root, parent) = setup_item2_retention_paths()
         expect(setup_item2_filesystem_link(root, parent, "{root}/.sj", true)).to_equal(0)
@@ -151,7 +216,7 @@ describe "Durable evidence retention orchestration":
         val unknown = DbEvidenceNode(digest: db_evidence_digest(content, []).unwrap(), content: content, availability: "available", created_day: 0, dependencies: [])
         val stored = db_evidence_store_put(root, parent, unknown, db_retention_store_quota()).unwrap()
         val added = db_retention_register(root, parent, registered.head, stored.digest, 0, "public").unwrap()
-        expect(db_retention_run(root, parent, added.head, 28, 0, "linux")).to_equal(Err("SCVDB_RETENTION_NO_OBSERVATIONS"))
+        expect(db_retention_run(root, parent, added.head, 28, 0, "linux")).to_equal(Err("SCVDB_UNVERIFIED_RETAINED_ROOT"))
         expect(path_entry_present(setup_item2_retention_raw(parent, stored.digest))).to_equal(Ok(true))
 
     it "rejects stale catalog heads and another held writer without deleting data":

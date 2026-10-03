@@ -85,11 +85,17 @@ fn db_retention_plan(nodes: [DbEvidenceNode], pins: [DbEvidencePin], now_day: u6
             return Err("SCVDB_EVIDENCE_AVAILABILITY")
         known.push(node.digest)
     var pending: [text] = []
+    # Recent raw roots retain their complete verified dependency closure, even
+    # when an older dependency would otherwise be individually old enough.
+    # Missing recent bytes fail closed rather than erasing unknown edges.
+    for node in nodes:
+        if now_day - node.created_day < 28:
+            pending.push(node.digest)
     for pin in pins:
         if pin.reason != "unresolved_failure" and pin.reason != "release" and pin.reason != "pending" and pin.reason != "reproduction" and pin.reason != "policy":
             return Err("SCVDB_PIN_REASON")
         val permanent = pin.reason == "unresolved_failure" or pin.reason == "release" or pin.reason == "pending"
-        if permanent or pin.expires_day == 0 or now_day < pin.expires_day:
+        if (permanent or pin.expires_day == 0 or now_day < pin.expires_day) and not _retention_has(pending, pin.root):
             pending.push(pin.root)
     var protected: [text] = []
     var cursor = 0
@@ -106,7 +112,7 @@ fn db_retention_plan(nodes: [DbEvidenceNode], pins: [DbEvidencePin], now_day: u6
             return Err("SCVDB_PIN_CLOSURE_UNVERIFIED")
         protected.push(digest)
         for dependency in node.dependencies:
-            if not _retention_has(protected, dependency):
+            if not _retention_has(pending, dependency):
                 pending.push(dependency)
     var deletions: [text] = []
     for node in nodes:
