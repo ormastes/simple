@@ -1,0 +1,106 @@
+# Checkpoint object IO only. Authoritative signature/closure checks belong to
+# checkpoint_store. All parents remain trusted against concurrent OS renames.
+use app.io.mod.{dir_create, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_fsync, directory_fsync, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_publish_noreplace}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains, path_entry_present}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+use std.scv.db_checkpoint_history.{db_checkpoint_hex}
+use std.scv.db_pages.*
+use app.scv.db.local_store.{db_local_path_scope}
+use app.scv.db.evidence_store.{db_evidence_external_scope}
+use app.scv.db.page_store.{db_page_store_publish_objects}
+
+struct DbCheckpointPageSource:
+    external_parent: text
+    maximum_pages: u64
+    maximum_bytes: u64
+
+fn _checkpoint_directory(root: text, relative: text) -> Result<text, text>:
+    if db_local_path_scope(root, []) != "": return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    var path = root
+    var parent = path_final_existing(root)?
+    for part in relative.split("/"):
+        if part == "" or part == "." or part == ".." or part.contains("\\"): return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+        path = path + "/" + part
+        if not path_entry_present(path)? and not dir_create(path, false): return Err("SCVDB_CHECKPOINT_OBJECT_CREATE")
+        if not dir_is_real_no_follow(path): return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+        val actual = path_final_existing(path)?
+        if actual.path != path or not path_identity_contains(parent, actual): return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+        if not directory_fsync(parent.path): return Err("SCVDB_CHECKPOINT_OBJECT_SYNC")
+        parent = actual
+    Ok(path)
+
+fn _checkpoint_read(path: text, limit: i64) -> Result<[u8], text>:
+    if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path: return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    file_read_regular_no_follow_bounded_bytes(path, limit)
+
+fn db_checkpoint_object_read(root: text, digest: text, journal: bool) -> Result<text, text>:
+    if not db_checkpoint_hex(digest): return Err("SCVDB_CHECKPOINT_DIGEST")
+    val relative = if journal: ".scv/checkpoints/journals" else: ".scv/checkpoints/artifacts"
+    if db_local_path_scope(root, [".scv", ".scv/checkpoints", relative]) != "": return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    val suffix = if journal: ".scvj" else: ".scvc"
+    validated_utf8_bytes_to_text_linear(_checkpoint_read(root + "/" + relative + "/" + digest + suffix, 33554800)?)
+
+fn _checkpoint_publish(directory: text, stage: text, destination: text, bytes: [u8]) -> Result<bool, text>:
+    val staged = stage + "/object"
+    if not file_write_bytes(staged, bytes) or not file_fsync(staged) or not directory_fsync(stage): return Err("SCVDB_CHECKPOINT_OBJECT_SYNC")
+    if _checkpoint_read(staged, 33554800)? != bytes: return Err("SCVDB_CHECKPOINT_OBJECT_CHANGED")
+    # Noreplace accepts an existing identical immutable artifact only after readback.
+    val published = file_publish_noreplace(staged, destination)
+    if _checkpoint_read(destination, 33554800)? != bytes: return Err("SCVDB_CHECKPOINT_OBJECT_COLLISION")
+    if not file_fsync(destination) or not directory_fsync(directory): return Err("SCVDB_CHECKPOINT_OBJECT_SYNC")
+    Ok(true)
+
+fn db_checkpoint_object_put(root: text, digest: text, content: text, journal: bool) -> Result<bool, text>:
+    if not db_checkpoint_hex(digest) or content.len() > 33554800: return Err("SCVDB_CHECKPOINT_OBJECT_QUOTA")
+    val relative = if journal: ".scv/checkpoints/journals" else: ".scv/checkpoints/artifacts"
+    val directory = _checkpoint_directory(root, relative)?
+    val suffix = if journal: ".scvj" else: ".scvc"
+    val stage = secure_temp_dir_raw(directory, "stage-")
+    if stage == "" or not stage.starts_with(directory + "/stage-") or not dir_is_real_no_follow(stage): return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    val identity = path_final_existing(stage)?
+    if identity.path != stage or not path_identity_contains(path_final_existing(directory)?, identity): return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    val result = _checkpoint_publish(directory, stage, directory + "/" + digest + suffix, base_encoding_text_to_bytes(content))
+    if not dir_is_real_no_follow(stage) or path_final_existing(stage)? != identity: return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    if not dir_remove_all(stage): return Err("SCVDB_CHECKPOINT_OBJECT_CLEANUP")
+    result
+
+fn db_checkpoint_page_read(root: text, manifest: DbPageManifest, entry: DbPageEntry) -> Result<DbRecordPage, text>:
+    # Caller admits manifest once. This boundary verifies one exact descriptor;
+    # it does not repeatedly scan the entire manifest on per-record lookups.
+    if not db_checkpoint_hex(entry.digest): return Err("SCVDB_CHECKPOINT_DIGEST")
+    if db_local_path_scope(root, [".scv", ".scv/db-pages", ".scv/db-pages/pages"]) != "": return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    val page = db_page_decode(_checkpoint_read(root + "/.scv/db-pages/pages/" + entry.digest + ".scvp", manifest.quota.max_page_bytes as i64)?, manifest.quota)?
+    if page.digest != entry.digest or page.bucket != entry.bucket or page.records.len() as u64 != entry.count: return Err("SCVDB_CHECKPOINT_PAGE_MISMATCH")
+    Ok(page)
+
+fn db_checkpoint_stage_pages(root: text, manifests: [DbPageManifest], source: DbCheckpointPageSource) -> Result<bool, text>:
+    if source.maximum_pages == 0 or source.maximum_pages > 131072u64 or source.maximum_bytes == 0 or source.maximum_bytes > 1099511627776u64: return Err("SCVDB_CHECKPOINT_SOURCE_QUOTA")
+    # Reuse canonical external-parent/Git-common disjointness checks. The new
+    # leaf is independently checked and never extracted from an archive.
+    val checked = db_evidence_external_scope(root, source.external_parent, "scv-evidence-v1")?
+    val directory = source.external_parent + "/scv-checkpoint-pages-v1"
+    if not dir_is_real_no_follow(directory) or path_final_existing(directory)?.path != directory: return Err("SCVDB_CHECKPOINT_OBJECT_SCOPE")
+    var remaining = source.maximum_bytes
+    var count = 0u64
+    for manifest in manifests:
+        db_pages_manifest_validate(manifest)?
+        for entry in manifest.entries:
+            count = count + 1u64
+            if count > source.maximum_pages: return Err("SCVDB_CHECKPOINT_SOURCE_QUOTA")
+            if remaining == 0u64: return Err("SCVDB_CHECKPOINT_SOURCE_QUOTA")
+            val limit = if remaining < manifest.quota.max_page_bytes: remaining else: manifest.quota.max_page_bytes
+            val bytes = _checkpoint_read(directory + "/" + entry.digest + ".page", limit as i64)?
+            if bytes.len() as u64 > remaining: return Err("SCVDB_CHECKPOINT_SOURCE_QUOTA")
+            remaining = remaining - bytes.len() as u64
+            val page = db_page_decode(bytes, manifest.quota)?
+            if page.digest != entry.digest or page.bucket != entry.bucket or page.records.len() as u64 != entry.count: return Err("SCVDB_CHECKPOINT_PAGE_MISMATCH")
+            # One bounded page build; no corpus-sized staging array.
+            val build = db_pages_build(page.records, manifest.quota)?
+            if build.pages.len() != 1 or build.pages[0] != page: return Err("SCVDB_CHECKPOINT_PAGE_MISMATCH")
+            db_page_store_publish_objects(root, build, nil)?
+    Ok(true)
+
+export DbCheckpointPageSource, db_checkpoint_object_read, db_checkpoint_object_put
+export db_checkpoint_page_read, db_checkpoint_stage_pages

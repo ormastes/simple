@@ -1,0 +1,190 @@
+# One explicit value-state reader per prepare/resume. These are trusted app
+# internals, not authorization capabilities. Always retain the returned state.
+# Limits describe encoded bytes/work reservations, never process RSS.
+use app.scv.db.checkpoint_objects.{db_checkpoint_page_read}
+use app.scv.db.local_store.{DbStoreView, db_store_read}
+use std.scv.db_pages.*
+use std.scv.db_canonical.{db_canonical_text, db_bytes_less, db_domain_bytes, db_frame, db_u64_bytes}
+use std.scv.db_admission.{DbAdmissionPolicy}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.db_checkpoint.{DbDatabaseCheckpoint}
+use std.scv.db_snapshot.{db_snapshot_decode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_decode}
+use std.scv.db_conflict_catalog.{DbConflictCatalog, db_conflict_catalog_decode}
+use std.scv.db_reducer.{MaterializedState, DbRow, DbAcceptedBatch}
+use std.scv.distributed_identity_map.{IdentityMap, IdentityMapBinding}
+
+struct DbCheckpointReaderLimits:
+    io_bytes: u64
+    work_bytes: u64
+    cache_bytes: u64
+    reference_bytes: u64
+
+struct DbCheckpointReferenceImage:
+    key: text
+    encoded_bytes: u64
+    state: MaterializedState
+    identities: IdentityMap
+    catalog: DbConflictCatalog
+    rows: {text: DbRow}
+    accepted: {text: DbAcceptedBatch}
+    bindings: {text: IdentityMapBinding}
+    high_water: {text: u64}
+
+struct DbCheckpointCachedPage:
+    manifest_root: text
+    quota: DbPageQuota
+    entry: DbPageEntry
+    page: DbRecordPage
+    reservation: u64
+
+struct DbCheckpointReader:
+    root: text
+    limits: DbCheckpointReaderLimits
+    io_bytes: u64
+    work_bytes: u64
+    cache_bytes: u64
+    reference_bytes: u64
+    page_reads: u64
+    reference_decodes: u64
+    policy_bytes: u64
+    pages: [DbCheckpointCachedPage]
+    references: [DbCheckpointReferenceImage]
+
+struct DbCheckpointLiveImage:
+    state: MaterializedState
+    catalog: DbConflictCatalog
+    encoded_bytes: u64
+
+fn db_checkpoint_reader_live(initial: DbCheckpointReader, captured: DbStoreView, admission: DbAdmissionPolicy) -> Result<(DbCheckpointReader, DbCheckpointLiveImage), text>:
+    # Decode the exact generation already read and covered by CAS. Never reopen
+    # a possibly newer generation, and never forge an authenticated cache key.
+    val size = captured.state.len() as u64
+    if size > initial.limits.reference_bytes - initial.reference_bytes: return Err("SCVDB_CHECKPOINT_REFERENCE_CACHE_QUOTA")
+    var reader = db_checkpoint_reader_reserve(initial, 0u64, size * 4u64)?
+    val context = db_canonical_text(admission.repository)? + db_canonical_text(admission.namespace)? + db_frame(2u8, db_u64_bytes(admission.epoch)) + db_canonical_text(admission.schema_revision)? + db_canonical_text(admission.reducer_revision)?
+    val digest = sha256_u8_hex(db_domain_bytes("local-authority", context)?)
+    if not captured.state.starts_with("SCVDB-LOCAL-v2\n{digest}\n"): return Err("SCVDB_STORE_CONTEXT")
+    val parts = captured.state.split("\n")
+    if parts.len() != 7 or parts[6] != "": return Err("SCVDB_STORE_IMAGE_FORMAT")
+    val image = DbCheckpointLiveImage(state: db_snapshot_decode("{parts[2]}\n{parts[3]}\n")?, catalog: db_conflict_catalog_decode("{parts[4]}\n{parts[5]}\n")?, encoded_bytes: size)
+    reader.reference_bytes = reader.reference_bytes + size
+    Ok((reader, image))
+
+fn db_checkpoint_reader_limits() -> DbCheckpointReaderLimits:
+    DbCheckpointReaderLimits(io_bytes: 1073741824u64, work_bytes: 1073741824u64, cache_bytes: 67108864u64, reference_bytes: 33554432u64)
+
+# Internal regression seam permits only stricter ceilings than production.
+fn db_checkpoint_reader_with_limits(root: text, limits: DbCheckpointReaderLimits) -> Result<DbCheckpointReader, text>:
+    val hard = db_checkpoint_reader_limits()
+    if limits.io_bytes > hard.io_bytes or limits.work_bytes > hard.work_bytes or limits.cache_bytes > hard.cache_bytes or limits.reference_bytes > hard.reference_bytes: return Err("SCVDB_CHECKPOINT_READER_LIMIT")
+    Ok(DbCheckpointReader(root: root, limits: limits, io_bytes: 0u64, work_bytes: 0u64, cache_bytes: 0u64, reference_bytes: 0u64, page_reads: 0u64, reference_decodes: 0u64, policy_bytes: 0u64, pages: [], references: []))
+
+fn db_checkpoint_reader_new(root: text) -> DbCheckpointReader:
+    db_checkpoint_reader_with_limits(root, db_checkpoint_reader_limits()).unwrap()
+
+fn db_checkpoint_reader_reserve(initial: DbCheckpointReader, io_bytes: u64, work_bytes: u64) -> Result<DbCheckpointReader, text>:
+    var reader = initial
+    if reader.io_bytes > reader.limits.io_bytes or io_bytes > reader.limits.io_bytes - reader.io_bytes: return Err("SCVDB_CHECKPOINT_READ_QUOTA")
+    if reader.work_bytes > reader.limits.work_bytes or work_bytes > reader.limits.work_bytes - reader.work_bytes: return Err("SCVDB_CHECKPOINT_WORK_QUOTA")
+    reader.io_bytes = reader.io_bytes + io_bytes
+    reader.work_bytes = reader.work_bytes + work_bytes
+    Ok(reader)
+
+fn db_checkpoint_reader_work(initial: DbCheckpointReader, record: DbPageRecord) -> Result<DbCheckpointReader, text>:
+    # Pay on cache hits too, before the caller invokes a record codec.
+    db_checkpoint_reader_reserve(initial, 0u64, record.payload.len() as u64 + record.key.len() as u64 + 1u64)
+
+fn db_checkpoint_reader_store(initial: DbCheckpointReader, channel: text) -> Result<(DbCheckpointReader, DbStoreView), text>:
+    # Include the HEAD pointer and the actual local_store generation ceiling.
+    # The compact checkpoint barrier has its own 2048-byte generation ceiling.
+    val bound = if channel == "checkpoint-install": 2113u64 else: 67108929u64
+    val reader = db_checkpoint_reader_reserve(initial, bound, bound)?
+    Ok((reader, db_store_read(reader.root, channel)))
+
+fn db_checkpoint_reader_page(initial: DbCheckpointReader, manifest: DbPageManifest, entry: DbPageEntry) -> Result<(DbCheckpointReader, DbRecordPage), text>:
+    var reader = initial
+    for index in 0..reader.pages.len():
+        val cached = reader.pages[index]
+        if cached.manifest_root == manifest.root and cached.quota == manifest.quota and cached.entry == entry:
+            # Move to MRU; root is fixed for the entire reader, never supplied
+            # independently by a caller on a cache lookup.
+            reader.pages = reader.pages[0:index] + reader.pages[index + 1:] + [cached]
+            return Ok((reader, cached.page))
+    val maximum = manifest.quota.max_page_bytes
+    if maximum == 0u64 or maximum > 16777216u64 or maximum > reader.limits.cache_bytes: return Err("SCVDB_CHECKPOINT_CACHE_QUOTA")
+    # Full descriptor bound reserved BEFORE IO, decoding, digest verification,
+    # and canonical reencoding. Eviction never refunds cumulative counters.
+    reader = db_checkpoint_reader_reserve(reader, maximum, maximum * 4u64)?
+    while reader.cache_bytes > reader.limits.cache_bytes - maximum:
+        reader.cache_bytes = reader.cache_bytes - reader.pages[0].reservation
+        reader.pages = reader.pages[1:]
+    val page = db_checkpoint_page_read(reader.root, manifest, entry)?
+    reader.page_reads = reader.page_reads + 1u64
+    reader.pages.push(DbCheckpointCachedPage(manifest_root: manifest.root, quota: manifest.quota, entry: entry, page: page, reservation: maximum))
+    reader.cache_bytes = reader.cache_bytes + maximum
+    Ok((reader, page))
+
+fn db_checkpoint_reader_record(initial: DbCheckpointReader, manifest: DbPageManifest, key: text) -> Result<(DbCheckpointReader, DbPageRecord?), text>:
+    # Canonical key comparison is bounded (<=4096 Unicode scalars, <=20
+    # comparisons). Include worst-case UTF-8 expansion, even on cache hits.
+    var reader = db_checkpoint_reader_reserve(initial, 0u64, 524288u64)?
+    if val entry = db_pages_entry(manifest, key)?:
+        val loaded = db_checkpoint_reader_page(reader, manifest, entry)?
+        reader = loaded.0
+        val page = loaded.1
+        val wanted = db_canonical_text(key)?
+        var low = 0
+        var high = page.records.len()
+        while low < high:
+            val middle = low + (high - low) / 2
+            if db_bytes_less(db_canonical_text(page.records[middle].key)?, wanted): low = middle + 1
+            else: high = middle
+        if low < page.records.len() and db_canonical_text(page.records[low].key)? == wanted:
+            reader = db_checkpoint_reader_work(reader, page.records[low])?
+            return Ok((reader, Some(page.records[low])))
+    Ok((reader, nil))
+
+fn db_checkpoint_reader_reference(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint) -> Result<(DbCheckpointReader, DbCheckpointReferenceImage), text>:
+    var reader = initial
+    for image in reader.references:
+        if image.key == checkpoint.revision: return Ok((reader, image))
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts):
+            val size = snapshot.len() as u64 + identities.len() as u64 + conflicts.len() as u64
+            if reader.references.len() >= 2 or size > reader.limits.reference_bytes - reader.reference_bytes: return Err("SCVDB_CHECKPOINT_REFERENCE_CACHE_QUOTA")
+            reader = db_checkpoint_reader_reserve(reader, 0u64, size)?
+            val state = db_snapshot_decode(snapshot)?
+            val identity = db_identity_snapshot_decode(identities)?
+            val catalog = db_conflict_catalog_decode(conflicts)?
+            if state.rows.len() > 10000 or state.accepted.len() > 10000: return Err("SCVDB_CHECKPOINT_REFERENCE_QUOTA")
+            var rows: {text: DbRow} = {}
+            var accepted: {text: DbAcceptedBatch} = {}
+            var bindings: {text: IdentityMapBinding} = {}
+            var marks: {text: u64} = {}
+            for row in state.rows: rows[row.entity] = row
+            for batch in state.accepted: accepted[batch.batch_id] = batch
+            for binding in identity.bindings: bindings[binding.identity] = binding
+            for mark in identity.high_water: marks[mark.entity_kind] = mark.sequence
+            val image = DbCheckpointReferenceImage(key: checkpoint.revision, encoded_bytes: size, state: state, identities: identity, catalog: catalog, rows: rows, accepted: accepted, bindings: bindings, high_water: marks)
+            reader.references.push(image)
+            reader.reference_bytes = reader.reference_bytes + size
+            reader.reference_decodes = reader.reference_decodes + 1u64
+            Ok((reader, image))
+        _: Err("SCVDB_CHECKPOINT_REFERENCE_REQUIRED")
+
+fn db_checkpoint_reader_forget_reference(initial: DbCheckpointReader, key: text) -> DbCheckpointReader:
+    var reader = initial
+    for index in 0..reader.references.len():
+        if reader.references[index].key == key:
+            reader.reference_bytes = reader.reference_bytes - reader.references[index].encoded_bytes
+            reader.references = reader.references[0:index] + reader.references[index + 1:]
+            break
+    reader
+
+export DbCheckpointReaderLimits, DbCheckpointReader, DbCheckpointReferenceImage
+export DbCheckpointLiveImage, db_checkpoint_reader_live
+export db_checkpoint_reader_limits, db_checkpoint_reader_with_limits, db_checkpoint_reader_new
+export db_checkpoint_reader_reserve, db_checkpoint_reader_work, db_checkpoint_reader_page, db_checkpoint_reader_record
+export db_checkpoint_reader_store
+export db_checkpoint_reader_reference, db_checkpoint_reader_forget_reference
