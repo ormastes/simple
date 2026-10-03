@@ -32,6 +32,10 @@ use compiler.driver.cache.package_module_index_builder.{
 use compiler.driver.cache.package_module_index.{
     PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
 }
+use compiler.driver.cache.generated_source_receipt.{
+    GeneratedSourceDeclarationV1, GeneratedSourceReceiptV1,
+    generated_source_receipt_admit_v1, generated_source_receipt_encode_v1
+}
 use compiler.hir.archive.interface_action_archive.{
     interface_action_archive_payloads_decode_v1
 }
@@ -64,6 +68,8 @@ struct ColdHirCompiledPackageArtifactV1:
     mir_file: ColdHirCompiledPayloadFileV1
     action_file: ColdHirCompiledPayloadFileV1
     manifest_source_identity: text
+    generated_declaration: GeneratedSourceDeclarationV1? = nil
+    generated_receipt: GeneratedSourceReceiptV1? = nil
 
 fn _cold_compiled_digest_valid_v1(value: text) -> bool:
     if value.len() != 64:
@@ -276,6 +282,23 @@ fn cold_hir_package_outputs_from_driver_v1(
         val action_payload = _cold_compiled_payload_read_v1(artifact.action_file)
         if not facets_valid or action_payload.is_err():
             return Err("cold-compiled-facet-read-invalid:{identity}")
+        var generated_source_digest = artifact.generated_source_file.digest
+        if artifact.generated_source_file.byte_count > 0:
+            if artifact.generated_declaration == nil or artifact.generated_receipt == nil:
+                return Err("cold-compiled-generated-receipt-missing:{identity}")
+            val generated = generated_source_receipt_admit_v1(
+                artifact.generated_declaration!, artifact.generated_receipt!, inventory,
+                authority.producer_digest, authority.inventory_digest, seed.source_identity)
+            if generated.is_err():
+                return Err("cold-compiled-{generated.unwrap_err()}:{identity}")
+            val generated_payload = _cold_compiled_payload_read_v1(artifact.generated_source_file)
+            if generated_payload.is_err():
+                return Err("cold-compiled-generated-content-mismatch:{identity}")
+            if generated_payload.unwrap() != generated_source_receipt_encode_v1(artifact.generated_receipt!):
+                return Err("cold-compiled-generated-content-mismatch:{identity}")
+            generated_source_digest = generated.unwrap()
+        elif artifact.generated_declaration != nil or artifact.generated_receipt != nil:
+            return Err("cold-compiled-generated-receipt-without-payload:{identity}")
         if mir_payload.is_err():
             return Err("{mir_payload.unwrap_err()}:{identity}")
         val source = inventory.entries[sources[seed.source_identity]]
@@ -296,7 +319,7 @@ fn cold_hir_package_outputs_from_driver_v1(
             source_witness,
             artifact.export_file.digest, artifact.initializer_file.digest,
             artifact.provider_file.digest,
-            artifact.generated_source_file.digest,
+            generated_source_digest,
             "", "", artifact.manifest_source_identity, manifest_digest))
         if not package_modules.has(artifact.package_identity):
             package_modules[artifact.package_identity] = []

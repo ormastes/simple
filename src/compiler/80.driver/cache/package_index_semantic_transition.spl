@@ -1,0 +1,101 @@
+# Optional, compiler-published evidence for precise invalidation. The receipt
+# embeds the previous graph: GC never needs to retain another generation file.
+# No index import here: the index publisher owns this storage-only dependency.
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{file_delete}
+use std.nogc_sync_mut.io.file_ops.{
+    file_atomic_write, file_create_exclusive,
+    file_read_regular_no_follow_bounded
+}
+
+val PACKAGE_INDEX_TRANSITION_MAGIC_V1: text = "simple-package-index-transition-v1\n"
+val PACKAGE_INDEX_TRANSITION_MAX_BYTES_V1: i64 = 256 * 1024 * 1024 + 192
+
+struct PackageIndexSemanticTransitionV1:
+    new_digest: text
+    previous_digest: text
+    previous_encoded: text
+
+fn _transition_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _transition_point_v1(dir: text, receipt_digest: text) -> bool:
+    val previous = file_read_regular_no_follow_bounded("{dir}/TRANSITION", 64)
+    if not file_atomic_write("{dir}/TRANSITION", receipt_digest):
+        return false
+    # Receipt readers fail conservative if retirement wins their read race.
+    # Never delete an index generation or the currently referenced receipt.
+    if previous.is_ok():
+        val old_digest = previous.unwrap()
+        if old_digest != receipt_digest and _transition_digest_valid_v1(old_digest):
+            file_delete("{dir}/{old_digest}.transition")
+    true
+
+# Must run under the publisher's CURRENT.lock, before CURRENT is replaced.
+# A mismatched pointer after interruption is harmless: precise reads refuse it.
+fn package_index_transition_stage_v1(
+    dir: text, new_digest: text, previous_digest: text, previous_encoded: text
+) -> bool:
+    if not _transition_digest_valid_v1(new_digest):
+        return false
+    if previous_digest == new_digest:
+        return true
+    if (not _transition_digest_valid_v1(previous_digest) or
+            previous_encoded == "" or sha256_text(previous_encoded) != previous_digest or
+            previous_encoded.len() > 256 * 1024 * 1024):
+        return _transition_point_v1(dir, "none")
+    # Fixed-width digests make the framing unambiguous without splitting a
+    # potentially large embedded graph into another array of lines.
+    val encoded = "{PACKAGE_INDEX_TRANSITION_MAGIC_V1}{new_digest}\n{previous_digest}\n{previous_encoded}"
+    val receipt_digest = sha256_text(encoded)
+    val path = "{dir}/{receipt_digest}.transition"
+    if not file_create_exclusive(path, encoded):
+        val existing = file_read_regular_no_follow_bounded(
+            path, PACKAGE_INDEX_TRANSITION_MAX_BYTES_V1)
+        if existing.is_err() or existing.unwrap() != encoded:
+            return false
+    _transition_point_v1(dir, receipt_digest)
+
+fn package_index_transition_read_v1(
+    dir: text, expected_new_digest: text
+) -> Result<PackageIndexSemanticTransitionV1, text>:
+    if not _transition_digest_valid_v1(expected_new_digest):
+        return Err("transition-new-digest-invalid")
+    val pointer = file_read_regular_no_follow_bounded("{dir}/TRANSITION", 64)
+    if pointer.is_err():
+        return Err("transition-unavailable")
+    val receipt_digest = pointer.unwrap()
+    if not _transition_digest_valid_v1(receipt_digest):
+        return Err("transition-unavailable")
+    val read = file_read_regular_no_follow_bounded(
+        "{dir}/{receipt_digest}.transition", PACKAGE_INDEX_TRANSITION_MAX_BYTES_V1)
+    if read.is_err():
+        return Err("transition-unavailable")
+    val encoded = read.unwrap()
+    val header = PACKAGE_INDEX_TRANSITION_MAGIC_V1.len()
+    if encoded.len() <= header + 130 or sha256_text(encoded) != receipt_digest:
+        return Err("transition-digest-mismatch")
+    if not encoded.starts_with(PACKAGE_INDEX_TRANSITION_MAGIC_V1) or
+            encoded.substring(header + 64, header + 65) != "\n" or
+            encoded.substring(header + 129, header + 130) != "\n":
+        return Err("transition-framing-invalid")
+    val new_digest = encoded.substring(header, header + 64)
+    val previous_digest = encoded.substring(header + 65, header + 129)
+    val previous_encoded = encoded.substring(header + 130, encoded.len())
+    if new_digest != expected_new_digest:
+        return Err("transition-current-mismatch")
+    if not _transition_digest_valid_v1(previous_digest) or
+            sha256_text(previous_encoded) != previous_digest:
+        return Err("transition-previous-mismatch")
+    Ok(PackageIndexSemanticTransitionV1(new_digest, previous_digest, previous_encoded))
+
+export PackageIndexSemanticTransitionV1
+export package_index_transition_stage_v1, package_index_transition_read_v1
