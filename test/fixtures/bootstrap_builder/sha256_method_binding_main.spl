@@ -1,7 +1,8 @@
 # Real SHA-256/zeroization method-binding regression for the native build closure.
 # Fixed digests are published FIPS vectors, not values computed by another call.
-use std.common.crypto.sha256.{sha256_text, sha256_u8_hex_zeroizing,
-    sha256_u8_hex, sha256_u8_fast_hex}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_text, sha256_u8_hex_zeroizing,
+    sha256_u8_hex, sha256_u8_fast_hex, sha256_stream_v1_new,
+    sha256_stream_v1_update_byte, sha256_stream_v1_zeroize}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_i64_slots}
 use std.common.text_bytes.{text_to_utf8_bytes}
 
@@ -49,6 +50,25 @@ fn main() -> i64:
     failures = failures + sha_binding_check(
         zeroizing == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         "zeroizing SHA256 uses verified report")
+    val stream: Sha256StreamV1 = sha256_stream_v1_new()
+    failures = failures + sha_binding_check(
+        sha256_stream_v1_update_byte(stream, 97u8), "stream accepts input before wipe")
+    failures = failures + sha_binding_check(
+        sha256_stream_v1_zeroize(stream), "stream wipe verifies all three reports")
+    var i = 0
+    while i < stream.state.len():
+        failures = failures + sha_binding_check(stream.state[i] == 0, "stream state wiped")
+        i = i + 1
+    i = 0
+    while i < stream.block.len():
+        failures = failures + sha_binding_check(stream.block[i] == 0, "stream block wiped")
+        i = i + 1
+    i = 0
+    while i < stream.schedule.len():
+        failures = failures + sha_binding_check(stream.schedule[i] == 0, "stream schedule wiped")
+        i = i + 1
+    failures = failures + sha_binding_check(
+        not sha256_stream_v1_update_byte(stream, 98u8), "wiped stream rejects reuse")
     if failures != 0:
         print "SHA256_METHOD_BINDING_NATIVE_FAIL count={failures}"
         return 1
