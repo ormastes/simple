@@ -1,0 +1,501 @@
+# Synopsys DesignWare Mobile Storage Host (DW MSHC, "dw_mmc") SD-card block
+# driver, pure Simple, PIO through the data FIFO.
+#
+# MDSOC: feature dimension, drivers layer.
+#
+# Target: the StarFive JH7110 SDIO controllers (VisionFive 2: mmc@16010000 =
+# eMMC slot, mmc@16020000 = micro-SD slot), compatible "starfive,jh7110-mmc"
+# / "snps,dw-mshc", selected from the firmware device tree by the caller.
+#
+# Scope, stated plainly:
+#   * SD cards only (SDSC v1/v2 and SDHC/SDXC): CMD0, CMD8, CMD55+ACMD41,
+#     CMD2, CMD3, CMD9, CMD7, ACMD6 (4-bit when the DTB bus-width allows),
+#     CMD16 (byte-addressed SDSC only). eMMC (CMD1 flow) is NOT supported; an
+#     eMMC slot fails ACMD41 and the caller moves on.
+#   * Data: CMD17/CMD24 single block, CMD18/CMD25 multi block + explicit CMD12,
+#     all PIO (no IDMAC). PIO keeps every byte in CPU loads/stores, so the
+#     JH7110's non-coherent DMA (no cache maintenance exists in this kernel)
+#     cannot corrupt transfers.
+#   * flush: SD has no volatile write cache in the default mode; durability is
+#     "programming finished", observed as STATUS.data_busy clear and CMD13
+#     reporting READY_FOR_DATA in the TRAN state.
+#   * Clocks/resets/pinmux are left as the firmware (U-Boot, which just read
+#     the kernel Image off this card) configured them. The card clock divider
+#     is derived from an ASSUMED CIU clock (DTB clock-frequency, else 100 MHz)
+#     so identification runs at <= 400 kHz and data at <= 25 MHz even if the
+#     real CIU clock is lower.
+#
+# Register access goes through the DwMshcRegs trait: DwMshcMmio on hardware;
+# test/01_unit/os/drivers/storage/dw_mshc_sd_model_spec.spl drives this exact
+# code against an SD-card register model. Unverified on silicon until the
+# VisionFive 2 transcript in
+# doc/08_tracking/bug/simpleos_riscv64_nvfs_root_board_blocked_2026-10-03.md.
+#
+# No module-level initializers: every constant is a function.
+
+use os.kernel.boot.mmio_hardware.{hardware_mmio_read32, hardware_mmio_write32}
+use os.services.block_device.{BlockDevice}
+
+# --- register offsets ---------------------------------------------------------
+fn _r_ctrl() -> u64: 0x00u64
+fn _r_pwren() -> u64: 0x04u64
+fn _r_clkdiv() -> u64: 0x08u64
+fn _r_clksrc() -> u64: 0x0Cu64
+fn _r_clkena() -> u64: 0x10u64
+fn _r_tmout() -> u64: 0x14u64
+fn _r_ctype() -> u64: 0x18u64
+fn _r_blksiz() -> u64: 0x1Cu64
+fn _r_bytcnt() -> u64: 0x20u64
+fn _r_intmask() -> u64: 0x24u64
+fn _r_cmdarg() -> u64: 0x28u64
+fn _r_cmd() -> u64: 0x2Cu64
+fn _r_resp0() -> u64: 0x30u64
+fn _r_resp1() -> u64: 0x34u64
+fn _r_resp2() -> u64: 0x38u64
+fn _r_resp3() -> u64: 0x3Cu64
+fn _r_rintsts() -> u64: 0x44u64
+fn _r_status() -> u64: 0x48u64
+fn _r_fifoth() -> u64: 0x4Cu64
+fn _r_verid() -> u64: 0x6Cu64
+fn _r_bmod() -> u64: 0x80u64
+fn _r_idinten() -> u64: 0x90u64
+
+# --- CMD register bits --------------------------------------------------------
+fn _cmd_resp_expect() -> u32: 0x40u32
+fn _cmd_resp_long() -> u32: 0x80u32
+fn _cmd_check_crc() -> u32: 0x100u32
+fn _cmd_data_expected() -> u32: 0x200u32
+fn _cmd_write() -> u32: 0x400u32
+fn _cmd_prv_dat_wait() -> u32: 0x2000u32
+fn _cmd_stop_abort() -> u32: 0x4000u32
+fn _cmd_send_init() -> u32: 0x8000u32
+fn _cmd_upd_clk() -> u32: 0x200000u32
+fn _cmd_use_hold_reg() -> u32: 0x20000000u32
+fn _cmd_start() -> u32: 0x80000000u32
+
+# --- RINTSTS bits -------------------------------------------------------------
+fn _int_re() -> u32: 0x2u32
+fn _int_cmd_done() -> u32: 0x4u32
+fn _int_dto() -> u32: 0x8u32
+fn _int_txdr() -> u32: 0x10u32
+fn _int_rxdr() -> u32: 0x20u32
+fn _int_rcrc() -> u32: 0x40u32
+fn _int_rto() -> u32: 0x100u32
+fn _int_hle() -> u32: 0x1000u32
+# DCRC | DRTO | HTO | FRUN | SBE | EBE
+fn _int_data_err() -> u32: 0xAE80u32
+
+fn _status_data_busy() -> u32: 0x200u32
+fn _poll_limit() -> i64: 2000000
+fn _acmd41_tries() -> i64: 4000
+
+# Response kinds.
+fn _rsp_none() -> u32: 0u32
+fn _rsp_short_crc() -> u32: 1u32
+fn _rsp_short_nocrc() -> u32: 2u32
+fn _rsp_long() -> u32: 3u32
+
+pub trait DwMshcRegs:
+    fn rd(off: u64) -> u32
+    fn wr(off: u64, value: u32)
+
+class DwMshcMmio:
+    base: u64
+
+impl DwMshcRegs for DwMshcMmio:
+    fn rd(off: u64) -> u32:
+        hardware_mmio_read32(self.base + off)
+
+    fn wr(off: u64, value: u32):
+        hardware_mmio_write32(self.base + off, value)
+
+struct DwMshcConfig:
+    base: u64
+    fifo_depth: u64
+    data_offset: u64
+    bus_width: u64
+    ciu_hz: u64
+    max_hz: u64
+
+pub fn dw_mshc_default_ciu_hz() -> u64: 100000000u64
+
+pub fn dw_mshc_clock_divider(ciu_hz: u64, target_hz: u64) -> u32:
+    """CLKDIV value: card clock = ciu / (2 * div), rounded so card <= target.
+    0 means bypass (card clock = ciu) and is used only when ciu <= target."""
+    if target_hz == 0u64 or ciu_hz <= target_hz:
+        return 0u32
+    val div = (ciu_hz + 2u64 * target_hz - 1u64) / (2u64 * target_hz)
+    if div > 255u64:
+        return 255u32
+    div as u32
+
+pub fn dw_mshc_data_offset(verid: u32, override_offset: u64) -> u64:
+    """Data FIFO window: DTB data-addr when non-zero, else 0x100 before
+    controller version 2.40a and 0x200 from it on (Linux dw_mmc rule)."""
+    if override_offset != 0u64:
+        return override_offset
+    if (verid & 0xFFFFu32) < 0x240Au32:
+        return 0x100u64
+    0x200u64
+
+# 128-bit R2 response words, most-significant first (w0 = RESP3).
+pub fn sd_csd_capacity_sectors(w0: u32, w1: u32, w2: u32) -> u64:
+    """Card capacity in 512-byte sectors from the CSD (v1.0 and v2.0)."""
+    val structure = (w0 >> 30u32) & 0x3u32
+    if structure == 1u32:
+        val c_size = (((w1 & 0x3Fu32) << 16u32) | ((w2 & 0xFFFF0000u32) >> 16u32)) as u64
+        return (c_size + 1u64) * 1024u64
+    val read_bl_len = ((w1 >> 16u32) & 0xFu32) as u64
+    val c_size = (((w1 & 0x3FFu32) << 2u32) | ((w2 & 0xC0000000u32) >> 30u32)) as u64
+    val c_mult = ((w2 & 0x00038000u32) >> 15u32) as u64
+    val bytes = ((c_size + 1u64) << (c_mult + 2u64)) << read_bl_len
+    bytes / 512u64
+
+class DwMshcSd:
+    regs: DwMshcRegs
+    data_off: u64
+    fifo_depth: u64
+    ciu_hz: u64
+    rca: u32
+    high_capacity: bool
+    capacity_sectors: u64
+    resp: [u32]
+
+impl DwMshcSd:
+    static fn open(regs: DwMshcRegs, cfg: DwMshcConfig) -> Result<DwMshcSd, text>:
+        """Reset the host, identify an SD card and bring it to TRAN; fail closed."""
+        val ciu = if cfg.ciu_hz != 0u64: cfg.ciu_hz else: dw_mshc_default_ciu_hz()
+        var host = DwMshcSd(regs: regs, data_off: 0x200u64, fifo_depth: 32u64, ciu_hz: ciu,
+                            rca: 0u32, high_capacity: false, capacity_sectors: 0u64,
+                            resp: [0u32, 0u32, 0u32, 0u32])
+        val up = host.host_init(cfg)
+        if up.is_err():
+            return Err(up.unwrap_err())
+        val ident = host.card_identify(cfg)
+        if ident.is_err():
+            return Err(ident.unwrap_err())
+        Ok(host)
+
+    me fn host_init(cfg: DwMshcConfig) -> Result<bool, text>:
+        self.regs.wr(_r_pwren(), 1u32)
+        val reset = self.wait_ctrl_reset(7u32)
+        if reset.is_err():
+            return reset
+        self.regs.wr(_r_rintsts(), 0xFFFFFFFFu32)
+        self.regs.wr(_r_intmask(), 0u32)
+        self.regs.wr(_r_tmout(), 0xFFFFFFFFu32)
+        self.regs.wr(_r_idinten(), 0u32)
+        self.regs.wr(_r_bmod(), 0u32)
+        # PIO: interrupts off, internal DMAC off.
+        val ctrl = self.regs.rd(_r_ctrl())
+        self.regs.wr(_r_ctrl(), ctrl & 0xFDFFFFEFu32)
+        if cfg.fifo_depth != 0u64:
+            self.fifo_depth = cfg.fifo_depth
+        else:
+            self.fifo_depth = (((self.regs.rd(_r_fifoth()) >> 16u32) & 0xFFFu32) + 1u32) as u64
+        if self.fifo_depth < 2u64 or self.fifo_depth > 4096u64:
+            return Err("dw-mshc: implausible FIFO depth")
+        val half = (self.fifo_depth / 2u64) as u32
+        self.regs.wr(_r_fifoth(), (2u32 << 28u32) | ((half - 1u32) << 16u32) | half)
+        self.data_off = dw_mshc_data_offset(self.regs.rd(_r_verid()), cfg.data_offset)
+        self.regs.wr(_r_ctype(), 0u32)
+        self.set_card_clock(400000u64)
+
+    me fn wait_ctrl_reset(bits: u32) -> Result<bool, text>:
+        self.regs.wr(_r_ctrl(), self.regs.rd(_r_ctrl()) | bits)
+        var polls: i64 = 0
+        while (self.regs.rd(_r_ctrl()) & bits) != 0u32:
+            polls = polls + 1
+            if polls > _poll_limit():
+                return Err("dw-mshc: controller reset did not complete")
+        Ok(true)
+
+    me fn clock_command() -> Result<bool, text>:
+        self.regs.wr(_r_cmd(), _cmd_start() | _cmd_upd_clk() | _cmd_prv_dat_wait())
+        var polls: i64 = 0
+        while (self.regs.rd(_r_cmd()) & _cmd_start()) != 0u32:
+            polls = polls + 1
+            if polls > _poll_limit():
+                return Err("dw-mshc: clock update command not accepted")
+        Ok(true)
+
+    me fn set_card_clock(target_hz: u64) -> Result<bool, text>:
+        self.regs.wr(_r_clkena(), 0u32)
+        self.regs.wr(_r_clksrc(), 0u32)
+        val first = self.clock_command()
+        if first.is_err():
+            return first
+        self.regs.wr(_r_clkdiv(), dw_mshc_clock_divider(self.ciu_hz, target_hz))
+        val second = self.clock_command()
+        if second.is_err():
+            return second
+        self.regs.wr(_r_clkena(), 1u32)
+        self.clock_command()
+
+    me fn wait_not_busy() -> Result<bool, text>:
+        var polls: i64 = 0
+        while (self.regs.rd(_r_status()) & _status_data_busy()) != 0u32:
+            polls = polls + 1
+            if polls > _poll_limit():
+                return Err("dw-mshc: card stayed busy")
+        Ok(true)
+
+    me fn command(index: u32, arg: u32, rsp: u32, extra: u32) -> Result<u32, text>:
+        """Issue one command and wait for CMD_DONE. Returns RESP0; long
+        responses are also left in self.resp (most-significant word first)."""
+        val idle = self.wait_not_busy()
+        if idle.is_err() and (extra & _cmd_stop_abort()) == 0u32:
+            return Err(idle.unwrap_err())
+        self.regs.wr(_r_rintsts(), 0xFFFFFFFFu32)
+        var flags = _cmd_start() | _cmd_use_hold_reg() | extra | index
+        if (extra & _cmd_stop_abort()) == 0u32:
+            flags = flags | _cmd_prv_dat_wait()
+        if rsp != _rsp_none():
+            flags = flags | _cmd_resp_expect()
+        if rsp == _rsp_long():
+            flags = flags | _cmd_resp_long()
+        if rsp == _rsp_short_crc() or rsp == _rsp_long():
+            flags = flags | _cmd_check_crc()
+        self.regs.wr(_r_cmdarg(), arg)
+        self.regs.wr(_r_cmd(), flags)
+        var polls: i64 = 0
+        var st = self.regs.rd(_r_rintsts())
+        while (st & _int_cmd_done()) == 0u32:
+            if (st & _int_hle()) != 0u32:
+                return Err("dw-mshc: hardware locked error on CMD" + _dec(index as u64))
+            polls = polls + 1
+            if polls > _poll_limit():
+                return Err("dw-mshc: CMD" + _dec(index as u64) + " never completed")
+            st = self.regs.rd(_r_rintsts())
+        self.regs.wr(_r_rintsts(), _int_cmd_done())
+        if (st & _int_rto()) != 0u32:
+            return Err("dw-mshc: CMD" + _dec(index as u64) + " response timeout")
+        if (st & _int_re()) != 0u32:
+            return Err("dw-mshc: CMD" + _dec(index as u64) + " response error")
+        if (flags & _cmd_check_crc()) != 0u32 and (st & _int_rcrc()) != 0u32:
+            return Err("dw-mshc: CMD" + _dec(index as u64) + " response CRC error")
+        if rsp == _rsp_long():
+            self.resp = [self.regs.rd(_r_resp3()), self.regs.rd(_r_resp2()),
+                         self.regs.rd(_r_resp1()), self.regs.rd(_r_resp0())]
+        Ok(self.regs.rd(_r_resp0()))
+
+    me fn app_command(index: u32, arg: u32, rsp: u32) -> Result<u32, text>:
+        val pre = self.command(55u32, self.rca << 16u32, _rsp_short_crc(), 0u32)
+        if pre.is_err():
+            return pre
+        self.command(index, arg, rsp, 0u32)
+
+    me fn card_identify(cfg: DwMshcConfig) -> Result<bool, text>:
+        val idle = self.command(0u32, 0u32, _rsp_none(), _cmd_send_init())
+        if idle.is_err():
+            return Err(idle.unwrap_err())
+        # CMD8: a v2.00+ card echoes the check pattern; v1 cards time out.
+        var v2 = true
+        val cond = self.command(8u32, 0x1AAu32, _rsp_short_crc(), 0u32)
+        if cond.is_err():
+            v2 = false
+        else if (cond.unwrap() & 0xFFFu32) != 0x1AAu32:
+            return Err("dw-mshc: CMD8 echoed a wrong check pattern")
+        val hcs = if v2: 0x40000000u32 else: 0u32
+        var tries: i64 = 0
+        var ocr: u32 = 0u32
+        while (ocr & 0x80000000u32) == 0u32:
+            tries = tries + 1
+            if tries > _acmd41_tries():
+                return Err("dw-mshc: ACMD41 power-up never finished")
+            val got = self.app_command(41u32, hcs | 0x00FF8000u32, _rsp_short_nocrc())
+            if got.is_err():
+                return Err("dw-mshc: no SD card answered ACMD41 (" + got.unwrap_err() + ")")
+            ocr = got.unwrap()
+        self.high_capacity = v2 and (ocr & 0x40000000u32) != 0u32
+        val cid = self.command(2u32, 0u32, _rsp_long(), 0u32)
+        if cid.is_err():
+            return Err(cid.unwrap_err())
+        val rel = self.command(3u32, 0u32, _rsp_short_crc(), 0u32)
+        if rel.is_err():
+            return Err(rel.unwrap_err())
+        self.rca = rel.unwrap() >> 16u32
+        val csd = self.command(9u32, self.rca << 16u32, _rsp_long(), 0u32)
+        if csd.is_err():
+            return Err(csd.unwrap_err())
+        self.capacity_sectors = sd_csd_capacity_sectors(self.resp[0], self.resp[1], self.resp[2])
+        if self.capacity_sectors == 0u64:
+            return Err("dw-mshc: CSD reports zero capacity")
+        val sel = self.command(7u32, self.rca << 16u32, _rsp_short_crc(), 0u32)
+        if sel.is_err():
+            return Err(sel.unwrap_err())
+        val settled = self.wait_not_busy()
+        if settled.is_err():
+            return settled
+        if cfg.bus_width >= 4u64:
+            val wide = self.app_command(6u32, 2u32, _rsp_short_crc())
+            if wide.is_err():
+                return Err(wide.unwrap_err())
+            self.regs.wr(_r_ctype(), 1u32)
+        if not self.high_capacity:
+            val blen = self.command(16u32, 512u32, _rsp_short_crc(), 0u32)
+            if blen.is_err():
+                return Err(blen.unwrap_err())
+        val max_hz = if cfg.max_hz != 0u64 and cfg.max_hz < 25000000u64: cfg.max_hz else: 25000000u64
+        self.set_card_clock(max_hz)
+
+    fn card_address(lba: u64) -> u32:
+        if self.high_capacity:
+            return lba as u32
+        (lba * 512u64) as u32
+
+    me fn prepare_data(blocks: u64) -> Result<bool, text>:
+        val fifo = self.wait_ctrl_reset(2u32)
+        if fifo.is_err():
+            return fifo
+        self.regs.wr(_r_blksiz(), 512u32)
+        self.regs.wr(_r_bytcnt(), (blocks * 512u64) as u32)
+        Ok(true)
+
+    me fn stop_transmission() -> Result<bool, text>:
+        val stop = self.command(12u32, 0u32, _rsp_short_crc(), _cmd_stop_abort())
+        if stop.is_err():
+            return Err(stop.unwrap_err())
+        self.wait_not_busy()
+
+    me fn read_blocks(lba: u64, count: u64) -> Result<[u8], text>:
+        """CMD17 (count 1) or CMD18 + CMD12, drained through the data FIFO."""
+        if count == 0u64 or lba + count > self.capacity_sectors:
+            return Err("dw-mshc: read outside the card")
+        val prep = self.prepare_data(count)
+        if prep.is_err():
+            return Err(prep.unwrap_err())
+        val index = if count == 1u64: 17u32 else: 18u32
+        val issued = self.command(index, self.card_address(lba), _rsp_short_crc(), _cmd_data_expected())
+        if issued.is_err():
+            return Err(issued.unwrap_err())
+        val words = count * 128u64
+        var got: u64 = 0u64
+        var out: [u8] = []
+        var polls: i64 = 0
+        var done = false
+        while not done:
+            val st = self.regs.rd(_r_rintsts())
+            if (st & _int_data_err()) != 0u32:
+                self.regs.wr(_r_rintsts(), st)
+                return Err("dw-mshc: read data error RINTSTS=" + _dec(st as u64))
+            if (st & (_int_rxdr() | _int_dto())) != 0u32:
+                self.regs.wr(_r_rintsts(), _int_rxdr())
+                var avail = ((self.regs.rd(_r_status()) >> 17u32) & 0x1FFFu32) as u64
+                while avail > 0u64 and got < words:
+                    val w = self.regs.rd(self.data_off)
+                    out = out.push((w & 0xFFu32) as u8)
+                    out = out.push(((w >> 8u32) & 0xFFu32) as u8)
+                    out = out.push(((w >> 16u32) & 0xFFu32) as u8)
+                    out = out.push(((w >> 24u32) & 0xFFu32) as u8)
+                    got = got + 1u64
+                    avail = avail - 1u64
+            if (st & _int_dto()) != 0u32 and got >= words:
+                done = true
+            else:
+                polls = polls + 1
+                if polls > _poll_limit():
+                    return Err("dw-mshc: read data never completed")
+        self.regs.wr(_r_rintsts(), _int_dto())
+        if count > 1u64:
+            val stopped = self.stop_transmission()
+            if stopped.is_err():
+                return Err(stopped.unwrap_err())
+        Ok(out)
+
+    me fn write_blocks(lba: u64, data: [u8]) -> Result<bool, text>:
+        """CMD24 (one block) or CMD25 + CMD12, fed through the data FIFO."""
+        val count = (data.len() as u64) / 512u64
+        if count == 0u64 or count * 512u64 != (data.len() as u64):
+            return Err("dw-mshc: write needs whole 512-byte blocks")
+        if lba + count > self.capacity_sectors:
+            return Err("dw-mshc: write outside the card")
+        val prep = self.prepare_data(count)
+        if prep.is_err():
+            return Err(prep.unwrap_err())
+        val index = if count == 1u64: 24u32 else: 25u32
+        val issued = self.command(index, self.card_address(lba), _rsp_short_crc(),
+                                  _cmd_data_expected() | _cmd_write())
+        if issued.is_err():
+            return Err(issued.unwrap_err())
+        val words = count * 128u64
+        var sent: u64 = 0u64
+        var polls: i64 = 0
+        var done = false
+        while not done:
+            val st = self.regs.rd(_r_rintsts())
+            if (st & _int_data_err()) != 0u32:
+                self.regs.wr(_r_rintsts(), st)
+                return Err("dw-mshc: write data error RINTSTS=" + _dec(st as u64))
+            if sent < words:
+                val used = ((self.regs.rd(_r_status()) >> 17u32) & 0x1FFFu32) as u64
+                var room = if used < self.fifo_depth: self.fifo_depth - used else: 0u64
+                while room > 0u64 and sent < words:
+                    val at = (sent * 4u64) as i64
+                    val w = (data[at] as u32) | ((data[at + 1] as u32) << 8u32) |
+                        ((data[at + 2] as u32) << 16u32) | ((data[at + 3] as u32) << 24u32)
+                    self.regs.wr(self.data_off, w)
+                    sent = sent + 1u64
+                    room = room - 1u64
+                self.regs.wr(_r_rintsts(), _int_txdr())
+            if (st & _int_dto()) != 0u32 and sent >= words:
+                done = true
+            else:
+                polls = polls + 1
+                if polls > _poll_limit():
+                    return Err("dw-mshc: write data never completed")
+        self.regs.wr(_r_rintsts(), _int_dto())
+        if count > 1u64:
+            val stopped = self.stop_transmission()
+            if stopped.is_err():
+                return Err(stopped.unwrap_err())
+        self.wait_not_busy()
+
+    me fn card_status() -> Result<u32, text>:
+        self.command(13u32, self.rca << 16u32, _rsp_short_crc(), 0u32)
+
+impl BlockDevice for DwMshcSd:
+    me fn read_sector(lba: u64) -> Result<[u8], text>:
+        self.read_blocks(lba, 1u64)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        if data.len() != 512:
+            return Err("dw-mshc: write requires exactly one 512-byte sector")
+        self.write_blocks(lba, data)
+
+    me fn sector_size() -> u32:
+        512u32
+
+    me fn sector_count() -> u64:
+        self.capacity_sectors
+
+    me fn flush() -> Result<bool, text>:
+        """Programming finished: not busy, and CMD13 says TRAN + READY_FOR_DATA."""
+        val idle = self.wait_not_busy()
+        if idle.is_err():
+            return idle
+        val status = self.card_status()
+        if status.is_err():
+            return Err(status.unwrap_err())
+        val s = status.unwrap()
+        if ((s >> 9u32) & 0xFu32) != 4u32 or (s & 0x100u32) == 0u32:
+            return Err("dw-mshc: card not ready after write (CMD13 status " + _dec(s as u64) + ")")
+        Ok(true)
+
+fn _dec_digit(v: u64) -> text:
+    if v < 5u64:
+        if v < 2u64:
+            return if v == 0u64: "0" else: "1"
+        if v == 2u64:
+            return "2"
+        return if v == 3u64: "3" else: "4"
+    if v < 7u64:
+        return if v == 5u64: "5" else: "6"
+    if v == 7u64:
+        return "7"
+    if v == 8u64: "8" else: "9"
+
+fn _dec(v: u64) -> text:
+    if v < 10u64:
+        return _dec_digit(v)
+    _dec(v / 10u64) + _dec_digit(v % 10u64)

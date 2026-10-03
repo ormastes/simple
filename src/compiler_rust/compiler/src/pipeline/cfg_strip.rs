@@ -254,6 +254,24 @@ fn doc_comment_end(lines: &[&str], start: usize) -> Option<usize> {
 /// so globals must be selected while the source still carries its `@cfg`.
 /// Blank replacement preserves source line numbers for diagnostics.
 pub fn strip_inactive_cfg_arch_globals(source: &str, target_arch: TargetArch) -> String {
+    // Host-arch callers are the interpreter/JIT `run` paths, which never pass
+    // through native discovery's OS-branch preprocessing. Without this, any
+    // module carrying an `@when(os="windows"): ... @else: ... @end` block
+    // (e.g. std io/windows_redirected_process.spl, reached from io_runtime)
+    // fails to parse under `simple run`. A malformed block is left untouched so
+    // the parser still rejects it (fail closed, never both branches).
+    let os_selected;
+    let source = if target_arch == TargetArch::host() {
+        match strip_os_when_blocks(source, TargetOS::host()) {
+            Ok(selected) => {
+                os_selected = selected;
+                os_selected.as_str()
+            }
+            Err(_) => source,
+        }
+    } else {
+        source
+    };
     let lines: Vec<&str> = source.split('\n').collect();
     let mut filtered = Vec::with_capacity(lines.len());
     let mut index = 0;
@@ -470,6 +488,22 @@ pub fn strip_inactive_cfg_arch_fns_for_host(module: &mut simple_parser::ast::Mod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_globals_strip_selects_host_os_when_branch_for_run_paths() {
+        // `simple run` / interpreter module loading reach this function with the
+        // HOST arch and never pass through native discovery's OS preprocessing.
+        let source = "@when(os=\"windows\"):\nfn pick() -> i64:\n    11\n@else:\nfn pick() -> i64:\n    22\n@end\n";
+        let filtered = strip_inactive_cfg_arch_globals(source, TargetArch::host());
+        assert_eq!(filtered.lines().count(), source.lines().count());
+        assert!(!filtered.contains("@when") && !filtered.contains("@else") && !filtered.contains("@end"));
+        let (kept, dropped) = if TargetOS::host() == TargetOS::Windows { ("11", "22") } else { ("22", "11") };
+        assert!(filtered.contains(kept) && !filtered.contains(dropped));
+        assert!(simple_parser::Parser::new(&filtered).parse().is_ok());
+        // Malformed blocks are left untouched so the parser still rejects them.
+        let malformed = "@when(os=\"unknown\"):\nval A = 1\n@end\n";
+        assert_eq!(strip_inactive_cfg_arch_globals(malformed, TargetArch::host()), malformed);
+    }
 
     #[test]
     fn os_when_blocks_select_one_parseable_branch_and_keep_line_numbers() {

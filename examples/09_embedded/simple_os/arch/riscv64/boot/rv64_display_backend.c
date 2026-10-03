@@ -29,7 +29,16 @@ spl_u64 spl_riscv_noalloc_alloc_page(void);
  * this anywhere. */
 #define RT_RISCV_UART_BASE 0x10000000ULL
 
+/* The FDT-selected console sink in boot_entry.c (byte-wide ns16550a on QEMU
+ * virt, 32-bit reg-shift-2 DesignWare 8250 on JH7110). Weak so a link
+ * without boot_entry.c keeps the historical byte store. */
+void rv64_console_putc(char c) __attribute__((weak));
+
 static void uart_put_byte(spl_u8 byte) {
+    if (rv64_console_putc) {
+        rv64_console_putc((char)byte);
+        return;
+    }
     *(volatile spl_u8 *)RT_RISCV_UART_BASE = byte;
 }
 

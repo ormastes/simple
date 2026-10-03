@@ -4,8 +4,10 @@ script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-schedule.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 statuses="$tmp/statuses"
+hashes="$tmp/hashes"
 events="$tmp/events"
 : >"$statuses"
+: >"$hashes"
 : >"$events"
 exe_suffix=
 llvm_index_config=phase4-llvm.config
@@ -13,6 +15,17 @@ cranelift_index_config=phase4-cranelift.config
 phase3_llvm_index_config=phase3-llvm.config
 phase3_cranelift_index_config=phase3-cranelift.config
 build_binary() {
+  if [ "$4:$1" = phase3:phase3-bootstrap ]; then
+    touch "$tmp/$5.started"
+    case "$5" in llvm) peer=cranelift ;; cranelift) peer=llvm ;; esac
+    attempts=0
+    until [ -f "$tmp/$peer.started" ]; do
+      attempts=$((attempts + 1))
+      [ "$attempts" -le 10 ] || exit 1
+      sleep 1
+    done
+    printf '%s\n' "$5" >>"$hashes"
+  fi
   printf 'binary %s %s %s\n' "$4" "$5" "$1" >>"$events"
   [ "$4:$5:$1" = phase4:llvm:bootstrap ] && exit 1
   return 0
@@ -26,6 +39,9 @@ prepare_backend() { printf 'prepare %s %s\n' "$1" "$2" >>"$events"; }
 run_module_backend() { printf 'group %s %s\n' "$1" "$2" >>"$events"; }
 . "$script_root/lib/provisional-task-schedule.shs"
 provisional_dispatch_tasks
+[ "$(cat "$hashes")" = "$(printf 'llvm\ncranelift')" ] || {
+  echo 'FAIL: lanes did not overlap or private hash journals were lost' >&2; exit 1
+}
 [ "$(grep -c '^binary ' "$events")" -eq 14 ] || {
   echo 'FAIL: not all fourteen binary tasks attempted' >&2; exit 1
 }
@@ -52,4 +68,11 @@ grep -qx 'phase3_cranelift_group_status=SUCCEEDED' "$statuses" || exit 1
 if grep -q '^group phase4 llvm$' "$events"; then
   echo 'FAIL: group launched after its failed index' >&2; exit 1
 fi
+for backend in llvm cranelift; do
+  awk -v backend="$backend" '
+    $1=="binary" && $2=="phase4" && $3==backend { advanced=1 }
+    $1=="index" && $2=="phase3" && $3==backend && !advanced { bad=1 }
+    END { exit bad || !advanced }
+  ' "$events" || { echo 'FAIL: module qualification delayed the next generation'; exit 1; }
+done
 echo 'PASS: failed Phase 4 task does not suppress independent binaries or groups'

@@ -1,0 +1,218 @@
+#!/bin/sh
+set -eu
+
+# Linux riscv64 QEMU VM: image, lifecycle, and in-guest bootstrap.
+#
+# Usage:
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --image     # fetch + verify base, build overlay + seed ISO
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --start     # boot (OpenSBI -> U-Boot -> distro kernel)
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke     # image+start+SSH+uname+nproc, PASS/FAIL line
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --provision # guest toolchain (clang/lld/rustup nightly)
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync [REF] # git archive REF (default HEAD) -> guest ~/simple
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2    # trust-root Stage 2 in guest (cranelift)
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --ssh CMD...
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stop
+#
+# The guest is a real riscv64 Linux (Ubuntu cloud image) under QEMU TCG with
+# multi-threaded TCG, booted through the same OpenSBI + U-Boot chain a board
+# uses — never `-kernel <linux>`. A riscv64 host has no x86 KVM, so this is
+# correctness evidence, not timing evidence.
+#
+# Env knobs (defaults):
+#   QEMU_CPUS=20  QEMU_MEM=32G  QEMU_DISK=160G  QEMU_PORT=2223  QEMU_USER=simple
+#   RISCV_LINUX_VM_DIR=$ROOT/build/linux-riscv64/vm (not QEMU_VM_DIR: the FreeBSD wrapper reads that)
+#   SIMPLE_BIG_STORAGE_ROOT=$HOME/.simple   (shared base image cache)
+#   RISCV_UBUNTU_RELEASE=24.04   RISCV_IMAGE_URL / RISCV_SHA256SUMS_URL override
+#   QEMU_SSH_PRIVATE_KEY=~/.ssh/id_ed25519  QEMU_SSH_TIMEOUT=1800
+#   QEMU_OPENSBI=/usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.bin
+#   QEMU_UBOOT=/usr/lib/u-boot/qemu-riscv64_smode/uboot.elf
+#   STAGE2_BACKEND=cranelift (no LLVM 23 packages exist for riscv64 guests)
+#   STAGE2_JOBS=$QEMU_CPUS
+#   Per-host overrides: ~/.simple/qemu-host.conf, then $ROOT/.simple/qemu-host.conf
+#   (use ': "${QEMU_CPUS:=20}"' so explicit env still wins).
+#
+# Host packages (Debian/Ubuntu): qemu-system-riscv opensbi u-boot-qemu
+#   qemu-utils cloud-image-utils openssh-client
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+[ -f "${HOME}/.simple/qemu-host.conf" ] && . "${HOME}/.simple/qemu-host.conf"
+[ -f "${ROOT_DIR}/.simple/qemu-host.conf" ] && . "${ROOT_DIR}/.simple/qemu-host.conf"
+
+QEMU_CPUS="${QEMU_CPUS:-20}"
+QEMU_MEM="${QEMU_MEM:-32G}"
+QEMU_DISK="${QEMU_DISK:-160G}"
+QEMU_PORT="${QEMU_PORT:-2223}"
+QEMU_USER="${QEMU_USER:-simple}"
+QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
+QEMU_OPENSBI="${QEMU_OPENSBI:-/usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.bin}"
+QEMU_UBOOT="${QEMU_UBOOT:-/usr/lib/u-boot/qemu-riscv64_smode/uboot.elf}"
+VM_DIR="${RISCV_LINUX_VM_DIR:-${ROOT_DIR}/build/linux-riscv64/vm}"
+MEDIA_DIR="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/media"
+REL="${RISCV_UBUNTU_RELEASE:-24.04}"
+IMG_NAME="ubuntu-${REL}-server-cloudimg-riscv64.img"
+IMG_URL="${RISCV_IMAGE_URL:-https://cloud-images.ubuntu.com/releases/${REL}/release/${IMG_NAME}}"
+SUMS_URL="${RISCV_SHA256SUMS_URL:-https://cloud-images.ubuntu.com/releases/${REL}/release/SHA256SUMS}"
+KEY="${QEMU_SSH_PRIVATE_KEY:-${HOME}/.ssh/id_ed25519}"
+STAGE2_BACKEND="${STAGE2_BACKEND:-cranelift}"
+STAGE2_JOBS="${STAGE2_JOBS:-${QEMU_CPUS}}"
+BASE="${MEDIA_DIR}/${IMG_NAME}"
+OVERLAY="${VM_DIR}/linux-riscv64.qcow2"
+SEED_ISO="${VM_DIR}/cloudinit-seed.iso"
+PIDFILE="${VM_DIR}/qemu.pid"
+SERIAL="${VM_DIR}/serial.log"
+
+say() { printf 'linux-riscv64-vm: %s\n' "$*"; }
+die() { printf 'linux-riscv64-vm: FAIL — %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing host tool: $1"; }
+
+ssh_vm() {
+    ssh -i "$KEY" -p "$QEMU_PORT" -o BatchMode=yes -o ConnectTimeout=10 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+        "${QEMU_USER}@127.0.0.1" "$@"
+}
+
+vm_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+do_image() {
+    need qemu-img; need cloud-localds; need sha256sum
+    mkdir -p "$MEDIA_DIR" "$VM_DIR"
+    if [ ! -f "$BASE" ]; then
+        need curl
+        say "downloading $IMG_URL"
+        curl -fL --retry 3 -o "${BASE}.part" "$IMG_URL" || die "download failed: $IMG_URL"
+        mv -f "${BASE}.part" "$BASE"
+    fi
+    if [ ! -f "${BASE}.sha256" ]; then
+        need curl
+        curl -fsSL "$SUMS_URL" | awk -v n="*${IMG_NAME}" '$2 == n || $2 == substr(n,2) { print $1 }' > "${BASE}.sha256"
+    fi
+    want=$(cat "${BASE}.sha256")
+    [ -n "$want" ] || die "no SHA256 for ${IMG_NAME} in ${SUMS_URL}"
+    got=$(sha256sum "$BASE" | awk '{print $1}')
+    [ "$got" = "$want" ] || die "base image sha256 mismatch: got=$got want=$want"
+    say "base verified sha256=$got"
+    [ -f "${KEY}.pub" ] || die "missing SSH public key ${KEY}.pub (ssh-keygen -t ed25519)"
+    cat > "${VM_DIR}/user-data" <<EOF
+#cloud-config
+hostname: simple-riscv64
+users:
+  - name: ${QEMU_USER}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - $(cat "${KEY}.pub")
+package_update: true
+packages: [build-essential, clang, lld, git, rsync, time, pkg-config, zstd, zlib1g-dev, libzstd-dev, libtinfo-dev]
+EOF
+    cloud-localds "$SEED_ISO" "${VM_DIR}/user-data"
+    if [ ! -f "$OVERLAY" ]; then
+        qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$OVERLAY" "$QEMU_DISK"
+        say "overlay $OVERLAY ($QEMU_DISK) over pristine base"
+    fi
+}
+
+do_start() {
+    need qemu-system-riscv64
+    [ -f "$QEMU_OPENSBI" ] || die "missing OpenSBI $QEMU_OPENSBI (apt install opensbi)"
+    [ -f "$QEMU_UBOOT" ] || die "missing U-Boot $QEMU_UBOOT (apt install u-boot-qemu)"
+    [ -f "$OVERLAY" ] || do_image
+    if vm_running; then say "already running pid=$(cat "$PIDFILE")"; return 0; fi
+    # A full host disk with QEMU's default werror=enospc pauses the guest
+    # silently (cost the FreeBSD lane a run); refuse early and report instead.
+    free_gb=$(df -Pk "$VM_DIR" | awk 'NR==2 { print int($4 / 1048576) }')
+    [ "$free_gb" -ge "${QEMU_MIN_FREE_GB:-30}" ] || die "only ${free_gb}G free under $VM_DIR"
+    qemu-system-riscv64 -machine virt -cpu rv64 -smp "$QEMU_CPUS" -m "$QEMU_MEM" \
+        -accel tcg,thread=multi,tb-size=2048 \
+        -bios "$QEMU_OPENSBI" -kernel "$QEMU_UBOOT" \
+        -drive if=none,id=hd0,file="$OVERLAY",format=qcow2,cache=writeback,discard=unmap,werror=report,rerror=report \
+        -device virtio-blk-device,drive=hd0 \
+        -drive if=none,id=ci,file="$SEED_ISO",format=raw,readonly=on \
+        -device virtio-blk-device,drive=ci \
+        -netdev user,id=n0,hostfwd=tcp:127.0.0.1:"$QEMU_PORT"-:22 \
+        -device virtio-net-device,netdev=n0 -device virtio-rng-device \
+        -display none -serial file:"$SERIAL" -daemonize -pidfile "$PIDFILE"
+    say "started pid=$(cat "$PIDFILE") cpus=$QEMU_CPUS mem=$QEMU_MEM ssh=127.0.0.1:$QEMU_PORT serial=$SERIAL"
+    t=0
+    until ssh_vm true 2>/dev/null; do
+        vm_running || die "qemu exited during boot; see $SERIAL"
+        [ "$t" -ge "$QEMU_SSH_TIMEOUT" ] && die "no SSH after ${QEMU_SSH_TIMEOUT}s; see $SERIAL"
+        sleep 10; t=$((t + 10))
+    done
+    ssh_vm 'cloud-init status --wait >/dev/null 2>&1 || true'
+    say "ssh up after ~${t}s"
+}
+
+do_stop() {
+    vm_running || { say "not running"; return 0; }
+    ssh_vm 'sudo poweroff' 2>/dev/null || true
+    t=0; while vm_running && [ "$t" -lt 120 ]; do sleep 2; t=$((t + 2)); done
+    vm_running && kill "$(cat "$PIDFILE")"
+    rm -f "$PIDFILE"; say "stopped"
+}
+
+do_smoke() {
+    do_image; do_start
+    arch=$(ssh_vm uname -m) ; cpus=$(ssh_vm nproc)
+    [ "$arch" = riscv64 ] || die "guest arch=$arch"
+    [ "$cpus" = "$QEMU_CPUS" ] || die "guest nproc=$cpus want=$QEMU_CPUS"
+    printf 'PASS — linux-riscv64 guest up: arch=%s nproc=%s kernel=%s\n' \
+        "$arch" "$cpus" "$(ssh_vm uname -r)"
+}
+
+do_provision() {
+    vm_running || do_start
+    ssh_vm 'set -e
+        command -v rustup >/dev/null 2>&1 || curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly
+        . "$HOME/.cargo/env"; rustup toolchain install nightly --profile minimal -c rustfmt -c clippy
+        clang --version | head -1; cargo --version'
+}
+
+do_sync() {
+    ref="${1:-HEAD}"
+    vm_running || do_start
+    sha=$(git rev-parse --verify "${ref}^{commit}") || die "bad ref $ref"
+    say "syncing $ref ($sha) -> guest ~/simple"
+    ssh_vm 'rm -rf ~/simple.new && mkdir -p ~/simple.new'
+    git archive --format=tar "$sha" | ssh_vm 'tar -C ~/simple.new -xf -'
+    ssh_vm "cd ~/simple.new && git init -q && git add -A >/dev/null && \
+        git -c user.name=vm -c user.email=vm@local commit -qm 'snapshot $sha' && \
+        printf '%s\n' $sha > .source-sha && cd && rm -rf ~/simple && mv ~/simple.new ~/simple"
+    say "guest ~/simple = $sha"
+}
+
+do_stage2() {
+    vm_running || do_start
+    log="${VM_DIR}/stage2-${STAGE2_BACKEND}.log"
+    say "trust-root Stage 2 in guest backend=$STAGE2_BACKEND jobs=$STAGE2_JOBS -> $log"
+    # Detached in the guest: a multi-hour TCG build must not die with an SSH
+    # session. TCG runs ~10x slower than native; the 300s per-file default
+    # times out large frontend files and reads as "N file(s) failed to compile".
+    ssh_vm "rm -f ~/stage2.rc; setsid nohup sh -c '. \$HOME/.cargo/env; \
+        export SIMPLE_NATIVE_FILE_TIMEOUT=${SIMPLE_NATIVE_FILE_TIMEOUT:-1800}; \
+        cd ~/simple && sh scripts/bootstrap/bootstrap-from-scratch.sh \
+        --full-bootstrap --stop-after-stage2 --mode=dynload --jobs=$STAGE2_JOBS \
+        --backend=$STAGE2_BACKEND; echo \$? > ~/stage2.rc' > ~/stage2.log 2>&1 < /dev/null &"
+    until ssh_vm 'test -f ~/stage2.rc' 2>/dev/null; do
+        vm_running || die "qemu exited during stage2"
+        sleep 60
+    done
+    ssh_vm 'cat ~/stage2.log' > "$log"
+    rc=$(ssh_vm 'cat ~/stage2.rc')
+    tail -n 20 "$log"
+    [ "$rc" = 0 ] || die "stage2 exit=$rc (log $log)"
+    printf 'PASS — riscv64 Stage 2 admitted (backend=%s source=%s)\n' \
+        "$STAGE2_BACKEND" "$(ssh_vm cat simple/.source-sha)"
+}
+
+case "${1:-}" in
+    --image) do_image ;;
+    --start) do_image; do_start ;;
+    --stop) do_stop ;;
+    --smoke) do_smoke ;;
+    --provision) do_provision ;;
+    --sync) shift; do_sync "${1:-HEAD}" ;;
+    --stage2) do_stage2 ;;
+    --ssh) shift; ssh_vm "$@" ;;
+    *) sed -n '4,13p' "$0"; exit 2 ;;
+esac
