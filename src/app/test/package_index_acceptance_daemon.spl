@@ -1,0 +1,54 @@
+use compiler.driver.cache.daemon.package_daemon_session.{PackageDaemonSessionV1}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+struct PackageIndexDaemonObservationV1:
+    valid: bool
+    reason: text
+    request_generation_preserved: bool
+    active_refresh_rejected: bool
+    foreign_workspace_rejected: bool
+    next_request_refreshed: bool
+    closed_generation_released: bool
+
+fn package_index_acceptance_daemon_v1(root: text) -> PackageIndexDaemonObservationV1:
+    var generation = PackageModuleIndexGenerationV1(
+        2, sha256_text("daemon-producer"), "daemon-root", "revision-a",
+        "commit-a", "tree-a", sha256_text("inventory-a"), [], sha256_text("variant"))
+    if not package_module_index_publish_if_current_v1(root, generation, ""):
+        return PackageIndexDaemonObservationV1(false, "fixture-publish-a-failed", false, false, false, false, false)
+    val initial = package_module_index_read_current_v1(root)
+    if not initial.valid:
+        return PackageIndexDaemonObservationV1(false, "fixture-read-a-failed", false, false, false, false, false)
+    var session = PackageDaemonSessionV1.create("workspace-a", root)
+    val first = session.begin_request("workspace-a")
+    if not first.valid or first.generation == nil:
+        return PackageIndexDaemonObservationV1(false, "request-a-failed", false, false, false, false, false)
+    generation.scv_revision_id = "revision-b"
+    generation.scv_commit_id = "commit-b"
+    generation.scv_tree_id = "tree-b"
+    generation.inventory_digest = sha256_text("inventory-b")
+    if not package_module_index_publish_if_current_v1(root, generation, initial.digest):
+        return PackageIndexDaemonObservationV1(false, "fixture-publish-b-failed", false, false, false, false, false)
+    val next = package_module_index_read_current_v1(root)
+    val active_refresh_rejected = not session.refresh()
+    val stable = first.index_digest == initial.digest and
+        first.generation!.scv_revision_id == "revision-a" and session.index_digest == initial.digest
+    val foreign = session.begin_request("workspace-b")
+    val isolated = not foreign.valid and foreign.reason == "workspace-mismatch"
+    if not session.end_request(first.sequence):
+        return PackageIndexDaemonObservationV1(false, "request-a-end-failed", stable, active_refresh_rejected, isolated, false, false)
+    val second = session.begin_request("workspace-a")
+    val refreshed = next.valid and second.valid and second.index_digest == next.digest and
+        second.index_digest != first.index_digest and second.sequence > first.sequence
+    val ended = session.end_request(second.sequence)
+    val closed = session.close()
+    val released = ended and closed and session.generation == nil and session.index_digest == ""
+    val valid = stable and active_refresh_rejected and isolated and refreshed and released
+    PackageIndexDaemonObservationV1(valid, if valid: "ok" else: "daemon-isolation-failed",
+        stable, active_refresh_rejected, isolated, refreshed, released)
+
+export PackageIndexDaemonObservationV1, package_index_acceptance_daemon_v1
