@@ -3,6 +3,7 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_layout.*
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 use std.nogc_sync_mut.text_layout.font_renderer.{
     font_measure_probe_report, resolved_font_front_memo_hits,
     resolved_font_front_memo_misses}
@@ -1394,7 +1395,7 @@ fn _simple_web_layout_compose_retained(
                     content.width, content.height, WEB_IFRAME_PLACEHOLDER,
                     visible
                 )
-                val now = rt_time_now_micros()
+                val now = time_now_micros()
                 if (
                     depth + 1 > WEB_IFRAME_DEPTH_CAP or
                     now >= _web_render_deadline_us or
@@ -1526,7 +1527,7 @@ fn _simple_web_layout_compose_document(
     images: [SimpleOsHostGpuImageResource],
     extra_rules: Rules, depth: i32, deadline_us: i64
 ) -> SimpleWebLayoutDrawIrResult:
-    val render_start_us = rt_time_now_micros()
+    val render_start_us = time_now_micros()
     val _phase_on = _web_phase_trace_enabled()
     if deadline_us > 0:
         _web_render_deadline_us = deadline_us
@@ -1541,16 +1542,16 @@ fn _simple_web_layout_compose_document(
     # unattributable. Permanent and default-off in the same style as the
     # surrounding phase trace: the clock is read only when `_phase_on`, so an
     # untraced render pays nothing for them.
-    val _pp_t0 = if _phase_on: rt_time_now_micros() else: 0
+    val _pp_t0 = if _phase_on: time_now_micros() else: 0
     val nodes = parse_html(html)
-    val _pp_t1 = if _phase_on: rt_time_now_micros() else: 0
+    val _pp_t1 = if _phase_on: time_now_micros() else: 0
     # Pass every parameter explicitly. An omitted trailing default was
     # observed taking a non-default value in the freestanding SimpleOS kernel
     # build (the `trace_stages` receipt fired from this call site even though
     # the only trace-enabled caller never ran), so this render path does not
     # rely on default-argument materialization.
     val own_rules = extract_css_vw(html, width, false)
-    val _pp_t2 = if _phase_on: rt_time_now_micros() else: 0
+    val _pp_t2 = if _phase_on: time_now_micros() else: 0
     val rules = Rules(
         group_parts: extra_rules.group_parts + own_rules.group_parts,
         group_specificities: extra_rules.group_specificities + own_rules.group_specificities,
@@ -1619,7 +1620,7 @@ fn _simple_web_layout_compose_document(
             part_i = part_i + 1
     val child_index = build_child_index(nodes)
     if _phase_on:
-        val _pp_t3 = rt_time_now_micros()
+        val _pp_t3 = time_now_micros()
         print "[web-phase] phase=parse elapsed_ms={(_pp_t3 - render_start_us) / 1000} nodes={nodes.len()}" +
             " pp_html_us={_pp_t1 - _pp_t0} pp_css_us={_pp_t2 - _pp_t1}" +
             " pp_childidx_us={_pp_t3 - _pp_t2}"
@@ -1629,13 +1630,13 @@ fn _simple_web_layout_compose_document(
     var cpu_material_nodes: [i32] = []
     var solid_material_nodes: [i32] = []
     if _phase_on:
-        print "[web-phase] phase=style_start elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=style_start elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
     val base_styles = compute_styles_with_material(
         nodes, rules, child_index, false, vector_fonts,
         material_entries, material_counts,
         cpu_material_nodes, solid_material_nodes)
     if _phase_on:
-        print "[web-phase] phase=style_end elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=style_end elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
         # Cascade- and font-memo effectiveness, same level gate as the phase
         # boundaries: a regression shows up here as a collapsed hit count long
         # before it shows up as wall-clock on someone else's machine.
@@ -1694,7 +1695,7 @@ fn _simple_web_layout_compose_document(
         neg_one_i32_list(node_count)
     )
     if _phase_on:
-        print "[web-phase] phase=layout elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=layout elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
     val _phase_composed = _simple_web_layout_compose_retained(
         html, nodes, rules, child_index, base_styles, styles, raw_boxes,
         animation_registry, animation_schedule, animation_time_ms,
@@ -1709,7 +1710,7 @@ fn _simple_web_layout_compose_document(
         # (_html_draw_ir_command's resolve_font_metrics_with_language call in
         # simple_web_html_layout_renderer_paint_layout.spl) actually runs, a
         # SECOND font-metric resolution per #text node distinct from style's.
-        print "[web-phase] phase=compose_shaping elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=compose_shaping elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
     _phase_composed
 
 pub class SimpleWebRetainedLayoutPreparation:
@@ -2090,24 +2091,24 @@ pub fn simple_web_layout_render_html_draw_ir_cpu_bitmap_with_images(
 # times so render-cost regressions can be localized without a debugger.
 pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
     _web_budget_begin(budget_ms)
-    val t0 = rt_time_now_micros()
+    val t0 = time_now_micros()
     val nodes = parse_html(html)
-    val t1 = rt_time_now_micros()
+    val t1 = time_now_micros()
     print "[layout-trace] parse_html_ms={(t1 - t0) / 1000} nodes={nodes.len()}"
     val rules = extract_css_vw(html, width, true)
-    val t2 = rt_time_now_micros()
+    val t2 = time_now_micros()
     print "[layout-trace] extract_css_ms={(t2 - t1) / 1000}"
     val child_index = build_child_index(nodes)
-    val t_child_index = rt_time_now_micros()
+    val t_child_index = time_now_micros()
     print "[layout-trace] build_child_index_ms={(t_child_index - t2) / 1000}"
     val styles = compute_styles(nodes, rules, child_index, true, true)
-    val t3 = rt_time_now_micros()
+    val t3 = time_now_micros()
     print "[layout-trace] compute_styles_ms={(t3 - t_child_index) / 1000}"
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(nodes, styles, child_index, 0, 0, 0, width, height, zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), empty_starts, empty_ends, neg_one_i32_list(node_count))
-    val t4 = rt_time_now_micros()
+    val t4 = time_now_micros()
     print "[layout-trace] layout_ms={(t4 - t3) / 1000}"
     var trace_i = 0
     while trace_i < node_count:  # cpu-lane-loop-ok: one pass over nodes printing the html/body/main box receipt; bound is node_count and this is the stage-timed diagnostic render entry point only
@@ -2120,12 +2121,12 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
     val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     var fb = browser_layout_framebuffer_filled(base, width, height)
-    val t_init = rt_time_now_micros()
+    val t_init = time_now_micros()
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
-    val t_paint = rt_time_now_micros()
+    val t_paint = time_now_micros()
     var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
-    val t5 = rt_time_now_micros()
+    val t5 = time_now_micros()
     print "[layout-trace] framebuffer_init_ms={(t_init - t4) / 1000} trace_setup_ms={(t_paint - t_init) / 1000} paint_draw_ms={(t5 - t_paint) / 1000} paint_ms={(t5 - t4) / 1000} widget_mode={widget_mode}"
     painted
 
@@ -2188,7 +2189,7 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     # (compute_styles on a hostile/huge real page, in practice) doesn't zero out
     # every later phase. Total wall-clock never exceeds the caller's budget_ms —
     # only the boundary between phases moves. See _web_budget_rearm().
-    val render_start_us = rt_time_now_micros()
+    val render_start_us = time_now_micros()
     val env_override = _web_render_budget_ms_env_override()
     val area_floor_ms = (width as i64) * (height as i64) / 16
     val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
