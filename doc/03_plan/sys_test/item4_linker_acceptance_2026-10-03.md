@@ -4,6 +4,14 @@ Date: 2026-10-03. Target: `release/1.0` at
 `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`.
 Status: specification in progress; execution and certification unverified.
 
+Implementation update, 2026-10-03: after the tests were committed, the user
+instructed `fix what you can`. The hosted ELF engine now rejects selected
+non-ET_REL archive members before resolution/layout and rejects embedded NUL
+in a dynamic interpreter path before input processing. The existing regression
+scenarios cover both changes; the interpreter scenario pins the exact error.
+This is test-first authorship followed by source-reviewed implementation, not
+an observed RED/GREEN cycle. Runtime execution and all broader gates remain open.
+
 This is an executable acceptance breakdown of the existing seven-item plan's
 item 4 and the linker research G0-G6 gates. It does not replace the full linker
 scope with the first portable test slice. Existing decisions remain selected;
@@ -113,8 +121,8 @@ PID 28048 at observation. Its unfinished Stage 2 output is not a Stage 4 CLI.
 Do not restart or interfere with that session. Revalidate live handles before
 waiting; historical PID values are not ongoing proof of activity.
 
-Until a runtime is admitted, the spec is unexecuted, the suspected archive bug
-is source-inspected, and RED/GREEN, generated manuals, full verification and
+Until a runtime is admitted, the specs and source fixes are unexecuted;
+RED/GREEN, generated manuals, full verification and
 release admission remain open. The existing bug
 `doc/08_tracking/bug/deployed_bin_simple_still_seed_2026-08-05.md` records the
 deployed-runtime problem. No completion receipt may be minted from this plan.

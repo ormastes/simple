@@ -24,8 +24,9 @@ Owner: `src/compiler/70.backend/linker/elf/elf_static_link.spl`,
 selected object enters TLS relaxation, symbol resolution, GC or layout.
 
 Direct inputs already require ET_REL and the requested e_machine. Selected
-archive members must satisfy the same two invariants. Today the hosted loop
-checks only e_machine. Add an ET_REL rejection there; diagnostics must retain
+archive members must satisfy the same two invariants. At the inspected release
+base the hosted loop checked only e_machine. The source fix now adds an ET_REL
+rejection there; diagnostics retain
 the archive member name and actual e_type. Keep archive parsing and selection
 separate: an unselected member is not an admitted input and must not change
 the linked image. The SimpleOS route already revalidates selected member bytes
@@ -39,6 +40,14 @@ through the production archive reader rather than hardcode offsets. Setup
 asserts the member exists and was ET_REL before mutation. The unchanged archive
 and direct-object cases establish valid behavior. No interface/type changes
 or new linker owner are required for this correction.
+
+The user's subsequent `fix what you can` instruction also authorizes the
+source-level interpreter-path correction: a dynamic request containing NUL in
+`interp` returns `dynamic interpreter path contains NUL (PT_INTERP)` before
+object parsing. This preserves the existing empty-interpreter error and static
+request behavior, and prevents emitting a path the native loader would truncate.
+Both corrections were authored after their regression specs; they remain
+unexecuted and do not establish observed RED/GREEN or platform certification.
 
 ### Evidence boundaries and remaining implementation
 
