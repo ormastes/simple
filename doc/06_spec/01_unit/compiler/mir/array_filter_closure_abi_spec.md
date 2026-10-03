@@ -9,10 +9,18 @@ One array-read and one push instruction remain in the loop. These are static
 shape counts, not observed runtime callback counts.
 
 Captured cases also require a nonzero resolved-target branch. Its failure block
-calls rt_panic and terminates unreachable; removing the success edge from the
+uses the canonical Abort terminator; removing the success edge from the
 actual generated CFG must disconnect every indirect callback. This checks guard
 dominance rather than merely finding a panic instruction. Runtime allocation
 failure injection remains pending.
+LLVM translation must emit the actual panic ABI: one pointer and the explicit
+42-byte message length. Backend-owned Abort lowering avoids guessing a shared
+panic ABI across LLVM, C, Cranelift and pure-runtime providers.
+
+Inspection also found older manual `rt_panic` calls with zero declared params
+and one operand elsewhere in method lowering, while LLVM declares `(ptr,i64)`
+and the pure core provider has a separate word-shaped entry. Those pre-existing
+sites need an owner-boundary audit; this repair changes only the new filter guard.
 
 The repair preserves the existing all-word lambda ABI and capture construction
 timing. It does not inline captures, fuse loops, or change type eligibility.

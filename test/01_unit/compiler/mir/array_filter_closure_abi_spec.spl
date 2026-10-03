@@ -9,6 +9,8 @@ use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
 
 fn filter_callback_reachable(function: MirFunction, blocked_from: i64, blocked_to: i64) -> bool:
     var work: [i64] = [function.entry_block.id]
@@ -69,18 +71,12 @@ fn filter_assert_null_target_guard(function: MirFunction):
             case _: pass
     expect(success_block).to_be_greater_than(-1)
     expect(failure_block).to_be_greater_than(-1)
-    var panic_found = false
+    var abort_found = false
     for block in function.blocks:
         if block.id.id == failure_block:
-            expect(block.terminator).to_equal(MirTerminator.Unreachable)
-            for instruction in block.instructions:
-                match instruction.kind:
-                    case MirInstKind.Call(_, callee, _):
-                        match callee.kind:
-                            case MirOperandKind.Const(MirConstValue.Str("rt_panic"), _): panic_found = true
-                            case _: pass
-                    case _: pass
-    expect(panic_found).to_equal(true)
+            expect(block.terminator).to_equal(MirTerminator.Abort("array filter closure target is unavailable"))
+            abort_found = true
+    expect(abort_found).to_equal(true)
     expect(filter_callback_reachable(function, -1, -1)).to_equal(true)
     # Removing the nonzero edge must disconnect every indirect callback call.
     expect(filter_callback_reachable(function, guard_block, success_block)).to_equal(false)
@@ -158,6 +154,16 @@ fn filter_abi_check(source: text, captured: bool):
     # One instruction in the existing loop, not a runtime invocation count.
     expect(array_reads).to_equal(1)
     expect(array_pushes).to_equal(1)
+    if captured:
+        var translator = MirToLlvm.create("filter_abi", CodegenTarget.X86_64, nil)
+        val llvm = translator.translate_module(mir)
+        var panic_calls = 0
+        for line in llvm.split("\n"):
+            if line.contains("call void @rt_panic("):
+                panic_calls = panic_calls + 1
+                expect(line).to_contain("call void @rt_panic(ptr ")
+                expect(line).to_end_with(", i64 42)")
+        expect(panic_calls).to_equal(1)
 
 describe "array filter lambda ABI":
     it "retains the noncapturing raw producer convention":
