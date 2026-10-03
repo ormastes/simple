@@ -141,3 +141,20 @@ its compare/delete is not atomic. This API does not replace the host's opaque
 exclusive-lock authority. Explicit service facades are not edited in this lane;
 the host must directly import the owner module or extend facade exports.
 Runtime tests remain unexecuted without an admitted pure-Simple runner.
+
+## Remote acceptance owner adapter
+
+Added `app.test.package_index_acceptance_remote` for canonical scenarios
+`remote-cache-local-admission` and `remote-cache-poison-denied`, with actual
+local hash observations from `remote_lookup_verified` and an in-memory transport
+whose recompute method repeats the untrusted claim. The returned record reports
+content verification and exact manifest/artifact digests; it does not report
+local semantic/archive admission, graph authority or fabricated filesystem
+counters. Three integration cases assert verified bytes, rejected poisoned
+bytes and unknown-scenario refusal. Parent/harness owner integrates the record
+into main; this lane does not edit main or the cached-binary wrapper.
+
+Read-only review of root `a1a36f44002` confirmed the prior owned-state and stale
+request-token P1 findings are closed in source. Wrapper inspection confirmed
+missing cached executable produces BLOCKED/exit 2 and no source fallback.
+These are static review findings, not runtime qualification.
