@@ -26,6 +26,11 @@ pub class LinkStagedFileV1:
     spill_bytes: u64
     scratch_reserved_bytes: u64
     var consumed: bool
+    var published: bool
+
+pub struct LinkSpillPublicationV1:
+    published_bytes: u64
+    cleanup_pending: bool
 
 pub fn link_spill_required_scratch_v1(content_bytes: u64, window_bytes: i64) -> Result<u64, text>:
     if window_bytes < 1 or window_bytes > 1048576:
@@ -82,7 +87,7 @@ pub fn link_discard_staged_v1(stage: LinkStagedFileV1) -> Result<bool, text>:
     if not _link_spill_cleanup(stage): return Err("spill cleanup failed")
     Ok(true)
 
-fn _link_spill_failure(stage: LinkStagedFileV1, reason: text) -> Result<u64, text>:
+fn _link_spill_failure(stage: LinkStagedFileV1, reason: text) -> Result<LinkSpillPublicationV1, text>:
     if not _link_spill_cleanup(stage): return Err("spill cleanup failed after: {reason}")
     Err(reason)
 
@@ -135,7 +140,7 @@ pub fn link_stage_file_v1(source: text, parent: text, window_bytes: i64,
         return Err(directory_result.unwrap_err())
     val stage = LinkStagedFileV1(directory: directory_result.unwrap(),
         content_bytes: input.size, window_bytes: window_bytes, spill_bytes: spill_bytes,
-        scratch_reserved_bytes: required, consumed: false)
+        scratch_reserved_bytes: required, consumed: false, published: false)
     val opened = retained_file_open(stage.directory + "/frames.bin", spill_bytes, true)
     if opened.is_err():
         val closed = retained_file_close(input)
@@ -181,7 +186,8 @@ fn _link_spill_replay(input: RetainedFile, output: RetainedFile,
     Ok(offset)
 
 pub fn link_publish_staged_v1(stage: LinkStagedFileV1, destination: text,
-        cancelled: fn() -> bool) -> Result<u64, text>:
+        cancelled: fn() -> bool) -> Result<LinkSpillPublicationV1, text>:
+    if stage.published: return Err("spill transaction already published")
     if stage.consumed: return Err("spill transaction already consumed")
     if cancelled(): return _link_spill_failure(stage, "spill publication cancelled")
     if not dir_is_real_no_follow(stage.directory): return Err("spill stage directory changed")
@@ -205,9 +211,9 @@ pub fn link_publish_staged_v1(stage: LinkStagedFileV1, destination: text,
     val published = file_publish_noreplace(stage.directory + "/payload.tmp", destination)
     if published.is_err(): return _link_spill_failure(stage, published.unwrap_err())
     if not published.unwrap(): return _link_spill_failure(stage, "spill destination exists")
-    if not _link_spill_cleanup(stage):
-        return Err("spill output published but stage cleanup failed")
-    Ok(replayed.unwrap())
+    stage.published = true
+    val cleaned = _link_spill_cleanup(stage)
+    Ok(LinkSpillPublicationV1(published_bytes: replayed.unwrap(), cleanup_pending: not cleaned))
 
-export LinkStagedFileV1, link_spill_required_scratch_v1
+export LinkStagedFileV1, LinkSpillPublicationV1, link_spill_required_scratch_v1
 export link_stage_file_v1, link_publish_staged_v1, link_discard_staged_v1
