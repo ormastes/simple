@@ -1,0 +1,74 @@
+use std.spec.{describe, it, expect}
+use app.io.mod.{cwd, dir_create, file_exists, process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.scv.db_confidentiality.{DbRestrictedContext}
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get}
+use app.scv.db.restricted_evidence.*
+
+fn setup_item2_restricted_paths() -> (text, text):
+    val root = secure_temp_dir(path_absolute(cwd()), "item2-restricted-").unwrap()
+    val source = "{root}/source"
+    val external = "{root}/external"
+    expect(dir_create(source, false)).to_be(true)
+    expect(dir_create(external, false)).to_be(true)
+    val (_out, _err, code) = process_run_timeout("git", ["init", "--quiet", source], 30000)
+    expect(code).to_equal(0)
+    (source, external)
+
+fn setup_item2_restricted_store_context() -> DbRestrictedContext:
+    DbRestrictedContext(repository: "fixture-repository", namespace: "00112233445566778899aabbccddeeff", epoch: 1, key_id: "fixture-owned-key", purpose: "failure-reproduction")
+
+fn setup_item2_restricted_quota() -> DbEvidenceStoreQuota:
+    DbEvidenceStoreQuota(max_content_bytes: 4096, max_envelope_bytes: 8192, max_dependencies: 8)
+
+describe "Restricted external evidence and owned active-key lifecycle":
+    it "stores actual encrypted bytes with fresh nonces and authenticated context":
+        val (source, external) = setup_item2_restricted_paths()
+        val context = setup_item2_restricted_store_context()
+        val owner = db_restricted_key_create(source, external, context).unwrap()
+        val key = db_restricted_key_load(source, external, owner).unwrap()
+        expect(key.len()).to_equal(32)
+        val plaintext: [u8] = [112,114,105,118,97,116,101]
+        val quota = setup_item2_restricted_quota()
+        val first = db_restricted_store_put(source, external, context, key, plaintext, [], 10, quota).unwrap()
+        val second = db_restricted_store_put(source, external, context, key, plaintext, [], 10, quota).unwrap()
+        expect(first.digest == second.digest).to_be(false)
+        expect(db_restricted_store_get(source, external, first, key, quota)).to_equal(Ok(plaintext))
+        val raw = db_evidence_store_get(source, external, first.digest, 10, quota).unwrap()
+        expect(raw.content[17:24] == plaintext).to_be(false)
+        expect(db_restricted_store_get(source, external, first, [], quota)).to_equal(Err("SCVDB_EVIDENCE_RESTRICTED"))
+        var foreign = first
+        foreign.context.epoch = 2
+        expect(db_restricted_store_get(source, external, foreign, key, quota)).to_equal(Err("SCVDB_RESTRICTED_AUTHENTICATION"))
+
+    it "deletes only the owned active key file and honestly preserves ciphertext and loaded copies":
+        val (source, external) = setup_item2_restricted_paths()
+        val context = setup_item2_restricted_store_context()
+        val owner = db_restricted_key_create(source, external, context).unwrap()
+        val loaded_copy = db_restricted_key_load(source, external, owner).unwrap()
+        val quota = setup_item2_restricted_quota()
+        val evidence = db_restricted_store_put(source, external, context, loaded_copy, [1,2,3], [], 10, quota).unwrap()
+        val report = db_restricted_key_delete(source, external, owner).unwrap()
+        expect(report.owned_key_status).to_equal("active_file_deleted_and_directory_synced")
+        expect(report.git_and_clone_erasure).to_equal("not_guaranteed")
+        expect(report.external_ciphertext_status).to_equal("retained")
+        expect(file_exists("{owner.directory}/active.key")).to_be(false)
+        expect(file_exists("{owner.directory}/owner")).to_be(true)
+        expect(db_restricted_key_load(source, external, owner)).to_equal(Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE"))
+        # The loaded copy deliberately still works: deletion is not retroactive
+        # zeroization of this process or proof about backups or cloned keys.
+        expect(db_restricted_store_get(source, external, evidence, loaded_copy, quota)).to_equal(Ok([1,2,3]))
+        expect(db_restricted_key_delete(source, external, owner)).to_equal(Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE"))
+
+    it "rejects a forged context or directory before key load and deletion":
+        val (source, external) = setup_item2_restricted_paths()
+        val owner = db_restricted_key_create(source, external, setup_item2_restricted_store_context()).unwrap()
+        var foreign = owner
+        foreign.context.repository = "other-repository"
+        expect(db_restricted_key_load(source, external, foreign)).to_equal(Err("SCVDB_RESTRICTED_KEY_OWNER"))
+        expect(db_restricted_key_delete(source, external, foreign)).to_equal(Err("SCVDB_RESTRICTED_KEY_OWNER"))
+        foreign = owner
+        foreign.directory = source
+        expect(db_restricted_key_load(source, external, foreign)).to_equal(Err("SCVDB_RESTRICTED_KEY_SCOPE"))
+        expect(file_exists("{owner.directory}/active.key")).to_be(true)

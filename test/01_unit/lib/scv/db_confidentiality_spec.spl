@@ -1,0 +1,111 @@
+use std.spec.{describe, it, expect}
+use std.scv.db_confidentiality.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+
+fn setup_item2_confidential_patch() -> DbPatch:
+    val entity = entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1))
+    DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: 1, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: [DbOperation.Create(entity, "bug", [DbField(name: "title", value: DbValue.Text("reviewed title"))])], payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "fixture-key", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "reviewed fixture")
+
+fn setup_item2_restricted_context() -> DbRestrictedContext:
+    DbRestrictedContext(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, key_id: "restricted-key-1", purpose: "failure-evidence")
+
+fn setup_item2_restricted_key() -> [u8]:
+    var key: [u8] = []
+    for value in 128..160: key.push(value as u8)
+    key
+
+describe "Default-deny reviewed metadata":
+    it "binds typed nested values and policy contents canonically":
+        expect(db_metadata_value_digest(DbValue.Text("1")).unwrap() == db_metadata_value_digest(DbValue.Unsigned(1)).unwrap()).to_be(false)
+        val nested = DbValue.List([DbValue.Text("reviewed"), DbValue.Unsigned(7)])
+        val changed = DbValue.List([DbValue.Text("unreviewed secret"), DbValue.Unsigned(7)])
+        expect(db_metadata_value_digest(nested).unwrap() == db_metadata_value_digest(changed).unwrap()).to_be(false)
+        val patch = setup_item2_confidential_patch()
+        val policy = setup_item2_reviewed_metadata([patch])
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Ok("allowed"))
+        var mutated = policy
+        mutated.rules = []
+        expect(db_metadata_check_patch(patch, mutated)).to_equal(Err("SCVDB_METADATA_POLICY_REVISION"))
+
+    it "rejects unknown fields and forbidden secret PII or restricted classifications":
+        val value = DbValue.Text("classified value")
+        for classification in ["secret", "pii", "restricted"]:
+            var policy = DbMetadataPolicy(revision: "", rules: [DbMetadataRule(kind: "bug", field: "private", classification: classification, allowed_value_digests: [db_metadata_value_digest(value).unwrap()])])
+            policy.revision = db_metadata_policy_digest(policy).unwrap()
+            expect(db_metadata_admit(policy, "bug", [DbField(name: "private", value: value)])).to_equal(Err("SCVDB_METADATA_FORBIDDEN"))
+            expect(db_metadata_admit(policy, "bug", [DbField(name: "unknown", value: value)])).to_equal(Err("SCVDB_METADATA_FIELD_UNREVIEWED"))
+
+    it "checks provenance rather than examining only proposed rows":
+        var patch = setup_item2_confidential_patch()
+        val policy = setup_item2_reviewed_metadata([patch])
+        patch.provenance = "private-token=not-reviewed"
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+
+    it "checks update before-values and preconditions before Git admission":
+        var patch = setup_item2_confidential_patch()
+        val entity = entity_ref_provisional(EntityUid(database_namespace: patch.namespace, entity_kind: "bug", actor: ActorIncarnation(hex: patch.actor), counter: 1))
+        val condition = RowPrecondition(base_row: "known-row", expected_revision: "known-revision", expected_fields: [DbField(name: "title", value: DbValue.Text("reviewed title"))])
+        val edits = [FieldEdit(field: "title", before: DbValue.Text("reviewed title"), after: DbValue.Text("reviewed new title"))]
+        patch.operations = [DbOperation.UpdateFields(entity, edits, condition)]
+        val policy = setup_item2_reviewed_metadata([patch])
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Ok("allowed"))
+        patch.operations = [DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("secret hidden in before"), after: DbValue.Text("reviewed new title"))], condition)]
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+        val hidden = RowPrecondition(base_row: "known-row", expected_revision: "known-revision", expected_fields: [DbField(name: "title", value: DbValue.Text("secret hidden in condition"))])
+        patch.operations = [DbOperation.UpdateFields(entity, edits, hidden)]
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+
+    it "rejects unreviewed causal-set observations and nested content":
+        var patch = setup_item2_confidential_patch()
+        val entity = entity_ref_provisional(EntityUid(database_namespace: patch.namespace, entity_kind: "bug", actor: ActorIncarnation(hex: patch.actor), counter: 1))
+        patch.operations = [DbOperation.AddSetMemberAfterRemoval(entity, "labels", DbValue.List([DbValue.Text("reviewed")]), "dot-1", ["remove-1"])]
+        val policy = setup_item2_reviewed_metadata([patch])
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Ok("allowed"))
+        patch.operations = [DbOperation.AddSetMemberAfterRemoval(entity, "labels", DbValue.List([DbValue.Text("reviewed")]), "dot-1", ["secret in causal dot"])]
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+        patch.operations = [DbOperation.AddSetMemberAfterRemoval(entity, "labels", DbValue.List([DbValue.Text("secret nested")]), "dot-1", ["remove-1"])]
+        expect(db_metadata_check_patch(patch, policy)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+
+describe "Restricted evidence real authenticated encryption":
+    it "uses the RFC8439 stream prefix and round-trips authenticated context":
+        val key = setup_item2_restricted_key()
+        val nonce: [u8] = [7,0,0,0,64,65,66,67,68,69,70,71]
+        val plaintext: [u8] = [76,97,100,105,101,115,32,97,110,100,32,71,101,110,116,108]
+        val context = setup_item2_restricted_context()
+        val envelope = db_restricted_seal(key, nonce, plaintext, context).unwrap()
+        expect(envelope.ciphertext_and_tag[0:16]).to_equal([211,26,141,52,100,142,96,219,123,134,175,188,83,239,126,194])
+        expect(db_restricted_open(key, envelope, context)).to_equal(Ok(plaintext))
+
+    it "rejects changed ciphertext context key nonce and authentication tag":
+        val key = setup_item2_restricted_key()
+        val nonce: [u8] = [1,2,3,4,5,6,7,8,9,10,11,12]
+        val context = setup_item2_restricted_context()
+        val sealed = db_restricted_seal(key, nonce, [1,2,3], context).unwrap()
+        var changed = sealed
+        changed.ciphertext_and_tag = [sealed.ciphertext_and_tag[0] ^ 1u8] + sealed.ciphertext_and_tag[1:]
+        expect(db_restricted_open(key, changed, context)).to_equal(Err("SCVDB_RESTRICTED_AUTHENTICATION"))
+        changed = sealed
+        changed.nonce = [sealed.nonce[0] ^ 1u8] + sealed.nonce[1:]
+        expect(db_restricted_open(key, changed, context)).to_equal(Err("SCVDB_RESTRICTED_AUTHENTICATION"))
+        changed = sealed
+        val last = sealed.ciphertext_and_tag.len() - 1
+        changed.ciphertext_and_tag = sealed.ciphertext_and_tag[0:last] + [sealed.ciphertext_and_tag[last] ^ 1u8]
+        expect(db_restricted_open(key, changed, context)).to_equal(Err("SCVDB_RESTRICTED_AUTHENTICATION"))
+        var foreign = context
+        foreign.repository = "another-repository"
+        expect(db_restricted_open(key, sealed, foreign)).to_equal(Err("SCVDB_RESTRICTED_AUTHENTICATION"))
+        foreign = context
+        foreign.key_id = "another-key-id"
+        expect(db_restricted_open(key, sealed, foreign)).to_equal(Err("SCVDB_RESTRICTED_AUTHENTICATION"))
+        var wrong_key = key
+        wrong_key[0] = 0u8
+        expect(db_restricted_open(wrong_key, sealed, context)).to_equal(Err("SCVDB_RESTRICTED_AUTHENTICATION"))
+        expect(db_restricted_seal([], nonce, [], context)).to_equal(Err("SCVDB_RESTRICTED_KEY_NONCE"))
+
+    it "does not turn a key ID into proof of erasure":
+        val report = db_restricted_deletion_report("key-1")
+        expect(report.owned_key_status).to_equal("unverified")
+        expect(report.git_and_clone_erasure).to_equal("not_guaranteed")
+        expect(report.external_ciphertext_status).to_equal("not_deleted_by_this_operation")

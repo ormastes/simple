@@ -1,0 +1,136 @@
+# Actual AEAD-encrypted external evidence and a narrowly scoped owned-key store.
+# Keys never enter Git, logs, envelopes or return receipts. Secure private key
+# directories use the existing host facade; no claim covers backups or RAM.
+use app.io.mod.{is_dir, dir_create, file_create_exclusive, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_delete, file_exists, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use std.scv.db_confidentiality.*
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use std.common.crypto.sha256.{sha256_text}
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_external_scope, db_evidence_store_put, db_evidence_store_get}
+
+struct DbRestrictedHandle:
+    digest: text
+    context: DbRestrictedContext
+    created_day: u64
+
+struct DbRestrictedKeyHandle:
+    directory: text
+    context: DbRestrictedContext
+
+fn _restricted_hex_bytes(hex: text, count: i64) -> Result<[u8], text>:
+    if hex.len() != count * 2: return Err("SCVDB_RESTRICTED_ENTROPY")
+    var bytes: [u8] = []
+    var value = 0
+    for index in 0..hex.len():
+        val code = hex.char_code_at(index)
+        var digit = -1
+        if code >= 48 and code <= 57: digit = code - 48
+        elif code >= 97 and code <= 102: digit = code - 97 + 10
+        if digit < 0: return Err("SCVDB_RESTRICTED_ENTROPY")
+        value = value * 16 + digit
+        if index % 2 == 1:
+            bytes.push(value as u8)
+            value = 0
+    Ok(bytes)
+
+fn db_restricted_store_put(checkout: text, external_parent: text, context: DbRestrictedContext, key: [u8], plaintext: [u8], dependencies: [text], created_day: u64, quota: DbEvidenceStoreQuota) -> Result<DbRestrictedHandle, text>:
+    # Reject resource policy before entropy, encryption or storage IO.
+    if quota.max_content_bytes < 0 or quota.max_content_bytes > 1073741824 or quota.max_envelope_bytes < 21 or quota.max_envelope_bytes > 2147483647 or quota.max_dependencies < 0 or quota.max_dependencies > 65536 or plaintext.len() < 0 or dependencies.len() > quota.max_dependencies or plaintext.len() > quota.max_content_bytes - 33:
+        return Err("SCVDB_EVIDENCE_QUOTA")
+    if plaintext.len() + 54 + dependencies.len() * 64 > quota.max_envelope_bytes: return Err("SCVDB_EVIDENCE_QUOTA")
+    val nonce = _restricted_hex_bytes(random_hex(12) ?? "", 12)?
+    val sealed = db_restricted_seal(key, nonce, plaintext, context)?
+    val bytes: [u8] = [83, 67, 82, 69, 1] + sealed.nonce + sealed.ciphertext_and_tag
+    val digest = db_evidence_digest(bytes, dependencies)?
+    val node = DbEvidenceNode(digest: digest, content: bytes, availability: "available", created_day: created_day, dependencies: dependencies)
+    val stored = db_evidence_store_put(checkout, external_parent, node, quota)?
+    Ok(DbRestrictedHandle(digest: stored.digest, context: context, created_day: created_day))
+
+fn db_restricted_store_get(checkout: text, external_parent: text, handle: DbRestrictedHandle, key: [u8], quota: DbEvidenceStoreQuota) -> Result<[u8], text>:
+    if key.len() == 0: return Err("SCVDB_EVIDENCE_RESTRICTED")
+    if key.len() != 32: return Err("SCVDB_RESTRICTED_KEY_NONCE")
+    val node = db_evidence_store_get(checkout, external_parent, handle.digest, handle.created_day, quota)?
+    val bytes = node.content
+    if bytes.len() < 33 or bytes[0] != 83 or bytes[1] != 67 or bytes[2] != 82 or bytes[3] != 69 or bytes[4] != 1: return Err("SCVDB_RESTRICTED_FORMAT")
+    var nonce: [u8] = []
+    var ciphertext: [u8] = []
+    for index in 5..bytes.len():
+        if index < 17: nonce.push(bytes[index])
+        else: ciphertext.push(bytes[index])
+    db_restricted_open(key, DbRestrictedEnvelope(nonce: nonce, ciphertext_and_tag: ciphertext), handle.context)
+
+fn _restricted_key_owner(checkout: text, context: DbRestrictedContext) -> Result<text, text>:
+    val context_digest = db_restricted_context_digest(context)?
+    Ok("scv-db/restricted-key-owner/v1\n{sha256_text(checkout)}\n{context_digest}\n")
+
+fn _restricted_key_scope(checkout: text, external_parent: text, handle: DbRestrictedKeyHandle) -> Result<text, text>:
+    val root = db_evidence_external_scope(checkout, external_parent, "scv-restricted-keys-v1")?
+    if not is_dir(root) or path_absolute(root) != root or not handle.directory.starts_with("{root}/key-") or not is_dir(handle.directory) or path_absolute(handle.directory) != handle.directory:
+        return Err("SCVDB_RESTRICTED_KEY_SCOPE")
+    val leaf = handle.directory[root.len() + 1:]
+    if leaf.contains("/") or leaf.contains("\\"): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
+    val marker = "{handle.directory}/owner"
+    if not file_is_regular_no_follow(marker) or path_absolute(marker) != marker: return Err("SCVDB_RESTRICTED_KEY_OWNER")
+    if file_read_regular_no_follow_bounded(marker, 256)? != _restricted_key_owner(checkout, handle.context)?: return Err("SCVDB_RESTRICTED_KEY_OWNER")
+    Ok(root)
+
+fn _restricted_key_create_owned(checkout: text, external_parent: text, root: text, context: DbRestrictedContext, hex: text) -> Result<DbRestrictedKeyHandle, text>:
+    if not is_dir(root) and not dir_create(root, false): return Err("SCVDB_RESTRICTED_KEY_STORE")
+    if path_absolute(root) != root: return Err("SCVDB_RESTRICTED_KEY_SCOPE")
+    # Secure host temp directories are private (0700 on POSIX), and persist as
+    # owned key directories. They are not automatically cleaned or archived.
+    val directory = secure_temp_dir(root, "key-")?
+    if path_absolute(directory) != directory or not directory.starts_with("{root}/key-"): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
+    val owner = _restricted_key_owner(checkout, context)?
+    if not file_create_exclusive("{directory}/owner", owner): return Err("SCVDB_RESTRICTED_KEY_OWNER")
+    if not file_create_exclusive("{directory}/active.key", hex): return Err("SCVDB_RESTRICTED_KEY_CREATE")
+    if not file_fsync("{directory}/owner") or not file_fsync("{directory}/active.key") or not directory_fsync(directory) or not directory_fsync(root) or not directory_fsync(external_parent): return Err("SCVDB_RESTRICTED_KEY_DURABILITY_UNCERTAIN")
+    val handle = DbRestrictedKeyHandle(directory: directory, context: context)
+    val validated = _restricted_key_scope(checkout, external_parent, handle)?
+    if file_read_regular_no_follow_bounded("{directory}/active.key", 64)? != hex: return Err("SCVDB_RESTRICTED_KEY_READBACK")
+    Ok(handle)
+
+fn db_restricted_key_create(checkout: text, external_parent: text, context: DbRestrictedContext) -> Result<DbRestrictedKeyHandle, text>:
+    val context_digest = db_restricted_context_digest(context)?
+    val root = db_evidence_external_scope(checkout, external_parent, "scv-restricted-keys-v1")?
+    val hex = random_hex(32) ?? ""
+    val checked = _restricted_hex_bytes(hex, 32)?
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_RESTRICTED_ENTROPY")
+    val holder = "restricted-key-{nonce}"
+    if not scv_sj_lease_acquire(checkout, holder).starts_with("ok:"): return Err("SCVDB_STORE_BUSY")
+    val result = _restricted_key_create_owned(checkout, external_parent, root, context, hex)
+    if not scv_sj_lease_release(checkout, holder).starts_with("ok:"): return Err("SCVDB_STORE_LEASE_RELEASE")
+    result
+
+fn db_restricted_key_load(checkout: text, external_parent: text, handle: DbRestrictedKeyHandle) -> Result<[u8], text>:
+    val root = _restricted_key_scope(checkout, external_parent, handle)?
+    val path = "{handle.directory}/active.key"
+    if not file_is_regular_no_follow(path) or path_absolute(path) != path: return Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE")
+    val hex = file_read_regular_no_follow_bounded(path, 64)?
+    _restricted_hex_bytes(hex, 32)
+
+fn _restricted_key_delete_owned(checkout: text, external_parent: text, handle: DbRestrictedKeyHandle) -> Result<DbDeletionReport, text>:
+    val root = _restricted_key_scope(checkout, external_parent, handle)?
+    val path = "{handle.directory}/active.key"
+    if not file_is_regular_no_follow(path) or path_absolute(path) != path: return Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE")
+    if not file_delete(path): return Err("SCVDB_RESTRICTED_KEY_DELETE")
+    if not directory_fsync(handle.directory) or not directory_fsync(root) or not directory_fsync(external_parent): return Err("SCVDB_RESTRICTED_KEY_DURABILITY_UNCERTAIN")
+    if file_exists(path) or file_is_regular_no_follow(path): return Err("SCVDB_RESTRICTED_KEY_DELETE_READBACK")
+    Ok(DbDeletionReport(key_id: handle.context.key_id, owned_key_status: "active_file_deleted_and_directory_synced", external_ciphertext_status: "retained", git_and_clone_erasure: "not_guaranteed", limitation: "Only the owned active key file was unlinked and its directories synced. Loaded key copies, backups, filesystem snapshots, device remnants and Git/clones are not erased or attested."))
+
+fn db_restricted_key_delete(checkout: text, external_parent: text, handle: DbRestrictedKeyHandle) -> Result<DbDeletionReport, text>:
+    val root = _restricted_key_scope(checkout, external_parent, handle)?
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_RESTRICTED_ENTROPY")
+    val holder = "restricted-delete-{nonce}"
+    if not scv_sj_lease_acquire(checkout, holder).starts_with("ok:"): return Err("SCVDB_STORE_BUSY")
+    val result = _restricted_key_delete_owned(checkout, external_parent, handle)
+    if not scv_sj_lease_release(checkout, holder).starts_with("ok:"): return Err("SCVDB_STORE_LEASE_RELEASE")
+    result
+
+export DbRestrictedHandle, db_restricted_store_put, db_restricted_store_get
+export DbRestrictedKeyHandle, db_restricted_key_create, db_restricted_key_load, db_restricted_key_delete

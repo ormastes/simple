@@ -1,0 +1,187 @@
+# Default-deny metadata admission. Policy comes from the authority owner.
+# Exact reviewed typed-value digests are deliberately stricter than a secret
+# regex: arbitrary free text is not silently declared safe. Changing a value
+# requires its review/allowlist update; no generic PII-detection claim is made.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
+
+struct DbMetadataRule:
+    kind: text
+    field: text
+    classification: text
+    allowed_value_digests: [text]
+
+struct DbMetadataPolicy:
+    revision: text
+    rules: [DbMetadataRule]
+
+fn _metadata_hex_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_metadata_value_digest(value: DbValue) -> Result<text, text>:
+    Ok(sha256_u8_hex(db_domain_bytes("reviewed-metadata-value", db_value_bytes(value)?)?))
+
+fn db_metadata_policy_digest(policy: DbMetadataPolicy) -> Result<text, text>:
+    if policy.rules.len() > 10000: return Err("SCVDB_METADATA_QUOTA")
+    var rules: [DbCanonicalEntry] = []
+    for rule in policy.rules:
+        if rule.kind == "" or rule.field == "": return Err("SCVDB_METADATA_RULE")
+        if not ["public", "internal", "secret", "pii", "restricted"].contains(rule.classification): return Err("SCVDB_METADATA_CLASSIFICATION")
+        if rule.allowed_value_digests.len() > 10000: return Err("SCVDB_METADATA_QUOTA")
+        var values: [[u8]] = []
+        for digest in rule.allowed_value_digests:
+            if not _metadata_hex_digest(digest): return Err("SCVDB_METADATA_DIGEST")
+            values.push(db_canonical_text(digest)?)
+        val identity = db_frame(9u8, db_canonical_text(rule.kind)? + db_canonical_text(rule.field)?)
+        val body = db_frame(9u8, db_canonical_text(rule.classification)? + db_canonical_set(values)?)
+        rules.push(DbCanonicalEntry(key: identity, value: body))
+    Ok(sha256_u8_hex(db_domain_bytes("metadata-policy", db_canonical_map(rules)?)?))
+
+fn _metadata_value(policy: DbMetadataPolicy, kind: text, field: text, value: DbValue) -> Result<text, text>:
+    for rule in policy.rules:
+        if rule.kind != kind or rule.field != field: continue
+        if rule.classification != "public" and rule.classification != "internal": return Err("SCVDB_METADATA_FORBIDDEN")
+        val digest = db_metadata_value_digest(value)?
+        if not rule.allowed_value_digests.contains(digest): return Err("SCVDB_METADATA_VALUE_UNREVIEWED")
+        return Ok("allowed")
+    Err("SCVDB_METADATA_FIELD_UNREVIEWED")
+
+fn _metadata_fields(policy: DbMetadataPolicy, kind: text, fields: [DbField]) -> Result<text, text>:
+    for field in fields:
+        val admitted = _metadata_value(policy, kind, field.name, field.value)?
+    Ok("allowed")
+
+fn db_metadata_admit(policy: DbMetadataPolicy, kind: text, fields: [DbField]) -> Result<text, text>:
+    if db_metadata_policy_digest(policy)? != policy.revision: return Err("SCVDB_METADATA_POLICY_REVISION")
+    _metadata_fields(policy, kind, fields)
+
+fn _metadata_kind(entity: EntityRef) -> text:
+    if val uid = entity.provisional: return uid.entity_kind
+    if val alias = entity.settled: return alias.entity_kind
+    ""
+
+fn _metadata_condition(policy: DbMetadataPolicy, kind: text, condition: RowPrecondition) -> Result<text, text>:
+    val base = _metadata_value(policy, "$envelope", "base_row", DbValue.Text(condition.base_row))?
+    val revision = _metadata_value(policy, "$envelope", "expected_revision", DbValue.Text(condition.expected_revision))?
+    _metadata_fields(policy, kind, condition.expected_fields)
+
+fn _metadata_operation_entity(operation: DbOperation) -> EntityRef:
+    match operation:
+        Create(entity, kind, fields): entity
+        AppendObservation(entity, kind, fields): entity
+        UpdateFields(entity, edits, condition): entity
+        Tombstone(entity, condition): entity
+        AddSetMember(entity, field, member, dot): entity
+        RemoveObservedSetMember(entity, field, observed): entity
+        AddSetMemberAfterRemoval(entity, field, member, dot, observed): entity
+        RemoveSetMember(entity, field, member, dot, observed): entity
+
+fn db_metadata_check_patch(patch: DbPatch, policy: DbMetadataPolicy) -> Result<text, text>:
+    if db_metadata_policy_digest(policy)? != policy.revision: return Err("SCVDB_METADATA_POLICY_REVISION")
+    # These strings are part of the signed bytes too. Even provenance and
+    # preconditions must be reviewed; checking only the proposed row leaks them.
+    val envelope = [DbField(name: "repository", value: DbValue.Text(patch.repository)), DbField(name: "namespace", value: DbValue.Text(patch.namespace)), DbField(name: "actor", value: DbValue.Text(patch.actor)), DbField(name: "base_revision", value: DbValue.Text(patch.base_revision)), DbField(name: "schema_revision", value: DbValue.Text(patch.schema_revision)), DbField(name: "reducer_revision", value: DbValue.Text(patch.reducer_revision)), DbField(name: "signer", value: DbValue.Text(patch.signer)), DbField(name: "provenance", value: DbValue.Text(patch.provenance))]
+    val checked_envelope = _metadata_fields(policy, "$envelope", envelope)?
+    for dependency in patch.causal_dependencies:
+        val checked_dependency = _metadata_value(policy, "$envelope", "causal_dependency", DbValue.Text(dependency))?
+    for operation in patch.operations:
+        val checked_entity = _metadata_value(policy, "$envelope", "entity_reference", DbValue.Text(entity_ref_canonical(_metadata_operation_entity(operation))))?
+        match operation:
+            Create(entity, kind, fields):
+                val checked = _metadata_fields(policy, kind, fields)?
+            AppendObservation(entity, kind, fields):
+                val checked = _metadata_fields(policy, kind, fields)?
+            UpdateFields(entity, edits, condition):
+                val kind = _metadata_kind(entity)
+                for edit in edits:
+                    val before = _metadata_value(policy, kind, edit.field, edit.before)?
+                    val after = _metadata_value(policy, kind, edit.field, edit.after)?
+                val checked = _metadata_condition(policy, kind, condition)?
+            Tombstone(entity, condition):
+                val checked = _metadata_condition(policy, _metadata_kind(entity), condition)?
+            AddSetMember(entity, field, member, dot):
+                val checked = _metadata_value(policy, _metadata_kind(entity), field, member)?
+                val checked_dot = _metadata_value(policy, "$envelope", "set_dot", DbValue.Text(dot))?
+            RemoveObservedSetMember(entity, field, observed):
+                # Empty removal still requires reviewed field authority.
+                val checked = _metadata_value(policy, _metadata_kind(entity), field, DbValue.Absent)?
+                for dot in observed:
+                    val checked_dot = _metadata_value(policy, "$envelope", "observed_dot", DbValue.Text(dot))?
+            AddSetMemberAfterRemoval(entity, field, member, dot, observed):
+                val checked = _metadata_value(policy, _metadata_kind(entity), field, member)?
+                val checked_dot = _metadata_value(policy, "$envelope", "set_dot", DbValue.Text(dot))?
+                for prior in observed:
+                    val checked_prior = _metadata_value(policy, "$envelope", "observed_dot", DbValue.Text(prior))?
+            RemoveSetMember(entity, field, member, dot, observed):
+                val checked = _metadata_value(policy, _metadata_kind(entity), field, member)?
+                val checked_dot = _metadata_value(policy, "$envelope", "set_dot", DbValue.Text(dot))?
+                for prior in observed:
+                    val checked_prior = _metadata_value(policy, "$envelope", "observed_dot", DbValue.Text(prior))?
+    Ok("allowed")
+
+struct DbRestrictedContext:
+    repository: text
+    namespace: text
+    epoch: u64
+    key_id: text
+    purpose: text
+
+struct DbRestrictedEnvelope:
+    nonce: [u8]
+    ciphertext_and_tag: [u8]
+
+fn _restricted_aad(context: DbRestrictedContext) -> Result<[u8], text>:
+    if context.repository == "" or context.namespace == "" or context.epoch == 0 or context.key_id == "" or context.purpose == "": return Err("SCVDB_RESTRICTED_CONTEXT")
+    val fields = db_canonical_text(context.repository)? + db_canonical_text(context.namespace)? + db_frame(2u8, db_u64_bytes(context.epoch)) + db_canonical_text(context.key_id)? + db_canonical_text(context.purpose)? + db_canonical_text("chacha20-poly1305")? + db_frame(2u8, db_u64_bytes(1u64))
+    db_domain_bytes("restricted-evidence", db_frame(9u8, fields))
+
+fn db_restricted_context_digest(context: DbRestrictedContext) -> Result<text, text>:
+    Ok(sha256_u8_hex(_restricted_aad(context)?))
+
+# Low-level deterministic primitive: effect owner must supply a fresh random
+# nonce for each key use. Validate lengths before entering the crypto core.
+fn db_restricted_seal(key: [u8], nonce: [u8], plaintext: [u8], context: DbRestrictedContext) -> Result<DbRestrictedEnvelope, text>:
+    if key.len() != 32 or nonce.len() != 12: return Err("SCVDB_RESTRICTED_KEY_NONCE")
+    if plaintext.len() < 0 or plaintext.len() > 1073741824: return Err("SCVDB_RESTRICTED_QUOTA")
+    val aad = _restricted_aad(context)?
+    val sealed = chacha20_poly1305_encrypt(key, nonce, plaintext, aad)
+    if sealed.len() != plaintext.len() + 16: return Err("SCVDB_RESTRICTED_CRYPTO")
+    Ok(DbRestrictedEnvelope(nonce: nonce, ciphertext_and_tag: sealed))
+
+fn db_restricted_open(key: [u8], envelope: DbRestrictedEnvelope, context: DbRestrictedContext) -> Result<[u8], text>:
+    if key.len() != 32 or envelope.nonce.len() != 12: return Err("SCVDB_RESTRICTED_KEY_NONCE")
+    val size = envelope.ciphertext_and_tag.len()
+    if size < 16 or size > 1073741840: return Err("SCVDB_RESTRICTED_QUOTA")
+    val aad = _restricted_aad(context)?
+    var ciphertext: [u8] = []
+    var tag: [u8] = []
+    for index in 0..size:
+        if index < size - 16: ciphertext.push(envelope.ciphertext_and_tag[index])
+        else: tag.push(envelope.ciphertext_and_tag[index])
+    match chacha20_poly1305_decrypt(key, envelope.nonce, ciphertext, aad, tag):
+        case Chacha20Poly1305Result.Ok(plaintext): Ok(plaintext)
+        case Chacha20Poly1305Result.Err(error): Err("SCVDB_RESTRICTED_AUTHENTICATION")
+
+struct DbDeletionReport:
+    key_id: text
+    owned_key_status: text
+    external_ciphertext_status: text
+    git_and_clone_erasure: text
+    limitation: text
+
+# There is no general-purpose key-owner erase receipt in this integration.
+# Never accept a caller Boolean or a missing local file as destruction proof.
+fn db_restricted_deletion_report(key_id: text) -> DbDeletionReport:
+    DbDeletionReport(key_id: key_id, owned_key_status: "unverified", external_ciphertext_status: "not_deleted_by_this_operation", git_and_clone_erasure: "not_guaranteed", limitation: "No owned-key destruction receipt was verified; already copied keys, Git history, backups and clones may retain recoverable data.")
+
+export DbMetadataRule, DbMetadataPolicy, db_metadata_value_digest, db_metadata_policy_digest, db_metadata_admit, db_metadata_check_patch
+export DbRestrictedContext, DbRestrictedEnvelope, db_restricted_seal, db_restricted_open
+export db_restricted_context_digest
+export DbDeletionReport, db_restricted_deletion_report
