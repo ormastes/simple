@@ -1,0 +1,145 @@
+# @req PSI-REQ-004
+# @evidence-display: links
+# Exercise persisted admission, not just the standalone metadata decoder.
+use std.spec.*
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_write, read_file}
+
+extern fn rt_getpid() -> i64
+
+fn persistence_admission_root() -> text:
+    "build/test-artifacts/package-index-persistence-admission-{rt_getpid()}"
+
+fn persistence_admission_generation() -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        2, sha256_text("persistence-admission-producer"), "root-generation",
+        "revision", "commit", "tree", sha256_text("inventory"), [],
+        sha256_text("variant"))
+
+describe "persisted package index admission":
+    before_each:
+        dir_remove(persistence_admission_root(), true)
+
+    after_each:
+        dir_remove(persistence_admission_root(), true)
+
+    it "rejects changed generation bytes and admits the restored generation":
+        step("Publish a complete package index")
+        val root = persistence_admission_root()
+        expect(package_module_index_publish_if_current_v1(
+            root, persistence_admission_generation(), "")).to_equal(true)
+        val admitted = package_module_index_read_current_v1(root)
+        expect(admitted.valid).to_equal(true)
+        expect(admitted.generation != nil).to_equal(true)
+        val pointer_path = "{root}/package-module-index-v1/CURRENT"
+        val generation_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+        val pointer_bytes = read_file(pointer_path)
+        val generation_bytes = read_file(generation_path)
+        expect(pointer_bytes).to_equal(admitted.digest)
+        expect(sha256_text(generation_bytes)).to_equal(admitted.digest)
+
+        step("Tamper with persisted generation bytes")
+        val corrupted_bytes = generation_bytes + "tampered"
+        expect(file_write(generation_path, corrupted_bytes)).to_equal(true)
+        step("Reject the corrupted generation")
+        val rejected = package_module_index_read_current_v1(root)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("generation-digest-mismatch")
+        expect(rejected.generation).to_be_nil()
+        expect(read_file(pointer_path)).to_equal(pointer_bytes)
+        expect(read_file(generation_path)).to_equal(corrupted_bytes)
+
+        step("Restore the admitted generation bytes")
+        expect(file_write(generation_path, generation_bytes)).to_equal(true)
+        val restored = package_module_index_read_current_v1(root)
+        expect(restored.valid).to_equal(true)
+        expect(restored.digest).to_equal(admitted.digest)
+        expect(restored.generation != nil).to_equal(true)
+        expect(read_file(generation_path)).to_equal(generation_bytes)
+
+    it "rejects an invalid pointer without rewriting the retained generation":
+        step("Publish a complete package index")
+        val root = persistence_admission_root()
+        expect(package_module_index_publish_if_current_v1(
+            root, persistence_admission_generation(), "")).to_equal(true)
+        val admitted = package_module_index_read_current_v1(root)
+        expect(admitted.valid).to_equal(true)
+        val pointer_path = "{root}/package-module-index-v1/CURRENT"
+        val generation_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+        val generation_bytes = read_file(generation_path)
+
+        step("Reject the corrupted generation")
+        expect(file_write(pointer_path, "invalid-pointer")).to_equal(true)
+        val rejected = package_module_index_read_current_v1(root)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("missing-or-invalid-generation")
+        expect(rejected.generation).to_be_nil()
+        expect(read_file(pointer_path)).to_equal("invalid-pointer")
+        expect(read_file(generation_path)).to_equal(generation_bytes)
+
+        step("Restore the admitted generation bytes")
+        expect(file_write(pointer_path, admitted.digest)).to_equal(true)
+        # A second owner operation must remain possible after the invalid read.
+        # This also exercises early-return lock release if admission is locked.
+        expect(package_module_index_publish_if_current_v1(
+            root, persistence_admission_generation(), admitted.digest)).to_equal(true)
+        expect(package_module_index_read_current_v1(root).valid).to_equal(true)
+
+    it "rejects an empty pointer and permits a later publication":
+        step("Publish a complete package index")
+        val root = persistence_admission_root()
+        expect(package_module_index_publish_if_current_v1(
+            root, persistence_admission_generation(), "")).to_equal(true)
+        val admitted = package_module_index_read_current_v1(root)
+        expect(admitted.valid).to_equal(true)
+        val pointer_path = "{root}/package-module-index-v1/CURRENT"
+        val generation_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+        val generation_bytes = read_file(generation_path)
+
+        step("Reject the corrupted generation")
+        expect(file_write(pointer_path, "")).to_equal(true)
+        val rejected = package_module_index_read_current_v1(root)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("missing-or-invalid-generation")
+        expect(rejected.generation).to_be_nil()
+        expect(read_file(pointer_path)).to_equal("")
+        expect(read_file(generation_path)).to_equal(generation_bytes)
+
+        step("Restore the admitted generation bytes")
+        expect(file_write(pointer_path, admitted.digest)).to_equal(true)
+        expect(package_module_index_publish_if_current_v1(
+            root, persistence_admission_generation(), admitted.digest)).to_equal(true)
+        expect(package_module_index_read_current_v1(root).valid).to_equal(true)
+
+    it "rejects a pointer to an absent generation without deleting prior bytes":
+        step("Publish a complete package index")
+        val root = persistence_admission_root()
+        expect(package_module_index_publish_if_current_v1(
+            root, persistence_admission_generation(), "")).to_equal(true)
+        val admitted = package_module_index_read_current_v1(root)
+        expect(admitted.valid).to_equal(true)
+        val pointer_path = "{root}/package-module-index-v1/CURRENT"
+        val generation_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+        val generation_bytes = read_file(generation_path)
+        val missing_digest = sha256_text("absent-generation")
+        expect(missing_digest == admitted.digest).to_equal(false)
+
+        step("Reject the corrupted generation")
+        expect(file_write(pointer_path, missing_digest)).to_equal(true)
+        val rejected = package_module_index_read_current_v1(root)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("generation-unavailable")
+        expect(rejected.generation).to_be_nil()
+        expect(read_file(pointer_path)).to_equal(missing_digest)
+        expect(read_file(generation_path)).to_equal(generation_bytes)
+
+        step("Restore the admitted generation bytes")
+        expect(file_write(pointer_path, admitted.digest)).to_equal(true)
+        val restored = package_module_index_read_current_v1(root)
+        expect(restored.valid).to_equal(true)
+        expect(restored.digest).to_equal(admitted.digest)
