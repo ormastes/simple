@@ -50,6 +50,22 @@ describe "Mach-O hosted dependency reader":
         expect(library.dependencies[0].compatibility_version).to_equal(0x10200)
         expect(library.exports.len()).to_equal(0)
 
+    it "preserves lazy-load dependency identity and ordinal position":
+        step("Change the real reexport command to LC_LAZY_LOAD_DYLIB")
+        val bytes = item4_dylib_bytes("reexport_x64.dylib")
+        val dependency = item4_dylib_command(bytes, 0x8000001f)
+        if dependency < 0: return
+        val library = macho_read_dylib(item4_dylib_set(bytes, dependency, 0x20), RelocArch.X86_64).unwrap()
+        step("Keep the dependency in ordinal slot one with its full version contract")
+        expect(library.dependencies.len()).to_equal(1)
+        expect(library.dependencies[0].command).to_equal(0x20)
+        expect(library.dependencies[0].install_name).to_equal("@rpath/libitem4.dylib")
+        expect(library.dependencies[0].current_version).to_equal(0x20304)
+        expect(library.dependencies[0].compatibility_version).to_equal(0x10200)
+        val reexports = macho_exports_trie([0, 1, 97, 0, 5, 3, 8, 1, 0, 0], 0, 10, library.dependencies.len()).unwrap()
+        expect(reexports[0].library_ordinal).to_equal(1)
+        expect(library.dependencies[reexports[0].library_ordinal - 1].install_name).to_equal("@rpath/libitem4.dylib")
+
     it "reads actual x64 dylib install versions and trie exports":
         step("Read ld64.lld dylib through the production dependency reader")
         val library = macho_read_dylib(item4_dylib_bytes("provider_x64.dylib"), RelocArch.X86_64).unwrap()
