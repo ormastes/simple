@@ -1,0 +1,81 @@
+# Bounded model of prior v1 admission, NOT captured historical execution and
+# NOT a production admission capability. Only empty genesis + one three-row
+# v1 append batch is supported. Production proof/row/index kernels do the work.
+# Accepted-entry derivation is the exact formula in db_paged_txn.spl at
+# 76899528004 (before source/test mapping admission): validated payload digest,
+# original signed actor/counter, captured parent; identical batch/counter pair.
+# Actual signed checkpoint import must validate this candidate before replay.
+use std.spec.*
+use std.scv.db_admission.{db_authorize_patch}
+use std.scv.db_evidence.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbAcceptedBatch}
+use std.scv.db_paged_model.*
+use std.scv.db_paged_proof.*
+use std.scv.db_paged_prepare.*
+use std.scv.db_paged_constraints.*
+use std.scv.db_paged_indexes.*
+use std.scv.db_page_records.*
+use std.scv.db_pages.*
+use std.scv.distributed_identity.*
+
+fn _item2_legacy_absence(genesis: DbPagedManifest, policy: DbPagedPolicy, keys: [text]) -> DbPagedReads:
+    expect(db_paged_manifest_validate(genesis, policy)).to_equal(Ok(true))
+    expect(genesis.pages.entries.len()).to_equal(0)
+    var seen: [text] = []
+    var proofs: [DbPagedLookupProof] = []
+    for key in keys:
+        val bucket = db_pages_bucket(key).unwrap()
+        if not seen.contains(bucket):
+            seen.push(bucket)
+            proofs.push(DbPagedLookupProof(keys: [key], page: nil))
+    db_paged_reads(genesis, policy, proofs).unwrap()
+
+fn setup_item2_paged_legacy_transition(genesis: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy) -> (DbPagedManifest, DbPageBuild):
+    expect(genesis.parent_revision).to_equal("")
+    expect(genesis.pages.entries.len()).to_equal(0)
+    expect(patch.base_revision).to_equal(genesis.revision)
+    expect(patch.causal_dependencies.len()).to_equal(0)
+    expect(patch.operations.len()).to_equal(3)
+    db_authorize_patch(patch, policy.config.admission, [], 10u64).unwrap()
+    val digest = db_patch_validate(patch).unwrap()
+    val records = db_reproduction_patch_records(patch).unwrap()
+    expect(records.len()).to_equal(3)
+    for record in records:
+        expect(db_reproduction_record_version(record)).to_equal("v1")
+        expect(db_reproduction_reference(record).entity.provisional != nil).to_equal(true)
+    val config = match records[0]:
+        Config(value): value
+        _: fail("legacy config must be first")
+    val reproduction = match records[1]:
+        Reproduction(value): value
+        _: fail("legacy reproduction must be second")
+    val observation = match records[2]:
+        Observation(value): value
+        _: fail("legacy observation must be third")
+    expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Ok(true))
+    var keys = [db_page_batch_key(patch.batch_id).unwrap(), db_page_actor_counter_key(patch.actor, patch.actor_counter).unwrap()]
+    keys = keys + db_paged_operation_row_keys(patch.operations).unwrap()
+    var reads = _item2_legacy_absence(genesis, policy, keys)
+    for key in keys: expect(db_paged_read(reads, key).unwrap()).to_be_nil()
+    # Conflicts error in the production row reducer, before any accepted entry.
+    val rows = db_paged_reduce_rows(patch, patch.operations, reads, policy).unwrap()
+    keys = keys + db_paged_constraint_reads(rows, policy).unwrap()
+    reads = _item2_legacy_absence(genesis, policy, keys)
+    val allocations = db_paged_allocations(rows, reads, policy).unwrap()
+    for binding in allocations:
+        keys.push(db_page_alias_key(SettledAlias(database_namespace: binding.namespace, authority_epoch: binding.epoch, entity_kind: binding.uid.entity_kind, sequence: binding.sequence)).unwrap())
+    keys.push(db_paged_history_key(genesis.revision).unwrap())
+    reads = _item2_legacy_absence(genesis, policy, keys)
+    var updates = db_paged_constraint_updates(rows, reads, policy, allocations).unwrap()
+    val accepted = DbAcceptedBatch(batch_id: patch.batch_id, canonical_digest: digest, actor: patch.actor, actor_counter: patch.actor_counter, prior_revision: genesis.revision)
+    updates.push(db_typed_page_record_encode(DbTypedPageRecord.Accepted(accepted)).unwrap())
+    updates.push(db_typed_page_record_encode(DbTypedPageRecord.ActorCounter(accepted)).unwrap())
+    updates.push(db_paged_index_record(db_paged_history_key(genesis.revision).unwrap(), 172u8, DbValue.Text(genesis.revision)).unwrap())
+    val build = db_pages_update(genesis.pages, [], updates).unwrap()
+    val manifest = db_paged_manifest_seal(DbPagedManifest(context: genesis.context, policy_revision: policy.revision, structure_revision: genesis.structure_revision, protocol: genesis.protocol, index_version: genesis.index_version, parent_revision: genesis.revision, pages: build.manifest, revision: "")).unwrap()
+    (manifest, build)
+
+export setup_item2_paged_legacy_transition

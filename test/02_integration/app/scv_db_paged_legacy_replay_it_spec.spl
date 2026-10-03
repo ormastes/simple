@@ -1,0 +1,65 @@
+# Actual Paged legacy checkpoint/replay source oracles. No admitted runtime;
+# neither historical execution nor production readiness is claimed here.
+use std.spec.*
+use app.io.mod.{file_delete}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.paged_store.{db_paged_open}
+use app.scv.db.observation_owner.{db_observation_apply_paged}
+use app.scv.db.observation_content.{db_observation_limits}
+use app.scv.db.checkpoint_store.{db_checkpoint_prepare_install}
+use std.scv.db_checkpoint.{db_checkpoint_encode}
+use std.scv.db_patch_codec.{db_patch_encode}
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_paged_legacy_replay_fixture.*
+
+describe "Paged legacy v1 replay from independently authenticated checkpoint pages":
+    it "refuses fresh legacy admission and a forged checkpoint before verified historical import":
+        val fixture = setup_item2_paged_legacy_replay()
+        val context = fixture.observation
+        val before = db_store_read(context.source, "paged")
+        val retained = db_store_read(context.source, "retention")
+        expect(db_observation_apply_paged(context.source, context.initial_head, context.patch, context.policy, context.sources, db_observation_limits()).unwrap_err()).to_equal("SCVDB_REPRODUCTION_MAPPING_REQUIRED")
+        expect(db_store_read(context.source, "paged")).to_equal(before)
+        expect(db_store_read(context.source, "retention")).to_equal(retained)
+        var forged = fixture.checkpoint
+        forged.signature = [0u8;64]
+        expect(db_checkpoint_prepare_install(context.source, context.initial_head, db_checkpoint_encode(forged).unwrap(), fixture.authority, fixture.pages).is_err()).to_equal(true)
+        expect(db_store_read(context.source, "paged")).to_equal(before)
+        expect(db_store_read(context.source, "checkpoint-install").code).to_equal("empty")
+        check_item2_paged_legacy_import(fixture)
+        expect(db_store_read(context.source, "paged").checkpoint_anchor).to_equal(fixture.checkpoint.revision)
+        check_item2_observation_cleanup(context)
+
+    it "replays original signed bytes and actual imported indices after content loss without repinning":
+        val fixture = setup_item2_paged_legacy_replay()
+        val context = fixture.observation
+        val wire = db_patch_encode(context.patch).unwrap()
+        val head = check_item2_paged_legacy_import(fixture)
+        val before = db_store_read(context.source, "paged")
+        val retained = db_store_read(context.source, "retention")
+        expect(file_delete(context.sources.evidence_parent + "/scv-evidence-v1/" + context.available_digest + ".scve")).to_equal(true)
+        val replay = db_observation_apply_paged(context.source, head, context.patch, context.policy, context.sources, db_observation_limits()).unwrap()
+        expect(replay.replay).to_equal(true)
+        expect(replay.head).to_equal(head)
+        expect(replay.revision).to_equal(fixture.historical.revision)
+        expect(db_patch_encode(context.patch).unwrap()).to_equal(wire)
+        expect(db_store_read(context.source, "paged")).to_equal(before)
+        expect(db_store_read(context.source, "retention")).to_equal(retained)
+        expect(db_paged_open(context.source, context.policy).unwrap().manifest).to_equal(fixture.historical)
+        check_item2_observation_cleanup(context)
+
+    it "requires current key trust authentic original signature and captured HEAD on replay":
+        val fixture = setup_item2_paged_legacy_replay()
+        val context = fixture.observation
+        val head = check_item2_paged_legacy_import(fixture)
+        val before = db_store_read(context.source, "paged")
+        expect(db_observation_apply_paged(context.source, context.initial_head, context.patch, context.policy, context.sources, db_observation_limits()).unwrap_err()).to_equal("SCVDB_STORE_HEAD_ADVANCED")
+        var forged = context.patch
+        forged.signature = [0u8;64]
+        expect(db_observation_apply_paged(context.source, head, forged, context.policy, context.sources, db_observation_limits()).unwrap_err()).to_equal("SCVDB_SIGNATURE_INVALID")
+        var revoked = context.policy
+        revoked.config.admission.keys[0].revoked = true
+        revoked = setup_item2_observation_repin(revoked)
+        expect(db_observation_apply_paged(context.source, head, context.patch, revoked, context.sources, db_observation_limits()).unwrap_err()).to_equal("SCVDB_KEY_REVOKED")
+        expect(db_store_read(context.source, "paged")).to_equal(before)
+        check_item2_observation_cleanup(context)

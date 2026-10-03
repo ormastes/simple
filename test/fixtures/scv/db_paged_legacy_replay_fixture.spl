@@ -1,0 +1,90 @@
+use std.spec.*
+use app.io.mod.{dir_create, file_write_bytes}
+use app.scv.db.paged_store.{db_paged_initialize, db_paged_open, db_paged_current_row}
+use app.scv.db.page_store.{db_page_store_load_page}
+use app.scv.db.checkpoint_store.*
+use app.scv.db.checkpoint_objects.{DbCheckpointPageSource}
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_paged_model.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_legacy_replay_fixture.*
+use test.fixtures.scv.db_paged_legacy_transition_fixture.*
+
+struct Item2PagedLegacyReplayFixture:
+    observation: Item2ObservationFixture
+    genesis: DbPagedManifest
+    historical: DbPagedManifest
+    checkpoint: DbDatabaseCheckpoint
+    authority: DbCheckpointAuthority
+    pages: DbCheckpointPageSource
+
+fn setup_item2_paged_legacy_replay() -> Item2PagedLegacyReplayFixture:
+    # Reuse only the explicitly reconstructed legacy signed-record contract.
+    # The Reference helper never installs its separately prepared checkpoint.
+    var context = setup_item2_legacy_replay().observation
+    context.policy.config.admission.reducer_revision = "scv-merkle-reducer-v1"
+    context.policy.config.merge.reducer_revision = "scv-merkle-reducer-v1"
+    context.policy = setup_item2_observation_repin(context.policy)
+    val captured = db_paged_initialize(context.source, context.policy).unwrap()
+    context.initial_head = captured.head
+    context.patch.reducer_revision = "scv-merkle-reducer-v1"
+    context.patch.base_revision = captured.manifest.revision
+    context.patch = setup_item2_observation_sign(context.patch)
+    context.policy = setup_item2_observation_review(context.policy, [context.patch])
+    expect(db_paged_open(context.source, context.policy).unwrap().manifest).to_equal(captured.manifest)
+    val (manifest, build) = setup_item2_paged_legacy_transition(captured.manifest, context.patch, context.policy)
+    var metadata = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(captured.manifest.revision, 1u64, [], [], captured.manifest.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(manifest.revision, 2u64, [captured.manifest.revision], [context.patch.batch_id], manifest.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(context.patch.batch_id, manifest.revision)).unwrap()]
+    for record in context.records:
+        metadata.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(db_reproduction_reference(record).entity, DbCheckpointDisposition.Live)).unwrap())
+    val history = db_pages_build(metadata, context.policy.quota).unwrap()
+    val parent = context.root + "/paged-legacy-checkpoint"
+    val objects = parent + "/scv-checkpoint-pages-v1"
+    expect(dir_create(objects, true)).to_equal(true)
+    for page in build.pages:
+        expect(file_write_bytes(objects + "/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_equal(true)
+    for page in history.pages:
+        expect(file_write_bytes(objects + "/" + page.digest + ".page", db_page_encode(page, history.manifest.quota).unwrap())).to_equal(true)
+    val admission = context.policy.config.admission
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision, policy_revision: context.policy.config.revision, predecessor_checkpoint: "", history_horizon: captured.manifest.revision, current_revision: manifest.revision, metadata: history.manifest, storage: DbCheckpointStorage.Paged(manifest), signer: "paged-legacy-checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    val authority = DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: context.policy.config, paged_policy: Some(context.policy))
+    Item2PagedLegacyReplayFixture(observation: context, genesis: captured.manifest, historical: manifest, checkpoint: checkpoint, authority: authority, pages: DbCheckpointPageSource(external_parent: parent, maximum_pages: 65536, maximum_bytes: 67108864))
+
+fn check_item2_paged_legacy_import(fixture: Item2PagedLegacyReplayFixture) -> text:
+    val context = fixture.observation
+    # This actual owner stages, rereads and globally validates every imported
+    # typed index plus signed history before publishing the authoritative HEAD.
+    val prepared = db_checkpoint_prepare_install(context.source, context.initial_head, db_checkpoint_encode(fixture.checkpoint).unwrap(), fixture.authority, fixture.pages).unwrap()
+    val installed = db_checkpoint_resume_install(context.source, prepared.journal_head, fixture.authority).unwrap()
+    expect(installed.phase).to_equal("Installed")
+    val current = db_paged_open(context.source, context.policy).unwrap()
+    expect(current.manifest).to_equal(fixture.historical)
+    val batch_key = db_page_batch_key(context.patch.batch_id).unwrap()
+    val actor_key = db_page_actor_counter_key(context.patch.actor, context.patch.actor_counter).unwrap()
+    val batch_page = db_page_store_load_page(context.source, current.manifest.pages, batch_key).unwrap().unwrap()
+    val actor_page = db_page_store_load_page(context.source, current.manifest.pages, actor_key).unwrap().unwrap()
+    val batch = match db_typed_page_record_decode(db_pages_lookup(current.manifest.pages, batch_page, batch_key).unwrap().unwrap()).unwrap():
+        Accepted(value): value
+        _: fail("actual imported batch index")
+    val actor = match db_typed_page_record_decode(db_pages_lookup(current.manifest.pages, actor_page, actor_key).unwrap().unwrap()).unwrap():
+        ActorCounter(value): value
+        _: fail("actual imported actor/counter index")
+    expect(actor).to_equal(batch)
+    expect(batch.batch_id).to_equal(context.patch.batch_id)
+    expect(batch.canonical_digest).to_equal(context.patch.payload_digest)
+    expect(batch.prior_revision).to_equal(fixture.genesis.revision)
+    for record in context.records:
+        val row = db_paged_current_row(context.source, context.policy, db_reproduction_reference(record).entity).unwrap().unwrap()
+        expect(db_reproduction_row(row).unwrap()).to_equal(record)
+        expect(row.revision).to_equal(context.patch.batch_id)
+    current.head
+
+export Item2PagedLegacyReplayFixture, setup_item2_paged_legacy_replay, check_item2_paged_legacy_import
