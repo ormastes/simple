@@ -1,0 +1,103 @@
+# Durable discovery state. Manifest records are immutable and cursor changes
+# are encoded atomically with tracked run IDs and the authenticated receipt anchor.
+use std.scv.db_ci_ingest.{DbCiCursor}
+use std.scv.db_evidence.{DbEvidenceRevision, db_evidence_check_ref, db_evidence_digest_valid}
+use std.scv.db_receipt.{DbSettlementReceipt}
+use std.scv.db_receipt_codec.{db_receipt_encode, db_receipt_decode}
+use std.scv.db_canonical.*
+use std.scv.db_patch.{DbValue}
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.*
+use std.scv.distributed_identity.{EntityRef}
+use std.common.crypto.sha256.{sha256_text}
+
+struct DbCiDurableManifest:
+    provider_instance: text
+    project: text
+    run_id: text
+    manifest: DbEvidenceRevision
+    bundle_digest: text
+    accepted_batch_digest: text
+
+struct DbCiState:
+    cursor: DbCiCursor
+    tracked_run_ids: [text]
+    manifests: [DbCiDurableManifest]
+    last_receipt: DbSettlementReceipt?
+
+fn db_ci_raw_digest_valid(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for index in 0..digest.len():
+        val code = digest.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_ci_manifest_encode(manifest: DbCiDurableManifest) -> Result<text, text>:
+    val valid = db_evidence_check_ref(manifest.manifest)?
+    if manifest.provider_instance == "" or manifest.project == "" or manifest.run_id == "" or not db_evidence_digest_valid(manifest.bundle_digest) or not db_ci_raw_digest_valid(manifest.accepted_batch_digest): return Err("SCVDB_CI_MANIFEST")
+    val payload = db_snapshot_text(manifest.provider_instance)? + db_snapshot_text(manifest.project)? + db_snapshot_text(manifest.run_id)? + db_snapshot_value_encode(DbValue.Reference(manifest.manifest.entity), 0)? + db_snapshot_text(manifest.manifest.revision)? + db_snapshot_text(manifest.bundle_digest)? + db_snapshot_text(manifest.accepted_batch_digest)?
+    Ok("SCVDB-CI-MANIFEST-v1\n" + db_snapshot_hex(db_frame(91u8, payload)) + "\n")
+
+fn db_ci_manifest_decode(encoded: text) -> Result<DbCiDurableManifest, text>:
+    val prefix = "SCVDB-CI-MANIFEST-v1\n"
+    if encoded.len() > 1048576 or encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_CI_MANIFEST_ENCODING")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val root = db_read_frame(bytes, 0)?
+    if root.tag != 91u8 or root.next_offset != bytes.len(): return Err("SCVDB_CI_MANIFEST_ENCODING")
+    val fields = db_read_children(root.payload)?
+    if fields.len() != 7: return Err("SCVDB_CI_MANIFEST_ENCODING")
+    var entity = EntityRef(provisional: nil, settled: nil)
+    match db_snapshot_value_decode(fields[3], 0)?:
+        Reference(ref): entity = ref
+        _: return Err("SCVDB_CI_MANIFEST_ENCODING")
+    val manifest = DbCiDurableManifest(provider_instance: db_read_text(fields[0])?, project: db_read_text(fields[1])?, run_id: db_read_text(fields[2])?, manifest: DbEvidenceRevision(entity: entity, revision: db_read_text(fields[4])?), bundle_digest: db_read_text(fields[5])?, accepted_batch_digest: db_read_text(fields[6])?)
+    if db_ci_manifest_encode(manifest)? != encoded: return Err("SCVDB_CI_MANIFEST_ENCODING")
+    Ok(manifest)
+
+fn db_ci_manifest_path(manifest: DbCiDurableManifest) -> Result<text, text>:
+    Ok("ci/manifests/" + sha256_text(db_ci_manifest_encode(manifest)?) + ".scvci")
+
+fn db_ci_state_encode(state: DbCiState) -> Result<text, text>:
+    val cursor = state.cursor
+    if cursor.provider_instance == "" or cursor.project == "" or cursor.overlap_from_seconds > cursor.high_water_seconds: return Err("SCVDB_CI_CURSOR")
+    var runs: [[u8]] = []
+    for run in state.tracked_run_ids:
+        if run == "": return Err("SCVDB_CI_RUN")
+        runs.push(db_snapshot_text(run)?)
+    val unique_runs = db_canonical_set(runs)?
+    var manifests: [[u8]] = []
+    var ids: [[u8]] = []
+    for manifest in state.manifests:
+        if manifest.provider_instance != cursor.provider_instance or manifest.project != cursor.project or not state.tracked_run_ids.contains(manifest.run_id): return Err("SCVDB_CI_MANIFEST_SCOPE")
+        ids.push(db_snapshot_value_encode(DbValue.Reference(manifest.manifest.entity), 0)? + db_snapshot_text(manifest.manifest.revision)?)
+        manifests.push(db_snapshot_text(db_ci_manifest_encode(manifest)?)?)
+    val unique_manifests = db_canonical_set(ids)?
+    var anchor = db_frame(0u8, [])
+    if val receipt = state.last_receipt: anchor = db_snapshot_text(db_receipt_encode(receipt)?)?
+    val payload = db_snapshot_text(cursor.provider_instance)? + db_snapshot_text(cursor.project)? + db_snapshot_text(cursor.opaque_position)? + db_frame(2u8, db_u64_bytes(cursor.high_water_seconds)) + db_frame(2u8, db_u64_bytes(cursor.overlap_from_seconds)) + db_canonical_list(runs) + db_canonical_list(manifests) + anchor
+    if payload.len() > 16777216: return Err("SCVDB_CI_STATE_QUOTA")
+    Ok("SCVDB-CI-STATE-v1\n" + db_snapshot_hex(db_frame(92u8, payload)) + "\n")
+
+fn db_ci_state_decode(encoded: text) -> Result<DbCiState, text>:
+    val prefix = "SCVDB-CI-STATE-v1\n"
+    if encoded.len() > 33554500 or encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_CI_STATE_ENCODING")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val root = db_read_frame(bytes, 0)?
+    if root.tag != 92u8 or root.next_offset != bytes.len(): return Err("SCVDB_CI_STATE_ENCODING")
+    val fields = db_read_children(root.payload)?
+    if fields.len() != 8 or fields[5].tag != 6u8 or fields[6].tag != 6u8: return Err("SCVDB_CI_STATE_ENCODING")
+    val cursor = DbCiCursor(provider_instance: db_read_text(fields[0])?, project: db_read_text(fields[1])?, opaque_position: db_read_text(fields[2])?, high_water_seconds: db_read_unsigned(fields[3])?, overlap_from_seconds: db_read_unsigned(fields[4])?)
+    var runs: [text] = []
+    for run in db_read_children(fields[5].payload)?: runs.push(db_read_text(run)?)
+    var manifests: [DbCiDurableManifest] = []
+    for manifest in db_read_children(fields[6].payload)?: manifests.push(db_ci_manifest_decode(db_read_text(manifest)?)?)
+    var receipt: DbSettlementReceipt? = nil
+    if fields[7].tag == 3u8: receipt = Some(db_receipt_decode(db_read_text(fields[7])?)?)
+    elif fields[7].tag != 0u8 or fields[7].payload.len() != 0: return Err("SCVDB_CI_STATE_ENCODING")
+    val state = DbCiState(cursor: cursor, tracked_run_ids: runs, manifests: manifests, last_receipt: receipt)
+    if db_ci_state_encode(state)? != encoded: return Err("SCVDB_CI_STATE_ENCODING")
+    Ok(state)
+
+export DbCiDurableManifest, DbCiState, db_ci_manifest_encode, db_ci_manifest_decode, db_ci_manifest_path
+export db_ci_state_encode, db_ci_state_decode
+export db_ci_raw_digest_valid

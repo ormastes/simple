@@ -1,0 +1,114 @@
+# Real filesystem/Git/CAS and Ed25519 checks. Requires a supported host;
+# unavailable canonical path/fsync facilities fail rather than silently skip.
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{cwd, dir_create, file_write, file_delete, process_run_bounded}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.scv.distributed_identity.*
+use std.scv.db_evidence.{DbEvidenceRevision}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use std.scv.db_ci_ingest.{DbDiscoveryItem, DbDiscoveryPage}
+use std.scv.db_receipt.*
+use std.scv.db_receipt_codec.*
+use app.scv.db.ci_state_codec.*
+use app.scv.db.ci_store.*
+use app.scv.db.evidence_store.*
+
+struct Item2CiFixture:
+    source: text
+    remote: text
+    scratch: text
+    evidence_parent: text
+    manifest: DbCiDurableManifest
+    receipt: DbSettlementReceipt
+    authority: DbReceiptAuthority
+
+fn check_item2_ci_git(root: text, args: [text]) -> text:
+    val prefix = ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=SCV Test", "-c", "user.email=scv-test@invalid"]
+    val (out, _error, code) = process_run_bounded("git", prefix + args, 30000, 65536)
+    expect(code).to_equal(0)
+    out.trim()
+
+fn setup_item2_ci_quota() -> DbEvidenceStoreQuota:
+    DbEvidenceStoreQuota(max_content_bytes: 4096, max_envelope_bytes: 8192, max_dependencies: 8)
+
+fn setup_item2_ci_fixture() -> Item2CiFixture:
+    val root = secure_temp_dir(path_absolute(cwd()), "item2-ci-store-").unwrap()
+    val source = root + "/source"
+    val remote = root + "/authority.git"
+    val scratch = root + "/scratch"
+    val external = root + "/external"
+    for path in [source, remote, scratch, external]: expect(dir_create(path, true)).to_be(true)
+    check_item2_ci_git(root, ["init", "--template=", "--object-format=sha1", source])
+    check_item2_ci_git(root, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    val bytes = [1u8, 2u8, 3u8]
+    val digest = db_evidence_digest(bytes, []).unwrap()
+    val node = DbEvidenceNode(digest: digest, content: bytes, availability: "available", created_day: 1, dependencies: [])
+    expect(db_evidence_store_put(source, external, node, setup_item2_ci_quota()).unwrap().digest).to_equal(digest)
+    val ref = entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "run_manifest", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1))
+    val manifest = DbCiDurableManifest(provider_instance: "github.example", project: "project-1", run_id: "run-1", manifest: DbEvidenceRevision(entity: ref, revision: "sha256:v1:" + sha256_text("manifest revision")), bundle_digest: "sha256:v1:" + digest, accepted_batch_digest: sha256_text("accepted manifest batch"))
+    expect(dir_create(source + "/ci/manifests", true)).to_be(true)
+    expect(file_write(source + "/" + db_ci_manifest_path(manifest).unwrap(), db_ci_manifest_encode(manifest).unwrap())).to_be(true)
+    check_item2_ci_git(source, ["add", "--", "ci/manifests"])
+    check_item2_ci_git(source, ["commit", "-m", "accepted immutable CI manifest"])
+    val head = check_item2_ci_git(source, ["rev-parse", "HEAD"])
+    val tree = check_item2_ci_git(source, ["log", "-1", "--format=%T"])
+    check_item2_ci_git(source, ["push", "--no-force", remote, "HEAD:refs/heads/settled"])
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([7u8;32])
+    val authority = DbReceiptAuthority(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, remote: remote, settled_ref: "refs/heads/settled", key_id: "settlement-key", public_key: public_key, schema_revision: "s1", reducer_revision: "r1")
+    var receipt = DbSettlementReceipt(repository: "repo", namespace: authority.namespace, epoch: 1, remote: remote, settled_ref: authority.settled_ref, previous_receipt: "", previous_head: "", accepted_head: head, accepted_tree: tree, object_format: "sha1", high_water: [], schema_revision: "s1", reducer_revision: "r1", batch_digests: [manifest.accepted_batch_digest], signer: "settlement-key", signature: [])
+    receipt.signature = pure_ed25519_sign(seed, public_key, db_receipt_signing_bytes(receipt).unwrap())
+    Item2CiFixture(source: source, remote: remote, scratch: scratch, evidence_parent: external, manifest: manifest, receipt: receipt, authority: authority)
+
+fn setup_item2_ci_page(fixture: Item2CiFixture) -> DbDiscoveryPage:
+    DbDiscoveryPage(provider_instance: fixture.manifest.provider_instance, project: fixture.manifest.project, requested_position: "", next_position: "page-2", observed_until_seconds: 100, items: [DbDiscoveryItem(manifest: fixture.manifest.manifest, bundle_digest: fixture.manifest.bundle_digest)])
+
+describe "REQ-025 durable CI discovery with authenticated canonical readback":
+    it "persists discovery before acknowledgement then advances after actual Git and CAS reads":
+        step("Persist the immutable discoverable manifest without advancing the cursor")
+        val fixture = setup_item2_ci_fixture()
+        val durable = db_ci_discover(fixture.source, "", fixture.manifest).unwrap()
+        expect(durable.state.cursor.opaque_position).to_equal("")
+        expect(durable.state.tracked_run_ids).to_equal(["run-1"])
+        val restarted = db_ci_store_read(fixture.source, fixture.manifest.provider_instance, fixture.manifest.project).unwrap()
+        expect(restarted.state.manifests[0]).to_equal(fixture.manifest)
+        expect(db_ci_discover(fixture.source, "", fixture.manifest).unwrap().head).to_equal(durable.head)
+        step("Authenticate the receipt and compare the fetched accepted manifest with actual evidence bytes")
+        val advanced = db_ci_advance_durable(fixture.source, fixture.scratch, fixture.evidence_parent, durable.head, setup_item2_ci_page(fixture), [fixture.receipt], fixture.authority, 30, setup_item2_ci_quota()).unwrap()
+        expect(advanced.state.cursor.opaque_position).to_equal("page-2")
+        expect(advanced.state.cursor.overlap_from_seconds).to_equal(70u64)
+        val recovered = db_ci_store_read(fixture.source, fixture.manifest.provider_instance, fixture.manifest.project).unwrap()
+        expect(recovered.head).to_equal(advanced.head)
+        expect(recovered.state.cursor.high_water_seconds).to_equal(100u64)
+        expect(db_receipt_decode(db_receipt_encode(fixture.receipt).unwrap()).unwrap().signature).to_equal(fixture.receipt.signature)
+
+    it "does not advance on forged receipts or missing durable evidence":
+        step("Reject a receipt-shaped value whose Ed25519 bytes do not verify")
+        val fixture = setup_item2_ci_fixture()
+        val durable = db_ci_discover(fixture.source, "", fixture.manifest).unwrap()
+        var forged = fixture.receipt
+        forged.signature = [0u8;64]
+        expect(db_ci_advance_durable(fixture.source, fixture.scratch, fixture.evidence_parent, durable.head, setup_item2_ci_page(fixture), [forged], fixture.authority, 30, setup_item2_ci_quota())).to_equal(Err("SCVDB_RECEIPT_SIGNATURE"))
+        step("Require actual CAS bytes even when the accepted signed manifest exists")
+        val physical = fixture.manifest.bundle_digest[10:]
+        expect(file_delete(fixture.evidence_parent + "/scv-evidence-v1/" + physical + ".scve")).to_be(true)
+        expect(db_ci_advance_durable(fixture.source, fixture.scratch, fixture.evidence_parent, durable.head, setup_item2_ci_page(fixture), [fixture.receipt], fixture.authority, 30, setup_item2_ci_quota())).to_equal(Err("SCVDB_EVIDENCE_UNAVAILABLE"))
+        val recovered = db_ci_store_read(fixture.source, fixture.manifest.provider_instance, fixture.manifest.project).unwrap()
+        expect(recovered.head).to_equal(durable.head)
+        expect(recovered.state.cursor.opaque_position).to_equal("")
+
+    it "rejects changed immutable manifests and a signed tree not present at the accepted commit":
+        step("Refuse discovery identity reuse with changed bundle bytes")
+        val fixture = setup_item2_ci_fixture()
+        val durable = db_ci_discover(fixture.source, "", fixture.manifest).unwrap()
+        var changed = fixture.manifest
+        changed.bundle_digest = "sha256:v1:" + sha256_text("different bundle")
+        expect(db_ci_discover(fixture.source, durable.head, changed)).to_equal(Err("SCVDB_CI_MANIFEST_COLLISION"))
+        step("Verify the actual fetched Git tree instead of trusting signed metadata alone")
+        var wrong_tree = fixture.receipt
+        wrong_tree.accepted_tree = "0000000000000000000000000000000000000000"
+        val (seed, public_key) = pure_ed25519_keypair_from_seed([7u8;32])
+        wrong_tree.signature = pure_ed25519_sign(seed, public_key, db_receipt_signing_bytes(wrong_tree).unwrap())
+        expect(db_ci_advance_durable(fixture.source, fixture.scratch, fixture.evidence_parent, durable.head, setup_item2_ci_page(fixture), [wrong_tree], fixture.authority, 30, setup_item2_ci_quota())).to_equal(Err("SCVDB_CI_RECEIPT_TREE"))

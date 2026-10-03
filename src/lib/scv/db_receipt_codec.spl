@@ -1,0 +1,44 @@
+# Strict receipt projection; decoding does not replace authority authentication.
+use std.scv.db_receipt.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.distributed_identity_map.{IdentityMapHighWater}
+
+fn db_receipt_encode(receipt: DbSettlementReceipt) -> Result<text, text>:
+    val payload = db_frame(4u8, db_receipt_signing_bytes(receipt)?) + db_frame(4u8, receipt.signature)
+    if payload.len() > 1048576: return Err("SCVDB_RECEIPT_QUOTA")
+    Ok("SCVDB-RECEIPT-v1\n" + db_snapshot_hex(db_frame(90u8, payload)) + "\n")
+
+fn db_receipt_decode(encoded: text) -> Result<DbSettlementReceipt, text>:
+    val header = "SCVDB-RECEIPT-v1\n"
+    if encoded.len() > 2097216: return Err("SCVDB_RECEIPT_QUOTA")
+    if encoded.len() <= header.len() or not encoded.starts_with(header) or not encoded.ends_with("\n"): return Err("SCVDB_RECEIPT_ENCODING")
+    val bytes = db_snapshot_unhex(encoded[header.len():encoded.len() - 1])?
+    val root = db_read_frame(bytes, 0)?
+    if root.tag != 90u8 or root.next_offset != bytes.len(): return Err("SCVDB_RECEIPT_ENCODING")
+    val envelope = db_read_children(root.payload)?
+    if envelope.len() != 2 or envelope[0].tag != 4u8 or envelope[1].tag != 4u8: return Err("SCVDB_RECEIPT_ENCODING")
+    val signed = envelope[0].payload
+    val domain = db_domain_bytes("settlement-receipt", [])?
+    if signed.len() <= domain.len(): return Err("SCVDB_RECEIPT_ENCODING")
+    for index in 0..domain.len():
+        if signed[index] != domain[index]: return Err("SCVDB_RECEIPT_ENCODING")
+    val body = db_read_frame(signed, domain.len())?
+    if body.tag != 9u8 or body.next_offset != signed.len(): return Err("SCVDB_RECEIPT_ENCODING")
+    val fields = db_read_children(body.payload)?
+    if fields.len() != 15 or fields[13].tag != 8u8 or fields[14].tag != 7u8: return Err("SCVDB_RECEIPT_ENCODING")
+    var marks: [IdentityMapHighWater] = []
+    val mark_fields = db_read_children(fields[13].payload)?
+    if mark_fields.len() % 2 != 0: return Err("SCVDB_RECEIPT_ENCODING")
+    var index = 0
+    while index < mark_fields.len():
+        marks.push(IdentityMapHighWater(entity_kind: db_read_text(mark_fields[index])?, sequence: db_read_unsigned(mark_fields[index + 1])?))
+        index = index + 2
+    var batches: [text] = []
+    val batch_fields = db_read_children(fields[14].payload)?
+    for batch in batch_fields: batches.push(db_read_text(batch)?)
+    val receipt = DbSettlementReceipt(repository: db_read_text(fields[0])?, namespace: db_read_text(fields[1])?, epoch: db_read_unsigned(fields[2])?, remote: db_read_text(fields[3])?, settled_ref: db_read_text(fields[4])?, previous_receipt: db_read_text(fields[5])?, previous_head: db_read_text(fields[6])?, accepted_head: db_read_text(fields[7])?, accepted_tree: db_read_text(fields[8])?, object_format: db_read_text(fields[9])?, schema_revision: db_read_text(fields[10])?, reducer_revision: db_read_text(fields[11])?, signer: db_read_text(fields[12])?, high_water: marks, batch_digests: batches, signature: envelope[1].payload)
+    if db_receipt_encode(receipt)? != encoded: return Err("SCVDB_RECEIPT_NONCANONICAL")
+    Ok(receipt)
+
+export db_receipt_encode, db_receipt_decode
