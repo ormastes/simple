@@ -4,6 +4,9 @@ use std.scv.db_patch.*
 use std.scv.distributed_identity.{entity_ref_canonical}
 use std.scv.db_schema.*
 use std.scv.db_remove_wins.*
+use std.scv.db_identity_resolve.{db_resolve_operations}
+use std.scv.db_reference_closure.{DbReferenceTarget, db_reference_errors}
+use std.scv.distributed_identity_map.{IdentityMap}
 use std.scv.db_patch_normalize.{db_normalize_text, db_normalize_operations}
 use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -191,6 +194,16 @@ fn db_constraint_conflicts(rows: [DbRow], policy: MergePolicy) -> Result<[DbConf
 fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) -> Result<MergePlan, text>:
     """Preview only: caller must obtain cryptographic/ACL admission before persistence."""
     val digest = db_patch_validate(patch)?
+    _db_plan_patch_operations(state, patch, policy, db_normalize_operations(patch.operations)?, digest)
+
+fn db_plan_patch_with_identity(state: MaterializedState, patch: DbPatch, policy: MergePolicy, identities: IdentityMap) -> Result<MergePlan, text>:
+    """Resolve only execution inputs; accepted identity always binds the original envelope."""
+    val digest = db_patch_validate(patch)?
+    if identities.database_namespace != policy.namespace or identities.authority_epoch != policy.epoch: return Err("SCVDB_ALLOCATOR_CONTEXT")
+    val resolved = db_resolve_operations(patch.operations, identities)?
+    _db_plan_patch_operations(state, patch, policy, db_normalize_operations(resolved)?, digest)
+
+fn _db_plan_patch_operations(state: MaterializedState, patch: DbPatch, policy: MergePolicy, operations: [DbOperation], digest: text) -> Result<MergePlan, text>:
     var schema_names: [[u8]] = []
     for field in policy.fields:
         schema_names.push(db_frame(9u8, db_canonical_text(field.kind)? + db_canonical_text(field.field)?))
@@ -220,7 +233,6 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
         if not accepted_ids.contains(dependency): return Err("SCVDB_MISSING_DEPENDENCY")
     var rows = state.rows
     var conflicts: [DbConflict] = []
-    val operations = db_normalize_operations(patch.operations)?
     for operation in operations:
         match operation:
             Create(ref, kind, fields):
@@ -346,6 +358,12 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                     rows.push(DbRow(entity: entity, kind: kind, fields: fields, revision: patch.batch_id, tombstoned: false))
                 elif rows[index].tombstoned or rows[index].kind != kind or db_fields_bytes(rows[index].fields)? != db_fields_bytes(fields)?:
                     conflicts.push(DbConflict(entity: entity, field: "", code: "SCVDB_APPEND_IDENTITY_COLLISION"))
+    var targets: [DbReferenceTarget] = []
+    for row in rows: targets.push(DbReferenceTarget(identity: row.entity, tombstoned: row.tombstoned))
+    for row in rows:
+        for field in row.fields:
+            val errors = db_reference_errors(field.value, targets, row.tombstoned, 0)?
+            for code in errors: conflicts.push(DbConflict(entity: row.entity, field: field.name, code: code))
     conflicts = conflicts + db_constraint_conflicts(rows, policy)?
     if conflicts.len() > 0:
         return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: conflicts, replay: false, authorization_status: "UNVERIFIED_PREVIEW"))
@@ -369,3 +387,4 @@ fn db_preview_materialize(checkpoint: MaterializedState, patches: [DbPatch], pol
 
 export FieldMergeRule, DbFieldSchema, MergePolicy, DbRow, DbAcceptedBatch, MaterializedState, DbConflict, MergePlan
 export db_empty_state, db_field_value, db_state_digest, db_plan_patch, db_preview_materialize
+export db_plan_patch_with_identity

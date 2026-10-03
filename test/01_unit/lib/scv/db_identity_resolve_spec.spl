@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.db_reference_closure.*
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+
+fn setup_item2_resolve_uid(counter: u64) -> EntityUid:
+    EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter)
+
+fn setup_item2_resolve_patch(operations: [DbOperation], counter: u64) -> DbPatch:
+    val patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: counter, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "author", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
+    db_patch_seal(patch).unwrap()
+
+fn setup_item2_resolve_policy() -> MergePolicy:
+    MergePolicy(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", fields: [DbFieldSchema(kind: "bug", field: "target", rule: FieldMergeRule.ScalarConflict)], constraints: [])
+
+describe "REQ-004 REQ-006 raw patch admission with resolved identity execution":
+    it "resolves alias operations and nested references without laundering signed identity":
+        step("Allocate an alias while retaining UID rows as the stable internal view")
+        val uid = setup_item2_resolve_uid(1)
+        val ref = entity_ref_provisional(uid)
+        val identities = identity_map_allocate(identity_map_empty(uid.database_namespace, 1), uid).state
+        val create = setup_item2_resolve_patch([DbOperation.Create(ref, "bug", [])], 1)
+        val state = db_plan_patch(db_empty_state(), create, setup_item2_resolve_policy()).unwrap().proposed
+        val alias = entity_ref_settled(SettledAlias(database_namespace: uid.database_namespace, authority_epoch: 1, entity_kind: "bug", sequence: 1))
+        val condition = RowPrecondition(base_row: "", expected_revision: "", expected_fields: [])
+        val operation = DbOperation.UpdateFields(alias, [FieldEdit(field: "target", before: DbValue.Absent, after: DbValue.List([DbValue.Reference(alias)]))], condition)
+        val raw = setup_item2_resolve_patch([operation], 2)
+        val digest = raw.payload_digest
+        step("Apply resolved operations but keep the original envelope digest in the registry")
+        val plan = db_plan_patch_with_identity(state, raw, setup_item2_resolve_policy(), identities).unwrap()
+        expect(plan.conflicts.len()).to_equal(0)
+        expect(plan.proposed.rows[0].entity).to_equal(entity_ref_canonical(ref))
+        expect(plan.proposed.rows[0].fields[0].value).to_equal(DbValue.List([DbValue.Reference(ref)]))
+        expect(plan.proposed.accepted[1].batch_id).to_equal(raw.batch_id)
+        expect(plan.proposed.accepted[1].canonical_digest).to_equal(digest)
+        expect(db_patch_validate(raw)).to_equal(Ok(digest))
+
+    it "rejects unknown nested references before creating rows or allocating aliases":
+        step("Require reference closure even when schema metadata omits a target-kind rule")
+        val uid = setup_item2_resolve_uid(1)
+        val identities = identity_map_empty(uid.database_namespace, 1)
+        val target = entity_ref_provisional(setup_item2_resolve_uid(9))
+        val fields = [DbField(name: "target", value: DbValue.List([DbValue.Set([DbValue.Reference(target)])]))]
+        val raw = setup_item2_resolve_patch([DbOperation.Create(entity_ref_provisional(uid), "bug", fields)], 1)
+        val plan = db_plan_patch_with_identity(db_empty_state(), raw, setup_item2_resolve_policy(), identities).unwrap()
+        expect(plan.conflicts[0].code).to_equal("SCVDB_REFERENCE_MISSING")
+        expect(plan.proposed.rows.len()).to_equal(0)
+        expect(identities.high_water.len()).to_equal(0)
+        var foreign = setup_item2_resolve_uid(9)
+        foreign.database_namespace = "ffffffffffffffffffffffffffffffff"
+        val foreign_patch = setup_item2_resolve_patch([DbOperation.Create(entity_ref_provisional(uid), "bug", [DbField(name: "target", value: DbValue.Reference(entity_ref_provisional(foreign)))])], 2)
+        expect(db_plan_patch_with_identity(db_empty_state(), foreign_patch, setup_item2_resolve_policy(), identities)).to_equal(Err("SCVDB_ALIAS_CONTEXT"))
+
+    it "retains known tombstone references only in historical collection members":
+        step("Keep removed-member history while rejecting live tombstone references")
+        val ref = entity_ref_provisional(setup_item2_resolve_uid(1))
+        val targets = [DbReferenceTarget(identity: entity_ref_canonical(ref), tombstoned: true)]
+        expect(db_reference_errors(DbValue.Reference(ref), targets, false, 0)).to_equal(Ok(["SCVDB_REFERENCE_TOMBSTONED"]))
+        val removed = DbValue.ObservedSet([DbSetMember(dot: "a", value: DbValue.Reference(ref), removed: true)])
+        expect(db_reference_errors(removed, targets, false, 0)).to_equal(Ok([]))
+        expect(db_reference_errors(removed, [], false, 0)).to_equal(Ok(["SCVDB_REFERENCE_MISSING"]))

@@ -1,0 +1,38 @@
+# Universal typed reference closure, including nested collection history.
+use std.scv.db_patch.*
+use std.scv.db_remove_wins.{db_remove_wins_visible}
+use std.scv.distributed_identity.{entity_ref_canonical}
+
+struct DbReferenceTarget:
+    identity: text
+    tombstoned: bool
+
+fn db_reference_errors(value: DbValue, targets: [DbReferenceTarget], historical: bool, depth: i64) -> Result<[text], text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    var errors: [text] = []
+    match value:
+        Reference(ref):
+            val id = entity_ref_canonical(ref)
+            var found = false
+            for target in targets:
+                if target.identity == id:
+                    found = true
+                    if target.tombstoned and not historical: errors.push("SCVDB_REFERENCE_TOMBSTONED")
+            if not found: errors.push("SCVDB_REFERENCE_MISSING")
+        List(values):
+            for item in values: errors = errors + db_reference_errors(item, targets, historical, depth + 1)?
+        Set(values):
+            for item in values: errors = errors + db_reference_errors(item, targets, historical, depth + 1)?
+        ObservedSet(members):
+            for member in members: errors = errors + db_reference_errors(member.value, targets, historical or member.removed, depth + 1)?
+        CausalSet(events):
+            val visible = db_remove_wins_visible(value)?
+            var live: [[u8]] = []
+            for item in visible: live.push(db_value_bytes(item)?)
+            for event in events:
+                val retained = historical or event.removed or not live.contains(db_value_bytes(event.value)?)
+                errors = errors + db_reference_errors(event.value, targets, retained, depth + 1)?
+        _: ()
+    Ok(errors)
+
+export DbReferenceTarget, db_reference_errors

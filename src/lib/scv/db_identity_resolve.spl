@@ -1,0 +1,69 @@
+# Resolve typed aliases into the stable UID view without changing signed bytes.
+use std.scv.db_patch.*
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+
+fn db_resolve_reference(ref: EntityRef, identities: IdentityMap) -> Result<EntityRef, text>:
+    if not entity_ref_validate(ref).valid: return Err("SCVDB_ENTITY_REF")
+    if val uid = ref.provisional:
+        if uid.database_namespace != identities.database_namespace: return Err("SCVDB_ALIAS_CONTEXT")
+        return Ok(ref)
+    if val alias = ref.settled:
+        if alias.database_namespace != identities.database_namespace or alias.authority_epoch != identities.authority_epoch: return Err("SCVDB_ALIAS_CONTEXT")
+        for binding in identities.bindings:
+            if binding.entity_kind == alias.entity_kind and binding.sequence == alias.sequence:
+                return Ok(entity_ref_provisional(binding.uid))
+    Err("SCVDB_IDENTITY_UNKNOWN")
+
+fn db_resolve_value(value: DbValue, identities: IdentityMap, depth: i64) -> Result<DbValue, text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    match value:
+        Reference(ref): Ok(DbValue.Reference(db_resolve_reference(ref, identities)?))
+        List(values):
+            var resolved: [DbValue] = []
+            for item in values: resolved.push(db_resolve_value(item, identities, depth + 1)?)
+            Ok(DbValue.List(resolved))
+        Set(values):
+            var resolved: [DbValue] = []
+            for item in values: resolved.push(db_resolve_value(item, identities, depth + 1)?)
+            Ok(DbValue.Set(resolved))
+        ObservedSet(members):
+            var resolved: [DbSetMember] = []
+            for member in members:
+                resolved.push(DbSetMember(dot: member.dot, value: db_resolve_value(member.value, identities, depth + 1)?, removed: member.removed))
+            Ok(DbValue.ObservedSet(resolved))
+        CausalSet(events):
+            var resolved: [DbSetEvent] = []
+            for event in events:
+                resolved.push(DbSetEvent(dot: event.dot, value: db_resolve_value(event.value, identities, depth + 1)?, removed: event.removed, observed: event.observed))
+            Ok(DbValue.CausalSet(resolved))
+        _: Ok(value)
+
+fn db_resolve_fields(fields: [DbField], identities: IdentityMap) -> Result<[DbField], text>:
+    var resolved: [DbField] = []
+    for field in fields: resolved.push(DbField(name: field.name, value: db_resolve_value(field.value, identities, 0)?))
+    Ok(resolved)
+
+fn db_resolve_condition(condition: RowPrecondition, identities: IdentityMap) -> Result<RowPrecondition, text>:
+    Ok(RowPrecondition(base_row: condition.base_row, expected_revision: condition.expected_revision, expected_fields: db_resolve_fields(condition.expected_fields, identities)?))
+
+fn db_resolve_operations(operations: [DbOperation], identities: IdentityMap) -> Result<[DbOperation], text>:
+    val error = identity_map_validate(identities)
+    if error != "": return Err(error)
+    var resolved: [DbOperation] = []
+    for operation in operations:
+        match operation:
+            Create(entity, kind, fields): resolved.push(DbOperation.Create(db_resolve_reference(entity, identities)?, kind, db_resolve_fields(fields, identities)?))
+            AppendObservation(entity, kind, fields): resolved.push(DbOperation.AppendObservation(db_resolve_reference(entity, identities)?, kind, db_resolve_fields(fields, identities)?))
+            Tombstone(entity, condition): resolved.push(DbOperation.Tombstone(db_resolve_reference(entity, identities)?, db_resolve_condition(condition, identities)?))
+            UpdateFields(entity, edits, condition):
+                var normalized: [FieldEdit] = []
+                for edit in edits: normalized.push(FieldEdit(field: edit.field, before: db_resolve_value(edit.before, identities, 0)?, after: db_resolve_value(edit.after, identities, 0)?))
+                resolved.push(DbOperation.UpdateFields(db_resolve_reference(entity, identities)?, normalized, db_resolve_condition(condition, identities)?))
+            AddSetMember(entity, field, member, dot): resolved.push(DbOperation.AddSetMember(db_resolve_reference(entity, identities)?, field, db_resolve_value(member, identities, 0)?, dot))
+            RemoveObservedSetMember(entity, field, observed): resolved.push(DbOperation.RemoveObservedSetMember(db_resolve_reference(entity, identities)?, field, observed))
+            AddSetMemberAfterRemoval(entity, field, member, dot, observed): resolved.push(DbOperation.AddSetMemberAfterRemoval(db_resolve_reference(entity, identities)?, field, db_resolve_value(member, identities, 0)?, dot, observed))
+            RemoveSetMember(entity, field, member, dot, observed): resolved.push(DbOperation.RemoveSetMember(db_resolve_reference(entity, identities)?, field, db_resolve_value(member, identities, 0)?, dot, observed))
+    Ok(resolved)
+
+export db_resolve_operations
