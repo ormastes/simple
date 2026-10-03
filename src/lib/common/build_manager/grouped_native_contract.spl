@@ -7,6 +7,7 @@ use std.common.build_manager.contracts.{
     builder_relative_path_valid_v1, builder_paths_overlap_v1
 }
 use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.memory_policy.{builder_memory_policy_valid_v1}
 
 val NATIVE_GROUP_WIRE_MAX_V1: i64 = 16777216
 val NATIVE_GROUP_MEMBER_MAX_V1: i64 = 4096
@@ -42,6 +43,7 @@ struct NativeGroupManifestV1:
     memory_limit_bytes: i64
     max_threads: i64
     members: [NativeGroupMemberV1]
+    memory_policy: text = "enforce"
 
 struct NativeModuleResultV1:
     module_id: text
@@ -126,6 +128,7 @@ struct NativeGroupRunV1:
     manifests: [NativeGroupManifestV1]
     resources: [NativeGroupResourceV1]
     results: [NativeGroupResultV1]
+    memory_policy: text = "enforce"
 
 fn native_group_absolute_path_valid_v1(path: text) -> bool:
     if path.len() < 2 or path.len() > 4096 or path.contains("\0") or
@@ -173,6 +176,7 @@ fn native_group_scc_set_id_v1(members: [NativeGroupMemberV1]) -> text:
     sha256_text(canonical)
 
 fn native_group_manifest_validate_v1(value: NativeGroupManifestV1) -> text:
+    if not builder_memory_policy_valid_v1(value.memory_policy): return "invalid group memory policy"
     for digest in [value.producer_digest, value.source_snapshot_digest,
             value.full_source_authority_digest, value.variant_digest,
             value.group_route_digest, value.tool_digest,
@@ -222,6 +226,7 @@ fn native_group_manifest_validate_v1(value: NativeGroupManifestV1) -> text:
 
 fn native_group_manifest_body_v1(value: NativeGroupManifestV1) -> text:
     var out = ""
+    if value.memory_policy != "enforce": out = builder_wire_line_v1(value.memory_policy)
     for field in [value.producer_digest, value.source_snapshot_digest,
             value.full_source_authority_digest, value.variant_digest,
             value.group_route_path, value.group_route_digest, value.tool_digest,
@@ -238,7 +243,8 @@ fn native_group_manifest_body_v1(value: NativeGroupManifestV1) -> text:
 
 fn native_group_manifest_encode_v1(value: NativeGroupManifestV1) -> text:
     if native_group_manifest_validate_v1(value) != "": return ""
-    val payload = "SIMPLE-NATIVE-GROUP-MANIFEST-1\n" + native_group_manifest_body_v1(value)
+    val header = if value.memory_policy == "enforce": "SIMPLE-NATIVE-GROUP-MANIFEST-1\n" else: "SIMPLE-NATIVE-GROUP-MANIFEST-2\n"
+    val payload = header + native_group_manifest_body_v1(value)
     if payload.len() > NATIVE_GROUP_WIRE_MAX_V1: return ""
     payload
 
@@ -265,14 +271,16 @@ fn native_group_smf_loader_receipt_v1(manifest: NativeGroupManifestV1,
 
 fn native_group_manifest_decode_v1(payload: text) -> Result<NativeGroupManifestV1, text>:
     var reader = BuilderWireReaderV1.create(payload)
-    if reader.scalar() != "SIMPLE-NATIVE-GROUP-MANIFEST-1": return Err("invalid native manifest header")
-    val value = native_group_manifest_read_v1(reader)
+    val header = reader.scalar()
+    if header != "SIMPLE-NATIVE-GROUP-MANIFEST-1" and header != "SIMPLE-NATIVE-GROUP-MANIFEST-2": return Err("invalid native manifest header")
+    val value = native_group_manifest_read_v1(reader, header == "SIMPLE-NATIVE-GROUP-MANIFEST-2")
     val parse_error = reader.complete_error()
     if parse_error != "": return Err(parse_error)
     if native_group_manifest_encode_v1(value) != payload: return Err("noncanonical or invalid native manifest")
     Ok(value)
 
-fn native_group_manifest_read_v1(reader: BuilderWireReaderV1) -> NativeGroupManifestV1:
+fn native_group_manifest_read_v1(reader: BuilderWireReaderV1, explicit_memory_policy: bool = false) -> NativeGroupManifestV1:
+    val memory_policy = if explicit_memory_policy: reader.scalar() else: "enforce"
     val producer = reader.scalar()
     val source = reader.scalar()
     val full_source = reader.scalar()
@@ -301,7 +309,7 @@ fn native_group_manifest_read_v1(reader: BuilderWireReaderV1) -> NativeGroupMani
         i = i + 1
     NativeGroupManifestV1(producer, source, full_source, variant, route_path,
         route_digest, tool, runtime, phase, backend, target, group,
-        scc, generation, attempt, inventory, inventory_count, memory, threads, members)
+        scc, generation, attempt, inventory, inventory_count, memory, threads, members, memory_policy)
 
 fn native_group_module_result_validate_v1(value: NativeModuleResultV1) -> text:
     if not builder_identifier_valid_v1(value.module_id) or
@@ -452,6 +460,7 @@ fn native_group_result_decode_v1(payload: text) -> Result<NativeGroupResultV1, t
     Ok(value)
 
 fn native_group_run_validate_v1(value: NativeGroupRunV1) -> text:
+    if not builder_memory_policy_valid_v1(value.memory_policy): return "invalid run memory policy"
     if not builder_identifier_valid_v1(value.run_id) or
             not native_group_phase_valid_v1(value.phase) or
             not builder_identifier_valid_v1(value.backend) or
@@ -543,6 +552,7 @@ fn native_group_run_validate_v1(value: NativeGroupRunV1) -> text:
                 manifest.inventory_digest != value.inventory_digest or
                 manifest.inventory_count != value.inventory_count or
                 manifest.memory_limit_bytes != value.memory_limit_bytes or
+                manifest.memory_policy != value.memory_policy or
                 manifest.max_threads != value.max_threads:
             return "manifest differs from run identity or budget"
         if manifest.attempt > value.max_attempts: return "manifest exceeds retry bound"
@@ -664,7 +674,8 @@ fn native_group_run_validate_v1(value: NativeGroupRunV1) -> text:
 
 fn native_group_run_encode_v1(value: NativeGroupRunV1) -> text:
     if native_group_run_validate_v1(value) != "": return ""
-    var out = "SIMPLE-NATIVE-GROUP-RUN-1\n"
+    var out = if value.memory_policy == "enforce": "SIMPLE-NATIVE-GROUP-RUN-1\n" else: "SIMPLE-NATIVE-GROUP-RUN-2\n"
+    if value.memory_policy != "enforce": out = out + builder_wire_line_v1(value.memory_policy)
     for field in [value.run_id, value.producer_digest, value.source_snapshot_digest,
             value.full_source_authority_digest, value.scv_source_inventory_digest,
             value.variant_digest, value.tool_digest, value.runtime_digest,
@@ -711,7 +722,10 @@ fn native_group_run_encode_v1(value: NativeGroupRunV1) -> text:
 
 fn native_group_run_decode_v1(payload: text) -> Result<NativeGroupRunV1, text>:
     var reader = BuilderWireReaderV1.create(payload)
-    if reader.scalar() != "SIMPLE-NATIVE-GROUP-RUN-1": return Err("invalid native run header")
+    val header = reader.scalar()
+    if header != "SIMPLE-NATIVE-GROUP-RUN-1" and header != "SIMPLE-NATIVE-GROUP-RUN-2": return Err("invalid native run header")
+    val explicit_memory_policy = header == "SIMPLE-NATIVE-GROUP-RUN-2"
+    val memory_policy = if explicit_memory_policy: reader.scalar() else: "enforce"
     val run_id = reader.scalar()
     val producer = reader.scalar()
     val source = reader.scalar()
@@ -768,7 +782,7 @@ fn native_group_run_decode_v1(payload: text) -> Result<NativeGroupRunV1, text>:
     var manifests: [NativeGroupManifestV1] = []
     var i = 0
     while i < manifest_count and reader.reason == "":
-        manifests = manifests.push(native_group_manifest_read_v1(reader))
+        manifests = manifests.push(native_group_manifest_read_v1(reader, explicit_memory_policy))
         i = i + 1
     val resource_count = reader.number(4096, false)
     var resources: [NativeGroupResourceV1] = []
@@ -805,7 +819,7 @@ fn native_group_run_decode_v1(payload: text) -> Result<NativeGroupRunV1, text>:
         state_root, output_root, producer_program, manager_program, manager_digest,
         worker_program, worker_digest,
         broker_program, broker_digest, environment, max_attempts, poll_ms,
-        lifetime_ms, manifests, resources, results)
+        lifetime_ms, manifests, resources, results, memory_policy)
     if native_group_run_encode_v1(value) != payload: return Err("noncanonical or invalid native run")
     Ok(value)
 

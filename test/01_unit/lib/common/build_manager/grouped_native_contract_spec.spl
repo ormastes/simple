@@ -44,6 +44,34 @@ fn success(id: text, kind: text) -> NativeModuleResultV1:
         kind == "SMF", if kind == "SMF": digest("9") else: "")
 
 describe "Pointer-free grouped native manifest and ledger":
+    it "preserves enforced v1 bytes and binds monitor policy through run and manifests":
+        var first = manifest([member("a", "scc_a", "OBJECT"), member("b", "scc_b", "SMF")])
+        val enforced = native_group_manifest_encode_v1(first)
+        expect(enforced).to_start_with("SIMPLE-NATIVE-GROUP-MANIFEST-1\n")
+        expect(native_group_manifest_decode_v1(enforced).unwrap().memory_policy).to_equal("enforce")
+        expect(native_group_manifest_encode_v1(native_group_manifest_decode_v1(enforced).unwrap())).to_equal(enforced)
+        val legacy_run = native_group_run_encode_v1(run(first))
+        expect(native_group_run_decode_v1(legacy_run).unwrap().memory_policy).to_equal("enforce")
+        expect(native_group_run_encode_v1(native_group_run_decode_v1(legacy_run).unwrap())).to_equal(legacy_run)
+        first.memory_policy = "monitor"
+        val monitored = native_group_manifest_encode_v1(first)
+        expect(monitored).to_start_with("SIMPLE-NATIVE-GROUP-MANIFEST-2\n")
+        expect(monitored != enforced).to_equal(true)
+        expect(native_group_manifest_decode_v1(monitored).unwrap().memory_policy).to_equal("monitor")
+        var value = run(first)
+        expect(native_group_run_encode_v1(value)).to_equal("")
+        value.memory_policy = "monitor"
+        val encoded = native_group_run_encode_v1(value)
+        expect(encoded).to_start_with("SIMPLE-NATIVE-GROUP-RUN-2\n")
+        val decoded = native_group_run_decode_v1(encoded).unwrap()
+        expect(decoded.memory_policy).to_equal("monitor")
+        expect(decoded.manifests[0].memory_policy).to_equal("monitor")
+        expect(native_group_run_encode_v1(decoded)).to_equal(encoded)
+        first.memory_limit_bytes = 0
+        expect(native_group_manifest_encode_v1(first)).to_equal("")
+        value.memory_policy = "unlimited"
+        expect(native_group_run_encode_v1(value)).to_equal("")
+
     it "binds an SMF loader receipt to exact manifest and output bytes":
         val first = manifest([member("a", "scc_a", "SMF")])
         val payload = native_group_smf_loader_receipt_v1(first, "a", digest("8"))
