@@ -34,6 +34,23 @@ pub struct ElfFileSectionV1:
     alignment: u64
     entry_size: u64
 
+pub struct ElfFileSymbolV1:
+    name_bytes: [u8]
+    binding: i64
+    symbol_type: i64
+    visibility: i64
+    section_index: i64
+    value: u64
+    size: u64
+
+pub struct ElfFileRelaV1:
+    offset: u64
+    symbol_index: u64
+    relocation_type: u64
+    addend: i64
+    target_section: i64
+    symbol_table: i64
+
 fn _elf_file_field(bytes: [u8], offset: i64, width: i64) -> u64:
     var value: u64 = 0
     for index in 0..width:
@@ -125,5 +142,74 @@ pub fn elf_file_section_window_v1(object: ElfFileObjectV1, index: i64,
 pub fn elf_file_close_v1(object: ElfFileObjectV1) -> bool:
     retained_file_close(object.file)
 
-export ElfFileObjectV1, ElfFileSectionV1
+pub fn elf_file_string_v1(object: ElfFileObjectV1, table_index: i64,
+        offset: u64, max_bytes: i64) -> Result<[u8], text>:
+    if max_bytes < 0 or max_bytes > object.max_window_bytes: return Err("ELF string budget invalid")
+    val table = elf_file_section_v1(object, table_index)?
+    if table.section_type != 3u64: return Err("ELF string table requires STRTAB")
+    if offset >= table.size: return Err("ELF string offset bounds")
+    var name: [u8] = []
+    var cursor = offset
+    while cursor < table.size:
+        val remaining = table.size - cursor
+        var count = max_bytes - name.len() + 1
+        if count > object.max_window_bytes: count = object.max_window_bytes
+        if remaining < count as u64: count = remaining as i64
+        val bytes = _elf_file_exact(object.file, table.file_offset + cursor, count)?
+        for byte in bytes:
+            if byte == 0u8: return Ok(name)
+            if name.len() == max_bytes: return Err("ELF string budget exceeded")
+            name.push(byte)
+        cursor = cursor + count as u64
+    Err("ELF string unterminated within STRTAB")
+
+fn _elf_file_symbol_table(object: ElfFileObjectV1, index: i64) -> Result<ElfFileSectionV1, text>:
+    val table = elf_file_section_v1(object, index)?
+    if table.section_type != 2u64 and table.section_type != 11u64:
+        return Err("ELF symbol table type invalid")
+    if table.entry_size != 24u64 or table.size % 24u64 != 0u64:
+        return Err("ELF symbol entry width unsupported")
+    val strings = elf_file_section_v1(object, table.link)?
+    if strings.section_type != 3u64: return Err("ELF symbol strings require STRTAB")
+    if table.info as u64 > table.size / 24u64: return Err("ELF local symbol boundary invalid")
+    Ok(table)
+
+pub fn elf_file_symbol_v1(object: ElfFileObjectV1, table_index: i64,
+        ordinal: u64, max_name_bytes: i64) -> Result<ElfFileSymbolV1, text>:
+    val table = _elf_file_symbol_table(object, table_index)?
+    if ordinal >= table.size / 24u64: return Err("ELF symbol ordinal bounds")
+    val bytes = _elf_file_exact(object.file, table.file_offset + ordinal * 24u64, 24)?
+    val section_index = _elf_file_field(bytes, 6, 2) as i64
+    if section_index == 65535: return Err("ELF extended symbol section unsupported")
+    if section_index < 65280 and section_index >= object.section_count:
+        return Err("ELF symbol section index bounds")
+    val name = elf_file_string_v1(object, table.link, _elf_file_field(bytes, 0, 4), max_name_bytes)?
+    Ok(ElfFileSymbolV1(name_bytes: name, binding: (bytes[4] >> 4) as i64,
+        symbol_type: (bytes[4] & 15u8) as i64, visibility: (bytes[5] & 3u8) as i64,
+        section_index: section_index, value: _elf_file_field(bytes, 8, 8), size: _elf_file_field(bytes, 16, 8)))
+
+pub fn elf_file_rela_v1(object: ElfFileObjectV1, table_index: i64,
+        ordinal: u64) -> Result<ElfFileRelaV1, text>:
+    val table = elf_file_section_v1(object, table_index)?
+    if table.section_type != 4u64: return Err("ELF relocation table requires RELA; implicit addends unsupported")
+    if table.entry_size != 24u64 or table.size % 24u64 != 0u64:
+        return Err("ELF RELA entry width unsupported")
+    if ordinal >= table.size / 24u64: return Err("ELF RELA ordinal bounds")
+    if table.info == 0: return Err("ELF RELA target is NULL")
+    val target = elf_file_section_v1(object, table.info)?
+    val symbols = _elf_file_symbol_table(object, table.link)?
+    val bytes = _elf_file_exact(object.file, table.file_offset + ordinal * 24u64, 24)?
+    val offset = _elf_file_field(bytes, 0, 8)
+    val info = _elf_file_field(bytes, 8, 8)
+    val symbol_index = info >> 32
+    if symbol_index >= symbols.size / 24u64: return Err("ELF relocation symbol index bounds")
+    # Relocation width/encoding is checked by the architecture consumer. A NONE
+    # record may legally name the end offset and performs no memory access.
+    if offset > target.size: return Err("ELF relocation target offset bounds")
+    Ok(ElfFileRelaV1(offset: offset, symbol_index: symbol_index,
+        relocation_type: info & 0xffffffffu64, addend: _elf_file_field(bytes, 16, 8) as i64,
+        target_section: table.info, symbol_table: table.link))
+
+export ElfFileObjectV1, ElfFileSectionV1, ElfFileSymbolV1, ElfFileRelaV1
 export elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1
+export elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1
