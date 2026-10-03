@@ -465,6 +465,12 @@ slots; it validates paired labels in their original input section. The target
 is little-endian ELF64 ET_EXEC. ABI flags are merged before the final build-id
 seal; incompatible floating ABIs, RV32 output, and dynamic/TLS requests reject.
 Instruction/data relocation tests use independent LLVM-assembled objects.
+Fixed-span ULEB SET/SUB pairs are validated within the original section before
+layout and patched together. ALIGN normalization accepts only validated NOP
+padding in allocated executable PROGBITS with sufficient section alignment;
+it rewrites coherent raw symbol/relocation/section tables and reparses them.
+Explicit addends remain unchanged, matching the recorded LLVM fixture oracle.
+Instruction-size call relaxation and attribute merging remain open.
 
 `macho/macho_static_link.spl` constructs fixed-address, symbol-stripped
 MH_EXECUTE images with PAGEZERO/TEXT/DATA and LC_UNIXTHREAD. Its checked input,
