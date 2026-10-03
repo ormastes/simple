@@ -1,0 +1,88 @@
+use app.test.package_index_acceptance_binding.{
+    PackageIndexBindingObservationV1, acceptance_variant_v1, acceptance_rebind_actions_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    PackageTldrHeaderV1, PackageSmfSectionV1, config_variant_digest_v1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_publish_if_current_v1, package_module_index_read_current_v1
+}
+use compiler.driver.cache.package_scc_scheduler.{
+    package_scc_schedule_v1, package_scc_consume_index_schedule_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn acceptance_schedule_header_v1(name: text, imports: [text], reverse: [text]) -> PackageTldrHeaderV1:
+    val digest = sha256_text(name)
+    PackageTldrHeaderV1(1, sha256_text("producer"), name, name, "src/{name}.spl",
+        acceptance_variant_v1("debug", "feature_x"), digest, digest, digest,
+        [PackageSmfSectionV1("exports", 0, 32, digest)],
+        digest, digest, digest, digest, digest, digest, imports, reverse,
+        "declared:{name}", [name], digest, digest)
+
+fn package_index_acceptance_schedule_v1(scenario: text, root: text) -> PackageIndexBindingObservationV1:
+    var headers: [PackageTldrHeaderV1] = []
+    var roots: [text] = []
+    if scenario == "deterministic-independent-schedule":
+        headers = [
+            acceptance_schedule_header_v1("alpha", [], ["bundle"]),
+            acceptance_schedule_header_v1("beta", [], ["bundle"]),
+            acceptance_schedule_header_v1("bundle", ["alpha", "beta"], [])]
+        roots = ["alpha", "beta"]
+    elif scenario == "scc-group-invalidation":
+        headers = [
+            acceptance_schedule_header_v1("cycle_a", ["cycle_b"], ["cycle_b", "root"]),
+            acceptance_schedule_header_v1("cycle_b", ["cycle_a"], ["cycle_a"]),
+            acceptance_schedule_header_v1("root", ["cycle_a"], [])]
+        roots = ["cycle_a"]
+    else:
+        return PackageIndexBindingObservationV1(false, "unsupported-schedule-scenario", [])
+    val variant = acceptance_variant_v1("debug", "feature_x")
+    val scheduled = package_scc_schedule_v1(headers, variant, roots)
+    val reversed = package_scc_schedule_v1([headers[2], headers[1], headers[0]], variant, roots)
+    if not scheduled.valid or not reversed.valid:
+        return PackageIndexBindingObservationV1(false, "metadata-schedule-failed", [scheduled.reason, reversed.reason])
+    var entries: [PackageModuleIndexEntryV1] = []
+    for header in headers:
+        var scc = ""
+        for group in scheduled.groups:
+            if group.members.contains(header.package_identity):
+                scc = group.identity
+        entries.push(PackageModuleIndexEntryV1(header.package_identity, header.module_identity,
+            header.source_identity, header.source_digest, header.smf_digest,
+            header.export_digest, header.abi_digest, header.initializer_digest,
+            header.provider_digest, header.action_archive_digest, sha256_text("manifest"),
+            scc, header.direct_imports, header.reverse_dependents))
+    val graph = acceptance_rebind_actions_v1(PackageModuleIndexGenerationV1(
+        2, sha256_text("producer"), "root", "revision", "commit", "tree",
+        sha256_text("inventory"), entries, config_variant_digest_v1(variant)))
+    if not package_module_index_publish_if_current_v1(root, graph, ""):
+        return PackageIndexBindingObservationV1(false, "fixture-publication-failed", [])
+    val persisted = package_module_index_read_current_v1(root)
+    if not persisted.valid or persisted.generation == nil:
+        return PackageIndexBindingObservationV1(false, "fixture-admission-failed", [])
+    val consumed = package_scc_consume_index_schedule_v1(persisted.generation!, scheduled.dirty_packages)
+    var forward_ids: [text] = []
+    var reverse_ids: [text] = []
+    for wave in scheduled.waves:
+        for group in wave.groups:
+            forward_ids.push(group.identity)
+    for wave in reversed.waves:
+        for group in wave.groups:
+            reverse_ids.push(group.identity)
+    val stable = forward_ids == reverse_ids
+    val ordered = consumed.package_order.join(",")
+    var valid = consumed.valid and stable
+    if scenario == "deterministic-independent-schedule":
+        valid = valid and ordered == "alpha,beta,bundle" and
+            consumed.waves == [["alpha", "beta"], ["bundle"]]
+    else:
+        valid = valid and ordered == "cycle_a,cycle_b,root" and
+            consumed.waves == [["cycle_a", "cycle_b"], ["root"]]
+    val dirty = scheduled.dirty_packages.join(",")
+    PackageIndexBindingObservationV1(valid, if valid: "ok" else: "schedule-contract-failed", [
+        "scheduled_packages={ordered}", "invalidated_packages={dirty}",
+        "repeat_group_order_match={stable}", "persisted_generation={persisted.digest}"])
+
+export package_index_acceptance_schedule_v1
