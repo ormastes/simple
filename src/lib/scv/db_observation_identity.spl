@@ -1,0 +1,174 @@
+# Pure comparison kernel. Append is not authenticated absence or write authority.
+# Every policy change changes the index key: even transport-only flag rotation
+# requires explicit migration by the future effect owner. No implicit fallback.
+# Text/count/body budgets apply to each policy or observation separately.
+# Decide validates at most two bounded observations; it is not a 1MiB aggregate
+# decision budget. The inherited sealed-record codec may reject a smaller body.
+# Multi-case providers must explicitly declare their case discriminator; this
+# kernel never guesses one from the semantic case reference.
+use std.scv.db_ci_ingest.{DbCiCapabilities, db_ci_capabilities_validate}
+use std.scv.db_evidence.{DbObservation, DbEvidenceRevision, db_evidence_check_ref, db_observation_content_bytes}
+use std.scv.db_reproduction_codec.{DbReproductionRecord, db_reproduction_record_encode}
+use std.scv.db_patch.{db_ref_context, db_ref_kind}
+use std.scv.db_canonical.{db_frame, db_u64_bytes, db_canonical_text, db_domain_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
+
+struct DbObservationIdentityPolicy:
+    revision: text
+    namespace: text
+    epoch: u64
+    provider_instance: text
+    project: text
+    capabilities: DbCiCapabilities
+
+struct DbObservationIdentityClaim:
+    policy_revision: text
+    identity_digest: text
+    content_digest: text
+    observation: DbEvidenceRevision
+
+enum DbObservationIdentityDecision:
+    Append
+    Duplicate(original: DbEvidenceRevision)
+    Quarantine(reason: text)
+
+fn _identity_core() -> [text]:
+    ["instance", "project", "run", "job", "attempt"]
+
+fn _identity_hex(value: text, size: i64) -> bool:
+    if value.len() != size: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+# Check length before UTF-8 conversion or NFC work. A scalar count <=4096
+# bounds the temporary encoding even when every scalar needs four bytes.
+fn _identity_text(value: text, canonical_error: text) -> Result<i64, text>:
+    if value.len() > 4096: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    val count = base_encoding_text_to_bytes(value).len()
+    if count > 4096: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    if unicode_normalize_nfc(value) != value: return Err(canonical_error)
+    Ok(count)
+
+fn _identity_names(names: [text]) -> Result<bool, text>:
+    if names.len() > 64: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    var previous = ""
+    for name in names:
+        _identity_text(name, "SCVDB_OBSERVATION_IDENTITY_POLICY")?
+        if name <= previous: return Err("SCVDB_OBSERVATION_IDENTITY_POLICY")
+        previous = name
+    Ok(true)
+
+fn db_observation_identity_policy_digest(policy: DbObservationIdentityPolicy) -> Result<text, text>:
+    _identity_text(policy.namespace, "SCVDB_OBSERVATION_IDENTITY_POLICY")?
+    _identity_text(policy.provider_instance, "SCVDB_OBSERVATION_IDENTITY_POLICY")?
+    _identity_text(policy.project, "SCVDB_OBSERVATION_IDENTITY_POLICY")?
+    if not _identity_hex(policy.namespace, 32) or policy.epoch == 0 or policy.provider_instance == "" or policy.project == "": return Err("SCVDB_OBSERVATION_IDENTITY_POLICY")
+    val caps = policy.capabilities
+    _identity_names(caps.identity_dimensions)?
+    _identity_names(caps.uniqueness_tuple)?
+    match db_ci_capabilities_validate(caps):
+        Ok(_): pass
+        Err(_): return Err("SCVDB_OBSERVATION_IDENTITY_POLICY")
+    var bytes = db_frame(1u8, db_canonical_text(policy.namespace)?) + db_frame(2u8, db_u64_bytes(policy.epoch))
+    bytes = bytes + db_frame(3u8, db_canonical_text(policy.provider_instance)?) + db_frame(4u8, db_canonical_text(policy.project)?)
+    for name in caps.identity_dimensions: bytes = bytes + db_frame(5u8, db_canonical_text(name)?)
+    for name in caps.uniqueness_tuple: bytes = bytes + db_frame(6u8, db_canonical_text(name)?)
+    for flag in [caps.event_hints, caps.polling, caps.bundle_import, caps.artifact_download, caps.attestations, caps.pagination]:
+        bytes = bytes + db_frame(7u8, if flag: [1u8] else: [0u8])
+    bytes = bytes + db_frame(8u8, db_u64_bytes(caps.maximum_bundle_bytes))
+    Ok(sha256_u8_hex(db_domain_bytes("observation-identity-policy-v1", bytes)?))
+
+fn db_observation_identity_policy_seal(policy: DbObservationIdentityPolicy) -> Result<DbObservationIdentityPolicy, text>:
+    var sealed = policy
+    sealed.revision = db_observation_identity_policy_digest(policy)?
+    Ok(sealed)
+
+fn _identity_ref_preflight(reference: DbEvidenceRevision) -> Result<i64, text>:
+    var count = _identity_text(reference.revision, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")?
+    if val uid = reference.entity.provisional:
+        for value in [uid.database_namespace, uid.entity_kind, uid.actor.hex]: count = count + _identity_text(value, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")?
+    if val alias = reference.entity.settled:
+        for value in [alias.database_namespace, alias.entity_kind]: count = count + _identity_text(value, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")?
+    Ok(count)
+
+fn _identity_refs(observation: DbObservation) -> [DbEvidenceRevision]:
+    var refs = [observation.reference, observation.test_definition, observation.config, observation.case_revision, observation.run]
+    if val reproduction = observation.reproduction: refs.push(reproduction)
+    refs
+
+fn _identity_preflight(observation: DbObservation, declared: [text]) -> Result<bool, text>:
+    if observation.provider.dimensions.len() > 64 or observation.measurements.len() > 64: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    # Conservative framing/domain allowance, in addition to all input UTF-8.
+    # This bounds encoding work before the inherited record codec's lower cap.
+    var count = 8192
+    for value in [observation.provider.instance, observation.provider.project, observation.provider.run, observation.provider.job, observation.source_revision, observation.actual, observation.failure_signature, observation.payload_digest]:
+        count = count + _identity_text(value, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")?
+    for reference in _identity_refs(observation): count = count + _identity_ref_preflight(reference)?
+    var previous = ""
+    for dimension in observation.provider.dimensions:
+        count = count + _identity_text(dimension.name, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")? + _identity_text(dimension.value, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")?
+        if dimension.name <= previous or dimension.value == "" or _identity_core().contains(dimension.name) or not declared.contains(dimension.name): return Err("SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")
+        previous = dimension.name
+    if observation.provider.dimensions.len() != declared.len(): return Err("SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")
+    previous = ""
+    for measurement in observation.measurements:
+        count = count + _identity_text(measurement.name, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")? + _identity_text(measurement.unit, "SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")?
+        if measurement.name <= previous or measurement.unit == "": return Err("SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")
+        previous = measurement.name
+    if count > 1048576: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    Ok(true)
+
+fn _identity_value(observation: DbObservation, name: text) -> Result<[u8], text>:
+    if name == "attempt": return Ok(db_frame(2u8, db_u64_bytes(observation.provider.attempt)))
+    var value = ""
+    if name == "instance": value = observation.provider.instance
+    elif name == "project": value = observation.provider.project
+    elif name == "run": value = observation.provider.run
+    elif name == "job": value = observation.provider.job
+    else:
+        for dimension in observation.provider.dimensions:
+            if dimension.name == name: value = dimension.value
+    if value == "": return Err("SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")
+    Ok(db_frame(1u8, db_canonical_text(value)?))
+
+fn db_observation_identity_claim(observation: DbObservation, policy: DbObservationIdentityPolicy, expected_revision: text) -> Result<DbObservationIdentityClaim, text>:
+    val revision = db_observation_identity_policy_digest(policy)?
+    if not _identity_hex(expected_revision, 64) or policy.revision != revision or expected_revision != revision: return Err("SCVDB_OBSERVATION_IDENTITY_PIN")
+    var declared: [text] = []
+    for name in policy.capabilities.identity_dimensions:
+        if not _identity_core().contains(name): declared.push(name)
+    _identity_preflight(observation, declared)?
+    for reference in _identity_refs(observation):
+        if not db_ref_context(reference.entity, policy.namespace, policy.epoch): return Err("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+        match db_evidence_check_ref(reference):
+            Ok(_): pass
+            Err(_): return Err("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+    if db_ref_kind(observation.reference.entity) != "observation" or observation.provider.instance != policy.provider_instance or observation.provider.project != policy.project: return Err("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+    match db_reproduction_record_encode(DbReproductionRecord.Observation(observation)):
+        Ok(_): pass
+        Err(error):
+            if error == "SCVDB_REPRODUCTION_QUOTA": return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+            return Err("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+    var bytes = db_frame(1u8, db_canonical_text(revision)?) + db_frame(2u8, db_canonical_text(policy.namespace)?) + db_frame(3u8, db_u64_bytes(policy.epoch))
+    for name in policy.capabilities.uniqueness_tuple:
+        bytes = bytes + db_frame(4u8, db_frame(1u8, db_canonical_text(name)?) + db_frame(2u8, _identity_value(observation, name)?))
+    val content = db_observation_content_bytes(observation, declared)?
+    if content.len() > 1048576 or bytes.len() > 1048576: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    Ok(DbObservationIdentityClaim(policy_revision: revision, identity_digest: sha256_u8_hex(db_domain_bytes("observation-identity-v1", bytes)?), content_digest: sha256_u8_hex(content), observation: observation.reference))
+
+fn db_observation_identity_decide(policy: DbObservationIdentityPolicy, expected_revision: text, existing: DbObservation?, incoming: DbObservation) -> Result<DbObservationIdentityDecision, text>:
+    val next = db_observation_identity_claim(incoming, policy, expected_revision)?
+    if val previous = existing:
+        val prior = db_observation_identity_claim(previous, policy, expected_revision)?
+        if prior.identity_digest != next.identity_digest: return Err("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+        if prior.content_digest == next.content_digest: return Ok(DbObservationIdentityDecision.Duplicate(previous.reference))
+        return Ok(DbObservationIdentityDecision.Quarantine("QuarantinedIdentityReuse"))
+    Ok(DbObservationIdentityDecision.Append)
+
+export DbObservationIdentityPolicy, DbObservationIdentityClaim, DbObservationIdentityDecision
+export db_observation_identity_policy_digest, db_observation_identity_policy_seal
+export db_observation_identity_claim, db_observation_identity_decide
