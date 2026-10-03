@@ -2,7 +2,7 @@
 # native privilege; inability to create the fixture is a failed qualification,
 # never a positive test of an unsupported platform. No recursive cleanup.
 use std.spec.{describe, it, expect}
-use app.io.mod.{cwd, dir_create, file_write, process_run_bounded}
+use app.io.mod.{cwd, dir_create, file_write, file_delete, process_run_bounded}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.nogc_sync_mut.io.path_identity.*
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
@@ -32,6 +32,15 @@ describe "Existing path identity host owner":
         expect(path_final_existing_with_capacity(root, 1)).to_equal(Err("PATH_IDENTITY_TRUNCATED"))
         val first = path_final_existing(root).unwrap()
         expect(path_identity_same(first, path_final_existing(root).unwrap())).to_be(true)
+
+    it "distinguishes an absent leaf from a missing parent and an existing entry":
+        val root = setup_item2_path_identity_root()
+        expect(path_entry_present("{root}/missing")).to_equal(Ok(false))
+        expect(file_write("{root}/present", "bytes")).to_be(true)
+        expect(path_entry_present("{root}/present")).to_equal(Ok(true))
+        expect(path_entry_present(root)).to_equal(Ok(true))
+        expect(path_entry_present("{root}/missing-parent/leaf")).to_equal(Err("PATH_IDENTITY_OPEN"))
+        expect(path_entry_present("{root}/present/leaf").is_err()).to_be(true)
 
     it "requires the correct object type and preserves bounded binary bytes":
         val root = setup_item2_path_identity_root()
@@ -95,6 +104,9 @@ describe "Windows handle-derived final identity":
         expect(path_identity_same(target, path_final_existing(alias).unwrap())).to_be(true)
         expect(file_is_regular_no_follow(alias)).to_be(false)
         expect(file_read_regular_no_follow_bounded_bytes(alias, 2).is_err()).to_be(true)
+        expect(file_delete(target.path)).to_be(true)
+        expect(path_entry_present(alias)).to_equal(Ok(true))
+        expect(path_entry_present(target.path)).to_equal(Ok(false))
 @else:
 describe "POSIX existing-path realpath owner":
     it "resolves actual symlink targets and preserves literal backslashes":
@@ -107,4 +119,11 @@ describe "POSIX existing-path realpath owner":
         expect(target.path.ends_with("/target\\literal")).to_be(true)
         expect(dir_is_real_no_follow("{root}/alias")).to_be(false)
         expect(directory_fsync("{root}/alias")).to_be(false)
+
+    it "recognizes a dangling symbolic link as an existing leaf":
+        val root = setup_item2_path_identity_root()
+        val (_out, _err, code) = process_run_bounded("ln", ["-s", "{root}/absent-target", "{root}/dangling"], 30000, 4096)
+        expect(code).to_equal(0)
+        expect(path_entry_present("{root}/dangling")).to_equal(Ok(true))
+        expect(path_entry_present("{root}/absent-target")).to_equal(Ok(false))
 @end

@@ -5,6 +5,7 @@
 # UNC/SMB without that capability fail closed rather than invent equivalence.
 # This is resolved path identity, not inode identity for distinct hard links.
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 
 struct HostFinalPath:
     path: text
@@ -20,8 +21,8 @@ fn path_identity_contains(parent: HostFinalPath, child: HostFinalPath) -> bool:
     child.identity.starts_with(prefix)
 
 @when(os="windows"):
-use std.nogc_sync_mut.io.path_identity_abi.{GetFinalPathNameByHandleW}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW, CloseHandle}
+use std.nogc_sync_mut.io.path_identity_abi.{GetFinalPathNameByHandleW, GetFileAttributesW}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW, CloseHandle, GetLastError}
 use std.nogc_sync_mut.io.windows_image_owner.{windows_image_decode}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_read_u16}
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
@@ -99,9 +100,24 @@ fn _path_final_existing(path: text, capacity: i64) -> Result<HostFinalPath, text
     elif final_path.starts_with("//?/"):
         final_path = final_path[4:final_path.len()]
     Ok(HostFinalPath(path: final_path, identity: identity))
+
+@unsafe(reason: "no-follow Windows attributes with immediate error capture and checked private-buffer release", capabilities: [ffi, raw_ptr])
+fn _path_entry_observe(path: text) -> Result<bool, text>:
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("PATH_IDENTITY_ALLOCATION")
+    val wide = _path_identity_wide(heap, host_path_native(path))
+    if wide == 0: return Err("PATH_IDENTITY_INPUT")
+    val attributes = GetFileAttributesW(wide)
+    val error = GetLastError()
+    val released = HeapFree(heap, 0u32, wide)
+    if released == 0: return Err("PATH_IDENTITY_RELEASE")
+    if attributes != 4294967295u32: return Ok(true)
+    if error == 2u32: return Ok(false)
+    # PATH_NOT_FOUND/access/network/invalid-name errors are not absent proofs.
+    Err("PATH_ENTRY_INDETERMINATE")
 @else:
-use std.nogc_sync_mut.io.path_identity_abi.{malloc, free, realpath}
-use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_read_u8}
+use std.nogc_sync_mut.io.path_identity_abi.{malloc, free, realpath, readlink, path_errno_address}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_read_u8, volatile_read_u32}
 
 @unsafe(reason: "POSIX realpath with allocated output, bounded copy and complete input/output release", capabilities: [ffi, raw_ptr])
 fn _path_final_existing(path: text, capacity: i64) -> Result<HostFinalPath, text>:
@@ -128,6 +144,26 @@ fn _path_final_existing(path: text, capacity: i64) -> Result<HostFinalPath, text
     val final_path = validated_utf8_bytes_to_text_linear(output)?
     if not final_path.starts_with("/"): return Err("PATH_IDENTITY_QUERY")
     Ok(HostFinalPath(path: final_path, identity: final_path))
+
+@unsafe(reason: "POSIX positive-size readlink with immediate exact errno, allocated input and one-byte output", capabilities: [ffi, raw_ptr])
+fn _path_entry_observe(path: text) -> Result<bool, text>:
+    val errno_pointer = path_errno_address()
+    if errno_pointer == 0: return Err("PATH_ENTRY_UNSUPPORTED")
+    val bytes = base_encoding_text_to_bytes(path)
+    val input = malloc((bytes.len() + 2) as u64)
+    if input == 0: return Err("PATH_IDENTITY_ALLOCATION")
+    for index in 0..bytes.len(): volatile_write_u8(input + index, bytes[index] as i64)
+    volatile_write_u8(input + bytes.len(), 0)
+    val observed = readlink(input, input + bytes.len() + 1, 1u64)
+    val error = volatile_read_u32(errno_pointer)
+    free(input)
+    if observed >= 0: return Ok(true)
+    # POSIX EINVAL means existing non-symlink when capacity is strictly >0;
+    # ENOENT is accepted only after the wrapper verifies the same parent.
+    # ENOENT=2 and EINVAL=22 on the Linux/FreeBSD/Darwin owners above.
+    if error == 22: return Ok(true)
+    if error == 2: return Ok(false)
+    Err("PATH_ENTRY_INDETERMINATE")
 @end
 
 # Capacity seam exercises real OS truncation without a mock provider. It is not
@@ -141,5 +177,36 @@ fn path_final_existing_with_capacity(path: text, capacity: i64) -> Result<HostFi
 fn path_final_existing(path: text) -> Result<HostFinalPath, text>:
     path_final_existing_with_capacity(path, 32768)
 
+# Leaf existence, including dangling symlinks. Only Ok(false) proves observed
+# absence under the caller's trusted stable-parent contract; errors never do.
+# No dirfd claim: a hostile remove-and-restore race is outside this contract.
+fn path_entry_present(path: text) -> Result<bool, text>:
+    if path == "" or path.contains("\0") or path.len() > 131072: return Err("PATH_IDENTITY_INPUT")
+    var spelling = path
+    val windows = host_is_windows_host()
+    if windows: spelling = spelling.replace("\\", "/")
+    if spelling.ends_with("/"): return Err("PATH_ENTRY_LEAF")
+    for component in spelling.split("/"):
+        if component == "." or component == "..": return Err("PATH_ENTRY_LEAF")
+    val separator = spelling.rfind("/")
+    if separator < 0: return Err("PATH_ENTRY_LEAF")
+    val leaf = spelling[separator + 1:spelling.len()]
+    if leaf == "": return Err("PATH_ENTRY_LEAF")
+    if windows:
+        if spelling.len() < 4 or spelling[1:3] != ":/" or leaf.contains(":"): return Err("PATH_ENTRY_LEAF")
+    elif not spelling.starts_with("/"): return Err("PATH_ENTRY_LEAF")
+    var parent = spelling[0:separator]
+    if separator == 0: parent = "/"
+    if windows and separator == 2: parent = spelling[0:3]
+    val before = path_final_existing(parent)?
+    val observed = unsafe(capabilities: [ffi, raw_ptr]):
+        _path_entry_observe(spelling)
+    val present = observed?
+    if not present:
+        val after = path_final_existing(parent)?
+        if not path_identity_same(before, after): return Err("PATH_ENTRY_PARENT_CHANGED")
+    Ok(present)
+
 export HostFinalPath, path_final_existing, path_final_existing_with_capacity
 export path_identity_same, path_identity_contains
+export path_entry_present

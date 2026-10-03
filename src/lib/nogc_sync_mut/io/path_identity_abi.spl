@@ -2,7 +2,9 @@
 @when(os="windows"):
 @unsafe(reason: "kernel32 copies normalized handle path to owned bounded UTF16 buffer", capabilities: [ffi, raw_ptr])
 extern fn GetFinalPathNameByHandleW(handle: i64, buffer: i64, capacity: u32, flags: u32) -> u32
-export GetFinalPathNameByHandleW
+@unsafe(reason: "kernel32 no-follow entry attributes; error captured immediately by owner", capabilities: [ffi, raw_ptr])
+extern fn GetFileAttributesW(path: i64) -> u32
+export GetFinalPathNameByHandleW, GetFileAttributesW
 @else:
 @unsafe(reason: "host libc allocates NUL-terminated realpath input buffer", capabilities: [ffi, raw_ptr])
 extern fn malloc(size: u64) -> i64
@@ -10,5 +12,31 @@ extern fn malloc(size: u64) -> i64
 extern fn free(pointer: i64)
 @unsafe(reason: "POSIX realpath returns allocated resolved existing path or null; no lexical fallback", capabilities: [ffi, raw_ptr])
 extern fn realpath(path: i64, resolved: i64) -> i64
-export malloc, free, realpath
+@unsafe(reason: "POSIX one-byte readlink probe never follows the final entry", capabilities: [ffi, raw_ptr])
+extern fn readlink(path: i64, buffer: i64, capacity: u64) -> i64
+export malloc, free, realpath, readlink
 @end
+
+@when(os="linux"):
+@unsafe(reason: "Linux libc thread-local errno address", capabilities: [ffi, raw_ptr])
+extern fn __errno_location() -> i64
+@unsafe(reason: "Linux libc thread-local errno owner", capabilities: [ffi, raw_ptr])
+fn path_errno_address() -> i64: __errno_location()
+@else:
+@when(os="freebsd"):
+@unsafe(reason: "FreeBSD libc thread-local errno address", capabilities: [ffi, raw_ptr])
+extern fn __error() -> i64
+@unsafe(reason: "FreeBSD libc thread-local errno owner", capabilities: [ffi, raw_ptr])
+fn path_errno_address() -> i64: __error()
+@else:
+@when(os="macos"):
+@unsafe(reason: "Darwin libc thread-local errno address", capabilities: [ffi, raw_ptr])
+extern fn __error() -> i64
+@unsafe(reason: "Darwin libc thread-local errno owner", capabilities: [ffi, raw_ptr])
+fn path_errno_address() -> i64: __error()
+@else:
+fn path_errno_address() -> i64: 0
+@end
+@end
+@end
+export path_errno_address
