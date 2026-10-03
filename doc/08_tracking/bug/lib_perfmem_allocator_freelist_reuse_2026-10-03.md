@@ -29,7 +29,7 @@ Runtime: Rust seed (`bin/simple`), `--mode=interpreter` (seed-run/diagnostic)
   alloc/free stats under churn, and per-class page lists stay at one page under
   interleaved two-class churn. PASS (3/3, seed interpreter).
 
-### 2. PoolAllocator mock free list copied each backing-buffer tail (status: follow-up pending native verification)
+### 2. PoolAllocator mock free list copied each backing-buffer tail (status: fixed; focused native probe passed)
 
 - `src/lib/gc_async_mut/allocator.spl` — the interpreter mocks `ptr_write` (no-op)
   and `ptr_read` (returns `Some(ptr)` itself), but `PoolAllocator` built its free
@@ -49,9 +49,11 @@ Runtime: Rust seed (`bin/simple`), `--mode=interpreter` (seed-run/diagnostic)
   stores the actual returned arrays in a fixed-capacity free stack. Allocation
   removes a stack reference; deallocation returns that same array under the
   `Allocator` contract's valid-pointer/no-double-free preconditions. This
-  removes the tail and prefix copies without changing the public API. Focused
-  byte-preservation, independence, exhaustion and count tests are added, but
-  the follow-up has no native PASS yet.
+  removes the tail and prefix copies without changing the public API. The
+  focused self-hosted native probe passed (exit 0) with exact-size,
+  byte-preservation, independent-live-slot, exhaustion, and zero-capacity
+  assertions. This is a scoped functional check, not a measured RSS or
+  throughput result.
 - The existing mock allocator remains an array abstraction; alignment and
   unchecked invalid-pointer/double-free behavior are unchanged.
 
