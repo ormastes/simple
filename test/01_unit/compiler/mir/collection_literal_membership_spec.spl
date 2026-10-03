@@ -9,6 +9,9 @@ use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.interp.mir_interpreter.{MirInterpreter}
 use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.llvm_backend.{generate_runtime_declarations_for_target}
 
 fn collection_literal_graph(source: text, budget: i64, level: i64 = 2) -> MirModule:
     val file = "collection_literal_membership.spl"
@@ -38,8 +41,12 @@ fn collection_literal_function(source: text, name: text) -> text:
 # Allocation/boxing calls are deterministic, the first insertion can fail,
 # and Original then observes the missing first key. All emitted guard/control
 # flow/comparison instructions execute unchanged in the MIR interpreter.
-fn collection_literal_fault_model(fail_first_insert: bool) -> i64:
-    val module = collection_literal_graph("fn pick() -> bool:\n    {1: 10, 2: 20}.contains_key(1)\n", 384)
+fn collection_literal_fault_model(fail_first_insert: bool, empty: bool = false, fail_allocation: bool = false) -> i64:
+    val source = if empty:
+        "fn pick() -> bool:\n    {}.contains_key(1)\n"
+    else:
+        "fn pick() -> bool:\n    {1: 10, 2: 20}.contains_key(1)\n"
+    val module = collection_literal_graph(source, 384)
     for source_function in module.functions.values():
         if source_function.name == "pick" or source_function.name.ends_with(".pick"):
             var function = source_function
@@ -56,7 +63,8 @@ fn collection_literal_fault_model(fail_first_insert: bool) -> i64:
                                 match callee.kind:
                                     case MirOperandKind.Const(MirConstValue.Str(name), _):
                                         if name == "rt_dict_new":
-                                            inst.kind = MirInstKind.Const(dest, MirConstValue.Int(4097), MirType.i64())
+                                            val handle = if fail_allocation: 3 else: 4097
+                                            inst.kind = MirInstKind.Const(dest, MirConstValue.Int(handle), MirType.i64())
                                         elif name == "rt_dict_set":
                                             val status = if fail_first_insert and insertion == 0: 0 else: 1
                                             inst.kind = MirInstKind.Const(dest, MirConstValue.Int(status), MirType(kind: MirTypeKind.I8))
@@ -72,7 +80,7 @@ fn collection_literal_fault_model(fail_first_insert: bool) -> i64:
                     instructions = instructions.push(inst)
                 block.instructions = instructions
                 blocks = blocks.push(block)
-            expect(insertion).to_equal(2)
+            expect(insertion).to_equal(if empty: 0 else: 2)
             function.blocks = blocks
             var interpreter = MirInterpreter.create()
             val result = interpreter.execute_function(function)
@@ -151,3 +159,41 @@ describe "literal dictionary membership physical consumer", tag: ["only-compiled
         expect(baseline.hash == policy.hash).to_equal(false)
         expect(baseline.hash == budget.hash).to_equal(false)
         expect(baseline.hash == target.hash).to_equal(false)
+
+    it "preserves the empty receiver allocation and an effectful probe":
+        step("Lower empty membership without deleting construction or probe calls")
+        val source = "fn probe() -> i64:\n    print 7\n    1\nfn pick() -> bool:\n    {}.contains_key(probe())\n"
+        val mir = collection_literal_mir(source, 128)
+        expect(mir).to_contain("typed_mir=consumed")
+        expect(mir).to_contain("static.size=0")
+        val function = collection_literal_function(source, "pick")
+        expect(function.split("rt_dict_new").len()).to_equal(2)
+        expect(function.contains("rt_dict_set")).to_equal(false)
+        expect(function.split("probe").len()).to_equal(2)
+        expect(function.index_of("rt_dict_new")).to_be_less_than(function.index_of("probe"))
+        expect(function).to_contain("collection_linear")
+        expect(collection_literal_fault_model(false, true, false)).to_equal(0)
+        expect(collection_literal_fault_model(false, true, true)).to_equal(0)
+
+    it "uses the runtime byte status in generated LLVM and the host preamble":
+        step("Compare actual emitted and prefixed dictionary call signatures")
+        val source = "fn pick(key: i64) -> bool:\n    {1: 10, 2: 20}.contains_key(key)\n"
+        val graph = collection_literal_graph(source, 384)
+        var translator = MirToLlvm.create("collection_status", CodegenTarget.X86_64, nil)
+        val llvm = translator.translate_module(graph)
+        val preamble = generate_runtime_declarations_for_target(CodegenTarget.X86_64)
+        expect(llvm).to_contain("call i8 @rt_dict_set(")
+        expect(llvm).to_contain("call i8 @rt_dict_contains(")
+        expect(preamble).to_contain("declare i8 @rt_dict_set(i64, i64, i64)")
+        expect(preamble).to_contain("declare i8 @rt_dict_contains(i64, i64)")
+
+    it "keeps ignored setters and ordinary membership on the same byte ABI":
+        step("Lower preexisting mutation and membership callers through LLVM")
+        val source = "fn pick() -> bool:\n    val values = {1: 10}\n    values.set(2, 20)\n    values.contains_key(2)\n"
+        val graph = collection_literal_graph(source, -1)
+        var translator = MirToLlvm.create("collection_original_status", CodegenTarget.X86_64, nil)
+        val llvm = translator.translate_module(graph)
+        expect(llvm).to_contain("call i8 @rt_dict_set(")
+        expect(llvm).to_contain("call i8 @rt_dict_contains(")
+        expect(llvm.contains("call i64 @rt_dict_set(")).to_equal(false)
+        expect(llvm.contains("call i64 @rt_dict_contains(")).to_equal(false)
