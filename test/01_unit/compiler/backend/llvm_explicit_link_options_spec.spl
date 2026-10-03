@@ -1,0 +1,51 @@
+"""Explicit native dependency forwarding and cache identity; unexecuted."""
+use std.spec.*
+use compiler.backend.build_native_types.{BuildConfig, build_native_llvm_compile_options}
+use compiler.backend.backend.llvm_native_link_hosted_support.{NativeLinkOptions, llvm_apply_explicit_link_options}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.driver.driver_types.{compute_options_hash}
+
+describe "LLVM explicit requested link inputs":
+    it "preserves existing BuildConfig link declarations in driver options":
+        var config = BuildConfig.default("fixture.spl", "fixture.exe")
+        config.libraries = ["C:/sdk/lib/LLVM-C.lib", "support.lib"]
+        config.library_paths = ["C:/sdk/lib", "C:/support"]
+        config.linker_flags = ["/DEBUG"]
+        val options = build_native_llvm_compile_options(config)
+        expect(options.native_libraries).to_equal(config.libraries)
+        expect(options.native_library_paths).to_equal(config.library_paths)
+        expect(options.native_linker_flags).to_equal(config.linker_flags)
+        expect(options.backend).to_equal("llvm-lib")
+
+    it "keeps LLVM linker defaults and appends explicit flags in order":
+        var options = NativeLinkOptions.default()
+        options.libraries = ["LLVM-C.lib"]
+        options.library_paths = ["C:/sdk/lib"]
+        options.linker_flags = ["first", "second"]
+        var base = NativeLinkConfig.default()
+        base.extra_flags = ["existing"]
+        val linked = llvm_apply_explicit_link_options(base, options)
+        expect(linked.libraries).to_equal(["LLVM-C.lib"])
+        expect(linked.library_paths).to_equal(["C:/sdk/lib"])
+        expect(linked.extra_flags).to_equal(["existing", "first", "second"])
+        expect(linked.allow_cc_fallback).to_equal(base.allow_cc_fallback)
+
+    it "invalidates the options identity for every ordered link input family":
+        var config = BuildConfig.default("fixture.spl", "fixture.exe")
+        config.libraries = []
+        val baseline = build_native_llvm_compile_options(config)
+        val original = compute_options_hash(baseline).hash
+        var changed = baseline
+        changed.native_libraries = ["LLVM-C.lib"]
+        expect(compute_options_hash(changed).hash == original).to_equal(false)
+        changed = baseline
+        changed.native_library_paths = ["C:/sdk/lib"]
+        expect(compute_options_hash(changed).hash == original).to_equal(false)
+        changed = baseline
+        changed.native_linker_flags = ["first", "second"]
+        val ordered = compute_options_hash(changed).hash
+        expect(ordered == original).to_equal(false)
+        changed.native_linker_flags = ["second", "first"]
+        expect(compute_options_hash(changed).hash == ordered).to_equal(false)
+        changed.native_linker_flags = ["firstsecond"]
+        expect(compute_options_hash(changed).hash == ordered).to_equal(false)
