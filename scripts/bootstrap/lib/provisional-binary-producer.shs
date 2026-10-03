@@ -1,0 +1,59 @@
+#!/bin/sh
+# Sourced by the provisional runner. No admission is inferred from this handoff.
+provisional_select_binary_producer() {
+  task_producer=$producer
+  task_producer_sha=$producer_sha
+  [ "$task_phase" = phase4 ] || return 0
+  predecessor="$root/phase3/binaries/$backend/phase3-bootstrap"
+  predecessor_key="phase3_${backend}_phase3-bootstrap"
+  task_producer="$predecessor/bin/simple$exe_suffix"
+  predecessor_receipt="$predecessor/state/receipts/phase3-bootstrap-$backend.sdn"
+  regular "$task_producer" && regular "$predecessor_receipt" &&
+    regular "$predecessor/manifest.sdn" || return 20
+  task_producer_sha=$(hash_file "$task_producer") || return 20
+  [ "$(bootstrap_stage3_manifest_value "$predecessor_key" "$hashes")" = "$task_producer_sha" ] &&
+    [ "$(bootstrap_stage3_manifest_value "${predecessor_key}_manager_receipt_sha256" "$hashes")" = "$(hash_file "$predecessor_receipt")" ] || return 20
+  "$builder_program" verify --manifest "$predecessor/manifest.sdn" \
+    --state "$predecessor/state" --source-root "$source_root" \
+    --output-root "$predecessor" >/dev/null || return 20
+
+  handoff_root="$root/phase4/hello/$backend"
+  handoff_receipt="$handoff_root/hello.receipt"
+  if [ ! -e "$handoff_receipt" ]; then
+    mkdir -p "$root/phase4/hello" || return 20
+    handoff_source=$(bootstrap_stage3_manifest_value hello_source_path "$hello_receipt") || return 20
+    handoff_source_sha=$(bootstrap_stage3_manifest_value hello_source_digest "$hello_receipt") || return 20
+    case "$handoff_source" in
+      */test/04_smoke/windows_native_hello.spl) handoff_checkout=${handoff_source%/test/04_smoke/windows_native_hello.spl} ;;
+      *) return 20 ;;
+    esac
+    sh "$repo_root/scripts/bootstrap/prepare-provisional-hello.shs" \
+      --producer="$task_producer" --producer-digest="$task_producer_sha" \
+      --source-checkout="$handoff_checkout" --source-snapshot="$original_source_snapshot" \
+      --source-snapshot-digest="$original_source_snapshot_digest" \
+      --hello-source="$handoff_source" --hello-source-digest="$handoff_source_sha" \
+      --output-root="$handoff_root" --target="$target" \
+      --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+      --timeout-seconds="$(((lifetime_ms + 999) / 1000))" --memory-policy="$memory_policy" \
+      >/dev/null || return 20
+  fi
+  provisional_verify_binary_handoff "$handoff_receipt" "$task_producer" "$task_producer_sha" \
+    "$original_source_snapshot_digest" || return 20
+}
+
+provisional_verify_binary_handoff() {
+  handoff=$1 expected_producer=$2 expected_sha=$3 expected_snapshot=$4
+  regular "$handoff" && regular "$expected_producer" &&
+    [ "$(hash_file "$expected_producer")" = "$expected_sha" ] || return 1
+  [ "$(bootstrap_stage3_manifest_value format "$handoff")" = SIMPLE-PROVISIONAL-HELLO-1 ] &&
+    [ "$(bootstrap_stage3_manifest_value producer_path "$handoff")" = "$expected_producer" ] &&
+    [ "$(bootstrap_stage3_manifest_value producer_digest "$handoff")" = "$expected_sha" ] &&
+    [ "$(bootstrap_stage3_manifest_value source_snapshot_digest "$handoff")" = "$expected_snapshot" ] &&
+    [ "$(bootstrap_stage3_manifest_value compile_exit "$handoff")" = 0 ] &&
+    [ "$(bootstrap_stage3_manifest_value run_exit "$handoff")" = 0 ] || return 1
+  for evidence in hello_source hello_executable stdout stderr compile_command compile_log; do
+    handoff_file=$(bootstrap_stage3_manifest_value "${evidence}_path" "$handoff") || return 1
+    handoff_sha=$(bootstrap_stage3_manifest_value "${evidence}_digest" "$handoff") || return 1
+    regular "$handoff_file" && [ "$(hash_file "$handoff_file")" = "$handoff_sha" ] || return 1
+  done
+}
