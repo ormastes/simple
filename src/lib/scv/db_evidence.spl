@@ -44,6 +44,11 @@ struct DbReproductionRevision:
     invocation_digest: text
     dependencies: [DbEvidenceDependency]
 
+struct DbEvidenceMeasurement:
+    name: text
+    value: u64
+    unit: text
+
 struct DbObservation:
     reference: DbEvidenceRevision
     provider: DbProviderIdentity
@@ -53,6 +58,7 @@ struct DbObservation:
     case_revision: DbEvidenceRevision
     run: DbEvidenceRevision
     actual: text
+    measurements: [DbEvidenceMeasurement]
     failure_signature: text
     custom_config: bool
     reproduction: DbEvidenceRevision?
@@ -167,6 +173,13 @@ fn db_observation_bytes(observation: DbObservation, declared: [text]) -> Result<
     if val reproduction = observation.reproduction:
         bytes = bytes + db_frame(11u8, db_evidence_ref_bytes(reproduction)?)
     bytes = bytes + db_frame(12u8, db_canonical_text(observation.payload_digest)?)
+    var previous_measurement = ""
+    for measurement in observation.measurements:
+        if measurement.name <= previous_measurement or measurement.unit == "":
+            return Err("NoncanonicalMeasurements")
+        previous_measurement = measurement.name
+        val encoded = db_frame(1u8, db_canonical_text(measurement.name)?) + db_frame(2u8, db_u64_bytes(measurement.value)) + db_frame(3u8, db_canonical_text(measurement.unit)?)
+        bytes = bytes + db_frame(13u8, encoded)
     db_domain_bytes("scv.db.observation.v1", bytes)
 
 fn db_evidence_dependencies_available(dependencies: [DbEvidenceDependency]) -> Result<bool, text>:
@@ -242,6 +255,13 @@ fn db_rule_specificity(rule: DbExpectationRule, observation: DbObservation, sets
     Err("MissingRuleSelector")
 
 fn db_evaluate(observation: DbObservation, policy: DbExpectationRevision, sets: [DbConfigSetRevision]) -> Result<DbOutcomeEvaluation, text>:
+    db_evidence_check_ref(observation.reference)?
+    db_evidence_check_ref(observation.test_definition)?
+    db_evidence_check_ref(observation.config)?
+    db_evidence_check_ref(observation.case_revision)?
+    db_evidence_check_ref(observation.run)?
+    if not db_evidence_digest_valid(observation.source_revision) or not db_evidence_digest_valid(observation.payload_digest):
+        return Err("MissingContentRevision")
     db_evidence_check_ref(policy.reference)?
     if policy.reviewed_by == "":
         return Err("UnreviewedExpectation")
@@ -299,6 +319,8 @@ fn db_manifest_coverage(manifest: DbRunManifest, observations: [DbObservation]) 
     db_evidence_check_ref(manifest.reference)?
     db_evidence_check_ref(manifest.config_set)?
     db_evidence_check_ref(manifest.expectation)?
+    if not db_evidence_digest_valid(manifest.source_revision):
+        return Err("MissingContentRevision")
     if not ["OPEN", "COMPLETE", "CANCELLED", "INCOMPLETE"].contains(manifest.completion):
         return Err("UnknownRunCompletion")
     var seen: [DbEvidenceRevision] = []
@@ -373,9 +395,9 @@ fn db_manifest_supersession(previous: DbRunManifest, next: DbRunManifest) -> Res
 export DbEvidenceRevision, DbIdentityDimension, DbProviderIdentity, DbEvidenceDependency
 export DbTestDefinitionRevision, DbConfigRevision, DbConfigSetRevision, DbReproductionRevision
 export DbObservation, DbExpectationRule, DbExpectationRevision, DbOutcomeEvaluation
+export DbEvidenceMeasurement
 export DbPlannedCase, DbEvidenceChunk, DbRunManifest, DbBugOccurrence
 export db_evidence_same_ref, db_evidence_check_ref, db_provider_identity_bytes
 export db_evidence_digest_valid
 export db_observation_bytes, db_observation_validate, db_observation_admit, db_evaluate
 export db_manifest_coverage, db_manifest_supersession
-

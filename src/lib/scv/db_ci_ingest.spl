@@ -1,7 +1,37 @@
 # Pure provider-neutral ingestion policy. No network, files, acknowledgement,
 # signature verification or durable writes occur here. Receipt inputs MUST be
 # loaded and authenticated by the SJ storage/settlement owner, never a CI caller.
-use std.scv.db_evidence.{DbEvidenceRevision, db_evidence_same_ref, db_evidence_check_ref, db_evidence_digest_valid}
+use std.scv.db_evidence.{DbEvidenceRevision, DbProviderIdentity, DbRunManifest, DbEvidenceChunk, db_evidence_same_ref, db_evidence_check_ref, db_evidence_digest_valid}
+
+# Provider transport DTOs. Stable IDs come from provider responses. The GitLab
+# retry index must come from authoritative retry history, never poll order.
+# These adapters do not assert that a response was authenticated.
+struct DbGithubActionsJob:
+    instance: text
+    repository_id: text
+    run_id: text
+    job_id: text
+    run_attempt: u64
+
+struct DbGitlabCiJob:
+    instance: text
+    project_id: text
+    pipeline_id: text
+    job_id: text
+    retry_index: u64
+
+struct DbJenkinsBuild:
+    instance: text
+    project_id: text
+    build_number: text
+    stage_id: text
+    attempt: u64
+
+struct DbNormalizedRunEnvelope:
+    provider_identity: DbProviderIdentity
+    manifest: DbRunManifest
+    chunks: [DbEvidenceChunk]
+    attestation_digests: [text]
 
 struct DbCiCapabilities:
     identity_dimensions: [text]
@@ -43,6 +73,7 @@ struct DbEvidenceReceipt:
     durable_object_digest: text
     accepted_manifest: DbEvidenceRevision
     accepted_head: text
+    accepted_object_format: text
     settlement_receipt_digest: text
 
 struct DbImportQuota:
@@ -88,6 +119,39 @@ fn db_ci_capabilities_validate(capabilities: DbCiCapabilities) -> Result<bool, t
         seen.push(dimension)
     Ok(true)
 
+fn db_ci_job_identity(instance: text, project: text, run: text, job: text, attempt: u64) -> Result<DbProviderIdentity, text>:
+    if instance == "" or project == "" or run == "" or job == "" or attempt == 0:
+        return Err("IncompleteProviderIdentity")
+    Ok(DbProviderIdentity(instance: instance, project: project, run: run, job: job, attempt: attempt, dimensions: []))
+
+fn db_ci_github_identity(job: DbGithubActionsJob) -> Result<DbProviderIdentity, text>:
+    db_ci_job_identity(job.instance, job.repository_id, job.run_id, job.job_id, job.run_attempt)
+
+# GitLab retry indexes are zero-based; the canonical attempt is one-based.
+fn db_ci_gitlab_identity(job: DbGitlabCiJob) -> Result<DbProviderIdentity, text>:
+    if job.retry_index == 18446744073709551615u64:
+        return Err("AttemptOverflow")
+    db_ci_job_identity(job.instance, job.project_id, job.pipeline_id, job.job_id, job.retry_index + 1u64)
+
+fn db_ci_jenkins_identity(build: DbJenkinsBuild) -> Result<DbProviderIdentity, text>:
+    db_ci_job_identity(build.instance, build.project_id, build.build_number, build.stage_id, build.attempt)
+
+# Verify transport identity matches immutable manifest before emitting an envelope.
+# Observations add capability-declared case/shard dimensions in a later stage.
+fn db_ci_normalize_run(identity: DbProviderIdentity, manifest: DbRunManifest, attestations: [text]) -> Result<DbNormalizedRunEnvelope, text>:
+    db_evidence_check_ref(manifest.reference)?
+    if identity.instance != manifest.provider.instance or identity.project != manifest.provider.project or identity.run != manifest.provider.run or identity.job != manifest.provider.job or identity.attempt != manifest.provider.attempt:
+        return Err("ProviderManifestMismatch")
+    if identity.dimensions.len() != 0 or manifest.provider.dimensions.len() != 0:
+        return Err("RunIdentityUnexpectedDimensions")
+    for digest in attestations:
+        if not db_evidence_digest_valid(digest):
+            return Err("InvalidAttestationDigest")
+    for chunk in manifest.chunks:
+        if not db_evidence_digest_valid(chunk.digest):
+            return Err("MissingChunkDigest")
+    Ok(DbNormalizedRunEnvelope(provider_identity: identity, manifest: manifest, chunks: manifest.chunks, attestation_digests: attestations))
+
 # CI producers cannot turn an authenticated upload into semantic policy authority.
 fn db_ci_authorize(role: text, operation: text, trusted_source: bool) -> Result<bool, text>:
     if role == "ci-producer":
@@ -99,6 +163,16 @@ fn db_ci_authorize(role: text, operation: text, trusted_source: bool) -> Result<
     if role == "release-owner" and operation == "qualify-release" and trusted_source:
         return Ok(true)
     Err("OperationUnauthorized")
+
+fn db_ci_head_valid(head: text, object_format: text) -> bool:
+    val expected_length = if object_format == "sha1": 40 else: 64
+    if not ["sha1", "sha256"].contains(object_format) or head.len() != expected_length:
+        return false
+    for i in 0..head.len():
+        val code = head.char_code_at(i)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
 
 # Returns a proposed cursor only; the owner atomically persists it with receipts.
 # No receipt fields are accepted as proof of authenticity by this function.
@@ -121,7 +195,7 @@ fn db_ci_advance(cursor: DbCiCursor, page: DbDiscoveryPage, verified_receipts: [
             if receipt.provider_instance == page.provider_instance and receipt.project == page.project and db_evidence_same_ref(receipt.manifest, item.manifest):
                 if receipt.bundle_digest != item.bundle_digest or receipt.durable_object_digest != item.bundle_digest:
                     return Err("ReceiptContentMismatch")
-                if not db_evidence_same_ref(receipt.accepted_manifest, item.manifest) or not db_evidence_digest_valid(receipt.accepted_head) or not db_evidence_digest_valid(receipt.settlement_receipt_digest):
+                if not db_evidence_same_ref(receipt.accepted_manifest, item.manifest) or not db_ci_head_valid(receipt.accepted_head, receipt.accepted_object_format) or not db_evidence_digest_valid(receipt.settlement_receipt_digest):
                     return Err("MissingCanonicalAcceptance")
                 accepted = true
         if not accepted:
@@ -151,7 +225,7 @@ fn db_import_path_validate(path: text, quota: DbImportQuota) -> Result<bool, tex
             return Err("UnsafeImportPath")
     Ok(true)
 
-# Charge BEFORE reading/decompressing each bounded chunk. Subtraction guards
+# Reserve BEFORE reading/decompressing each entry. Subtraction guards
 # avoid u64 wrap; ceil division enforces the ratio without multiplication overflow.
 fn db_import_charge(usage: DbImportUsage, entry: DbImportEntry, quota: DbImportQuota, elapsed_ms: u64) -> Result<DbImportUsage, text>:
     db_import_path_validate(entry.path, quota)?
@@ -176,7 +250,25 @@ fn db_import_charge(usage: DbImportUsage, entry: DbImportEntry, quota: DbImportQ
             return Err("ImportDecompressionExceeded")
     Ok(DbImportUsage(bytes: usage.bytes + entry.bytes, compressed_bytes: usage.compressed_bytes + entry.compressed_bytes, files: usage.files + 1, records: usage.records + entry.records))
 
+# Reject cross-platform path aliases before reserving the complete bundle budget.
+# Caller still verifies actual streamed byte totals/digests under the same bounds.
+fn db_import_plan(entries: [DbImportEntry], quota: DbImportQuota, elapsed_ms: u64) -> Result<DbImportUsage, text>:
+    var usage = DbImportUsage(bytes: 0u64, compressed_bytes: 0u64, files: 0u64, records: 0u64)
+    var paths: [text] = []
+    for entry in entries:
+        val normalized = entry.path.to_lower()
+        if paths.contains(normalized):
+            return Err("ImportPathCollision")
+        for previous in paths:
+            if normalized.starts_with(previous + "/") or previous.starts_with(normalized + "/"):
+                return Err("ImportFileDirectoryCollision")
+        usage = db_import_charge(usage, entry, quota, elapsed_ms)?
+        paths.push(normalized)
+    Ok(usage)
+
 export DbCiCapabilities, DbCiCursor, DbDiscoveryItem, DbDiscoveryPage, DbEvidenceReceipt
+export DbGithubActionsJob, DbGitlabCiJob, DbJenkinsBuild, DbNormalizedRunEnvelope
+export db_ci_github_identity, db_ci_gitlab_identity, db_ci_jenkins_identity, db_ci_normalize_run
 export DbImportQuota, DbImportUsage, DbImportEntry
 export db_ci_capabilities_validate, db_ci_authorize, db_ci_advance
-export db_import_path_validate, db_import_charge
+export db_import_path_validate, db_import_charge, db_import_plan

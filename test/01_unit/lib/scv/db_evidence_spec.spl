@@ -12,7 +12,7 @@ fn setup_item2_provider(attempt: u64) -> DbProviderIdentity:
     DbProviderIdentity(instance: "ci.example", project: "project", run: "run-1", job: "job-1", attempt: attempt, dimensions: [DbIdentityDimension(name: "case", value: "case-1")])
 
 fn setup_item2_observation(actual: text) -> DbObservation:
-    DbObservation(reference: setup_item2_ref("observation", 1u64), provider: setup_item2_provider(1u64), source_revision: setup_item2_digest(), test_definition: setup_item2_ref("test", 1u64), config: setup_item2_ref("config", 1u64), case_revision: setup_item2_ref("case", 1u64), run: setup_item2_ref("run", 1u64), actual: actual, failure_signature: "assert-42", custom_config: false, reproduction: nil, payload_digest: setup_item2_digest())
+    DbObservation(reference: setup_item2_ref("observation", 1u64), provider: setup_item2_provider(1u64), source_revision: setup_item2_digest(), test_definition: setup_item2_ref("test", 1u64), config: setup_item2_ref("config", 1u64), case_revision: setup_item2_ref("case", 1u64), run: setup_item2_ref("run", 1u64), actual: actual, measurements: [], failure_signature: "assert-42", custom_config: false, reproduction: nil, payload_digest: setup_item2_digest())
 
 fn setup_item2_rule(expected: text) -> DbExpectationRule:
     DbExpectationRule(rule_digest: setup_item2_digest(), test_definition: setup_item2_ref("test", 1u64), exact_config: Some(setup_item2_ref("config", 1u64)), config_set: nil, expected: expected, failure_signature: "assert-42", priority: 1u64)
@@ -51,6 +51,14 @@ describe "REQ-016..021 immutable evidence policy":
         var changed = observation
         changed.provider = setup_item2_provider(2u64)
         expect(db_observation_admit([observation], changed, ["case"], [], [])).to_equal(Err("QuarantinedRevisionReuse"))
+
+    it "includes measurements in identity-reuse quarantine and rejects duplicate metrics":
+        val original = setup_item2_observation("PASS")
+        var changed = original
+        changed.measurements = [DbEvidenceMeasurement(name: "duration", value: 99u64, unit: "nanoseconds")]
+        expect(db_observation_admit([original], changed, ["case"], [], [])).to_equal(Err("QuarantinedIdentityReuse"))
+        changed.measurements = changed.measurements + changed.measurements
+        expect(db_observation_admit([], changed, ["case"], [], [])).to_equal(Err("NoncanonicalMeasurements"))
 
     it "distinguishes all actual-policy classifications":
         val expected_pass = setup_item2_policy([setup_item2_rule("PASS")])
@@ -94,6 +102,10 @@ describe "REQ-016..021 immutable evidence policy":
         expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Err("DependencyUnavailable"))
         reproduction.dependencies = [DbEvidenceDependency(digest: setup_item2_digest(), availability: "available")]
         expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Ok(true))
+        for availability in ["restricted", "expired"]:
+            reproduction.dependencies = [DbEvidenceDependency(digest: setup_item2_digest(), availability: availability)]
+            expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Err("DependencyUnavailable"))
+        reproduction.dependencies = []
         reproduction.config = setup_item2_ref("config", 2u64)
         expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Err("ReproductionMismatch"))
 
@@ -117,3 +129,12 @@ describe "REQ-016..021 immutable evidence policy":
         expect(db_manifest_supersession(previous, next)).to_equal(Err("AttemptRegression"))
         next.provider = setup_item2_provider(2u64)
         expect(db_manifest_supersession(previous, next)).to_equal(Ok(true))
+
+    it "rejects duplicate planned cases and late evidence for an older source revision":
+        var manifest = setup_item2_manifest()
+        manifest.planned = manifest.planned + manifest.planned
+        expect(db_manifest_coverage(manifest, [setup_item2_observation("PASS")])).to_equal(Err("DuplicatePlannedCase"))
+        manifest = setup_item2_manifest()
+        var old = setup_item2_observation("PASS")
+        old.source_revision = "sha256:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(db_manifest_coverage(manifest, [old])).to_equal(Err("ObservationRunMismatch"))
