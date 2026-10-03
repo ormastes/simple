@@ -300,6 +300,9 @@ fn _retention_incomplete_owned(root: text, parent: text, holder: text, expected:
     val cas = db_evidence_external_scope(root, parent, "scv-evidence-v1")?
     var pending: [text] = []
     var roots: [text] = []
+    # Existing permanent protection survives loss. Unknown missing-root edges
+    # are not reconstructed: the whole-catalog marker blocks all collection.
+    var protected_roots: [text] = []
     for pin in pins:
         if pin.reason != "reproduction" or pin.expires_day != 0u64:
             if not current.catalog.pins.contains(pin): return Err("SCVDB_PIN_REASON")
@@ -310,6 +313,7 @@ fn _retention_incomplete_owned(root: text, parent: text, holder: text, expected:
         if not registered: return Err("SCVDB_PIN_CLOSURE_MISSING")
         if not pending.contains(pin.root): pending.push(pin.root)
         roots.push(pin.root)
+        if current.catalog.pins.contains(pin): protected_roots.push(pin.root)
     var visited: [text] = []
     var remaining = 33554432u64
     var incomplete = false
@@ -321,7 +325,7 @@ fn _retention_incomplete_owned(root: text, parent: text, holder: text, expected:
         if visited.len() >= 256: return Err("SCVDB_RETENTION_QUOTA")
         visited.push(digest)
         if not path_entry_present(cas + "/" + digest + ".scve")?:
-            if roots.contains(digest): return Err("SCVDB_PIN_CLOSURE_MISSING")
+            if roots.contains(digest) and not protected_roots.contains(digest): return Err("SCVDB_PIN_CLOSURE_MISSING")
             incomplete = true
             continue
         var quota = db_retention_store_quota()
@@ -335,7 +339,7 @@ fn _retention_incomplete_owned(root: text, parent: text, holder: text, expected:
         for entry in current.catalog.entries:
             if entry.digest == digest and entry.classification == "restricted": restricted = true
         if restricted:
-            if roots.contains(digest): return Err("SCVDB_PIN_CLOSURE_UNVERIFIED")
+            if roots.contains(digest) and not protected_roots.contains(digest): return Err("SCVDB_PIN_CLOSURE_UNVERIFIED")
             incomplete = true
         for child in node.dependencies:
             if not pending.contains(child):

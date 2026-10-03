@@ -111,3 +111,11 @@ layers times2 proof requests, nine fixed sites, plus the Ready observation. Vali
 typed Observation->Bound->mapping closure needs at most14. Malformed signed
 references still terminate with typed/quota errors; byte/key/node budgets remain
 cumulative and unchanged. This bound is source-derived, not latency qualification.
+
+A previously available artifact may later be authoritatively absent or restricted.
+If its root already has a permanent reproduction pin and a nondeleted registered
+entry, the existing retention owner preserves that pin and records incomplete
+protection instead of rejecting the new truthful declaration. Newly requested
+missing/restricted roots still fail. Corruption, unreadability, quota and scope
+errors propagate. Missing-root edges are unknown, not reconstructed; the marker
+blocks whole-catalog collection until actual repair verifies the full closure.
