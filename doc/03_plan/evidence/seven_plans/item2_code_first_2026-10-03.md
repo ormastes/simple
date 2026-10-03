@@ -314,3 +314,19 @@ sources, 131 explicit fail-fast contracts and three pure prerequisites. All
 runtime evidence remains UNEXECUTED. Paged legacy/drop cases, independent v1
 golden wire, full reproduction boundaries and all broader acceptance gates
 remain open. No PR or release qualification is claimed.
+
+### Actual availability boundary source checkpoint
+
+Root added setup_item2_expired_observation, using a real retention observation,
+registration, rollup and day-28 deletion. It asserts actual unlink, deleted state
+and rollup identity before signing the updated immutable dependency chain.
+Independent research review found the owner flow and reference resealing coherent.
+The REQ-019 boundary system scenario now drives both backends for restricted,
+expired and missing evidence, reopens every canonical record, verifies actual
+availability and replays without changing semantic/retention heads or wire.
+
+Current inventory: 23 actual-owner acceptance sources and 130 explicit fail-fast
+contracts, plus three pure prerequisites. No test has run on an admitted runtime;
+these counts are source inventory, not RED/GREEN, coverage or production PASS.
+Complete source-tree/environment reproduction, Paged legacy replay, scalable
+retention, remote publication and the original remaining requirements stay open.

@@ -386,3 +386,12 @@ drop cases; research independently reviews both and the root rejection oracle.
 Root owns integration, the system failure scenario and source-aligned manuals.
 Reviewed source commits: 81584c59c18 and a978450911c. Final runtime review and
 merge remain pending; source review does not establish acceptance.
+
+### Availability and compatibility continuation
+
+Root owns actual-expiry fixture, REQ-019 boundary and shared docs. Core owns
+independent literal v1 vectors; evidence owns consistent Paged mapping-drop
+candidates. Research reviews all three isolated scopes. Shared helper names:
+setup_item2_expired_observation, setup_item2_v1_golden_vectors and
+setup_item2_paged_artifact_drop. Root remains merge owner; final runtime
+verification is pending. All branches derive from the same release-based lane.

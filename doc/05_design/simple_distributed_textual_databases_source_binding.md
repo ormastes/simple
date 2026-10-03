@@ -119,3 +119,19 @@ protection instead of rejecting the new truthful declaration. Newly requested
 missing/restricted roots still fail. Corruption, unreadability, quota and scope
 errors propagate. Missing-root edges are unknown, not reconstructed; the marker
 blocks whole-catalog collection until actual repair verifies the full closure.
+
+### Availability boundary acceptance oracle (2026-10-03)
+
+REQ-019 boundary must enter both signed observation owners and reopen every
+committed canonical record. Restricted uses real authenticated ciphertext;
+missing uses an absent digest; expired uses a real retained observation that
+passes register -> rollup -> pending deletion -> unlink at day 28. The fixture
+must assert the deleted entry, actual absence and rollup digest before admitting
+an immutable declaration. Editing a retention catalog into a deleted state is
+not an acceptable substitute.
+
+The content owner must report the declared unavailable state and
+all_declared_available=false. Unavailable roots gain no available-evidence pin.
+Accepted replay preserves the signed wire and semantic/retention heads; it does
+not claim to restore evidence. This boundary is a source oracle, not a runtime
+receipt or proof of complete source-tree/environment capture.

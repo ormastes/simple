@@ -29,3 +29,18 @@ Reference alias limitation and large-object target remain open.
 Owners: this lane research/design and source after freeze; core compatibility
 review; evidence fixtures/specs after freeze. Exact proposed contract is in
 simple_distributed_textual_databases_source_binding.md under doc/05_design.
+
+### Actual expiry evidence follow-up (2026-10-03)
+
+Local inspection found observation_content._observation_inspect recognizes
+expired only for absent bytes backed by a deleted retention entry, an unlink or
+synced-absence receipt, nonempty rollup digest and age at least 28 days. The
+existing false-expired regression had no positive real-deletion counterpart.
+The new expired observation fixture drives db_retention_run over an actual
+encoded retention observation before signing the config/reproduction/observation
+chain. No production change is implied by this test gap.
+
+The read-only runner audit still found no C:/dev/simple/bin/release directory.
+The inherited SCV hello diagnostic reports terminal exit 1 and empty admission;
+the provisional startup diagnostic reports terminal exit 88. Neither is a
+verified live wait or an admitted full runner. No binary was executed here.

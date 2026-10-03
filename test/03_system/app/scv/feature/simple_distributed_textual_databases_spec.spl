@@ -1,6 +1,6 @@
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-019 happy and failure, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, all three REQ-019 cases, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -42,7 +42,9 @@ use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
 use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_root, setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_ref}
 use test.fixtures.scv.db_artifact_binding_fixture.*
-use test.fixtures.scv.db_observation_fixture.{Item2ObservationFixture, check_item2_observation_cleanup, setup_item2_observation_sign, setup_item2_observation_review}
+use test.fixtures.scv.db_observation_fixture.{Item2ObservationFixture, setup_item2_observation_fixture, check_item2_observation_cleanup, setup_item2_observation_sign, setup_item2_observation_review}
+use test.fixtures.scv.db_expired_observation_fixture.{setup_item2_expired_observation}
+use app.scv.db.observation_content.{db_observation_verify_and_pin, db_observation_limits}
 use app.scv.db.observation_owner.{db_observation_now}
 use std.scv.db_reproduction_codec.*
 use std.scv.db_reproduction_projection.{db_reproduction_row}
@@ -663,9 +665,44 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
                 check_item2_observation_cleanup(fixture)
 
         it "should prove that it records restricted expired and missing dependency availability honestly":
-            step("Classify configuration-bound evidence")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_test_evidence_contract("REQ-019", "drive boundary configuration and reproduction state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            step("Create actual restricted ciphertext, absent evidence or retention-deleted evidence")
+            for paged in [false, true]:
+                for availability in ["restricted", "expired", "missing"]:
+                    val fixture = if availability == "expired": setup_item2_expired_observation(paged) else: setup_item2_observation_fixture(paged, availability)
+                    val wire = db_patch_encode(fixture.patch).unwrap()
+                    val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+                    step("Read committed immutable records and observe evidence through the content owner")
+                    for record in fixture.records:
+                        val reference = db_reproduction_reference(record)
+                        if paged:
+                            val row = db_paged_current_row(fixture.source, fixture.policy, reference.entity).unwrap().unwrap()
+                            expect(db_reproduction_row(row).unwrap()).to_equal(record)
+                        else:
+                            val image = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image
+                            var found = false
+                            for row in image.state.rows:
+                                if row.entity == entity_ref_canonical(reference.entity):
+                                    expect(db_reproduction_row(row).unwrap()).to_equal(record)
+                                    found = true
+                            expect(found).to_be(true)
+                    val proof = db_observation_verify_and_pin(fixture.source, fixture.sources, fixture.records, fixture.patch.batch_id, db_observation_limits(), db_observation_now().unwrap() / 86400u64).unwrap()
+                    expect(proof.all_declared_available).to_be(false)
+                    var observed = false
+                    for dependency in proof.availability:
+                        if dependency.digest == "sha256:v1:" + fixture.absent_digest:
+                            expect(dependency.declared).to_equal(availability)
+                            expect(dependency.observed).to_equal(availability)
+                            observed = true
+                    expect(observed).to_be(true)
+                    for pin in db_retention_open(fixture.source).unwrap().catalog.pins:
+                        expect(pin.root == fixture.absent_digest).to_be(false)
+                    step("Replay the original signed fact without claiming evidence restoration")
+                    val retained = db_store_read(fixture.source, "retention")
+                    expect(check_item2_artifact_apply(fixture, head).unwrap()).to_equal(head)
+                    expect(db_store_read(fixture.source, if paged: "paged" else: "semantic").head).to_equal(head)
+                    expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+                    expect(db_patch_encode(fixture.patch).unwrap()).to_equal(wire)
+                    check_item2_observation_cleanup(fixture)
 
         it "should prove that it rejects moving names private paths or mutable jj IDs as reproducibility":
             step("Classify configuration-bound evidence")

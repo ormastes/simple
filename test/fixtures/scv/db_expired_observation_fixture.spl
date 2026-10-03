@@ -1,0 +1,51 @@
+use std.spec.*
+use app.io.mod.{file_exists}
+use app.scv.db.retention_store.*
+use std.scv.db_evidence.*
+use std.scv.db_reproduction_codec.*
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_artifact_binding_fixture.{setup_item2_artifact_patch}
+use test.fixtures.scv.db_retention_fixture.{setup_item2_retention_node, setup_item2_retention_raw}
+
+# Produce expiry through the real rollup, pending-delete and unlink owners.
+# No catalog fields or deletion receipts are fabricated by this fixture.
+fn setup_item2_expired_observation(paged: bool) -> Item2ObservationFixture:
+    var fixture = setup_item2_observation_fixture(paged, "expired")
+    val node = setup_item2_retention_node(fixture.source, fixture.sources.evidence_parent, "expired-reproduction-dependency", 7u64, 0u64)
+    val registered = db_retention_register(fixture.source, fixture.sources.evidence_parent, "", node.digest, 0u64, "internal").unwrap()
+    val expired = db_retention_run(fixture.source, fixture.sources.evidence_parent, registered.head, 28u64, 0u64, "linux").unwrap()
+    expect(file_exists(setup_item2_retention_raw(fixture.sources.evidence_parent, node.digest))).to_be(false)
+    var found = false
+    for entry in expired.catalog.entries:
+        if entry.digest == node.digest:
+            expect(entry.state).to_equal("deleted")
+            expect(entry.deletion_status).to_equal("unlinked")
+            expect(entry.rollup_digest.len()).to_equal(64)
+            found = true
+    expect(found).to_be(true)
+    val before = "sha256:v1:" + fixture.absent_digest
+    val after = "sha256:v1:" + node.digest
+    var config = match fixture.records[0]:
+        Config(value): value
+        _: fail("expected captured configuration")
+    config.dependencies = [DbEvidenceDependency(digest: after, availability: "expired")]
+    fixture.records[0] = db_reproduction_record_seal(DbReproductionRecord.Config(config)).unwrap()
+    var reproduction = match fixture.records[1]:
+        BoundReproduction(value, _): value
+        _: fail("expected bound reproduction")
+    reproduction.config = db_reproduction_reference(fixture.records[0])
+    var dependencies: [DbEvidenceDependency] = []
+    for dependency in reproduction.dependencies:
+        dependencies.push(if dependency.digest == before: DbEvidenceDependency(digest: after, availability: "expired") else: dependency)
+    reproduction.dependencies = setup_item2_observation_dependencies(dependencies)
+    fixture.records[1] = db_reproduction_record_seal(DbReproductionRecord.BoundReproduction(reproduction, db_reproduction_reference(fixture.records[3]))).unwrap()
+    var observation = match fixture.records[2]:
+        Observation(value): value
+        _: fail("expected immutable observation")
+    observation.config = db_reproduction_reference(fixture.records[0])
+    observation.reproduction = Some(db_reproduction_reference(fixture.records[1]))
+    fixture.records[2] = db_reproduction_record_seal(DbReproductionRecord.Observation(observation)).unwrap()
+    fixture.absent_digest = node.digest
+    setup_item2_artifact_patch(fixture, fixture.records)
+
+export setup_item2_expired_observation

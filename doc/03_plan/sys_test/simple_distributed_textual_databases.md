@@ -1,7 +1,7 @@
 # System test plan: Simple distributed textual databases
 
 **Selection:** Authority A / Adapters A / Operating B / Retention A  
-**Status:** Full acceptance remains unproved: 22 of 153 scenarios invoke actual production owners; 131 retain explicit fail-fast checkers. Three additional pure identity-map prerequisite cases are not durable acceptance. All sources remain unexecuted; this is not a recorded TDD RED/GREEN result.
+**Status:** Full acceptance remains unproved: 23 of 153 scenarios invoke actual production owners; 130 retain explicit fail-fast checkers. Three additional pure identity-map prerequisite cases are not durable acceptance. All sources remain unexecuted; this is not a recorded TDD RED/GREEN result.
 **Executable:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`  
 **Manual:** `doc/06_spec/03_system/app/scv/feature/simple_distributed_textual_databases_spec.md`
 
@@ -159,8 +159,8 @@ reproduction. Those claims require separate formats and acceptance evidence.
 The integrated checkpoint contains the nine original binding integration
 scenarios, a signed Reference checkpoint-drop scenario covering both mapping
 kinds, three Reference legacy-v1 replay scenarios, and actual-owner REQ-019
-happy and failure system scenarios. Historical v1 fixture state comes from
+happy, boundary and failure system scenarios. Historical v1 fixture state comes from
 prior-contract authorization and the actual reducer, then a signed checkpoint;
 it is not evidence of execution by an old released binary. Paged legacy replay,
 Paged mapping-drop and an independent literal v1 golden vector remain open.
-The full boundary system scenario remains explicit fail-fast. All are unexecuted.
+The boundary uses real retention rollup/deletion before observing expired evidence; restricted and missing states also reach both owners. All are unexecuted.
