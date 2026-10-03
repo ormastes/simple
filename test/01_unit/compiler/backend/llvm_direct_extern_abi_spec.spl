@@ -1,0 +1,64 @@
+"""Actual direct-extern lowering ABI; authored and unexecuted."""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn exact_extern_check(source: text, external_name: text, params: [MirType], result: MirType, declaration: text, call_prefix: text):
+    val ast = parse_full_frontend(source, "exact_extern.spl", "exact_extern", Logger(level: 0))
+    var lowering = HirLowering.with_filename("exact_extern.spl")
+    val hir = lowering.lower_module(ast)
+    expect(lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    var calls = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, args):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                                if name == external_name:
+                                    calls = calls + 1
+                                    expect(args.len()).to_equal(params.len())
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            expect(signature.params).to_equal(params)
+                                            expect(signature.return_type).to_equal(result)
+                                            expect(signature.is_variadic).to_equal(false)
+                                        case _: fail("direct extern must retain a fixed function signature")
+                            case _: pass
+                    case _: pass
+    expect(calls).to_equal(1)
+    val output = MirToLlvm.create("exact_extern", CodegenTarget.X86_64, nil).translate_module(mir)
+    var declarations = 0
+    var emitted_calls = 0
+    for line in output.split("\n"):
+        if line.trim() == declaration: declarations = declarations + 1
+        if line.contains(call_prefix): emitted_calls = emitted_calls + 1
+    expect(declarations).to_equal(1)
+    expect(emitted_calls).to_equal(1)
+
+describe "fixed direct LLVM-C ABI prerequisites":
+    it "preserves pointer handles and pointer-to-pointer outputs with C i32 status":
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        val pp = MirType.ptr(p, true)
+        exact_extern_check("extern fn LLVMParseIRInContext2(ctx: *mut u8, buffer: *mut u8, output: *mut *mut u8, message: *mut *mut u8) -> i32\nfn probe(ctx: *mut u8, buffer: *mut u8, output: *mut *mut u8, message: *mut *mut u8) -> i32:\n    LLVMParseIRInContext2(ctx, buffer, output, message)\n", "LLVMParseIRInContext2", [p, p, pp, pp], MirType(kind: MirTypeKind.I32), "declare i32 @LLVMParseIRInContext2(ptr, ptr, ptr, ptr)", "call i32 @LLVMParseIRInContext2(ptr ")
+
+    it "preserves pointer return and unsigned executor-address output":
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        val name = MirType.ptr(MirType(kind: MirTypeKind.U8), false)
+        val address = MirType.ptr(MirType(kind: MirTypeKind.U64), true)
+        exact_extern_check("extern fn LLVMOrcLLJITLookup(jit: *mut u8, output: *mut u64, name: *const u8) -> *mut u8\nfn probe(jit: *mut u8, output: *mut u64, name: *const u8) -> *mut u8:\n    LLVMOrcLLJITLookup(jit, output, name)\n", "LLVMOrcLLJITLookup", [p, address, name], p, "declare ptr @LLVMOrcLLJITLookup(ptr, ptr, ptr)", "call ptr @LLVMOrcLLJITLookup(ptr ")
+
+    it "preserves void result and unsigned C version output pointers":
+        val output = MirType.ptr(MirType(kind: MirTypeKind.U32), true)
+        exact_extern_check("extern fn LLVMGetVersion(major: *mut u32, minor: *mut u32, patch: *mut u32)\nfn probe(major: *mut u32, minor: *mut u32, patch: *mut u32):\n    LLVMGetVersion(major, minor, patch)\n", "LLVMGetVersion", [output, output, output], MirType.unit(), "declare void @LLVMGetVersion(ptr, ptr, ptr)", "call void @LLVMGetVersion(ptr ")
