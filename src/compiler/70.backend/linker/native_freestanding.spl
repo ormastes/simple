@@ -1,0 +1,95 @@
+"""Explicit static file adapter. No CRT, dyld, external fallback or host admission.
+
+Inputs and ELF output are resident arrays: output_byte_limit limits the published
+artifact, not memory use. This entrypoint cannot certify bounded execution.
+"""
+use std.io_runtime.{file_exists, file_read_bytes, cwd, host_os}
+use std.path.{resolve}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.macho.macho_static_link.{macho_static_link}
+use compiler.backend.linker.native_image_publish.{native_image_publish}
+use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1}
+
+enum NativeFreestandingFormat:
+    Elf
+    MachO
+
+struct NativeFreestandingLinkConfig:
+    format: NativeFreestandingFormat
+    target: RelocArch
+    entry: text
+    output_byte_limit: i64
+    executable: bool
+
+fn freestanding_inputs(paths: [text]) -> Result<[[u8]], text>:
+    var inputs: [[u8]] = []
+    for path in paths:
+        if path == "" or path.contains("\0") or not file_exists(path):
+            return Err("freestanding input cannot be read: {path}")
+        val bytes = file_read_bytes(path)
+        if bytes.len() == 0: return Err("freestanding input is empty or unreadable: {path}")
+        inputs.push(bytes)
+    Ok(inputs)
+
+fn freestanding_widen(inputs: [[u8]]) -> [[i64]]:
+    var output: [[i64]] = []
+    for input in inputs:
+        var bytes: [i64] = []
+        for byte in input: bytes.push(byte as i64)
+        output.push(bytes)
+    output
+
+fn freestanding_path_key(path: text, base: text, windows: bool) -> text:
+    val normalized = resolve(path, base)
+    if windows: normalized.lower() else: normalized
+
+fn link_freestanding_to_native_v1(objects: [text], archives: [text], output: text,
+        config: NativeFreestandingLinkConfig) -> Result<NativeLinkSuccessV1, text>:
+    """Link explicitly freestanding files and report the engine that produced them.
+
+    Unsupported configuration and all linker failures precede publication.
+    Existing outputs survive resolution, relocation, and output-limit failures.
+    """
+    if config.entry == "" or config.entry.contains("\0"):
+        return Err("freestanding entry name is missing or contains NUL")
+    if output == "" or output.contains("\0"):
+        return Err("freestanding output path is missing or contains NUL")
+    if config.output_byte_limit <= 0 or config.output_byte_limit > 2147483647:
+        return Err("freestanding output byte limit must be in 1..2147483647")
+    if config.target != RelocArch.X86_64 and config.target != RelocArch.AArch64 and
+            config.target != RelocArch.Riscv64:
+        return Err("unsupported freestanding target architecture")
+    if config.format == NativeFreestandingFormat.MachO and config.target == RelocArch.Riscv64:
+        return Err("unsupported freestanding Mach-O target architecture")
+    if config.format == NativeFreestandingFormat.MachO and config.output_byte_limit < 32768:
+        return Err("freestanding Mach-O output byte limit must be at least 32768")
+    # Lexical protection for explicit input names; the caller owns the output
+    # directory and must not substitute filesystem aliases during publication.
+    val base = cwd()
+    val windows = host_os() == "windows"
+    val output_key = freestanding_path_key(output, base, windows)
+    for path in objects + archives:
+        if freestanding_path_key(path, base, windows) == output_key:
+            return Err("freestanding output aliases an input path")
+    val object_bytes = freestanding_inputs(objects)?
+    val archive_bytes = freestanding_inputs(archives)?
+    var image: [u8] = []
+    var engine = ""
+    match config.format:
+        case Elf:
+            val linked = elf_static_link(freestanding_widen(object_bytes),
+                freestanding_widen(archive_bytes), config.entry, config.target)?
+            for byte in linked: image.push(byte as u8)
+            engine = "internal:elf"
+        case MachO:
+            image = macho_static_link(object_bytes, archive_bytes, config.entry,
+                config.target, config.output_byte_limit)?
+            engine = "internal:macho"
+    if image.len() > config.output_byte_limit:
+        return Err("freestanding image exceeds output byte limit {config.output_byte_limit}")
+    if not native_image_publish(output, image, config.executable):
+        return Err("freestanding image could not be published: {output}")
+    Ok(NativeLinkSuccessV1(output: output, engine_id: engine))
+
+export NativeFreestandingFormat, NativeFreestandingLinkConfig, link_freestanding_to_native_v1
