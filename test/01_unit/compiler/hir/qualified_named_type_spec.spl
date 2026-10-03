@@ -1,0 +1,81 @@
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn qualified_type_fixture() -> HirLowering:
+    val source = "pub struct Digest:\n    word: u64\npub type Label = text\npub type DigestAlias = Digest\n"
+    var modules: {text: ParserModule} = {}
+    modules["lib.nogc_sync_mut.qualified_owner"] = parse_and_build_module(source,
+        "src/lib/nogc_sync_mut/qualified_owner.spl")
+    val registry = module_surfaces_from_modules(modules, [SourceFile(
+        path: "src/lib/nogc_sync_mut/qualified_owner.spl", content: source,
+        module_name: "lib.nogc_sync_mut.qualified_owner")]).unwrap()
+    hirlowering_for_module("consumer.spl", registry)
+
+describe "HIR fully qualified named annotations":
+    it "resolves the exact owner through std aliases without replacing a local name":
+        val lowering = qualified_type_fixture()
+        val shadow = lowering.symbols.define("Digest", SymbolKind.Class, nil,
+            Span.empty(), Visibility.Public, false, Some("consumer"))
+        val kind = lowering.lower_named_kind("std.nogc_sync_mut.qualified_owner.Digest",
+            [], Span.empty())
+        var resolved = -1
+        match kind:
+            case HirTypeKind.Named(id, _): resolved = id.id
+            case _: ()
+        expect(resolved).to_be_greater_than(-1)
+        expect(resolved == shadow.id).to_equal(false)
+        expect(lowering.symbols.lookup_or_invalid("Digest").id).to_equal(shadow.id)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "preserves imported aliases rather than widening them to Any":
+        val lowering = qualified_type_fixture()
+        var is_text = false
+        match lowering.lower_named_kind("std.nogc_sync_mut.qualified_owner.Label", [], Span.empty()):
+            case HirTypeKind.Str: is_text = true
+            case _: ()
+        expect(is_text).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "preserves an existing local namespace alias member":
+        val lowering = qualified_type_fixture()
+        # Same binding produced by `use owner as local` in import resolution.
+        lowering.register_imported_symbol(0, "lib.nogc_sync_mut.qualified_owner",
+            "Digest", "local.Digest", Span.empty(), true)
+        val imported = lowering.symbols.lookup_or_invalid("local.Digest").id
+        var resolved = -1
+        match lowering.lower_named_kind("local.Digest", [], Span.empty()):
+            case HirTypeKind.Named(id, _): resolved = id.id
+            case _: ()
+        expect(imported).to_be_greater_than(-1)
+        expect(resolved).to_equal(imported)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "publishes a nominal alias under the requested owner-qualified identity":
+        val lowering = qualified_type_fixture()
+        val alias = lowering.resolve_qualified_named_type(
+            "std.nogc_sync_mut.qualified_owner.DigestAlias", Span.empty())
+        val target = lowering.resolve_qualified_named_type(
+            "std.nogc_sync_mut.qualified_owner.Digest", Span.empty())
+        expect(alias).to_be_greater_than(-1)
+        expect(alias).to_equal(target)
+
+    it "fails closed for missing owners and members":
+        val lowering = qualified_type_fixture()
+        expect(lowering.resolve_qualified_named_type("missing.owner.Digest", Span.empty())).to_equal(-1)
+        expect(lowering.resolve_qualified_named_type("std.nogc_sync_mut.qualified_owner.Missing", Span.empty())).to_equal(-1)
+
+    it "reuses an already materialized owner binding":
+        val lowering = qualified_type_fixture()
+        val first = lowering.resolve_qualified_named_type("std.nogc_sync_mut.qualified_owner.Digest", Span.empty())
+        val second = lowering.resolve_qualified_named_type("std.nogc_sync_mut.qualified_owner.Digest", Span.empty())
+        expect(first).to_be_greater_than(-1)
+        expect(second).to_equal(first)

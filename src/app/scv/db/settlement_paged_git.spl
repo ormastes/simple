@@ -1,0 +1,115 @@
+# Shared Git object infrastructure for the paged backend. All payload authority
+# remains with the signed semantic owner. Binary IO uses git_blob, never stdout
+# text conversion. The fixed bucket paths bound the current tree inventory.
+use app.io.mod.{process_run_bounded}
+use app.scv.db.git_candidate.*
+use app.scv.db.git_blob.{db_git_blob_read_owned, db_git_blob_put_owned}
+use app.scv.db.git_policy.*
+use app.scv.db.settlement_paged_projection.*
+use app.scv.db.page_store.{db_page_store_import_page}
+use std.scv.db_paged_model.*
+use std.scv.db_pages.*
+use std.scv.db_receipt.{DbSettlementReceipt}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+
+fn db_paged_git_command(owner: DbGitPreparedCandidate, args: [text], limit: i64 = 65536) -> Result<text, text>:
+    db_git_candidate_require_owned_scratch(owner.scratch)?
+    if scv_sj_lease_is_held(owner.source_root): return Err("SCVDB_SETTLEMENT_NETWORK_UNDER_LEASE")
+    if not db_git_environment_safe() or not db_git_network_config_safe(owner.scratch): return Err("SCVDB_SETTLEMENT_GIT_POLICY")
+    if limit < 1 or limit > 16777217: return Err("SCVDB_PAGED_GIT_QUOTA")
+    val (output, _error, code) = process_run_bounded("git", ["--no-lazy-fetch"] + db_git_effect_prefix(owner.scratch) + args, 30000, limit)
+    if code != 0 or output.len() >= limit: return Err("SCVDB_PAGED_GIT_READ")
+    Ok(output)
+
+fn db_paged_git_acquire(source: text, parent: text, remote: text, head: text, format: text) -> Result<DbGitPreparedCandidate, text>:
+    # This unpublished scratch candidate supplies the existing exact registry
+    # lifecycle. Its placeholder tree is never returned as semantic publication.
+    val request = DbGitCandidateRequest(source_root: source, remote: remote, scratch_parent: parent, expected_head: head, object_format: format, files: [DbGitCandidateFile(path: "scv/paged/owner", content: "private paged IO owner\n")], message: "private paged object staging")
+    val owner = db_git_candidate_prepare(request, \: scv_sj_lease_is_held(source))?
+    val bare = db_paged_git_command(owner, ["-C", remote, "rev-parse", "--is-bare-repository"], 256)
+    match bare:
+        Ok(value):
+            if value.trim() == "true": return Ok(owner)
+            db_git_candidate_cleanup(owner)?
+            Err("SCVDB_SETTLEMENT_LOCAL_REMOTE_REQUIRED")
+        Err(reason):
+            db_git_candidate_cleanup(owner)?
+            Err(reason)
+
+fn db_paged_git_bucket_path(bucket: text) -> Result<text, text>:
+    if bucket.len() != 4: return Err("SCVDB_PAGED_GIT_BUCKET")
+    for byte in bucket.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return Err("SCVDB_PAGED_GIT_BUCKET")
+    Ok("scv/paged/buckets/{bucket}.scvp")
+
+fn db_paged_git_inventory(owner: DbGitPreparedCandidate, receipt: DbSettlementReceipt) -> Result<{text:text}, text>:
+    val raw = db_paged_git_command(owner, ["cat-file", "commit", receipt.accepted_head])?
+    var parents: [text] = []
+    var trees: [text] = []
+    for line in raw.split("\n"):
+        if line == "": break
+        if line.starts_with("parent "): parents.push(line[7:])
+        if line.starts_with("tree "): trees.push(line[5:])
+    if trees != [receipt.accepted_tree]: return Err("SCVDB_PAGED_GIT_TREE")
+    if receipt.previous_head == "":
+        if parents.len() != 0: return Err("SCVDB_PAGED_GIT_PARENT")
+    elif parents != [receipt.previous_head]: return Err("SCVDB_PAGED_GIT_PARENT")
+    # Include tree entries: recursive leaf-only listing hides extra empty trees.
+    val listing = db_paged_git_command(owner, ["ls-tree", "-r", "-t", "--full-tree", receipt.accepted_tree], 16777217)?
+    var objects: {text:text} = {}
+    var directories: [text] = []
+    var count = 0
+    for line in listing.split("\n"):
+        if line == "": continue
+        val fields = line.split("\t")
+        if fields.len() != 2: return Err("SCVDB_PAGED_GIT_INVENTORY")
+        val metadata = fields[0].split(" ")
+        if metadata.len() != 3: return Err("SCVDB_PAGED_GIT_INVENTORY")
+        if metadata[0] == "040000" and metadata[1] == "tree":
+            if not ["scv", "scv/paged", "scv/paged/buckets"].contains(fields[1]) or directories.contains(fields[1]): return Err("SCVDB_PAGED_GIT_INVENTORY")
+            directories.push(fields[1])
+            continue
+        if metadata[0] != "100644" or metadata[1] != "blob" or objects.contains_key(fields[1]): return Err("SCVDB_PAGED_GIT_INVENTORY")
+        if fields[1] != "scv/paged/manifest" and fields[1] != "scv/paged/high-water":
+            val path = fields[1]
+            if path.len() != 27 or not path.starts_with("scv/paged/buckets/") or not path.ends_with(".scvp"): return Err("SCVDB_PAGED_GIT_INVENTORY")
+            if db_paged_git_bucket_path(path[18:22])? != path: return Err("SCVDB_PAGED_GIT_INVENTORY")
+        objects[fields[1]] = metadata[2]
+        count = count + 1
+        if count > 65538: return Err("SCVDB_PAGED_GIT_QUOTA")
+    if not objects.contains_key("scv/paged/manifest") or not objects.contains_key("scv/paged/high-water"): return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    if not directories.contains("scv") or not directories.contains("scv/paged") or directories.contains("scv/paged/buckets") != (objects.len() > 2): return Err("SCVDB_PAGED_GIT_INVENTORY")
+    Ok(objects)
+
+fn db_paged_git_write_index(owner: DbGitPreparedCandidate, root: text, projection: DbPagedGitProjection, previous: DbPagedGitProjection?) -> Result<bool, text>:
+    db_paged_manifest_encode(projection.manifest)?
+    var old: {text:text} = {}
+    if val prior = previous:
+        db_paged_git_command(owner, ["read-tree", owner.expected_head])?
+        for entry in prior.manifest.pages.entries: old[entry.bucket] = entry.digest
+    else:
+        db_paged_git_command(owner, ["read-tree", "--empty"])?
+    var remaining = 17179869184u64
+    var retained: {text:bool} = {}
+    for entry in projection.manifest.pages.entries:
+        retained[entry.bucket] = true
+        if old.contains_key(entry.bucket) and old[entry.bucket] == entry.digest: continue
+        val maximum = if remaining < projection.manifest.pages.quota.max_page_bytes: remaining else: projection.manifest.pages.quota.max_page_bytes
+        val page = db_page_store_import_page(root, projection.manifest.pages, entry, maximum)?
+        val bytes = db_page_encode(page, projection.manifest.pages.quota)?
+        remaining = remaining - (bytes.len() as u64)
+        val blob = db_git_blob_put_owned(owner.scratch, bytes, maximum)?
+        val path = db_paged_git_bucket_path(entry.bucket)?
+        db_paged_git_command(owner, ["update-index", "--add", "--cacheinfo", "100644,{blob.oid},{path}"])?
+    if val prior = previous:
+        for entry in prior.manifest.pages.entries:
+            if not retained.contains_key(entry.bucket):
+                db_paged_git_command(owner, ["update-index", "--force-remove", "--", db_paged_git_bucket_path(entry.bucket)?])?
+    for file in [DbGitCandidateFile(path: "scv/paged/manifest", content: db_paged_manifest_encode(projection.manifest)?), DbGitCandidateFile(path: "scv/paged/high-water", content: db_paged_git_marks(projection.high_water)?)]:
+        val blob = db_git_blob_put_owned(owner.scratch, base_encoding_text_to_bytes(file.content), 16777216u64)?
+        db_paged_git_command(owner, ["update-index", "--add", "--cacheinfo", "100644,{blob.oid},{file.path}"])?
+    Ok(true)
+
+export db_paged_git_command, db_paged_git_acquire, db_paged_git_bucket_path
+export db_paged_git_inventory, db_paged_git_write_index

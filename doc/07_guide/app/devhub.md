@@ -445,6 +445,36 @@ multiple values and are attached automatically by both `wiki` and `api` when
 the selected target routes through its gateway. `gateway_url` is a complete API prefix; routing and headers stay in
 `config.sdn`, while target-scoped secrets stay in `auth.sdn`.
 
+Each named target resolves credentials only within its own scope: for target
+`internal`, configure `confluence.internal` in `token_env`, `token_cmd`, or
+`auth.sdn`, in that precedence order. An unset environment variable falls
+through to the command and then the file for that same target. A named target
+with no credential does **not** borrow a token from the legacy `confluence`
+section or another target. Move any formerly shared default credential to the
+selected target's section. Unnamed legacy configuration continues to use
+`confluence` credentials.
+
+```sdn
+token_env:
+    confluence.internal: INTERNAL_CONFLUENCE_TOKEN
+token_cmd:
+    confluence.public: pass show confluence/public
+```
+
+Confluence transport and configuration host operations use the canonical
+SOSIX host facade. HTTP failures retain their status and redact credential
+assignments in diagnostics; successful page content is preserved. Searches
+escape quotes and backslashes in both titles and space keys. Listings reject
+malformed response shapes. Requests are not automatically retried, and the
+existing `--limit` bounds a single result page rather than fetching all pages.
+
+Offline acceptance is in
+`test/03_system/app/devhub/feature/confluence_access_spec.spl`. Its synthetic
+transport responses and auth documents exercise production response parsing,
+routing, CQL and credential resolution. Phase1 interpreter results prove those
+offline paths; they do not establish live account access, native compilation,
+or successful server writes.
+
 ```sdn
 confluence:
     default_target: internal

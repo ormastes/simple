@@ -1,0 +1,103 @@
+# Native regression: zero deadline remains live until explicit owned cancellation.
+use app.io.args_ops.{get_args}
+use std.nogc_sync_mut.io.windows_worker_launcher.{windows_worker_spawn_v1, windows_worker_detach_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, windows_process_request_valid_v1, windows_process_file_digest_v1, windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetTickCount64, Sleep}
+
+fn zero_proof_request(kind: text, timeout_ms: i64) -> WindowsProcessRequestV1:
+    val root = "D:/wk-bootstrap-manager-resume-20260930/build/bootstrap-builder/phase1-seed-292b59a3/timeout-zero-proof"
+    val program = root + "/timeout-zero-proof.exe"
+    val args = [kind]
+    WindowsProcessRequestV1(program, windows_process_file_digest_v1(program), args,
+        ["SystemRoot=C:\\Windows", "PATH=C:\\Windows\\System32"], root, [],
+        root + "/" + kind + ".stdout.log", root + "/" + kind + ".stderr.log", timeout_ms)
+
+fn zero_proof_collect(lease: WindowsProcessLeaseV1, expected_exit: i64, cancelled: bool) -> i64:
+    val deadline = GetTickCount64() + 10000u64
+    while GetTickCount64() < deadline:
+        val observed = match windows_process_poll_v1(lease):
+            Ok(value): value
+            Err(reason):
+                print "zero-proof FAIL poll: {reason}"
+                return 2
+        if observed.terminal:
+            val receipt = match windows_process_collect_v1(lease):
+                Ok(value): value
+                Err(reason):
+                    print "zero-proof FAIL collect: {reason}"
+                    return 3
+            if not receipt.leader_reaped or not receipt.tree_empty or receipt.active_processes != 0:
+                return 4
+            if receipt.timed_out or receipt.cancelled != cancelled or receipt.exit_code != expected_exit:
+                print "zero-proof FAIL terminal exit={receipt.exit_code} timeout={receipt.timed_out} cancelled={receipt.cancelled}"
+                return 5
+            print "zero-proof PASS terminal exit={receipt.exit_code} timeout=false cancelled={receipt.cancelled} active=0"
+            return 0
+        Sleep(10u32)
+    val _cancelled = windows_process_cancel_v1(lease)
+    print "zero-proof FAIL terminal observation bound"
+    6
+
+fn zero_proof_bounds() -> i64:
+    if windows_process_request_valid_v1(zero_proof_request("bounds", 604800000)) != "": return 11
+    if windows_process_request_valid_v1(zero_proof_request("bounds", -1)) == "": return 12
+    if windows_process_request_valid_v1(zero_proof_request("bounds", 604800001)) == "": return 13
+    print "zero-proof PASS request bounds: 604800000 accepted; -1 and 604800001 denied"
+    0
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() > 1:
+        if args[1] == "bounds": return zero_proof_bounds()
+        if args[1] == "normal": return 37
+        if args[1] == "unlimited":
+            val request = zero_proof_request("leaf", 0)
+            val child = match windows_worker_spawn_v1(request.program, request.producer_digest, ["leaf"], request.directory):
+                Ok(value): value
+                Err(reason):
+                    print "zero-proof FAIL descendant spawn: {reason}"
+                    return 21
+            match windows_worker_detach_v1(child):
+                Ok(_value): pass
+                Err(reason):
+                    print "zero-proof FAIL descendant detach: {reason}"
+                    return 22
+        elif args[1] != "leaf": return 23
+        val child_deadline = GetTickCount64() + 60000u64
+        while GetTickCount64() < child_deadline: Sleep(20u32)
+        return 124
+    val lease = match windows_process_start_v1(zero_proof_request("unlimited", 0)):
+        Ok(value): value
+        Err(reason):
+            print "zero-proof FAIL unlimited start: {reason}"
+            return 14
+    val started = GetTickCount64()
+    val boundary = started + 1200u64
+    var max_active: i64 = 0
+    var observations: i64 = 0
+    while GetTickCount64() < boundary:
+        val observed = match windows_process_poll_v1(lease):
+            Ok(value): value
+            Err(reason):
+                print "zero-proof FAIL unlimited poll: {reason}"
+                return 15
+        if observed.terminal or observed.timed_out or observed.cancelled: return 16
+        if observed.active_processes > max_active: max_active = observed.active_processes
+        observations = observations + 1
+        Sleep(20u32)
+    if max_active < 2 or observations < 2: return 17
+    print "zero-proof PASS no deadline: elapsed_ms={GetTickCount64() - started} observations={observations} max_active={max_active}"
+    match windows_process_cancel_v1(lease):
+        Ok(accepted):
+            if not accepted: return 18
+        Err(reason):
+            print "zero-proof FAIL explicit cancel: {reason}"
+            return 19
+    val cancelled = zero_proof_collect(lease, 125, true)
+    if cancelled != 0: return cancelled
+    val normal = match windows_process_start_v1(zero_proof_request("normal", 0)):
+        Ok(value): value
+        Err(reason):
+            print "zero-proof FAIL normal start: {reason}"
+            return 20
+    zero_proof_collect(normal, 37, false)

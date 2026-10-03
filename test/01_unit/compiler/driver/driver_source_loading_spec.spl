@@ -1,11 +1,53 @@
 use std.spec.*
-use compiler.driver.driver_source_loading.{_driver_collect_entry_import_source, _driver_collect_sources, _driver_module_aliases, _driver_resolve_entry_import}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use compiler.driver.driver_source_loading.{_driver_collect_entry_import_source, _driver_collect_sources, _driver_module_aliases, _driver_resolve_entry_import, _driver_is_explicit_native_entry_source}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_path_absolute(path: text) -> text
 
 describe "driver source module aliases":
+    it "normalizes only the selected excluded entry without admitting neighboring files":
+        expect(_driver_is_explicit_native_entry_source("src/compiler/core/interpreter/value.spl", "src\\compiler\\core\\interpreter\\.\\value.spl")).to_equal(true)
+        expect(_driver_is_explicit_native_entry_source("test/fixtures/entry.spl", "test/fixtures/entry.spl.other.spl")).to_equal(false)
+        expect(_driver_is_explicit_native_entry_source("test/fixtures/entry.spl", "")).to_equal(false)
+        expect(_driver_is_explicit_native_entry_source("test/fixtures", "test/fixtures")).to_equal(false)
+
+    it "matches relative and absolute entry spellings without broadening bulk admission":
+        val relative = "test/fixtures/compiler/type_multiline_signature_valid.spl"
+        val absolute = rt_path_absolute(relative)
+        expect(_driver_is_explicit_native_entry_source(relative, absolute)).to_equal(true)
+        expect(_driver_is_explicit_native_entry_source(absolute, relative)).to_equal(true)
+        expect(_driver_is_explicit_native_entry_source(absolute.replace("/", "\\"), relative)).to_equal(true)
+        expect(_driver_is_explicit_native_entry_source(absolute + ".other.spl", relative)).to_equal(false)
+        if host_is_windows_host():
+            expect(_driver_is_explicit_native_entry_source(absolute.upper().replace(".SPL", ".spl"), relative)).to_equal(true)
+
+    it "uses physical host identity when OS environment metadata is absent":
+        val old_os = rt_env_get("OS") ?? ""
+        val _cleared_os = rt_env_set("OS", "")
+        val relative = "test/fixtures/compiler/type_multiline_signature_valid.spl"
+        val absolute = rt_path_absolute(relative)
+        val matches = _driver_is_explicit_native_entry_source(relative, absolute)
+        val case_matches = if host_is_windows_host():
+                _driver_is_explicit_native_entry_source(absolute.upper().replace(".SPL", ".spl"), relative)
+            else: true
+        val _restored_os = rt_env_set("OS", old_os)
+        expect(matches).to_equal(true)
+        expect(case_matches).to_equal(true)
+        expect(_driver_is_explicit_native_entry_source("missing/native-entry/type_multiline_signature_valid.spl", absolute)).to_equal(false)
+
+    it "keeps directory discovery filtered except for the selected native file":
+        val key = "SIMPLE_NATIVE_BUILD_ENTRY"
+        val old_entry = rt_env_get(key) ?? ""
+        val relative = "test/fixtures/compiler/type_multiline_signature_valid.spl"
+        val _selected = rt_env_set(key, rt_path_absolute(relative))
+        val collected = _driver_collect_sources("test/fixtures/compiler")
+        val _restored = rt_env_set(key, old_entry)
+        expect(collected.len()).to_be_greater_than(0)
+        for source in collected:
+            expect(_driver_is_explicit_native_entry_source(source.path, relative)).to_equal(true)
+
     it "admits only the exact absolute native entry inside an excluded bulk tree":
         val key = "SIMPLE_NATIVE_BUILD_ENTRY"
         val old_entry = rt_env_get(key) ?? ""

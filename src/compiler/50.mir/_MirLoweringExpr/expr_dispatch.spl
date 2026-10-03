@@ -1,6 +1,9 @@
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: expression dispatch, match-case, gpu lane, bitfield helpers
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLowering.global_initializer_guard.*
+use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
+use compiler.mir._MirLoweringExpr.text_index_ranges.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -286,19 +289,7 @@ impl MirLowering:
             visibility = symbol_info.visibility
             if val defining_module = symbol_info.defining_module:
                 if defining_module != "": owner = defining_module
-        val owner_dots = owner.replace(".", "_")
-        val owner_slashes = owner_dots.replace("/", "_")
-        val owner_dashes = owner_slashes.replace("-", "_")
-        # Windows source paths reach this name with a drive colon and
-        # backslashes ("C:\dir"). Neither is legal in an LLVM global name, and
-        # llc rejects the module with "expected '=' in global variable". Sanitize
-        # them the same way as the separators above; the three copies of this
-        # sequence (lower_static, lower_runtime_module_initializers_named,
-        # materialize_folded_global_static_for_address) must stay identical or
-        # one symbol would get two storage slots.
-        val owner_colons = owner_dashes.replace(":", "_")
-        val owner_safe = owner_colons.replace("\\", "_")
-        val link_name = if owner_safe == "": constant.name else: "{owner_safe}__{constant.name}"
+        val link_name = mir_global_storage_name(owner, constant.name)
         val corrected_constant = MirConstant(
             symbol: constant.symbol, name: constant.name,
             type_: corrected_type, value: constant.value)
@@ -339,6 +330,7 @@ impl MirLowering:
         if not static_.?:
             return nil
         val target = static_.unwrap()
+        self.ensure_imported_global_initialized(symbol_id)
         var b = self.builder
         val dest = b.emit_global_addr(target.symbol, target.type_, mutable)
         self.builder = b
@@ -403,6 +395,9 @@ impl MirLowering:
             self.error(message, nil)
 
     me try_lower_global_read(symbol_id: i64) -> LocalId?:
+        # Imported callable values can observe provider globals when invoked
+        # indirectly; initialize their provider before publishing the value.
+        self.ensure_imported_global_initialized(symbol_id)
         if not self.global_symbol_ids.contains(symbol_id):
             return nil
         # Mutable (`var`) case first: real storage, backed by a LoadGlobal
@@ -412,6 +407,19 @@ impl MirLowering:
             val dest = b_glob.new_temp(static_.type_)
             b_glob.emit(MirInst(kind: MirInstKind.LoadGlobal(dest, static_.symbol), span: nil))
             self.builder = b_glob
+            # Storage may be an i64 handle while the declaration is a Dict or
+            # array. Keep semantic provenance on the loaded receiver/iterable.
+            if val global_symbol = self.symbols.get_symbol_raw(symbol_id):
+                if val declared_type = global_symbol.type_:
+                    self.remember_local_hir_type(dest.id, declared_type, 0, 0)
+                    match declared_type.kind:
+                        case HirTypeKind.Dict(_, _):
+                            self.runtime_dict_locals[dest.id] = true
+                            self.mark_runtime_value_local(dest.id)
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            self.runtime_array_locals[dest.id] = true
+                            self.mark_runtime_value_local(dest.id)
+                        case _: ()
             # Register struct provenance for the loaded local, mirroring every
             # other struct-value-producing site (mir_lowering_stmts.spl:291,
             # method_calls_literals.spl:537, etc). Every other such site
@@ -428,8 +436,12 @@ impl MirLowering:
             # Landed anyway as a genuine, low-risk provenance-consistency gap.
             match static_.type_.kind:
                 case Struct(struct_sym):
-                    if val struct_symbol_raw = self.symbols.get_symbol_raw(struct_sym.id):
-                        self.struct_value_syms[dest.id] = struct_symbol_raw.name
+                    # lower_type(Named) emits canonical MIR IDs, which do not
+                    # exist in the HIR symbol table. Resolve that namespace and
+                    # retain qualified class identities for method dispatch.
+                    val global_struct_name = self.mir_struct_symbol_name(struct_sym)
+                    if global_struct_name != "":
+                        self.struct_value_syms[dest.id] = global_struct_name
                 case _: ()
             return Some(dest)
         # Immutable (`val`) case: no real storage (lower_static gates on
@@ -1410,6 +1422,7 @@ impl MirLowering:
            heap-box POINTER).
         """
         var dict_result_type = MirType.i64()
+        var dict_value_hir_type: HirType? = nil
         var resolved_from_local = false
         var resolved_dict_mir_type = MirType.i64()
         val has_dict_mir_type = if val type_ = self.builder.local_type(base_local):
@@ -1428,7 +1441,29 @@ impl MirLowering:
             match base.type_.kind:
                 case Dict(_, value_type):
                     dict_result_type = self.lower_type(value_type)
+                    dict_value_hir_type = Some(value_type)
+                    resolved_from_local = true
                 case _: ()
+        # Global storage and projected fields can use an i64 handle while
+        # their semantic Dict type lives in the declaration/local metadata.
+        # Never decode a nominal value as an integer just because the handle
+        # erased the builder's Dict(K,V) type.
+        if not resolved_from_local:
+            if val remembered_dict = self.find_local_hir_type(base_local.id):
+                match remembered_dict.kind:
+                    case Dict(_, value_type):
+                        dict_result_type = self.lower_type(value_type)
+                        dict_value_hir_type = Some(value_type)
+                        resolved_from_local = true
+                    case _: ()
+        if not resolved_from_local:
+            if val declared_dict = self.receiver_declared_type(base):
+                match declared_dict.kind:
+                    case Dict(_, value_type):
+                        dict_result_type = self.lower_type(value_type)
+                        dict_value_hir_type = Some(value_type)
+                        resolved_from_local = true
+                    case _: ()
         # Store-side refinement: an empty `{}` literal fixes the declared
         # value type at the i64 default, so an f64 stored later would decode
         # via the integer `>>3` arm and leak the heap-box POINTER. Use the
@@ -1470,6 +1505,9 @@ impl MirLowering:
             val guardable_value_type = self.mir_type_is_integer(dict_result_type) or self.mir_type_is_str(dict_result_type)
             if as_option and guardable_value_type:
                 decoded = self.dict_get_preserve_flat_nil(get_local, decoded, dict_result_type)
+            if not as_option:
+                if val value_hir_type = dict_value_hir_type:
+                    self.remember_local_hir_type(decoded.id, value_hir_type, 0, 0)
             # Bug #189 (struct-valued Dict read misread): a struct-typed dict
             # result decodes via decode_runtime_value's default raw-passthrough
             # arm (no shift, correct bits), but that arm does not register the
@@ -1491,10 +1529,8 @@ impl MirLowering:
                 case MirTypeKind.Struct(struct_symbol):
                     dbg_arm_taken = true
                     dbg_sym_id = struct_symbol.id
-                    if val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id):
-                        dbg_sym_found = true
-                        if struct_type_sym.name != "":
-                            dict_struct_name = struct_type_sym.name
+                    dict_struct_name = self.mir_struct_symbol_name(struct_symbol)
+                    dbg_sym_found = dict_struct_name != ""
                 case _: ()
             # Bug #189, second half. The `Struct(symbol)` resolution above gets
             # the TYPE right -- decode_runtime_value takes the correct
@@ -2058,7 +2094,7 @@ impl MirLowering:
         self.builder = br2
         ret_temp
 
-    me emit_pending_finally_for_transfer():
+    me emit_pending_finally_for_transfer() -> ():
         """Run active finally blocks inner-to-outer before a nonlocal exit.
 
         The lexical stack is restored after CFG emission so sibling branches
@@ -2114,7 +2150,9 @@ impl MirLowering:
         # convention in lower_array_lit) instead of emitting IR that
         # crashes at runtime.
         match index.kind:
-            case Range(_, _, _, _):
+            case Range(range_start, range_end, range_inclusive, range_step):
+                if val text_slice = self.try_lower_text_range_index(base, range_start, range_end, range_inclusive, range_step):
+                    return text_slice
                 # NAME THE FORM THAT ACTUALLY FAILED, and declare fatality at
                 # the SITE. This arm fires only on a RANGE index (`a[i..]`,
                 # `a[i..j]`) -- `case Range` above is the whole guard. The
@@ -4320,8 +4358,17 @@ impl MirLowering:
                 # same way `lower_if` (mir_lowering_stmts.spl) does.
                 val left_local = self.lower_expr(left)
                 var result_type = MirType.i64()
+                var coalesce_missing_type = true
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
+                    coalesce_missing_type = false
+                # A non-optional text-returning call can still appear on the
+                # left of ?? in compatibility code (env_get(...) ?? "").
+                # Flat HIR may omit the coalesce annotation; preserve the
+                # already-lowered text receiver instead of erasing it to i64.
+                # Do not lower the default here: its effects remain lazy.
+                if coalesce_missing_type and self.local_is_str(left_local):
+                    result_type = self.bootstrap_text_type()
                 # Struct-typed payload: same gap as ExistsCheck (`.?`) just
                 # below, and proven to reproduce identically here (both
                 # `x ?? default` and its None-branch default silently

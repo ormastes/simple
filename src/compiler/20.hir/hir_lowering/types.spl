@@ -223,6 +223,8 @@ class HirLowering:
     # struct-positional reinterpretation (irrefutable) silently wins and the
     # arm is always taken (native_const_pattern_lowers_irrefutably bug).
     enum_variant_names: {text: bool}
+    # Nullary pattern names indexed by the consumer's enum symbol identity.
+    enum_unit_pattern_names: {text: bool}
     # True while registering IMPORTED/sibling symbols: signature diagnostics
     # (untyped returns, unlowerable param types) belong to the DEFINING
     # module's own lowering pass, not the importer's — errors here are
@@ -594,6 +596,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_struct_field_order: HirFieldOrderByName = {}
     val empty_local_tuple_types: HirLocalTupleTypes = {}
     val empty_enum_variant_names: {text: bool} = {}
+    val empty_enum_unit_pattern_names: {text: bool} = {}
     val empty_fn_tuple_returns: {text: [HirType]} = {}
     val empty_glob_expand_memo: {text: i64} = {}
     val empty_field_package_dep_memo: {text: i64} = {}
@@ -664,6 +667,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         struct_field_order_by_name: empty_struct_field_order,
         local_tuple_types: empty_local_tuple_types,
         enum_variant_names: empty_enum_variant_names,
+        enum_unit_pattern_names: empty_enum_unit_pattern_names,
         registering_import_symbols: false,
         fn_tuple_returns: empty_fn_tuple_returns,
         glob_expand_memo: empty_glob_expand_memo,
@@ -842,13 +846,11 @@ impl HirLowering:
         errors_ok and messages_ok and recovered_ok
 
     me promote_symbol_table_transient_owners() -> bool:
-        # begin_module -> reset_module runs BEFORE the per-file HIR scope, so
-        # the table and its containers are persistent; the ENTRIES added
-        # while lowering (HirSymbol, Scope, ScopeId, text keys) are
-        # transient. The walk from the HIR root reaches them through the
-        # module's SymbolTable.module_snapshot(); promoting the containers
-        # here as well keeps the lowerer's own table valid (same containers)
-        # until its next reset_module, and fails closed on its own.
+        # The table object outlives each per-file scope. Uncached streaming
+        # HIR resets its module-local containers inside that scope, so promote
+        # them before it ends. The HIR root also reaches the distinct
+        # SymbolTable.module_snapshot(); this keeps the lowerer's current
+        # containers live until the next reset_module.
         # current_scope needs no separate call: it is a field of that
         # snapshot, so the HIR-root walk promotes it (and a failure there
         # already fails the HIR promotion).
@@ -1269,7 +1271,14 @@ impl HirLowering:
                     HirTypeKind.Error
             case _:
                 var symbol_id = SymbolId(id: -1)
-                if self.type_alias_current_owner != "" and self.type_alias_current_owner != self.module_filename:
+                if name.contains("."):
+                    # `use owner as local` publishes exact `local.Member`
+                    # bindings. Preserve that namespace before resolving an
+                    # authored full module path through the surface registry.
+                    symbol_id = self.symbols.lookup_or_invalid(name)
+                    if not symbol_id.is_valid():
+                        symbol_id = SymbolId(id: self.resolve_qualified_named_type(name, span))
+                elif self.type_alias_current_owner != "" and self.type_alias_current_owner != self.module_filename:
                     # Imported alias bodies use the declaring module's scope,
                     # never a same-named type in the consumer.
                     val raw_alias_target = self.symbols.lookup_qualified_type_raw(self.type_alias_current_owner, name)

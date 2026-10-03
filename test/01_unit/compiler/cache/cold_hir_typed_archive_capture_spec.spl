@@ -1,0 +1,48 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    cold_hir_typed_receipt_from_admitted_entry_v1
+}
+use compiler.hir.archive.interface_action_archive.{
+    interface_action_archive_payloads_decode_v1
+}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn typed_module(name: text) -> HirModule:
+    HirModule(name: name, path: "/frozen/a.spl", imports: [],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn typed_source() -> CompileSourceInventoryEntryV1:
+    val empty = sha256_text("")
+    CompileSourceInventoryEntryV1("a.spl", sha256_text("source-a"),
+        empty, empty, empty, empty, 8)
+
+describe "cold HIR archive interface capture":
+    it "carries the typed module ABI into a decodable archive symbol":
+        val captured = cold_hir_typed_receipt_from_admitted_entry_v1(
+            typed_module("a"), "/frozen", "a.spl", "source-a",
+            sha256_text("inventory"), typed_source())
+        expect(captured.is_ok()).to_be(true)
+        if captured.is_ok():
+            val receipt = captured.unwrap()
+            val digest = sha256_text(receipt.abi_payload)
+            expect(receipt.seed.abi_digest).to_equal(digest)
+            expect(receipt.interface_content).to_equal(
+                "symbol|a|module|{digest}|{digest}")
+            val object_digest = sha256_text("object")
+            val decoded = interface_action_archive_payloads_decode_v1(
+                receipt.interface_content,
+                "action|a-native|compile-native|a|{object_digest}")
+            expect(decoded.is_ok()).to_be(true)
+
+    it "rejects a module name that would inject another archive field":
+        val captured = cold_hir_typed_receipt_from_admitted_entry_v1(
+            typed_module("a|b"), "/frozen", "a.spl", "source-a",
+            sha256_text("inventory"), typed_source())
+        expect(captured.is_err()).to_be(true)

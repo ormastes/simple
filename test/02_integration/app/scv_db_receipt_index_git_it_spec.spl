@@ -1,0 +1,200 @@
+# Real local Git and Ed25519 fixtures; none prove GitHub deployment authority.
+use std.spec.*
+use app.io.mod.{cwd, dir_create, dir_remove_all, file_write, process_run_bounded}
+use app.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.db_receipt.*
+use std.scv.db_receipt_index.*
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use app.scv.db.receipt_index_git.*
+
+struct Item2ReceiptIndexFixture:
+    root: text
+    request: DbReceiptIndexGitRequest
+
+fn check_item2_index_git(root: text, args: [text]) -> text:
+    val (output, _error, code) = process_run_bounded("git", ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=SCV Test", "-c", "user.email=scv-test@invalid"] + args, 30000, 1048576)
+    expect(code).to_equal(0)
+    output.trim()
+
+fn setup_item2_index_sign(receipt: DbSettlementReceipt) -> DbSettlementReceipt:
+    var signed = receipt
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([44u8;32])
+    signed.signature = pure_ed25519_sign(seed, public_key, db_receipt_signing_bytes(signed).unwrap())
+    signed
+
+fn setup_item2_index_fixture() -> Item2ReceiptIndexFixture:
+    val allocated = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path, "scv-index-spec-")
+    expect(allocated.len()).to_be_greater_than(0)
+    val root = path_final_existing(allocated).unwrap().path
+    val source = root + "/source"
+    val remote = root + "/remote.git"
+    val scratch = root + "/scratch"
+    expect(dir_create(source, true)).to_equal(true)
+    expect(dir_create(scratch, true)).to_equal(true)
+    check_item2_index_git(source, ["init", "--template=", "--object-format=sha1", "."])
+    check_item2_index_git(source, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    expect(file_write(source + "/state.scv", "one\n")).to_equal(true)
+    check_item2_index_git(source, ["add", "--", "state.scv"])
+    check_item2_index_git(source, ["commit", "-m", "one"])
+    val head = check_item2_index_git(source, ["rev-parse", "HEAD"])
+    val tree = check_item2_index_git(source, ["log", "-1", "--format=%T"])
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([44u8;32])
+    val authority = DbReceiptAuthority(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, remote: remote, settled_ref: "refs/heads/settled", key_id: "authority", public_key: public_key, schema_revision: "s1", reducer_revision: "r1")
+    val receipt = setup_item2_index_sign(DbSettlementReceipt(repository: "repo", namespace: authority.namespace, epoch: 1, remote: remote, settled_ref: authority.settled_ref, previous_receipt: "", previous_head: "", accepted_head: head, accepted_tree: tree, object_format: "sha1", high_water: [], schema_revision: "s1", reducer_revision: "r1", batch_digests: [sha256_text("one")], signer: authority.key_id, signature: []))
+    Item2ReceiptIndexFixture(root: root, request: DbReceiptIndexGitRequest(source_root: source, remote: remote, scratch_parent: scratch, expected_head: "", receipt: receipt, authority: authority))
+
+fn setup_item2_index_successor(request: DbReceiptIndexGitRequest, index_head: text) -> DbReceiptIndexGitRequest:
+    expect(file_write(request.source_root + "/state.scv", "two\n")).to_equal(true)
+    check_item2_index_git(request.source_root, ["add", "--", "state.scv"])
+    check_item2_index_git(request.source_root, ["commit", "-m", "two"])
+    var receipt = request.receipt
+    receipt.previous_receipt = db_receipt_digest(request.receipt).unwrap()
+    receipt.previous_head = request.receipt.accepted_head
+    receipt.accepted_head = check_item2_index_git(request.source_root, ["rev-parse", "HEAD"])
+    receipt.accepted_tree = check_item2_index_git(request.source_root, ["log", "-1", "--format=%T"])
+    receipt.batch_digests = [sha256_text("two")]
+    var next = request
+    next.receipt = setup_item2_index_sign(receipt)
+    next.expected_head = index_head
+    next
+
+fn check_item2_index_cleanup(fixture: Item2ReceiptIndexFixture):
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(fixture.root.starts_with(path_final_existing(cwd()).unwrap().path + "/scv-index-spec-")).to_equal(true)
+    expect(dir_remove_all(fixture.root)).to_equal(true)
+
+fn setup_item2_index_corrupt_blob(request: DbReceiptIndexGitRequest, proof: DbReceiptIndexGitProof, path: text, bytes: text) -> text:
+    check_item2_index_git(request.remote, ["read-tree", proof.index_head])
+    expect(file_write(request.remote + "/fixture-payload", bytes)).to_equal(true)
+    val blob = check_item2_index_git(request.remote, ["hash-object", "-w", "--no-filters", "--", "fixture-payload"])
+    check_item2_index_git(request.remote, ["update-index", "--add", "--cacheinfo", "100644,{blob},{path}"])
+    val tree = check_item2_index_git(request.remote, ["write-tree"])
+    val broken = check_item2_index_git(request.remote, ["commit-tree", tree, "-p", proof.index_head, "-m", "malformed fixture"])
+    check_item2_index_git(request.remote, ["update-ref", proof.index_ref, broken, proof.index_head])
+    broken
+
+describe "actual local receipt-index Git mechanics without protected-completion claims":
+    it "creates the exact branch and three identical immutable copies then independently reads and retries":
+        val fixture = setup_item2_index_fixture()
+        val request = fixture.request
+        val before = check_item2_index_git(request.source_root, ["hash-object", "--", ".git/index"])
+        expect(db_receipt_index_git_read(request)).to_equal(Err("SCVDB_INDEX_NOT_INDEXED"))
+        val proof = db_receipt_index_git_publish_local(request).unwrap()
+        expect(proof.index_ref).to_equal("refs/heads/scv-receipts/v1/00112233445566778899aabbccddeeff/1")
+        expect(proof.sequence).to_equal(1u64)
+        expect(proof.receipt_digest).to_equal(db_receipt_digest(request.receipt).unwrap())
+        val entry = check_item2_index_git(request.remote, ["show", proof.index_head + ":entries/" + proof.receipt_digest])
+        expect(check_item2_index_git(request.remote, ["show", proof.index_head + ":by-commit/" + request.receipt.accepted_head])).to_equal(entry)
+        expect(check_item2_index_git(request.remote, ["show", proof.index_head + ":sequence/00000000000000000001"])).to_equal(entry)
+        expect(db_receipt_index_git_read(request).unwrap()).to_equal(proof)
+        expect(db_receipt_index_git_publish_local(request).unwrap()).to_equal(proof)
+        expect(check_item2_index_git(request.source_root, ["hash-object", "--", ".git/index"])).to_equal(before)
+        check_item2_index_cleanup(fixture)
+
+    it "preserves old entries and authenticates historical replay through the current signed cursor":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        val prior_blob = check_item2_index_git(fixture.request.remote, ["rev-parse", first.index_head + ":entries/" + first.receipt_digest])
+        val next = setup_item2_index_successor(fixture.request, first.index_head)
+        val second = db_receipt_index_git_publish_local(next).unwrap()
+        expect(second.sequence).to_equal(2u64)
+        expect(check_item2_index_git(next.remote, ["rev-list", "--parents", "-n", "1", second.index_head])).to_equal(second.index_head + " " + first.index_head)
+        expect(check_item2_index_git(next.remote, ["rev-parse", second.index_head + ":entries/" + first.receipt_digest])).to_equal(prior_blob)
+        val old = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        expect(old.index_head).to_equal(second.index_head)
+        expect(old.sequence).to_equal(1u64)
+        expect(old.receipt_digest).to_equal(first.receipt_digest)
+        check_item2_index_cleanup(fixture)
+
+    it "refuses a stale expected head and bad signature without remote mutation":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        val stale = setup_item2_index_successor(fixture.request, "")
+        expect(db_receipt_index_git_publish_local(stale)).to_equal(Err("SCVDB_INDEX_STALE_HEAD"))
+        var forged = stale
+        forged.receipt.signature = [0u8;64]
+        expect(db_receipt_index_git_publish_local(forged)).to_equal(Err("SCVDB_RECEIPT_SIGNATURE"))
+        expect(check_item2_index_git(stale.remote, ["rev-parse", first.index_ref])).to_equal(first.index_head)
+        check_item2_index_cleanup(fixture)
+
+    it "rejects a real remote tree with a missing immutable copy instead of repairing it silently":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        val remote = fixture.request.remote
+        check_item2_index_git(remote, ["read-tree", first.index_head])
+        check_item2_index_git(remote, ["update-index", "--force-remove", "--", "by-commit/" + fixture.request.receipt.accepted_head])
+        val tree = check_item2_index_git(remote, ["write-tree"])
+        val broken = check_item2_index_git(remote, ["commit-tree", tree, "-p", first.index_head, "-m", "malformed fixture"])
+        check_item2_index_git(remote, ["update-ref", first.index_ref, broken, first.index_head])
+        expect(db_receipt_index_git_read(fixture.request)).to_equal(Err("SCVDB_INDEX_QUARANTINE_PARTIAL"))
+        expect(db_receipt_index_git_publish_local(fixture.request)).to_equal(Err("SCVDB_INDEX_QUARANTINE_PARTIAL"))
+        expect(check_item2_index_git(remote, ["rev-parse", first.index_ref])).to_equal(broken)
+        check_item2_index_cleanup(fixture)
+
+    it "rejects held SJ writers and overlapping scratch before any publication":
+        val fixture = setup_item2_index_fixture()
+        expect(scv_sj_lease_acquire(fixture.request.source_root, "index-fixture").starts_with("ok:")).to_equal(true)
+        expect(db_receipt_index_git_publish_local(fixture.request)).to_equal(Err("SCVDB_INDEX_NETWORK_UNDER_LEASE"))
+        expect(scv_sj_lease_release(fixture.request.source_root, "index-fixture").starts_with("ok:")).to_equal(true)
+        var overlap = fixture.request
+        overlap.scratch_parent = overlap.source_root
+        expect(db_receipt_index_git_publish_local(overlap)).to_equal(Err("SCVDB_INDEX_SCOPE"))
+        check_item2_index_cleanup(fixture)
+
+    it "has no production publication escape through the local-only entrypoint":
+        val fixture = setup_item2_index_fixture()
+        var request = fixture.request
+        request.remote = "https://github.com/example/example.git"
+        request.authority.remote = request.remote
+        request.receipt.remote = request.remote
+        request.receipt = setup_item2_index_sign(request.receipt)
+        expect(db_receipt_index_git_publish_local(request)).to_equal(Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED"))
+        expect(db_receipt_index_ref("../namespace", 1)).to_equal(Err("SCVDB_INDEX_REF"))
+        expect(db_receipt_index_ref(request.receipt.namespace, 0)).to_equal(Err("SCVDB_INDEX_REF"))
+        check_item2_index_cleanup(fixture)
+
+    it "rejects truncated and trailing remote entry bytes rather than normalizing them":
+        for bad in ["SCVDB-RECEIPT-INDEX-v1\n00\n", "SCVDB-RECEIPT-INDEX-v1\n00\ntrailing"]:
+            val fixture = setup_item2_index_fixture()
+            val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+            val broken = setup_item2_index_corrupt_blob(fixture.request, first, "entries/" + first.receipt_digest, bad)
+            expect(db_receipt_index_git_read(fixture.request)).to_equal(Err("SCVDB_INDEX_ENCODING"))
+            expect(check_item2_index_git(fixture.request.remote, ["rev-parse", first.index_ref])).to_equal(broken)
+            check_item2_index_cleanup(fixture)
+
+    it "enforces the effect blob quota before decoding a remotely stored entry":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        var oversized = "0123456789abcdef"
+        for index in 0..15: oversized = oversized + oversized
+        expect(oversized.len()).to_equal(524288)
+        val broken = setup_item2_index_corrupt_blob(fixture.request, first, "entries/" + first.receipt_digest, oversized)
+        expect(db_receipt_index_git_read(fixture.request)).to_equal(Err("SCVDB_INDEX_GIT_EFFECT"))
+        check_item2_index_cleanup(fixture)
+
+    it "refuses a successor when the signed latest cursor has lost an immutable projection":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        val remote = fixture.request.remote
+        check_item2_index_git(remote, ["read-tree", first.index_head])
+        check_item2_index_git(remote, ["update-index", "--force-remove", "--", "by-commit/" + fixture.request.receipt.accepted_head])
+        val tree = check_item2_index_git(remote, ["write-tree"])
+        val broken = check_item2_index_git(remote, ["commit-tree", tree, "-p", first.index_head, "-m", "latest copy missing"])
+        check_item2_index_git(remote, ["update-ref", first.index_ref, broken, first.index_head])
+        val successor = setup_item2_index_successor(fixture.request, broken)
+        expect(db_receipt_index_git_publish_local(successor)).to_equal(Err("SCVDB_INDEX_QUARANTINE_PARTIAL"))
+        expect(check_item2_index_git(remote, ["rev-parse", first.index_ref])).to_equal(broken)
+        check_item2_index_cleanup(fixture)
+
+    it "refuses an existing branch with a fabricated empty cursor rather than restarting sequence one":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        val empty = db_receipt_index_cursor_encode(DbReceiptIndexCursor(count: 0, last_receipt: nil)).unwrap()
+        val broken = setup_item2_index_corrupt_blob(fixture.request, first, "cursor", empty)
+        val successor = setup_item2_index_successor(fixture.request, broken)
+        expect(db_receipt_index_git_publish_local(successor)).to_equal(Err("SCVDB_INDEX_QUARANTINE_CURSOR"))
+        expect(check_item2_index_git(fixture.request.remote, ["rev-parse", first.index_ref])).to_equal(broken)
+        check_item2_index_cleanup(fixture)

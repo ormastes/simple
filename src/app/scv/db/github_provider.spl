@@ -1,0 +1,365 @@
+# Read-only GitHub Actions discovery. GitHub response content is untrusted.
+# API contracts: https://docs.github.com/en/rest/actions/workflow-runs
+# https://docs.github.com/en/rest/actions/workflow-jobs
+# IO runs before SJ acquisition; caller supplies the owner lease-state query and
+# must prohibit concurrent lease acquisition until this synchronous call returns.
+# No evidence persistence, cursor acknowledgement, or release qualification here.
+use app.io.mod.{process_run_bounded, process_bounded_timed_out}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.types.{json_get_type, json_to_object}
+use std.scv.db_evidence.{DbProviderIdentity}
+use std.scv.db_ci_ingest.{DbGithubActionsJob, db_ci_github_identity}
+
+struct DbGithubSource:
+    host: text
+    owner: text
+    repository: text
+    repository_id: text
+    created_since: text
+    tracked_run_ids: [text]
+    per_page: u64
+    maximum_pages: u64
+    maximum_requests: u64
+    timeout_ms: i64
+    maximum_response_bytes: i64
+
+struct DbGithubProcessReply:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+struct DbGithubTransport:
+    execute: fn([text], i64, i64) -> DbGithubProcessReply
+    lease_held: fn() -> bool
+
+struct DbGithubRun:
+    run_id: text
+    attempt: u64
+    source_oid: text
+    status: text
+    conclusion: text
+    untrusted_fork: bool
+
+struct DbGithubJob:
+    identity: DbProviderIdentity
+    source_oid: text
+    status: text
+    conclusion: text
+    untrusted_fork: bool
+
+struct DbGithubDiscovery:
+    runs: [DbGithubRun]
+    jobs: [DbGithubJob]
+    requests: u64
+
+fn db_github_safe_component(value: text, host: bool) -> bool:
+    if value == "" or value.starts_with("-") or value.starts_with(".") or value.ends_with(".") or value.contains(".."):
+        return false
+    for i in 0..value.len():
+        val c = value.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 46 or (not host and c == 95)):
+            return false
+    true
+
+fn db_github_decimal(value: text) -> bool:
+    if value == "" or value.starts_with("0"):
+        return false
+    for i in 0..value.len():
+        val c = value.char_code_at(i)
+        if c < 48 or c > 57:
+            return false
+    true
+
+fn db_github_source_validate(source: DbGithubSource) -> Result<bool, text>:
+    if not db_github_safe_component(source.host, true) or not db_github_safe_component(source.owner, false) or not db_github_safe_component(source.repository, false) or not db_github_decimal(source.repository_id):
+        return Err("GithubInvalidScope")
+    if source.per_page == 0 or source.per_page > 100 or source.maximum_pages == 0 or source.maximum_pages > 100 or source.maximum_requests == 0 or source.maximum_requests > 1000:
+        return Err("GithubInvalidPageBound")
+    if source.timeout_ms <= 0 or source.timeout_ms > 30000 or source.maximum_response_bytes < 1024 or source.maximum_response_bytes > 2097152:
+        return Err("GithubInvalidProcessBound")
+    # A conservative ISO-8601 date/time subset, never an arbitrary query fragment.
+    if source.created_since == "" or source.created_since.len() > 32:
+        return Err("GithubInvalidOverlapWindow")
+    for i in 0..source.created_since.len():
+        val c = source.created_since.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or [45, 58, 84, 90, 46].contains(c)):
+            return Err("GithubInvalidOverlapWindow")
+    if source.tracked_run_ids.len() > 1000:
+        return Err("GithubTrackedRunBoundExceeded")
+    for run_id in source.tracked_run_ids:
+        if not db_github_decimal(run_id):
+            return Err("GithubInvalidTrackedRun")
+    Ok(true)
+
+# Inspect nesting before entering the recursive shared JSON parser.
+fn db_github_json_depth(body: text) -> Result<bool, text>:
+    var depth = 0
+    var quoted = false
+    var escaped = false
+    for i in 0..body.len():
+        val c = body.char_code_at(i)
+        if quoted:
+            if escaped:
+                escaped = false
+            elif c == 92:
+                escaped = true
+            elif c == 34:
+                quoted = false
+        elif c == 34:
+            quoted = true
+        elif c == 123 or c == 91:
+            depth = depth + 1
+            if depth > 24:
+                return Err("GithubJsonDepthExceeded")
+        elif c == 125 or c == 93:
+            depth = depth - 1
+            if depth < 0:
+                return Err("GithubMalformedJson")
+    if quoted or depth != 0:
+        return Err("GithubMalformedJson")
+    Ok(true)
+
+# Return only classified errors. Raw stderr/body may contain credentials or PII.
+fn db_github_response(reply: DbGithubProcessReply, maximum_bytes: i64) -> Result<text, text>:
+    if process_bounded_timed_out(reply.exit_code, reply.stderr):
+        return Err("GithubTimeoutRetryable")
+    if reply.stdout.len() >= maximum_bytes or reply.stderr.len() >= maximum_bytes:
+        return Err("GithubResponseBoundExceeded")
+    val normalized = reply.stdout.replace("\r\n", "\n")
+    val lines = normalized.split("\n")
+    if lines.len() == 0 or not lines[0].starts_with("HTTP/"):
+        if reply.exit_code != 0:
+            return Err("GithubTransportOrAuthenticationFailure")
+        return Err("GithubMissingHttpStatus")
+    val status_parts = lines[0].split(" ")
+    if status_parts.len() < 2:
+        return Err("GithubMissingHttpStatus")
+    val status = status_parts[1]
+    var in_headers = true
+    var rate_limited = false
+    var body_lines: [text] = []
+    for i in 1..lines.len():
+        val line = lines[i]
+        if in_headers:
+            if line == "":
+                in_headers = false
+            else:
+                val lower = line.to_lower()
+                if lower.starts_with("retry-after:") or lower == "x-ratelimit-remaining: 0":
+                    rate_limited = true
+        else:
+            body_lines.push(line)
+    if status == "429" or (status == "403" and rate_limited):
+        return Err("GithubRateLimitedRetryable")
+    if status == "401" or status == "403":
+        return Err("GithubPermissionDenied")
+    if status == "404":
+        return Err("GithubUnavailableOrHidden")
+    if ["500", "502", "503", "504"].contains(status):
+        return Err("GithubServerRetryable")
+    if status != "200" or reply.exit_code != 0:
+        return Err("GithubUnexpectedResponse")
+    if in_headers:
+        return Err("GithubMissingResponseBody")
+    val body = body_lines.join("\n")
+    db_github_json_depth(body)?
+    Ok(body)
+
+fn db_github_request(source: DbGithubSource, transport: DbGithubTransport, endpoint: text) -> Result<any, text>:
+    if transport.lease_held():
+        return Err("GithubNetworkForbiddenUnderLease")
+    val args = ["api", "--hostname", source.host, "--method", "GET", "--include", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint]
+    val reply = transport.execute(args, source.timeout_ms, source.maximum_response_bytes)
+    val body = db_github_response(reply, source.maximum_response_bytes)?
+    val (parsed, parse_error) = json_parse_with_error(body)
+    if parse_error != "" or json_get_type(parsed) != "object":
+        return Err("GithubMalformedJson")
+    Ok(parsed)
+
+fn db_github_field(object: any, key: text) -> Result<any, text>:
+    if json_get_type(object) != "object":
+        return Err("GithubSchemaMismatch")
+    val fields: Dict<text, any> = json_to_object(object)
+    if not fields.has(key):
+        return Err("GithubSchemaMismatch")
+    Ok(fields[key])
+
+fn db_github_text(object: any, key: text, nullable: bool) -> Result<text, text>:
+    val field = db_github_field(object, key)?
+    if nullable and json_get_type(field) == "null":
+        return Ok("")
+    if json_get_type(field) != "string":
+        return Err("GithubSchemaMismatch")
+    val value: text = field.1
+    Ok(value)
+
+fn db_github_integer(object: any, key: text, allow_zero: bool) -> Result<u64, text>:
+    val field = db_github_field(object, key)?
+    if json_get_type(field) != "number":
+        return Err("GithubSchemaMismatch")
+    val number: f64 = field.1
+    if number < 0 or number > 9007199254740991 or (number == 0 and not allow_zero):
+        return Err("GithubUnsafeNumericIdentity")
+    val integer = number as u64
+    if integer as f64 != number:
+        return Err("GithubUnsafeNumericIdentity")
+    Ok(integer)
+
+fn db_github_oid_valid(oid: text) -> bool:
+    if oid.len() != 40 and oid.len() != 64:
+        return false
+    for i in 0..oid.len():
+        val c = oid.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)):
+            return false
+    true
+
+fn db_github_array(object: any, key: text) -> Result<[any], text>:
+    val field = db_github_field(object, key)?
+    if json_get_type(field) != "array":
+        return Err("GithubSchemaMismatch")
+    val values: [any] = field.1
+    Ok(values)
+
+fn db_github_decode_run(value: any, source: DbGithubSource) -> Result<DbGithubRun, text>:
+    val repository = db_github_field(value, "repository")?
+    val repository_id = db_github_integer(repository, "id", false)?
+    if repository_id.to_text() != source.repository_id:
+        return Err("GithubRepositoryScopeMismatch")
+    val oid = db_github_text(value, "head_sha", false)?
+    if not db_github_oid_valid(oid):
+        return Err("GithubInvalidSourceOid")
+    val head_repository = db_github_field(value, "head_repository")?
+    var untrusted = true
+    if json_get_type(head_repository) == "object":
+        val head_repository_id = db_github_integer(head_repository, "id", false)?
+        untrusted = head_repository_id.to_text() != source.repository_id
+    val run_id = db_github_integer(value, "id", false)?
+    Ok(DbGithubRun(run_id: run_id.to_text(), attempt: db_github_integer(value, "run_attempt", false)?, source_oid: oid, status: db_github_text(value, "status", false)?, conclusion: db_github_text(value, "conclusion", true)?, untrusted_fork: untrusted))
+
+fn db_github_decode_job(value: any, source: DbGithubSource, run: DbGithubRun) -> Result<DbGithubJob, text>:
+    val run_id = db_github_integer(value, "run_id", false)?
+    if run_id.to_text() != run.run_id:
+        return Err("GithubJobRunMismatch")
+    val oid = db_github_text(value, "head_sha", false)?
+    if oid != run.source_oid:
+        return Err("GithubJobSourceMismatch")
+    val job_id = db_github_integer(value, "id", false)?
+    val dto = DbGithubActionsJob(instance: source.host, repository_id: source.repository_id, run_id: run.run_id, job_id: job_id.to_text(), run_attempt: run.attempt)
+    Ok(DbGithubJob(identity: db_ci_github_identity(dto)?, source_oid: oid, status: db_github_text(value, "status", false)?, conclusion: db_github_text(value, "conclusion", true)?, untrusted_fork: run.untrusted_fork))
+
+# Page numbers are constructed locally; untrusted Link URLs never become commands.
+# Provider discovery is mutable. A duplicated run/attempt with changed state is a
+# retryable snapshot change, never immutable Observation corruption or completion.
+fn db_github_discover(source: DbGithubSource, transport: DbGithubTransport) -> Result<DbGithubDiscovery, text>:
+    db_github_source_validate(source)?
+    var runs: [DbGithubRun] = []
+    var jobs: [DbGithubJob] = []
+    var requests = 0u64
+    var page = 1u64
+    var runs_done = false
+    var expected_runs: u64? = nil
+    val base = "repos/{source.owner}/{source.repository}/actions/runs"
+    while page <= source.maximum_pages and not runs_done:
+        if requests >= source.maximum_requests:
+            return Err("GithubRequestBudgetExceeded")
+        val endpoint = "{base}?per_page={source.per_page}&page={page}&created=%3E%3D{source.created_since}"
+        val response = db_github_request(source, transport, endpoint)?
+        requests = requests + 1u64
+        val total = db_github_integer(response, "total_count", true)?
+        if val expected = expected_runs:
+            if expected != total:
+                return Err("GithubSnapshotChangedRetryable")
+        else:
+            expected_runs = Some(total)
+        if total > 1000u64:
+            return Err("GithubOverlapWindowMustNarrow")
+        val rows = db_github_array(response, "workflow_runs")?
+        if rows.len() as u64 > source.per_page:
+            return Err("GithubPageBoundExceeded")
+        for row in rows:
+            val run = db_github_decode_run(row, source)?
+            var duplicate = false
+            for previous in runs:
+                if previous.run_id == run.run_id and previous.attempt == run.attempt:
+                    if previous.source_oid != run.source_oid or previous.status != run.status or previous.conclusion != run.conclusion or previous.untrusted_fork != run.untrusted_fork:
+                        return Err("GithubSnapshotChangedRetryable")
+                    duplicate = true
+            if not duplicate:
+                runs.push(run)
+        runs_done = rows.len() as u64 < source.per_page
+        page = page + 1u64
+    if not runs_done:
+        return Err("GithubPageBudgetExceeded")
+    if val expected = expected_runs:
+        if runs.len() as u64 != expected:
+            return Err("GithubIncompleteDiscoveryRetryable")
+    # A rerun retains its original creation date. Refresh tracked run IDs even
+    # outside the created overlap window; the durable caller retains this set.
+    var refreshed: [text] = []
+    for run_id in source.tracked_run_ids:
+        if not refreshed.contains(run_id):
+            if requests >= source.maximum_requests:
+                return Err("GithubRequestBudgetExceeded")
+            val response = db_github_request(source, transport, "{base}/{run_id}")?
+            requests = requests + 1u64
+            val run = db_github_decode_run(response, source)?
+            if run.run_id != run_id:
+                return Err("GithubJobRunMismatch")
+            var duplicate = false
+            for previous in runs:
+                if previous.run_id == run.run_id and previous.attempt == run.attempt:
+                    if previous.source_oid != run.source_oid or previous.status != run.status or previous.conclusion != run.conclusion:
+                        return Err("GithubSnapshotChangedRetryable")
+                    duplicate = true
+            if not duplicate:
+                runs.push(run)
+            refreshed.push(run_id)
+    for run in runs:
+        page = 1u64
+        var jobs_done = false
+        var expected_jobs: u64? = nil
+        val prior_job_count = jobs.len()
+        while page <= source.maximum_pages and not jobs_done:
+            if requests >= source.maximum_requests:
+                return Err("GithubRequestBudgetExceeded")
+            val endpoint = "{base}/{run.run_id}/attempts/{run.attempt}/jobs?per_page={source.per_page}&page={page}"
+            val response = db_github_request(source, transport, endpoint)?
+            requests = requests + 1u64
+            val total = db_github_integer(response, "total_count", true)?
+            if val expected = expected_jobs:
+                if expected != total:
+                    return Err("GithubSnapshotChangedRetryable")
+            else:
+                expected_jobs = Some(total)
+            val rows = db_github_array(response, "jobs")?
+            if rows.len() as u64 > source.per_page:
+                return Err("GithubPageBoundExceeded")
+            for row in rows:
+                val job = db_github_decode_job(row, source, run)?
+                var duplicate = false
+                for previous in jobs:
+                    if previous.identity.run == job.identity.run and previous.identity.job == job.identity.job and previous.identity.attempt == job.identity.attempt:
+                        if previous.status != job.status or previous.conclusion != job.conclusion:
+                            return Err("GithubSnapshotChangedRetryable")
+                        duplicate = true
+                if not duplicate:
+                    jobs.push(job)
+            jobs_done = rows.len() as u64 < source.per_page
+            page = page + 1u64
+        if not jobs_done:
+            return Err("GithubPageBudgetExceeded")
+        if val expected = expected_jobs:
+            if (jobs.len() - prior_job_count) as u64 != expected:
+                return Err("GithubIncompleteDiscoveryRetryable")
+    Ok(DbGithubDiscovery(runs: runs, jobs: jobs, requests: requests))
+
+fn db_github_execute(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    val (stdout, stderr, exit_code) = process_run_bounded("gh", args, timeout_ms, maximum_bytes)
+    DbGithubProcessReply(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+fn db_github_discover_live(source: DbGithubSource, lease_held: fn() -> bool) -> Result<DbGithubDiscovery, text>:
+    db_github_discover(source, DbGithubTransport(execute: db_github_execute, lease_held: lease_held))
+
+export DbGithubSource, DbGithubProcessReply, DbGithubTransport, DbGithubRun, DbGithubJob, DbGithubDiscovery
+export db_github_discover, db_github_discover_live, db_github_source_validate, db_github_response

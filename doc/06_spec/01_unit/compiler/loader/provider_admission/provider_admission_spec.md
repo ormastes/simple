@@ -1,5 +1,49 @@
 # Provider Admission Specification
 
+> **2026-10-01 update pending execution and regeneration.** The executable spec
+> now adds five behavioral scenarios for stable typed rejection (18 scenarios
+> total). No qualified self-hosted runner is available in this lane. The
+> generated baseline below describes the earlier 13 scenarios and is not
+> current acceptance evidence. Do not mark this manual complete until SPipe
+> docgen regenerates it with zero stubs and the new scenarios execute.
+>
+> The six inherited source-text checks have also been replaced with behavioral
+> checks for one claimant, bounded waiting, missing successful receipt,
+> mismatched effect owner, invalid direct-mode shadow policy, and malformed
+> descriptor digests. Requirement tags now reside inside scenario bodies.
+
+## Stable typed refusal — authored scenario update
+
+Requirements: REQ-002, REQ-012 (metadata admission scope only).
+
+Adjacent policy checks cover REQ-005 metadata rules only; they do not prove
+provider dispatch or dual implementation execution.
+
+1. Prepare an admission with a malformed provider descriptor. Observe an
+   unrequested state with no failure or receipt; construction has not
+   attempted admission.
+2. Demand the capability. Observe `invalid_descriptor` and a rejected state.
+3. Demand it again. Observe the same typed refusal and no admission receipt.
+4. Repeat with a valid descriptor but an invalid package image. Both demands
+   must return `invalid_package_image`.
+5. Publish each concrete metadata refusal through the production terminal
+   publisher. Refuse a competing replacement, then demand twice and check
+   that the original reason, provider, package, and archive digest remain.
+6. Expose a rejected state without its failure metadata. Demand must return
+   `admission_conflict`, rather than inventing a refusal reason.
+7. Publish a successful terminal receipt, then demand again. The observer
+   receives the original identity with `owner=false`; the stored receipt
+   remains owned by its original publisher.
+
+The terminal fixtures prove admission-state behavior only. They do not claim
+catalog registration, archive mapping, provider execution, or end-to-end unavailable-capability
+parity. The source-level package-image facade maps admission failures to
+`provider_metadata_rejected`, but its imported shared-contract adapter is absent
+from this tree. That unbuildable facade and its broader contract remain outside
+this fix.
+
+## Last generated baseline — regeneration required
+
 > Tests covering metadata-only provider admission.
 
 | Tests | Active | Skipped | Pending |

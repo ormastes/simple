@@ -1,0 +1,96 @@
+# @req REQ-RUNTIME-STD-NATIVE-COLD-CAS-ADMISSION
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{getpid, time_now_unix_micros, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.binary_object_cas.{
+    binary_object_cas_put, binary_object_cas_blob_path}
+use compiler.driver.cache.cas_store.{cas_put}
+use compiler.driver.cache.package_archive_types.{
+    PackageArchiveMemberReceiptV1, PackageArchiveReceiptV1}
+use compiler.driver.cache.runtime_std_native_cold_load_v2.{
+    runtime_std_native_cold_objects_admit_v2}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    runtime_std_compiled_source_closure_digest_v1}
+use compiler.driver.smf.runtime_std_native_outcomes_v2.{
+    RuntimeStdNativeOutcomeKindV2, RuntimeStdNativeOutcomeReceiptV2,
+    runtime_std_native_semantic_action_key_v2,
+    runtime_std_native_outcomes_section_v2}
+
+fn _runtime_std_cold_spec_root_v2() -> text:
+    val root = "build/tmp/runtime_std_native_cold_load_v2_spec/" +
+        "{getpid()}-{time_now_unix_micros()}"
+    dir_create_all(root)
+    root
+
+describe "runtime/std V2 cold native CAS admission", tag: ["only-compiled"]:
+    it "admits a sealed outcome only while its exact object remains in CAS":
+        val root = _runtime_std_cold_spec_root_v2()
+        val object = [0x7F_u8, 0x45_u8, 0x4C_u8, 0x46_u8,
+            0x02_u8, 0x01_u8, 0x01_u8, 0x2A_u8]
+        val object_digest = binary_object_cas_put(root, object)
+        expect(object_digest == "").to_equal(false)
+        val target = "x86_64-unknown-linux-gnu"
+        val backend = "llvm"
+        val source = "src/runtime/native_cold_fixture.spl"
+        val source_digest = sha256_text("fixture source")
+        val hir_digest = sha256_text("live HIR")
+        val mir_digest = sha256_text("live MIR")
+        val cfg_digest = sha256_text("target cfg")
+        val key = runtime_std_native_semantic_action_key_v2(
+            RuntimeStdNativeOutcomeKindV2.code_object,
+            source, source_digest, target, backend,
+            hir_digest, mir_digest, cfg_digest)
+        val outcome = RuntimeStdNativeOutcomeReceiptV2(
+            RuntimeStdNativeOutcomeKindV2.code_object,
+            source, source_digest, target, hir_digest, mir_digest,
+            cfg_digest, key, object_digest, object.len(),
+            sha256_text("capsule identity"))
+        val objects = runtime_std_native_outcomes_section_v2(
+            [outcome], backend, target, [source], [source_digest])
+        expect(objects.is_ok()).to_equal(true)
+        val action = sha256_text("V2 action")
+        val producer = sha256_text("producer")
+        val variant = sha256_text("variant")
+        val inventory_digest = sha256_text("inventory")
+        val closure = runtime_std_compiled_source_closure_digest_v1(
+            [source], [source_digest])
+        val receipts = ["simple-runtime-std-compiled-receipts-v2",
+            "package=simple.runtime", "source-closure={closure}",
+            "source-inventory={inventory_digest}",
+            "backend={backend}", "target={target}",
+            "producer={producer}", "config={variant}",
+            "action={action}"].join("\n")
+        val names = ["debug.smf", "exports.smf", "generics.smf",
+            "hir-summaries.smf", "imports.smf", "initialization.smf",
+            "mir.smf", "objects.smf", "receipts.smf", "types.smf"]
+        var archive = ""
+        var members: [PackageArchiveMemberReceiptV1] = []
+        var index = 0
+        while index < names.len():
+            val content = if names[index] == "objects.smf": objects.unwrap()
+                elif names[index] == "receipts.smf": receipts
+                else: "section-{names[index]}"
+            members.push(PackageArchiveMemberReceiptV1(
+                names[index], archive.len().to_u64(),
+                content.len().to_u64(), sha256_text(content)))
+            archive = archive + content
+            index = index + 1
+        val archive_digest = cas_put(root, archive)
+        expect(archive_digest == "").to_equal(false)
+        val receipt = PackageArchiveReceiptV1(
+            "simple.runtime", action, archive_digest,
+            sha256_text("ABI"), sha256_text("producer identity"),
+            producer, variant, [], members, sha256_text("receipt"))
+
+        step("The sealed package and object both validate")
+        expect(runtime_std_native_cold_objects_admit_v2(
+            root, receipt, target)).to_equal("ok")
+
+        step("Deleting the referenced native object revokes admission")
+        expect(file_delete(binary_object_cas_blob_path(
+            root, object_digest))).to_equal(true)
+        expect(runtime_std_native_cold_objects_admit_v2(
+            root, receipt, target) == "ok").to_equal(false)

@@ -1,0 +1,57 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{env_get, file_is_regular_no_follow, process_run_timeout}
+
+# @inline
+fn run_native_builder_case(name: text) -> (text, text, i32):
+    val qualifier = env_get("SIMPLE_BUILDER_QUALIFIER")
+    assert(file_is_regular_no_follow(qualifier))
+    process_run_timeout(qualifier, [name], 120000)
+
+describe "Native distributed bootstrap builder lifecycle":
+    describe "REQ-BBM-003: real local worker execution":
+        it "should execute native producers and hash admitted output bytes":
+            step("Run native producer tasks through the compiled manager")
+            val result = run_native_builder_case("local_execution")
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("builder-qualification-v1 local_execution PASS")
+
+    describe "REQ-BBM-006: verified cache reuse and invalidation":
+        it "should reuse the original output without executing its producer again":
+            step("Resume the completed run with unchanged inputs and output")
+            val result = run_native_builder_case("cache_reuse")
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("builder-qualification-v1 cache_reuse PASS")
+
+        it "should restore or rebuild a corrupted cached output before admission":
+            step("Corrupt one owned output and resume the cached run")
+            val result = run_native_builder_case("cache_invalidation")
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("builder-qualification-v1 cache_invalidation PASS")
+
+    describe "REQ-BBM-004: failed worker isolation":
+        it "should reap a cancelled producer and block its dependent":
+            step("Cancel an executing producer through its owning worker")
+            val result = run_native_builder_case("worker_failure")
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("builder-qualification-v1 worker_failure PASS")
+
+    describe "REQ-BBM-005: dependency and failure policy":
+        it "should finish an independent task after a real producer failure":
+            step("Run a failing task, its dependent, and independent work with keep-going")
+            val result = run_native_builder_case("keep_going")
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("builder-qualification-v1 keep_going PASS")
+
+        it "should leave undispatched independent work blocked under fail-fast":
+            step("Run the same failure graph with one slot and fail-fast")
+            val result = run_native_builder_case("fail_fast")
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("builder-qualification-v1 fail_fast PASS")
+
+    describe "REQ-BBM-008: manager restart":
+        it "should recover an executing worker after the original manager terminates":
+            step("Interrupt the manager while its producer is at an observable barrier")
+            step("Restart against the same journal and acknowledge the live worker")
+            val result = run_native_builder_case("restart")
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("builder-qualification-v1 restart PASS")

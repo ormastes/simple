@@ -6,14 +6,28 @@ dependencies and a native credential-helper build; Linux tests do not certify
 Windows, macOS, or BSD runtime behavior.
 
 Use `mail auth login --protocol pop3 --account work` to configure a TLS POP3
-maildrop plus SMTP sending. POP3 defaults to port 995. Mandatory STLS is
-available through the `starttls` setting; certificate checks remain enabled.
+maildrop plus SMTP sending. Use `tls: implicit` with port 995, or
+`tls: starttls` with port 110. STARTTLS requires a successful POP3 STLS
+upgrade before authentication; missing or rejected STLS fails the request.
+Certificate verification remains enabled, and plaintext POP3 is rejected.
 
 `mail inbox --account work --json --limit 25` lists messages. `mail read 1
 --account work` retrieves message number 1 without deleting it. Message numbers
 may change between sessions. POP3 does not support mail-cli folders, search,
 flags, archive, delete, move or drafts. Reply/forward reuse message retrieval
 and SMTP. Inbox header display retrieves whole messages, capped at 16 MiB each.
+
+```bash
+mail inbox --config-file "{home}/.config/devhub/email.sdn" --account work --json --limit 25
+mail read 1 --config-file "{home}/.config/devhub/email.sdn" --account work --raw
+```
+
+Select a message number from the current listing. Numbers are positive decimal
+integers without leading zeros (`1`, not `01`) and are not persistent IMAP UIDs.
+Inbox results use descending message-number order, limited by `--limit` (1–1000).
+A malformed LIST row or duplicate message number fails before any message is
+retrieved. An empty maildrop returns `[]` with `--json`; server failures and
+truncated retrievals return a nonzero status instead of an empty-inbox success.
 
 ## Password storage
 
@@ -27,7 +41,7 @@ New saved passwords use Simple's `encrypted:v2:` format and the existing
 `{home}/.simple/credential_key`. The key itself is stored locally, and CBC records
 lack an authentication tag. This is not an OS credential vault; see the
 [hardening TODO](../../08_tracking/todo/credential_storage_hardening_2026-09-29.md).
-Existing plaintext account records remain readable; `auth password` rewrites
+Existing plaintext account records are readable only with an explicit legacy JSON file; `auth password` rewrites
 the selected password in encrypted form after successful authentication.
 
 `mail auth password --account work --password-file /private/password.txt`
@@ -64,6 +78,31 @@ that file and forwards its exact location. Conflicting file/directory flags
 are rejected. Mail-cli alone supports matching MAIL_CONFIG_FILE/DIR environment
 defaults. Custom file parents are created when configuration is initialized.
 
+An explicitly selected DevHub SDN file may contain the mail configuration under
+its top-level `email` section. Use the same flags as for a standalone account
+file:
+
+```bash
+mail inbox --config-file "{home}/.config/devhub/config.sdn" --account work --json
+mail read 1 --config-file "{home}/.config/devhub/config.sdn" --account work --raw
+mail config get default_account --config-file "{home}/.config/devhub/config.sdn"
+```
+
+Inside that file, `email.default_account` and `email.accounts` have the same
+schema as the standalone file's root `default_account` and `accounts`. Mail-cli
+ignores other root sections, such as `confluence`, `jira`, and `output`, when
+selecting mail settings. The whole document must still be valid SDN. If `email`
+is present, it takes precedence over any root-level account fields. An invalid
+`email` section or missing account mapping fails; it does not select settings
+from another file. The explicit path overrides environment/default locations,
+and `--account` overrides only the selected document's default account.
+
+Combined DevHub documents are currently read-only through mail-cli: setup,
+password persistence, and configuration changes fail explicitly rather than
+rewriting unrelated sections. Use invocation-only `--password-file` or
+`--password-cmd` when overriding credentials for a read. Standalone `email.sdn`
+continues to support account updates.
+
 The shared schema has `default_account` and `accounts` blocks; account fields
 include `protocol`, `email`, `username`, `pop3_server`, `pop3_port`,
 `smtp_server`, `smtp_port`, `tls`, and `password` (encrypted) or `password_cmd`.
@@ -71,10 +110,24 @@ IMAP accounts use `imap_server`/`imap_port`. A Graph account specifies
 `protocol: graph` and its Graph identity fields; its authentication remains
 separate. Do not forward Graph accounts to direct mail-cli operations.
 
-When `email.sdn` is absent, DevHub can still read its former `email.json`.
-mail-cli imports that file, or its older `~/.config/mail-cli/config.json`,
-into `email.sdn` on first configuration initialization. The source JSON file
-is left untouched for review.
+SDN is the default in both clients. Legacy JSON requires an explicit
+`--config-file /private/email.json`; automatic fallback is disabled. Set
+`MAIL_IMPORT_LEGACY=1` to deliberately import an existing JSON configuration.
+The import rejects plaintext passwords; migrate those to credential references
+first. The source JSON remains untouched.
+
+Install the rebuilt compiled `simple-mail-credentials` helper, including
+`config-json PATH`, before using the shell SDN reader. `MAIL_CONFIG_BIN` selects
+that executable independently from `MAIL_CREDENTIAL_BIN`; otherwise the
+credential helper also provides the parser. Production startup never compiles
+source. The helper and DevHub use the same canonical SDN parser and stable
+`MAIL_CONFIG_*` errors without input values. Do not log the helper JSON output:
+it contains credential references and encrypted envelopes.
+
+`--account` overrides `default_account`; missing selected accounts fail closed
+without selecting a sibling. `--password-file` and `--password-cmd` retain their
+existing invocation precedence. Duplicate keys, malformed SDN, plaintext shared
+passwords, unsupported TLS/protocols and out-of-range ports are rejected.
 
 `devhub email auth password --account work --password-file /private/password.txt`
 updates the shared file after validation. Credential flags also work on other
@@ -91,3 +144,17 @@ Path arguments accept a leading literal `{home}`. Quote it even in launch
 examples, such as `devhub email inbox --config-file "{home}/.config/devhub/email.sdn"`.
 The application expands it from the host home-directory environment; neither
 Bash nor PowerShell needs to interpret the placeholder.
+
+## Local protocol verification
+
+The executable scenarios live in
+`test/03_system/app/mail_cli/feature/mail_pop3_credentials_spec.spl`.
+Their local TLS fixture runs the real Bash mail CLI and curl against a disposable
+loopback POP3 server. It checks implicit TLS, STLS before credentials, missing or
+rejected STLS, certificate rejection, authentication rejection, dot unstuffing,
+empty listings, server errors, and truncated messages. It does not contact an
+external account, send mail, or delete messages. Synthetic transport scenarios
+separately check LIST validation, ordering, credential precedence, and redaction.
+
+This remains the Bash/curl transport adapter. These checks do not establish a
+native SOSIX transport migration or certify another host platform.

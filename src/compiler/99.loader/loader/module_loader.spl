@@ -22,6 +22,7 @@ use ..linker.smf_reader.*
 use compiler.loader.loader.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory, SmfRelocEntry}
 use .object_mapper.{LoaderMapper, LoaderMapperConfig, ResolvedSymbol, apply_smf_relocations}
+use .smf_reloc_partition.{smf_partition_code_relocations_v1}
 use .smf_mmap_native.{native_make_executable, native_make_rw, native_flush_icache, native_call_function_0, native_free_exec_memory}
 use .jit_instantiator.*
 use ..metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
@@ -80,6 +81,14 @@ struct LoadedSymbol:
     is_jit: bool
     # Offset within the SMF (for possible reload/relocs)
     file_offset: i64
+
+struct LoadedDataSection:
+    section_index: i64
+    address: i64
+    size: i64
+    readonly: bool
+    got_address: i64
+    got_size: i64
 
 
 # ============================================================================
@@ -162,6 +171,9 @@ struct LazyModuleLoader:
     # Global symbol table: name -> (module_path, symbol)
     global_symbols: Dict<text, (text, LoadedSymbol)>
     global_symbol_addresses: Dict<text, i64>
+    # Batch-native Data/RoData allocations, owned by module path. Code and
+    # per-function GOTs remain owned by SharedExecMapper.
+    native_group_data_sections: Dict<text, [LoadedDataSection]>
     # Configuration
     config: LazyModuleLoaderConfig
     # Public ABI/accessor semantic keys exported by each loaded module.
@@ -195,6 +207,7 @@ fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
             dependency_semantic_fingerprints: {},
             global_symbols: {},
             global_symbol_addresses: {},
+            native_group_data_sections: {},
             config: config,
             semantic_exports: {},
             semantic_dependencies: {}
@@ -245,6 +258,20 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
 
         val reader = reader_result.unwrap()
 
+        # The ordinary loader maps Code functions only. v1.2 relocation
+        # sources may be Data/RoData, so reject before publishing mappings.
+        if module_bytes_result.is_ok():
+            val native_probe = SmfReaderMemory.from_data(
+                module_bytes_result.unwrap())
+            if native_probe.is_err():
+                lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
+                return LoadResult.Error(message: native_probe.unwrap_err())
+            val (_, minor) = native_probe.unwrap().header.version
+            if minor >= 2:
+                lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
+                return LoadResult.Error(message:
+                    "SMF v1.2 requires native batch section loading")
+
         # Build from the reader selected above. On the normal path that reader
         # already owns `module_bytes_result`; reparsing and re-enumerating it is
         # deterministic duplicate work.
@@ -270,6 +297,41 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
             self.global_symbols[smf_sym.name] = (path, loaded_sym)
             self.global_symbol_addresses[smf_sym.name] = loaded_sym.address
             lifecycle_on_symbol_mapped(lifecycle, path, smf_sym.name)
+
+        # Native group SMFs retain local function symbols for relocations.
+        # Keep their executable mappings in the module's address table, but
+        # give the mapper path-private keys and never publish them globally.
+        if module_bytes_result.is_ok():
+            val ordered_reader_result = SmfReaderMemory.from_data(
+                module_bytes_result.unwrap())
+            if ordered_reader_result.is_err():
+                return LoadResult.Error(message: ordered_reader_result.unwrap_err())
+            val ordered_result = ordered_reader_result.unwrap().symbols_in_table_order()
+            if ordered_result.is_err():
+                return LoadResult.Error(message: ordered_result.unwrap_err())
+            for smf_sym in ordered_result.unwrap():
+                if smf_sym.binding != SymbolBinding.Local or
+                        smf_sym.section_index != 0 or
+                        smf_sym.ty != SymbolType.Function or smf_sym.size <= 0:
+                    continue
+                if smf_sym.name == "" or symbols.has(smf_sym.name):
+                    return LoadResult.Error(message:
+                        "Native SMF local symbol name is empty or duplicated")
+                val code_result = reader.read_code(smf_sym)
+                if code_result.is_err():
+                    return LoadResult.Error(message: code_result.unwrap_err())
+                val local_key = "{path}#local:{smf_sym.name}"
+                val local_addr = moduleloader_allocate_exec_module(self,
+                    owner_id: path, symbol: local_key, code: code_result.unwrap(),
+                    allow_replace: false)
+                if local_addr == 0:
+                    return LoadResult.Error(message:
+                        "Failed to allocate local code for {smf_sym.name}")
+                symbols[smf_sym.name] = LoadedSymbol(
+                    name: smf_sym.name, address: local_addr,
+                    size: smf_sym.size, ty: smf_sym.ty, is_jit: false,
+                    file_offset: smf_sym.offset as i64)
+                lifecycle_on_symbol_mapped(lifecycle, path, local_key)
 
         val module = LoadedModule(
             path: path,
@@ -326,11 +388,17 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
             return Err(mem_reader_result.unwrap_err())
 
         val mem_reader = mem_reader_result.unwrap()
+        val (_, minor) = mem_reader.header.version
+        if minor >= 2:
+            return Err("SMF v1.2 requires native batch section loading")
         val relocs_result = mem_reader.read_relocations()
         if relocs_result.is_err():
             return Err(relocs_result.unwrap_err())
 
         val relocs = relocs_result.unwrap()
+        for reloc in relocs:
+            if reloc.source_section_index != 0:
+                return Err("ordinary loader cannot patch non-Code relocation source")
         if relocs.len() == 0:
             return Ok(())
         if not self.modules.has(path):
@@ -346,20 +414,33 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
         val ordered_symbols_result = mem_reader.symbols_in_table_order()
         if ordered_symbols_result.is_err():
             return Err(ordered_symbols_result.unwrap_err())
-        for smf_sym in ordered_symbols_result.unwrap():
+        val ordered_symbols = ordered_symbols_result.unwrap()
+        var mapped_code_symbols: [SmfSymbol] = []
+        for smf_sym in ordered_symbols:
             val sym_name = smf_sym.name
             var addr = 0i64
             if module.symbols.has(sym_name):
                 addr = module.symbols[sym_name].address
+                if smf_sym.section_index == 0 and smf_sym.ty == SymbolType.Function:
+                    mapped_code_symbols.push(smf_sym)
             resolved = resolved.push(ResolvedSymbol(
                 name: sym_name,
                 address: addr
             ))
 
+        # SMF offsets address the merged Code section. The loader maps each
+        # function into its own executable allocation, so a patch must be
+        # assigned to one function and rebased before write protection changes.
+        val partitioned = smf_partition_code_relocations_v1(
+            relocs, mapped_code_symbols)?
+
         # For each symbol in the loaded module, apply relocations
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for sym_name in module.symbols.keys():
             val loaded_sym = module.symbols[sym_name]
+            val symbol_relocs = partitioned[sym_name] ?? []
+            if symbol_relocs.len() == 0:
+                continue
             # Temporarily make memory writable for relocation patching
             val addr = loaded_sym.address
             val size = loaded_sym.size
@@ -372,7 +453,8 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
                 return Err("Failed to make memory writable for relocation at {sym_name}")
 
             # Apply relocations
-            val apply_result = apply_smf_relocations(addr, size, relocs, resolved, self.global_symbol_addresses)
+            val apply_result = apply_smf_relocations(addr, size, symbol_relocs,
+                resolved, self.global_symbol_addresses)
             if apply_result.is_err():
                 return Err("Relocation failed for {sym_name}: {apply_result.unwrap_err()}")
             # Record any GOT synthesized for this symbol's GotRel32
@@ -385,7 +467,11 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
             # (Fable review of lane A4b commit 939c924dc16).
             val got = apply_result.unwrap()
             if got.base != 0:
-                val exec_key = key_prefix + sym_name
+                var exec_key = key_prefix + sym_name
+                val table_symbol = mem_reader.lookup_symbol(sym_name)
+                if table_symbol.is_ok() and
+                        table_symbol.unwrap().binding == SymbolBinding.Local:
+                    exec_key = key_prefix + path + "#local:" + sym_name
                 val attached = moduleloader_ensure_jit(self).exec_mapper.set_got(exec_key, addr, got.base, got.size)
                 if not attached:
                     _ = native_free_exec_memory(got.base, got.size)
@@ -419,6 +505,12 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
             return moduleloader_load(self, path)
 
         val old_module = self.modules[path]
+        for sym_name in old_module.symbols.keys():
+            val old_symbol = old_module.reader.lookup_symbol(sym_name)
+            if old_symbol.is_ok() and
+                    old_symbol.unwrap().binding == SymbolBinding.Local:
+                return LoadResult.Error(message:
+                    "Hot reload of native SMF private code symbols is unsupported")
         val next_version = old_module.version + 1
         val candidate_prefix = "{path}#gen{next_version}:"
 
@@ -739,6 +831,43 @@ fn moduleloader_invalidate_semantic_change(self: LazyModuleLoader, changed_key: 
             moduleloader_drop_semantic_cache_record(self, path)
     affected
 
+fn moduleloader_release_native_group_data(self: LazyModuleLoader,
+        path: text) -> bool:
+    if not self.native_group_data_sections.has(path):
+        return true
+    var kept: [LoadedDataSection] = []
+    var all_released = true
+    for section in self.native_group_data_sections[path]:
+        var address = section.address
+        var got_address = section.got_address
+        if got_address != 0:
+            val freed_got = unsafe(capabilities: [raw_ptr]):
+                native_free_exec_memory(got_address, section.got_size)
+            if freed_got:
+                got_address = 0
+            else:
+                all_released = false
+        if address != 0:
+            val freed_data = unsafe(capabilities: [raw_ptr]):
+                native_free_exec_memory(address, section.size)
+            if freed_data:
+                address = 0
+            else:
+                all_released = false
+        if address != 0 or got_address != 0:
+            kept.push(LoadedDataSection(section_index: section.section_index,
+                address: address, size: section.size,
+                readonly: section.readonly, got_address: got_address,
+                got_size: section.got_size))
+    var updated: Dict<text, [LoadedDataSection]> = {}
+    for key in self.native_group_data_sections.keys():
+        if key != path:
+            updated[key] = self.native_group_data_sections[key]
+    if kept.len() > 0:
+        updated[path] = kept
+    self.native_group_data_sections = updated
+    all_released
+
 fn moduleloader_unload(self: LazyModuleLoader, path: text):
     """Unload module and free all associated resources.
 
@@ -763,6 +892,7 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     # 1. Delegate exec page and SMF cache cleanup to lifecycle manager.
     #    Frees JIT-triggered symbols, loader-mapped pages, SMF ref counts.
     lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
+    _ = moduleloader_release_native_group_data(self, path)
 
     # 2. Collect symbols owned by this module in the global table.
     val (owned_symbols, globals_without_owned) =
@@ -836,6 +966,8 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     self.modules = _kept_self_modules
 fn moduleloader_destroy(self: LazyModuleLoader):
     """Release every lazily created loader service and retained index."""
+    for path in self.native_group_data_sections.keys():
+        _ = moduleloader_release_native_group_data(self, path)
     if moduleloader_lifecycle_created(self):
         val lifecycle = self.lifecycle_cell[0]
         if moduleloader_jit_service_created(self):
@@ -859,6 +991,7 @@ fn moduleloader_destroy(self: LazyModuleLoader):
     self.modules = {}
     self.global_symbols = {}
     self.global_symbol_addresses = {}
+    self.native_group_data_sections = {}
     self.semantic_fingerprints = {}
     self.dependency_semantic_fingerprints = {}
     self.semantic_exports = {}

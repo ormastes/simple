@@ -1,0 +1,234 @@
+# Diagnostic evidence only. This schema has no Stage2 admission identity.
+use app.bootstrap_builder.native_group_index_contract.{native_group_index_absolute_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{
+    file_hash_sha256, file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded
+}
+
+val PROVISIONAL_AUTHORITY_SCHEMA_V1 = "SIMPLE-PROVISIONAL-AUTHORITY-1"
+val PROVISIONAL_HELLO_SCHEMA_V1 = "SIMPLE-PROVISIONAL-HELLO-1"
+
+fn native_group_provisional_hello_keys_v1() -> [text]:
+    ["format", "producer_path", "producer_digest", "hello_source_path",
+        "hello_source_digest", "hello_executable_path",
+        "hello_executable_digest", "compile_exit", "run_exit",
+        "stdout_path", "stdout_digest", "stderr_path", "stderr_digest",
+        "source_snapshot_digest", "compile_command_path",
+        "compile_command_digest", "compile_log_path",
+        "compile_log_digest", "launcher_relation"]
+
+fn native_group_provisional_authority_keys_v1() -> [text]:
+    ["schema", "diagnostic_only", "producer_source_relation",
+        "hello_source_relation",
+        "output_root", "source_root", "target", "producer_path",
+        "producer_digest", "source_snapshot_path", "source_snapshot_digest",
+        "source_authority_path", "source_authority_digest",
+        "runtime_snapshot_path", "runtime_snapshot_digest",
+        "runtime_snapshot_count",
+        "hello_receipt_path", "hello_receipt_digest",
+        "hello_source_path", "hello_source_digest",
+        "hello_executable_path", "hello_executable_digest",
+        "hello_stdout_path", "hello_stdout_digest",
+        "hello_stderr_path", "hello_stderr_digest",
+        "hello_compile_command_path", "hello_compile_command_digest",
+        "hello_compile_log_path", "hello_compile_log_digest",
+        "hello_launcher_relation",
+        "source_inventory_path", "source_inventory_digest",
+        "source_inventory_count", "full_source_inventory_path",
+        "full_source_inventory_digest", "full_source_inventory_count",
+        "full_source_links_path", "full_source_links_digest",
+        "full_source_links_count", "module_inventory_path",
+        "module_inventory_digest", "module_inventory_count",
+        "excluded_inventory_path", "excluded_inventory_digest",
+        "excluded_inventory_count", "module_role_policy_path",
+        "module_role_policy_digest", "scv_snapshot_root",
+        "scv_receipt_path", "scv_receipt_digest", "scv_revision_id",
+        "scv_commit_id", "scv_tree_id", "scv_snapshot_inventory_digest",
+        "scv_source_inventory_digest", "scv_source_inventory_generation",
+        "package_policy_digest", "llvm_index_config_path",
+        "llvm_index_config_digest", "cranelift_index_config_path",
+        "cranelift_index_config_digest", "phase3_llvm_index_config_path",
+        "phase3_llvm_index_config_digest",
+        "phase3_cranelift_index_config_path",
+        "phase3_cranelift_index_config_digest"]
+
+fn _provisional_decode_rows_v1(
+    payload: text, keys: [text], maximum: i64
+) -> Result<{text: text}, text>:
+    if payload == "" or payload.len() > maximum or
+            not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\0"):
+        return Err("provisional receipt framing invalid")
+    val rows = payload.split("\n")
+    if rows.len() != keys.len() + 1 or rows[rows.len() - 1] != "":
+        return Err("provisional receipt row count invalid")
+    var fields: {text: text} = {}
+    for index in 0..keys.len():
+        val prefix = keys[index] + "="
+        if not rows[index].starts_with(prefix):
+            return Err("provisional receipt row order invalid")
+        val value = rows[index].substring(prefix.len())
+        if value == "" or value.len() > 4096:
+            return Err("provisional receipt value invalid")
+        fields[keys[index]] = value
+    Ok(fields)
+
+fn _provisional_encode_rows_v1(
+    fields: {text: text}, keys: [text]
+) -> Result<text, text>:
+    var rows: [text] = []
+    for key in keys:
+        if not fields.has(key):
+            return Err("provisional receipt field missing: " + key)
+        val value = fields[key]
+        if value == "" or value.len() > 4096 or value.contains("\n") or
+                value.contains("\r") or value.contains("\0"):
+            return Err("provisional receipt field invalid: " + key)
+        rows = rows.push(key + "=" + value)
+    Ok(rows.join("\n") + "\n")
+
+fn native_group_provisional_hello_decode_v1(
+    payload: text
+) -> Result<{text: text}, text>:
+    val fields = _provisional_decode_rows_v1(
+        payload, native_group_provisional_hello_keys_v1(), 16384)?
+    if fields["format"] != PROVISIONAL_HELLO_SCHEMA_V1 or
+            fields["compile_exit"] != "0" or fields["run_exit"] != "0" or
+            fields["launcher_relation"] !=
+                "executed_by_provisional_runner":
+        return Err("provisional hello schema or status invalid")
+    for key in ["producer_path", "hello_source_path",
+            "hello_executable_path", "stdout_path", "stderr_path",
+            "compile_command_path", "compile_log_path"]:
+        if not native_group_index_absolute_v1(fields[key]):
+            return Err("provisional hello path invalid: " + key)
+    for key in ["producer_digest", "hello_source_digest",
+            "hello_executable_digest", "stdout_digest", "stderr_digest",
+            "source_snapshot_digest", "compile_command_digest",
+            "compile_log_digest"]:
+        if not builder_digest_valid_v1(fields[key]):
+            return Err("provisional hello digest invalid: " + key)
+    Ok(fields)
+
+fn native_group_provisional_hello_open_v1(
+    path: text, expected_digest: text
+) -> Result<{text: text}, text>:
+    if not native_group_index_absolute_v1(path) or
+            not builder_digest_valid_v1(expected_digest) or
+            not file_is_regular_no_follow(path):
+        return Err("provisional hello receipt unavailable")
+    val payload = file_read_regular_no_follow_bounded(path, 16384)?
+    if sha256_text(payload) != expected_digest or
+            file_hash_sha256(path) != expected_digest:
+        return Err("provisional hello receipt SHA differs")
+    val fields = native_group_provisional_hello_decode_v1(payload)?
+    val evidence_paths = ["producer_path", "hello_source_path",
+        "hello_executable_path", "stdout_path", "stderr_path",
+        "compile_command_path", "compile_log_path"]
+    val evidence_digests = ["producer_digest", "hello_source_digest",
+        "hello_executable_digest", "stdout_digest", "stderr_digest",
+        "compile_command_digest", "compile_log_digest"]
+    for index in 0..evidence_paths.len():
+        val path_key = evidence_paths[index]
+        val digest_key = evidence_digests[index]
+        if not file_is_regular_no_follow(fields[path_key]) or
+                file_hash_sha256(fields[path_key]) != fields[digest_key]:
+            return Err("provisional hello evidence changed: " + path_key)
+    Ok(fields)
+
+fn native_group_provisional_authority_encode_v1(
+    fields: {text: text}
+) -> Result<text, text>:
+    val payload = _provisional_encode_rows_v1(
+        fields, native_group_provisional_authority_keys_v1())?
+    val checked = native_group_provisional_authority_decode_v1(payload)?
+    if checked["schema"] != PROVISIONAL_AUTHORITY_SCHEMA_V1:
+        return Err("provisional authority schema invalid")
+    Ok(payload)
+
+fn native_group_provisional_authority_decode_v1(
+    payload: text
+) -> Result<{text: text}, text>:
+    val fields = _provisional_decode_rows_v1(
+        payload, native_group_provisional_authority_keys_v1(), 32768)?
+    if fields["schema"] != PROVISIONAL_AUTHORITY_SCHEMA_V1 or
+            fields["diagnostic_only"] != "1" or
+            fields["producer_source_relation"] != "unproven" or
+            fields["hello_source_relation"] != "outside_snapshot" or
+            fields["hello_launcher_relation"] !=
+                "executed_by_provisional_runner":
+        return Err("provisional authority is not diagnostic-only")
+    for key in native_group_provisional_authority_keys_v1():
+        if key.ends_with("_path") or key == "output_root" or
+                key == "source_root" or key == "scv_snapshot_root":
+            if not native_group_index_absolute_v1(fields[key]):
+                return Err("provisional authority path invalid: " + key)
+        if key.ends_with("_digest"):
+            if not builder_digest_valid_v1(fields[key]):
+                return Err("provisional authority digest invalid: " + key)
+    for key in ["runtime_snapshot_count", "source_inventory_count",
+            "full_source_inventory_count",
+            "full_source_links_count", "module_inventory_count",
+            "excluded_inventory_count", "scv_source_inventory_generation"]:
+        val count = fields[key].to_i64() ?? -1
+        if count < 0 or count > 200000 or str(count) != fields[key]:
+            return Err("provisional authority count invalid: " + key)
+    if fields["runtime_snapshot_count"] == "0" or
+            fields["source_inventory_count"] == "0" or
+            fields["full_source_inventory_count"] == "0" or
+            fields["module_inventory_count"] == "0":
+        return Err("provisional authority inventory empty")
+    val root = fields["output_root"]
+    val source = root + "/source-root"
+    if fields["source_root"] != source or
+            fields["source_authority_path"] !=
+                root + "/source-inputs-before.txt" or
+            fields["runtime_snapshot_path"] != root + "/runtime.snapshot" or
+            fields["source_inventory_path"] != source + "/source.inventory" or
+            fields["full_source_inventory_path"] !=
+                source + "/full-source.inventory" or
+            fields["full_source_links_path"] !=
+                source + "/full-source-links.inventory" or
+            fields["module_inventory_path"] != root + "/module.inventory" or
+            fields["excluded_inventory_path"] !=
+                root + "/excluded-modules.inventory" or
+            fields["module_role_policy_path"] != source +
+                "/src/package_ownership/native_module_roles.sdn" or
+            fields["llvm_index_config_path"] !=
+                root + "/index-config-llvm.sdn" or
+            fields["cranelift_index_config_path"] !=
+                root + "/index-config-cranelift.sdn" or
+            fields["phase3_llvm_index_config_path"] !=
+                root + "/index-config-phase3-llvm.sdn" or
+            fields["phase3_cranelift_index_config_path"] !=
+                root + "/index-config-phase3-cranelift.sdn":
+        return Err("provisional authority artifact ownership invalid")
+    Ok(fields)
+
+fn native_group_provisional_authority_open_v1(
+    receipt_path: text, expected_digest: text
+) -> Result<{text: text}, text>:
+    if not native_group_index_absolute_v1(receipt_path) or
+            not builder_digest_valid_v1(expected_digest) or
+            not file_is_regular_no_follow(receipt_path):
+        return Err("provisional authority receipt unavailable")
+    val payload = file_read_regular_no_follow_bounded(receipt_path, 32768)?
+    if sha256_text(payload) != expected_digest or
+            file_hash_sha256(receipt_path) != expected_digest:
+        return Err("provisional authority receipt SHA differs")
+    val fields = native_group_provisional_authority_decode_v1(payload)?
+    if receipt_path != fields["output_root"] +
+            "/provisional-authority.receipt":
+        return Err("provisional authority receipt path invalid")
+    Ok(fields)
+
+export PROVISIONAL_AUTHORITY_SCHEMA_V1, PROVISIONAL_HELLO_SCHEMA_V1
+export native_group_provisional_hello_keys_v1
+export native_group_provisional_authority_keys_v1
+export native_group_provisional_hello_decode_v1
+export native_group_provisional_hello_open_v1
+export native_group_provisional_authority_encode_v1
+export native_group_provisional_authority_decode_v1
+export native_group_provisional_authority_open_v1

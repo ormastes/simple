@@ -1,7 +1,17 @@
 # Completion plan for the seven requested items, by host
 
 Date: 2026-09-29
-Status: execution plan; implementation completion is not certified.
+Status: stopped at user request; implementation completion is not certified.
+## 2026-10-02 stop checkpoint
+
+The user stopped further feature implementation for items 1 and 5 at their
+current partial scope, then requested landing completed fixes on release and
+stopping this session. Neither item is implementation-complete. All session-owned
+bootstrap jobs are stopped with caches and logs retained. Source fixes in
+PRs #2163-#2166 landed on release/1.0; this does not establish native acceptance
+or completion of the seven plans. No current coding percentage is certified.
+See the [restart checkpoint](infra/bootstrap/bootstrap_restart_2026-10-01.md)
+for terminal evidence, unfinished work locations and verification gaps.
 
 Parallel pure-Simple TDD update (2026-09-29): five bounded implementation
 changes and their diagnostic results are recorded in
@@ -100,6 +110,12 @@ References: [research](../01_research/app/tools/scv/simple_distributed_textual_d
 [architecture](../04_architecture/simple_distributed_textual_databases.md),
 [system test plan](sys_test/simple_distributed_textual_databases.md).
 
+2026-10-03: [concrete 51-row acceptance matrix](evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md)
+and [isolated development/evidence report](evidence/seven_plans/item2_dev_execution_2026-10-03.md).
+Research/design and a bounded Git history-readback candidate are updated. Full
+acceptance remains incomplete: no executed self-hosted RED/GREEN evidence, 153
+broad fail-fast scenarios, and open durable/host/provider/performance gates.
+
 - Finish schema validation, stable record identity, deterministic serialization,
   indexing/query behavior, and transactional local updates.
 - Complete SCV integration with jj history and GitHub synchronization using the
@@ -116,6 +132,17 @@ and history inspected; remote authorization and secrets remain outside artifacts
 
 References: [collection plan IR](../01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md),
 [system test plan](sys_test/collection_planner.md).
+
+2026-10-03 development follow-up: the selected scope remains REQ-001–011 and
+NFR-001–007. See the refreshed [local research](../01_research/local/collection_planner.md),
+[domain research](../01_research/domain/collection_planner.md),
+[architecture](../04_architecture/collection_planner.md),
+[detail design](../05_design/collection_planner.md), and
+[parallel ownership plan](agent_tasks/collection_planner.md).
+The system test plan enumerates concrete CP-001-A through CP-011-C acceptance
+cases. CP-GUARD scenarios exercise the advisory selector and its explanation;
+they do not establish production lowering, backend parity, or performance.
+Host completion remains TODO until those separate execution gates pass.
 
 - Audit and close the research P0 semantic prerequisites before enabling optimized
   execution: array-map resolution, closure ABI, any/all, native Dict insertion,

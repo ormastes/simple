@@ -1,0 +1,83 @@
+# Authored cross-host owner regressions; native execution is UNRUN.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_projection_decode_v1,
+    native_tool_projection_environment_v1, native_tool_role_matches_path_v1,
+    native_pinned_artifact_open_v1, native_pinned_artifact_revalidate_v1,
+    native_tool_strict_requested_v1}
+use app.io.env_ops.{cwd, env_get, env_set}
+use app.io.dir_ops.{dir_create_all}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, file_delete}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+fn tool_projection_fixture_v1(root: text, suffix: text) -> text:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    var result = "PATH=untrusted-legacy-row\nmanaged-native-tools-format=1\n"
+    for pair in [("cc", "clang"), ("linker", "ld.lld"), ("ar", "llvm-ar"),
+            ("ranlib", "llvm-ranlib"), ("llc", "llc"), ("llvm-as", "llvm-as"), ("opt", "opt"),
+            ("nm", "llvm-nm")]:
+        result = result + "managed-tool={pair.0}|path={root}/{pair.1}{suffix}|sha256={digest}\n"
+    for name in ["INCLUDE", "LIB", "LIBPATH", "LIBRARY_PATH", "SIMPLE_WINDOWS_ABI", "SIMPLE_LINKER_FLAVOR"]:
+        result = result + "managed-tool-env={name}|value=\n"
+    result
+
+describe "canonical strict native tool authority":
+    it "keeps capture-only mode separate from sealed consumer activation":
+        val names = ["SIMPLE_MANAGED_NATIVE_TOOLS", "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH",
+            "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256"]
+        var saved: [(text, text)] = []
+        for name in names: saved = saved.push((name, env_get(name)))
+        expect(env_set(names[0], "1")).to_equal(true)
+        expect(env_set(names[1], "")).to_equal(true)
+        expect(env_set(names[2], "")).to_equal(true)
+        expect(native_tool_strict_requested_v1()).to_equal(false)
+        expect(env_set(names[1], "/authority/tool.snapshot")).to_equal(true)
+        expect(native_tool_strict_requested_v1()).to_equal(true)
+        expect(env_set(names[1], "")).to_equal(true)
+        expect(env_set(names[2], "partial")).to_equal(true)
+        expect(native_tool_strict_requested_v1()).to_equal(true)
+        for pair in saved: expect(env_set(pair.0, pair.1)).to_equal(true)
+
+    it "decodes exact Linux and Windows projections without consulting PATH":
+        for pair in [("/opt/admitted/bin", ""), ("D:/admitted/bin", ".exe")]:
+            val payload = tool_projection_fixture_v1(pair.0, pair.1)
+            match native_tool_projection_decode_v1(payload):
+                Ok(pins):
+                    expect(pins.len()).to_equal(8)
+                    expect(pins[4].path).to_equal(pair.0 + "/llc" + pair.1)
+                Err(reason): expect(reason).to_equal("valid managed projection")
+            match native_tool_projection_environment_v1(payload):
+                Ok(environment): expect(environment.len()).to_equal(6)
+                Err(reason): expect(reason).to_equal("valid managed environment")
+
+    it "rejects old, incomplete, duplicate and wrong-tool projections":
+        val payload = tool_projection_fixture_v1("/opt/admitted/bin", "")
+        expect(native_tool_projection_decode_v1("PATH=/usr/bin\n").is_err()).to_equal(true)
+        expect(native_tool_projection_decode_v1(payload.replace("managed-tool=llc|", "unknown=llc|")).is_err()).to_equal(true)
+        expect(native_tool_projection_decode_v1(payload + "managed-native-tools-format=1\n").is_err()).to_equal(true)
+        expect(native_tool_projection_decode_v1(payload.replace("/bin/llc|", "/bin/opt|")).is_err()).to_equal(true)
+        expect(native_tool_projection_decode_v1(payload.replace("/opt/admitted/bin/llc", "llc")).is_err()).to_equal(true)
+        expect(native_tool_projection_environment_v1(payload + "managed-tool-env=LIB|value=other\n").is_err()).to_equal(true)
+
+    it "accepts canonical versioned tool names but rejects a role substitution":
+        expect(native_tool_role_matches_path_v1("llc", "/usr/lib/llvm-20/bin/llc")).to_equal(true)
+        expect(native_tool_role_matches_path_v1("cc", "C:/LLVM/bin/clang-cl.exe")).to_equal(true)
+        expect(native_tool_role_matches_path_v1("linker", "/usr/bin/x86_64-linux-gnu-ld.bfd")).to_equal(true)
+        expect(native_tool_role_matches_path_v1("llc", "C:/LLVM/bin/opt.exe")).to_equal(false)
+        expect(native_tool_role_matches_path_v1("nm", "C:/LLVM/bin/llvm-nm.exe")).to_equal(true)
+        expect(native_tool_role_matches_path_v1("nm", "/usr/bin/opt")).to_equal(false)
+
+    it "refuses missing and mutated bytes after descriptor-bound admission":
+        val root = cwd().replace("\\", "/") + "/build/tool-pin-" + str(getpid())
+        expect(dir_create_all(root)).to_equal(true)
+        val path = root + "/artifact"
+        expect(file_atomic_write(path, "first-admitted-bytes\n")).to_equal(true)
+        val digest = file_hash_sha256(path)
+        expect(native_pinned_artifact_open_v1(root + "/absent", digest).is_err()).to_equal(true)
+        match native_pinned_artifact_open_v1(path, digest):
+            Ok(binding):
+                expect(native_pinned_artifact_revalidate_v1(binding, false).is_ok()).to_equal(true)
+                expect(file_atomic_write(path, "other-admitted-bytes\n")).to_equal(true)
+                expect(native_pinned_artifact_revalidate_v1(binding, false).is_err()).to_equal(true)
+                expect(native_pinned_artifact_revalidate_v1(binding, true).is_err()).to_equal(true)
+            Err(reason): expect(reason).to_equal("descriptor authority available on host")
+        expect(file_delete(path)).to_equal(true)

@@ -43,6 +43,20 @@ grep -Fxq 'hir-cache=1' "$work/policy" && grep -Fxq 'hir-cache-location=selected
 SIMPLE_STAGE3_MISSION_CRITICAL=1 bootstrap_cache_stage3_assurance > "$work/assurance"
 grep -Fxq 'hir-cache=1' "$work/assurance" || fail 'resume assurance omits HIR controls'
 
+# Inspect the inline Stage 3 hash and execution vectors separately. Both must
+# force the selected cache entry's HIR directory; the worker path is exercised
+# below without invoking a compiler.
+engine="$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
+awk '/^  stage3_build_args_sha256=/{on=1} on{print} on && /^  \)$/{exit}' \
+  "$engine" > "$work/stage3-hash.shs"
+awk '/^[[:space:]]*bootstrap_stage3_run_transcribed \\/{count++; if(count==2) on=1} on{print} on && /-o "\$\{stage3_bin\}" src\/app\/cli\/bootstrap_main.spl$/{exit}' \
+  "$engine" > "$work/stage3-run.shs"
+for vector in "$work/stage3-hash.shs" "$work/stage3-run.shs"; do
+  [ -s "$vector" ] || fail "missing actual inline Stage 3 vector: $vector"
+  [ "$(grep -c 'SIMPLE_HIR_CACHE=1' "$vector")" -eq 1 ] || fail 'inline Stage 3 HIR enable is ambiguous'
+  [ "$(grep -c 'SIMPLE_HIR_CACHE_DIR=.*stage3_cache_absolute.*/hir' "$vector")" -eq 1 ] || fail 'inline Stage 3 HIR directory is wrong'
+done
+
 # Execute the actual worker against an argument capture facade. Use the Darwin
 # branch solely to avoid any host resource-limit change; no compiler is called.
 fake_root="$work/capture-root"
@@ -88,4 +102,4 @@ main="$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
 grep -Fq '"SIMPLE_HIR_CACHE=1" "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir"' "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" || fail 'resume transcript omits HIR pair'
 [ "$(grep -c 'SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir"' "$main")" -eq 3 ] || fail 'tool semantic keys do not match selected directories'
 grep -Fq 'bootstrap_cache_enable_persistence "$(absolute_path "$3")"' "$main" || fail 'actual inherited tool env omits HIR pair'
-echo 'PASS bootstrap HIR forwarding: inherited disable overridden, persistent selected directory, phase separation, semantic keys, actual worker and transcripts; no compiler hit qualification'
+echo 'PASS bootstrap HIR forwarding: inherited disable overridden, persistent selected directory, phase separation, semantic keys, inline Stage 3 vectors, actual worker and resume transcripts; no compiler hit qualification'

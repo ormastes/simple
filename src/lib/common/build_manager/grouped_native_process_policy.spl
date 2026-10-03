@@ -1,0 +1,115 @@
+# Admission reservations remain positive even when native enforcement is disabled. The public
+# Win64 extended-limit row has a lifetime job peak but no current job charge.
+# Reserve each active process's full reservation for physical and commit
+# headroom. Monitor overshoot increases that charge; an unavailable current
+# measurement uses the lifetime peak conservatively, never a fabricated zero.
+use std.common.build_manager.memory_policy.{builder_memory_policy_valid_v1}
+
+struct NativeGroupActiveChargeV1:
+    memory_limit_bytes: i64
+    memory_current_bytes: i64
+    effective_threads: i64
+    memory_policy: text = "enforce"
+
+struct NativeGroupProcessBudgetV1:
+    admitted: bool
+    reason: text
+    available_memory_bytes: i64
+    available_commit_bytes: i64
+    required_host_bytes: i64
+    required_commit_bytes: i64
+    active_threads: i64
+
+fn native_group_observed_charge_v1(policy: text, current: i64, peak: i64,
+        current_measured: bool) -> i64:
+    if current_measured: return current
+    if policy == "monitor": return peak
+    0
+
+export native_group_observed_charge_v1
+
+fn native_group_process_budget_v1(cpu_count: i64, candidate_threads: i64,
+        candidate_limit_bytes: i64, host_reserve_bytes: i64,
+        available_memory_bytes: i64, available_commit_bytes: i64,
+        commit_measured: bool, active: [NativeGroupActiveChargeV1]
+        ) -> Result<NativeGroupProcessBudgetV1, text>:
+    if cpu_count < 1 or cpu_count > 1024 or candidate_threads < 1 or
+            candidate_threads > cpu_count or candidate_limit_bytes < 1 or
+            candidate_limit_bytes > 1125899906842624 or
+            host_reserve_bytes < 0 or host_reserve_bytes > 1125899906842624 or
+            available_memory_bytes < 0 or available_memory_bytes > 1125899906842624 or
+            available_commit_bytes < 0 or available_commit_bytes > 1125899906842624 or
+            (not commit_measured and available_commit_bytes != 0) or
+            active.len() > 4096:
+        return Err("invalid native group process budget input")
+    var active_threads: i64 = 0
+    var active_host_cap: i64 = 0
+    for charge in active:
+        if not builder_memory_policy_valid_v1(charge.memory_policy) or charge.memory_limit_bytes < 1 or
+                charge.memory_limit_bytes > 1125899906842624 or
+                charge.memory_current_bytes < 0 or
+                charge.memory_current_bytes > 1125899906842624 or
+                (charge.memory_policy == "enforce" and charge.memory_current_bytes > charge.memory_limit_bytes) or
+                charge.effective_threads < 1 or charge.effective_threads > cpu_count:
+            return Err("invalid active native group charge")
+        active_threads = active_threads + charge.effective_threads
+        val admission_charge = if charge.memory_current_bytes > charge.memory_limit_bytes: charge.memory_current_bytes else: charge.memory_limit_bytes
+        active_host_cap = active_host_cap + admission_charge
+    val required_host = active_host_cap + candidate_limit_bytes + host_reserve_bytes
+    val required_commit = active_host_cap + candidate_limit_bytes + host_reserve_bytes
+    if active_threads + candidate_threads > cpu_count:
+        return Ok(NativeGroupProcessBudgetV1(false, "CPU threads exhausted",
+            available_memory_bytes, available_commit_bytes, required_host,
+            required_commit, active_threads))
+    if required_host > available_memory_bytes:
+        return Ok(NativeGroupProcessBudgetV1(false, "available host/cgroup memory exhausted",
+            available_memory_bytes, available_commit_bytes, required_host,
+            required_commit, active_threads))
+    if commit_measured and required_commit > available_commit_bytes:
+        return Ok(NativeGroupProcessBudgetV1(false, "Windows system commit headroom exhausted",
+            available_memory_bytes, available_commit_bytes, required_host,
+            required_commit, active_threads))
+    Ok(NativeGroupProcessBudgetV1(true, "capacity proven at probe",
+        available_memory_bytes, available_commit_bytes, required_host,
+        required_commit, active_threads))
+
+export NativeGroupActiveChargeV1, NativeGroupProcessBudgetV1
+export native_group_process_budget_v1
+
+# Disk reserve must remain after all admitted groups consume their estimated
+# growth. Zero active growth is the singleton case, not a different policy.
+fn native_group_disk_required_v1(reserve_bytes: i64, active_growth_bytes: i64,
+        source_bytes: i64, estimated_growth_bytes: i64) -> Result<i64, text>:
+    if reserve_bytes < 0 or active_growth_bytes < 0 or source_bytes < 0 or
+            estimated_growth_bytes < 0:
+        return Err("invalid native group disk budget input")
+    val maximum: i64 = 9223372036854775807
+    if source_bytes > maximum / 8:
+        return Err("native group disk budget overflow")
+    val source_growth = source_bytes * 8
+    if estimated_growth_bytes > maximum - source_growth:
+        return Err("native group disk budget overflow")
+    val candidate_growth = source_growth + estimated_growth_bytes
+    if active_growth_bytes > maximum - candidate_growth:
+        return Err("native group disk budget overflow")
+    val total_growth = candidate_growth + active_growth_bytes
+    if reserve_bytes > maximum - total_growth:
+        return Err("native group disk budget overflow")
+    Ok(reserve_bytes + total_growth)
+
+export native_group_disk_required_v1
+
+struct NativeGroupDiskBudgetV1:
+    admitted: bool
+    required_bytes: i64
+
+fn native_group_disk_budget_v1(available_bytes: i64, reserve_bytes: i64,
+        active_growth_bytes: i64, source_bytes: i64, estimated_growth_bytes: i64
+        ) -> Result<NativeGroupDiskBudgetV1, text>:
+    if available_bytes < 0:
+        return Err("invalid native group disk capacity measurement")
+    val required = native_group_disk_required_v1(reserve_bytes,
+        active_growth_bytes, source_bytes, estimated_growth_bytes)?
+    Ok(NativeGroupDiskBudgetV1(available_bytes >= required, required))
+
+export NativeGroupDiskBudgetV1, native_group_disk_budget_v1

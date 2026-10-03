@@ -23,6 +23,8 @@ use compiler.backend.linker.linker_wrapper.*
 use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
@@ -79,10 +81,19 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     "/bin/sh -c", which can never spawn on native Windows (CreateProcess has
     no /bin/sh), so every link died with exit -1 and no output. Direct argv
     also removes shell-quoting hazards in object paths."""
-    val cc = env_get("CC")
+    val cc = if native_tool_strict_requested_v1():
+        native_tool_strict_resolve_v1("cc")?
+    else: env_get("CC")
     if cc == "" or (not cc.ends_with("/clang") and not cc.ends_with("/clang.exe") and not cc.ends_with("\\clang") and not cc.ends_with("\\clang.exe")):
         return Err("Windows GNU linking requires bootstrap-owned clang through CC")
     var args: [text] = []
+    if native_tool_strict_requested_v1():
+        val linker = native_tool_strict_resolve_v1("linker")?
+        args.push("-fuse-ld=" + linker)
+        val argument_error = managed_native_extra_args_error_v1(config.extra_flags)
+        if argument_error != "": return Err(argument_error)
+        val path_argument_error = managed_native_input_args_error_v1(object_files + [output] + config.library_paths + config.libraries)
+        if path_argument_error != "": return Err(path_argument_error)
     args = args.push("--target=x86_64-w64-windows-gnu")
     for flag in native_retained_symbol_cc_args(config.retained_symbols, "windows-mingw"):
         args = args.push(flag)

@@ -1,0 +1,88 @@
+"""Native ownership regression for per-module ABI receipt scratch.
+
+The allocation comparison requires the native runtime's heap registry. An
+interpreter-only pass does not establish reclamation.
+"""
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable, SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+
+extern fn rt_heap_registry_count() -> i64
+
+fn abi_scratch_module() -> HirModule:
+    var exports: [text] = []
+    var index = 0
+    while index < 64:
+        exports.push("public_export_{index}")
+        index = index + 1
+    HirModule(name: "fixture.abi_scratch", path: "fixture/abi_scratch.spl",
+        imports: [], exports: exports, domain_blocks: [],
+        symbols: SymbolTable.new(), functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+describe "HIR ABI receipt scratch ownership":
+    it "preserves the digest after releasing encoder scratch":
+        val module = abi_scratch_module()
+        val expected = hir_abi_interface_digest_v1(module).unwrap()
+        val actual = driver_hir_abi_interface_digest_v1(module).unwrap()
+        expect(actual).to_equal(expected)
+        expect(actual.len()).to_equal(64)
+        expect(driver_hir_abi_interface_digest_v1(module).unwrap()).to_equal(actual)
+
+    it "preserves a dynamically rendered encoder error and closes its scope":
+        var module = abi_scratch_module()
+        val span = Span.default()
+        val unresolved = HirType(kind: HirTypeKind.Named(SymbolId.new(9001), []), span: span)
+        val symbol = SymbolId.new(1)
+        module.constants[symbol] = HirConst(symbol: symbol, name: "invalid",
+            type_: unresolved,
+            value: HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+                type_: unresolved, span: span),
+            is_mutable: false, visibility: Visibility.Public, is_public: true,
+            is_volatile: false, has_fixed_address: false, fixed_address: 0, span: span)
+        val reason = driver_hir_abi_interface_digest_v1(module).unwrap_err()
+        expect(driver_hir_abi_interface_digest_v1(abi_scratch_module()).is_ok()).to_equal(true)
+        expect(reason).to_equal("unresolved-symbol:9001")
+
+    it "leaves an enclosing owner's scope intact when acquisition fails":
+        val module = abi_scratch_module()
+        expect(transient_scope_begin()).to_equal(true)
+        val refused = driver_hir_abi_interface_digest_v1(module).is_err()
+        val owner_closed = transient_scope_end()
+        expect(refused).to_equal(true)
+        expect(owner_closed).to_equal(true)
+        expect(driver_hir_abi_interface_digest_v1(module).is_ok()).to_equal(true)
+
+    it "retains substantially fewer allocations than the unscoped digest":
+        val module = abi_scratch_module()
+        val expected = hir_abi_interface_digest_v1(module).unwrap()
+        # Warm both code paths before measuring. Only scalar comparisons run
+        # between registry snapshots; expectation diagnostics stay outside.
+        val warm = driver_hir_abi_interface_digest_v1(module).unwrap()
+        expect(warm).to_equal(expected)
+        var matched = true
+        var index = 0
+        val scoped_before = rt_heap_registry_count()
+        while index < 8:
+            val digest = driver_hir_abi_interface_digest_v1(module).unwrap()
+            matched = matched and digest == expected
+            index = index + 1
+        val scoped_growth = rt_heap_registry_count() - scoped_before
+        index = 0
+        val unscoped_before = rt_heap_registry_count()
+        while index < 8:
+            val digest = hir_abi_interface_digest_v1(module).unwrap()
+            matched = matched and digest == expected
+            index = index + 1
+        val unscoped_growth = rt_heap_registry_count() - unscoped_before
+        expect(matched).to_equal(true)
+        expect(scoped_growth).to_be_greater_than(0)
+        expect(unscoped_growth).to_be_greater_than(scoped_growth * 8)

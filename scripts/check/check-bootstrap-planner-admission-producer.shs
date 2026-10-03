@@ -16,6 +16,14 @@
 #   ERROR — nothing was checked     exit 2
 set -eu
 
+focused_configured_output=0
+case "${1:-}" in
+    --configured-output-only) focused_configured_output=1 ;;
+    --windows-candidate-only|--candidate-path-negative-only) ;;
+    "") ;;
+    *) echo "usage: $0 [--configured-output-only|--windows-candidate-only|--candidate-path-negative-only]" >&2; exit 2 ;;
+esac
+
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -272,7 +280,7 @@ run_producer() {
 }
 
 run_custom_output_producer() {
-    rp_root=$1 rp_output=$2
+    rp_root=$1 rp_output=${2:-$custom_output}
     SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$rp_output" \
     sh "$producer" --root="$rp_root" \
         --bootstrap-output="$rp_output" \
@@ -303,7 +311,7 @@ if [ "${1:-}" = --candidate-path-negative-only ]; then
     exit 0
 fi
 
-if [ "${1:-}" != --configured-output-only ]; then
+if [ "$focused_configured_output" -eq 0 ]; then
 # --- fixture 1: the gate is satisfiable -------------------------------------
 if [ "${1:-}" != --windows-candidate-only ]; then
 ok_root="$scratch/ok"
@@ -414,22 +422,39 @@ if bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" \
 fi
 checked=$((checked + 1))
 
-# A valid receipt from a sibling output is not authority for this parent.
-sibling="$scratch/sibling-output"
+# A configured parent must not borrow admission authority from a sibling output.
+sibling="$custom_root/build/bootstrap-sibling"
 mkdir -p "$sibling"
 cp "$custom_admission" "$sibling/admission.env"
 sibling_receipt_esc=$(printf '%s' "$sibling/admission.env" | sed 's/[\/&]/\\&/g')
 for custom_receipt in "$custom_sanity" "$custom_provenance"; do
     replace_in_file "s/^admission_receipt_path=.*/admission_receipt_path=$sibling_receipt_esc/" "$custom_receipt"
 done
-if run_custom_output_producer "$custom_root" "$custom_output" >"$scratch/sibling-output.log" 2>&1; then
+if run_custom_output_producer "$custom_root" >"$scratch/sibling-output.log" 2>&1; then
     fail "configured output borrowed a sibling admission receipt"
 fi
-grep -q 'parent-stage2-admission-outside-bootstrap' "$scratch/sibling-output.log" ||
+grep -q 'parent-stage2-admission-outside-bootstrap-output' "$scratch/sibling-output.log" ||
     fail "sibling authority was not rejected at the output owner boundary"
 checked=$((checked + 1))
-if [ "${1:-}" = --configured-output-only ]; then
-    echo "PASS — $checked fixture(s) checked (configured output ownership)"
+
+# A Windows-suffixed parent emits and binds planner.exe through the actual producer.
+exe_root="$scratch/windows-suffix"
+make_fixture "$exe_root" 'stage2-provenance: pure-simple' strict .exe
+exe_root=$(CDPATH= cd -- "$exe_root" && pwd -P)
+sh "$producer" --root="$exe_root" \
+    --parent-compiler="$exe_root/build/bootstrap/stage2/fixture-triple/simple.exe" \
+    --runtime-dir="$exe_root/src/runtime" \
+    --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+    --out="$exe_root/receipt.env" >"$scratch/windows-suffix.log" 2>&1 ||
+    fail "producer refused the Windows executable suffix fixture"
+bootstrap_planner_v2_verify "$exe_root/receipt.env" "$exe_root" >/dev/null 2>&1 ||
+    fail "Windows executable receipt failed canonical verification"
+exe_planner=$(bootstrap_planner_v2_field planner_path "$exe_root/receipt.env")
+case "$exe_planner" in */planner.exe) ;; *) fail "Windows planner lost executable suffix" ;; esac
+checked=$((checked + 1))
+
+if [ "$focused_configured_output" -eq 1 ]; then
+    echo "PASS — $checked configured-output/Windows fixture(s) checked"
     exit 0
 fi
 

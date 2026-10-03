@@ -1,0 +1,88 @@
+# Actual accepted Git content read-back, bounded and outside the SJ lease.
+use app.io.mod.{process_run_bounded, dir_remove_all}
+use app.scv.db.git_policy.{db_git_environment_safe, db_git_network_config_safe, db_git_effect_prefix}
+use app.scv.db.git_settlement_transport.{db_git_settlement_ref_head}
+use app.scv.db.local_store.{db_local_path_scope}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use std.scv.db_receipt.{DbSettlementReceipt, db_receipt_signing_bytes}
+use app.scv.db.ci_state_codec.{db_ci_raw_digest_valid}
+
+fn _ci_git(root: text, args: [text], limit: i64) -> Result<text, text>:
+    if not db_git_environment_safe() or not db_git_network_config_safe(root): return Err("SCVDB_CI_GIT_POLICY")
+    val (output, _error, code) = process_run_bounded("git", db_git_effect_prefix(root) + args, 30000, limit)
+    if code != 0 or output.len() >= limit: return Err("SCVDB_CI_GIT_READ")
+    Ok(output)
+
+fn _ci_read_fetched_manifest(scratch: text, source: text, receipt: DbSettlementReceipt, observed: text, manifest_digest: text) -> Result<text, text>:
+    val initialized = _ci_git(scratch, ["init", "--bare", "--template=", "--object-format={receipt.object_format}", "."], 4096)?
+    val fetched = _ci_git(scratch, ["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=33", receipt.remote, observed], 65536)?
+    var cursor = observed
+    var found = false
+    for depth in 0..33:
+        if cursor == receipt.accepted_head:
+            found = true
+            break
+        val kind = _ci_git(scratch, ["cat-file", "-t", cursor], 1024)?
+        if kind.trim() != "commit": return Err("SCVDB_CI_HISTORY_REQUIRED")
+        val commit = _ci_git(scratch, ["cat-file", "-p", cursor], 65536)?
+        var parents: [text] = []
+        for line in commit.split("\n"):
+            if line == "": break
+            if line.starts_with("parent "): parents.push(line[7:])
+        if parents.len() != 1: return Err("SCVDB_CI_HISTORY_REQUIRED")
+        cursor = parents[0]
+    if not found: return Err("SCVDB_CI_HISTORY_REQUIRED")
+    val accepted_kind = _ci_git(scratch, ["cat-file", "-t", receipt.accepted_head], 1024)?
+    if accepted_kind.trim() != "commit": return Err("SCVDB_CI_RECEIPT_COMMIT")
+    val accepted_commit = _ci_git(scratch, ["cat-file", "-p", receipt.accepted_head], 65536)?
+    val first_line = accepted_commit.split("\n")[0]
+    if first_line != "tree " + receipt.accepted_tree: return Err("SCVDB_CI_RECEIPT_TREE")
+    if receipt.previous_head != "":
+        var parents: [text] = []
+        for line in accepted_commit.split("\n"):
+            if line == "": break
+            if line.starts_with("parent "): parents.push(line[7:])
+        if parents != [receipt.previous_head]: return Err("SCVDB_CI_RECEIPT_PARENT")
+    if manifest_digest == "":
+        val current = db_git_settlement_ref_head(source, receipt.remote)
+        if current.code != "ok" or current.oid != observed: return Err("SCVDB_CI_READBACK_MOVED")
+        return Ok("")
+    val path = "ci/manifests/{manifest_digest}.scvci"
+    val entry = _ci_git(scratch, ["ls-tree", "-r", "--full-tree", receipt.accepted_tree, "--", path], 2048)?
+    val halves = entry.trim().split("\t")
+    if halves.len() != 2 or halves[1] != path: return Err("SCVDB_CI_MANIFEST_MISSING")
+    val metadata = halves[0].split(" ")
+    if metadata.len() != 3 or metadata[0] != "100644" or metadata[1] != "blob": return Err("SCVDB_CI_MANIFEST_MODE")
+    val content = _ci_git(scratch, ["cat-file", "blob", metadata[2]], 1048577)?
+    val current = db_git_settlement_ref_head(source, receipt.remote)
+    if current.code != "ok" or current.oid != observed: return Err("SCVDB_CI_READBACK_MOVED")
+    Ok(content)
+
+fn _ci_git_readback(source: text, scratch_parent: text, receipt: DbSettlementReceipt, manifest_digest: text) -> Result<text, text>:
+    val structurally_valid = db_receipt_signing_bytes(receipt)?
+    if scv_sj_lease_is_held(source): return Err("SCVDB_CI_NETWORK_UNDER_LEASE")
+    if not ["sha1", "sha256"].contains(receipt.object_format): return Err("SCVDB_CI_GIT_FORMAT")
+    if db_local_path_scope(source, []) != "" or db_local_path_scope(scratch_parent, []) != "": return Err("SCVDB_CI_SCRATCH_SCOPE")
+    if scratch_parent == source or scratch_parent.starts_with(source + "/"): return Err("SCVDB_CI_SCRATCH_SCOPE")
+    val common = _ci_git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096)?
+    if scratch_parent == common.trim() or scratch_parent.starts_with(common.trim() + "/"): return Err("SCVDB_CI_SCRATCH_SCOPE")
+    val observed = db_git_settlement_ref_head(source, receipt.remote)
+    if observed.code != "ok": return Err(observed.code)
+    val scratch = secure_temp_dir_raw(scratch_parent, "scv-ci-readback-")
+    if scratch == "" or path_absolute(scratch) != scratch or not scratch.starts_with(scratch_parent + "/scv-ci-readback-") or not dir_is_real_no_follow(scratch): return Err("SCVDB_CI_SCRATCH_SCOPE")
+    val result = _ci_read_fetched_manifest(scratch, source, receipt, observed.oid, manifest_digest)
+    if path_absolute(scratch) != scratch or not dir_is_real_no_follow(scratch): return Err("SCVDB_CI_SCRATCH_SCOPE")
+    if not dir_remove_all(scratch): return Err("SCVDB_CI_SCRATCH_CLEANUP")
+    result
+
+fn db_ci_git_manifest_readback(source: text, scratch_parent: text, receipt: DbSettlementReceipt, manifest_digest: text) -> Result<text, text>:
+    if not db_ci_raw_digest_valid(manifest_digest): return Err("SCVDB_CI_MANIFEST_DIGEST")
+    _ci_git_readback(source, scratch_parent, receipt, manifest_digest)
+
+fn db_ci_git_receipt_readback(source: text, scratch_parent: text, receipt: DbSettlementReceipt) -> Result<text, text>:
+    _ci_git_readback(source, scratch_parent, receipt, "")
+
+export db_ci_git_manifest_readback, db_ci_git_receipt_readback

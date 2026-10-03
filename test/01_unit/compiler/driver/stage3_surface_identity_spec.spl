@@ -6,8 +6,15 @@
 
 use std.spec.step
 
-use compiler.driver.driver_hir_pipeline_support.{driver_stage3_surface_identity_matches, driver_stage3_surface_content_matches}
+use compiler.driver.driver_hir_pipeline_support.{
+    driver_stage3_surface_identity_matches,
+    driver_stage3_surface_identity_matches_receipt,
+    driver_stage3_surface_content_matches
+}
 use std.spec.{describe, it, expect}
+use std.io_runtime.{hash_text}
+use compiler.common.driver_core_types.{CompileOptions, SourceFile}
+use compiler.driver.driver_types.{CompileContext}
 
 
 extern fn rt_path_absolute(path: text) -> text
@@ -51,3 +58,55 @@ describe "Stage3 surface validation identity":
         expect(driver_stage3_surface_content_matches(
             path, 25391, 0,
             "src/compiler/10.frontend/core/aop.spl", 25392, 0)).to_be(false)
+
+    it "validates the original surface against an evicted source receipt":
+        # @req REQ-SSPEC-UNIT
+        step("Compare retained phase-1 length and hash after SourceFile.content is empty")
+        val path = rt_path_absolute("src/app/test_runner_new/main.spl")
+        expect(driver_stage3_surface_identity_matches_receipt(
+            0, path, "app.test_runner_new.main", 31, 991,
+            0, "src/app/test_runner_new/main.spl", "app.test_runner_new.main",
+            31, 991, true)).to_be(true)
+        expect(driver_stage3_surface_identity_matches_receipt(
+            0, path, "app.test_runner_new.main", 31, 991,
+            0, "src/app/test_runner_new/main.spl", "app.test_runner_new.main",
+            0, 991, true)).to_be(false)
+        expect(driver_stage3_surface_identity_matches_receipt(
+            0, path, "app.test_runner_new.main", 31, 991,
+            0, "src/app/test_runner_new/main.spl", "app.test_runner_new.main",
+            31, 992, true)).to_be(false)
+        # A real zero hash is stored as one by the phase-1 receipt producer.
+        expect(driver_stage3_surface_identity_matches_receipt(
+            0, path, "app.test_runner_new.main", 31, 0,
+            0, "src/app/test_runner_new/main.spl", "app.test_runner_new.main",
+            31, 1, true)).to_be(true)
+        expect(driver_stage3_surface_identity_matches_receipt(
+            0, path, "app.test_runner_new.main", 31, 0,
+            0, "src/app/test_runner_new/main.spl", "app.test_runner_new.main",
+            31, 0, true)).to_be(false)
+
+    it "preserves surface identity through real low-memory source eviction":
+        # @req REQ-SSPEC-UNIT
+        step("Evict SourceFile.content while retaining phase-1 scalar receipts")
+        val source_path = "src/app/test_runner_new/main.spl"
+        val module_name = "app.test_runner_new.main"
+        val source_content = "fn main() -> i64:\n    0\n"
+        val raw_hash = hash_text(source_content)
+        val captured_hash = if raw_hash == 0: 1 else: raw_hash
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [SourceFile(
+            path: source_path, content: source_content, module_name: module_name)]
+        ctx.source_paths_owner = [source_path]
+        ctx.source_module_names_owner = [module_name]
+        ctx.source_byte_lengths_owner = [source_content.len()]
+        ctx.source_content_hashes_owner = [captured_hash]
+        ctx.evict_sources()
+        expect(ctx.sources[0].content).to_equal("")
+
+        step("Match the frozen original-content surface with the immutable receipt")
+        expect(driver_stage3_surface_identity_matches_receipt(
+            0, rt_path_absolute(source_path), module_name,
+            source_content.len(), raw_hash,
+            0, ctx.sources[0].path, ctx.sources[0].module_name,
+            ctx.source_byte_lengths_owner[0], ctx.source_content_hashes_owner[0],
+            true)).to_be(true)

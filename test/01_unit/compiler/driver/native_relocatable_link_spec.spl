@@ -1,0 +1,40 @@
+use std.spec
+use std.spec.step
+use compiler.driver.native_relocatable_link.{native_relocatable_link_plan}
+
+describe "target-aware relocatable object linking":
+    it "uses the COFF partial linker for a native Windows AMD64 target":
+        step("Keep both objects and the output as separate process arguments")
+        val plan = native_relocatable_link_plan("", "windows", "x86_64",
+            ["D:/path with spaces/one.o", "two.o"], "out.o").unwrap()
+        expect(plan.program).to_equal("ld")
+        expect(plan.args).to_equal(["-m", "i386pep", "-r",
+            "D:/path with spaces/one.o", "two.o", "-o", "out.o"])
+
+    it "selects the cross COFF linker from the explicit target":
+        step("Compile a Windows target on an ELF host")
+        val plan = native_relocatable_link_plan("x86_64-pc-windows-msvc", "linux",
+            "x86_64", ["one.o", "two.o"], "out.o").unwrap()
+        expect(plan.program).to_equal("x86_64-w64-mingw32-ld")
+        expect(plan.args[1]).to_equal("i386pep")
+
+    it "selects 32-bit PE emulation for an explicit i686 target":
+        step("Override the 64-bit Windows host architecture")
+        val plan = native_relocatable_link_plan("i686-w64-mingw32", "windows",
+            "x86_64", ["one.o", "two.o"], "out.o").unwrap()
+        expect(plan.args[1]).to_equal("i386pe")
+
+    it "retains the ELF linker for an explicit Linux target on Windows":
+        step("Use target format rather than host format")
+        val plan = native_relocatable_link_plan("x86_64-unknown-linux-gnu", "windows",
+            "x86_64", ["one.o", "two.o"], "out.o").unwrap()
+        expect(plan.program).to_equal("ld.lld")
+        expect(plan.args).to_equal(["-r", "one.o", "two.o", "-o", "out.o"])
+
+    it "rejects unsupported COFF partial-link architectures before launching ELF ld":
+        step("Request an ARM64 COFF relocatable object")
+        val result = native_relocatable_link_plan("aarch64-pc-windows-msvc", "windows",
+            "x86_64", ["one.o", "two.o"], "out.o")
+        match result:
+            case Err(reason): expect(reason).to_contain("unsupported for architecture aarch64")
+            case Ok(_): expect(false).to_equal(true)

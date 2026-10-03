@@ -1,0 +1,42 @@
+@allow(star_import) # reason: load the canonical CompilerDriver source-phase impl without importing codegen facade
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.common.driver_core_types.{driver_core_compile_options_default, CompileMode}
+use app.io.args_ops.{get_args}
+use app.io.file_ops.{path_absolute, file_atomic_write, file_hash_sha256}
+use std.common.crypto.types.{crypto_text_to_bytes}
+use std.common.binary_inspect.{bytes_to_hex_canonical}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 4: return 2
+    val root = path_absolute(args[1]).replace("\\", "/")
+    val entry = args[2]
+    var options = driver_core_compile_options_default()
+    options.input_files = [entry]
+    options.bootstrap_input_count = 1
+    options.bootstrap_input_0 = entry
+    options.mode = CompileMode.Aot
+    options.cli_mode_text = "aot"
+    var driver = CompilerDriver.create(options)
+    driver.ctx.config["compiler_source_entry"] = entry
+    print "TRACE canonical loader begin entry={entry}"
+    val loaded = driver.load_sources_impl()
+    if not loaded.1: return 3
+    var seen: {text: bool} = {}
+    var rows: [text] = []
+    for source in driver.ctx.sources:
+        val physical = path_absolute(_driver_physical_source_key(source.path)).replace("\\", "/")
+        if not physical.starts_with(root + "/"): return 4
+        if seen.contains_key(physical): continue
+        seen[physical] = true
+        val relative = physical.substring(root.len() + 1)
+        val bytes = crypto_text_to_bytes(relative)
+        val digest = file_hash_sha256(physical)
+        if digest.len() != 64: return 5
+        rows = rows.push("file-hex:{bytes.len()}:{bytes_to_hex_canonical(bytes)}:0:{digest}")
+    rows.sort()
+    if rows.len() == 0 or not file_atomic_write(args[3], rows.join("\n") + "\n"): return 6
+    print "PASS canonical load-only physical closure entry={entry} files={rows.len()}"
+    0

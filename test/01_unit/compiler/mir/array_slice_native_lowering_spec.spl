@@ -1,0 +1,163 @@
+# Runtime assertions plus real frontend -> HIR -> MIR -> LLVM regression.
+# No source-text census is used as evidence of lowering behavior.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct SliceBounds:
+    first: i64
+    finish: i64
+
+fn slice_artifacts(source: text, target: text) -> (text, text):
+    val filename = "array_slice_" + target + ".spl"
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var serialized = ""
+    for error in hir_lowering.errors:
+        serialized = serialized + "HIR_ERROR:" + error.message + "\n"
+    for error in lowering.errors:
+        serialized = serialized + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with("." + target):
+            serialized = serialized + serialize_mir_function(function)
+    if hir_lowering.errors.len() != 0 or lowering.errors.len() != 0:
+        return (serialized, "")
+    var translator = MirToLlvm.create(filename, CodegenTarget.X86_64, nil)
+    (serialized, translator.translate_module(mir))
+
+describe "Native array slice values", tag: ["only-compiled"]:
+    it "accepts contract drop-last and typed array and field bounds":
+        val parts: [text] = ["root", "child", "leaf"]
+        expect(parts.slice(0, parts.len() - 1)).to_equal(["root", "child"])
+        val bounds: [i64] = [1, 3]
+        expect(parts.slice(bounds[0], bounds[1])).to_equal(["child", "leaf"])
+        val narrow: [u8] = [1u8, 3u8]
+        expect(parts.slice(narrow[0], narrow[1])).to_equal(["child", "leaf"])
+        val fields = SliceBounds(first: 1, finish: 3)
+        expect(parts.slice(fields.first, fields.finish)).to_equal(["child", "leaf"])
+
+    it "clamps signed bounds and handles empty full partial and reversed ranges":
+        val values: [i64] = [10, 20, 30, 40]
+        val empty: [i64] = []
+        expect(values.slice(1, 3)).to_equal([20, 30])
+        expect(values.slice(-3, -1)).to_equal([20, 30])
+        expect(values.slice(-99, 99)).to_equal(values)
+        expect(values.slice(0, 4)).to_equal(values)
+        expect(values.slice(2)).to_equal([30, 40])
+        expect(values.slice(2, 2).len()).to_equal(0)
+        expect(values.slice(3, 1).len()).to_equal(0)
+        expect(empty.slice(0, 4).len()).to_equal(0)
+
+    it "owns a fresh container and keeps downstream text byte and integer types":
+        val source: [i64] = [1, 2, 3]
+        var copy = source.slice(0, 3)
+        copy[0] = 99
+        copy.push(4)
+        expect(source).to_equal([1, 2, 3])
+        expect(copy).to_equal([99, 2, 3, 4])
+        val words: [text] = ["before", "middle", "after"]
+        expect(words.slice(1, 2)[0]).to_equal("middle")
+        val bytes: [u8] = [0u8, 128u8, 255u8]
+        expect(bytes.slice(1, 3)[0]).to_equal(128u8)
+        expect(bytes.slice(1, 3)[1]).to_equal(255u8)
+        val wide: [u64] = [0u64, 18446744073709551615u64]
+        expect(wide.slice(1, 2)[0]).to_equal(18446744073709551615u64)
+        expect("abcd".slice(1, 3)).to_equal("bc")
+
+describe "Native array slice lowering", tag: ["only-compiled"]:
+    it "lowers length arithmetic and typed element and field bounds without rejecting integers":
+        val drop_last = slice_artifacts("fn pick(parts: [text]) -> [text]:\n    parts.slice(0, parts.len() - 1)\n", "pick")
+        val elements = slice_artifacts("fn pick(parts: [text], bounds: [i64]) -> [text]:\n    parts.slice(bounds[0], bounds[1])\n", "pick")
+        val narrow = slice_artifacts("fn pick(parts: [text], bounds: [u8]) -> [text]:\n    parts.slice(bounds[0], bounds[1])\n", "pick")
+        val fields = slice_artifacts("struct Bounds:\n    first: i64\n    finish: i64\n" +
+            "fn pick(parts: [text], bounds: Bounds) -> [text]:\n    parts.slice(bounds.first, bounds.finish)\n", "pick")
+        for artifacts in [drop_last, elements, narrow, fields]:
+            expect(artifacts.0.contains("HIR_ERROR:")).to_equal(false)
+            expect(artifacts.0.contains("MIR_ERROR:")).to_equal(false)
+            expect(artifacts.0).to_contain("rt_slice")
+            expect(artifacts.1).to_contain("call i64 @rt_slice(i64 ")
+        # i64 array elements must cross the established tagged-value decoder
+        # before being passed as raw signed bounds to rt_slice.
+        expect(elements.0).to_contain("rt_value_as_int_wide")
+        expect(narrow.0).to_contain("rt_bytes_u8_at")
+
+    it "emits the existing four-i64 ABI and a matching LLVM declaration":
+        val artifacts = slice_artifacts(
+            "fn pick(xs: [i64]) -> i64:\n    xs[1:3][0]\n", "pick")
+        expect(artifacts.0.contains("HIR_ERROR:")).to_equal(false)
+        expect(artifacts.0.contains("MIR_ERROR:")).to_equal(false)
+        expect(artifacts.0).to_contain("rt_slice")
+        expect(artifacts.0).to_contain("rt_array_get")
+        expect(artifacts.1).to_contain("declare i64 @rt_slice(i64, i64, i64, i64)")
+        expect(artifacts.1).to_contain("call i64 @rt_slice(i64 ")
+
+    it "evaluates side-effecting receiver and bounds once":
+        val source = "fn values() -> [i64]:\n    [1, 2, 3]\n" +
+            "fn slice_start() -> i64:\n    1\nfn slice_finish() -> i64:\n    3\n" +
+            "fn pick() -> i64:\n    values().slice(slice_start(), slice_finish()).len()\n"
+        val artifacts = slice_artifacts(source, "pick")
+        expect(artifacts.0.contains("MIR_ERROR:")).to_equal(false)
+        expect(artifacts.0.split("values").len() - 1).to_equal(1)
+        expect(artifacts.0.split("slice_start").len() - 1).to_equal(1)
+        expect(artifacts.0.split("slice_finish").len() - 1).to_equal(1)
+        expect(artifacts.0.split("rt_slice").len() - 1).to_equal(1)
+
+    it "preserves byte decoding and keeps custom and text slice dispatch":
+        val bytes = slice_artifacts("fn pick(xs: [u8]) -> u8:\n    xs.slice(1, 3)[0]\n", "pick")
+        expect(bytes.0.contains("MIR_ERROR:")).to_equal(false)
+        expect(bytes.0).to_contain("rt_bytes_u8_at")
+        val text_case = slice_artifacts("fn pick(xs: text) -> text:\n    xs.slice(1, 3)\n", "pick")
+        expect(text_case.0.contains("MIR_ERROR:")).to_equal(false)
+        expect(text_case.0).to_contain("spl_str_slice")
+        expect(text_case.0.contains("rt_slice")).to_equal(false)
+        val custom = slice_artifacts("struct Window:\n    value: i64\n" +
+            "    fn slice(start: i64, end: i64) -> i64:\n        self.value + start + end\n" +
+            "fn pick(window: Window) -> i64:\n    window.slice(1, 3)\n", "pick")
+        expect(custom.0.contains("MIR_ERROR:")).to_equal(false)
+        expect(custom.0.contains("rt_slice")).to_equal(false)
+
+    it "never routes an opaque integer receiver through the array slice ABI":
+        val opaque = slice_artifacts("fn pick(word: i64) -> i64:\n    word.slice(1, 3).len()\n", "pick")
+        expect(opaque.0.contains("rt_slice")).to_equal(false)
+
+    it "rejects text bool float and erased Any bounds before an array runtime call":
+        for invalid in ["\"bad\"", "true", "1.5"]:
+            val start_case = slice_artifacts("fn pick(xs: [i64]) -> [i64]:\n    xs.slice(" + invalid + ", 3)\n", "pick")
+            val end_case = slice_artifacts("fn pick(xs: [i64]) -> [i64]:\n    xs.slice(0, " + invalid + ")\n", "pick")
+            expect(start_case.0).to_contain("MIR_ERROR:array slice bound must be an integer")
+            expect(end_case.0).to_contain("MIR_ERROR:array slice bound must be an integer")
+            expect(start_case.0.contains("rt_slice")).to_equal(false)
+            expect(end_case.0.contains("rt_slice")).to_equal(false)
+            expect(start_case.0).to_contain("rt_panic")
+        val erased = slice_artifacts("fn pick(xs: [i64], bound: Any) -> [i64]:\n    xs.slice(bound, 3)\n", "pick")
+        expect(erased.0).to_contain("MIR_ERROR:array slice bound must be an integer")
+        expect(erased.0.contains("rt_slice")).to_equal(false)
+
+    it "refuses bare fixed-array slice and opaque MIR storage without a runtime owner":
+        # These are real MIR locals, deliberately lacking the metadata set
+        # by host array parameters, runtime constructors and owned returns.
+        # A MIR Array/Slice type by itself must never grant header access.
+        for storage in [MirType(kind: MirTypeKind.Array(MirType.i64(), 4)),
+                MirType(kind: MirTypeKind.Slice(MirType.i64())), MirType.i64()]:
+            val module = parse_full_frontend("fn seed() -> i64:\n    0\n", "slice_raw.spl", "slice_raw.spl", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("slice_raw.spl")
+            val hir = hir_lowering.lower_module(module)
+            var owner = MirLowering.new(hir.symbols)
+            var builder = owner.builder
+            builder.begin_simple_function("raw_storage", "i64")
+            val raw = builder.new_temp(storage)
+            owner.builder = builder
+            expect(owner.runtime_array_locals.contains(raw.id)).to_equal(false)
+            val rejected = owner.lower_runtime_array_slice(raw, [])
+            expect(owner.errors.len()).to_equal(1)
+            expect(owner.errors[0].fatal).to_equal(true)
+            expect(owner.errors[0].message).to_equal("array slice requires a proven runtime array handle")

@@ -1,0 +1,29 @@
+# Shared actual filesystem retention fixtures; no canonical-remote authority.
+use std.spec.{expect}
+use app.io.mod.{cwd, dir_create, process_run_bounded}
+use app.scv.db.retention_codec.{db_retention_observation_encode}
+use app.scv.db.retention_store.{db_retention_store_quota}
+use app.scv.db.evidence_store.{db_evidence_store_put}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+
+fn setup_item2_retention_paths() -> (text, text):
+    val base = secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-retention-fixture-").unwrap()
+    val root = "{base}/source"
+    val parent = "{base}/external"
+    expect(dir_create(root, false)).to_be(true)
+    expect(dir_create(parent, false)).to_be(true)
+    val (_out, _err, code) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+    expect(code).to_equal(0)
+    (root, parent)
+
+fn setup_item2_retention_node(root: text, parent: text, identity: text, duration: u64, created_day: u64, dependencies: [text] = [], cohort: text = "linux", day: u64 = 0) -> DbEvidenceNode:
+    val content = db_retention_observation_encode(identity, day, cohort, "PASS", duration, [7u8;128]).unwrap()
+    val node = DbEvidenceNode(digest: db_evidence_digest(content, dependencies).unwrap(), content: content, availability: "available", created_day: created_day, dependencies: dependencies)
+    db_evidence_store_put(root, parent, node, db_retention_store_quota()).unwrap()
+
+fn setup_item2_retention_raw(parent: text, digest: text) -> text:
+    "{parent}/scv-evidence-v1/{digest}.scve"
+
+export setup_item2_retention_paths, setup_item2_retention_node, setup_item2_retention_raw

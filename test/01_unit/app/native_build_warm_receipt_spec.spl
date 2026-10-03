@@ -6,6 +6,7 @@ use std.io_runtime.{
 }
 use std.spec.*
 use app.io.env_ops.{env_get, env_set}
+use std.common.crypto.sha256.{sha256_text}
 use app.cli.native_build_warm_receipt.{
     NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_candidate_publish,
     native_build_warm_artifact_restore,
@@ -65,10 +66,24 @@ describe "native-build exact final-artifact receipt":
         val old_scv_tree = env_get("SIMPLE_SCV_TREE_ID") ?? ""
         val old_scv_inventory = env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""
         val old_scv_drift = env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? ""
+        val old_index_digest = env_get("SIMPLE_PACKAGE_INDEX_DIGEST") ?? ""
+        val old_index_producer = env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? ""
+        val old_index_variant = env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? ""
+        val old_index_root = env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? ""
+        val old_index_pending = env_get("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING") ?? ""
+        val old_index_cold = env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? ""
+        val old_machine_cache = env_get("SIMPLE_CACHE") ?? ""
         env_set("SIMPLE_FRONTEND_CACHE", "1")
         env_set("SIMPLE_HIR_CACHE", "1")
         env_set("SIMPLE_PARSE_SHARD", "")
         env_set("SIMPLE_HIR_SHARD", "")
+        env_set("SIMPLE_PACKAGE_INDEX_DIGEST", "")
+        env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", "")
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", "")
+        env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", "")
+        env_set("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING", "0")
+        env_set("SIMPLE_PACKAGE_INDEX_COLD_INIT", "0")
+        env_set("SIMPLE_CACHE", root + "/machine-cache")
         val args = [
             "--entry-closure", "--source", root, "--entry", source_path,
             "--cache-dir", root + "/cache", "--backend-plugin",
@@ -97,6 +112,64 @@ describe "native-build exact final-artifact receipt":
 
         val exact_again = native_build_warm_receipt_prepare(args, binary_path)
         expect(exact_again.hit).to_equal(true)
+
+        # The admitted graph generation is part of the artifact identity.
+        # A new generation with unchanged source/object paths still needs the
+        # real worker, and a cold rebuild may not be skipped by this cache.
+        val index_dir = root + "/machine-cache/package-module-index-v1"
+        expect(dir_create_all(index_dir)).to_equal(true)
+        val index_a = sha256_text("index-a")
+        val index_b = sha256_text("index-b")
+        expect(file_write(index_dir + "/CURRENT", index_a)).to_equal(true)
+        env_set("SIMPLE_PACKAGE_INDEX_DIGEST", index_a)
+        env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", sha256_text("producer-a"))
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", sha256_text("variant-a"))
+        env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", "root-a")
+        val changed_index = native_build_warm_receipt_prepare(args, binary_path)
+        expect(changed_index.eligible).to_equal(true)
+        expect(changed_index.hit).to_equal(false)
+        expect(native_build_warm_artifact_restore(exact_again)).to_equal(false)
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, changed_index.candidate_path)
+        expect(native_build_warm_candidate_publish([source_path])).to_equal(true)
+        expect(native_build_warm_receipt_finish(
+            changed_index, complete, true, true)).to_equal(true)
+        val indexed_warm = native_build_warm_receipt_prepare(args, binary_path)
+        expect(indexed_warm.hit).to_equal(true)
+        expect(file_write(index_dir + "/CURRENT", index_b)).to_equal(true)
+        # Even an unchanged process environment cannot outlive CURRENT.
+        expect(native_build_warm_artifact_restore(indexed_warm)).to_equal(false)
+        val moved_pointer = native_build_warm_receipt_prepare(args, binary_path)
+        expect(moved_pointer.eligible).to_equal(false)
+        env_set("SIMPLE_PACKAGE_INDEX_DIGEST", index_b)
+        val next_index = native_build_warm_receipt_prepare(args, binary_path)
+        expect(next_index.eligible).to_equal(true)
+        expect(next_index.hit).to_equal(false)
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", "")
+        expect(native_build_warm_receipt_prepare(args, binary_path).eligible).to_equal(false)
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", sha256_text("variant-a"))
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, next_index.candidate_path)
+        expect(native_build_warm_candidate_publish([source_path])).to_equal(true)
+        expect(file_write(index_dir + "/CURRENT", index_a)).to_equal(true)
+        expect(native_build_warm_receipt_finish(
+            next_index, complete, true, true)).to_equal(false)
+        expect(file_write(index_dir + "/CURRENT", index_b)).to_equal(true)
+        env_set("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING", "1")
+        val pending_index = native_build_warm_receipt_prepare(args, binary_path)
+        expect(pending_index.eligible).to_equal(false)
+        expect(pending_index.hit).to_equal(false)
+        env_set("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING", "0")
+        env_set("SIMPLE_PACKAGE_INDEX_COLD_INIT", "1")
+        val cold_index = native_build_warm_receipt_prepare(args, binary_path)
+        expect(cold_index.eligible).to_equal(false)
+        expect(cold_index.hit).to_equal(false)
+        env_set("SIMPLE_PACKAGE_INDEX_COLD_INIT", "0")
+        env_set("SIMPLE_PACKAGE_INDEX_DIGEST", "")
+        env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", "")
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", "")
+        env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", "")
+        expect(native_build_warm_receipt_prepare(args, binary_path).eligible).to_equal(false)
+        expect(file_delete(index_dir + "/CURRENT")).to_equal(true)
+        expect(native_build_warm_receipt_prepare(args, binary_path).hit).to_equal(true)
 
         # Provider replacement at the same selected path is a cache miss even
         # when compiler, argv, source closure, and output path are unchanged.
@@ -133,6 +206,13 @@ describe "native-build exact final-artifact receipt":
         env_set("SIMPLE_SCV_TREE_ID", old_scv_tree)
         env_set("SIMPLE_SCV_INVENTORY_DIGEST", old_scv_inventory)
         env_set("SIMPLE_SCV_SOURCE_DRIFTED", old_scv_drift)
+        env_set("SIMPLE_PACKAGE_INDEX_DIGEST", old_index_digest)
+        env_set("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", old_index_producer)
+        env_set("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", old_index_variant)
+        env_set("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION", old_index_root)
+        env_set("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING", old_index_pending)
+        env_set("SIMPLE_PACKAGE_INDEX_COLD_INIT", old_index_cold)
+        env_set("SIMPLE_CACHE", old_machine_cache)
         val _cleaned = dir_remove_all(root)
 
     it "restores before worker startup and keeps the worker as fail-closed fallback":

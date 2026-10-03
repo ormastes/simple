@@ -6,6 +6,7 @@ set -eu
 # Usage:
 #   sh scripts/check-freebsd-bootstrap-qemu.shs --smoke   # VM start + SSH + uname
 #   sh scripts/check-freebsd-bootstrap-qemu.shs --full    # Full bootstrap verification
+#   sh scripts/check-freebsd-bootstrap-qemu.shs --phase2-only  # Both Stage 2 backends
 #
 # Env knobs:
 #   QEMU_VM_PATH         Admitted base qcow2 image (default: shared media)
@@ -26,6 +27,8 @@ set -eu
 #                        'apt download qemu-efi-aarch64' + dpkg -x into
 #                        ~/.simple/qemu/firmware)
 #   QEMU_MEM             RAM (default: 32G)
+#   QEMU_DISK_SIZE       Sparse overlay virtual capacity in GiB (default: 48G;
+#                        accepted range: 40G..2048G)
 #   QEMU_CPUS            CPUs (default: 10)
 #   Per-host config (untracked, gitignored): .simple/qemu-host.conf at the
 #   repo root or ~/.simple/qemu-host.conf is sourced at startup; use
@@ -33,6 +36,10 @@ set -eu
 #   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 1800; pristine images
 #                        may run freebsd-update before nuageinit/sshd)
 #   QEMU_ROOT_SSH_TIMEOUT Root SSH wait seconds after user SSH (default: 120)
+#   QEMU_PHASE2_BACKEND   both|llvm|cranelift (default: both)
+#   QEMU_PHASE2_JOBS      Stage 2 requested jobs (default: QEMU_CPUS)
+#   QEMU_PHASE2_BUILD_THREADS Explicit verifier native-build threads (optional)
+#   QEMU_PHASE2_TEST_WORKERS Explicit verifier test workers (optional)
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -45,7 +52,7 @@ EXPECTED_BOOTSTRAP_VERSION=$(bootstrap_stage3_canonical_version "$ROOT_DIR") || 
 
 # Per-host, untracked config (gitignored): repo-local wins over ~/.simple.
 # Use ': "${VAR:=value}"' inside the file to keep explicit env exports
-# taking precedence. Knobs: QEMU_ARCH, QEMU_MEM, QEMU_CPUS, QEMU_EFI_FD.
+# taking precedence. Knobs: QEMU_ARCH, QEMU_MEM, QEMU_DISK_SIZE, QEMU_CPUS, QEMU_EFI_FD.
 [ -f "${HOME}/.simple/qemu-host.conf" ] && . "${HOME}/.simple/qemu-host.conf"
 [ -f "${ROOT_DIR}/.simple/qemu-host.conf" ] && . "${ROOT_DIR}/.simple/qemu-host.conf"
 
@@ -68,7 +75,12 @@ VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-32G}"
+QEMU_DISK_SIZE="${QEMU_DISK_SIZE:-48G}"
 QEMU_CPUS="${QEMU_CPUS:-10}"
+QEMU_PHASE2_BACKEND="${QEMU_PHASE2_BACKEND:-both}"
+QEMU_PHASE2_JOBS="${QEMU_PHASE2_JOBS:-${QEMU_CPUS}}"
+QEMU_PHASE2_BUILD_THREADS="${QEMU_PHASE2_BUILD_THREADS:-}"
+QEMU_PHASE2_TEST_WORKERS="${QEMU_PHASE2_TEST_WORKERS:-}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 QEMU_REMOTE_TIMEOUT="${QEMU_REMOTE_TIMEOUT:-300}"
@@ -105,7 +117,7 @@ MODE_VALID=1
 PREFLIGHT=0
 ARG_REASON="none"
 usage_error() {
-    printf 'Usage: %s [--smoke|--full] [--preflight]\n' "$0" >&2
+    printf 'Usage: %s [--smoke|--full|--phase2-only] [--preflight]\n' "$0" >&2
     exit 1
 }
 
@@ -129,9 +141,18 @@ for arg in "$@"; do
                 MODE_SET=1
             fi
             ;;
+        --phase2-only)
+            if [ "$MODE_SET" -eq 1 ]; then
+                MODE_VALID=0
+                ARG_REASON="mode_multiple"
+            else
+                MODE="phase2-only"
+                MODE_SET=1
+            fi
+            ;;
         --preflight) PREFLIGHT=1 ;;
         --help|-h)
-            printf 'Usage: %s [--smoke|--full] [--preflight]\n' "$0"
+            printf 'Usage: %s [--smoke|--full|--phase2-only] [--preflight]\n' "$0"
             exit 0
             ;;
         *)
@@ -159,6 +180,18 @@ is_valid_memory() {
     esac
 }
 
+is_valid_disk_size() {
+    case "$1" in
+        *G) _disk_gib=${1%G} ;;
+        *) return 1 ;;
+    esac
+    case "$_disk_gib" in
+        ''|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "$_disk_gib" -ge 40 ] 2>/dev/null &&
+        [ "$_disk_gib" -le 2048 ] 2>/dev/null
+}
+
 is_valid_port() {
     is_positive_integer "$1" || return 1
     [ "$1" -le 65535 ] 2>/dev/null
@@ -176,7 +209,7 @@ if [ -z "$TIMEOUT_BIN" ]; then
     TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 fi
 
-PREFLIGHT_ORDER="mode,port,user,memory,cpus,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
+PREFLIGHT_ORDER="mode,port,user,memory,disk_size,cpus,phase2_backend,phase2_jobs,phase2_build_threads,phase2_test_workers,phase2_isolation,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
 PREFLIGHT_REASON="none"
 
 preflight_try() {
@@ -196,7 +229,31 @@ preflight_mode() {
 preflight_port() { is_valid_port "$QEMU_PORT"; }
 preflight_user() { is_valid_user "$QEMU_USER"; }
 preflight_memory() { is_valid_memory "$QEMU_MEM"; }
+preflight_disk_size() { is_valid_disk_size "$QEMU_DISK_SIZE"; }
 preflight_cpus() { is_positive_integer "$QEMU_CPUS"; }
+preflight_phase2_backend() {
+    case "$QEMU_PHASE2_BACKEND" in both|llvm|cranelift) return 0 ;; *) return 1 ;; esac
+}
+preflight_phase2_jobs() {
+    is_positive_integer "$QEMU_PHASE2_JOBS" &&
+        [ "$QEMU_PHASE2_JOBS" -le "$QEMU_CPUS" ]
+}
+preflight_phase2_build_threads() {
+    [ -z "$QEMU_PHASE2_BUILD_THREADS" ] ||
+        { is_positive_integer "$QEMU_PHASE2_BUILD_THREADS" &&
+          [ "$QEMU_PHASE2_BUILD_THREADS" -le "$QEMU_CPUS" ]; }
+}
+preflight_phase2_test_workers() {
+    [ -z "$QEMU_PHASE2_TEST_WORKERS" ] ||
+        { is_positive_integer "$QEMU_PHASE2_TEST_WORKERS" &&
+          [ "$QEMU_PHASE2_TEST_WORKERS" -le "$QEMU_CPUS" ] &&
+          [ "$QEMU_PHASE2_TEST_WORKERS" -le 80 ]; }
+}
+preflight_phase2_isolation() {
+    [ "$MODE" != phase2-only ] ||
+        { [ -n "${QEMU_VM_DIR:-}" ] && [ ! -e "$PID_FILE" ] &&
+          [ ! -e "$OVERLAY_IMAGE" ] && [ ! -e "$VM_DIR/.phase2-run.lock" ]; }
+}
 preflight_ssh_timeout() { is_positive_integer "$QEMU_SSH_TIMEOUT"; }
 preflight_root_ssh_timeout() { is_positive_integer "$QEMU_ROOT_SSH_TIMEOUT"; }
 
@@ -279,7 +336,13 @@ run_preflight() {
     preflight_try port preflight_port
     preflight_try user preflight_user
     preflight_try memory preflight_memory
+    preflight_try disk_size preflight_disk_size
     preflight_try cpus preflight_cpus
+    preflight_try phase2_backend preflight_phase2_backend
+    preflight_try phase2_jobs preflight_phase2_jobs
+    preflight_try phase2_build_threads preflight_phase2_build_threads
+    preflight_try phase2_test_workers preflight_phase2_test_workers
+    preflight_try phase2_isolation preflight_phase2_isolation
     preflight_try ssh_timeout preflight_ssh_timeout
     preflight_try root_ssh_timeout preflight_root_ssh_timeout
     preflight_try timeout preflight_timeout
@@ -300,7 +363,7 @@ run_preflight() {
         PREFLIGHT_STATUS="fail"
     fi
     printf 'freebsd_qemu_preflight_status=%s\n' "$PREFLIGHT_STATUS"
-    printf 'freebsd_qemu_preflight_checks=19\n'
+    printf 'freebsd_qemu_preflight_checks=25\n'
     printf 'freebsd_qemu_preflight_order=%s\n' "$PREFLIGHT_ORDER"
     printf 'freebsd_qemu_preflight_reason=%s\n' "$PREFLIGHT_REASON"
     [ "$PREFLIGHT_STATUS" = "pass" ]
@@ -327,8 +390,23 @@ if ! is_valid_memory "$QEMU_MEM"; then
     printf 'Invalid QEMU_MEM: %s\n' "$QEMU_MEM" >&2
     exit 1
 fi
+if ! is_valid_disk_size "$QEMU_DISK_SIZE"; then
+    printf 'Invalid QEMU_DISK_SIZE: %s (expected 40G..2048G)\n' "$QEMU_DISK_SIZE" >&2
+    exit 1
+fi
 if ! is_positive_integer "$QEMU_CPUS"; then
     printf 'Invalid QEMU_CPUS: %s\n' "$QEMU_CPUS" >&2
+    exit 1
+fi
+for phase2_check in preflight_phase2_backend preflight_phase2_jobs \
+    preflight_phase2_build_threads preflight_phase2_test_workers; do
+    if ! "$phase2_check"; then
+        printf 'Invalid FreeBSD Phase 2 resource or backend setting: %s\n' "$phase2_check" >&2
+        exit 1
+    fi
+done
+if ! preflight_phase2_isolation; then
+    printf 'FreeBSD Phase 2 requires an explicit, unused QEMU_VM_DIR\n' >&2
     exit 1
 fi
 if ! preflight_timeout; then
@@ -450,6 +528,13 @@ pkg_root() {
         root@localhost "$@"
 }
 
+PHASE2_VM_LOCK=
+if [ "$MODE" = phase2-only ]; then
+    mkdir -p "$VM_DIR" || fail "Cannot create isolated Phase 2 VM directory"
+    PHASE2_VM_LOCK="$VM_DIR/.phase2-run.lock"
+    mkdir "$PHASE2_VM_LOCK" 2>/dev/null || fail "Phase 2 VM directory is already owned"
+    printf '%s\n' "$$" >"$PHASE2_VM_LOCK/owner"
+fi
 SCRIPT_OK=0
 cleanup() {
     if [ -f "$PID_FILE" ]; then
@@ -471,6 +556,11 @@ cleanup() {
         rm -f "$OVERLAY_IMAGE" "$SERIAL_LOG"
     else
         [ -f "$SERIAL_LOG" ] && info "Serial log preserved: $SERIAL_LOG"
+    fi
+    if [ -n "$PHASE2_VM_LOCK" ] &&
+       [ "$(cat "$PHASE2_VM_LOCK/owner" 2>/dev/null || true)" = "$$" ]; then
+        rm -f "$PHASE2_VM_LOCK/owner"
+        rmdir "$PHASE2_VM_LOCK" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -632,29 +722,45 @@ printf '[5/7] QEMU overlay + start\n'
 
 rm -f "$OVERLAY_IMAGE"
 run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
-run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img resize "$OVERLAY_IMAGE" 30G >/dev/null 2>&1
-pass "Overlay created (30G): $OVERLAY_IMAGE"
+run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img resize "$OVERLAY_IMAGE" "$QEMU_DISK_SIZE" >/dev/null 2>&1
+pass "Overlay created (${QEMU_DISK_SIZE} virtual): $OVERLAY_IMAGE"
 
-# Detect KVM
-ACCEL="tcg"
-CPU_MODEL="qemu64"
+# Probe the selected system emulator only for a native-architecture guest.
+# Arm's host CPU model is usable with KVM; TCG keeps the existing max model.
+select_qemu_boot_machine_args() {
+    _boot_guest_arch=$1
+    _boot_host_arch=$2
+    _boot_qemu_system=$3
+    _boot_kvm_device=$4
+    _boot_efi_fd=$5
+    ACCEL="tcg"
+    CPU_MODEL="qemu64"
+    [ "$_boot_guest_arch" = arm64 ] && CPU_MODEL="max"
+
+    _boot_native_arch=false
+    case "$_boot_guest_arch:$_boot_host_arch" in
+        arm64:aarch64|arm64:arm64|amd64:x86_64|amd64:amd64)
+            _boot_native_arch=true ;;
+    esac
+    if [ "$_boot_native_arch" = true ] && [ -w "$_boot_kvm_device" ] &&
+        "$_boot_qemu_system" -accel help 2>/dev/null |
+            grep -Eq '^[[:space:]]*kvm([[:space:]]|$)'; then
+        if [ "$_boot_guest_arch" != arm64 ] ||
+            "$_boot_qemu_system" -cpu help 2>/dev/null |
+                grep -Eq '^[[:space:]]*host([[:space:]]|$)'; then
+            ACCEL="kvm"
+            CPU_MODEL="host"
+        fi
+    fi
+
+    case "$_boot_guest_arch" in
+        arm64) MACHINE_ARGS="-machine virt,accel=${ACCEL} -cpu ${CPU_MODEL} -bios ${_boot_efi_fd}" ;;
+        *) MACHINE_ARGS="-machine accel=${ACCEL} -cpu ${CPU_MODEL}" ;;
+    esac
+}
+
 HOST_ARCH="$(uname -m 2>/dev/null || true)"
-if { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; } &&
-    [ -w /dev/kvm ] 2>/dev/null &&
-    qemu-system-x86_64 -accel help 2>/dev/null | grep -Eq '^[[:space:]]*kvm([[:space:]]|$)'; then
-    ACCEL="kvm"
-    CPU_MODEL="host"
-fi
-
-# Arch-specific machine tuple: aarch64 guests use the virt machine with UEFI.
-case "$QEMU_ARCH" in
-    arm64)
-        MACHINE_ARGS="-machine virt,accel=${ACCEL} -cpu max -bios ${QEMU_EFI_FD_RESOLVED}"
-        ;;
-    *)
-        MACHINE_ARGS="-machine accel=${ACCEL} -cpu ${CPU_MODEL}"
-        ;;
-esac
+select_qemu_boot_machine_args "$QEMU_ARCH" "$HOST_ARCH" "$QEMU_SYSTEM" /dev/kvm "${QEMU_EFI_FD_RESOLVED:-}"
 
 rm -f "$PID_FILE" "$QEMU_START_LOG"
 if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" "$QEMU_SYSTEM" \
@@ -787,7 +893,7 @@ if [ "$MODE" = "smoke" ]; then
     else
         info "Installing clang..."
         $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>/dev/null || true
-        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm18" 2>&1 | tail -3
+        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm23" 2>&1 | tail -3
         CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
         if [ "$CLANG_CHECK" = "ok" ]; then
             pass "clang installed"
@@ -801,7 +907,7 @@ if [ "$MODE" = "smoke" ]; then
     pass "Trivial C compilation works"
 
     SCRIPT_OK=1
-    printf '\nFreeBSD x86_64 QEMU smoke PASS\n'
+    printf '\nFreeBSD %s QEMU smoke PASS\n' "$QEMU_ARCH"
 else
     # Full: install deps, rsync project, build seed, run bootstrap
     rm -f "$PROVENANCE_RECEIPT"
@@ -826,12 +932,26 @@ else
         $VM_SSH "tail -20 /tmp/simple-pkg-update.log" >&2 || true
         fail "pkg update failed"
     fi
-    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5 > /tmp/simple-pkg-install.log 2>&1"; then
+    # llvm23 is in FreeBSD's latest package repository; its tools live in a
+    # versioned bin directory rather than the default PATH.
+    if ! $PKG_CMD "mkdir -p /usr/local/etc/pkg/repos && sed 's|/quarterly|/latest|' /etc/pkg/FreeBSD.conf > /usr/local/etc/pkg/repos/FreeBSD.conf && grep -q '/latest' /usr/local/etc/pkg/repos/FreeBSD.conf && env ASSUME_ALWAYS_YES=yes pkg update -f > /tmp/simple-pkg-latest.log 2>&1"; then
+        $VM_SSH "tail -20 /tmp/simple-pkg-latest.log" >&2 || true
+        fail "pkg latest repository setup failed"
+    fi
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm23 git gmake pkgconf libffi zstd perl5 coreutils python3 > /tmp/simple-pkg-install.log 2>&1"; then
         $VM_SSH "tail -20 /tmp/simple-pkg-install.log" >&2 || true
         fail "dependency installation failed"
     fi
     $VM_SSH "command -v rsync" 2>/dev/null || fail "rsync install failed"
     $VM_SSH "command -v perl" 2>/dev/null || fail "perl install failed"
+    LLVM23_VERSION=$($VM_SSH "/usr/local/llvm23/bin/llvm-config --version" 2>/dev/null) ||
+        fail "FreeBSD llvm23 package has no llvm-config"
+    case "$LLVM23_VERSION" in
+        23.1.1|23.1.2) ;;
+        *) fail "FreeBSD LLVM version is not admitted: $LLVM23_VERSION" ;;
+    esac
+    $VM_SSH "test -x /usr/local/llvm23/bin/clang && test -x /usr/local/llvm23/bin/llvm-ar" 2>/dev/null ||
+        fail "FreeBSD llvm23 package lacks clang or llvm-ar"
     pass "Dependencies installed"
 
     info "Syncing project to VM..."
@@ -879,7 +999,138 @@ else
     # provenance), then a typed Stage 4 receipt + Stage 4 resume. Reasons must
     # be in bootstrap_planner_v2_reason_allowed
     # (scripts/check/lib/bootstrap-planner-admission-bound.shs).
-    GUEST_ENV="env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig"
+    GUEST_ENV="env PATH=/usr/local/llvm23/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin LLVM_SYS_231_PREFIX=/usr/local/llvm23 LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig"
+    if [ "$MODE" = phase2-only ]; then
+        PHASE2_GUEST_CPUS=$($VM_SSH "sysctl -n hw.ncpu" 2>/dev/null) ||
+            fail "Cannot read FreeBSD guest CPU count"
+        PHASE2_GUEST_MEMORY=$($VM_SSH "sysctl -n hw.physmem" 2>/dev/null) ||
+            fail "Cannot read FreeBSD guest memory"
+        is_positive_integer "$PHASE2_GUEST_CPUS" &&
+            is_positive_integer "$PHASE2_GUEST_MEMORY" ||
+            fail "FreeBSD guest resource probe is invalid"
+        [ "$PHASE2_GUEST_CPUS" -ge "$QEMU_PHASE2_JOBS" ] ||
+            fail "FreeBSD guest exposes fewer CPUs than requested Stage 2 jobs"
+        if [ -n "$QEMU_PHASE2_BUILD_THREADS" ]; then
+            phase2_required_memory=$((QEMU_PHASE2_BUILD_THREADS * 3221225472 + 4294967296))
+            [ "$PHASE2_GUEST_MEMORY" -ge "$phase2_required_memory" ] ||
+                fail "FreeBSD guest memory cannot support requested verifier build threads plus 4 GiB reserve"
+        fi
+        case "$QEMU_ARCH" in
+            arm64) PHASE2_TRIPLE=aarch64-unknown-freebsd-elf ;;
+            amd64) PHASE2_TRIPLE=x86_64-unknown-freebsd-elf ;;
+        esac
+        PHASE2_HOST_SUMMARY="${PROVENANCE_DIR}/phase2-summary.env"
+        mkdir -p "$PROVENANCE_DIR"
+        {
+            printf 'schema=freebsd-qemu-phase2-v1\n'
+            printf 'guest_arch=%s\n' "$QEMU_ARCH"
+            printf 'guest_triple=%s\n' "$PHASE2_TRIPLE"
+            printf 'guest_cpus=%s\n' "$PHASE2_GUEST_CPUS"
+            printf 'guest_memory_bytes=%s\n' "$PHASE2_GUEST_MEMORY"
+            printf 'source_commit=%s\n' "$(git -C "$ROOT_DIR" rev-parse HEAD)"
+            printf 'llvm_version=%s\n' "$LLVM23_VERSION"
+            printf 'requested_jobs=%s\n' "$QEMU_PHASE2_JOBS"
+            printf 'requested_build_threads=%s\n' "${QEMU_PHASE2_BUILD_THREADS:-auto}"
+        } >"$PHASE2_HOST_SUMMARY"
+        phase2_backends=$QEMU_PHASE2_BACKEND
+        [ "$phase2_backends" != both ] || phase2_backends='llvm cranelift'
+        phase2_failed=0
+        for phase2_backend in $phase2_backends; do
+            phase2_output="${VM_HOME}/simple/build/bootstrap-freebsd-phase2-${phase2_backend}"
+            phase2_work="${phase2_output}/stage2-compiler-tests/${PHASE2_TRIPLE}/verification"
+            phase2_compiler="${phase2_output}/stage3/${PHASE2_TRIPLE}/stage2-admitted/simple"
+            phase2_sha=
+            phase2_host_dir="${PROVENANCE_DIR}/${phase2_backend}"
+            mkdir -p "$phase2_host_dir"
+            phase2_started=$(date +%s)
+            phase2_env=$GUEST_ENV
+            [ -z "$QEMU_PHASE2_BUILD_THREADS" ] ||
+                phase2_env="$phase2_env BOOTSTRAP_VERIFY_BUILD_THREADS=$QEMU_PHASE2_BUILD_THREADS"
+            [ -z "$QEMU_PHASE2_TEST_WORKERS" ] ||
+                phase2_env="$phase2_env BOOTSTRAP_VERIFY_TEST_WORKERS=$QEMU_PHASE2_TEST_WORKERS"
+            info "Building and verifying FreeBSD ${PHASE2_TRIPLE} Stage 2 with ${phase2_backend} (jobs=${QEMU_PHASE2_JOBS})..."
+            phase2_build_status=0
+            if ! $VM_SSH "cd ${VM_HOME}/simple && ${phase2_env} sh scripts/bootstrap/bootstrap-from-scratch.sh --output=${phase2_output} --backend=${phase2_backend} --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --strategy=normal --keep-going --jobs=${QEMU_PHASE2_JOBS}" \
+                >"$phase2_host_dir/manager-run.log" 2>&1; then
+                phase2_build_status=1
+            fi
+            tail -n 12 "$phase2_host_dir/manager-run.log"
+            phase2_supplement_status=95
+            if [ "$phase2_build_status" -eq 0 ]; then
+                phase2_sha=$($VM_SSH "test -x ${phase2_compiler} && sha256 -q ${phase2_compiler}" 2>/dev/null) || phase2_sha=
+                if [ -n "$phase2_sha" ]; then
+                    info "Running FreeBSD ${phase2_backend} linked-module and interpreter/loader supplement..."
+                    phase2_supplement_status=0
+                    if ! $VM_SSH "cd ${VM_HOME}/simple && ${phase2_env} sh scripts/bootstrap/run-freebsd-phase2-tests.shs --reuse-base --phase=stage2 --backend=${phase2_backend} --compiler=${phase2_compiler} --compiler-sha256=${phase2_sha} --hash-policy=canonical --work-root=${phase2_work} --source-root=${VM_HOME}/simple"; then
+                        phase2_supplement_status=1
+                    fi
+                else
+                    phase2_build_status=1
+                fi
+            fi
+            phase2_copy_status=0
+            if ! run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+                "${VM_USER}@localhost:${phase2_output}/logs/" "$phase2_host_dir/bootstrap-logs/"; then
+                phase2_copy_status=1
+            fi
+            for phase2_receipt in \
+                "${phase2_output}/selected-build-jobs.env" \
+                "${phase2_output}/stage3/${PHASE2_TRIPLE}/stage2-admitted/admission.env" \
+                "${phase2_output}/stage2-compiler-tests/${PHASE2_TRIPLE}/stage2-compiler-tests.env"; do
+                if $VM_SSH "test -f ${phase2_receipt}" 2>/dev/null; then
+                    if ! run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+                        "${VM_USER}@localhost:${phase2_receipt}" "$phase2_host_dir/"; then
+                        phase2_copy_status=1
+                    fi
+                elif [ "$phase2_build_status" -eq 0 ]; then
+                    phase2_copy_status=1
+                fi
+            done
+            if $VM_SSH "test -f ${phase2_work}/summary.env" 2>/dev/null; then
+                if ! run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+                    "${VM_USER}@localhost:${phase2_work}/summary.env" "$phase2_host_dir/summary.env"; then
+                    phase2_copy_status=1
+                fi
+                if ! run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+                    "${VM_USER}@localhost:${phase2_work}/logs/" "$phase2_host_dir/verification-logs/"; then
+                    phase2_copy_status=1
+                fi
+            elif [ "$phase2_build_status" -eq 0 ]; then
+                phase2_copy_status=1
+            fi
+            if $VM_SSH "test -f ${phase2_work}/post-phase2-summary.env" 2>/dev/null; then
+                if ! run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+                    "${VM_USER}@localhost:${phase2_work}/post-phase2-summary.env" \
+                    "$phase2_host_dir/post-phase2-summary.env"; then
+                    phase2_copy_status=1
+                fi
+                if ! run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+                    "${VM_USER}@localhost:${phase2_work}/post-phase2-logs/" \
+                    "$phase2_host_dir/post-phase2-logs/"; then
+                    phase2_copy_status=1
+                fi
+            elif [ "$phase2_supplement_status" -eq 0 ]; then
+                phase2_copy_status=1
+            fi
+            phase2_elapsed=$(($(date +%s) - phase2_started))
+            printf 'backend=%s|stage2_status=%s|supplement_status=%s|evidence_status=%s|elapsed_seconds=%s|compiler_path=%s|compiler_sha256=%s|output=%s\n' \
+                "$phase2_backend" "$phase2_build_status" "$phase2_supplement_status" \
+                "$phase2_copy_status" "$phase2_elapsed" "$phase2_compiler" "$phase2_sha" \
+                "$phase2_host_dir" >>"$PHASE2_HOST_SUMMARY"
+            if [ "$phase2_build_status" -ne 0 ] || [ "$phase2_supplement_status" -ne 0 ] ||
+               [ "$phase2_copy_status" -ne 0 ]; then
+                phase2_failed=1
+            fi
+        done
+        if [ "$phase2_failed" -ne 0 ]; then
+            printf 'overall=FAIL\n' >>"$PHASE2_HOST_SUMMARY"
+            fail "FreeBSD Phase 2 failed; terminal rows: $PHASE2_HOST_SUMMARY"
+        fi
+        printf 'overall=PASS\n' >>"$PHASE2_HOST_SUMMARY"
+        SCRIPT_OK=1
+        printf '\nFreeBSD %s QEMU Phase 2 PASS\n' "$QEMU_ARCH"
+        exit 0
+    fi
     GUEST_STAGE2='stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit) && test -n "$stage2"'
     info "Building receipt-free admitted Stage 2 trust root in VM..."
     if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --jobs=2"; then

@@ -1,0 +1,383 @@
+# Immutable bounded semantic pages. No IO, authorization, atomic publication or
+# scale receipt is implied. Fixed hash buckets deliberately fail on skew rather
+# than raising a per-object bound. Payload is the higher-level codec's bytes;
+# external evidence belongs in CAS and is represented here by its digest.
+use std.scv.db_canonical.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+enum DbPageKind:
+    Row
+    Tombstone
+    Accepted
+    HighWater(value: u64)
+    Alias
+
+struct DbPageRecord:
+    key: text
+    kind: DbPageKind
+    payload: [u8]
+
+struct DbPageQuota:
+    max_page_bytes: u64
+    max_page_records: u64
+    max_records: u64
+
+struct DbRecordPage:
+    bucket: text
+    records: [DbPageRecord]
+    digest: text
+
+struct DbPageEntry:
+    bucket: text
+    digest: text
+    count: u64
+
+struct DbPageManifest:
+    quota: DbPageQuota
+    entries: [DbPageEntry]
+    root: text
+
+struct DbPageBuild:
+    manifest: DbPageManifest
+    pages: [DbRecordPage]
+
+struct _DbKeyedRecord:
+    bucket: text
+    key_bytes: [u8]
+    record: DbPageRecord
+
+fn _db_page_quota(quota: DbPageQuota) -> Result<bool, text>:
+    if quota.max_page_bytes == 0 or quota.max_page_bytes > 16777216 or quota.max_page_records == 0 or quota.max_page_records > 1000000 or quota.max_records == 0: return Err("SCVDB_PAGE_QUOTA")
+    Ok(true)
+
+fn db_pages_bucket(key: text) -> Result<text, text>:
+    if key == "" or key.len() > 4096: return Err("SCVDB_PAGE_KEY")
+    Ok(sha256_u8_hex(db_canonical_text(key)?)[0:4])
+
+fn _db_page_keyed(records: [DbPageRecord]) -> Result<[_DbKeyedRecord], text>:
+    var keyed: [_DbKeyedRecord] = []
+    for record in records:
+        val bucket = db_pages_bucket(record.key)?
+        val key_bytes = db_canonical_text(record.key)?
+        val normalized = db_read_text(db_read_frame(key_bytes, 0)?)?
+        keyed.push(_DbKeyedRecord(bucket: bucket, key_bytes: key_bytes, record: DbPageRecord(key: normalized, kind: record.kind, payload: record.payload)))
+    Ok(_db_page_sort(keyed))
+
+# Existing canonical map/set insertion sort is intentionally not used here.
+# Cached key encodings and stable merge sort give O(n log n) comparisons.
+fn _db_page_less(left: _DbKeyedRecord, right: _DbKeyedRecord) -> bool:
+    if left.bucket != right.bucket: return left.bucket < right.bucket
+    db_bytes_less(left.key_bytes, right.key_bytes)
+
+fn _db_page_sort(records: [_DbKeyedRecord]) -> [_DbKeyedRecord]:
+    if records.len() < 2: return records
+    val middle = records.len() / 2
+    val left = _db_page_sort(records[0:middle])
+    val right = _db_page_sort(records[middle:records.len()])
+    var ordered: [_DbKeyedRecord] = []
+    var a = 0
+    var b = 0
+    while a < left.len() or b < right.len():
+        if b == right.len():
+            ordered.push(left[a])
+            a = a + 1
+        elif a == left.len():
+            ordered.push(right[b])
+            b = b + 1
+        elif _db_page_less(right[b], left[a]):
+            ordered.push(right[b])
+            b = b + 1
+        else:
+            ordered.push(left[a])
+            a = a + 1
+    ordered
+
+fn _db_page_kind(kind: DbPageKind) -> [u8]:
+    match kind:
+        DbPageKind.Row: db_frame(1u8, [])
+        DbPageKind.Tombstone: db_frame(2u8, [])
+        DbPageKind.Accepted: db_frame(3u8, [])
+        DbPageKind.HighWater(value): db_frame(4u8, db_u64_bytes(value))
+        DbPageKind.Alias: db_frame(5u8, [])
+
+fn db_page_encode(page: DbRecordPage, quota: DbPageQuota) -> Result<[u8], text>:
+    val checked = _db_page_quota(quota)?
+    if page.records.len() == 0 or (page.records.len() as u64) > quota.max_page_records: return Err("SCVDB_PAGE_RECORD_QUOTA")
+    var payload: [u8] = []
+    var previous: [u8] = []
+    for record in page.records:
+        val key = db_canonical_text(record.key)?
+        if db_pages_bucket(record.key)? != page.bucket: return Err("SCVDB_PAGE_BUCKET")
+        if previous.len() > 0 and not db_bytes_less(previous, key): return Err("SCVDB_PAGE_KEY_ORDER")
+        previous = key
+        if (record.payload.len() as u64) > quota.max_page_bytes: return Err("SCVDB_PAGE_BYTES_QUOTA")
+        val encoded = db_frame(92u8, key + _db_page_kind(record.kind) + db_frame(5u8, record.payload))
+        if (payload.len() as u64) + (encoded.len() as u64) > quota.max_page_bytes: return Err("SCVDB_PAGE_BYTES_QUOTA")
+        for byte in encoded: payload.push(byte)
+    val encoded = db_domain_bytes("record-page", db_frame(93u8, db_canonical_text(page.bucket)? + db_frame(6u8, payload)))?
+    if (encoded.len() as u64) > quota.max_page_bytes: return Err("SCVDB_PAGE_BYTES_QUOTA")
+    Ok(encoded)
+
+fn _db_page_make(bucket: text, records: [DbPageRecord], quota: DbPageQuota) -> Result<DbRecordPage, text>:
+    var page = DbRecordPage(bucket: bucket, records: records, digest: "")
+    page.digest = sha256_u8_hex(db_page_encode(page, quota)?)
+    Ok(page)
+
+fn db_pages_manifest_encode(manifest: DbPageManifest) -> Result<[u8], text>:
+    val checked = _db_page_quota(manifest.quota)?
+    if manifest.entries.len() > 65536: return Err("SCVDB_PAGE_DIRECTORY_QUOTA")
+    var payload: [u8] = []
+    var previous = ""
+    var total: u64 = 0
+    for entry in manifest.entries:
+        if entry.bucket.len() != 4 or entry.bucket <= previous or entry.digest.len() != 64: return Err("SCVDB_PAGE_DIRECTORY")
+        val hex = entry.bucket + entry.digest
+        for position in 0..hex.len():
+            val code = hex.char_code_at(position)
+            if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return Err("SCVDB_PAGE_DIRECTORY")
+        if entry.count == 0 or entry.count > manifest.quota.max_page_records or entry.count > manifest.quota.max_records - total: return Err("SCVDB_PAGE_RECORD_QUOTA")
+        total = total + entry.count
+        previous = entry.bucket
+        val encoded = db_frame(94u8, db_canonical_text(entry.bucket)? + db_canonical_text(entry.digest)? + db_frame(2u8, db_u64_bytes(entry.count)))
+        for byte in encoded: payload.push(byte)
+    val quotas = db_frame(2u8, db_u64_bytes(manifest.quota.max_page_bytes)) + db_frame(2u8, db_u64_bytes(manifest.quota.max_page_records)) + db_frame(2u8, db_u64_bytes(manifest.quota.max_records))
+    db_domain_bytes("page-manifest", db_frame(95u8, quotas + db_frame(6u8, payload)))
+
+fn db_pages_manifest_validate(manifest: DbPageManifest) -> Result<bool, text>:
+    if sha256_u8_hex(db_pages_manifest_encode(manifest)?) != manifest.root: return Err("SCVDB_PAGE_MANIFEST_DIGEST")
+    Ok(true)
+
+fn _db_pages_manifest(entries: [DbPageEntry], quota: DbPageQuota) -> Result<DbPageManifest, text>:
+    var manifest = DbPageManifest(quota: quota, entries: entries, root: "")
+    manifest.root = sha256_u8_hex(db_pages_manifest_encode(manifest)?)
+    Ok(manifest)
+
+fn _db_page_find(entries: [DbPageEntry], bucket: text) -> i64:
+    var low = 0
+    var high = entries.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        if entries[middle].bucket < bucket: low = middle + 1
+        else: high = middle
+    if low < entries.len() and entries[low].bucket == bucket: low else: -1
+
+fn _db_page_verify(page: DbRecordPage, entry: DbPageEntry, quota: DbPageQuota) -> Result<bool, text>:
+    if page.bucket != entry.bucket or page.digest != entry.digest or (page.records.len() as u64) != entry.count: return Err("SCVDB_PAGE_MISSING_OR_DIGEST")
+    if sha256_u8_hex(db_page_encode(page, quota)?) != entry.digest: return Err("SCVDB_PAGE_DIGEST")
+    Ok(true)
+
+# The manifest root is an integrity digest, never a signature/admission proof.
+# Caller validates its complete manifest once at the trust boundary. This query
+# binary-searches its directory and one supplied page; it hashes that bounded
+# page before exposing content. Missing pages never mean missing records.
+fn db_pages_lookup(manifest: DbPageManifest, page: DbRecordPage, key: text) -> Result<DbPageRecord?, text>:
+    val bucket = db_pages_bucket(key)?
+    val index = _db_page_find(manifest.entries, bucket)
+    if index < 0: return Ok(nil)
+    val checked = _db_page_verify(page, manifest.entries[index], manifest.quota)?
+    val wanted = db_canonical_text(key)?
+    var low = 0
+    var high = page.records.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        if db_bytes_less(db_canonical_text(page.records[middle].key)?, wanted): low = middle + 1
+        else: high = middle
+    if low < page.records.len() and db_canonical_text(page.records[low].key)? == wanted: return Ok(page.records[low])
+    Ok(nil)
+
+fn db_pages_entry(manifest: DbPageManifest, key: text) -> Result<DbPageEntry?, text>:
+    val index = _db_page_find(manifest.entries, db_pages_bucket(key)?)
+    if index < 0: return Ok(nil)
+    Ok(manifest.entries[index])
+
+fn _db_page_root(bytes: [u8], domain_name: text, tag: u8) -> Result<DbDecodedFrame, text>:
+    val domain = db_domain_bytes(domain_name, [])?
+    if bytes.len() <= domain.len() or bytes.len() > 16777216: return Err("SCVDB_PAGE_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_PAGE_FORMAT")
+    val frame = db_read_frame(bytes, domain.len())?
+    if frame.tag != tag or frame.next_offset != bytes.len(): return Err("SCVDB_PAGE_FORMAT")
+    Ok(frame)
+
+fn _db_page_fields(bytes: [u8], limit: i64) -> Result<[DbDecodedFrame], text>:
+    var frames: [DbDecodedFrame] = []
+    var cursor = 0
+    while cursor < bytes.len():
+        if frames.len() >= limit: return Err("SCVDB_PAGE_FORMAT")
+        val frame = db_read_frame(bytes, cursor)?
+        frames.push(frame)
+        cursor = frame.next_offset
+    Ok(frames)
+
+fn db_page_decode(bytes: [u8], quota: DbPageQuota) -> Result<DbRecordPage, text>:
+    val checked = _db_page_quota(quota)?
+    if (bytes.len() as u64) > quota.max_page_bytes: return Err("SCVDB_PAGE_BYTES_QUOTA")
+    val root = _db_page_root(bytes, "record-page", 93u8)?
+    val fields = _db_page_fields(root.payload, 2)?
+    if fields.len() != 2 or fields[1].tag != 6u8: return Err("SCVDB_PAGE_FORMAT")
+    val bucket = db_read_text(fields[0])?
+    var records: [DbPageRecord] = []
+    var cursor = 0
+    while cursor < fields[1].payload.len():
+        if (records.len() as u64) >= quota.max_page_records: return Err("SCVDB_PAGE_RECORD_QUOTA")
+        val frame = db_read_frame(fields[1].payload, cursor)?
+        cursor = frame.next_offset
+        if frame.tag != 92u8: return Err("SCVDB_PAGE_FORMAT")
+        val record = _db_page_fields(frame.payload, 3)?
+        if record.len() != 3 or record[2].tag != 5u8: return Err("SCVDB_PAGE_FORMAT")
+        val kind_frame = record[1]
+        if kind_frame.tag != 4u8 and kind_frame.payload.len() != 0: return Err("SCVDB_PAGE_FORMAT")
+        var kind = DbPageKind.Row
+        match kind_frame.tag:
+            1u8: kind = DbPageKind.Row
+            2u8: kind = DbPageKind.Tombstone
+            3u8: kind = DbPageKind.Accepted
+            4u8: kind = DbPageKind.HighWater(db_decode_u64(kind_frame.payload)?)
+            5u8: kind = DbPageKind.Alias
+            _: return Err("SCVDB_PAGE_FORMAT")
+        records.push(DbPageRecord(key: db_read_text(record[0])?, kind: kind, payload: record[2].payload))
+    val page = _db_page_make(bucket, records, quota)?
+    if db_page_encode(page, quota)? != bytes: return Err("SCVDB_PAGE_FORMAT")
+    Ok(page)
+
+fn db_pages_manifest_decode(bytes: [u8]) -> Result<DbPageManifest, text>:
+    val root = _db_page_root(bytes, "page-manifest", 95u8)?
+    val fields = _db_page_fields(root.payload, 4)?
+    if fields.len() != 4 or fields[3].tag != 6u8: return Err("SCVDB_PAGE_FORMAT")
+    val quota = DbPageQuota(max_page_bytes: db_read_unsigned(fields[0])?, max_page_records: db_read_unsigned(fields[1])?, max_records: db_read_unsigned(fields[2])?)
+    var entries: [DbPageEntry] = []
+    var cursor = 0
+    while cursor < fields[3].payload.len():
+        if entries.len() >= 65536: return Err("SCVDB_PAGE_DIRECTORY_QUOTA")
+        val frame = db_read_frame(fields[3].payload, cursor)?
+        cursor = frame.next_offset
+        if frame.tag != 94u8: return Err("SCVDB_PAGE_FORMAT")
+        val entry = _db_page_fields(frame.payload, 3)?
+        if entry.len() != 3: return Err("SCVDB_PAGE_FORMAT")
+        entries.push(DbPageEntry(bucket: db_read_text(entry[0])?, digest: db_read_text(entry[1])?, count: db_read_unsigned(entry[2])?))
+    val manifest = _db_pages_manifest(entries, quota)?
+    if db_pages_manifest_encode(manifest)? != bytes: return Err("SCVDB_PAGE_FORMAT")
+    Ok(manifest)
+
+fn db_pages_required_buckets(updates: [DbPageRecord]) -> Result<[text], text>:
+    val keyed = _db_page_keyed(updates)?
+    var buckets: [text] = []
+    var previous = ""
+    for value in keyed:
+        if value.bucket != previous: buckets.push(value.bucket)
+        previous = value.bucket
+    Ok(buckets)
+
+fn db_pages_build(records: [DbPageRecord], quota: DbPageQuota) -> Result<DbPageBuild, text>:
+    val checked = _db_page_quota(quota)?
+    if (records.len() as u64) > quota.max_records: return Err("SCVDB_PAGE_RECORD_QUOTA")
+    val ordered = _db_page_keyed(records)?
+    var pages: [DbRecordPage] = []
+    var entries: [DbPageEntry] = []
+    var cursor = 0
+    while cursor < ordered.len():
+        val bucket = ordered[cursor].bucket
+        var group: [DbPageRecord] = []
+        while cursor < ordered.len() and ordered[cursor].bucket == bucket:
+            group.push(ordered[cursor].record)
+            cursor = cursor + 1
+        val page = _db_page_make(bucket, group, quota)?
+        pages.push(page)
+        entries.push(DbPageEntry(bucket: bucket, digest: page.digest, count: group.len() as u64))
+    Ok(DbPageBuild(manifest: _db_pages_manifest(entries, quota)?, pages: pages))
+
+fn _db_page_replace(old: DbPageRecord, next: DbPageRecord) -> Result<bool, text>:
+    match old.kind:
+        DbPageKind.Accepted:
+            if old != next: return Err("SCVDB_PAGE_RETAINED_RECORD")
+        DbPageKind.Alias:
+            if old != next: return Err("SCVDB_PAGE_RETAINED_RECORD")
+        DbPageKind.Tombstone:
+            if old != next: return Err("SCVDB_PAGE_RETAINED_RECORD")
+        DbPageKind.HighWater(before):
+            match next.kind:
+                DbPageKind.HighWater(after):
+                    if after < before: return Err("SCVDB_PAGE_HIGHWATER")
+                _: return Err("SCVDB_PAGE_RETAINED_RECORD")
+        DbPageKind.Row:
+            if next.kind != DbPageKind.Row and next.kind != DbPageKind.Tombstone: return Err("SCVDB_PAGE_RECORD_KIND")
+    Ok(true)
+
+# Only affected EXISTING pages are provided, sorted by bucket, exactly once.
+# Returned pages are replacements/new pages only. Persist all before publishing
+# the one manifest; never acknowledge individual pages as accepted batches.
+fn db_pages_update(manifest: DbPageManifest, affected_pages: [DbRecordPage], updates: [DbPageRecord]) -> Result<DbPageBuild, text>:
+    val checked = db_pages_manifest_validate(manifest)?
+    if (updates.len() as u64) > manifest.quota.max_records: return Err("SCVDB_PAGE_RECORD_QUOTA")
+    val ordered = _db_page_keyed(updates)?
+    var replacements: [DbRecordPage] = []
+    var replacement_entries: [DbPageEntry] = []
+    var supplied = 0
+    var cursor = 0
+    while cursor < ordered.len():
+        val bucket = ordered[cursor].bucket
+        var changes: [_DbKeyedRecord] = []
+        while cursor < ordered.len() and ordered[cursor].bucket == bucket:
+            if changes.len() > 0 and changes[changes.len() - 1].key_bytes == ordered[cursor].key_bytes: return Err("SCVDB_PAGE_KEY_ORDER")
+            changes.push(ordered[cursor])
+            cursor = cursor + 1
+        var existing: [DbPageRecord] = []
+        val index = _db_page_find(manifest.entries, bucket)
+        if index >= 0:
+            if supplied >= affected_pages.len(): return Err("SCVDB_PAGE_MISSING_OR_DIGEST")
+            val verified = _db_page_verify(affected_pages[supplied], manifest.entries[index], manifest.quota)?
+            existing = affected_pages[supplied].records
+            supplied = supplied + 1
+        var merged: [DbPageRecord] = []
+        var a = 0
+        var b = 0
+        while a < existing.len() or b < changes.len():
+            if b == changes.len():
+                merged.push(existing[a])
+                a = a + 1
+            elif a == existing.len():
+                merged.push(changes[b].record)
+                b = b + 1
+            else:
+                val old_key = db_canonical_text(existing[a].key)?
+                if old_key == changes[b].key_bytes:
+                    val retained = _db_page_replace(existing[a], changes[b].record)?
+                    merged.push(changes[b].record)
+                    a = a + 1
+                    b = b + 1
+                elif db_bytes_less(old_key, changes[b].key_bytes):
+                    merged.push(existing[a])
+                    a = a + 1
+                else:
+                    merged.push(changes[b].record)
+                    b = b + 1
+        val page = _db_page_make(bucket, merged, manifest.quota)?
+        replacements.push(page)
+        replacement_entries.push(DbPageEntry(bucket: bucket, digest: page.digest, count: merged.len() as u64))
+    if supplied != affected_pages.len(): return Err("SCVDB_PAGE_UNEXPECTED")
+    var entries: [DbPageEntry] = []
+    var a = 0
+    var b = 0
+    while a < manifest.entries.len() or b < replacement_entries.len():
+        if b == replacement_entries.len():
+            entries.push(manifest.entries[a])
+            a = a + 1
+        elif a == manifest.entries.len():
+            entries.push(replacement_entries[b])
+            b = b + 1
+        elif manifest.entries[a].bucket == replacement_entries[b].bucket:
+            entries.push(replacement_entries[b])
+            a = a + 1
+            b = b + 1
+        elif manifest.entries[a].bucket < replacement_entries[b].bucket:
+            entries.push(manifest.entries[a])
+            a = a + 1
+        else:
+            entries.push(replacement_entries[b])
+            b = b + 1
+    Ok(DbPageBuild(manifest: _db_pages_manifest(entries, manifest.quota)?, pages: replacements))
+
+export DbPageKind, DbPageRecord, DbPageQuota, DbRecordPage, DbPageEntry, DbPageManifest, DbPageBuild
+export db_pages_bucket, db_pages_required_buckets, db_pages_build, db_pages_update, db_pages_lookup
+export db_page_encode, db_pages_manifest_encode, db_pages_manifest_validate
+export db_page_decode, db_pages_manifest_decode, db_pages_entry

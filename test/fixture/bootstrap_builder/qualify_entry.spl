@@ -1,0 +1,44 @@
+use app.io.args_ops.{get_args}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use test.fixture.bootstrap_builder.harness.{qualification_config, qualification_case, qualification_emit}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+
+fn builder_qualification_main(process_port: BuilderProcessPortV1) -> i64:
+    val raw_args = get_args()
+    var args: [text] = []
+    for index in 1..raw_args.len():
+        args = args.push(raw_args[index])
+    if args.len() != 1:
+        print "usage: builder-qualifier all|local_execution|cache_reuse|worker_failure|restart|keep_going|fail_fast|cache_invalidation"
+        return 64
+    val config = match qualification_config(process_port):
+        Ok(value): value
+        Err(message):
+            print "qualification setup failed: {message}"
+            return 2
+    var cases = [args[0]]
+    if args[0] == "all":
+        cases = ["local_execution", "cache_reuse", "worker_failure", "restart", "keep_going", "fail_fast", "cache_invalidation"]
+    var evidence = "native-manager=" + config.manager + "\nmanager-sha256=" + config.manager_digest + "\nfixture-root=" + config.root + "\n"
+    var failures = 0
+    for name in cases:
+        match qualification_case(config, name):
+            Ok(_checked):
+                val line = "builder-qualification-v1 " + name + " PASS"
+                print "{line}"
+                evidence = evidence + line + "\n"
+            Err(message):
+                failures = failures + 1
+                print "builder-qualification-v1 {name} FAIL: {message}"
+                evidence = evidence + "builder-qualification-v1 " + name + " FAIL: " + message + "\n"
+    if not file_atomic_write(config.root + "/runtime-evidence.log", evidence): return 3
+    if failures > 0: return 1
+    if args[0] == "all":
+        match qualification_emit(config, evidence):
+            Ok(path): print "qualification-receipt={path}"
+            Err(message):
+                print "qualification receipt rejected: {message}"
+                return 3
+    0
+
+export builder_qualification_main

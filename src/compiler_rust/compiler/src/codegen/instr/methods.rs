@@ -177,6 +177,17 @@ pub(crate) fn compile_builtin_method<M: Module>(
             }
             return Ok(());
         }
+        // A nullable text value can retain Pointer<text> after `??`.
+        // Runtime dispatch parses its string handle and preserves genuine
+        // integer receivers; known primitive casts keep their width rules.
+        if matches!(method, "to_i64" | "to_int") && super::int_cast_needs_runtime_dispatch(from_ty) {
+            let converted = call_runtime_1(ctx, builder, "rt_to_int_dynamic", receiver_val);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, converted);
+                ctx.vreg_types.insert(*d, TypeId::I64);
+            }
+            return Ok(());
+        }
         let converted = if from_ty == to_ty {
             receiver_val
         } else if actual_is_float && to_is_int {

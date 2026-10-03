@@ -1,0 +1,120 @@
+# Native qualification execution shares the real compiler parser and codecs.
+# Parent results are compared against a separately launched, digest-pinned worker.
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseModuleV1, ManagedParseSnapshotV1,
+    ManagedParseActionV1, managed_parse_snapshot_digest_v1, managed_parse_snapshot_encode_v1,
+    managed_parse_action_encode_v1, managed_parse_action_basename_v1}
+use compiler.driver.driver_build.managed_parse_group_result.{ManagedParseActionResultV1,
+    managed_parse_action_result_decode_v1, managed_parse_action_result_validate_v1}
+use compiler.driver.managed_parse_group.{managed_parse_group_install_v1, managed_parse_group_action_owned_v1}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
+use std.nogc_sync_mut.io.windows_worker_launcher.{windows_worker_spawn_v1, windows_worker_wait_v1, windows_worker_terminate_v1}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.parser_qualification_parent_run.{parser_qualification_parent_run_v1}
+
+struct ParserQualificationEvidenceV1:
+    frontend_identity: text
+    evidence: text
+
+fn parser_qualification_action_v1(snapshot: ManagedParseSnapshotV1, id: text) -> ManagedParseActionV1:
+    ManagedParseActionV1(id, "qualification-group", snapshot.worker_id, snapshot.generation,
+        "qualification-lease-" + id, snapshot.snapshot_digest, snapshot.cache_identity, ["package"], true)
+
+fn parser_qualification_result_v1(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1,
+    result: ManagedParseActionResultV1, root: text, expected: text, reuse: bool) -> text:
+    val invalid = managed_parse_action_result_validate_v1(snapshot, action, result)
+    if invalid != "": return invalid
+    if result.modules.len() != 3 or result.modules[0].status != "ERROR" or result.modules[1].status != "OK" or
+            result.modules[2].status != "ERROR" or result.modules[0].diagnostics.len() == 0 or
+            result.modules[2].diagnostics.len() == 0:
+        return "native parser did not collect real errors and independent success"
+    val good = result.modules[1]
+    if file_hash_sha256_or_empty(root + "/" + good.blob_path) != good.blob_digest or
+            (expected != "" and expected != good.blob_digest):
+        return "native parent/worker artifact parity differs"
+    if reuse and not good.reused: return "native worker durable cache was not reused"
+    ""
+
+fn parser_qualification_sources_write_v1(root: text, good: text, bad: text) -> bool:
+    dir_create(root + "/sources/qualification-parent", true) and dir_create(root + "/requests", true) and
+        file_atomic_write(root + "/sources/qualification-parent/good.spl", good) and
+        file_atomic_write(root + "/sources/qualification-parent/bad1.spl", bad) and
+        file_atomic_write(root + "/sources/qualification-parent/bad2.spl", bad)
+
+fn parser_qualification_mailbox_v1(root: text, snapshot: ManagedParseSnapshotV1,
+    action: ManagedParseActionV1) -> Result<ManagedParseActionResultV1, text>:
+    val name = managed_parse_action_basename_v1(action)
+    if not file_atomic_write(root + "/requests/" + name, managed_parse_action_encode_v1(action)) or
+            not file_atomic_write(root + "/next.sdn", name): return Err("cannot publish native qualification request")
+    val path = root + "/receipts/" + name
+    val deadline = current_time_ms() + 30000
+    while not file_exists(path):
+        if current_time_ms() > deadline: return Err("native qualification worker receipt timeout")
+        sleep_ms(20)
+    val payload = file_read_regular_no_follow_bounded(path, 16777216)?
+    managed_parse_action_result_decode_v1(payload)
+
+fn parser_qualification_worker_evidence_v1(root: text, snapshot: ManagedParseSnapshotV1, expected: text) -> text:
+    for id in ["parse-first", "parse-second"]:
+        val action = parser_qualification_action_v1(snapshot, id)
+        val result = match parser_qualification_mailbox_v1(root, snapshot, action):
+            case Ok(value): value
+            case Err(reason): return reason
+        val invalid = parser_qualification_result_v1(snapshot, action, result, root, expected, id == "parse-second")
+        if invalid != "": return invalid
+    ""
+
+fn parser_qualification_execute_v1(root: text, workspace: text, worker: text, digest: text,
+    producer: text, producer_digest: text, target: text) -> Result<ParserQualificationEvidenceV1, text>:
+    if file_exists(root + "/parent/install.sdn") or file_exists(root + "/worker/install.sdn"):
+        return Err("qualification evidence root is not fresh")
+    val good = "fn answer() -> i64:\n    42\n"
+    val bad = "fn broken() -> i64:\n    val = 1\n"
+    print "TRACE qualifier actual parent parse-only begin"
+    val actual_parent = parser_qualification_parent_run_v1(workspace, root, producer, producer_digest, target, good)?
+    print "TRACE qualifier actual parent parse-only end"
+    var snapshot = ManagedParseSnapshotV1("qualification-slot", 1, digest, "", sha256_text("qualification-cache"),
+        cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu(), 1048576,
+        [ManagedParseModuleV1("bad1", "package", "qualification-parent/bad1.spl", sha256_text(bad)),
+         ManagedParseModuleV1("good", "package", "qualification-parent/good.spl", sha256_text(good)),
+         ManagedParseModuleV1("bad2", "package", "qualification-parent/bad2.spl", sha256_text(bad))])
+    snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+    val parent_root = root + "/parent"
+    val worker_root = root + "/worker"
+    if not parser_qualification_sources_write_v1(parent_root, good, bad) or
+            not parser_qualification_sources_write_v1(worker_root, good, bad): return Err("cannot prepare native parser sources")
+    val parent = managed_parse_group_install_v1(parent_root, snapshot)?
+    val action = parser_qualification_action_v1(snapshot, "parent-first")
+    val first = managed_parse_group_action_owned_v1(parent, action)
+    val invalid = parser_qualification_result_v1(snapshot, action, first.result, parent_root, actual_parent.blob_digest, false)
+    if invalid != "": return Err(invalid)
+    val expected = actual_parent.blob_digest
+    val replacement = managed_parse_group_install_v1(parent_root, snapshot)?
+    val repeated = managed_parse_group_action_owned_v1(replacement, action)
+    val reused = parser_qualification_result_v1(snapshot, action, repeated.result, parent_root, expected, true)
+    if reused != "": return Err(reused)
+    if not file_atomic_write(worker_root + "/install.sdn", managed_parse_snapshot_encode_v1(snapshot)):
+        return Err("cannot write native worker snapshot")
+    val token = windows_worker_spawn_v1(worker, digest, ["--group-root", worker_root], worker_root)?
+    val failure = parser_qualification_worker_evidence_v1(worker_root, snapshot, expected)
+    if not file_atomic_write(worker_root + "/shutdown.sdn",
+            snapshot.worker_id + "\n{snapshot.generation}\n" + snapshot.snapshot_digest + "\n"):
+        val _terminated = windows_worker_terminate_v1(token)
+        return Err("cannot request qualification worker shutdown")
+    val exit = match windows_worker_wait_v1(token, 10000):
+        case Ok(value): value
+        case Err(reason):
+            val _terminated = windows_worker_terminate_v1(token)
+            return Err(reason)
+    if exit == -2:
+        val _terminated = windows_worker_terminate_v1(token)
+        return Err("qualification worker shutdown timeout")
+    if failure != "": return Err(failure)
+    if exit != 0: return Err("qualification native worker exit was nonzero")
+    Ok(ParserQualificationEvidenceV1(actual_parent.frontend_identity,
+        "MANAGED_PARSE_REAL_FAILURE_COLLECTION_PASS\nMANAGED_PARSE_DURABLE_REUSE_PASS\nMANAGED_PARSE_PARENT_WORKER_PARITY_PASS\n"))
+
+export parser_qualification_execute_v1, ParserQualificationEvidenceV1

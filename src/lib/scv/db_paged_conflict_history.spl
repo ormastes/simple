@@ -1,0 +1,58 @@
+# Cryptographic/structural checks for an independently authenticated checkpoint.
+# These checks do NOT grant present-day write permission or prove historical ACL
+# approval. The signed checkpoint authority owns that history. Retained revoked
+# keys are usable for signature verification; missing keys remain unverifiable.
+use std.scv.db_paged_conflicts.*
+use std.scv.db_paged_resolve.{db_paged_map_operations}
+use std.scv.db_patch_normalize.{db_normalize_operations}
+use std.scv.db_patch.*
+use std.scv.db_admission.{DbAdmissionPolicy, db_admission_policy_digest, db_patch_signing_bytes}
+use std.scv.db_conflict_resolution.{DbConflictDecision, db_conflict_resolution_provenance}
+use std.scv.db_canonical.{db_canonical_text}
+use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+
+fn db_paged_history_signature(patch: DbPatch, policy: DbAdmissionPolicy) -> Result<bool, text>:
+    if db_admission_policy_digest(policy)? != policy.revision: return Err("SCVDB_POLICY_REVISION")
+    if db_canonical_text(patch.repository)? != db_canonical_text(policy.repository)? or patch.namespace != policy.namespace or patch.epoch != policy.epoch: return Err("SCVDB_AUTHORITY_CONTEXT")
+    if patch.schema_revision != policy.schema_revision or patch.reducer_revision != policy.reducer_revision: return Err("SCVDB_VERSION")
+    val message = db_patch_signing_bytes(patch)?
+    for key in policy.keys:
+        if db_canonical_text(key.key_id)? != db_canonical_text(patch.signer)?: continue
+        if patch.signature.len() != 64 or not pure_ed25519_verify(key.public_key, message, patch.signature): return Err("SCVDB_SIGNATURE_INVALID")
+        return Ok(true)
+    Err("SCVDB_HISTORICAL_KEY_UNAVAILABLE")
+
+fn db_paged_history_conflict(evidence: DbPagedConflictEvidence, policy: DbAdmissionPolicy, resolve: fn(EntityRef) -> Result<EntityRef, text>) -> Result<bool, text>:
+    val encoded = db_paged_conflict_evidence(evidence)?
+    db_paged_history_signature(evidence.original, policy)?
+    val record = evidence.record
+    if record.code != "SCVDB_CONCURRENT_FIELD": return Err("SCVDB_CONFLICT_RESOLUTION_UNSUPPORTED")
+    val operations = db_normalize_operations(db_paged_map_operations(evidence.original.operations, resolve)?)?
+    for operation in operations:
+        match operation:
+            UpdateFields(entity, edits, _):
+                if entity_ref_canonical(entity) != entity_ref_canonical(record.entity): continue
+                for edit in edits:
+                    if edit.field == record.field and db_value_bytes(edit.before)? == db_value_bytes(record.base)? and db_value_bytes(edit.after)? == db_value_bytes(record.incoming)?: return Ok(true)
+            _: ()
+    Err("SCVDB_CONFLICT_ORIGINAL_OPERATION")
+
+fn db_paged_history_resolution(evidence: DbPagedConflictEvidence, patch: DbPatch, policy: DbAdmissionPolicy) -> Result<bool, text>:
+    val encoded = db_paged_conflict_evidence(evidence)?
+    db_paged_history_signature(evidence.original, policy)?
+    db_paged_history_signature(patch, policy)?
+    if patch.operations.len() != 1: return Err("SCVDB_CONFLICT_OPERATION")
+    val record = evidence.record
+    match patch.operations[0]:
+        UpdateFields(entity, edits, _):
+            if edits.len() != 1: return Err("SCVDB_CONFLICT_OPERATION")
+            val decision = DbConflictDecision(conflict_id: record.conflict_id, reviewer: patch.signer, expected_current: record.local, chosen: edits[0].after)
+            val condition = RowPrecondition(base_row: "", expected_revision: record.local_revision, expected_fields: [DbField(name: record.field, value: record.local)])
+            val expected = DbOperation.UpdateFields(record.entity, [FieldEdit(field: record.field, before: record.local, after: decision.chosen)], condition)
+            if db_operation_bytes(expected)? != db_operation_bytes(patch.operations[0])?: return Err("SCVDB_CONFLICT_OPERATION")
+            if patch.provenance != db_conflict_resolution_provenance(record, decision)?: return Err("SCVDB_CONFLICT_PROVENANCE")
+            Ok(true)
+        _: Err("SCVDB_CONFLICT_OPERATION")
+
+export db_paged_history_signature, db_paged_history_conflict, db_paged_history_resolution

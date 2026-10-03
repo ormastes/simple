@@ -1,0 +1,151 @@
+# Versioned metadata loading and explicit resolved-symbol admission.
+# This is a content-only boundary. The caller owns file capture and evidence
+# authentication; matching a receipt string never authenticates its producer.
+use std.common.sdn.parser.{parse_untrusted, parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use compiler.semantics.perf_facts.types.*
+use compiler.semantics.perf_facts.registry_schema.*
+
+fn collection_registry_parse(source: text) -> Result<CollectionRegistrySnapshotV1, text>:
+    if source.len() == 0 or text_byte_len(source) > 65536:
+        return Err("collection-registry-source-size-invalid")
+    # The hardened parser bounds structural depth before recursion; the issue
+    # parser additionally rejects duplicate dictionary keys instead of last-wins.
+    match parse_untrusted(source):
+        case Err(_): return Err("collection-registry-sdn-invalid")
+        case Ok(_): pass_do_nothing
+    val parsed = match parse_with_issues(source):
+        case Err(_): return Err("collection-registry-sdn-invalid")
+        case Ok(value): value
+    if parsed.1.len() != 0:
+        return Err("collection-registry-sdn-issues")
+    val root = _registry_fields(parsed.0, ["schema_version", "metadata_version", "operations"])?
+    val schema = _registry_text(root, "schema_version")?
+    if schema != "simple.collection-operations/v1":
+        return Err("collection-registry-schema-unsupported")
+    val version = _registry_text(root, "metadata_version")?
+    val operations = match root["operations"]:
+        case SdnValue.Array(values): values
+        case _: return Err("collection-registry-operations-invalid")
+    if operations.len() > 256:
+        return Err("collection-registry-operation-count-invalid")
+    var rows: [CollectionRegistryRowV1] = []
+    var names: Dict<text, bool> = {}
+    for value in operations:
+        val row = _registry_row_parse(value)?
+        if names.has(row.stable_name):
+            return Err("collection-registry-operation-duplicate")
+        names[row.stable_name] = true
+        rows.push(row)
+    Ok(CollectionRegistrySnapshotV1(schema_version: schema, metadata_version: version,
+        source_digest: sha256_text(source), source_text: source, rows: rows))
+
+fn _registry_snapshot_validate(snapshot: CollectionRegistrySnapshotV1) -> Result<CollectionRegistrySnapshotV1, text>:
+    # Public value constructors are not admission. Reparse the captured source
+    # and verify every cached projection before consuming it. Called once at
+    # compilation admission, never per expression or per symbol lookup.
+    val current = collection_registry_parse(snapshot.source_text)?
+    if (snapshot.schema_version != current.schema_version or
+            snapshot.metadata_version != current.metadata_version or
+            snapshot.source_digest != current.source_digest or
+            snapshot.rows.len() != current.rows.len()):
+        return Err("collection-registry-snapshot-mismatch")
+    var index = 0
+    while index < current.rows.len():
+        if _registry_row_identity(snapshot.rows[index]) != _registry_row_identity(current.rows[index]):
+            return Err("collection-registry-snapshot-row-mismatch")
+        index = index + 1
+    Ok(current)
+
+fn _registry_index(snapshot: CollectionRegistrySnapshotV1) -> Dict<text, CollectionRegistryRowV1>:
+    var rows: Dict<text, CollectionRegistryRowV1> = {}
+    for row in snapshot.rows:
+        rows[row.stable_name] = row
+    rows
+
+fn _registry_bind_group(
+    current: CollectionRegistrySnapshotV1, bindings: [CollectionRegistryBindingV1],
+    rows_by_name: Dict<text, CollectionRegistryRowV1>
+) -> Result<CollectionOperationRegistry, text>:
+    var registry = CollectionOperationRegistry.new(current.metadata_version)
+    var symbols: Dict<i64, bool> = {}
+    var operations: Dict<text, bool> = {}
+    var owner = ""
+    for binding in bindings:
+        if binding.module_path.trim() == "":
+            return Err("collection-registry-binding-module-missing")
+        if owner == "":
+            owner = binding.module_path
+        if owner != binding.module_path:
+            return Err("collection-registry-binding-module-mismatch")
+        if binding.symbol_id < 0:
+            return Err("collection-registry-binding-symbol-invalid")
+        if symbols.has(binding.symbol_id) or operations.has(binding.stable_name):
+            return Err("collection-registry-binding-duplicate")
+        if (binding.metadata_version != current.metadata_version or
+                binding.source_digest != current.source_digest):
+            return Err("collection-registry-binding-version-mismatch")
+        if not rows_by_name.has(binding.stable_name):
+            return Err("collection-registry-binding-operation-unknown")
+        val row = rows_by_name[binding.stable_name]
+        val receiver = _registry_receiver(row.receiver)?
+        if binding.receiver != receiver:
+            return Err("collection-registry-binding-receiver-mismatch")
+        if binding.signature_fingerprint != row.signature_fingerprint:
+            return Err("collection-registry-binding-signature-mismatch")
+        if not row.backends.contains(binding.backend):
+            return Err("collection-registry-binding-backend-mismatch")
+        if binding.evidence_receipt != row.evidence_receipt:
+            return Err("collection-registry-binding-receipt-mismatch")
+        val summary = CollectionOperationSummary(
+            symbol_id: binding.symbol_id, stable_name: row.stable_name,
+            operation: _registry_operation(row.operation)?, cost: _registry_cost(row.expected_cost)?,
+            output_cardinality: _registry_cardinality(row.cardinality, row.cardinality_value)?,
+            enumeration: _registry_enumeration(row.enumeration, row.enumeration_count)?,
+            expected_receiver: receiver, signature_fingerprint: row.signature_fingerprint,
+            explicit_argument_count: row.explicit_argument_count, effects: row.effects,
+            allocation: _registry_allocation(row.allocation)?, preserves_order: row.preserves_order,
+            materializes: row.materializes, metadata_version: current.metadata_version,
+            provenance: row.provenance, evidence_receipt: row.evidence_receipt,
+            worst_cost: _registry_cost(row.worst_cost)?, key_contract: row.key_contract,
+            supported_backends: row.backends)
+        registry.register(summary)
+        if not registry.is_structurally_valid():
+            return Err("collection-registry-summary-invalid")
+        symbols[binding.symbol_id] = true
+        operations[binding.stable_name] = true
+    Ok(registry)
+
+fn collection_registry_bind(
+    snapshot: CollectionRegistrySnapshotV1, bindings: [CollectionRegistryBindingV1]
+) -> Result<CollectionOperationRegistry, text>:
+    if bindings.len() > 4096:
+        return Err("collection-registry-binding-count-invalid")
+    val current = _registry_snapshot_validate(snapshot)?
+    _registry_bind_group(current, bindings, _registry_index(current))
+
+fn collection_registry_bind_modules(
+    snapshot: CollectionRegistrySnapshotV1, bindings: [CollectionRegistryBindingV1]
+) -> Result<Dict<text, CollectionOperationRegistry>, text>:
+    if bindings.len() > 4096:
+        return Err("collection-registry-binding-count-invalid")
+    val current = _registry_snapshot_validate(snapshot)?
+    val rows = _registry_index(current)
+    var groups: Dict<text, [CollectionRegistryBindingV1]> = {}
+    for binding in bindings:
+        if binding.module_path.trim() == "":
+            return Err("collection-registry-binding-module-missing")
+        var group = groups[binding.module_path] ?? []
+        group.push(binding)
+        groups[binding.module_path] = group
+    var registries: Dict<text, CollectionOperationRegistry> = {}
+    for owner in groups.keys():
+        registries[owner] = _registry_bind_group(current, groups[owner], rows)?
+    Ok(registries)
+
+export use compiler.semantics.perf_facts.registry_schema.{
+    CollectionRegistryRowV1, CollectionRegistrySnapshotV1, CollectionRegistryBindingV1
+}
+export collection_registry_parse, collection_registry_bind, collection_registry_bind_modules

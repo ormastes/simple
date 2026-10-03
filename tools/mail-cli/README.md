@@ -52,6 +52,22 @@ repo-relative launcher) and supply the placeholder as an argument.
 
 ## dev-hub invocation
 
+Both clients read `email.sdn` through the canonical Simple SDN parser. Install
+the rebuilt `simple-mail-credentials` helper with its `config-json PATH` mode;
+the shell client does not compile source or fall back to an AWK parser.
+`MAIL_CONFIG_BIN` can select that helper independently of `MAIL_CREDENTIAL_BIN`.
+The bridge emits account metadata, credential commands and encrypted envelopes,
+so do not capture its output in public logs. It rejects plaintext `password`
+values, duplicate keys, invalid field types and malformed port/TLS settings
+with stable `MAIL_CONFIG_*` diagnostics that contain no input values.
+Use `password_cmd` for a credential reference or the existing encrypted password
+store. Explicit `.json` paths retain legacy compatibility; SDN parsing never
+silently falls back to JSON. One-time JSON import requires
+`MAIL_IMPORT_LEGACY=1` and rejects plaintext credentials. Account selection is `--account` then
+`default_account`; credential overrides retain `--password-file` then
+`--password-cmd` precedence. An unknown selected account never uses a sibling.
+POP3 defaults to port 995 for implicit TLS and port 110 for STARTTLS.
+
 dev-hub passes its selected SDN configuration with `--config-file`. Both tools
 also accept `--config-dir DIR` for `DIR/email.sdn`. For direct process
 execution on Windows, configure `DEVHUB_MAIL_BIN` to the Git Bash executable and

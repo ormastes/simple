@@ -1,0 +1,48 @@
+#!/bin/sh
+# Release's real inline Stage2 producer profile; no main builder fiction.
+# Caller sources the existing bootstrap-stage3 provenance facade first.
+bootstrap_cache_release_stage2_cache_assignments_v1() (
+  [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+  transcript=$1
+  present=0
+  for name in SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE SIMPLE_HIR_CACHE_DIR; do
+    count=$(grep -c "^explicit-env:[^:]*:${name}=" "$transcript" || true)
+    case "$count" in 0) ;; 1) present=$((present + 1)) ;; *) return 1 ;; esac
+  done
+  # Retain the historical exact vector when all four fields were absent.
+  [ "$present" -ne 0 ] || exit 0
+  [ "$present" -eq 4 ] || return 1
+  frontend=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_FRONTEND_CACHE) || return 1
+  frontend_dir=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_FRONTEND_CACHE_DIR) || return 1
+  hir=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_HIR_CACHE) || return 1
+  hir_dir=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_HIR_CACHE_DIR) || return 1
+  [ "$frontend" = 1 ] && [ "$hir" = 1 ] || return 1
+  [ -n "$frontend_dir" ] && [ -n "$hir_dir" ] || return 1
+  printf '%s\n' "SIMPLE_FRONTEND_CACHE=$frontend" "SIMPLE_FRONTEND_CACHE_DIR=$frontend_dir" \
+    "SIMPLE_HIR_CACHE=$hir" "SIMPLE_HIR_CACHE_DIR=$hir_dir"
+)
+
+# Explicit key metadata describes actual release inputs. No unavailable main
+# plugin/K1/ABI selection is invented. The inner AOT key independently binds
+# the full actual environment through its source-owned fingerprint.
+# stripped = inline Stage2/Stage3 child under run_transcribed's env -i;
+# inherited = native tool child inheriting the already selected parent inputs.
+bootstrap_cache_release_options_v1() (
+  [ "$#" -eq 3 ] || return 1
+  domain=$1 library=$2 link=$3
+  case "$domain" in stripped|inherited) ;; *) return 1 ;; esac
+  for pair in 'abi SIMPLE_ABI_POLICY' 'plugin-policy SIMPLE_PLUGIN_MANIFEST_POLICY' \
+    'k1-policy SIMPLE_KERNEL_K1_POLICY' 'coverage SIMPLE_COVERAGE_CUTOVER_STATE' \
+    'composition SIMPLE_K1_COMPOSITION_SHA256_BEFORE'; do
+    key=${pair%% *} name=${pair#* }
+    if [ "$domain" = inherited ] && value=$(printenv "$name"); then
+      case "$value" in *'
+'*) return 1 ;; esac
+      printf '%s=present:%s:%s\n' "$key" "${#value}" "$value"
+    else
+      printf '%s=absent\n' "$key"
+    fi
+  done
+  printf 'library-path=present:%s:%s\nlink-compat=present:%s:%s\nstub-fallback=forbidden\n' \
+    "${#library}" "$library" "${#link}" "$link"
+)

@@ -1,0 +1,149 @@
+# Read a compiler-authored runtime/std authority and verify both sealed CAS
+# baseline packages before exposing the environment values to grouped builds.
+
+use compiler.driver.cache.runtime_std_authority_receipt.{
+    RuntimeStdAuthorityReceiptV1,
+    runtime_std_authority_receipt_path_v1,
+    runtime_std_authority_receipt_read_v1,
+    runtime_std_authority_receipt_path_v2,
+    runtime_std_authority_receipt_read_v2
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1, runtime_std_action_digest_v1,
+    runtime_std_action_digest_v2,
+    runtime_std_load_baseline_v1, runtime_std_load_baseline_v2,
+    RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1
+}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2}
+use compiler.driver.cache.runtime_std_native_cold_load_v2.{
+    runtime_std_native_cold_objects_admit_v2}
+
+struct RuntimeStdBaselinePinsV1:
+    compiler_digest: text
+    action_abi_digest: text
+    runtime_abi_digest: text
+    std_abi_digest: text
+    config_digest: text
+    target_triple: text
+    snapshot_revision: text
+    runtime_action_digest: text
+    std_action_digest: text
+    runtime_archive_digest: text
+    std_archive_digest: text
+
+struct RuntimeStdBaselinePinsV2:
+    baseline: RuntimeStdBaselinePinsV1
+    budget: RuntimeStdNativeActionBudgetV2
+
+fn runtime_std_authority_admit_v1(
+    index_read_root: text, receipt_path: text, receipt_digest: text,
+    expected_compiler_digest: text, expected_variant_digest: text,
+    expected_target_triple: text, expected_snapshot_revision: text
+) -> Result<RuntimeStdBaselinePinsV1, text>:
+    val read = runtime_std_authority_receipt_read_v1(
+        receipt_path, receipt_digest)
+    if read.is_err():
+        return Err("runtime-std-authority-{read.unwrap_err()}")
+    val receipt: RuntimeStdAuthorityReceiptV1 = read.unwrap()
+    if (receipt_path != runtime_std_authority_receipt_path_v1(
+                index_read_root, receipt_digest) or
+            receipt.compiler_digest != expected_compiler_digest or
+            receipt.config_digest != expected_variant_digest or
+            receipt.target_triple != expected_target_triple or
+            receipt.snapshot_revision != expected_snapshot_revision):
+        return Err("runtime-std-authority-binding-mismatch")
+    val authority = RuntimeStdPackageAuthorityV1(
+        receipt.compiler_digest, receipt.action_abi_digest,
+        receipt.runtime_abi_digest, receipt.std_abi_digest,
+        receipt.config_digest, receipt.target_triple,
+        receipt.snapshot_revision)
+    val runtime_action = runtime_std_action_digest_v1(
+        authority, RUNTIME_PACKAGE_IDENTITY_V1)
+    val std_action = runtime_std_action_digest_v1(
+        authority, STD_PACKAGE_IDENTITY_V1)
+    if runtime_action == "" or runtime_action != receipt.runtime_action_digest or
+            std_action == "" or std_action != receipt.std_action_digest:
+        return Err("runtime-std-authority-action-mismatch")
+    val baseline = runtime_std_load_baseline_v1(index_read_root, authority)
+    if not baseline.valid or baseline.runtime.receipt == nil or
+            baseline.std.receipt == nil:
+        return Err("runtime-std-authority-baseline-{baseline.reason}")
+    if (baseline.runtime.receipt!.archive_digest != receipt.runtime_archive_digest or
+            baseline.std.receipt!.archive_digest != receipt.std_archive_digest or
+            baseline.runtime.receipt!.receipt_digest != receipt.runtime_receipt_digest or
+            baseline.std.receipt!.receipt_digest != receipt.std_receipt_digest):
+        return Err("runtime-std-authority-baseline-digest-mismatch")
+    Ok(RuntimeStdBaselinePinsV1(
+        receipt.compiler_digest, receipt.action_abi_digest,
+        receipt.runtime_abi_digest, receipt.std_abi_digest,
+        receipt.config_digest, receipt.target_triple,
+        receipt.snapshot_revision,
+        runtime_action, std_action,
+        receipt.runtime_archive_digest, receipt.std_archive_digest))
+
+fn runtime_std_authority_admit_v2(
+    index_read_root: text, receipt_path: text, receipt_digest: text,
+    expected_compiler_digest: text, expected_variant_digest: text,
+    expected_target_triple: text, expected_snapshot_revision: text
+) -> Result<RuntimeStdBaselinePinsV2, text>:
+    val read = runtime_std_authority_receipt_read_v2(
+        receipt_path, receipt_digest)
+    if read.is_err():
+        return Err("runtime-std-authority-v2-{read.unwrap_err()}")
+    val receipt = read.unwrap()
+    val base = receipt.base
+    if receipt_path != runtime_std_authority_receipt_path_v2(
+                index_read_root, receipt_digest) or
+            base.compiler_digest != expected_compiler_digest or
+            base.config_digest != expected_variant_digest or
+            base.target_triple != expected_target_triple or
+            base.snapshot_revision != expected_snapshot_revision:
+        return Err("runtime-std-authority-v2-binding-mismatch")
+    val authority = RuntimeStdPackageAuthorityV1(
+        base.compiler_digest, base.action_abi_digest,
+        base.runtime_abi_digest, base.std_abi_digest,
+        base.config_digest, base.target_triple,
+        base.snapshot_revision)
+    val runtime_action = runtime_std_action_digest_v2(authority,
+        RUNTIME_PACKAGE_IDENTITY_V1, receipt.budget)
+    val std_action = runtime_std_action_digest_v2(authority,
+        STD_PACKAGE_IDENTITY_V1, receipt.budget)
+    if runtime_action == "" or
+            runtime_action != base.runtime_action_digest or
+            std_action == "" or std_action != base.std_action_digest:
+        return Err("runtime-std-authority-v2-action-mismatch")
+    val baseline = runtime_std_load_baseline_v2(
+        index_read_root, authority, receipt.budget)
+    if not baseline.valid or baseline.runtime.receipt == nil or
+            baseline.std.receipt == nil:
+        return Err("runtime-std-authority-v2-baseline-{baseline.reason}")
+    if baseline.runtime.receipt!.archive_digest !=
+            base.runtime_archive_digest or
+            baseline.std.receipt!.archive_digest !=
+                base.std_archive_digest or
+            baseline.runtime.receipt!.receipt_digest !=
+                base.runtime_receipt_digest or
+            baseline.std.receipt!.receipt_digest !=
+                base.std_receipt_digest:
+        return Err("runtime-std-authority-v2-baseline-digest-mismatch")
+    val runtime_objects = runtime_std_native_cold_objects_admit_v2(
+        index_read_root, baseline.runtime.receipt!,
+        expected_target_triple)
+    if runtime_objects != "ok":
+        return Err("runtime-std-authority-v2-runtime-{runtime_objects}")
+    val std_objects = runtime_std_native_cold_objects_admit_v2(
+        index_read_root, baseline.std.receipt!,
+        expected_target_triple)
+    if std_objects != "ok":
+        return Err("runtime-std-authority-v2-std-{std_objects}")
+    val pins = RuntimeStdBaselinePinsV1(
+        base.compiler_digest, base.action_abi_digest,
+        base.runtime_abi_digest, base.std_abi_digest,
+        base.config_digest, base.target_triple,
+        base.snapshot_revision, runtime_action, std_action,
+        base.runtime_archive_digest, base.std_archive_digest)
+    Ok(RuntimeStdBaselinePinsV2(pins, receipt.budget))
+
+export RuntimeStdBaselinePinsV1, runtime_std_authority_admit_v1
+export RuntimeStdBaselinePinsV2, runtime_std_authority_admit_v2

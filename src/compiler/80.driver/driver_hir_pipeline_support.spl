@@ -1,6 +1,7 @@
 # Scalar support boundaries for the CompilerDriver HIR pipeline.
 
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_record, mem_snapshot_record_promotion}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{
@@ -18,7 +19,7 @@ use compiler.hir.hir_lowering.types.{LoweringError, LoweringErrorKind}
 use compiler.frontend.aspect_registry.{aspect_registry_reset}
 use compiler.frontend.effect_registry.{effect_registry_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
-use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
+use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_retained_frontend_owners_v1}
 use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
@@ -28,6 +29,10 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_log_helpers.{log_phase}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_module_abort_v1, reverse_reference_module_seal_v1,
+    reverse_reference_module_publish_v1
+}
 
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_exit(code: i64)
@@ -47,20 +52,42 @@ fn reset_frontend_registries_after_scope():
     effect_registry_reset()
     layer_eq_registry_reset()
 
-pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
+pub fn driver_abort_reverse_reference_parse_scope_v1(token: i64) -> bool:
+    val aborted = reverse_reference_module_abort_v1(token)
+    val ended = driver_end_transient_parse_scope()
+    aborted and ended
+
+# The caller has paused its own allocation scope and retained its other roots.
+# Only a successfully sealed batch may be published after that scope ends.
+pub fn driver_publish_reverse_reference_parse_scope_v1(token: i64) -> bool:
+    if not reverse_reference_module_seal_v1(token):
+        val _ended = driver_abort_reverse_reference_parse_scope_v1(token)
+        return false
+    if not driver_end_transient_parse_scope():
+        val _aborted = reverse_reference_module_abort_v1(token)
+        return false
+    if not reverse_reference_module_publish_v1(token):
+        val _aborted = reverse_reference_module_abort_v1(token)
+        return false
+    true
+
+pub fn driver_finish_failed_parse_scope(source_path: text, reverse_token: i64 = 0) -> text:
     if not rt_transient_array_scope_pause():
-        val _ended = driver_end_transient_parse_scope()
+        val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
         reset_frontend_registries_after_scope()
-        return "parse error in {source_path} (see [parser_error] output above); transient parser scope pause failed"
-    if not driver_promote_frontend_registry_owners():
-        val _ended = driver_end_transient_parse_scope()
+        return "parse error in {source_path}; transient parser scope pause failed before diagnostic capture"
+    # Allocate the retained message only after pausing the scratch arena.
+    # Later cleanup must not free the message returned to the driver.
+    val parse_error = driver_parse_error_message(source_path)
+    if not driver_promote_retained_frontend_owners_v1(true):
+        val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
         reset_frontend_registries_after_scope()
         rt_exit(1)
-        return "parse error in {source_path} (see [parser_error] output above); frontend registry promotion failed"
-    if not driver_end_transient_parse_scope():
+        return "{parse_error}; frontend registry promotion failed"
+    if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
         reset_frontend_registries_after_scope()
-        return "parse error in {source_path} (see [parser_error] output above); transient parser scope end failed"
-    "parse error in {source_path} (see [parser_error] output above)"
+        return "{parse_error}; reverse-reference parse-scope publication failed"
+    parse_error
 
 fn driver_normalized_source_path(source_path: text) -> text:
     # The surface side of every identity/content comparison below stores
@@ -89,6 +116,33 @@ pub fn driver_stage3_surface_identity_matches(
         surface_module_name == source_module_name and
         surface_content_length == source_content_length and
         surface_content_hash == source_content_hash
+
+pub fn driver_stage3_surface_identity_matches_receipt(
+    surface_source_index: i64,
+    surface_canonical_path: text,
+    surface_module_name: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_index: i64,
+    source_path: text,
+    source_module_name: text,
+    source_content_length: i64,
+    source_content_hash: i64,
+    source_was_evicted: bool
+) -> bool:
+    # Phase 1 reserves zero for a missing hash. A real zero is stored as one;
+    # normalize the surface side only when comparing an evicted-source receipt.
+    if source_was_evicted and source_content_hash == 0:
+        return false
+    val compare_surface_hash = if source_was_evicted and surface_content_hash == 0:
+        1
+    else:
+        surface_content_hash
+    driver_stage3_surface_identity_matches(
+        surface_source_index, surface_canonical_path, surface_module_name,
+        surface_content_length, compare_surface_hash,
+        source_index, source_path, source_module_name,
+        source_content_length, source_content_hash)
 
 pub fn driver_stage3_surface_content_matches(
     surface_canonical_path: text,

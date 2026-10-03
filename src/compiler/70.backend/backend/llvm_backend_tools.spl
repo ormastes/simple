@@ -19,6 +19,7 @@ use std.nogc_sync_mut.path.{dirname}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io_runtime.{process_run}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
 
 # SFFI for reading files (object code + optimized IR)
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -72,10 +73,23 @@ fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
     Parses nm output to identify function, data, and constant symbols.
     Skips undefined (U) and weak (W/w) symbols.
     """
+    if native_tool_strict_requested_v1():
+        match extract_symbols_nm_checked_v1(obj_path):
+            case Ok(symbols): return symbols
+            case Err(_): return []
     val (nm_out, nm_err, nm_code) = backend_shell_tuple("nm '{obj_path}' 2>/dev/null")
     if nm_code != 0:
         return []
+    extract_symbols_nm_output_v1(nm_out)
 
+pub fn extract_symbols_nm_checked_v1(obj_path: text) -> Result<[CompiledSymbol], text>:
+    val nm = native_tool_strict_resolve_v1("nm")?
+    val (stdout, stderr, code) = process_run(nm, [obj_path])
+    if code != 0:
+        return Err("admitted nm failed for '" + obj_path + "': " + stderr)
+    Ok(extract_symbols_nm_output_v1(stdout))
+
+pub fn extract_symbols_nm_output_v1(nm_out: text) -> [CompiledSymbol]:
     var symbols: [CompiledSymbol] = []
     val lines = nm_out.split("\n")
     for line in lines:
@@ -255,7 +269,9 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
             file_delete(bitcode_path)
 
     # Extract symbols before deleting the object file
-    val symbols = extract_symbols_nm(obj_path)
+    val symbols = if native_tool_strict_requested_v1():
+        extract_symbols_nm_checked_v1(obj_path)?
+    else: extract_symbols_nm(obj_path)
 
     # Read object bytes
     val bytes = rt_file_read_bytes(obj_path)

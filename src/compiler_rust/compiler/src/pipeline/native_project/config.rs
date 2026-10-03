@@ -282,11 +282,11 @@ fn bootstrap_hosted_native_all_runtime(
     temp_dir: &Path,
 ) -> Option<PathBuf> {
     fn usable(path: PathBuf) -> Option<PathBuf> {
-        // An empty placeholder archive is not an authority.
-        match std::fs::metadata(&path) {
-            Ok(meta) if meta.is_file() && meta.len() > 0 => Some(path),
-            _ => None,
-        }
+        // Provider-only supplements can be nonempty archives too. Admitting one
+        // here bypasses the complete runtime and leaves the entire core ABI
+        // unresolved. Require both the hosted driver and its runtime owners.
+        let symbols = archive_defined_symbols(&path)?;
+        bootstrap_native_all_has_runtime_owners(&symbols).then_some(path)
     }
 
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -317,6 +317,12 @@ fn bootstrap_hosted_native_all_runtime(
     }
 
     build_bootstrap_hosted_native_all_archive(native_all_name, temp_dir).and_then(usable)
+}
+
+pub(super) fn bootstrap_native_all_has_runtime_owners(symbols: &std::collections::HashSet<String>) -> bool {
+    ["rt_native_build", "rt_set_args", "rt_alloc", "rt_free",
+     "rt_string_new", "rt_string_free", "rt_array_new", "rt_string_new_literal"]
+        .iter().all(|symbol| symbols.contains(*symbol))
 }
 
 /// Last resort for `bootstrap_hosted_native_all_runtime`: build the hosted

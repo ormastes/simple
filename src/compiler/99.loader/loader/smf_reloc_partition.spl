@@ -1,0 +1,39 @@
+# An SMF relocation's offset is in the merged Code section. Executable
+# symbols are mapped separately by the loader, so each patch must belong to
+# exactly one mapped function and be rebased to that function's mapping.
+use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType}
+use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
+
+fn smf_partition_code_relocations_v1(relocs: [SmfRelocEntry],
+        code_symbols: [SmfSymbol]) -> Result<Dict<text, [SmfRelocEntry]>, text>:
+    var by_symbol: Dict<text, [SmfRelocEntry]> = {}
+    for reloc in relocs:
+        var width: i64 = 4
+        if reloc.reloc_type == 1:
+            width = 8
+        elif reloc.reloc_type != 2 and reloc.reloc_type != 3 and
+                reloc.reloc_type != 4 and reloc.reloc_type != 5:
+            return Err("unsupported SMF relocation wire type {reloc.reloc_type}")
+        if reloc.offset < 0 or reloc.offset > 0x7FFFFFFFFFFFFFFF - width:
+            return Err("SMF relocation offset is invalid")
+        var owner = ""
+        var owner_base: i64 = 0
+        for symbol in code_symbols:
+            if symbol.section_index != 0 or symbol.ty != SymbolType.Function or
+                    symbol.size < width or symbol.offset < 0:
+                continue
+            if reloc.offset >= symbol.offset and
+                    reloc.offset - symbol.offset <= symbol.size - width:
+                if owner != "":
+                    return Err("SMF relocation belongs to overlapping code symbols")
+                owner = symbol.name
+                owner_base = symbol.offset
+        if owner == "":
+            return Err("SMF relocation has no mapped code symbol at offset {reloc.offset}")
+        val local = SmfRelocEntry(offset: reloc.offset - owner_base,
+            symbol_index: reloc.symbol_index, reloc_type: reloc.reloc_type,
+            addend: reloc.addend)
+        var bucket = by_symbol[owner] ?? []
+        bucket = bucket.push(local)
+        by_symbol[owner] = bucket
+    Ok(by_symbol)

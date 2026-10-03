@@ -7,6 +7,13 @@ on:
       - 'src/compiler_rust/**'
       - 'src/compiler/70.backend/**'
       - 'src/lib/nogc_sync_mut/ffi/llvm.spl'
+      - 'scripts/check/lib/bootstrap-stage3/command-snapshot.shs'
+      - 'scripts/check/lib/bootstrap-stage3/authority.shs'
+      - 'scripts/resource/process-tree-rss-watchdog.pl'
+      - 'scripts/bootstrap/bootstrap-session-exec.c'
+      - 'test/01_unit/scripts/bootstrap_rss_retry_test.shs'
+      - 'test/01_unit/scripts/bootstrap_windows_transcribed_rss_inherit_test.shs'
+      - 'scripts/check/check-bootstrap-windows-c-admission.shs'
       - '.github/workflows/windows-build.yml'
   workflow_dispatch:
 
@@ -124,6 +131,25 @@ jobs:
           echo "CXX=clang-cl" >> "$GITHUB_ENV"
           clang-cl --version
 
+      - name: Verify Windows transcribed RSS and retry receipts
+        if: matrix.toolchain == 'msvc'
+        shell: bash
+        run: |
+          export PATH="$(cygpath -u "$LLVM_ROOT")/bin:$PATH"
+          export CC=clang-cl
+          proof="$(cygpath -u "$RUNNER_TEMP")/bootstrap-rss-contract"
+          mkdir -p "$proof"
+          export SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$(cygpath -u "$RUNNER_TEMP")/bootstrap-rss-session-cache"
+          sh test/01_unit/scripts/bootstrap_rss_retry_test.shs "$proof"
+
+      - name: Preserve Windows RSS contract evidence
+        if: always() && matrix.toolchain == 'msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bootstrap-rss-contract
+          path: ${{ runner.temp }}/bootstrap-rss-contract
+          if-no-files-found: warn
+
       # GNU-target support comes from the MinGW sysroot; Clang remains the driver.
       - name: Setup MSYS2 (MinGW)
         if: matrix.toolchain == 'mingw'
@@ -195,6 +221,15 @@ jobs:
         run: |
           "CC=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify Windows C admission with native clang-cl
+        if: matrix.toolchain == 'msvc'
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          clang_cl=$(cygpath -u "$CC")
+          sh scripts/check/check-bootstrap-windows-c-admission.shs \
+            "$clang_cl" "$PWD/build/bootstrap/windows-c-admission"
 
       - name: Build Rust seed
         working-directory: src/compiler_rust

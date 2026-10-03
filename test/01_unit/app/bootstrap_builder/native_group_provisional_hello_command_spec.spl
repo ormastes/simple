@@ -1,0 +1,128 @@
+use std.spec.{describe, it, expect, fail}
+use app.bootstrap_builder.native_group_provisional_hello_command.{
+    native_group_provisional_hello_command_decode_v1
+}
+
+fn _hello_command_fields_v1() -> {text: text}:
+    var hello: {text: text} = {}
+    hello["producer_path"] = "D:/producer/simple.exe"
+    hello["producer_digest"] = "a".repeat(64)
+    hello["hello_source_path"] =
+        "D:/checkout/test/04_smoke/windows_native_hello.spl"
+    hello["hello_source_digest"] = "b".repeat(64)
+    hello["hello_executable_path"] = "D:/hello/hello.exe"
+    hello["compile_command_path"] = "D:/hello/compile.argv"
+    hello["compile_log_path"] = "D:/hello/compile.log"
+    hello
+
+fn _hello_command_payload_v1(hello: {text: text}) -> text:
+    val target = "x86_64-pc-windows-msvc"
+    val keys = ["producer_path", "producer_digest",
+        "hello_source_path", "hello_source_digest",
+        "hello_executable_path", "cache_root", "runtime_root",
+        "target", "backend", "compile_exit", "run_exit", "arg_count"]
+    var fields: {text: text} = {}
+    fields["producer_path"] = hello["producer_path"]
+    fields["producer_digest"] = hello["producer_digest"]
+    fields["hello_source_path"] = hello["hello_source_path"]
+    fields["hello_source_digest"] = hello["hello_source_digest"]
+    fields["hello_executable_path"] = hello["hello_executable_path"]
+    fields["cache_root"] = "D:/hello/cache/hello"
+    fields["runtime_root"] = "D:/checkout/src/runtime"
+    fields["target"] = target
+    fields["backend"] = "llvm"
+    fields["compile_exit"] = "0"
+    fields["run_exit"] = "0"
+    fields["arg_count"] = "27"
+    var rows: [text] = ["SIMPLE-PROVISIONAL-HELLO-COMMAND-1"]
+    for key in keys:
+        rows = rows.push(key + "=" + fields[key])
+    val args = [hello["producer_path"], "native-build", "--target",
+        target, "--backend", "llvm", "--source", "src/compiler",
+        "--source", "src/app", "--source", "src/lib",
+        "--entry-closure", "--threads", "1", "--cache-dir",
+        fields["cache_root"], "--mode", "one-binary", "--entry",
+        "test/04_smoke/windows_native_hello.spl",
+        "--runtime-bundle", "core-c-bootstrap", "--runtime-path",
+        fields["runtime_root"], "-o", hello["hello_executable_path"]]
+    for index in 0..args.len():
+        rows = rows.push("arg_{index}=" + args[index])
+    rows.join("\n") + "\n"
+
+describe "provisional hello launcher transcript":
+    it "accepts the launcher's literal raw-header command file":
+        val hello = _hello_command_fields_v1()
+        val target = "x86_64-pc-windows-msvc"
+        val sample = "SIMPLE-PROVISIONAL-HELLO-COMMAND-1\n" +
+            "producer_path=D:/producer/simple.exe\n" +
+            "producer_digest=" + "a".repeat(64) + "\n" +
+            "hello_source_path=D:/checkout/test/04_smoke/windows_native_hello.spl\n" +
+            "hello_source_digest=" + "b".repeat(64) + "\n" +
+            "hello_executable_path=D:/hello/hello.exe\n" +
+            "cache_root=D:/hello/cache/hello\n" +
+            "runtime_root=D:/checkout/src/runtime\n" +
+            "target=x86_64-pc-windows-msvc\nbackend=llvm\n" +
+            "compile_exit=0\nrun_exit=0\narg_count=27\n" +
+            "arg_0=D:/producer/simple.exe\narg_1=native-build\n" +
+            "arg_2=--target\narg_3=x86_64-pc-windows-msvc\n" +
+            "arg_4=--backend\narg_5=llvm\n" +
+            "arg_6=--source\narg_7=src/compiler\n" +
+            "arg_8=--source\narg_9=src/app\n" +
+            "arg_10=--source\narg_11=src/lib\n" +
+            "arg_12=--entry-closure\narg_13=--threads\narg_14=1\n" +
+            "arg_15=--cache-dir\narg_16=D:/hello/cache/hello\n" +
+            "arg_17=--mode\narg_18=one-binary\n" +
+            "arg_19=--entry\n" +
+            "arg_20=test/04_smoke/windows_native_hello.spl\n" +
+            "arg_21=--runtime-bundle\narg_22=core-c-bootstrap\n" +
+            "arg_23=--runtime-path\narg_24=D:/checkout/src/runtime\n" +
+            "arg_25=-o\narg_26=D:/hello/hello.exe\n"
+        match native_group_provisional_hello_command_decode_v1(
+                sample, hello, target):
+            Ok(cache): expect(cache).to_equal("D:/hello/cache/hello")
+            Err(reason): fail(reason)
+        match native_group_provisional_hello_command_decode_v1(
+                sample.replace("SIMPLE-PROVISIONAL-HELLO-COMMAND-1\n",
+                    "schema=SIMPLE-PROVISIONAL-HELLO-COMMAND-1\n"),
+                hello, target):
+            Ok(_): fail("keyed command header accepted")
+            Err(reason): expect(reason).to_contain("count")
+
+    it "accepts only the pinned producer, fixture, runtime bundle and output":
+        val hello = _hello_command_fields_v1()
+        match native_group_provisional_hello_command_decode_v1(
+                _hello_command_payload_v1(hello), hello,
+                "x86_64-pc-windows-msvc"):
+            Ok(cache): expect(cache).to_equal("D:/hello/cache/hello")
+            Err(reason): fail(reason)
+
+    it "rejects another fixture, output, runtime bundle or target":
+        val hello = _hello_command_fields_v1()
+        val payload = _hello_command_payload_v1(hello)
+        for changed in [
+                payload.replace("arg_20=test/04_smoke/windows_native_hello.spl",
+                    "arg_20=test/04_smoke/other.spl"),
+                payload.replace("arg_22=core-c-bootstrap",
+                    "arg_22=other-bundle"),
+                payload.replace("arg_26=D:/hello/hello.exe",
+                    "arg_26=D:/hello/other.exe"),
+                payload.replace("target=x86_64-pc-windows-msvc",
+                    "target=aarch64-pc-windows-msvc")]:
+            match native_group_provisional_hello_command_decode_v1(
+                    changed, hello, "x86_64-pc-windows-msvc"):
+                Ok(_): fail("changed hello compile transcript admitted")
+                Err(reason): expect(reason).to_contain("differ")
+
+    it "rejects old status-only and extra argument transcripts":
+        val hello = _hello_command_fields_v1()
+        val payload = _hello_command_payload_v1(hello)
+        match native_group_provisional_hello_command_decode_v1(
+                payload.replace("arg_26=D:/hello/hello.exe\n", ""),
+                hello, "x86_64-pc-windows-msvc"):
+            Ok(_): fail("missing output argument accepted")
+            Err(reason): expect(reason).to_contain("count")
+        match native_group_provisional_hello_command_decode_v1(
+                payload + "arg_27=hidden\n", hello,
+                "x86_64-pc-windows-msvc"):
+            Ok(_): fail("extra launcher argument accepted")
+            Err(reason): expect(reason).to_contain("count")

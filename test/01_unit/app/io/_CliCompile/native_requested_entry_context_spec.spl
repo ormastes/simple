@@ -1,0 +1,71 @@
+# @req REQ-NATIVE-REQUESTED-ENTRY-001
+# @cover src/app/io/_CliCompile/native_collection_profile.spl
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_write_exact, file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
+use app.io.env_ops.{env_get, env_set}
+use app.io._CliCompile.native_collection_profile.{native_build_compile_with_collection_profile}
+use app.optimize.sprof_collection_profile.{sprof_source_module_identity, sprof_serialize_collection_profile}
+use compiler.driver.driver.{compiler_driver_create}
+use compiler.driver.driver_source_loading.{_driver_collect_entry_import_source}
+use compiler.common.driver_core_types.{CompileMode, CompileResult, driver_core_compile_options_default, compile_result_is_success}
+
+extern fn rt_path_absolute(path: text) -> text
+
+fn requested_entry_result(profiled: bool) -> CompileResult:
+    val entry = rt_path_absolute("test/fixtures/compiler/native_requested_entry/main.spl")
+    val old_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+    val old_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    expect(env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)).to_equal(true)
+    expect(env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")).to_equal(true)
+
+    var options = driver_core_compile_options_default()
+    # Check mode exercises real collection/parsing/typechecking without a linker.
+    options.mode = CompileMode.Check
+    options.cli_mode_text = "check"
+    options.input_files = [entry]
+    val driver = compiler_driver_create(options)
+    var profile_path = ""
+    var profile_digest = ""
+    var workload = ""
+    var target = ""
+    if profiled:
+        expect(dir_create_all("build/test/native-requested-entry-context")).to_equal(true)
+        profile_path = "build/test/native-requested-entry-context/profile.sprof"
+        workload = "requested-entry"
+        target = "x86_64-v3"
+        val sample = AdaptiveSetWorkloadProfile(
+            site_id: "ast://module/entry#stable", target_profile_id: target,
+            sample_count: 1, size_p95: 1, lookup_count_p95: 1,
+            hit_count_p95: 1, miss_count_p95: 0)
+        val body = sprof_serialize_collection_profile(
+            sprof_source_module_identity(entry), workload, [], [sample])
+        profile_digest = sha256_text(body)
+        expect(file_write_exact(profile_path, body)).to_equal(true)
+
+    val result = native_build_compile_with_collection_profile(
+        driver, entry, profile_path, workload, target, profile_digest)
+    expect(env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)).to_equal(true)
+    expect(env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
+    result
+
+describe "native requested-entry context":
+    it "loads a requested test entry without a collection profile":
+        # @req REQ-NATIVE-REQUESTED-ENTRY-001
+        step("Compile the absolute requested test entry through the native CLI's shared handoff")
+        expect(compile_result_is_success(requested_entry_result(false))).to_equal(true)
+
+    it "loads the same requested test entry with admitted collection feedback":
+        # @req REQ-NATIVE-REQUESTED-ENTRY-001
+        step("Admit a real source-bound profile before compiling the requested entry")
+        expect(compile_result_is_success(requested_entry_result(true))).to_equal(true)
+
+    it "keeps unrelated existing test dependencies excluded":
+        # @req REQ-NATIVE-REQUESTED-ENTRY-002
+        step("An existing neighboring test source remains excluded by dependency collection")
+        val unrelated = rt_path_absolute("test/fixtures/compiler/native_requested_entry/unrelated.spl")
+        expect(file_exists(unrelated)).to_equal(true)
+        expect(_driver_collect_entry_import_source(unrelated).len()).to_equal(0)

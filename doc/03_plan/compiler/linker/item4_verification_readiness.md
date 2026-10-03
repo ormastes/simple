@@ -81,6 +81,11 @@ Read-only runtime reinspection found no deployed `bin/release` executable and
 the known candidate still reports `admission=UNADMITTED`, despite child exit 0.
 No further diagnostic build or unauthorized Rust seed test was attempted.
 
+## Historical main-only scope before reconciliation
+
+This earlier forward-port note is retained for provenance. The reconciled tree
+includes the release-only SCV callers and their retained-owner migrations.
+
 ## Main forward-port scope
 
 Main base: `f2423274600ffe7beef03e2bf07fcf8bba310db7`. The release-only SCV

@@ -1,0 +1,81 @@
+# REQ-005: explicit contracts and actual generic map/set, never native Dict.
+use std.gc_async_mut.pure.indexed_collections.{HashMap, HashSet}
+use std.nogc_sync_mut.df.mod.{Symbol, symbol_eq}
+
+enum IndexShade:
+    Light
+    Dark
+
+fn integer_hash(key: i64) -> i64:
+    -9223372036854775807 - 1
+fn integer_equal(a: i64, b: i64) -> bool:
+    a == b
+fn text_hash(key: text) -> i64:
+    key.len()
+fn text_equal(a: text, b: text) -> bool:
+    a == b
+fn tuple_hash(key: (i64, text)) -> i64:
+    key.0
+fn tuple_equal(a: (i64, text), b: (i64, text)) -> bool:
+    a.0 == b.0 and a.1 == b.1
+fn shade_hash(key: IndexShade) -> i64:
+    match key:
+        Light: 0
+        Dark: 1
+fn shade_equal(a: IndexShade, b: IndexShade) -> bool:
+    shade_hash(a) == shade_hash(b)
+fn symbol_hash(key: Symbol) -> i64:
+    key.intern_id()
+
+fn main() -> i64:
+    var numbers: HashMap<i64, i64> = HashMap.with_contract(integer_hash, integer_equal)
+    val keys = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    val expected = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116]
+    for key in keys:
+        numbers.insert(key, key + 100)
+    if numbers.len() != 17:
+        return 1
+    for i in 0..17:
+        if numbers.get(keys[i]) != Some(expected[i]):
+            return 2
+    numbers.insert(8, 999)
+    if numbers.len() != 17 or numbers.get(8) != Some(999):
+        return 3
+    if not numbers.remove(0) or not numbers.remove(8) or not numbers.remove(16):
+        return 4
+    if numbers.remove(8) or numbers.len() != 14 or numbers.contains(8):
+        return 5
+    if numbers.get(1) != Some(101) or numbers.get(15) != Some(115):
+        return 6
+
+    var words: HashMap<text, i64> = HashMap.with_contract(text_hash, text_equal)
+    words.insert("ab", 4)
+    words.insert("cd", 7)
+    words.insert("ab", 9)
+    if words.len() != 2 or words.get("ab") != Some(9) or words.get("cd") != Some(7):
+        return 7
+    var pairs: HashSet<(i64, text)> = HashSet.with_contract(tuple_hash, tuple_equal)
+    pairs.insert((1, "a"))
+    pairs.insert((1, "b"))
+    pairs.insert((1, "a"))
+    if pairs.len() != 2 or not pairs.remove((1, "a")) or not pairs.contains((1, "b")):
+        return 8
+    var shades: HashSet<IndexShade> = HashSet.with_contract(shade_hash, shade_equal)
+    shades.insert(IndexShade.Light)
+    shades.insert(IndexShade.Dark)
+    shades.insert(IndexShade.Light)
+    if shades.len() != 2 or not shades.contains(IndexShade.Dark):
+        return 9
+    val first = Symbol.from("index-fixture-alpha")
+    val again = Symbol.from("index-fixture-alpha")
+    val other = Symbol.from("index-fixture-beta")
+    if not symbol_eq(first, again) or symbol_eq(first, other):
+        return 10
+    var symbols: HashMap<Symbol, i64> = HashMap.with_contract(symbol_hash, symbol_eq)
+    symbols.insert(first, 1)
+    symbols.insert(again, 2)
+    symbols.insert(other, 3)
+    if symbols.len() != 2 or symbols.get(first) != Some(2) or symbols.get(other) != Some(3):
+        return 11
+    print("REQ005|generic_indices|growth=17|overwrite=999|remove=14|text=9,7|tuple=1:b|enum=2|symbol=2,3")
+    0

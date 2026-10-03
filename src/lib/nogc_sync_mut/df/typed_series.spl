@@ -4,6 +4,12 @@
 use std.ndarray.*
 use std.nogc_sync_mut.df.mod.{Symbol, Series, DfError}
 
+enum TypedColumnError:
+    MaskLength(expected: i64, actual: i64)
+    IndexOutOfBounds(index: i64, length: i64)
+    DTypeMismatch(expected: DType, declared: DType, storage: DType)
+    InvalidStorage(reason: text)
+
 struct TypedSeries<T>:
     name: Symbol
     values: [T]
@@ -20,18 +26,37 @@ struct TypedSeries<T>:
     static fn from_masked(
         name: Symbol, values: [T], missing: [Bool]
     ) -> Result<TypedSeries<T>, DfError>:
+        match TypedSeries<T>.from_masked_checked(name, values, missing):
+            case Ok(column): Ok(column)
+            case Err(_): Err(DfError.ShapeMismatch)
+
+    static fn from_masked_checked(
+        name: Symbol, values: [T], missing: [Bool]
+    ) -> Result<TypedSeries<T>, TypedColumnError>:
+        """Build a typed column or report both mask lengths without callbacks."""
         if values.len() != missing.len():
-            return Err(DfError.ShapeMismatch)
+            return Err(TypedColumnError.MaskLength(values.len(), missing.len()))
         Ok(TypedSeries(name: name, values: values, missing: missing))
+
+    fn validate(self) -> Result<bool, TypedColumnError>:
+        """Validate direct construction before a caller performs transformations."""
+        if self.missing.len() != self.values.len():
+            return Err(TypedColumnError.MaskLength(self.values.len(), self.missing.len()))
+        Ok(true)
 
     fn len(self) -> Index:
         Index.new(self.values.len())
 
     fn get(self, index: Index) -> Result<T?, DfError>:
-        if self.missing.len() != self.values.len():
-            return Err(DfError.ShapeMismatch)
+        match self.get_checked(index):
+            case Ok(value): Ok(value)
+            case Err(_): Err(DfError.ShapeMismatch)
+
+    fn get_checked(self, index: Index) -> Result<T?, TypedColumnError>:
+        """Distinguish invalid shape, out-of-range index and a valid missing row."""
+        self.validate()?
         if index.value < 0 or index.value >= self.values.len():
-            return Err(DfError.ShapeMismatch)
+            return Err(TypedColumnError.IndexOutOfBounds(index.value, self.values.len()))
         if self.missing[index.value].value:
             return Ok(nil)
         Ok(Some(self.values[index.value]))
@@ -104,33 +129,105 @@ struct TypedSeries<T>:
         Ok(true)
 
 fn f64_typed_series_from_dynamic(series: Series) -> Result<TypedSeries<Float64>, DfError>:
-    if (series.dtype != DType.F64 or series.values.dtype != DType.F64 or
-        series.missing.len() != series.len().value):
-        return Err(DfError.ShapeMismatch)
+    match f64_typed_series_from_dynamic_checked(series):
+        case Ok(column): Ok(column)
+        case Err(_): Err(DfError.ShapeMismatch)
+
+fn f64_typed_series_from_dynamic_checked(series: Series) -> Result<TypedSeries<Float64>, TypedColumnError>:
+    """Admit dtype, metadata, backing extent and mask before reading f64 values."""
+    val length = typed_column_dynamic_length(series, DType.F64)?
     var values: [Float64] = []
     var i = 0
-    while i < series.len().value:
+    while i < length:
         values.push(series.values.flat_f64(Index.new(i)))
         i = i + 1
-    TypedSeries<Float64>.from_masked(series.name, values, series.missing)
+    TypedSeries<Float64>.from_masked_checked(series.name, values, series.missing)
 
 fn i64_typed_series_from_dynamic(series: Series) -> Result<TypedSeries<Int64>, DfError>:
-    if (series.dtype != DType.I64 or series.values.dtype != DType.I64 or
-        series.missing.len() != series.len().value):
-        return Err(DfError.ShapeMismatch)
+    match i64_typed_series_from_dynamic_checked(series):
+        case Ok(column): Ok(column)
+        case Err(_): Err(DfError.ShapeMismatch)
+
+fn i64_typed_series_from_dynamic_checked(series: Series) -> Result<TypedSeries<Int64>, TypedColumnError>:
+    """Admit storage before reading integers without an intermediate f64 cast."""
+    val length = typed_column_dynamic_length(series, DType.I64)?
     var values: [Int64] = []
     var i = 0
-    while i < series.len().value:
+    while i < length:
         values.push(series.values.flat_i64(Index.new(i)))
         i = i + 1
-    TypedSeries<Int64>.from_masked(series.name, values, series.missing)
+    TypedSeries<Int64>.from_masked_checked(series.name, values, series.missing)
 
 fn f64_typed_series_into_dynamic(series: TypedSeries<Float64>) -> Result<Series, DfError>:
-    Series.from_f64_masked(series.name, series.values, series.missing)
+    match f64_typed_series_into_dynamic_checked(series):
+        case Ok(column): Ok(column)
+        case Err(_): Err(DfError.ShapeMismatch)
 
 fn i64_typed_series_into_dynamic(series: TypedSeries<Int64>) -> Result<Series, DfError>:
-    Series.from_i64_masked(series.name, series.values, series.missing)
+    match i64_typed_series_into_dynamic_checked(series):
+        case Ok(column): Ok(column)
+        case Err(_): Err(DfError.ShapeMismatch)
 
-export TypedSeries
+fn f64_typed_series_into_dynamic_checked(series: TypedSeries<Float64>) -> Result<Series, TypedColumnError>:
+    """Preserve values and missingness, rejecting a malformed typed mask."""
+    series.validate()?
+    Ok(Series.from_f64_masked(series.name, series.values, series.missing).unwrap())
+
+fn i64_typed_series_into_dynamic_checked(series: TypedSeries<Int64>) -> Result<Series, TypedColumnError>:
+    """Preserve exact i64 storage and report malformed masks before allocation."""
+    series.validate()?
+    Ok(Series.from_i64_masked(series.name, series.values, series.missing).unwrap())
+
+# NDArray flat accessors validate logical indices but not backing-array extent.
+# Validate all metadata before calling them, without overflowing numel or an
+# offset expression. Valid reversed/strided/multidimensional views are retained.
+fn typed_column_dynamic_length(series: Series, expected: DType) -> Result<i64, TypedColumnError>:
+    val values = series.values
+    if series.dtype != expected or values.dtype != expected:
+        return Err(TypedColumnError.DTypeMismatch(expected, series.dtype, values.dtype))
+    val rank = values.shape.dims.len()
+    if rank == 0 or values.strides.dims.len() != rank:
+        return Err(TypedColumnError.InvalidStorage("shape-stride-rank"))
+    var empty = false
+    for dimension in values.shape.dims:
+        if dimension.value < 0:
+            return Err(TypedColumnError.InvalidStorage("negative-dimension"))
+        if dimension.value == 0:
+            empty = true
+    var length: i64 = if empty: 0 else: 1
+    if not empty:
+        for dimension in values.shape.dims:
+            if length > 9223372036854775807 / dimension.value:
+                return Err(TypedColumnError.InvalidStorage("element-count-overflow"))
+            length = length * dimension.value
+    val backing_length = if expected == DType.I64: values.data_i64.len() else: values.data_f64.len()
+    var low = values.offset.value
+    var high = values.offset.value
+    if low < 0 or low > backing_length or (length > 0 and low == backing_length):
+        return Err(TypedColumnError.InvalidStorage("offset-outside-backing"))
+    if length > 0:
+        var axis = 0
+        while axis < rank:
+            val steps = values.shape.dims[axis].value - 1
+            val stride = values.strides.dims[axis].value
+            if steps > 0 and stride > 0:
+                if steps > (backing_length - 1 - high) / stride:
+                    return Err(TypedColumnError.InvalidStorage("stride-outside-backing"))
+                high = high + steps * stride
+            elif steps > 0 and stride < 0:
+                if stride < -9223372036854775807:
+                    return Err(TypedColumnError.InvalidStorage("stride-outside-backing"))
+                val magnitude = 0 - stride
+                if steps > low / magnitude:
+                    return Err(TypedColumnError.InvalidStorage("stride-outside-backing"))
+                low = low - steps * magnitude
+            axis = axis + 1
+    if series.missing.len() != length:
+        return Err(TypedColumnError.MaskLength(length, series.missing.len()))
+    Ok(length)
+
+export TypedSeries, TypedColumnError
 export f64_typed_series_from_dynamic, i64_typed_series_from_dynamic
 export f64_typed_series_into_dynamic, i64_typed_series_into_dynamic
+export f64_typed_series_from_dynamic_checked, i64_typed_series_from_dynamic_checked
+export f64_typed_series_into_dynamic_checked, i64_typed_series_into_dynamic_checked

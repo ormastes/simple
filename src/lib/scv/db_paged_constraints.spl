@@ -1,0 +1,139 @@
+use std.scv.db_paged_model.*
+use std.scv.db_paged_proof.*
+use std.scv.db_paged_prepare.*
+use std.scv.db_paged_indexes.*
+use std.scv.db_page_records.*
+use std.scv.db_pages.{DbPageRecord}
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbRow, db_field_value}
+use std.scv.distributed_identity.*
+
+fn db_paged_allocations(rows: DbPagedRows, reads: DbPagedReads, policy: DbPagedPolicy) -> Result<[DbPageAlias], text>:
+    var marks: {text: u64} = {}
+    var bindings: [DbPageAlias] = []
+    val context = db_paged_context(policy)
+    for entity in rows.entities:
+        if rows.before.contains_key(entity_ref_canonical(entity)): continue
+        if db_paged_read(reads, db_paged_reverse_key(entity)?)? != nil: return Err("SCVDB_PAGED_INDEX_CORRUPT")
+        val kind = db_ref_kind(entity)
+        if not marks.contains_key(kind):
+            var sequence = 0u64
+            if val record = db_paged_read(reads, db_page_highwater_key(context.namespace, context.epoch, kind)?)?:
+                match db_typed_page_record_decode(record)?:
+                    HighWater(_, _, _, value): sequence = value
+                    _: return Err("SCVDB_PAGED_INDEX_CORRUPT")
+            marks[kind] = sequence
+        if marks[kind] == 18446744073709551615u64: return Err("SCVDB_ALLOCATOR_EXHAUSTED")
+        marks[kind] = marks[kind] + 1u64
+        bindings.push(DbPageAlias(namespace: context.namespace, epoch: context.epoch, uid: entity.provisional.unwrap(), sequence: marks[kind]))
+    Ok(bindings)
+
+fn _paged_target(rows: DbPagedRows, reads: DbPagedReads, entity: EntityRef) -> Result<DbRow, text>:
+    val identity = entity_ref_canonical(entity)
+    if rows.after.contains_key(identity): return Ok(rows.after[identity])
+    val row = db_paged_get_row(reads, entity)?
+    if row == nil: return Err("SCVDB_REFERENCE_MISSING")
+    Ok(row.unwrap())
+
+fn _paged_live_edges(row: DbRow) -> Result<[EntityRef], text>:
+    var edges: [EntityRef] = []
+    var seen: {text: bool} = {}
+    for reference in db_paged_row_references(row)?:
+        val identity = entity_ref_canonical(reference.entity)
+        if not reference.historical and not seen.contains_key(identity):
+            seen[identity] = true
+            edges.push(reference.entity)
+    Ok(edges)
+
+fn _paged_count(reads: DbPagedReads, key: text) -> Result<u64, text>:
+    val record = db_paged_read(reads, key)?
+    if record == nil: return Ok(0u64)
+    match db_paged_index_value(record.unwrap(), 171u8)?:
+        Unsigned(count): Ok(count)
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+fn _paged_unique(reads: DbPagedReads, key: text) -> Result<DbValue, text>:
+    val record = db_paged_read(reads, key)?
+    if record == nil: return Ok(DbValue.Absent)
+    val value = db_paged_index_value(record.unwrap(), 170u8)?
+    match value:
+        Absent: Ok(value)
+        Reference(entity):
+            if entity.provisional == nil: return Err("SCVDB_PAGED_INDEX_CORRUPT")
+            Ok(value)
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+fn db_paged_constraint_updates(rows: DbPagedRows, reads: DbPagedReads, policy: DbPagedPolicy, allocations: [DbPageAlias]) -> Result<[DbPageRecord], text>:
+    var unique: {text: DbValue} = {}
+    var unique_keys: [text] = []
+    var counts: {text: u64} = {}
+    var count_keys: [text] = []
+    # Remove ALL old claims before adding new ones: swaps are one transaction.
+    for entity in rows.entities:
+        val identity = entity_ref_canonical(entity)
+        if not rows.before.contains_key(identity): continue
+        val old = rows.before[identity]
+        for key in db_paged_unique_keys(old, policy.config.merge)?:
+            if not unique.contains_key(key):
+                unique[key] = _paged_unique(reads, key)?
+                unique_keys.push(key)
+            if unique[key] != DbValue.Reference(entity): return Err("SCVDB_PAGED_INDEX_CORRUPT")
+            unique[key] = DbValue.Absent
+        for target in _paged_live_edges(old)?:
+            val key = db_paged_refcount_key(target)?
+            if not counts.contains_key(key):
+                counts[key] = _paged_count(reads, key)?
+                count_keys.push(key)
+            if counts[key] == 0: return Err("SCVDB_PAGED_INDEX_CORRUPT")
+            counts[key] = counts[key] - 1u64
+    for entity in rows.entities:
+        val row = rows.after[entity_ref_canonical(entity)]
+        for key in db_paged_unique_keys(row, policy.config.merge)?:
+            if not unique.contains_key(key):
+                unique[key] = _paged_unique(reads, key)?
+                unique_keys.push(key)
+            if unique[key] != DbValue.Absent and unique[key] != DbValue.Reference(entity): return Err("SCVDB_UNIQUE_COLLISION")
+            unique[key] = DbValue.Reference(entity)
+        # Every retained typed reference must resolve, including removed history.
+        for reference in db_paged_row_references(row)?:
+            val target = _paged_target(rows, reads, reference.entity)?
+            if target.tombstoned and not reference.historical: return Err("SCVDB_REFERENCE_TOMBSTONED")
+        for constraint in policy.config.merge.constraints:
+            if row.tombstoned or constraint.kind != row.kind: continue
+            for reference in constraint.references:
+                match db_field_value(row.fields, reference.field):
+                    Absent: ()
+                    Reference(target):
+                        val target_row = _paged_target(rows, reads, target)?
+                        if target_row.tombstoned or target_row.kind != reference.target_kind: return Err("SCVDB_REFERENCE_INVALID")
+                    _: return Err("SCVDB_REFERENCE_TYPE")
+        for target in _paged_live_edges(row)?:
+            val key = db_paged_refcount_key(target)?
+            if not counts.contains_key(key):
+                counts[key] = _paged_count(reads, key)?
+                count_keys.push(key)
+            if counts[key] == 18446744073709551615u64: return Err("SCVDB_PAGED_REFERENCE_OVERFLOW")
+            counts[key] = counts[key] + 1u64
+    for entity in rows.entities:
+        if rows.after[entity_ref_canonical(entity)].tombstoned:
+            val key = db_paged_refcount_key(entity)?
+            val count = if counts.contains_key(key): counts[key] else: _paged_count(reads, key)?
+            if count != 0: return Err("SCVDB_REFERENCE_TOMBSTONED")
+    var updates: [DbPageRecord] = []
+    for entity in rows.entities: updates.push(db_typed_page_record_encode(DbTypedPageRecord.CurrentRow(entity, rows.after[entity_ref_canonical(entity)]))?)
+    for key in unique_keys: updates.push(db_paged_index_record(key, 170u8, unique[key])?)
+    for key in count_keys: updates.push(db_paged_index_record(key, 171u8, DbValue.Unsigned(counts[key]))?)
+    var marks: {text: u64} = {}
+    var kinds: [text] = []
+    for binding in allocations:
+        val alias = SettledAlias(database_namespace: binding.namespace, authority_epoch: binding.epoch, entity_kind: binding.uid.entity_kind, sequence: binding.sequence)
+        if db_paged_read(reads, db_page_alias_key(alias)?)? != nil: return Err("SCVDB_PAGED_ALIAS_COLLISION")
+        updates.push(db_typed_page_record_encode(DbTypedPageRecord.Alias(binding))?)
+        updates.push(db_paged_index_record(db_paged_reverse_key(entity_ref_provisional(binding.uid))?, 173u8, DbValue.Reference(entity_ref_settled(alias)))?)
+        if not marks.contains_key(binding.uid.entity_kind): kinds.push(binding.uid.entity_kind)
+        marks[binding.uid.entity_kind] = binding.sequence
+    val context = db_paged_context(policy)
+    for kind in kinds: updates.push(db_typed_page_record_encode(DbTypedPageRecord.HighWater(context.namespace, context.epoch, kind, marks[kind]))?)
+    Ok(updates)
+
+export db_paged_allocations, db_paged_constraint_updates

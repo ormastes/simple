@@ -49,6 +49,7 @@ use compiler.core.types.{TYPE_UNION}
 use compiler.core.types.{int_to_str}
 use compiler.core.types.{named_type_find, named_type_register}
 use compiler.core.types.{primitive_integer_bit_width_from_name}
+use compiler.core.types.{type_pools_promote_hir_owners}
 use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
@@ -99,6 +100,25 @@ var par_kind_slot: [i64] = [0]
 var par_text_slot: [text] = [""]
 var par_line_slot: [i64] = [0]
 var par_col_slot: [i64] = [0]
+var par_initialization_generation_v1: i64 = 0
+
+pub fn parser_initialization_generation_v1() -> i64:
+    par_initialization_generation_v1
+
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+# Token slot owners can be allocated by the first parse in a native process.
+# Keep them and public diagnostics alive before reclaiming the file's scratch;
+# parser_init_with_path reuses non-nil token slots on the next file.
+pub fn parser_promote_transient_owners() -> bool:
+    rt_transient_heap_promote(par_kind_slot) and
+        rt_transient_heap_promote(par_text_slot) and
+        rt_transient_heap_promote(par_line_slot) and
+        rt_transient_heap_promote(par_col_slot) and
+        rt_transient_heap_promote(par_errors) and
+        rt_transient_heap_promote(par_warnings) and
+        rt_transient_heap_promote(par_struct_names) and
+        type_pools_promote_hir_owners()
 # Perf: cache SIMPLE_BOOTSTRAP_PAR_ENV_SAVE env var to avoid per-token getenv() syscall.
 # -1 = uncached, 0 = disabled, 1 = enabled
 var par_env_save_cached: i64 = -1
@@ -240,6 +260,7 @@ fn parser_init(source: text):
     parser_init_with_path(source, "")
 
 fn parser_init_with_path(source: text, path: text):
+    par_initialization_generation_v1 = par_initialization_generation_v1 + 1
     # Profile policy is immutable within one parse but may change between
     # same-process compiler requests. Resample once before the first token;
     # split declaration profiling consumes this same cached decision.
@@ -267,6 +288,9 @@ fn parser_init_with_path(source: text, path: text):
     par_col_slot[0] = 0
     par_had_error = false
     par_diagnostics_suppressed = false
+    # First-error text belongs to this module, including ordinary driver
+    # parses. A preceding failed file must not supply this file's diagnostic.
+    par_first_error_mirror_clear()
     par_diagnostic_emit_count = 0
     if (env_get("SIMPLE_TRACE_AST_RESET") == "1" and
         not frontend_trace_suppressed()):
@@ -1146,7 +1170,6 @@ fn parse_module_silent(source: text, path: text):
 # bool is returned by value and is therefore reliable.
 fn parse_module_silent_checked(source: text, path: text) -> bool:
     par_had_error_mirror_clear()
-    par_first_error_mirror_clear()
     _parse_module_with_diagnostics(source, path, true)
 
 fn parse_module_file(source: text, path: text):
@@ -1212,6 +1235,7 @@ export par_errors, par_warnings, par_struct_names
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
 export parser_first_error_get
+export parser_initialization_generation_v1, parser_promote_transient_owners
 export parser_tok_save, parser_tok_restore
 export parser_path_is_script, parser_warn_print_if_needed
 export par_prof_enabled
@@ -1292,13 +1316,13 @@ pub fn flat_parser_state_dump() -> text:
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
-    par_col_slot = flat_pool_dec_i64(r)
+    par_col_slot = flat_pool_dec_i64_into(par_col_slot, r)
     par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
     par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
     par_errors = flat_pool_dec_text(r)
     par_had_error = flat_pool_dec_scalar_bool(r)
-    par_kind_slot = flat_pool_dec_i64(r)
-    par_line_slot = flat_pool_dec_i64(r)
+    par_kind_slot = flat_pool_dec_i64_into(par_kind_slot, r)
+    par_line_slot = flat_pool_dec_i64_into(par_line_slot, r)
     par_struct_names = flat_pool_dec_text(r)
     par_text_slot = flat_pool_dec_text(r)
     par_warnings = flat_pool_dec_text(r)

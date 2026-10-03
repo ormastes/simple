@@ -7,6 +7,20 @@ Accounts retain IMAP defaults when `protocol` is absent. POP3 accounts set
 SMTP settings remain per account. Dev-hub uses `provider: pop3` and the same
 account name in its email config. No password is duplicated in dev-hub config.
 
+`--config-file` selects either standalone email.sdn or a combined DevHub file.
+The latter uses `email:`, with indented `default_account:` and `accounts:`
+children. Both consumers select this subtree through parse_email_sdn_json;
+no sibling provider settings enter the mail projection. The selected path is
+passed unchanged to the shell client. Canonical SDN issues inside the selected
+subtree are rejected with redacted MAIL_CONFIG_* codes. Account values are
+projected using the canonical JSON dictionary constructor.
+
+The projection carries internal `_mail_config_scope` metadata. Combined-file
+reads are supported; mail settings/password persistence fails explicitly with
+MAIL_CONFIG_EMAIL_READ_ONLY before its legacy block writer can change other
+sections. Standalone email.sdn remains writable. A user can supply a transient
+password-file/command override without modifying a combined document.
+
 Password precedence is explicit password file, explicit password command,
 saved password command, then saved encrypted/legacy password. New password
 saves always use Simple encryption. Supplying both explicit sources is an

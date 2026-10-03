@@ -1,0 +1,223 @@
+# codex-impl
+# Read-only Git settlement transport. The caller owns authenticated Git
+# credentials and semantic receipt verification; this module never publishes.
+# A remote URL contains no credential bytes. Git's configured credential helper
+# may authenticate an HTTPS read without exposing that credential here.
+
+use app.io.mod (is_dir, dir_remove_all, process_run_bounded)
+use app.scv.db.git_policy.{db_git_environment_safe, db_git_effect_prefix, db_git_network_config_safe}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path_identity_same, path_identity_contains}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+
+struct DbGitSettlementHead:
+    code: text
+    oid: text
+
+struct DbGitSettlementReadback:
+    code: text
+    observed_head: text
+
+fn _db_git_local_path(path: text) -> bool:
+    if not dir_is_real_no_follow(path): return false
+    match path_final_existing(path):
+        Ok(identity): identity.path == path
+        Err(_): false
+
+fn _db_git_remote_allowed(remote: text) -> bool:
+    for index in 0..remote.len():
+        val code = remote.char_code_at(index)
+        if code < 32 or code == 127:
+            return false
+    if _db_git_local_path(remote):
+        return is_dir(remote)
+    if not remote.starts_with("https://github.com/"):
+        return false
+    val tail = remote[19:]
+    val parts = tail.split("/")
+    if parts.len() != 2 or parts[0] == "" or parts[1] == "":
+        return false
+    for part in parts:
+        if part == "." or part.contains(".."):
+            return false
+        for index in 0..part.len():
+            val code = part.char_code_at(index)
+            if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 45 or code == 46 or code == 95):
+                return false
+    true
+
+fn _db_git_oid_valid(oid: text, object_format: text) -> bool:
+    val width = if object_format == "sha1": 40 else: if object_format == "sha256": 64 else: 0
+    if width == 0 or oid.len() != width:
+        return false
+    for index in 0..oid.len():
+        val code = oid.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn _db_git_run(root: text, args: [text]) -> (text, bool):
+    if not db_git_environment_safe(): return ("", false)
+    if (args.contains("fetch") or args.contains("ls-remote")) and not db_git_network_config_safe(root):
+        return ("", false)
+    var argv = db_git_effect_prefix(root)
+    for arg in args:
+        argv.push(arg)
+    val (out, _err, code) = process_run_bounded("git", argv, 30000, 65536)
+    # Git stderr may contain credential-helper diagnostics or remote URLs.
+    # Return only classified status and bounded stdout to the caller.
+    if code != 0 or out.len() >= 65536:
+        return ("", false)
+    (out.trim(), true)
+
+fn _db_git_object_format(source: text) -> text:
+    val (out, ok) = _db_git_run(source, ["rev-parse", "--show-object-format"])
+    if ok and (out == "sha1" or out == "sha256"):
+        return out
+    ""
+
+fn db_git_settlement_ref_head(source: text, remote: text) -> DbGitSettlementHead:
+    if not _db_git_local_path(source) or not is_dir(source) or not _db_git_remote_allowed(remote):
+        return DbGitSettlementHead(code: "SCVDB_REMOTE_SCOPE", oid: "")
+    val format = _db_git_object_format(source)
+    if format == "":
+        return DbGitSettlementHead(code: "SCVDB_GIT_FORMAT", oid: "")
+    val (out, ok) = _db_git_run(source, ["ls-remote", "--exit-code", "--refs", remote, "refs/heads/settled"])
+    if not ok:
+        return DbGitSettlementHead(code: "SCVDB_READBACK_UNAVAILABLE", oid: "")
+    if out.len() > 1024:
+        return DbGitSettlementHead(code: "SCVDB_READBACK_MALFORMED", oid: "")
+    val lines = out.split("\n")
+    if lines.len() != 1:
+        return DbGitSettlementHead(code: "SCVDB_READBACK_MALFORMED", oid: "")
+    val parts = lines[0].split("\t")
+    if parts.len() != 2 or parts[1] != "refs/heads/settled" or not _db_git_oid_valid(parts[0], format):
+        return DbGitSettlementHead(code: "SCVDB_READBACK_MALFORMED", oid: "")
+    DbGitSettlementHead(code: "ok", oid: parts[0])
+
+fn db_git_settlement_reconcile(source: text, remote: text, expected_old_oid: text, candidate_oid: text) -> DbGitSettlementReadback:
+    if not _db_git_local_path(source) or not is_dir(source):
+        return DbGitSettlementReadback(code: "SCVDB_REMOTE_SCOPE", observed_head: "")
+    val format = _db_git_object_format(source)
+    if not _db_git_oid_valid(expected_old_oid, format) or not _db_git_oid_valid(candidate_oid, format):
+        return DbGitSettlementReadback(code: "SCVDB_GIT_OID", observed_head: "")
+    # The candidate must be the actual one-parent child of the expected head.
+    # This check precedes all status decisions, including a lost acknowledgement.
+    val (kind, kind_ok) = _db_git_run(source, ["cat-file", "-t", candidate_oid])
+    val (commit, commit_ok) = _db_git_run(source, ["cat-file", "-p", candidate_oid])
+    var parent = ""
+    var parent_count = 0
+    if commit_ok:
+        for line in commit.split("\n"):
+            if line == "":
+                break
+            if line.starts_with("parent "):
+                parent_count = parent_count + 1
+                parent = line[7:]
+    if not kind_ok or kind != "commit" or not commit_ok or parent_count != 1 or parent != expected_old_oid:
+        return DbGitSettlementReadback(code: "SCVDB_PARENT_MISMATCH", observed_head: "")
+    val head = db_git_settlement_ref_head(source, remote)
+    if head.code != "ok":
+        return DbGitSettlementReadback(code: head.code, observed_head: "")
+    if head.oid == candidate_oid:
+        return DbGitSettlementReadback(code: "published", observed_head: head.oid)
+    if head.oid == expected_old_oid:
+        return DbGitSettlementReadback(code: "not_published", observed_head: head.oid)
+    # A successor could contain the candidate, or be a competing settlement.
+    # Neither case permits a new allocation until canonical history is fetched.
+    DbGitSettlementReadback(code: "SCVDB_HISTORY_REQUIRED", observed_head: head.oid)
+
+export DbGitSettlementHead, DbGitSettlementReadback
+export db_git_settlement_ref_head, db_git_settlement_reconcile
+
+# This transport-only read-back neither admits signed receipts nor grants an
+# allocation lease. Call it outside SJ leases. The caller supplies an existing
+# scratch parent; only the securely created child is ever removed.
+fn _db_git_scratch_parent(source: text, scratch_parent: text) -> Result<HostFinalPath, text>:
+    if not db_git_environment_safe(): return Err("SCVDB_GIT_ENV")
+    if not dir_is_real_no_follow(source) or not dir_is_real_no_follow(scratch_parent):
+        return Err("SCVDB_SCRATCH_SCOPE")
+    val source_identity = path_final_existing(source)?
+    val parent = path_final_existing(scratch_parent)?
+    val (checkout, checkout_ok) = _db_git_run(source_identity.path, ["rev-parse", "--show-toplevel"])
+    val checkout_identity = path_final_existing(if checkout_ok: checkout else: source_identity.path)?
+    val (common, ok) = _db_git_run(source_identity.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if not ok: return Err("SCVDB_SCRATCH_SCOPE")
+    val common_identity = path_final_existing(common)?
+    if parent.path.ends_with("/") or path_identity_contains(checkout_identity, parent) or path_identity_contains(common_identity, parent):
+        return Err("SCVDB_SCRATCH_SCOPE")
+    Ok(parent)
+
+fn _db_git_history_status(scratch: text, observed: text, expected: text, candidate: text) -> text:
+    var cursor = observed
+    # Deliberately bound work. Larger history requires a separate sync pass,
+    # never a guessed answer or an unbounded network/history walk under a lease.
+    for depth in 0..32:
+        if cursor == candidate:
+            return "published"
+        if cursor == expected:
+            return "not_published"
+        val (kind, kind_ok) = _db_git_run(scratch, ["cat-file", "-t", cursor])
+        val (commit, commit_ok) = _db_git_run(scratch, ["cat-file", "-p", cursor])
+        if not kind_ok or kind != "commit" or not commit_ok:
+            return "SCVDB_HISTORY_REQUIRED"
+        var parent = ""
+        var parents = 0
+        for line in commit.split("\n"):
+            if line == "":
+                break
+            if line.starts_with("parent "):
+                parent = line[7:]
+                parents = parents + 1
+        if parents != 1:
+            return "SCVDB_HISTORY_REQUIRED"
+        cursor = parent
+    "SCVDB_HISTORY_REQUIRED"
+
+fn _db_git_read_history(scratch: text, source: text, remote: text, expected: text, candidate: text, observed: text) -> DbGitSettlementReadback:
+    val format = _db_git_object_format(source)
+    val (_init_out, initialized) = _db_git_run(scratch, ["init", "--bare", "--template=", "--object-format={format}", "."])
+    if not initialized:
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_UNAVAILABLE", observed_head: observed)
+    # No refspec destination, FETCH_HEAD, tags, source ref, or source object
+    # writes. Fetch the exact advertised OID, then re-read authority for races.
+    val (_fetch_out, fetched) = _db_git_run(scratch, ["-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null", "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=33", remote, observed])
+    if not fetched:
+        return DbGitSettlementReadback(code: "SCVDB_READBACK_UNAVAILABLE", observed_head: observed)
+    val status = _db_git_history_status(scratch, observed, expected, candidate)
+    val current = db_git_settlement_ref_head(source, remote)
+    if current.code != "ok":
+        return DbGitSettlementReadback(code: current.code, observed_head: observed)
+    if current.oid != observed:
+        return DbGitSettlementReadback(code: "SCVDB_READBACK_MOVED", observed_head: current.oid)
+    DbGitSettlementReadback(code: status, observed_head: observed)
+
+fn db_git_settlement_reconcile_history(source: text, remote: text, expected_old_oid: text, candidate_oid: text, scratch_parent: text) -> DbGitSettlementReadback:
+    val parent = match _db_git_scratch_parent(source, scratch_parent):
+        Ok(identity): identity
+        Err(reason): return DbGitSettlementReadback(code: reason, observed_head: "")
+    val initial = db_git_settlement_reconcile(source, remote, expected_old_oid, candidate_oid)
+    if initial.code != "SCVDB_HISTORY_REQUIRED":
+        return initial
+    val scratch = secure_temp_dir_raw(parent.path, "scv-readback-")
+    if scratch.len() <= 0:
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_UNAVAILABLE", observed_head: initial.observed_head)
+    val created = match path_final_existing(scratch):
+        Ok(identity): identity
+        Err(reason): return DbGitSettlementReadback(code: reason, observed_head: initial.observed_head)
+    if not dir_is_real_no_follow(scratch) or created.path != scratch or not path_identity_contains(parent, created) or not scratch.starts_with(parent.path + "/scv-readback-"):
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_SCOPE", observed_head: initial.observed_head)
+    val result = _db_git_read_history(scratch, source, remote, expected_old_oid, candidate_oid, initial.observed_head)
+    # Never follow a replacement alias during cleanup. A changed identity is
+    # reported for caller recovery, not recursively removed on a guessed path.
+    # Stable trusted parent required: identity does not attest same-name inode replacement.
+    val reopened = match path_final_existing(scratch):
+        Ok(identity): identity
+        Err(reason): return DbGitSettlementReadback(code: reason, observed_head: result.observed_head)
+    if not dir_is_real_no_follow(scratch) or not path_identity_same(created, reopened):
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_SCOPE", observed_head: result.observed_head)
+    if not dir_remove_all(scratch):
+        return DbGitSettlementReadback(code: "SCVDB_SCRATCH_CLEANUP", observed_head: result.observed_head)
+    result
+
+export db_git_settlement_reconcile_history

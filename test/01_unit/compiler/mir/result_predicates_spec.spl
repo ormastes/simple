@@ -1,0 +1,90 @@
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable, MethodResolution}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir._MirLoweringExpr.result_predicates.*
+
+fn lower_result_predicate(source: text, target: text) -> (text, text):
+    val parsed = parse_full_frontend(source, "result_predicates.spl", "result_predicates", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("result_predicates.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors = ""
+    for error in lowering.errors:
+        errors = errors + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return (serialize_mir_function(function), errors)
+    ("", errors)
+
+describe "Result predicate receiver ownership", tag: ["only-compiled"]:
+    it "lowers both predicates through the canonical enum discriminant":
+        step("Lower typed Result parameters with both predicate spellings")
+        val source = "fn ok(value: Result<i64, text>) -> bool:\n    value.is_ok()\n\nfn err(value: Result<i64, text>) -> bool:\n    value.is_err()\n"
+        val (ok_mir, ok_errors) = lower_result_predicate(source, "ok")
+        val (err_mir, err_errors) = lower_result_predicate(source, "err")
+        expect(ok_errors).to_equal("")
+        expect(err_errors).to_equal("")
+        expect(ok_mir).to_contain("rt_enum_discriminant")
+        expect(err_mir).to_contain("rt_enum_discriminant")
+        expect(ok_mir).to_contain("\"op\":\"Eq\"")
+        expect(err_mir).to_contain("\"op\":\"Eq\"")
+        expect(ok_mir).to_contain("\"value\":0,\"type\":\"I64\"")
+        expect(err_mir).to_contain("\"value\":1,\"type\":\"I64\"")
+
+    it "recovers Result provenance from a declared free-function return":
+        step("Resolve an unannotated local initialized from a Result function")
+        val source = "fn make() -> Result<i64, text>:\n    Ok(37)\n\nfn inspect() -> bool:\n    val pending = make()\n    pending.is_ok()\n"
+        val (mir, errors) = lower_result_predicate(source, "inspect")
+        expect(errors).to_equal("")
+        expect(mir).to_contain("rt_enum_discriminant")
+
+    it "emits one call when the receiver expression has side effects":
+        step("Count lowered receiver calls for each predicate")
+        val source = "var calls: i64 = 0\n\nfn make() -> Result<i64, text>:\n    calls = calls + 1\n    Ok(37)\n\nfn inspect_ok() -> bool:\n    make().is_ok()\n\nfn inspect_err() -> bool:\n    make().is_err()\n"
+        for target in ["inspect_ok", "inspect_err"]:
+            val (mir, errors) = lower_result_predicate(source, target)
+            expect(errors).to_equal("")
+            expect(mir.split("result_predicates.make").len() - 1).to_equal(1)
+            expect(mir.split("rt_enum_discriminant").len() - 1).to_equal(1)
+
+    it "defers to an explicitly resolved method on Result storage":
+        step("Preserve trait, instance, UFCS, and static method selections")
+        val span = Span.empty()
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        val result_type = HirType(kind: HirTypeKind.Result(scalar, scalar), span: span)
+        val receiver = HirExpr(kind: HirExprKind.Var(SymbolId(id: 7)),
+            has_type_: true, type_: result_type, span: span)
+        var lowering = MirLowering.new(SymbolTable.new())
+        val owner = SymbolId(id: 8)
+        val method = SymbolId(id: 9)
+        for resolution in [MethodResolution.InstanceMethod(owner, method),
+                MethodResolution.TraitMethod(owner, method),
+                MethodResolution.FreeFunction(method),
+                MethodResolution.StaticMethod(owner, method)]:
+            expect(lowering.try_lower_result_predicate(receiver, "is_ok", [], resolution)).to_be_nil()
+            expect(lowering.try_lower_result_predicate(receiver, "is_err", [], resolution)).to_be_nil()
+
+    it "preserves a nominal method with the same leaf name":
+        step("Keep a custom is_ok method on its declaring owner")
+        val source = "struct Status:\n    value: i64\n\nimpl Status:\n    fn is_ok(self) -> bool: self.value == 7\n\nfn inspect(value: Status) -> bool:\n    value.is_ok()\n"
+        val (mir, errors) = lower_result_predicate(source, "inspect")
+        expect(errors).to_equal("")
+        expect(mir).to_contain("Status.is_ok")
+        expect(mir.contains("rt_enum_discriminant")).to_equal(false)
+
+    it "rejects an integer receiver instead of guessing from the method name":
+        step("Reject is_ok on a non-Result primitive")
+        val (_, errors) = lower_result_predicate("fn bad(value: i64) -> bool:\n    value.is_ok()\n", "bad")
+        expect(errors).to_contain("unresolved method call: is_ok")
+
+    it "does not ignore unexpected predicate arguments":
+        step("Reject a Result predicate with the wrong arity")
+        val (_, errors) = lower_result_predicate("fn bad(value: Result<i64, text>) -> bool:\n    value.is_err(1)\n", "bad")
+        expect(errors).to_contain("unresolved method call: is_err")

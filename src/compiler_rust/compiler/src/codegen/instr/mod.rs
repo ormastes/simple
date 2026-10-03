@@ -49,6 +49,28 @@ pub mod units;
 // Re-export key functions for backward compatibility
 pub use body::compile_function_body;
 
+// Nullable text can arrive at codegen as a registered Pointer<text> TypeId,
+// even though its value is still a runtime string handle. Keep casts from
+// known primitive types on their width-aware path; inspect every other i64-
+// shaped receiver at runtime before accepting it as an integer.
+fn int_cast_needs_runtime_dispatch(from_ty: TypeId) -> bool {
+    !matches!(
+        from_ty,
+        TypeId::BOOL
+            | TypeId::CHAR
+            | TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64
+            | TypeId::F32
+            | TypeId::F64
+            | TypeId::STRING
+    )
+}
+
 // Import compile_* functions from submodules for use in compile_instruction
 use actors::{
     compile_actor_join, compile_actor_recv, compile_actor_reply, compile_actor_send, compile_await,

@@ -40,7 +40,7 @@ mail_smtp_send() {
     --mail-from "$from" \
     "${rcpt_args[@]}" \
     --upload-file "$message_file" \
-    "${extra_args[@]}" 2>/dev/null
+    ${extra_args[@]+"${extra_args[@]}"} 2>/dev/null
 
   return $?
 }

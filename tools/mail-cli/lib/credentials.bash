@@ -123,5 +123,5 @@ _mail_check_login() {
     *) [ "$MAIL_ACCT_PROTOCOL" != pop3 ] || { echo "error: POP3 requires TLS" >&3; return 2; } ;;
   esac
   _mail_curl -s --url "${scheme}://${server}:${port}/" \
-    --user "${MAIL_ACCT_USERNAME}:${MAIL_ACCT_PASSWORD}" --request NOOP "${tls_args[@]}" -o /dev/null
+    --user "${MAIL_ACCT_USERNAME}:${MAIL_ACCT_PASSWORD}" --request NOOP ${tls_args[@]+"${tls_args[@]}"} -o /dev/null
 }

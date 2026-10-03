@@ -38,5 +38,5 @@ The original pipe-alternative case5 failed and remains an open separate bug:
 `match_pipe_alternative_consumed_as_bitwise_or_2026-09-29.md`. The corrected
 case uses comma-separated alternatives to isolate guard/body preservation.
 Passing cases1–4 were not rerun. No original-suite, full CLI, native producer,
-interpreter-wide, MCP/LSP or bootstrap qualification is claimed. The old product
-batch was not rerun.
+interpreter-wide, MCP/LSP or bootstrap qualification is claimed. Product-suite
+execution evidence remains pending; the old product batch was not rerun.

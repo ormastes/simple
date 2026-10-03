@@ -1,0 +1,80 @@
+# Immutable bridge from a verified manager-owned full inventory index task to
+# grouped compilation. The digest of this wire file is pinned by preparation.
+use app.bootstrap_builder.native_group_index_contract.{native_group_index_absolute_v1}
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256}
+
+struct NativeGroupIndexHandoffV1:
+    config_digest: text
+    index_receipt_digest: text
+    manager_receipt_digest: text
+    phase: text
+    backend: text
+    target: text
+    producer_digest: text
+    snapshot_inventory_digest: text
+    source_inventory_digest: text
+    source_count: i64
+    variant_digest: text
+    index_digest: text
+    index_read_root: text
+    variant_receipt_path: text
+    variant_receipt_digest: text
+    runtime_std_authority_path: text
+    runtime_std_authority_digest: text
+    retained_attempt_root: text
+
+fn native_group_index_handoff_encode_v1(value: NativeGroupIndexHandoffV1) -> text:
+    for digest in [value.config_digest, value.index_receipt_digest,
+            value.manager_receipt_digest, value.producer_digest,
+            value.snapshot_inventory_digest, value.source_inventory_digest,
+            value.variant_digest, value.index_digest,
+            value.variant_receipt_digest, value.runtime_std_authority_digest]:
+        if not builder_digest_valid_v1(digest): return ""
+    if (value.phase != "phase3" and value.phase != "phase4") or
+            (value.backend != "llvm" and value.backend != "cranelift") or
+            not builder_identifier_valid_v1(value.target) or
+            value.source_count < 1 or value.source_count > 20000:
+        return ""
+    for path in [value.index_read_root, value.variant_receipt_path,
+            value.runtime_std_authority_path, value.retained_attempt_root]:
+        if not native_group_index_absolute_v1(path): return ""
+    var payload = "SIMPLE-NATIVE-INDEX-HANDOFF-1\n"
+    for field in [value.config_digest, value.index_receipt_digest,
+            value.manager_receipt_digest, value.phase, value.backend,
+            value.target, value.producer_digest, value.snapshot_inventory_digest,
+            value.source_inventory_digest, str(value.source_count),
+            value.variant_digest, value.index_digest, value.index_read_root,
+            value.variant_receipt_path, value.variant_receipt_digest,
+            value.runtime_std_authority_path, value.runtime_std_authority_digest,
+            value.retained_attempt_root]:
+        payload = payload + builder_wire_line_v1(field)
+    if payload.len() > 32768: return ""
+    payload
+
+fn native_group_index_handoff_decode_v1(payload: text) -> Result<NativeGroupIndexHandoffV1, text>:
+    if payload == "" or payload.len() > 32768:
+        return Err("index handoff size invalid")
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-NATIVE-INDEX-HANDOFF-1":
+        return Err("index handoff header invalid")
+    val value = NativeGroupIndexHandoffV1(reader.scalar(), reader.scalar(),
+        reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(),
+        reader.scalar(), reader.scalar(), reader.scalar(), reader.number(20000, false),
+        reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(),
+        reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar())
+    if reader.complete_error() != "" or native_group_index_handoff_encode_v1(value) != payload:
+        return Err("index handoff noncanonical or invalid")
+    Ok(value)
+
+fn native_group_index_handoff_read_v1(path: text, digest: text) -> Result<NativeGroupIndexHandoffV1, text>:
+    if not native_group_index_absolute_v1(path) or not builder_digest_valid_v1(digest):
+        return Err("index handoff path or digest invalid")
+    val payload = file_read_regular_no_follow_bounded(path, 32768)?
+    if file_hash_sha256(path) != digest:
+        return Err("index handoff digest differs")
+    native_group_index_handoff_decode_v1(payload)
+
+export NativeGroupIndexHandoffV1, native_group_index_handoff_encode_v1
+export native_group_index_handoff_decode_v1, native_group_index_handoff_read_v1

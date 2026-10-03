@@ -1,0 +1,73 @@
+# Native Windows SOSIX admission probe. Pass an existing private evidence
+# directory; the fixture never overwrites prior logs and owns every child.
+use app.io.args_ops.{get_args}
+use app.io.file_ops.{file_exists}
+use app.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1,
+    WindowsProcessAdmissionV1, windows_capacity_headroom_v1,
+    windows_available_memory_headroom_v1, windows_process_file_digest_v1,
+    windows_process_admit_with_reserve_v1, windows_process_poll_v1,
+    windows_process_collect_v1, windows_process_cancel_v1,
+    windows_process_peak_memory_v1}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 2: return 2
+    val root = args[1]
+    if windows_capacity_headroom_v1(8589934592, 2147483648) != 2147483648: return 10
+    if windows_capacity_headroom_v1(2147483648, 8589934592) != 2147483648: return 11
+    if windows_capacity_headroom_v1(8589934592, 0) != 0: return 12
+    val available = match windows_available_memory_headroom_v1():
+        Ok(value): value
+        Err(reason):
+            print "capacity query failed: {reason}"
+            return 13
+    if available < 33554432: return 14
+    val program = "C:/Windows/System32/cmd.exe"
+    val request = WindowsProcessRequestV1(program, windows_process_file_digest_v1(program),
+        ["/d", "/c", "exit", "0"], ["SystemRoot=C:\\Windows"], root, [],
+        root + "/stdout.log", root + "/stderr.log", 5000)
+    match windows_process_admit_with_reserve_v1(request, 33554432, 1125899906842624):
+        WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
+            if not reason.contains("memory"): return 15
+        WindowsProcessAdmissionV1.Started(lease):
+            val _cancelled = windows_process_cancel_v1(lease)
+            return 16
+        WindowsProcessAdmissionV1.FailedAfterCleanup(_): return 17
+        WindowsProcessAdmissionV1.Unknown(_): return 18
+    if file_exists(request.stdout_path) or file_exists(request.stderr_path): return 19
+    val lease = match windows_process_admit_with_reserve_v1(request, 33554432, 33554432):
+        WindowsProcessAdmissionV1.Started(value): value
+        WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
+            print "admission failed: {reason}"
+            return 20
+        WindowsProcessAdmissionV1.FailedAfterCleanup(reason):
+            print "start cleaned up: {reason}"
+            return 21
+        WindowsProcessAdmissionV1.Unknown(reason):
+            print "ownership unknown: {reason}"
+            return 22
+    var polls = 0
+    while polls < 1000:
+        val observed = match windows_process_poll_v1(lease):
+            Ok(value): value
+            Err(reason):
+                print "poll failed: {reason}"
+                val _cancelled = windows_process_cancel_v1(lease)
+                return 23
+        if observed.terminal:
+            val peak = match windows_process_peak_memory_v1(lease):
+                Ok(value): value
+                Err(_): return 24
+            val receipt = match windows_process_collect_v1(lease):
+                Ok(value): value
+                Err(_): return 25
+            if not receipt.leader_reaped or not receipt.tree_empty or receipt.active_processes != 0:
+                return 26
+            if receipt.exit_code != 0 or peak <= 0 or peak > 33554432: return 27
+            print "PASS Windows capacity: reserve rejection before streams; verified JobObject cap; complete tree cleanup; peak={peak}"
+            return 0
+        sleep_ms(10)
+        polls = polls + 1
+    val _cancelled = windows_process_cancel_v1(lease)
+    28

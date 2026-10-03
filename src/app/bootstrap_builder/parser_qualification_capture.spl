@@ -1,0 +1,102 @@
+# Conservative materialized source closure using the canonical SCV inventory codec.
+# Normalized identities deduplicate paths; directory reparse points are rejected.
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1, CompileSourceEventV1,
+    compile_source_inventory_filesystem_event_v1, compile_source_inventory_initial_events_v1,
+    compile_source_inventory_encode_v1, compile_source_inventory_path_valid_v1}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_exists, file_hash_sha256_or_empty}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_directory_no_follow_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow}
+use std.common.build_manager.contracts.{BuildTaskV1, builder_relative_path_valid_v1}
+
+fn parser_qualification_plain_path_v1(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    if normalized.starts_with("//?/"): normalized.substring(4) else: normalized
+
+fn parser_qualification_canonical_v1(path: text) -> text:
+    parser_qualification_plain_path_v1(path_absolute(path))
+
+fn parser_qualification_sources_v1(workspace: text, task: BuildTaskV1) -> Result<text, text>:
+    val root = parser_qualification_canonical_v1(workspace)
+    if root == "": return Err("source workspace cannot be canonicalized")
+    var directories: [text] = []
+    var declared_roots: [text] = []
+    var entry = ""
+    for index in 0..task.args.len():
+        if task.args[index] == "--source":
+            if index + 1 >= task.args.len(): return Err("missing source root argument")
+            val path = parser_qualification_canonical_v1(root + "/" + task.args[index + 1])
+            declared_roots = declared_roots.push(task.args[index + 1])
+            if path == "" or not path.starts_with(root + "/") or not dir_exists(path):
+                return Err("source root outside canonical workspace or unavailable")
+            if not directories.contains(path): directories = directories.push(path)
+        if task.args[index] == "--entry":
+            if index + 1 >= task.args.len(): return Err("missing entry argument")
+            entry = task.args[index + 1]
+    if entry != "src/compiler/80.driver/driver_managed_parse_group_main.spl" or directories.len() == 0:
+        return Err("worker entry or explicit source roots missing")
+    for required in ["src/compiler", "src/app", "src/lib", "src/compositions/kernel_llvm_cranelift"]:
+        if not declared_roots.contains(required): return Err("required worker import root missing: " + required)
+    if dir_exists(root + "/src/plugins") and not declared_roots.contains("src/plugins"):
+        return Err("existing plugin import root must be conservatively captured")
+    var seen: {text: bool} = {}
+    var files: {text: bool} = {}
+    var events: [CompileSourceEventV1] = []
+    var cursor = 0
+    while cursor < directories.len():
+        if directories.len() > 65536: return Err("source directory closure exceeds bound")
+        val directory = directories[cursor]
+        cursor = cursor + 1
+        if seen.contains_key(directory): continue
+        seen[directory] = true
+        if not windows_process_directory_no_follow_v1(directory):
+            return Err("source directory unavailable or a non-materialized reparse point: " + directory)
+        val children = match dir_list_optional(directory):
+            case Some(value): value
+            case _: return Err("cannot enumerate canonical source directory: " + directory)
+        for name in children:
+            if name == "." or name == "..": continue
+            if name.contains("/") or name.contains("\\"): return Err("directory listing returned non-leaf path")
+            val path = parser_qualification_canonical_v1(directory + "/" + name)
+            if path == "" or not path.starts_with(root + "/"):
+                return Err("source projection escapes canonical workspace")
+            if dir_exists(path):
+                if not seen.contains_key(path): directories = directories.push(path)
+            elif name.ends_with(".spl") or name.ends_with(".sdn"):
+                if files.contains_key(path): continue
+                if not file_is_regular_no_follow(path): return Err("source is not a regular no-follow file")
+                val relative = path.substring(root.len() + 1)
+                if not builder_relative_path_valid_v1(relative): return Err("canonical source identity invalid")
+                if not compile_source_inventory_path_valid_v1(relative):
+                    var declared = false
+                    val digest = file_hash_sha256_or_empty(path)
+                    for input in task.inputs:
+                        if input.path == relative and input.digest == digest: declared = true
+                    if not declared: return Err("non-SCV source config lacks declared digest pin: " + relative)
+                    files[path] = true
+                    continue
+                val content = match file_read_regular_no_follow_bounded(path, 67108864):
+                    case Ok(value): value
+                    case Err(reason): return Err(reason)
+                events = events.push(compile_source_inventory_filesystem_event_v1("create", relative, content))
+                files[path] = true
+                if events.len() > 65536: return Err("source file closure exceeds bound")
+    if not files.contains_key(root + "/" + entry): return Err("source closure does not contain worker entry")
+    val inventory = match compile_source_inventory_initial_events_v1(events):
+        case Some(value): value
+        case _: return Err("canonical source inventory construction rejected")
+    val encoded = compile_source_inventory_encode_v1(inventory)
+    if encoded == "": return Err("canonical source inventory encoding rejected")
+    Ok(encoded)
+
+fn parser_qualification_pins_v1(workspace: text, task: BuildTaskV1) -> text:
+    if task.inputs.len() == 0: return "build input/runtime/tool pins missing"
+    for input in task.inputs:
+        val path = workspace + "/" + input.path
+        if not file_is_regular_no_follow(path) or file_hash_sha256_or_empty(path) != input.digest:
+            return "build input/runtime/tool pin differs: " + input.path
+    if file_hash_sha256_or_empty(task.program) != task.producer_digest:
+        return "build producer differs"
+    ""
+
+export parser_qualification_sources_v1, parser_qualification_pins_v1, parser_qualification_canonical_v1

@@ -1,0 +1,71 @@
+# Source regression oracles only until run by an admitted Simple runtime.
+use std.spec.*
+use app.scv.db.git_blob.*
+use app.io.mod.{file_write}
+use test.fixtures.scv.db_git_blob_fixture.*
+
+describe "owned bare Git binary blob boundary":
+    it "roundtrips NUL and invalid UTF8 without text conversion in both object formats":
+        for format in ["sha1", "sha256"]:
+            val fixture = setup_item2_blob_fixture(format)
+            val bytes: [u8] = [0u8, 255u8, 254u8, 10u8, 13u8, 0u8, 65u8, 128u8]
+            val stored = db_git_blob_put_owned(fixture.candidate.scratch, bytes, 8u64).unwrap()
+            expect(stored.bytes).to_equal(bytes)
+            expect(stored.size).to_equal(8u64)
+            expect(stored.oid.len()).to_equal(if format == "sha1": 40 else: 64)
+            val read = db_git_blob_read_owned(fixture.candidate.scratch, stored.oid, 8u64).unwrap()
+            expect(read.bytes).to_equal(bytes)
+            expect(read.oid).to_equal(stored.oid)
+            check_item2_blob_no_temporary_files(fixture)
+            check_item2_blob_cleanup(fixture)
+
+    it "accepts an empty binary blob under a zero byte bound":
+        val fixture = setup_item2_blob_fixture("sha1")
+        val bytes: [u8] = []
+        val stored = db_git_blob_put_owned(fixture.candidate.scratch, bytes, 0u64).unwrap()
+        expect(stored.size).to_equal(0u64)
+        expect(db_git_blob_read_owned(fixture.candidate.scratch, stored.oid, 0u64).unwrap().bytes).to_equal(bytes)
+        check_item2_blob_no_temporary_files(fixture)
+        check_item2_blob_cleanup(fixture)
+
+    it "rejects oversize before materialization and refuses commits and trees":
+        val fixture = setup_item2_blob_fixture("sha1")
+        val scratch = fixture.candidate.scratch
+        val stored = db_git_blob_put_owned(scratch, [0u8, 255u8], 2u64).unwrap()
+        expect(db_git_blob_read_owned(scratch, stored.oid, 1u64)).to_equal(Err("SCVDB_GIT_BLOB_QUOTA"))
+        expect(db_git_blob_put_owned(scratch, [0u8, 255u8], 1u64)).to_equal(Err("SCVDB_GIT_BLOB_QUOTA"))
+        expect(db_git_blob_read_owned(scratch, stored.oid, 16777217u64)).to_equal(Err("SCVDB_GIT_BLOB_QUOTA"))
+        expect(db_git_blob_read_owned(scratch, fixture.candidate.candidate_oid, 1024u64)).to_equal(Err("SCVDB_GIT_BLOB_TYPE"))
+        expect(db_git_blob_read_owned(scratch, fixture.candidate.tree_oid, 1024u64)).to_equal(Err("SCVDB_GIT_BLOB_TYPE"))
+        check_item2_blob_no_temporary_files(fixture)
+        check_item2_blob_cleanup(fixture)
+
+    it "rejects revision expressions uppercase IDs and foreign hash widths":
+        val fixture = setup_item2_blob_fixture("sha1")
+        for oid in ["HEAD", "../objects", "--help", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "0000000000000000000000000000000000000000000000000000000000000000"]:
+            expect(db_git_blob_read_owned(fixture.candidate.scratch, oid, 1024u64)).to_equal(Err("SCVDB_GIT_BLOB_OID"))
+        check_item2_blob_no_temporary_files(fixture)
+        check_item2_blob_cleanup(fixture)
+
+    it "does not accept a bare repository or copied marker as private ownership":
+        val fixture = setup_item2_blob_fixture("sha1")
+        val fake = fixture.root + "/authority.git"
+        expect(file_write(fake + "/.scv-candidate-owner", fake)).to_equal(true)
+        expect(db_git_blob_put_owned(fake, [0u8], 1u64)).to_equal(Err("CandidateScratchNotOwned"))
+        check_item2_blob_cleanup(fixture)
+
+    it "rejects real configured URL redirection before binary effects":
+        val fixture = setup_item2_blob_fixture("sha1")
+        val scratch = fixture.candidate.scratch
+        check_item2_blob_git(scratch, ["config", "url.file:///unexpected.insteadOf", "https://example.invalid/"])
+        expect(db_git_blob_put_owned(scratch, [0u8], 1u64)).to_equal(Err("SCVDB_GIT_BLOB_CONFIG"))
+        check_item2_blob_git(scratch, ["config", "--unset", "url.file:///unexpected.insteadOf"])
+        check_item2_blob_no_temporary_files(fixture)
+        check_item2_blob_cleanup(fixture)
+
+    it "accepts only Git's single generated leaf output":
+        expect(db_git_blob_unpack_leaf(".merge_file_aB019Z\n")).to_equal(Ok(".merge_file_aB019Z"))
+        expect(db_git_blob_unpack_leaf(".merge_file_aB019Z\r\n")).to_equal(Ok(".merge_file_aB019Z"))
+        for output in ["../.merge_file_aB019Z\n", "/.merge_file_aB019Z\n", ".merge_file_aB019/\n", ".merge_file_aB019\\\n", ".merge_file_aB019Z\nextra\n", ".merge_file_aB019Z", ".merge_file_aB019Z\0\n"]:
+            expect(db_git_blob_unpack_leaf(output).is_err()).to_equal(true)
+

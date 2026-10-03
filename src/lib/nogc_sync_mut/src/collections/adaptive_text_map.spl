@@ -9,7 +9,8 @@ use std.nogc_sync_mut.src.collections.adaptive_text_set.{
     AdaptiveSetObservation, AdaptiveSetWorkloadProfile,
     adaptive_set_default_profile, adaptive_set_normalize_profile,
     adaptive_set_attribute_supported, adaptive_set_feedback_for_site,
-    adaptive_set_feedback_target, adaptive_set_live_collision_step
+    adaptive_set_feedback_target, adaptive_set_live_collision_step,
+    adaptive_set_workload_profile_matches
 }
 
 class AdaptiveTextMap:
@@ -117,7 +118,6 @@ class AdaptiveTextMap:
             map.site_id = site_id
         if map.target_profile_id == "":
             map.target_profile_id = target_profile_id
-        map = AdaptiveTextMap.attributed(map, algorithm_name)
         val prior = AdaptiveSetWorkloadProfile(
             site_id: site_id, target_profile_id: target_profile_id,
             sample_count: sample_count, size_p95: size_p95,
@@ -126,6 +126,9 @@ class AdaptiveTextMap:
             hash_probe_count_p95: hash_probe_count_p95,
             hash_collision_count_p95: hash_collision_count_p95
         )
+        if not adaptive_set_workload_profile_matches(prior, map.site_id, map.target_profile_id):
+            panic("embedded collection workload does not match container site and target")
+        map = AdaptiveTextMap.attributed(map, algorithm_name)
         if algorithm_name == "auto" and not map.apply_workload_profile(prior):
             panic("embedded collection workload does not match container site and target")
         if map.site_id != "":
@@ -372,24 +375,8 @@ class AdaptiveTextMap:
             self.promote_if_useful()
 
     me apply_workload_profile(prior: AdaptiveSetWorkloadProfile) -> bool:
-        if self.site_id == "" or self.target_profile_id == "" or
-                prior.site_id != self.site_id or
-                prior.target_profile_id != self.target_profile_id or
-                prior.sample_count <= 0 or prior.size_p95 < 0 or
-                prior.lookup_count_p95 < 0 or prior.hit_count_p95 < 0 or
-                prior.miss_count_p95 < 0 or
+        if not adaptive_set_workload_profile_matches(prior, self.site_id, self.target_profile_id) or
                 self.attribute != AdaptiveSetAttribute.Auto:
-            return false
-        if prior.hit_count_p95 > prior.lookup_count_p95 or
-                prior.miss_count_p95 > prior.lookup_count_p95:
-            return false
-        if prior.sample_count == 1 and
-                prior.hit_count_p95 != prior.lookup_count_p95 - prior.miss_count_p95:
-            return false
-        if prior.hash_probe_count_p95 < -1 or prior.hash_collision_count_p95 < -1 or
-                (prior.hash_probe_count_p95 < 0) != (prior.hash_collision_count_p95 < 0) or
-                (prior.hash_probe_count_p95 >= 0 and
-                    prior.hash_collision_count_p95 > prior.hash_probe_count_p95):
             return false
         self.prefer_ordered_from_profile = (prior.hash_probe_count_p95 >= self.profile.lookup_promotion_count and
             prior.hash_collision_count_p95 > prior.hash_probe_count_p95 / 4) or

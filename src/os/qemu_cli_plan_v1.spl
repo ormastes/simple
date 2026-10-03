@@ -1,11 +1,15 @@
-# Host-probed, inspect-only QEMU CLI plan owner.
+# Host-probed QEMU CLI preparation and sealed dispatch owner.
 #
 # This is the sole impure bridge between `simple os run --show-plan` /
 # `--print-command` and the pure target/spec/host-adapter/launch-plan chain.
-# Normal `simple os run` deliberately remains on the established runner until
-# the typed plan reproduces every scenario and lane argument.
+# The default `simple os run` lane and represented named shapes consume the
+# same sealed plan. Other named and GUI shapes remain separate migration work.
 
 use app.io.mod.{file_exists, file_hash_sha256, process_run_timeout}
+use os.qemu_launch_resources_v1.{
+    qemu_effective_memory, qemu_effective_cpus,
+    qemu_launch_memory_mib_v1, qemu_launch_cpu_count_v1
+}
 use os.port.simpleos_multiplatform_build.{
     simpleos_machine_target_known, simpleos_machine_target_projection
 }
@@ -26,10 +30,12 @@ pub class QemuCliInspectOutcomeV1:
     _ok: bool
     _error: text
     _lines: [text]
+    _plan: QemuLaunchPlanV1?
 
 impl QemuCliInspectOutcomeV1:
     pub fn ok() -> bool: self._ok
     pub fn error() -> text: self._error
+    pub fn launch_plan() -> QemuLaunchPlanV1?: self._plan
     pub fn lines_copy() -> [text]:
         var result: [text] = []
         for line in self._lines:
@@ -47,7 +53,25 @@ class _QemuSettingsV1:
     riscv64_bin: text
 
 fn _qemu_cli_reject_v1(reason: text) -> QemuCliInspectOutcomeV1:
-    QemuCliInspectOutcomeV1(_ok: false, _error: reason, _lines: [])
+    QemuCliInspectOutcomeV1(_ok: false, _error: reason, _lines: [], _plan: nil)
+
+pub fn qemu_cli_dispatch_command_v1(plan: QemuLaunchPlanV1) -> [text]:
+    """Copy an admitted sealed command without shell parsing or recomposition."""
+    if not plan.admitted() or not plan.sealed_valid():
+        return []
+    var command: [text] = [plan.executable_path()]
+    for arg in plan.argv_copy():
+        command.push(arg)
+    command
+
+pub fn qemu_cli_dispatch_plan_v1(plan: QemuLaunchPlanV1, timeout_ms: i64) -> (text, text, i32):
+    """Dispatch exactly the sealed argv through the bounded process facade."""
+    val command = qemu_cli_dispatch_command_v1(plan)
+    if command.len() == 0:
+        return ("", "QEMU dispatch rejected an unadmitted or invalid seal", -1)
+    if timeout_ms <= 0 or timeout_ms > 600000:
+        return ("", "QEMU dispatch requires a timeout from 1 to 600000 ms", -1)
+    process_run_timeout(command[0], command.slice(1), timeout_ms)
 
 fn _qemu_setting_value_v1(output: text, key: text) -> text:
     val prefix = key + "="
@@ -109,15 +133,6 @@ fn _qemu_path_directory_v1(path: text) -> text:
 
 pub fn qemu_cli_executable_policy_matches_v1(normal_runner: text, configured: text) -> bool:
     normal_runner.replace("\\", "/") == configured.replace("\\", "/")
-
-fn _qemu_memory_mib_v1(value: text) -> u64:
-    val normalized = value.trim().upper()
-    if normalized.ends_with("G"):
-        val number = normalized[:normalized.len() - 1]
-        return (int(number) * 1024) as u64
-    if normalized.ends_with("M"):
-        return int(normalized[:normalized.len() - 1]) as u64
-    int(normalized) as u64
 
 fn _qemu_shell_quote_v1(value: text) -> text:
     "'" + value.replace("'", "'\"'\"'") + "'"
@@ -190,6 +205,7 @@ fn _qemu_cli_render_plan_v1(
     machine: text,
     cpu: text,
     memory_mib: u64,
+    cpu_count: u16,
     firmware_display: text,
     image_path: text,
     image_digest: text,
@@ -211,7 +227,7 @@ fn _qemu_cli_render_plan_v1(
         "Machine:     {machine}",
         "CPU:         {cpu}",
         "Memory:      {memory_mib} MiB",
-        "CPUs:        1",
+        "CPUs:        {cpu_count}",
         "Plan SHA256: {plan.argv_digest()}",
         "Sealed:      true"
     ]
@@ -319,25 +335,27 @@ fn _qemu_cli_inspect_lane_shape_v1(
             "QEMU executable policy mismatch: settings resolved {executable_path}, " +
             "adapter selected {host_outcome.resolution().executable_path}")
 
-    val memory_mib = _qemu_memory_mib_v1(qemu_memory)
+    val memory_mib = qemu_launch_memory_mib_v1(qemu_effective_memory(qemu_memory))
+    val cpu_count = qemu_launch_cpu_count_v1(qemu_effective_cpus())
     val request = QemuAcceleratorRequestV1(
         kind: QemuAcceleratorRequestKindV1.Auto,
         accelerator: accelerator)
     val spec = if named_scenario_shape:
         qemu_machine_spec_from_named_lane_v1(
-            target, lane, image_digest, memory_mib, request)
+            target, lane, image_digest, memory_mib, request, cpu_count)
     else:
         qemu_machine_spec_from_lane_v1(
-            target, lane, image_digest, memory_mib, request)
+            target, lane, image_digest, memory_mib, request, cpu_count)
     val plan = qemu_launch_plan_bind_lane_parity_v1(spec, host_outcome.resolution())
     if not plan.admitted() or not plan.sealed_valid():
         return _qemu_cli_reject_v1("QEMU launch plan rejected: {_qemu_plan_error_text_v1(plan.error())}")
     QemuCliInspectOutcomeV1(
         _ok: true,
         _error: "",
+        _plan: plan,
         _lines: _qemu_cli_render_plan_v1(
             settings.host, target.canonical_name, target.native_target,
-            target.qemu_machine, target.qemu_cpu, memory_mib, qemu_bios,
+            target.qemu_machine, target.qemu_cpu, memory_mib, cpu_count, qemu_bios,
             image_path, image_digest, plan, print_command))
 
 pub fn qemu_cli_inspect_lane_v1(
@@ -390,3 +408,4 @@ export qemu_cli_command_display_v1, qemu_cli_executable_policy_matches_v1
 export qemu_cli_named_lane_supported_v1
 export qemu_cli_inspect_lane_v1, qemu_cli_inspect_named_lane_v1
 export qemu_cli_inspect_plan_v1
+export qemu_cli_dispatch_command_v1, qemu_cli_dispatch_plan_v1

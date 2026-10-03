@@ -23,3 +23,7 @@ Guardian and native exit statuses were zero, before/after input hashes matched, 
 ## Remaining limits
 
 The original canonical run failed its compile-command branch. That nonzero status was not reproduced by the cohort, and the filename mismatch does not explain it. The old failure remains preserved. Dedicated source-level orchestration regression coverage is prepared separately with the shared bootstrap regression helper; it has not been run and is not claimed as passing by this fix. Negative compile-status propagation has static review only in this patch.
+
+## Release-specific adaptation limits (historical)
+
+The Release832b snapshot had only the mutable-receiver probe in this gate. Its adapted fix applied to that execution boundary and preserved the original arguments and runtime defaults. Explicit strict-stub and Windows ABI/linker selection were separately imported prerequisites from the reviewed main gate. The positional Stage3 route probe described above was absent from that release snapshot, so its suffix and quoting changes were not part of the release adaptation. Bringing that route coverage to release requires a separate reviewed prerequisite. The adaptation claimed no exact patch-ID backport, target runtime PASS or release admission.

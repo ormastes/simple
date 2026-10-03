@@ -1,0 +1,153 @@
+"""Checked typed columns: real adapter errors and storage safety, not engine parity."""
+# @req REQ-001
+use std.spec.*
+use std.ndarray.*
+use std.nogc_async_mut.df.mod.{Symbol, Series, DfError}
+use std.nogc_async_mut.df.*
+
+fn checked_column_dynamic(kind: text) -> Series:
+    var column = Series.from_i64_values(Symbol.from("storage"), [Int64.new(11), Int64.new(22), Int64.new(33)])
+    var backing = column.values
+    if kind == "negative-dimension":
+        backing.shape = Shape.new([Index.new(-3)])
+    elif kind == "rank-mismatch":
+        backing.strides = Stride.new([])
+    elif kind == "count-overflow":
+        backing.shape = Shape.new([Index.new(9223372036854775807), Index.new(2)])
+        backing.strides = Stride.new([Index.new(2), Index.new(1)])
+    elif kind == "backing-short":
+        backing.data_i64 = [Int64.new(11)]
+    elif kind == "negative-offset":
+        backing.offset = Index.new(-1)
+    elif kind == "stride-outside":
+        backing.strides = Stride.new([Index.new(2)])
+    elif kind == "negative-stride-outside":
+        backing.strides = Stride.new([Index.new(-1)])
+    elif kind == "minimum-stride":
+        backing.strides = Stride.new([Index.new(-9223372036854775807 - 1)])
+    elif kind == "zero-rank":
+        backing.shape = Shape.new([])
+        backing.strides = Stride.new([])
+    column.values = backing
+    column
+
+fn checked_column_poison(value: Int64) -> Int64:
+    panic("a malformed column must reject before callback invocation")
+    value
+
+describe "checked typed column diagnostics and storage":
+    it "reports exact expected and actual mask lengths with legacy compatibility":
+        val name = Symbol.from("mask")
+        match TypedSeries<Int64>.from_masked_checked(name, [Int64.new(1), Int64.new(2)], []):
+            case Err(error): expect(error).to_equal(TypedColumnError.MaskLength(2, 0))
+            case _: fail("invalid mask was admitted")
+        match TypedSeries<Int64>.from_masked(name, [Int64.new(1), Int64.new(2)], []):
+            case Err(error): expect(error).to_equal(DfError.ShapeMismatch)
+            case _: fail("legacy constructor accepted invalid mask")
+
+    it "reports both index boundaries distinctly from missing values":
+        val column = TypedSeries<Int64>.from_masked_checked(Symbol.from("indices"),
+            [Int64.new(7), Int64.new(8)], [Bool.new(false), Bool.new(true)]).unwrap()
+        for index in [-1, 2]:
+            match column.get_checked(Index.new(index)):
+                case Err(error): expect(error).to_equal(TypedColumnError.IndexOutOfBounds(index, 2))
+                case _: fail("out-of-range checked index was admitted")
+        expect(column.get_checked(Index.new(0)).unwrap().unwrap().value).to_equal(7)
+        val missing_value = column.get_checked(Index.new(1)).unwrap()
+        expect(missing_value.?).to_equal(false)
+
+    it "distinguishes declared and backing dtype mismatch before reading storage":
+        var floating = Series.from_f64_values(Symbol.from("floating"), [Float64.new(1.25)])
+        match i64_typed_series_from_dynamic_checked(floating):
+            case Err(error): expect(error).to_equal(TypedColumnError.DTypeMismatch(DType.I64, DType.F64, DType.F64))
+            case _: fail("floating column admitted as integer")
+        floating.dtype = DType.I64
+        match i64_typed_series_from_dynamic_checked(floating):
+            case Err(error): expect(error).to_equal(TypedColumnError.DTypeMismatch(DType.I64, DType.I64, DType.F64))
+            case _: fail("forged outer dtype hid backing dtype")
+
+    it "rejects malformed dynamic metadata and unreachable backing before flat reads":
+        for kind in ["negative-dimension", "rank-mismatch", "count-overflow", "backing-short", "negative-offset", "stride-outside", "negative-stride-outside", "minimum-stride", "zero-rank"]:
+            val malformed = checked_column_dynamic(kind)
+            match i64_typed_series_from_dynamic_checked(malformed):
+                case Err(error):
+                    match error:
+                        case InvalidStorage(reason): expect(reason.len()).to_be_greater_than(0)
+                        case _: fail("storage defect misclassified")
+                case _: fail("malformed dynamic storage was read")
+            expect(i64_typed_series_from_dynamic(malformed).is_err()).to_equal(true)
+
+    it "keeps reversed and multidimensional valid storage views readable":
+        var reversed = checked_column_dynamic("valid")
+        var backing = reversed.values
+        backing.offset = Index.new(2)
+        backing.strides = Stride.new([Index.new(-1)])
+        reversed.values = backing
+        val restored = i64_typed_series_from_dynamic_checked(reversed).unwrap()
+        expect(restored.values[0].value).to_equal(33)
+        expect(restored.values[1].value).to_equal(22)
+        expect(restored.values[2].value).to_equal(11)
+        var matrix = checked_column_dynamic("valid")
+        var matrix_backing = matrix.values
+        matrix_backing.shape = Shape.new([Index.new(1), Index.new(3)])
+        matrix_backing.strides = Stride.new([Index.new(3), Index.new(1)])
+        matrix.values = matrix_backing
+        val flat = i64_typed_series_from_dynamic_checked(matrix).unwrap()
+        expect(flat.values[0].value).to_equal(11)
+        expect(flat.values[2].value).to_equal(33)
+
+    it "accepts empty typed storage and returns a precise dynamic mask error":
+        val empty = Series.from_i64_values(Symbol.from("empty"), [])
+        expect(i64_typed_series_from_dynamic_checked(empty).unwrap().len().value).to_equal(0)
+        var wrong_mask = checked_column_dynamic("valid")
+        wrong_mask.missing = [Bool.new(false)]
+        match i64_typed_series_from_dynamic_checked(wrong_mask):
+            case Err(error): expect(error).to_equal(TypedColumnError.MaskLength(3, 1))
+            case _: fail("dynamic mask mismatch admitted")
+
+    it "validates malformed typed output before conversion or callback":
+        val malformed = TypedSeries<Int64>(name: Symbol.from("malformed"),
+            values: [Int64.new(7)], missing: [])
+        match malformed.validate():
+            case Err(error): expect(error).to_equal(TypedColumnError.MaskLength(1, 0))
+            case _: fail("malformed typed storage admitted")
+        match i64_typed_series_into_dynamic_checked(malformed):
+            case Err(error): expect(error).to_equal(TypedColumnError.MaskLength(1, 0))
+            case _: fail("malformed output converted")
+        expect(i64_typed_series_into_dynamic(malformed).is_err()).to_equal(true)
+        expect(malformed.map_values(checked_column_poison).is_err()).to_equal(true)
+
+    it "allows an empty view at backing end but rejects an offset beyond it":
+        var empty = checked_column_dynamic("valid")
+        var backing = empty.values
+        backing.shape = Shape.new([Index.new(0)])
+        backing.offset = Index.new(3)
+        backing.strides = Stride.new([Index.new(-9223372036854775807 - 1)])
+        empty.values = backing
+        empty.missing = []
+        expect(i64_typed_series_from_dynamic_checked(empty).unwrap().len().value).to_equal(0)
+        backing.offset = Index.new(4)
+        empty.values = backing
+        match i64_typed_series_from_dynamic_checked(empty):
+            case Err(error): expect(error).to_equal(TypedColumnError.InvalidStorage("offset-outside-backing"))
+            case _: fail("empty view admitted an offset beyond its backing")
+
+    it "validates f64 backing extent independently of matching dtype and mask":
+        var column = Series.from_f64_values(Symbol.from("short_f64"),
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        var backing = column.values
+        backing.data_f64 = [Float64.new(1.0)]
+        column.values = backing
+        match f64_typed_series_from_dynamic_checked(column):
+            case Err(error): expect(error).to_equal(TypedColumnError.InvalidStorage("stride-outside-backing"))
+            case _: fail("f64 adapter read beyond backing")
+        expect(f64_typed_series_from_dynamic(column).is_err()).to_equal(true)
+
+    it "roundtrips f64 through checked adapters without changing present or missing rows":
+        val column = TypedSeries<Float64>.from_masked_checked(Symbol.from("f64"),
+            [Float64.new(-1.25), Float64.new(99.0), Float64.new(3.5)],
+            [Bool.new(false), Bool.new(true), Bool.new(false)]).unwrap()
+        val restored = f64_typed_series_from_dynamic_checked(f64_typed_series_into_dynamic_checked(column).unwrap()).unwrap()
+        expect(restored.values[0].value).to_equal(-1.25)
+        expect(restored.values[2].value).to_equal(3.5)
+        expect(restored.missing[1].value).to_equal(true)

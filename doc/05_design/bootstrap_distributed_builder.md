@@ -1,0 +1,150 @@
+# Bootstrap distributed builder detail design
+
+## Capacity admission repair (2026-10-02)
+
+`common/build_manager/capacity_request.spl` owns the canonical bounded sidecar:
+version header, task identity, host identity and `owned-platform-boundary-v1`.
+Transport persists it before launching either compiled worker. Missing, altered,
+cross-task or cross-host authority is rejected before acquiring a resource.
+
+Linux's `LinuxCgroupParentV1` exposes a lease token and observed path/device/inode;
+the native SOSIX adapter retains the actual directory descriptors. Acquisition
+fails on existing names, unavailable delegation, or failed controller readback.
+Capacity and process start reuse that exact descriptor; start additionally checks
+the task identity and attempt root. Release refuses live/uncollected children
+and removes only the pinned empty directory. The worker brackets every admitted
+run with acquisition and release, including pre-start rejection paths.
+Generation tokens prevent a stale copied lease from releasing a later parent.
+Failed rollback retains the parent token and descriptors; typed admission
+distinguishes this cleanup obligation from a proven clean rejection.
+
+`BuilderCapacitySettlementV1` requires positive task/host-bound evidence for
+`no-parent-owned`, `linux-parent-released`, or `windows-job-settled`. For a
+released Linux parent, transport also requires canonical acquisition and
+identical release receipts. Read errors never imply absence. The grouped Linux
+broker keeps its tree receipt pending until parent release, then publishes
+the terminal record. The grouped manager's separate parent only measures
+capacity and is removed after the admitted run.
+
+Windows capacity is `min(ullAvailPhys, ullAvailPageFile)` from one
+`MEMORYSTATUSEX` snapshot, since JobObject limits account commit. Admission reads
+back `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY` and the
+exact byte limit before attempting `CreateProcessW`.
+
+Tests: `capacity_request_spec.spl`, `windows_capacity_headroom_spec.spl`,
+`no_child_started_spec.spl`, and the Linux/Windows capacity owner fixtures.
+`test/fixtures/bootstrap_builder/linux_capacity_owner.c` runs real
+cgroup2/clone3/pidfd operations and requires an already memory-delegating mount.
+Its `lifecycle` mode separately injects delegation/rollback failures and
+checks retained ownership and stale-lease rejection. Windows native coverage
+is `test/fixtures/bootstrap_builder/windows_capacity_owner_main.spl`.
+Manager and worker must be rebuilt together: old workers lack the sidecar
+contract, and old compiler text-ABI registries mis-lower the Linux owner calls.
+
+Status: shared protocol implemented; native qualification pending.
+
+## Shared interface
+
+`std.common.build_manager.contracts` exports `BuildInputV1`, `BuildLinkV1`, `BuildTaskV1`,
+`BuildHostV1`, `BuildResultV1`, `BuildRunV1`. Schema fields are defined once in
+that source. Validators return an empty error string on success:
+`builder_validate_task_v1`, `builder_validate_host_v1`,
+`builder_validate_run_v1`, `builder_validate_result_shape_v1`, and
+`builder_validate_result_v1(task, result)`.
+
+`builder_task_identity_v1` uses the `simple-build-task-identity-v3` domain and
+hashes unambiguous length-delimited scalar fields, counts and ordered lists,
+including task attempt, all three input identities, program/argv, cache key,
+timeout, the required `memory_limit_bytes` cap, and ordered typed links.
+Invalid tasks have no identity. Full-run
+journal identity is SHA256 of `builder_encode_run_v1`, binding host configuration
+and scheduling policy as well as tasks.
+
+`std.common.build_manager.codec` provides matching
+`builder_encode_{task,run,result}_v1` and
+`builder_decode_{task,run,result}_v1`. Encoders reject invalid input with empty
+payload; decoders return `Result<T,text>`. App adapter provides matching
+`builder_read_*_v1` and `builder_write_*_v1` through bounded no-follow reads and
+atomic file-write facades. Parent directories must already exist.
+
+## Wire format
+
+The first newline-terminated scalar is `SIMPLE-BUILD-TASK-3`,
+`SIMPLE-BUILD-RUN-4` or `SIMPLE-BUILD-RESULT-1`. Earlier task/run headers
+reject rather than receiving an inferred memory cap or link list. Ordered scalar fields follow;
+arrays have an explicit canonical decimal count. Percent, tab, CR and LF encode
+as `%25`, `%09`, `%0D`, `%0A`. Decode once. Unknown escapes, leading-zero
+integers, negative zero, trailing fields, absent final newline, excess bounds
+and truncated records reject. Arguments stay opaque data, never executable
+shell fragments. Codec and identity framing are separate deliberate formats.
+
+Task body order: id, attempt, phase, producer/source/toolchain digests, program,
+cache key, timeout, memory limit in bytes, dependency count and IDs, argc and arguments, input count
+and path/digest pairs, link count and kind/path/raw target/resolved path/target digest
+records, then output count and paths. Directory links have an empty target digest;
+file links require the exact SHA256 of a separately declared regular target.
+Run prefix: keep-going 0/1,
+max-attempts, host count, each host's id/transport/endpoint/workspace/worker-program/
+worker-digest/slots, then task count and task bodies. Result: task id, attempt, identity,
+host id, status, exit, cache hits/misses/stores, output count and path/digest pairs.
+
+Task/input/output paths are portable relative paths; traversal, absolute paths,
+Windows device aliases and overlapping writable declarations reject. Text can
+contain Unicode; field lengths follow the language text length semantics. File
+payload admission is separately bounded in bytes by the app reader. SHA256
+identities are 64 lowercase hex characters.
+
+Run wire version 4 requires `BuildHostV1.worker_digest`, the SHA256 of that
+host's compiled worker executable, and every task's explicit memory cap in
+the inclusive range 1..1125899906842624 bytes. Empty/malformed digests and
+missing or out-of-range caps reject at admission;
+transport must compare actual executable bytes before executing. Task producer
+identity and worker identity are separate. Every host constructor must supply
+the worker digest; the stable source API names ending in `_v1` do not imply
+acceptance of obsolete wire formats. Run versions 1 through 3 are deliberately
+rejected, never silently upgraded or filled from the local manager image.
+
+The compiled emitter requires a canonical decimal cap with
+`--template WORKER WORKSPACE OUTPUT SLOTS --memory-limit-bytes N`,
+`--job TEMPLATE PROGRAM ROOT ID PHASE OUTPUT --memory-limit-bytes N --inputs FILE... -- ARGS...`,
+or `--job-from-inventory TEMPLATE PROGRAM ROOT ID PHASE OUTPUT INVENTORY --memory-limit-bytes N --links-inventory REL [--manifest ABS] -- ARGS...`.
+The link inventory is required even when empty. It is an exact sorted list of
+Stage 2 `link-dir-hex` and `link-hex` rows and is SHA-pinned alongside the
+regular inventory. The manager stages only declared regular files, creates
+confined links after their targets, and checks exact link text and target kind
+before worker launch and before admitting a successful result. Run, restore, resume and
+verify also check the immutable source links. A typed Phase 2 authority receipt
+and compiled pre/post authority verification establish that the target subtree
+inventory is complete; a path list alone cannot prove that completeness.
+The positional Stage 2 bootstrap emission inherits the template's explicit
+cap. The one-task job modes set a 24-hour task timeout. The cap and timeout
+are protocol admission values; native enforcement requires separate worker
+qualification.
+
+The current user ordering uses the permitted genuine Phase 1 seed to build
+the native manager, then retains that qualified manager through Phase 4.
+Scripts continue the cached bootstrap concurrently. Grouped isolated local
+workers are the immediate priority; remote execution remains separately
+tracked and may not be claimed from local protocol tests.
+
+Terminal result statuses are `OK`, `ERROR`, `CRASHED`, `TIMEOUT`, `BLOCKED`,
+`NOT_RUN`. OK requires exit zero and exactly all declared outputs. Other statuses
+have nonzero exit and cannot carry admitted outputs. Actual file verification
+belongs to parent orchestration, not this pure shape validator. Cache counters
+allow `-1` for unobserved compiler telemetry; counts of stored files are not hits.
+
+## Validation and tests
+
+`test/01_unit/app/bootstrap_builder/contracts_codec_spec.spl` checks opaque argv,
+literal percent escaping, invalid/truncated records, integer overflow, cap bounds
+and identity binding, portable
+paths, overlap, missing/cyclic dependencies, changed attempts, output completeness,
+and unknown telemetry. It supplies protocol evidence only after execution.
+
+Scenario helpers for lifecycle suites: `prepare_builder_fixture`,
+`start_builder_run`, `interrupt_owned_worker`, `resume_builder_run`,
+`assert_terminal_task_rows`, `assert_dependency_blocked`, `assert_cache_reused`,
+`assert_stale_result_rejected`, `assert_remote_execution_receipt`.
+Unimplemented helpers must fail explicitly; none may supply placeholder passes.
+Native local/remote process checks and compiler integration belong to their
+corresponding implementation lanes, with retained evidence and separate status.

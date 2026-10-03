@@ -1,0 +1,28 @@
+# Native task producer for lifecycle qualification. Every success is an actual
+# process execution. The PID in output detects accidental execution on a cache hit.
+use app.io.args_ops.{get_args}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists, file_atomic_write}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms}
+
+fn main() -> i64:
+    val raw_args = get_args()
+    var args: [text] = []
+    for index in 1..raw_args.len():
+        args = args.push(raw_args[index])
+    if args.len() != 3: return 64
+    val mode = args[0]
+    val input = file_read(args[1])
+    if input == "": return 65
+    if not file_atomic_write("started", "{getpid()}\n" + input): return 66
+    if mode == "fail": return 23
+    if mode == "wait":
+        var ticks = 0
+        while not file_exists("release") and ticks < 600:
+            sleep_ms(100)
+            ticks = ticks + 1
+        if not file_exists("release"): return 124
+    elif mode != "copy":
+        return 64
+    if not file_atomic_write(args[2], input + "\nproducer-pid={getpid()}\n"): return 67
+    0

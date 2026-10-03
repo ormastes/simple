@@ -2025,9 +2025,7 @@ impl Lowerer {
     ///
     /// The `??` operator returns the left operand if it's not nil,
     /// otherwise returns the right operand. This is lowered to:
-    /// `if expr != nil then expr else default`
-    ///
-    /// For simplicity, we evaluate expr once and check against nil.
+    /// `let subject = expr; if subject != nil then subject else default`
     pub(super) fn lower_coalesce(
         &mut self,
         expr: &Expr,
@@ -2103,6 +2101,22 @@ impl Lowerer {
             return Ok(expr_hir);
         }
 
+        // Both the presence test and payload extraction must read the same
+        // value. Cloning the original HIR expression here duplicates calls
+        // (and their effects) on the present branch.
+        let subject_ty = expr_hir.ty;
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$coalesce_subject".to_string(), subject_ty, Mutability::Immutable);
+        let store_subject = HirStmt::Let {
+            local_index: subject_idx,
+            ty: subject_ty,
+            value: Some(expr_hir),
+        };
+        let expr_hir = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+
         // Create a nil check: expr != nil
         let nil_expr = HirExpr {
             kind: HirExprKind::Nil,
@@ -2171,12 +2185,16 @@ impl Lowerer {
         // Bug: doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
         let default_hir = self.box_scalar_into_tagged_result(result_ty, default_hir);
 
-        Ok(HirExpr {
+        let selected = HirExpr {
             kind: HirExprKind::If {
                 condition: Box::new(condition),
                 then_branch: Box::new(unwrapped_expr),
                 else_branch: Some(Box::new(default_hir)),
             },
+            ty: result_ty,
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::Block(vec![store_subject, HirStmt::Expr(selected)]),
             ty: result_ty,
         })
     }

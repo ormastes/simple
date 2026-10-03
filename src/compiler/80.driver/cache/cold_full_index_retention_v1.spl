@@ -1,0 +1,59 @@
+# Release non-runtime/std compiler payloads after the caller has proven exact
+# frozen package membership. This reduces post-pass retention only; the full
+# semantic pass has already reached its peak before this boundary.
+
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.smf.runtime_std_package_membership_v1.{
+    RuntimeStdPackageMembershipV1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1
+}
+
+fn cold_full_index_trim_non_runtime_std_v1(
+    ctx: CompileContext, membership: RuntimeStdPackageMembershipV1
+) -> Result<i64, text>:
+    var selected_sources: Dict<text, bool> = {}
+    for member in membership.members:
+        if member.package_identity == RUNTIME_PACKAGE_IDENTITY_V1 or
+                member.package_identity == STD_PACKAGE_IDENTITY_V1:
+            selected_sources[member.source_identity] = true
+    var selected_names: Dict<text, bool> = {}
+    var all_names: Dict<text, bool> = {}
+    for receipt in ctx.cold_hir_typed_receipts:
+        val source_identity = receipt.seed.source_identity
+        val module_identity = receipt.seed.module_identity
+        if module_identity == "" or all_names.has(module_identity) or
+                not ctx.runtime_std_hir_emissions.has(source_identity) or
+                ctx.runtime_std_hir_emissions[source_identity].source_identity !=
+                    source_identity or
+                ctx.runtime_std_hir_emissions[source_identity].source_digest !=
+                    receipt.seed.source_digest or
+                ctx.runtime_std_hir_emissions[source_identity].module_identity !=
+                    module_identity:
+            return Err("full-index-runtime-std-retention-module-invalid")
+        all_names[module_identity] = true
+        if selected_sources.has(source_identity):
+            if selected_names.has(module_identity) or
+                    not ctx.mir_modules.has(module_identity) or
+                    not ctx.runtime_std_hir_emissions.has(source_identity):
+                return Err("full-index-runtime-std-retention-preflight-invalid")
+            selected_names[module_identity] = true
+    if selected_names.len() == 0 or
+            selected_sources.len() != selected_names.len() or
+            ctx.freeze_storage_registry() == "invalid":
+        return Err("full-index-runtime-std-retention-freeze-invalid")
+    var evicted = 0
+    for receipt in ctx.cold_hir_typed_receipts:
+        val source_identity = receipt.seed.source_identity
+        if selected_sources.has(source_identity): continue
+        val module_identity = receipt.seed.module_identity
+        if ctx.mir_modules.has(module_identity):
+            ctx.evict_mir_module(module_identity)
+            evicted = evicted + 1
+        var hir = ctx.runtime_std_hir_emissions[source_identity]
+        hir.semantic_payloads = []
+        ctx.runtime_std_hir_emissions[source_identity] = hir
+    Ok(evicted)
+
+export cold_full_index_trim_non_runtime_std_v1

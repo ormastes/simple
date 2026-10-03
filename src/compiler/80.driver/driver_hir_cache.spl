@@ -38,6 +38,7 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use std.common.crypto.sha256.{sha256_text}
 use std.io.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_hash}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
@@ -210,6 +211,18 @@ fn hir_cache_last_warnings() -> [text]:
 fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
     if key == "" or not hir_cache_enabled():
         return false
+    # Eligibility initializes the immutable frontend scope memo before scratch
+    # ownership begins. Encoding and synchronous publication retain no graph:
+    # only the scalar store counter escapes. Do not borrow an enclosing scope.
+    if not transient_scope_begin():
+        return false
+    val stored = hir_cache_store_in_owned_scope(key, module, warnings)
+    # Always close, including codec refusal and failed writes/renames. A
+    # short-circuit expression here would leak precisely the failure cases.
+    val ended = transient_scope_end()
+    stored and ended
+
+fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]) -> bool:
     val blob = hir_module_encode(module)
     if blob == "":
         return false

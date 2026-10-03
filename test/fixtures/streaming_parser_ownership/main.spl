@@ -1,0 +1,163 @@
+# Focused native boundary regression. General streaming qualification is separate.
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_types.{CompileMode}
+use compiler.driver.driver_source_pipeline_impl.*
+use compiler.driver.driver_hir_pipeline_lowering.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, module_surface_canonical_path}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.core.parser.{parser_initialization_generation_v1, parser_has_errors, parser_get_errors}
+use compiler.core.parser_decls.{parser_unsafe_annotations_get, parser_enum_open_regions_for}
+use compiler.frontend.resource_registry.{resource_meta_prefix}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set_process, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_cli_get_args() -> [text]
+
+class StreamingHirOwner:
+    module: HirModule
+
+fn hex_identity(value: text, count: i64) -> bool:
+    if value.len() != count: return false
+    for character in value:
+        if not "0123456789abcdef".contains(character): return false
+    true
+
+fn source_for(mode: text, index: i64) -> text:
+    val function = "fn value_{index}() -> i64:\n    return {index * 19}\n"
+    if mode == "hir": return function
+    "@sffi(prefix: \"stream_{index}\", invalid: -1)\nresource Handle{index}\n" +
+        "enum Choice{index}:\n    Value(v: i64)\n    complete:\n    dyn:\n" +
+        "@unsafe(reason: \"stream_{index}\", capabilities: [ffi])\n" + function
+
+fn surface_metadata_valid(index: i64) -> bool:
+    if parser_has_errors() or resource_meta_prefix("Handle{index}") != "stream_{index}": return false
+    val annotations = parser_unsafe_annotations_get()
+    if annotations.len() != 1 or not annotations[0].starts_with("value_{index}|") or
+            not annotations[0].contains("stream_{index}") or not annotations[0].ends_with("|ffi"):
+        return false
+    val regions = parser_enum_open_regions_for("Choice{index}")
+    regions[0] and regions[1]
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.len() != 3: return 10
+    val mode = args[1]
+    val root = args[2]
+    if mode != "surface" and mode != "hir": return 11
+    val producer = env_get_opt("SIMPLE_STREAM_PRODUCER_SHA256") ?? ""
+    val producer_source = env_get_opt("SIMPLE_STREAM_PRODUCER_SOURCE_REVISION") ?? ""
+    val source_revision = env_get_opt("SIMPLE_STREAM_SOURCE_REVISION") ?? ""
+    if not hex_identity(producer, 64) or not hex_identity(producer_source, 40) or
+            not hex_identity(source_revision, 40): return 12
+    if not dir_create_all(root): return 13
+    if not env_set_process("SIMPLE_BOOTSTRAP", "0") or
+            not env_set_process("SIMPLE_FRONTEND_CACHE", "1") or
+            not env_set_process("SIMPLE_FRONTEND_CACHE_SCOPE", "streaming-owner-probe-v1") or
+            not env_set_process("SIMPLE_FRONTEND_CACHE_DIR", root + "/cache") or
+            not env_set_process("SIMPLE_SHARED_PARSE_SOURCE_ROOT", ""):
+        return 14
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Aot
+    options.backend = "llvm"
+    var driver = CompilerDriver.create(options)
+    var builder = ModuleSurfaceBuilder.new()
+    val generation = parser_initialization_generation_v1()
+    if generation != 0: return 15
+    val first_path = root + "/first.spl"
+    val first_source = source_for(mode, 1)
+    if not file_write(first_path, first_source): return 16
+    driver.ctx.frontend_advisory_policy = FrontendAdvisoryPreprocessPolicyV1.RequireSimd
+    var rejected_text = ""
+    if mode == "surface":
+        val rejected = driver.add_streaming_module_surface(builder,
+            first_path, first_path, first_source, "probe.first", 0,
+            module_surface_canonical_path(first_path))
+        if not rejected.is_err(): return 17
+        rejected_text = rejected.unwrap_err()
+    else:
+        var rejected_lowering = HirLowering.with_filename(first_path)
+        val rejected = driver.lower_streaming_surface_source(rejected_lowering,
+            SourceFile(path: first_path, authored_path: first_path,
+                content: first_source, module_name: "probe.first"), true)
+        if not rejected.is_err(): return 18
+        rejected_text = rejected.unwrap_err()
+    if parser_initialization_generation_v1() != generation or
+            not rejected_text.contains("required environment variant frontend provider unavailable"):
+        return 19
+    val rejected_digest = sha256_text(rejected_text)
+    driver.ctx.frontend_advisory_policy = FrontendAdvisoryPreprocessPolicyV1.Reference
+    var retained_hir: [StreamingHirOwner] = []
+    var first_hir_digest = ""
+    var parser_diagnostics: [text] = []
+    var diagnostic_digest = ""
+    var index = 1
+    while index <= 3:
+        val path = root + "/module_{index}.spl"
+        val source = source_for(mode, index)
+        if not file_write(path, source): return 20
+        if mode == "surface":
+            val parsed = driver.add_streaming_module_surface(builder,
+                path, path, source, "probe.module_{index}", index - 1,
+                module_surface_canonical_path(path))
+            if parsed.is_err() or not surface_metadata_valid(index): return 21
+            builder = parsed.unwrap()
+            if builder.surfaces.len() != index or
+                    not builder.surfaces[0].callables.contains_key("value_1"):
+                return 22
+        else:
+            var lowering = HirLowering.with_filename(path)
+            val lowered = driver.lower_streaming_surface_source(lowering,
+                SourceFile(path: path, authored_path: path, content: source,
+                    module_name: "probe.module_{index}"), index == 1)
+            if lowered.is_err() or parser_has_errors(): return 23
+            val module = lowered.unwrap()
+            if module.functions.len() != 1: return 24
+            retained_hir.push(StreamingHirOwner(module: module))
+            if index == 1:
+                val encoded = hir_module_encode(module)
+                if encoded == "": return 25
+                first_hir_digest = sha256_text(encoded)
+        if index == 1:
+            val broken_path = root + "/broken.spl"
+            val broken = "fn broken(\n"
+            if not file_write(broken_path, broken): return 26
+            if mode == "surface":
+                val failed = driver.add_streaming_module_surface(builder,
+                    broken_path, broken_path, broken, "probe.broken", 3,
+                    module_surface_canonical_path(broken_path))
+                if not failed.is_err(): return 27
+            else:
+                var failed_lowering = HirLowering.with_filename(broken_path)
+                val failed = driver.lower_streaming_surface_source(failed_lowering,
+                    SourceFile(path: broken_path, authored_path: broken_path,
+                        content: broken, module_name: "probe.broken"), false)
+                if not failed.is_err(): return 28
+            if not parser_has_errors(): return 29
+            parser_diagnostics = parser_get_errors()
+            if parser_diagnostics.len() == 0: return 30
+            diagnostic_digest = sha256_text(parser_diagnostics.join("\n"))
+        index = index + 1
+    if parser_has_errors() or parser_initialization_generation_v1() != generation + 4:
+        return 31
+    if sha256_text(rejected_text) != rejected_digest or
+            sha256_text(parser_diagnostics.join("\n")) != diagnostic_digest: return 32
+    if mode == "hir" and sha256_text(hir_module_encode(retained_hir[0].module)) != first_hir_digest:
+        return 33
+    print "profile=streaming-parser-owner-v1"
+    print "mode={mode}"
+    print "producer_sha256={producer}"
+    print "producer_source_revision={producer_source}"
+    print "source_revision={source_revision}"
+    print "successful_modules=3"
+    print "parser_initializations=4"
+    print "required_provider_rejected=yes"
+    print "error_lifetime_ok=yes"
+    print "retained_output_ok=yes"
+    print "collector_active=no"
+    print "complete=yes"
+    0

@@ -1,0 +1,111 @@
+# Derive explicit runtime/std membership from one complete compiler V2 graph.
+# Package labels come from validated compiler entries, never source prefixes.
+
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1, NATIVE_FULL_INVENTORY_MAX_SOURCES_V1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, PACKAGE_MODULE_INDEX_SCHEMA_V2,
+    package_module_index_validate_v1, package_module_index_encode_v1
+}
+use compiler.driver.smf.runtime_std_package_membership_v1.{
+    RuntimeStdPackageMemberV1, RuntimeStdPackageMembershipV1,
+    runtime_std_package_membership_encode_v1
+}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.scv.compile_source_inventory_core.{
+    compile_source_inventory_identity_cmp_v1
+}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct RuntimeStdMembershipPolicyOutputV1:
+    membership: RuntimeStdPackageMembershipV1
+    membership_content: text
+    membership_digest: text
+    index_digest: text
+    policy_digest: text
+
+fn runtime_std_membership_policy_from_index_v1(
+    sources: NativeFullInventorySourcesV1,
+    snapshot: ScvCompileSnapshotV1,
+    generation: PackageModuleIndexGenerationV1,
+    expected_index_digest: text,
+    expected_producer_digest: text,
+    expected_variant_digest: text
+) -> Result<RuntimeStdMembershipPolicyOutputV1, text>:
+    if not snapshot.valid or snapshot.source_drifted or
+            snapshot.inventory_digest != sources.snapshot_inventory_digest or
+            snapshot.snapshot_root == "" or
+            sources.source_count < 1 or
+            sources.source_count > NATIVE_FULL_INVENTORY_MAX_SOURCES_V1 or
+            sources.source_identities.len() != sources.source_count or
+            sources.source_digests.len() != sources.source_count or
+            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+            generation.scope_entry_source_identity != "" or
+            generation.entries.len() != sources.source_count or
+            generation.scv_revision_id != snapshot.revision_id or
+            generation.scv_commit_id != snapshot.commit_id or
+            generation.scv_tree_id != snapshot.tree_id or
+            generation.inventory_digest != sources.source_inventory_digest or
+            not builder_digest_valid_v1(expected_index_digest) or
+            not builder_digest_valid_v1(expected_producer_digest) or
+            not builder_digest_valid_v1(expected_variant_digest) or
+            generation.producer_digest != expected_producer_digest or
+            generation.variant_digest != expected_variant_digest:
+        return Err("runtime-std-membership-policy-authority-mismatch")
+    if package_module_index_validate_v1(generation) != "ok":
+        return Err("runtime-std-membership-policy-graph-invalid")
+    val encoded_index = package_module_index_encode_v1(generation)
+    if encoded_index == "" or
+            sha256_text(encoded_index) != expected_index_digest:
+        return Err("runtime-std-membership-policy-index-digest-mismatch")
+    var by_source: Dict<text, i64> = {}
+    var folded: Dict<text, bool> = {}
+    var entry_index = 0
+    while entry_index < generation.entries.len():
+        val entry = generation.entries[entry_index]
+        if by_source.has(entry.source_identity) or
+                folded.has(entry.source_identity.lower()):
+            return Err("runtime-std-membership-policy-source-duplicate")
+        by_source[entry.source_identity] = entry_index
+        folded[entry.source_identity.lower()] = true
+        entry_index = entry_index + 1
+    var members: [RuntimeStdPackageMemberV1] = []
+    var previous = ""
+    var source_index = 0
+    while source_index < sources.source_count:
+        val identity = sources.source_identities[source_index]
+        if (previous != "" and
+                compile_source_inventory_identity_cmp_v1(identity, previous) <= 0) or
+                not by_source.has(identity):
+            return Err("runtime-std-membership-policy-source-missing")
+        val entry = generation.entries[by_source[identity]]
+        if entry.source_digest != sources.source_digests[source_index]:
+            return Err("runtime-std-membership-policy-source-digest-mismatch")
+        members = members.push(RuntimeStdPackageMemberV1(
+            identity, entry.source_digest, entry.package_identity))
+        previous = identity
+        source_index = source_index + 1
+    val membership = RuntimeStdPackageMembershipV1(
+        sources.snapshot_inventory_digest, sources.source_inventory_digest,
+        sources.scv_receipt_digest, members)
+    val membership_content = runtime_std_package_membership_encode_v1(
+        membership, sources)
+    if membership_content == "":
+        return Err("runtime-std-membership-policy-required-package-missing")
+    val membership_digest = sha256_text(membership_content)
+    val policy_digest = sha256_text(
+        "simple/runtime-std-membership-policy/v1\n" +
+        "index={expected_index_digest}\n" +
+        "producer={expected_producer_digest}\n" +
+        "variant={expected_variant_digest}\n" +
+        "snapshot={sources.snapshot_inventory_digest}\n" +
+        "source-inventory={sources.source_inventory_digest}\n" +
+        "membership={membership_digest}")
+    Ok(RuntimeStdMembershipPolicyOutputV1(
+        membership, membership_content, membership_digest,
+        expected_index_digest, policy_digest))
+
+export RuntimeStdMembershipPolicyOutputV1
+export runtime_std_membership_policy_from_index_v1

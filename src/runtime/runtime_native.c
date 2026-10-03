@@ -10745,7 +10745,11 @@ int64_t rt_path_ext(const uint8_t* path_ptr, uint64_t path_len) {
     return rt_string_new(NULL, 0);
 }
 int64_t rt_path_separator(void) {
+#if defined(_WIN32)
+    static const uint8_t sep[1] = { '\\' };
+#else
     static const uint8_t sep[1] = { '/' };
+#endif
     return rt_string_new(sep, 1);
 }
 
@@ -14386,6 +14390,24 @@ int64_t rt_process_spawn_guarded_value(int64_t cmd, SplArray* args) {
     return pid;
 }
 
+/* Unique value ABI for native Simple callers. The raw C owner below
+ * keeps its existing (char*, char**, count) contract. */
+int64_t rt_process_spawn_async_value(int64_t cmd, SplArray* args) {
+    const char* command = rt_interp_cstr(cmd);
+    if (!command) return -1;
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -1;
+    const char** argv = (const char**)calloc((size_t)argc + 1, sizeof(char*));
+    if (!argv) return -1;
+    for (int64_t i = 0; i < argc; i++) {
+        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
+        argv[i] = value ? value : "";
+    }
+    int64_t pid = rt_process_spawn_async(command, argv, argc);
+    free(argv);
+    return pid;
+}
+
 int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }
@@ -14561,6 +14583,71 @@ int rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return rt_is_dir(path) ? 1 : 0;
+}
+
+/* Core-C native binaries link this translation unit without runtime.c. */
+int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) || !path[0]) return 0;
+#if defined(_WIN32)
+    wchar_t* wide = rt_widen_long_path_rc(path);
+    if (!wide) return 0;
+    DWORD attrs = GetFileAttributesW(wide);
+    free(wide);
+    return attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+/* SOSIX directory admission uses two encoded byte-array values. This keeps
+ * the machine boundary scalar on already-admitted self-hosted producers;
+ * no newly named text extern can accidentally collapse a pointer/length pair.
+ */
+#include "runtime_fd_stat_v1.h"
+#include "runtime_sosix_directory_roots_v1.h"
+
+int64_t rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t out_bytes) {
+    return rt_fd_stat_snapshot_v1_impl(
+        descriptor, (uint64_t *)(uintptr_t)out_addr, out_bytes);
+}
+
+static int rt_sdr_values_paths_v1(int64_t shared_bytes, int64_t private_bytes,
+                                char *shared, char *private_root) {
+    int64_t shared_length = rt_array_bytes_validate(shared_bytes);
+    int64_t private_length = rt_array_bytes_validate(private_bytes);
+    if (shared_length <= 0 || shared_length >= RT_SDR_PATH_V1 ||
+        private_length <= 0 || private_length >= RT_SDR_PATH_V1 ||
+        rt_array_bytes_copy_checked(shared_bytes, (uint8_t*)shared, shared_length) != shared_length ||
+        rt_array_bytes_copy_checked(private_bytes, (uint8_t*)private_root, private_length) != private_length ||
+        memchr(shared, 0, (size_t)shared_length) || memchr(private_root, 0, (size_t)private_length))
+        return -EINVAL;
+    shared[shared_length] = 0; private_root[private_length] = 0;
+    return 0;
+}
+int64_t rt_sosix_directory_pair_open_v1(int64_t shared_bytes, int64_t private_bytes) {
+    char shared[RT_SDR_PATH_V1], private_root[RT_SDR_PATH_V1];
+    int status = rt_sdr_values_paths_v1(shared_bytes, private_bytes, shared, private_root);
+    if (status) return status;
+    return rt_sdr_open_v1(shared, private_root);
+}
+int64_t rt_sosix_directory_pair_check_v1(int64_t shared_bytes, int64_t private_bytes) {
+    char shared[RT_SDR_PATH_V1], private_root[RT_SDR_PATH_V1];
+    int status = rt_sdr_values_paths_v1(shared_bytes, private_bytes, shared, private_root);
+    if (status) return status;
+    return rt_sdr_check_v1(shared, private_root);
+}
+int64_t rt_sosix_directory_pair_revalidate_v1(int64_t token) {
+    return rt_sdr_revalidate_v1(token);
+}
+int64_t rt_sosix_directory_pair_snapshot_v1(int64_t token, int64_t output, int64_t bytes) {
+    return rt_sdr_snapshot_v1(token, (uint64_t*)(uintptr_t)output, bytes);
+}
+int64_t rt_sosix_directory_pair_close_v1(int64_t token) {
+    return rt_sdr_close_v1(token);
 }
 
 /* ----------------------------------------------------------------

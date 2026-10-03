@@ -1,0 +1,181 @@
+# Immutable checkpoint metadata records, stored in ordinary bounded pages.
+# Dispositions preserve accepted causal batches; split resolution never picks a
+# target. Missing records are errors, never implicit Live/history defaults.
+# Older History.object_digest entries are signed catalog references; they do
+# not prove historical object availability or authorize exact materialization.
+use std.scv.db_pages.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode, db_snapshot_value_decode}
+use std.scv.db_patch.{DbValue, db_ref_kind}
+use std.scv.distributed_identity.*
+
+enum DbCheckpointDisposition:
+    Live
+    Tombstoned(batch: text)
+    MergedInto(target: EntityRef, batch: text)
+    SplitInto(targets: [EntityRef], batch: text)
+
+enum DbCheckpointMetadata:
+    Disposition(entity: EntityRef, value: DbCheckpointDisposition)
+    History(revision: text, ordinal: u64, parents: [text], batches: [text], object_digest: text)
+    Acceptance(batch: text, revision: text)
+
+enum DbCheckpointResolution:
+    Live(entity: EntityRef)
+    Tombstoned(entity: EntityRef, batch: text)
+    Ambiguous(entity: EntityRef, targets: [EntityRef], batch: text)
+
+fn db_checkpoint_hex(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _checkpoint_ref(entity: EntityRef) -> Result<[u8], text>:
+    if not entity_ref_validate(entity).valid or entity.provisional == nil: return Err("SCVDB_CHECKPOINT_UID")
+    db_snapshot_value_encode(DbValue.Reference(entity), 0)
+
+fn db_checkpoint_disposition_key(entity: EntityRef) -> Result<text, text>:
+    Ok("disposition/" + db_snapshot_hex(_checkpoint_ref(entity)?))
+
+fn db_checkpoint_history_key(revision: text) -> Result<text, text>:
+    if not db_checkpoint_hex(revision): return Err("SCVDB_CHECKPOINT_HISTORY_REVISION")
+    Ok("history/" + revision)
+
+fn db_checkpoint_acceptance_key(batch: text) -> Result<text, text>:
+    if not db_checkpoint_hex(batch): return Err("SCVDB_CHECKPOINT_BATCH")
+    Ok("accepted-history/" + batch)
+
+fn _checkpoint_digests(values: [text]) -> Result<[u8], text>:
+    if values.len() > 10000: return Err("SCVDB_CHECKPOINT_RECORD_QUOTA")
+    var encoded: [[u8]] = []
+    for value in values:
+        if not db_checkpoint_hex(value): return Err("SCVDB_CHECKPOINT_DIGEST")
+        encoded.push(db_canonical_text(value)?)
+    db_canonical_set(encoded)
+
+fn db_checkpoint_metadata_encode(value: DbCheckpointMetadata) -> Result<DbPageRecord, text>:
+    var key = ""
+    var payload: [u8] = []
+    var tag = 180u8
+    match value:
+        Disposition(entity, disposition):
+            key = db_checkpoint_disposition_key(entity)?
+            payload = _checkpoint_ref(entity)?
+            var targets: [EntityRef] = []
+            var batch = ""
+            var kind = 0u64
+            match disposition:
+                Live: kind = 0u64
+                Tombstoned(cause):
+                    kind = 1u64
+                    batch = cause
+                MergedInto(target, cause):
+                    kind = 2u64
+                    targets = [target]
+                    batch = cause
+                SplitInto(children, cause):
+                    kind = 3u64
+                    targets = children
+                    batch = cause
+                    if targets.len() < 2 or targets.len() > 256: return Err("SCVDB_CHECKPOINT_SPLIT")
+            if kind != 0u64 and not db_checkpoint_hex(batch): return Err("SCVDB_CHECKPOINT_BATCH")
+            var encoded: [[u8]] = []
+            for target in targets:
+                if target == entity or db_ref_kind(target) != db_ref_kind(entity): return Err("SCVDB_CHECKPOINT_LINK")
+                val bytes = _checkpoint_ref(target)?
+                if target.provisional.unwrap().database_namespace != entity.provisional.unwrap().database_namespace: return Err("SCVDB_CHECKPOINT_LINK")
+                encoded.push(bytes)
+            payload = payload + db_frame(2u8, db_u64_bytes(kind)) + db_canonical_text(batch)? + db_canonical_set(encoded)?
+        History(revision, ordinal, parents, batches, object_digest):
+            tag = 181u8
+            key = db_checkpoint_history_key(revision)?
+            if ordinal == 0u64 or parents.len() > 64 or parents.contains(revision) or not db_checkpoint_hex(object_digest): return Err("SCVDB_CHECKPOINT_HISTORY")
+            payload = db_canonical_text(revision)? + db_frame(2u8, db_u64_bytes(ordinal)) + _checkpoint_digests(parents)? + _checkpoint_digests(batches)? + db_canonical_text(object_digest)?
+        Acceptance(batch, revision):
+            tag = 186u8
+            key = db_checkpoint_acceptance_key(batch)?
+            if not db_checkpoint_hex(revision): return Err("SCVDB_CHECKPOINT_HISTORY_REVISION")
+            payload = db_canonical_text(batch)? + db_canonical_text(revision)?
+    val bytes = db_domain_bytes("checkpoint-metadata-v1", db_frame(tag, payload))?
+    if bytes.len() > 1048576: return Err("SCVDB_CHECKPOINT_RECORD_QUOTA")
+    Ok(DbPageRecord(key: key, kind: DbPageKind.Row, payload: bytes))
+
+fn _checkpoint_read_ref(frame: DbDecodedFrame) -> Result<EntityRef, text>:
+    match db_snapshot_value_decode(frame, 0)?:
+        Reference(entity):
+            val checked = _checkpoint_ref(entity)?
+            Ok(entity)
+        _: Err("SCVDB_CHECKPOINT_UID")
+
+fn _checkpoint_read_set(frame: DbDecodedFrame) -> Result<[text], text>:
+    if frame.tag != 7u8: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+    var values: [text] = []
+    for child in db_read_children(frame.payload)?: values.push(db_read_text(child)?)
+    Ok(values)
+
+fn db_checkpoint_metadata_decode(record: DbPageRecord) -> Result<DbCheckpointMetadata, text>:
+    val domain = db_domain_bytes("checkpoint-metadata-v1", [])?
+    if record.payload.len() > 1048576 or record.payload.len() <= domain.len(): return Err("SCVDB_CHECKPOINT_RECORD_QUOTA")
+    for index in 0..domain.len():
+        if record.payload[index] != domain[index]: return Err("SCVDB_CHECKPOINT_METADATA_DOMAIN")
+    val root = db_read_frame(record.payload, domain.len())?
+    if root.next_offset != record.payload.len(): return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+    val fields = db_read_children(root.payload)?
+    if (root.tag == 180u8 and fields.len() != 4) or (root.tag == 181u8 and fields.len() != 5) or (root.tag == 186u8 and fields.len() != 2): return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+    var value = DbCheckpointMetadata.History("", 0u64, [], [], "")
+    if root.tag == 180u8:
+        val entity = _checkpoint_read_ref(fields[0])?
+        val kind = db_read_unsigned(fields[1])?
+        val batch = db_read_text(fields[2])?
+        if fields[3].tag != 7u8: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+        var targets: [EntityRef] = []
+        for child in db_read_children(fields[3].payload)?: targets.push(_checkpoint_read_ref(child)?)
+        var disposition = DbCheckpointDisposition.Live
+        if kind == 0u64:
+            if batch != "" or targets.len() != 0: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+        elif kind == 1u64:
+            if targets.len() != 0: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+            disposition = DbCheckpointDisposition.Tombstoned(batch)
+        elif kind == 2u64:
+            if targets.len() != 1: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+            disposition = DbCheckpointDisposition.MergedInto(targets[0], batch)
+        elif kind == 3u64: disposition = DbCheckpointDisposition.SplitInto(targets, batch)
+        else: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+        value = DbCheckpointMetadata.Disposition(entity, disposition)
+    elif root.tag == 181u8:
+        value = DbCheckpointMetadata.History(db_read_text(fields[0])?, db_read_unsigned(fields[1])?, _checkpoint_read_set(fields[2])?, _checkpoint_read_set(fields[3])?, db_read_text(fields[4])?)
+    elif root.tag == 186u8: value = DbCheckpointMetadata.Acceptance(db_read_text(fields[0])?, db_read_text(fields[1])?)
+    else: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+    if db_checkpoint_metadata_encode(value)? != record: return Err("SCVDB_CHECKPOINT_METADATA_NONCANONICAL")
+    Ok(value)
+
+# A bounded visited chain proof supplied by a page-loading owner. This pure
+# validator never interprets missing proof records as a live entity.
+fn db_checkpoint_resolve(entity: EntityRef, proof: [DbPageRecord]) -> Result<DbCheckpointResolution, text>:
+    if proof.len() == 0 or proof.len() > 256: return Err("SCVDB_CHECKPOINT_GRAPH_QUOTA")
+    var cursor = entity
+    var visited: [text] = []
+    for record in proof:
+        val key = db_checkpoint_disposition_key(cursor)?
+        if visited.contains(key): return Err("SCVDB_CHECKPOINT_GRAPH_CYCLE")
+        visited.push(key)
+        if record.key != key: return Err("SCVDB_CHECKPOINT_GRAPH_PROOF")
+        match db_checkpoint_metadata_decode(record)?:
+            Disposition(current, disposition):
+                if current != cursor: return Err("SCVDB_CHECKPOINT_GRAPH_PROOF")
+                match disposition:
+                    Live: return Ok(DbCheckpointResolution.Live(cursor))
+                    Tombstoned(batch): return Ok(DbCheckpointResolution.Tombstoned(cursor, batch))
+                    MergedInto(target, batch): cursor = target
+                    SplitInto(targets, batch): return Ok(DbCheckpointResolution.Ambiguous(cursor, targets, batch))
+            _: return Err("SCVDB_CHECKPOINT_GRAPH_PROOF")
+    if visited.contains(db_checkpoint_disposition_key(cursor)?): return Err("SCVDB_CHECKPOINT_GRAPH_CYCLE")
+    Err("SCVDB_CHECKPOINT_GRAPH_INCOMPLETE")
+
+export DbCheckpointDisposition, DbCheckpointMetadata, DbCheckpointResolution
+export db_checkpoint_hex, db_checkpoint_disposition_key, db_checkpoint_history_key
+export db_checkpoint_metadata_encode, db_checkpoint_metadata_decode, db_checkpoint_resolve
+export db_checkpoint_acceptance_key

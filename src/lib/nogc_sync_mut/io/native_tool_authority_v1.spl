@@ -1,0 +1,270 @@
+# Canonical managed-tool projection of the admitted bootstrap tool snapshot.
+# Hash once at invocation admission, compare descriptor metadata per lookup,
+# and hash again at explicit terminal validation. No directory discovery.
+# This assumes the tool installation remains under frozen owner authority;
+# metadata observations are not an adversarial write lease or exec-by-fd.
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_hash_sha256,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.descriptor_stat_v1.{descriptor_stat_snapshot_v1}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.sffi.fs.{file_open, file_close}
+use std.nogc_sync_mut.sffi.transient.{transient_promote}
+use std.io_runtime.{platform_name}
+use std.common.contracts.sosix.descriptor_stat_v1.{DescriptorFileStatV1,
+    descriptor_file_stat_validate_v1, descriptor_file_identity_equal_v1}
+
+pub struct NativeToolPinV1:
+    role: text
+    path: text
+    digest: text
+
+pub struct NativePinnedArtifactV1:
+    path: text
+    digest: text
+    metadata: DescriptorFileStatV1
+
+struct NativeToolBindingV1:
+    role: text
+    artifact: NativePinnedArtifactV1
+
+var _native_tool_authority_identity_v1: text = ""
+var _native_tool_authority_bindings_v1: [NativeToolBindingV1] = []
+var _native_tool_authority_failed_v1: bool = false
+var _native_tool_authority_environment_v1: [(text, text)] = []
+
+pub fn native_tool_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for digit in value:
+        if not "0123456789abcdef".contains(digit): return false
+    true
+
+pub fn native_tool_absolute_v1(path: text) -> bool:
+    if path == "" or path.contains("\\") or path.contains("\n") or
+            path.contains("\r") or path.contains("\0") or path.contains("|") or
+            path.contains("/../") or path.ends_with("/.."):
+        return false
+    path.starts_with("/") or (path.len() > 3 and path[1:3] == ":/" and
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(path[0:1]))
+
+pub fn native_tool_role_matches_path_v1(role: text, path: text) -> bool:
+    val parts = path.split("/")
+    var name = parts[parts.len() - 1].lower()
+    if name.ends_with(".exe"): name = name[0:name.len() - 4]
+    if role == "cc": return name == "clang" or name.starts_with("clang-")
+    if role == "linker":
+        return name == "ld" or name == "ld.lld" or name == "ld.bfd" or
+            name == "ld.gold" or name == "lld-link" or name.starts_with("lld-link-") or
+            name.ends_with("-ld") or name.ends_with("-ld.bfd") or name.ends_with("-ld.gold")
+    if role == "ar" or role == "ranlib" or role == "nm":
+        return name == role or name == "llvm-" + role or
+            name.starts_with("llvm-" + role + "-") or name.ends_with("-" + role)
+    name == role or name.starts_with(role + "-")
+
+pub fn native_tool_projection_decode_v1(payload: text) -> Result<[NativeToolPinV1], text>:
+    if payload == "" or payload.len() > 1048576 or payload.contains("\0") or
+            payload.contains("\r") or not payload.ends_with("\n"):
+        return Err("managed tool authority framing invalid")
+    var version_count = 0
+    var pins: [NativeToolPinV1] = []
+    val roles = ["cc", "linker", "ar", "ranlib", "llc", "llvm-as", "opt", "nm"]
+    for line in payload.split("\n"):
+        if line.starts_with("managed-native-tools-format="):
+            if line != "managed-native-tools-format=1": return Err("managed tool projection version invalid")
+            version_count = version_count + 1
+        elif line.starts_with("managed-tool="):
+            val fields = line.split("|")
+            if fields.len() != 3 or not fields[1].starts_with("path=") or
+                    not fields[2].starts_with("sha256="):
+                return Err("managed tool projection row invalid")
+            val role = fields[0][13:]
+            val path = fields[1][5:]
+            val digest = fields[2][7:]
+            if not roles.contains(role) or not native_tool_absolute_v1(path) or
+                    not native_tool_digest_valid_v1(digest) or
+                    not native_tool_role_matches_path_v1(role, path):
+                return Err("managed tool projection role/path/digest invalid")
+            for prior in pins:
+                if prior.role == role: return Err("managed tool role duplicated")
+            pins = pins.push(NativeToolPinV1(role, path, digest))
+    if version_count != 1 or pins.len() != roles.len():
+        return Err("managed tool projection incomplete")
+    Ok(pins)
+
+pub fn native_tool_projection_environment_v1(payload: text) -> Result<[(text, text)], text>:
+    val names = ["INCLUDE", "LIB", "LIBPATH", "LIBRARY_PATH", "SIMPLE_WINDOWS_ABI", "SIMPLE_LINKER_FLAVOR"]
+    var assignments: [(text, text)] = []
+    for line in payload.split("\n"):
+        if not line.starts_with("managed-tool-env="): continue
+        val fields = line.split("|")
+        if fields.len() != 2 or not fields[1].starts_with("value="):
+            return Err("managed tool environment row invalid")
+        val name = fields[0][17:]
+        val value = fields[1][6:]
+        if not names.contains(name) or value.contains("\0") or value.contains("\r"):
+            return Err("managed tool environment assignment invalid")
+        for prior in assignments:
+            if prior.0 == name: return Err("managed tool environment duplicated")
+        assignments = assignments.push((name, value))
+    if assignments.len() != names.len(): return Err("managed tool environment incomplete")
+    Ok(assignments)
+
+fn native_tool_metadata_v1(path: text) -> Result<DescriptorFileStatV1, text>:
+    if not native_tool_absolute_v1(path) or not file_is_regular_no_follow(path):
+        return Err("admitted tool is not a regular no-follow file")
+    val descriptor = file_open(host_path_native(path), 0)
+    if descriptor < 0: return Err("admitted tool open failed")
+    val observed = descriptor_stat_snapshot_v1(descriptor as i64)
+    val closed = file_close(descriptor)
+    if not closed: return Err("admitted tool descriptor close failed")
+    val metadata = match observed:
+        Ok(value): value
+        Err(_): return Err("admitted tool metadata unavailable")
+    if not descriptor_file_stat_validate_v1(metadata, true, 9223372036854775807u64).accepted or
+            metadata.modified_time_ns == 0u64 or metadata.change_time_ns == 0u64:
+        return Err("admitted tool metadata cannot detect invalidation")
+    Ok(metadata)
+
+fn native_tool_metadata_equal_v1(left: DescriptorFileStatV1, right: DescriptorFileStatV1) -> bool:
+    descriptor_file_identity_equal_v1(left.identity, right.identity) and
+        left.size == right.size and left.modified_time_ns == right.modified_time_ns and
+        left.change_time_ns == right.change_time_ns and left.mode == right.mode and
+        left.link_count == right.link_count
+
+pub fn native_pinned_artifact_open_v1(path: text, digest: text) -> Result<NativePinnedArtifactV1, text>:
+    if not native_tool_digest_valid_v1(digest): return Err("admitted artifact digest invalid")
+    val before = native_tool_metadata_v1(path)?
+    if file_hash_sha256(path) != digest: return Err("admitted artifact bytes differ")
+    val after = native_tool_metadata_v1(path)?
+    if not native_tool_metadata_equal_v1(before, after): return Err("admitted artifact changed while hashing")
+    Ok(NativePinnedArtifactV1(path, digest, after))
+
+pub fn native_pinned_artifact_revalidate_v1(binding: NativePinnedArtifactV1, hash_bytes: bool) -> Result<bool, text>:
+    val observed = native_tool_metadata_v1(binding.path)?
+    if not native_tool_metadata_equal_v1(binding.metadata, observed):
+        return Err("admitted artifact identity or metadata changed")
+    if hash_bytes:
+        val checked = native_pinned_artifact_open_v1(binding.path, binding.digest)?
+        if not native_tool_metadata_equal_v1(binding.metadata, checked.metadata):
+            return Err("admitted artifact changed during terminal validation")
+    Ok(true)
+
+pub fn native_tool_strict_requested_v1() -> bool:
+    # The mode flag alone requests projection capture while minting authority.
+    # A consumer becomes strict when a sealed selector is supplied. Partial
+    # selectors still activate strict refusal; a bound owner cannot fall back.
+    _native_tool_authority_identity_v1 != "" or _native_tool_authority_failed_v1 or
+        env_get("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH") != "" or
+        env_get("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256") != ""
+
+fn native_tool_strict_prepare_v1() -> Result<bool, text>:
+    if _native_tool_authority_failed_v1: return Err("managed tool authority previously invalidated")
+    if env_get("SIMPLE_MANAGED_NATIVE_TOOLS") != "1": return Err("managed strict tool mode invalid")
+    val path = env_get("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH")
+    val digest = env_get("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256")
+    val identity = path + "\n" + digest
+    if _native_tool_authority_identity_v1 != "":
+        if identity != _native_tool_authority_identity_v1: return Err("managed tool authority changed within invocation")
+        return Ok(true)
+    val authority = native_pinned_artifact_open_v1(path, digest)?
+    val payload = file_read_regular_no_follow_bounded(path, 1048576)?
+    val pins = native_tool_projection_decode_v1(payload)?
+    val assignments = native_tool_projection_environment_v1(payload)?
+    var bindings = [NativeToolBindingV1("authority", authority)]
+    for pin in pins:
+        bindings = bindings.push(NativeToolBindingV1(pin.role,
+            native_pinned_artifact_open_v1(pin.path, pin.digest)?))
+    val _unchanged = native_pinned_artifact_revalidate_v1(authority, true)?
+    # The registry survives any caller-owned module scratch scope.
+    if not transient_promote(bindings) or not transient_promote(identity) or
+            not transient_promote(assignments):
+        return Err("managed tool owner promotion failed")
+    _native_tool_authority_bindings_v1 = bindings
+    _native_tool_authority_identity_v1 = identity
+    _native_tool_authority_environment_v1 = assignments
+    Ok(true)
+
+fn native_tool_resolve_owned_v1(role: text) -> Result<text, text>:
+    match native_tool_strict_prepare_v1():
+        Ok(_): pass
+        Err(reason):
+            _native_tool_authority_failed_v1 = true
+            return Err(reason)
+    # No hashing or directory scan in this hot lookup. Changed metadata is a
+    # sticky refusal, never permission to rebind an unadmitted replacement.
+    for binding in _native_tool_authority_bindings_v1:
+        if binding.role == "authority" or binding.role == role:
+            match native_pinned_artifact_revalidate_v1(binding.artifact, false):
+                Ok(_): pass
+                Err(reason):
+                    _native_tool_authority_failed_v1 = true
+                    return Err(reason)
+    for binding in _native_tool_authority_bindings_v1:
+        if binding.role == role and role != "authority": return Ok(binding.artifact.path)
+    Err("tool role is not admitted: " + role)
+
+pub fn native_tool_strict_environment_validate_v1() -> Result<bool, text>:
+    match native_tool_strict_prepare_v1():
+        Ok(_): pass
+        Err(reason):
+            _native_tool_authority_failed_v1 = true
+            return Err(reason)
+    for pair in _native_tool_authority_environment_v1:
+        if env_get(pair.0) != pair.1:
+            _native_tool_authority_failed_v1 = true
+            return Err("managed tool environment differs: " + pair.0)
+    Ok(true)
+
+pub fn native_tool_strict_resolve_v1(role: text) -> Result<text, text>:
+    val _environment = native_tool_strict_environment_validate_v1()?
+    native_tool_resolve_owned_v1(role)
+
+pub fn native_tool_strict_revalidate_v1() -> Result<bool, text>:
+    val _ready = native_tool_strict_environment_validate_v1()?
+    for binding in _native_tool_authority_bindings_v1:
+        match native_pinned_artifact_revalidate_v1(binding.artifact, true):
+            Ok(_): pass
+            Err(reason):
+                _native_tool_authority_failed_v1 = true
+                return Err(reason)
+    Ok(true)
+
+pub fn native_tool_strict_environment_v1() -> Result<[(text, text)], text>:
+    match native_tool_strict_prepare_v1():
+        Ok(_): pass
+        Err(reason):
+            _native_tool_authority_failed_v1 = true
+            return Err(reason)
+    Ok(_native_tool_authority_environment_v1)
+
+pub fn native_tool_strict_child_environment_v1() -> Result<[(text, text)], text>:
+    """Compose the canonical managed tool environment without inherited search paths."""
+    var assignments = native_tool_strict_environment_v1()?
+    var directories: [text] = []
+    for role in ["cc", "linker", "ar", "ranlib", "llc", "llvm-as", "opt", "nm"]:
+        val path = native_tool_resolve_owned_v1(role)?
+        val parts = path.split("/")
+        var directory = ""
+        for index in 0..parts.len() - 1:
+            if index > 0: directory = directory + "/"
+            directory = directory + parts[index]
+        if directory == "": directory = "/"
+        if not directories.contains(directory): directories = directories.push(directory)
+        if role == "cc":
+            assignments = assignments.push(("SIMPLE_CC", path))
+            assignments = assignments.push(("CC", path))
+            assignments = assignments.push(("CXX", path))
+        elif role == "linker": assignments = assignments.push(("LD", path))
+        elif role == "ar": assignments = assignments.push(("AR", path))
+        elif role == "ranlib": assignments = assignments.push(("RANLIB", path))
+        elif role == "llc": assignments = assignments.push(("SIMPLE_LLVM_BIN", directory))
+    val separator = if platform_name() == "windows": ";" else: ":"
+    assignments = assignments.push(("PATH", directories.join(separator)))
+    # Strict selectors do not use these alternate discovery/driver inputs.
+    # Clear them centrally so callers cannot accidentally retain ambient ones.
+    for name in ["LLVM_SYS_180_PREFIX", "LLVM_SYS_231_PREFIX", "SIMPLE_LLVM_WIN_ROOT_23",
+            "SIMPLE_LLVM_PATH", "SIMPLE_LINKER", "CFLAGS", "CXXFLAGS", "LDFLAGS",
+            "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX",
+            "SIMPLE_LINK_OBJECTS", "CCC_OVERRIDE_OPTIONS", "CL", "_CL_"]:
+        assignments = assignments.push((name, ""))
+    Ok(assignments)

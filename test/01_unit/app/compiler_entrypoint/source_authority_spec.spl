@@ -3,8 +3,10 @@ use app.compiler_entrypoint.source_authority.{
     CompilerSourceAuthorityV1, compiler_source_authority_binding_reason_v1,
     compiler_source_authority_acquire_v1, compiler_source_authority_validate_v1,
     compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
+    compiler_source_authority_open_published_v1,
     compiler_source_authority_invalid_v1, compiler_source_authority_inventory_roots_v1}
-use app.io.env_ops.{env_get}
+use app.io.env_ops.{env_get, env_set}
+use app.cli.native_build_warm_receipt.{_warm_scv_prepare}
 use app.io.file_ops.{path_absolute}
 use app.io.time_ops.{time_now_unix_micros}
 use std.io_runtime.{dir_create_all, file_write, file_read}
@@ -45,6 +47,21 @@ fn authority_fixture(root_path: text, roots: [text]) -> text:
         [compile_source_inventory_git_event_v1("create", "src/app/next.spl", "fn next() -> i64: 1\n")])
     if not advanced.valid: return "advance"
     if compile_source_inventory_read_current_v1(cache).digest == current.digest: return "current-did-not-advance"
+    # Exercise the actual warm-preparation branch with explicit entry/source:
+    # CURRENT has moved, but the parent binding must stay pinned and complete.
+    val warm_args = ["--entry", "src/app/cli/bootstrap_main.spl", "--source", "src/app"]
+    if not env_set("SIMPLE_SCV_SOURCE_DRIFTED", "1"): return "drift-fixture"
+    if not _warm_scv_prepare(warm_args, root): return "warm-pinned-authority-rejected"
+    if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") != "1": return "warm-cleared-parent-drift"
+    val reopened = compiler_source_authority_open_published_v1(root)
+    if not reopened.valid: return "warm-reopen:" + reopened.reason
+    if reopened.source_inventory_digest != current.digest: return "warm-rebound-current"
+    if reopened.inventory_generation != admitted.inventory_generation: return "warm-rebound-generation"
+    if reopened.snapshot.revision_id != admitted.snapshot.revision_id: return "warm-rebound-snapshot"
+    if not env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", ""): return "partial-fixture"
+    if _warm_scv_prepare(warm_args, root): return "warm-accepted-partial-authority"
+    if not compiler_source_authority_publish_v1(admitted): return "restore-authority"
+    if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") != "0": return "publish-retained-stale-drift"
     val inherited = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
         admitted.source_inventory_digest, admitted.inventory_generation, true)
     if not inherited.valid: return "inherited:" + inherited.reason
@@ -65,6 +82,7 @@ fn authority_fixture(root_path: text, roots: [text]) -> text:
     if compiler_source_authority_publish_v1(corrupt): return "invalid-published"
     if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") != "": return "failed-root-retained"
     if (env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") != "": return "failed-digest-retained"
+    if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") != "": return "failed-drift-retained"
     ""
 
 describe "native-build canonical source authority":

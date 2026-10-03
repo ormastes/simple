@@ -433,7 +433,7 @@ fn json_unescape_string(s: text) -> text:
             parts.push(s[run_start:i])
     parts.join("")
 
-fn json_parse_value_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+fn _json_parse_value_at(tokens: [(text, text)], pos: i64, reject_duplicate_keys: bool) -> (bool, any, text, i64):
     """Parse value at token position.
 
     Args:
@@ -461,14 +461,14 @@ fn json_parse_value_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i6
     if token_type == "NULL":
         return (true, json_parser_null(), "", pos + 1)
     if token_type == "LBRACKET":
-        return json_parse_array_at(tokens, pos)
+        return _json_parse_array_at(tokens, pos, reject_duplicate_keys)
     if token_type == "LBRACE":
-        return json_parse_object_at(tokens, pos)
+        return _json_parse_object_at(tokens, pos, reject_duplicate_keys)
     if token_type == "INVALID":
         return (false, nil, "Unexpected token: {token_value}", pos)
     (false, nil, "Unexpected token: {token_type}", pos)
 
-fn json_parse_array_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+fn _json_parse_array_at(tokens: [(text, text)], pos: i64, reject_duplicate_keys: bool) -> (bool, any, text, i64):
     """Parse array at token position.
 
     Args:
@@ -489,7 +489,7 @@ fn json_parse_array_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i6
             if token_type != "COMMA":
                 return (false, nil, "Expected comma in array", p)
             p = p + 1
-        val result = json_parse_value_at(tokens, p)
+        val result = _json_parse_value_at(tokens, p, reject_duplicate_keys)
         val success = result.0
         val value = result.1
         val error_msg = result.2
@@ -500,7 +500,7 @@ fn json_parse_array_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i6
         p = next_pos
     (false, nil, "Unclosed array", p)
 
-fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+fn _json_parse_object_at(tokens: [(text, text)], pos: i64, reject_duplicate_keys: bool) -> (bool, any, text, i64):
     """Parse object at token position.
 
     Args:
@@ -538,6 +538,8 @@ fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i
         if key_type != "STRING":
             return (false, nil, "Expected string key in object", p)
         val key = json_unescape_string(key_value)
+        if reject_duplicate_keys and pairs.has(key):
+            return (false, nil, "Duplicate object key", p)
         p = p + 1
         if p >= tokens.len():
             return (false, nil, "Unexpected end after key", p)
@@ -546,7 +548,7 @@ fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i
         if colon_type != "COLON":
             return (false, nil, "Expected colon after key", p)
         p = p + 1
-        val result = json_parse_value_at(tokens, p)
+        val result = _json_parse_value_at(tokens, p, reject_duplicate_keys)
         val success = result.0
         val value = result.1
         val error_msg = result.2
@@ -558,7 +560,7 @@ fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i
         p = next_pos
     (false, nil, "Unclosed object", p)
 
-fn json_parse_tokens(tokens: [(text, text)]) -> (bool, any, text, i64):
+fn _json_parse_tokens(tokens: [(text, text)], reject_duplicate_keys: bool) -> (bool, any, text, i64):
     """Parse tokens into JSON value.
 
     Args:
@@ -572,7 +574,7 @@ fn json_parse_tokens(tokens: [(text, text)]) -> (bool, any, text, i64):
     """
     if tokens.len() == 0:
         return (false, nil, "Empty input", 0)
-    val result = json_parse_value_at(tokens, 0)
+    val result = _json_parse_value_at(tokens, 0, reject_duplicate_keys)
     if not result.0:
         return result
     if result.3 != tokens.len():
@@ -622,3 +624,27 @@ fn json_parse_with_error(text: text) -> (any, text):
     if result.0:
         return (result.1, "")
     (nil, result.2)
+
+fn json_parse_strict_with_error(text: text) -> (any, text):
+    """Reject duplicate decoded object names at every nesting level.
+
+    Existing permissive entrypoints retain last-value-wins behavior. Callers
+    handling untrusted large inputs must impose their own byte/depth quotas.
+    """
+    val result = _json_parse_tokens(json_tokenize(text), true)
+    if result.0:
+        return (result.1, "")
+    (nil, result.2)
+
+# Preserve the original public function arities, including first-class uses.
+fn json_parse_value_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+    _json_parse_value_at(tokens, pos, false)
+
+fn json_parse_array_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+    _json_parse_array_at(tokens, pos, false)
+
+fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+    _json_parse_object_at(tokens, pos, false)
+
+fn json_parse_tokens(tokens: [(text, text)]) -> (bool, any, text, i64):
+    _json_parse_tokens(tokens, false)

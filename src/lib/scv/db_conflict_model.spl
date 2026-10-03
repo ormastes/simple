@@ -1,0 +1,38 @@
+# Immutable conflict evidence. This pure value is not a durability receipt.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{EntityRef, entity_ref_validate, entity_ref_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbConflictRecord:
+    conflict_id: text
+    repository: text
+    epoch: u64
+    entity: EntityRef
+    field: text
+    code: text
+    base_revision: text
+    local_revision: text
+    incoming_revision: text
+    base: DbValue
+    local: DbValue
+    incoming: DbValue
+
+fn db_conflict_record_digest(record: DbConflictRecord) -> Result<text, text>:
+    if record.repository == "" or record.epoch == 0 or record.field == "" or not entity_ref_validate(record.entity).valid: return Err("SCVDB_CONFLICT_CONTEXT")
+    val context = db_canonical_text(record.repository)? + db_frame(2u8, db_u64_bytes(record.epoch)) + db_canonical_text(entity_ref_canonical(record.entity))? + db_canonical_text(record.field)? + db_canonical_text(record.code)?
+    val revisions = db_canonical_text(record.base_revision)? + db_canonical_text(record.local_revision)? + db_canonical_text(record.incoming_revision)?
+    val values = db_value_bytes(record.base)? + db_value_bytes(record.local)? + db_value_bytes(record.incoming)?
+    Ok(sha256_u8_hex(db_domain_bytes("conflict", db_frame(60u8, context + revisions + values))?))
+
+fn db_conflict_record_seal(record: DbConflictRecord) -> Result<DbConflictRecord, text>:
+    var sealed = record
+    sealed.conflict_id = db_conflict_record_digest(record)?
+    Ok(sealed)
+
+fn db_conflict_record_validate(record: DbConflictRecord) -> Result<text, text>:
+    val digest = db_conflict_record_digest(record)?
+    if record.conflict_id != digest: return Err("SCVDB_CONFLICT_DIGEST")
+    Ok(digest)
+
+export DbConflictRecord, db_conflict_record_digest, db_conflict_record_seal, db_conflict_record_validate

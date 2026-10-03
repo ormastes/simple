@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-runtime-policy.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fixture="$tmp/repo"
+for leaf in src/compiler src/app src/lib src/os src/runtime src/package_ownership \
+    src/plugins src/compositions examples/10_tooling; do
+  mkdir -p "$fixture/$leaf"
+done
+printf 'compiler\n' >"$fixture/src/compiler/main.spl"
+printf 'runtime-one\n' >"$fixture/src/runtime/startup.spl"
+printf 'runtime-policy-one\n' >"$fixture/src/runtime/simple.sdn"
+printf 'ownership-one\n' >"$fixture/src/package_ownership/simple.sdn"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_source_snapshot "$tmp/before" "$fixture"
+for relative in src/runtime/startup.spl src/runtime/simple.sdn \
+    src/package_ownership/simple.sdn; do
+  path_hex=$(printf '%s' "$relative" | od -An -tx1 | tr -d ' \n')
+  grep -Eq "^file-hex:[0-9]+:$path_hex:" "$tmp/before" || {
+    echo "FAIL: $relative absent from Stage 2 source authority" >&2; exit 1;
+  }
+done
+for relative in src/runtime/startup.spl src/runtime/simple.sdn \
+    src/package_ownership/simple.sdn; do
+  printf 'changed\n' >"$fixture/$relative"
+  bootstrap_stage3_source_snapshot "$tmp/changed" "$fixture"
+  ! cmp -s "$tmp/before" "$tmp/changed" || {
+    echo "FAIL: $relative mutation did not change source authority" >&2; exit 1;
+  }
+  printf '%s\n' "$(case "$relative" in
+    src/runtime/startup.spl) printf runtime-one ;;
+    src/runtime/simple.sdn) printf runtime-policy-one ;;
+    *) printf ownership-one ;;
+  esac)" >"$fixture/$relative"
+done
+for leaf in src/runtime src/package_ownership; do
+  moved="$tmp/$(printf '%s' "$leaf" | tr / _)"
+  mv "$fixture/$leaf" "$moved"
+  if bootstrap_stage3_source_snapshot "$tmp/missing" "$fixture" 2>"$tmp/error"; then
+    echo "FAIL: missing $leaf source authority admitted" >&2; exit 1
+  fi
+  grep -q 'missing authority root' "$tmp/error" || {
+    echo "FAIL: missing $leaf refusal reason absent" >&2; exit 1;
+  }
+  mv "$moved" "$fixture/$leaf"
+done
+echo 'PASS: runtime and package ownership content and required roots are Stage 2 authority'

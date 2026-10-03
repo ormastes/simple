@@ -1,0 +1,223 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.io.file_ops.{path_absolute}
+use app.bootstrap_builder.native_group_provisional_contract.{
+    native_group_provisional_hello_keys_v1,
+    native_group_provisional_authority_keys_v1,
+    native_group_provisional_hello_decode_v1,
+    native_group_provisional_authority_encode_v1,
+    native_group_provisional_authority_decode_v1,
+    native_group_provisional_authority_open_v1
+}
+use app.bootstrap_builder.native_group_phase2_receipt.{
+    phase2_native_authority_receipt_decode_v1
+}
+use app.bootstrap_builder.native_group_provisional_authority.{
+    native_group_provisional_field_v1
+}
+
+fn _provisional_spec_fields_v1(root: text) -> {text: text}:
+    val source = root + "/source-root"
+    var fields: {text: text} = {}
+    for key in native_group_provisional_authority_keys_v1():
+        if key.ends_with("_digest"):
+            fields[key] = "a".repeat(64)
+        elif key.ends_with("_count") or
+                key == "scv_source_inventory_generation":
+            fields[key] = "1"
+        elif key.ends_with("_path"):
+            fields[key] = root + "/" + key
+        else:
+            fields[key] = "placeholder"
+    fields["schema"] = "SIMPLE-PROVISIONAL-AUTHORITY-1"
+    fields["diagnostic_only"] = "1"
+    fields["producer_source_relation"] = "unproven"
+    fields["hello_source_relation"] = "outside_snapshot"
+    fields["hello_launcher_relation"] = "executed_by_provisional_runner"
+    fields["output_root"] = root
+    fields["source_root"] = source
+    fields["target"] = "x86_64-pc-windows-msvc"
+    fields["source_authority_path"] = root + "/source-inputs-before.txt"
+    fields["runtime_snapshot_path"] = root + "/runtime.snapshot"
+    fields["source_inventory_path"] = source + "/source.inventory"
+    fields["full_source_inventory_path"] = source + "/full-source.inventory"
+    fields["full_source_links_path"] =
+        source + "/full-source-links.inventory"
+    fields["module_inventory_path"] = root + "/module.inventory"
+    fields["excluded_inventory_path"] =
+        root + "/excluded-modules.inventory"
+    fields["module_role_policy_path"] = source +
+        "/src/package_ownership/native_module_roles.sdn"
+    fields["scv_snapshot_root"] = source + "/build/scv/snapshots/rev"
+    fields["llvm_index_config_path"] = root + "/index-config-llvm.sdn"
+    fields["cranelift_index_config_path"] =
+        root + "/index-config-cranelift.sdn"
+    fields["phase3_llvm_index_config_path"] =
+        root + "/index-config-phase3-llvm.sdn"
+    fields["phase3_cranelift_index_config_path"] =
+        root + "/index-config-phase3-cranelift.sdn"
+    fields
+
+fn _provisional_hello_payload_v1() -> text:
+    var fields: {text: text} = {}
+    for key in native_group_provisional_hello_keys_v1():
+        if key.ends_with("_digest"):
+            fields[key] = "a".repeat(64)
+        elif key.ends_with("_path"):
+            fields[key] = "D:/hello/" + key
+        else:
+            fields[key] = "0"
+    fields["format"] = "SIMPLE-PROVISIONAL-HELLO-1"
+    fields["launcher_relation"] = "executed_by_provisional_runner"
+    var rows: [text] = []
+    for key in native_group_provisional_hello_keys_v1():
+        rows = rows.push(key + "=" + fields[key])
+    rows.join("\n") + "\n"
+
+fn _provisional_payload_v1(root: text) -> text:
+    match native_group_provisional_authority_encode_v1(
+            _provisional_spec_fields_v1(root)):
+        Ok(payload): return payload
+        Err(reason): fail(reason)
+    ""
+
+describe "provisional authority cannot become canonical admission":
+    it "accepts the launcher's literal format-key hello receipt":
+        val digest = "a".repeat(64)
+        val sample = "format=SIMPLE-PROVISIONAL-HELLO-1\n" +
+            "producer_path=D:/producer/simple.exe\n" +
+            "producer_digest=" + digest + "\n" +
+            "hello_source_path=D:/checkout/test/04_smoke/windows_native_hello.spl\n" +
+            "hello_source_digest=" + digest + "\n" +
+            "hello_executable_path=D:/hello/hello.exe\n" +
+            "hello_executable_digest=" + digest + "\n" +
+            "compile_exit=0\nrun_exit=0\n" +
+            "stdout_path=D:/hello/run.stdout\n" +
+            "stdout_digest=" + digest + "\n" +
+            "stderr_path=D:/hello/run.stderr\n" +
+            "stderr_digest=" + digest + "\n" +
+            "source_snapshot_digest=" + digest + "\n" +
+            "compile_command_path=D:/hello/compile.argv\n" +
+            "compile_command_digest=" + digest + "\n" +
+            "compile_log_path=D:/hello/compile.log\n" +
+            "compile_log_digest=" + digest + "\n" +
+            "launcher_relation=executed_by_provisional_runner\n"
+        match native_group_provisional_hello_decode_v1(sample):
+            Ok(hello):
+                expect(hello["format"]).to_equal(
+                    "SIMPLE-PROVISIONAL-HELLO-1")
+                expect(hello["compile_command_path"]).to_equal(
+                    "D:/hello/compile.argv")
+            Err(reason): fail(reason)
+
+    it "roundtrips only diagnostic schema and rejects canonical decoder":
+        val fields = _provisional_spec_fields_v1("D:/provisional")
+        match native_group_provisional_authority_encode_v1(fields):
+            Ok(payload):
+                match native_group_provisional_authority_decode_v1(payload):
+                    Ok(actual):
+                        expect(actual["diagnostic_only"]).to_equal("1")
+                        expect(actual["producer_source_relation"]).to_equal(
+                            "unproven")
+                        expect(actual["hello_source_relation"]).to_equal(
+                            "outside_snapshot")
+                        expect(actual["runtime_snapshot_count"]).to_equal("1")
+                    Err(reason): fail(reason)
+                match phase2_native_authority_receipt_decode_v1(payload):
+                    Ok(_): fail("provisional schema laundered into Phase2")
+                    Err(reason): expect(reason).to_contain("Phase2")
+            Err(reason): fail(reason)
+
+    it "rejects changed diagnostic flag and renamed canonical schema":
+        val payload = _provisional_payload_v1("D:/provisional")
+        match native_group_provisional_authority_decode_v1(
+                payload.replace("diagnostic_only=1\n",
+                    "diagnostic_only=0\n")):
+            Ok(_): fail("diagnostic flag removed")
+            Err(reason): expect(reason).to_contain("diagnostic")
+        match native_group_provisional_authority_decode_v1(
+                payload.replace("SIMPLE-PROVISIONAL-AUTHORITY-1",
+                    "SIMPLE-PHASE2-NATIVE-AUTHORITY-3")):
+            Ok(_): fail("canonical schema accepted as provisional")
+            Err(reason): expect(reason).to_contain("diagnostic")
+
+    it "rejects missing runtime source path and zero runtime records":
+        val payload = _provisional_payload_v1("D:/provisional")
+        match native_group_provisional_authority_decode_v1(
+                payload.replace("runtime_snapshot_path=D:/provisional/runtime.snapshot\n",
+                    "")):
+            Ok(_): fail("missing runtime source snapshot path accepted")
+            Err(reason): expect(reason).to_contain("count")
+        match native_group_provisional_authority_decode_v1(
+                payload.replace("runtime_snapshot_count=1\n",
+                    "runtime_snapshot_count=0\n")):
+            Ok(_): fail("empty runtime source snapshot accepted")
+            Err(reason): expect(reason).to_contain("empty")
+
+    it "rejects nonzero hello compile or run status and malformed SHA":
+        val payload = _provisional_hello_payload_v1()
+        expect(payload).to_start_with(
+            "format=SIMPLE-PROVISIONAL-HELLO-1\nproducer_path=")
+        match native_group_provisional_hello_decode_v1(payload):
+            Ok(actual): expect(actual["run_exit"]).to_equal("0")
+            Err(reason): fail(reason)
+        match native_group_provisional_hello_decode_v1(
+                payload.replace("format=SIMPLE-PROVISIONAL-HELLO-1",
+                    "schema=SIMPLE-PROVISIONAL-HELLO-1")):
+            Ok(_): fail("old schema-key hello receipt accepted")
+            Err(reason): expect(reason).to_contain("order")
+        for key in ["compile_exit", "run_exit"]:
+            match native_group_provisional_hello_decode_v1(
+                    payload.replace(key + "=0\n", key + "=1\n")):
+                Ok(_): fail("nonzero hello status accepted")
+                Err(reason): expect(reason).to_contain("status")
+        match native_group_provisional_hello_decode_v1(
+                payload.replace("producer_digest=" + "a".repeat(64),
+                    "producer_digest=" + "a".repeat(63))):
+            Ok(_): fail("malformed producer SHA accepted")
+            Err(reason): expect(reason).to_contain("digest")
+        val old_status_only = payload.replace(
+            "compile_command_path=D:/hello/compile_command_path\n", "")
+        match native_group_provisional_hello_decode_v1(old_status_only):
+            Ok(_): fail("status-only hello receipt accepted")
+            Err(reason): expect(reason).to_contain("count")
+        match native_group_provisional_hello_decode_v1(
+                payload.replace(
+                    "launcher_relation=executed_by_provisional_runner",
+                    "launcher_relation=claimed_by_external_file")):
+            Ok(_): fail("external launcher claim accepted")
+            Err(reason): expect(reason).to_contain("status")
+
+    it "rejects changed compile transcript SHA in authority receipt":
+        val payload = _provisional_payload_v1("D:/provisional")
+        match native_group_provisional_authority_decode_v1(
+                payload.replace(
+                    "hello_compile_command_digest=" + "a".repeat(64),
+                    "hello_compile_command_digest=" + "a".repeat(63))):
+            Ok(_): fail("changed compile transcript pin accepted")
+            Err(reason): expect(reason).to_contain("digest")
+
+    it "rejects a changed receipt SHA before reading any artifacts":
+        val root = path_absolute(
+            "build/provisional-authority-contract-spec").replace("\\", "/")
+        expect(dir_create_all(root)).to_equal(true)
+        val payload = _provisional_payload_v1(root)
+        val receipt_path = root + "/provisional-authority.receipt"
+        expect(file_write(receipt_path, payload)).to_equal(true)
+        val wrong_digest = sha256_text(payload + "changed")
+        match native_group_provisional_authority_open_v1(
+                receipt_path, wrong_digest):
+            Ok(_): fail("changed receipt SHA accepted")
+            Err(reason): expect(reason).to_contain("SHA")
+        val actual_digest = sha256_text(payload)
+        match native_group_provisional_field_v1(
+                receipt_path, actual_digest, "source_authority_path"):
+            Ok(path): expect(path).to_equal(
+                root + "/source-inputs-before.txt")
+            Err(reason): fail(reason)
+        match native_group_provisional_field_v1(
+                receipt_path, actual_digest, "hello_receipt_digest"):
+            Ok(digest): expect(digest).to_equal("a".repeat(64))
+            Err(reason): fail(reason)

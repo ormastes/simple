@@ -1,0 +1,34 @@
+"""From-import declarations must contribute their modules to native closure discovery.
+
+The flat parser already emits imports for this syntax. Omitting their modules
+made the interpreter entry fail HIR despite the functions existing on disk.
+"""
+use std.spec.step
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths}
+
+describe "entry closure from-import dependencies":
+    it "collects the interpreter entry's bare sibling module paths":
+        val source = "from core import {Interpreter, Value}\n" +
+            "from parser import {SimpleParser}\n" +
+            "from ast_convert import {tree_to_module, tree_to_expression}\n"
+        expect(_driver_entry_import_module_paths(source)).to_equal(
+            ["core", "parser", "ast_convert"])
+
+    it "preserves relative and qualified paths with multiline named lists":
+        val source = "# 文\nfrom .sibling import {value}\n" +
+            "from ..parent.types import {\n    Item,\n    Kind\n}\n" +
+            "from app.interpreter.ast_convert import {tree_to_module}\n"
+        expect(_driver_entry_import_module_paths(source)).to_equal(
+            [".sibling", "..parent.types", "app.interpreter.ast_convert"])
+
+    it "ignores comments docstrings and non-import from lines":
+        val source = "# from fake.comment import {value}\n" +
+            "\"\"\"\nfrom fake.doc import {value}\n\"\"\"\n" +
+            "from malformed\nfrom real.owner import {value} # import comment\n"
+        expect(_driver_entry_import_module_paths(source)).to_equal(["real.owner"])
+
+    it "keeps the existing use import and export-from order":
+        val source = "use first.owner.{A}\nfrom second.owner import {B}\n" +
+            "import third.owner.{C}\nexport D from fourth.owner\n"
+        expect(_driver_entry_import_module_paths(source)).to_equal(
+            ["first.owner", "second.owner", "third.owner", "fourth.owner"])

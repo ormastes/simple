@@ -966,6 +966,7 @@ int64_t  rt_string_trim_end(int64_t value);
 int64_t  rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_off);
 int64_t  rt_string_to_int(int64_t value);
 int64_t  rt_string_to_int_lenient(int64_t value);
+int64_t  rt_to_int_dynamic(int64_t value);
 void     rt_print_str(const uint8_t* ptr, uint64_t len);
 void     rt_println_str(const uint8_t* ptr, uint64_t len);
 void     rt_eprint_str(const uint8_t* ptr, uint64_t len);
@@ -1156,6 +1157,7 @@ int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
+int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1423. NOT a bare SplArray*. */
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -1182,6 +1184,10 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 /* ===== Process Async ===== */
 
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+#ifdef _WIN32
+/* Core-C PID/handle ownership shared with rt_process_wait. */
+int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
+#endif
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 /* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
 int64_t  rt_process_spawn_inherit(void);
@@ -1304,6 +1310,29 @@ SplArray* rt_process_inspection_v1_start_pinned_value(
               SplArray* binding, SplArray* atomic_input,
               SplArray* expected_input_digest);
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
+
+/* Broker-only Linux cgroup-v2/pidfd owner. The start result is [token,error];
+ * poll/collect return [error,terminal,leader_reaped,tree_empty,active,
+ * exit_code,timed_out,cancelled,memory_peak,memory_current]. The latter is
+ * cgroup memory.current while live and zero after the tree is reaped.
+ * Unsupported hosts fail closed. */
+#ifdef __linux__
+SplArray* rt_linux_group_launch_broker_v1(const char* program,
+    uint64_t program_len, const char* digest, uint64_t digest_len,
+    SplArray* args);
+SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
+    const char* digest, uint64_t digest_len, SplArray* args,
+    SplArray* environment, const char* directory, uint64_t directory_len,
+    const char* root, uint64_t root_len,
+    const char* identity, uint64_t identity_len,
+    int64_t memory_limit, int64_t timeout_ms,
+    const char* stdout_path, uint64_t stdout_len,
+    const char* stderr_path, uint64_t stderr_len);
+SplArray* rt_linux_group_poll_v1(int64_t token);
+int64_t rt_linux_group_cancel_v1(int64_t token);
+SplArray* rt_linux_group_collect_v1(int64_t token);
+SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
+#endif
 
 /* ===== Process Piped (editor LSP transport) ===== */
 
@@ -1478,6 +1507,15 @@ int64_t     rt_file_exists_probe_test_seed_counters(int64_t total, int64_t faile
 int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len);
+/* Encoded byte-array RuntimeValues, not semantic text pointer/length pairs. */
+int64_t     rt_sosix_directory_pair_open_v1(int64_t shared_bytes, int64_t private_bytes);
+int64_t     rt_sosix_directory_pair_check_v1(int64_t shared_bytes, int64_t private_bytes);
+int64_t     rt_sosix_directory_pair_revalidate_v1(int64_t token);
+int64_t     rt_sosix_directory_pair_snapshot_v1(int64_t token, int64_t output, int64_t bytes);
+int64_t     rt_sosix_directory_pair_close_v1(int64_t token);
+int64_t     rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t out_bytes);
+int64_t     rt_shared_parse_cell_read_v1(const uint8_t* path_ptr, uint64_t path_len, int64_t maximum);
 int         rt_file_write(const char* path, const char* content);
 int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);

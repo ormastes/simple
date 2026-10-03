@@ -1,0 +1,51 @@
+# Conflict capture and resolution share the paged transaction proof protocol.
+# No partial table is treated as global state and no caller plan authorizes IO.
+use app.scv.db.local_store.{db_store_read, db_store_commit}
+use app.scv.db.page_store.{db_page_store_publish_objects}
+use app.scv.db.paged_transition.{db_paged_load_proofs}
+use std.scv.db_paged_model.*
+use std.scv.db_paged_txn.*
+use std.scv.db_paged_conflicts.*
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_conflict_resolution.{DbConflictDecision}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+
+struct DbPagedConflictResult:
+    head: text
+    revision: text
+    replay: bool
+    conflict_ids: [text]
+
+fn _paged_conflict_commit(root: text, expected_head: text, patch: DbPatch, policy: DbPagedPolicy, intent: DbPagedIntent) -> Result<DbPagedConflictResult, text>:
+    val sample = time_sample_unix_micros_or_failure()
+    if sample < 0: return Err("SCVDB_COMMAND_CLOCK")
+    val current = db_store_read(root, "paged")
+    if current.code != "ok": return Err(current.code)
+    val manifest = db_paged_manifest_decode(current.state, policy)?
+    if current.transaction_id != manifest.revision: return Err("SCVDB_PAGED_ROOT")
+    var progress = db_paged_conflict_begin(manifest, patch, policy, (sample / 1000000) as u64, intent)?
+    # Additional evidence/receipt buckets share the SAME cumulative read budget
+    # as dependency, alias, row, constraint and final update-bucket proofs.
+    for round in 0..12:
+        match progress:
+            NeedKeys(request, keys):
+                progress = db_paged_advance(progress, db_paged_load_proofs(root, request, keys)?)?
+            Ready(plan):
+                if plan.replay:
+                    val durable = db_store_commit(root, current.parent, current.transaction_id, current.state, "paged")
+                    if durable.code != "ok": return Err(durable.code)
+                    return Ok(DbPagedConflictResult(head: durable.head, revision: manifest.revision, replay: true, conflict_ids: plan.conflict_ids))
+                if current.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+                db_page_store_publish_objects(root, plan.build, Some(manifest.pages))?
+                val published = db_store_commit(root, current.head, plan.manifest.revision, db_paged_manifest_encode(plan.manifest)?, "paged")
+                if published.code != "ok": return Err(published.code)
+                return Ok(DbPagedConflictResult(head: published.head, revision: plan.manifest.revision, replay: false, conflict_ids: plan.conflict_ids))
+    Err("SCVDB_PAGED_PLANNING_BOUND")
+
+fn db_paged_capture_conflict(root: text, expected_head: text, original: DbPatch, policy: DbPagedPolicy) -> Result<DbPagedConflictResult, text>:
+    _paged_conflict_commit(root, expected_head, original, policy, DbPagedIntent.CaptureConflict)
+
+fn db_paged_resolve_conflict(root: text, expected_head: text, decision: DbConflictDecision, original: DbPatch, policy: DbPagedPolicy) -> Result<DbPagedConflictResult, text>:
+    _paged_conflict_commit(root, expected_head, original, policy, DbPagedIntent.ResolveConflict(decision))
+
+export DbPagedConflictResult, db_paged_capture_conflict, db_paged_resolve_conflict

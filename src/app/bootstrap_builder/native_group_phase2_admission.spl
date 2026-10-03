@@ -1,0 +1,127 @@
+# The canonical Stage2 admission receipt is the source for this handoff.
+# Every named input is rehashed; unknown or reordered rows are rejected.
+use app.io.file_ops.{path_absolute}
+use app.bootstrap_builder.native_group_index_contract.{
+    native_group_index_absolute_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{
+    file_is_regular_no_follow, file_hash_sha256,
+    file_read_regular_no_follow_bounded
+}
+
+struct Phase2Stage2AdmissionV1:
+    receipt_path: text
+    receipt_digest: text
+    producer_path: text
+    producer_digest: text
+    source_authority_path: text
+    source_authority_digest: text
+    admission_identity: text
+
+fn phase2_stage2_admission_decode_v1(
+    receipt_path: text, payload: text
+) -> Result<Phase2Stage2AdmissionV1, text>:
+    if payload == "" or payload.len() > 16384 or
+            not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\0"):
+        return Err("Phase2 Stage2 admission framing invalid")
+    val keys = ["schema", "status", "admission_receipt_path",
+        "candidate_path", "candidate_sha256", "source_snapshot_path",
+        "source_snapshot_sha256", "runtime_snapshot_path",
+        "runtime_snapshot_sha256", "runtime_authority_path",
+        "hosted_runtime_relative_path", "hosted_runtime_sha256",
+        "tool_authority_path", "tool_authority_sha256",
+        "build_args_sha256", "simple_abi_policy", "simple_abi_version",
+        "simple_abi_deferred", "sanity_evidence_path",
+        "sanity_evidence_sha256", "receiver_evidence_path",
+        "receiver_evidence_sha256", "receiver_log_path",
+        "receiver_log_sha256", "admission_identity",
+        "checks_executed_at_admission", "checks_replayed_during_stage3"]
+    val rows = payload.split("\n")
+    if rows.len() != keys.len() + 1 or rows[rows.len() - 1] != "":
+        return Err("Phase2 Stage2 admission row count invalid")
+    var fields: {text: text} = {}
+    var index = 0
+    while index < keys.len():
+        val prefix = keys[index] + "="
+        if not rows[index].starts_with(prefix):
+            return Err("Phase2 Stage2 admission row order invalid")
+        val value = rows[index].substring(prefix.len())
+        if value == "" or value.len() > 4096:
+            return Err("Phase2 Stage2 admission row empty or oversized")
+        fields[keys[index]] = value
+        index = index + 1
+    if fields["schema"] != "simple-bootstrap-stage2-admission-v2" or
+            fields["status"] != "admitted" or
+            fields["simple_abi_policy"] != "v1" or
+            fields["simple_abi_version"] != "1" or
+            fields["simple_abi_deferred"] != "0" or
+            fields["checks_executed_at_admission"] != "1" or
+            fields["checks_replayed_during_stage3"] != "0" or
+            not fields["hosted_runtime_relative_path"].starts_with(
+                "deps/libspl_hosted_runtime") or
+            not fields["hosted_runtime_relative_path"].ends_with(".rlib"):
+        return Err("Phase2 Stage2 admission policy invalid")
+    val identity_rows = [
+        "schema=simple-bootstrap-stage2-admission-identity-v1",
+        "artifact_sha256=" + fields["candidate_sha256"],
+        "source_snapshot_sha256=" + fields["source_snapshot_sha256"],
+        "runtime_snapshot_sha256=" + fields["runtime_snapshot_sha256"],
+        "tool_authority_sha256=" + fields["tool_authority_sha256"],
+        "build_args_sha256=" + fields["build_args_sha256"],
+        "sanity_evidence_sha256=" + fields["sanity_evidence_sha256"],
+        "receiver_evidence_sha256=" + fields["receiver_evidence_sha256"],
+        "hosted_runtime_relative_path=" +
+            fields["hosted_runtime_relative_path"],
+        "hosted_runtime_sha256=" + fields["hosted_runtime_sha256"]]
+    if not builder_digest_valid_v1(fields["build_args_sha256"]) or
+            not builder_digest_valid_v1(fields["hosted_runtime_sha256"]) or
+            not builder_digest_valid_v1(fields["admission_identity"]) or
+            sha256_text(identity_rows.join("\n") + "\n") !=
+                fields["admission_identity"]:
+        return Err("Phase2 Stage2 admission identity invalid")
+    val path_keys = ["admission_receipt_path", "candidate_path",
+        "source_snapshot_path", "runtime_snapshot_path",
+        "runtime_authority_path", "tool_authority_path",
+        "sanity_evidence_path", "receiver_evidence_path",
+        "receiver_log_path"]
+    for key in path_keys:
+        if not native_group_index_absolute_v1(fields[key]):
+            return Err("Phase2 Stage2 admission path invalid: " + key)
+    if path_absolute(receipt_path).replace("\\", "/").lower() !=
+            path_absolute(fields["admission_receipt_path"])
+                .replace("\\", "/").lower():
+        return Err("Phase2 Stage2 admission receipt path differs")
+    for prefix in ["candidate", "source_snapshot", "runtime_snapshot",
+            "tool_authority", "sanity_evidence", "receiver_evidence",
+            "receiver_log"]:
+        val path = fields[prefix + "_path"]
+        val digest = fields[prefix + "_sha256"]
+        if not builder_digest_valid_v1(digest) or
+                not file_is_regular_no_follow(path) or
+                file_hash_sha256(path) != digest:
+            return Err("Phase2 Stage2 admission evidence differs: " + prefix)
+    if not file_is_regular_no_follow(fields["runtime_authority_path"]):
+        return Err("Phase2 Stage2 runtime authority unavailable")
+    Ok(Phase2Stage2AdmissionV1(receipt_path, sha256_text(payload),
+        fields["candidate_path"], fields["candidate_sha256"],
+        fields["source_snapshot_path"],
+        fields["source_snapshot_sha256"], fields["admission_identity"]))
+
+fn phase2_stage2_admission_open_v1(
+    receipt_path: text
+) -> Result<Phase2Stage2AdmissionV1, text>:
+    if not native_group_index_absolute_v1(receipt_path) or
+            not file_is_regular_no_follow(receipt_path):
+        return Err("Phase2 Stage2 admission receipt unavailable")
+    val payload = file_read_regular_no_follow_bounded(receipt_path, 16384)?
+    val admission = phase2_stage2_admission_decode_v1(
+        receipt_path, payload)?
+    if file_hash_sha256(receipt_path) != admission.receipt_digest:
+        return Err("Phase2 Stage2 admission changed during read")
+    Ok(admission)
+
+export Phase2Stage2AdmissionV1
+export phase2_stage2_admission_decode_v1, phase2_stage2_admission_open_v1

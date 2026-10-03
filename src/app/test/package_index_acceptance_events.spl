@@ -1,0 +1,126 @@
+use app.test.package_index_acceptance_binding.{PackageIndexBindingObservationV1}
+use app.test.package_index_acceptance_invalidation.{acceptance_graph_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.compiler_entrypoint.admission.{
+    compiler_entrypoint_index_transition_v1, compiler_entrypoint_binding_generation_v1
+}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use compiler.driver.cache.package_module_index.{
+    package_module_index_read_current_v1, package_module_index_publish_if_current_v1,
+    package_module_index_entry_action_digest_v1
+}
+use compiler.driver.cache.dirty_module_record.{dirty_module_record_admit_v1, DirtyModuleRecordErrorV1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{dir_create, file_read, file_write, file_delete, process_run_timeout}
+use app.io.file_ops.{path_absolute}
+
+fn acceptance_event_git_v1(root: text, args: [text]) -> bool:
+    var command = ["-C", root]
+    for arg in args:
+        command.push(arg)
+    val (_, _, status) = process_run_timeout("git", command, 10000)
+    status == 0
+
+fn acceptance_event_commit_v1(root: text) -> bool:
+    if not acceptance_event_git_v1(root, ["add", "src/main.spl"]):
+        return false
+    acceptance_event_git_v1(root, ["-c", "user.name=Snapshot Acceptance",
+        "-c", "user.email=snapshot-acceptance@example.invalid", "commit",
+        "--quiet", "--no-gpg-sign", "-m", "snapshot acceptance fixture"])
+
+fn package_index_acceptance_events_v1(scenario: text, fixture_root: text) -> PackageIndexBindingObservationV1:
+    val root = path_absolute(fixture_root).replace("\\", "/")
+    val cache = "{root}/build/scv"
+    val original = "export fn main() -> i64:\n    1\n"
+    if not dir_create("{root}/src", true) or not file_write("{root}/src/main.spl", original) or
+            not acceptance_event_git_v1(root, ["init", "--quiet"]) or not acceptance_event_commit_v1(root):
+        return PackageIndexBindingObservationV1(false, "fixture-git-source-failed", [])
+    if scenario == "no-hidden-full-scan-fallback":
+        val denied = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        val inventory = compile_source_inventory_read_current_v1(cache)
+        val valid = not denied.valid and denied.reason.starts_with("compile-event-journal-missing") and not inventory.valid
+        return PackageIndexBindingObservationV1(valid, denied.reason, [
+            "event_authority_missing_rejected={not denied.valid}",
+            "inventory_published={inventory.valid}"])
+    val initial = compiler_inventory_refresh_v1(root, cache, ["src"], true)
+    if not initial.valid:
+        return PackageIndexBindingObservationV1(false, "fixture-cold-refresh:{initial.reason}", [])
+    val inventory = compile_source_inventory_read_current_v1(cache)
+    if not inventory.valid or inventory.inventory == nil or inventory.inventory!.entries.len() != 1:
+        return PackageIndexBindingObservationV1(false, "fixture-inventory-unavailable", [])
+    if scenario == "missing-index-bounded-rebuild":
+        val snapshot = scv_compile_snapshot_acquire_v1(root, cache, ["src"])
+        if not snapshot.valid:
+            return PackageIndexBindingObservationV1(false, "fixture-snapshot:{snapshot.reason}", [])
+        val index_cache = "{root}/build/package-index"
+        val missing = package_module_index_read_current_v1(index_cache)
+        val transition = compiler_entrypoint_index_transition_v1(missing, snapshot, inventory.digest, true)
+        val binding = compiler_entrypoint_binding_generation_v1(snapshot)
+        val published = package_module_index_publish_if_current_v1(index_cache, binding, "")
+        val admitted = package_module_index_read_current_v1(index_cache)
+        val after = compiler_entrypoint_index_transition_v1(admitted, snapshot, inventory.digest, false)
+        val valid = not missing.valid and transition == "publish-binding" and published and admitted.valid and after == "bound"
+        return PackageIndexBindingObservationV1(valid, "binding-only-recovery", [
+            "recovery_scope=snapshot-binding-only", "transition_before={transition}",
+            "transition_after={after}", "binding_published={published}",
+            "snapshot_revision={snapshot.revision_id}", "source_inventory_digest={inventory.digest}"])
+    if scenario != "scv-git-event-auto-index-update":
+        return PackageIndexBindingObservationV1(false, "unsupported-event-scenario", [])
+    val changed = "export fn main() -> i64:\n    2\n"
+    if not file_write("{root}/src/main.spl", changed) or not acceptance_event_commit_v1(root):
+        return PackageIndexBindingObservationV1(false, "fixture-git-change-failed", [])
+    val refreshed = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+    val next = compile_source_inventory_read_current_v1(cache)
+    if not refreshed.valid or not next.valid or next.inventory == nil or next.inventory!.entries.len() != 1:
+        return PackageIndexBindingObservationV1(false, "warm-git-refresh:{refreshed.reason}", [])
+    val changed_digest = next.inventory!.entries[0].content_digest
+    val digest_changed = next.digest != inventory.digest
+    val source_matches = changed_digest == sha256_text(changed)
+    val generation_advanced = refreshed.inventory_generation > initial.inventory_generation
+    val valid = digest_changed and source_matches and generation_advanced
+    PackageIndexBindingObservationV1(valid, "git-refresh-owner", [
+        "prior_inventory_digest={inventory.digest}", "next_inventory_digest={next.digest}",
+        "source_content_digest={changed_digest}", "expected_content_digest={sha256_text(changed)}",
+        "prior_generation={initial.inventory_generation}", "next_generation={refreshed.inventory_generation}",
+        "inventory_digest_changed={digest_changed}", "source_content_matches={source_matches}",
+        "generation_advanced={generation_advanced}"])
+
+fn package_index_acceptance_frozen_refusal_v1(fixture_root: text) -> PackageIndexBindingObservationV1:
+    val root = path_absolute(fixture_root).replace("\\", "/")
+    val snapshot = "{root}/frozen"
+    val content = "export fn main() -> i64:\n    1\n"
+    if not dir_create("{root}/src", true) or not dir_create("{snapshot}/src", true) or
+            not file_write("{root}/src/main.spl", content) or not file_write("{snapshot}/src/main.spl", content):
+        return PackageIndexBindingObservationV1(false, "fixture-source-write-failed", [])
+    var graph = acceptance_graph_v1()
+    var entry = graph.entries[0]
+    entry.source_identity = "src/main.spl"
+    entry.source_digest = sha256_text(content)
+    entry.direct_imports = []
+    entry.reverse_dependents = []
+    graph.entries = [entry]
+    entry.action_digest = package_module_index_entry_action_digest_v1(graph, entry)
+    graph.entries = [entry]
+    var source_entry = entry
+    source_entry.source_identity = "{snapshot}/src/main.spl"
+    val accepted = dirty_module_record_admit_v1(graph, source_entry, snapshot, graph.scv_revision_id,
+        graph.scv_tree_id, graph.inventory_digest, graph.producer_digest, graph.root_generation, graph.variant_digest)
+    if not accepted.is_ok():
+        return PackageIndexBindingObservationV1(false, "fixture-frozen-admission-failed", [])
+    val record = accepted.unwrap()
+    if not file_delete("{snapshot}/src/main.spl"):
+        return PackageIndexBindingObservationV1(false, "fixture-frozen-removal-failed", [])
+    val rejected = dirty_module_record_admit_v1(graph, source_entry, snapshot, graph.scv_revision_id,
+        graph.scv_tree_id, graph.inventory_digest, graph.producer_digest, graph.root_generation, graph.variant_digest)
+    val denied = match rejected:
+        case Err(reason): reason == DirtyModuleRecordErrorV1.identity_drift
+        case _: false
+    val live_preserved = file_read("{root}/src/main.spl") == content
+    val read_bound = record.read_set.len() == 1 and record.read_set[0].source_identity == record.source_identity and
+        record.source_identity.starts_with(snapshot + "/")
+    PackageIndexBindingObservationV1(denied and live_preserved and read_bound, "frozen-source-refusal", [
+        "missing_frozen_source_rejected={denied}", "live_source_preserved={live_preserved}",
+        "initial_read_set_snapshot_bound={read_bound}"])
+
+export package_index_acceptance_events_v1, package_index_acceptance_frozen_refusal_v1

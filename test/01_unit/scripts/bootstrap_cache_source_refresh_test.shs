@@ -3,6 +3,7 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 . "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+. "$repo/scripts/bootstrap/bootstrap-cache-release-vector.shs"
 parent=${BOOTSTRAP_CACHE_TEST_ROOT:?absolute private fixture root required}
 bootstrap_cache_new_path_validate "$parent" || exit 64
 mkdir -p "$parent"
@@ -55,10 +56,10 @@ reject() {
 }
 other=$(printf 'different producer' | hash_stream)
 reject "$other" "$new" producer
-simple_abi_policy=changed
+bootstrap_link_compat_sha256=changed
 options=$(bootstrap_cache_context_hash stage2)
 reject "$producer" "$options" options
-simple_abi_policy=v1
+bootstrap_link_compat_sha256=absent
 repo_root=$work
 relocated=$(bootstrap_cache_context_hash stage2)
 reject "$producer" "$relocated" relocation
@@ -68,4 +69,22 @@ for name in runtime-admitted.txt tool-authority-before.txt; do
   reject "$producer" "$new" "$name"
   cp "$work/new/$name" "$work/old/$name"
 done
+mv "$work/old/source-inputs-before.txt" "$work/old/source.saved"
+if bootstrap_cache_context_hash stage2 "$work/old" > "$work/missing-source.log" 2>&1; then exit 1; fi
+[ "$(bootstrap_cache_hash_file "$cache/.bootstrap-cache-binding")" = "$binding" ]
+mv "$work/old/source.saved" "$work/old/source-inputs-before.txt"
+# Release inline Stage2 strips ambient policy fields, whereas inherited tool
+# contexts preserve absent versus present-empty fields and reject multiline data.
+SIMPLE_ABI_POLICY='ambient-stage2-policy'; export SIMPLE_ABI_POLICY
+[ "$(bootstrap_cache_context_hash stage2)" = "$new" ]
+unset SIMPLE_ABI_POLICY
+absent_options=$(bootstrap_cache_release_options_v1 inherited '' absent)
+SIMPLE_ABI_POLICY=; export SIMPLE_ABI_POLICY
+empty_options=$(bootstrap_cache_release_options_v1 inherited '' absent)
+[ "$absent_options" != "$empty_options" ]
+SIMPLE_ABI_POLICY='invalid
+snapshot'; export SIMPLE_ABI_POLICY
+if bootstrap_cache_release_options_v1 inherited '' absent > "$work/malformed-env.log" 2>&1; then exit 1; fi
+[ "$(bootstrap_cache_hash_file "$cache/.bootstrap-cache-binding")" = "$binding" ]
+[ "$(bootstrap_cache_hash_file "$cache/objects/stable.o")" = "$object" ]
 printf 'PASS source refresh: actual context rederivation, default rejection, explicit immutable transition, retained completed objects, incompatible inputs/relocation and active writer refusal; no compiler execution\n'

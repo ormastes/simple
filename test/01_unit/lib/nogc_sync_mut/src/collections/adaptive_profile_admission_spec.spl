@@ -1,0 +1,133 @@
+# @tag:in-development
+# @req REQ-PSC-001 REQ-PSC-004 REQ-PSC-005
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_text_set.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_text_map.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_map.spl
+"""
+# Embedded collection feedback admission
+
+An attributed container checks the embedded sample for its own site and target
+before choosing storage. A forced attribute remains authoritative after a valid
+sample, while `auto` can use the same sample to select hash storage.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetWorkloadProfile, AdaptiveTextSet,
+    adaptive_set_workload_profile_matches
+}
+use std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+
+fn hot_profile() -> AdaptiveSetWorkloadProfile:
+    AdaptiveSetWorkloadProfile(
+        site_id: "ast://profile/admission#stable", target_profile_id: "x86_64-v3",
+        sample_count: 1, size_p95: 64, lookup_count_p95: 128,
+        hit_count_p95: 100, miss_count_p95: 28
+    )
+
+describe "embedded collection profile admission":
+    it "should admit a valid exact-site sample before a forced choice":
+        # @req REQ-PSC-001 REQ-PSC-004 REQ-PSC-005
+        step("Prepare a measured sample for one collection site and target")
+        val prior = hot_profile()
+        expect(adaptive_set_workload_profile_matches(
+            prior, prior.site_id, prior.target_profile_id)).to_be(true)
+        step("Apply an explicit linear attribute to text and generic containers")
+        var text_set = AdaptiveTextSet.attributed_with_prior_at_site(
+            AdaptiveTextSet.new(), "linear", prior.site_id, prior.target_profile_id,
+            prior.sample_count, prior.size_p95, prior.lookup_count_p95,
+            prior.hit_count_p95, prior.miss_count_p95,
+            prior.hash_probe_count_p95, prior.hash_collision_count_p95)
+        var text_map = AdaptiveTextMap.attributed_with_prior_at_site(
+            AdaptiveTextMap.new(), "linear", prior.site_id, prior.target_profile_id,
+            prior.sample_count, prior.size_p95, prior.lookup_count_p95,
+            prior.hit_count_p95, prior.miss_count_p95,
+            prior.hash_probe_count_p95, prior.hash_collision_count_p95)
+        var generic_set: AdaptiveSet<i64> = AdaptiveSet.attributed_with_prior_at_site(
+            AdaptiveSet.new(), "linear", prior.site_id, prior.target_profile_id,
+            prior.sample_count, prior.size_p95, prior.lookup_count_p95,
+            prior.hit_count_p95, prior.miss_count_p95,
+            prior.hash_probe_count_p95, prior.hash_collision_count_p95)
+        var generic_map: AdaptiveMap<i64, text> = AdaptiveMap.attributed_with_prior_at_site(
+            AdaptiveMap.new(), "linear", prior.site_id, prior.target_profile_id,
+            prior.sample_count, prior.size_p95, prior.lookup_count_p95,
+            prior.hit_count_p95, prior.miss_count_p95,
+            prior.hash_probe_count_p95, prior.hash_collision_count_p95)
+        expect(text_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(text_map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(generic_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(generic_map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(text_set.insert("seven")).to_be(true)
+        expect(text_map.put("seven", "value")).to_be(true)
+        expect(generic_set.insert(7)).to_be(true)
+        expect(generic_map.put(7, "value")).to_be(true)
+        expect(text_set.contains("seven")).to_be(true)
+        expect(text_map.get("seven") ?? "").to_equal("value")
+        expect(generic_set.contains(7)).to_be(true)
+        expect(generic_map.get(7) ?? "").to_equal("value")
+
+    it "should let an exact-site hot sample select actual auto storage":
+        # @req REQ-PSC-001 REQ-PSC-004 REQ-PSC-005
+        step("Prepare a hot workload with valid counts")
+        val prior = hot_profile()
+        step("Construct an attributed auto text set and generic map")
+        val text_set = AdaptiveTextSet.attributed_with_prior_at_site(
+            AdaptiveTextSet.new(), "auto", prior.site_id, prior.target_profile_id,
+            prior.sample_count, prior.size_p95, prior.lookup_count_p95,
+            prior.hit_count_p95, prior.miss_count_p95,
+            prior.hash_probe_count_p95, prior.hash_collision_count_p95)
+        val generic_map: AdaptiveMap<i64, text> = AdaptiveMap.attributed_with_prior_at_site(
+            AdaptiveMap.new(), "auto", prior.site_id, prior.target_profile_id,
+            prior.sample_count, prior.size_p95, prior.lookup_count_p95,
+            prior.hit_count_p95, prior.miss_count_p95,
+            prior.hash_probe_count_p95, prior.hash_collision_count_p95)
+        expect(text_set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(generic_map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+
+    it "should reject stale site and target identities":
+        # @req REQ-PSC-004 REQ-PSC-005
+        step("Compare a valid sample against a different declaration and target")
+        val prior = hot_profile()
+        expect(adaptive_set_workload_profile_matches(
+            prior, "ast://profile/other#stable", prior.target_profile_id)).to_be(false)
+        expect(adaptive_set_workload_profile_matches(
+            prior, prior.site_id, "aarch64-neon")).to_be(false)
+        expect(adaptive_set_workload_profile_matches(prior, "", prior.target_profile_id)).to_be(false)
+        expect(adaptive_set_workload_profile_matches(prior, prior.site_id, "")).to_be(false)
+
+    it "should reject impossible counts and incomplete hash metrics":
+        # @req REQ-PSC-004 REQ-PSC-005
+        step("Corrupt independently checked fields of a measured sample")
+        val prior = hot_profile()
+        var impossible = prior
+        impossible.hit_count_p95 = 129
+        expect(adaptive_set_workload_profile_matches(
+            impossible, prior.site_id, prior.target_profile_id)).to_be(false)
+        impossible = prior
+        impossible.hit_count_p95 = 101
+        expect(adaptive_set_workload_profile_matches(
+            impossible, prior.site_id, prior.target_profile_id)).to_be(false)
+        impossible = prior
+        impossible.sample_count = 0
+        expect(adaptive_set_workload_profile_matches(
+            impossible, prior.site_id, prior.target_profile_id)).to_be(false)
+        impossible = prior
+        impossible.hash_probe_count_p95 = 64
+        expect(adaptive_set_workload_profile_matches(
+            impossible, prior.site_id, prior.target_profile_id)).to_be(false)
+        impossible.hash_collision_count_p95 = 65
+        expect(adaptive_set_workload_profile_matches(
+            impossible, prior.site_id, prior.target_profile_id)).to_be(false)
+
+    it "should accept a multi-sample distribution without false additive equality":
+        # @req REQ-PSC-004
+        step("Use independent p95 marginals from two valid samples")
+        var prior = hot_profile()
+        prior.sample_count = 2
+        prior.hit_count_p95 = 90
+        prior.miss_count_p95 = 30
+        expect(adaptive_set_workload_profile_matches(
+            prior, prior.site_id, prior.target_profile_id)).to_be(true)

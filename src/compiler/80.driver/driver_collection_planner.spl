@@ -1,0 +1,128 @@
+# Request-owned collection metadata and pre-monomorphization HIR evidence.
+# The caller supplies source bytes and independently resolved bindings once;
+# no filesystem, environment, source-name inference or rewrite is performed.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.semantics.perf_facts.types.{CollectionOperationRegistry}
+use compiler.semantics.perf_facts.registry.{
+    CollectionRegistryBindingV1, collection_registry_parse, collection_registry_bind_modules
+}
+use compiler.semantics.perf.collection_plan_analysis.{analyze_collection_module_v1}
+use compiler.hir.hir_types.{HirModule, SymbolId, SymbolKind}
+use compiler.hir.abi_interface.{hir_abi_function_digest_v1}
+use compiler.semantics.perf_facts.collector.{
+    hir_perf_receiver_kind_for_type, hir_perf_receiver_matches
+}
+
+fn collection_driver_validate_binding_v1(
+    module: HirModule, binding: CollectionRegistryBindingV1, backend: text
+) -> Result<bool, text>:
+    if module.path == "" or binding.module_path != module.path:
+        return Err("collection-binding-module-owner-mismatch")
+    if backend == "auto" or binding.backend != backend:
+        return Err("collection-binding-backend-mismatch")
+    val symbol_id = SymbolId(id: binding.symbol_id)
+    if not module.functions.contains_key(symbol_id) or not module.symbols.symbols.contains_key(binding.symbol_id):
+        return Err("collection-binding-definition-missing")
+    val function = module.functions[symbol_id]
+    val symbol = module.symbols.symbols[binding.symbol_id]
+    if (function.symbol.id != binding.symbol_id or symbol.id.id != binding.symbol_id or
+            symbol.name != function.name or function.is_extern or
+            function.span.file != module.path or symbol.span.file != module.path):
+        return Err("collection-binding-definition-owner-mismatch")
+    match symbol.kind:
+        case SymbolKind.Function: pass_do_nothing
+        case SymbolKind.Method: pass_do_nothing
+        case _: return Err("collection-binding-symbol-kind-mismatch")
+    if val owner = symbol.defining_module:
+        if owner != module.name:
+            return Err("collection-binding-imported-owner")
+    if function.params.len() == 0 or function.is_static:
+        return Err("collection-binding-receiver-missing")
+    if not hir_perf_receiver_matches(binding.receiver, hir_perf_receiver_kind_for_type(function.params[0].type_)):
+        return Err("collection-binding-typed-receiver-mismatch")
+    val digest = hir_abi_function_digest_v1(module, function)?
+    if digest != binding.signature_fingerprint:
+        return Err("collection-binding-typed-signature-mismatch")
+    Ok(true)
+
+impl CompilerDriver:
+    me configure_collection_registry(
+        source: text, bindings: [CollectionRegistryBindingV1]
+    ) -> Result<bool, text>:
+        """Replace this request's registry; failure discards all old evidence."""
+        self.collection_registries = {}
+        self.collection_bindings = []
+        self.collection_registry_version = "unconfigured"
+        self.collection_registry_configured = true
+        self.collection_registry_error = ""
+        self.collection_analyses = {}
+        val snapshot = match collection_registry_parse(source):
+            case Ok(value): value
+            case Err(reason):
+                self.collection_registry_error = reason
+                return Err(reason)
+        match collection_registry_bind_modules(snapshot, bindings):
+            case Ok(registries):
+                self.collection_registries = registries
+                self.collection_bindings = bindings
+                self.collection_registry_version = snapshot.metadata_version
+                Ok(true)
+            case Err(reason):
+                self.collection_registry_error = reason
+                Err(reason)
+
+    me analyze_collections_before_monomorphize(hir_phase_admitted: bool) -> bool:
+        """Publish fresh analysis snapshots, never lowered/executed receipts."""
+        self.collection_analyses = {}
+        if not hir_phase_admitted:
+            return false
+        if not self.collection_registry_configured:
+            return true
+        if self.collection_registry_error != "":
+            self.ctx.add_error("collection-registry-configuration: " + self.collection_registry_error)
+            return false
+        # Flat/bootstrap routes can retain fewer object modules than the
+        # admitted HIR population. Do not publish a partial result as complete.
+        if self.ctx.hir_module_count_value > self.ctx.hir_modules.len():
+            self.ctx.add_error("collection-analysis-incomplete-hir")
+            return false
+        # Symbol IDs are module-local. Admit every owner before publishing any
+        # snapshot, including bindings whose requested module disappeared.
+        var names_by_path: Dict<text, text> = {}
+        for name in self.ctx.hir_modules.keys():
+            val path = self.ctx.hir_modules[name].path
+            if path == "" or names_by_path.has(path):
+                self.ctx.add_error("collection-analysis-module-path-ambiguous")
+                return false
+            names_by_path[path] = name
+        for binding in self.collection_bindings:
+            if not names_by_path.has(binding.module_path):
+                self.ctx.add_error("collection-binding-module-missing")
+                return false
+            val module = self.ctx.hir_modules[names_by_path[binding.module_path]]
+            match collection_driver_validate_binding_v1(module, binding, self.ctx.options.backend):
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    return false
+                case Ok(_): pass_do_nothing
+            if not self.collection_registries.has(binding.module_path):
+                self.ctx.add_error("collection-binding-module-registry-missing")
+                return false
+            val registry = self.collection_registries[binding.module_path]
+            val summary = registry.lookup(binding.symbol_id)
+            if not registry.is_structurally_valid() or not summary.?:
+                self.ctx.add_error("collection-registry-invalid-at-hir-boundary")
+                return false
+            if summary.unwrap().explicit_argument_count != module.functions[SymbolId(id: binding.symbol_id)].params.len() - 1:
+                self.ctx.add_error("collection-binding-typed-arity-mismatch")
+                return false
+        for name in self.ctx.hir_modules.keys():
+            val module = self.ctx.hir_modules[name]
+            val registry = if self.collection_registries.has(module.path):
+                self.collection_registries[module.path]
+            else:
+                CollectionOperationRegistry.new(self.collection_registry_version)
+            self.collection_analyses[name] = analyze_collection_module_v1(module, registry)
+        true
+
+export collection_driver_validate_binding_v1

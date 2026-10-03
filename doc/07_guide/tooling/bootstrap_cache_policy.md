@@ -6,6 +6,27 @@ Compiler rebuilds, one-binary mode, successful Phase 2 completion and cache age
 never authorize deletion. Failed attempts retain completed native objects,
 frontend records, runtime objects and logs.
 
+### Release branch adaptation
+
+Release runs Stage 2 and Stage 3 inline. Its command hashes and recovery replay
+use those actual vectors. ABI/plugin/K1 options absent from the stripped child
+environment are recorded as absent; the wrapper does not invent main-branch
+policy selections. Inherited tool environments distinguish absent and empty
+values. The native driver separately binds its complete checked environment
+snapshot, refusing reuse when that snapshot fails.
+
+Release source refresh pins the reviewed Rust source owner SHA-256
+`51febe82933b423cdcb113e1b36e9d2bdfe73b2f166076af718629c7dc2bc2db`.
+Its object/global dependency-key region matches the reviewed main source,
+including full module content and unconditional structural dependencies. The
+actual release producer must still match its seed; main binary cache evidence
+does not qualify a release binary.
+
+Prior sealed authority directories retain their parent and enter the immutable
+attempt through `attempt-directories.tsv`. Mutable HOME/TMP directories receive
+unique sibling names, recorded in `mutable-working-state-locations.tsv`; that
+record proves placement, without making an admission claim about their contents.
+
 ## Commands
 
 | Command | Scope |
@@ -43,8 +64,9 @@ changed binding refuses default reuse with an actionable diagnostic and keeps
 the old files. It never rewrites a producer identity or stamp to admit old
 objects. The phase binding records schema, phase, exact producer SHA-256, entry,
 and a digest of source identity/content, backend/mode, runtime and resolved tool
-snapshots, ABI/plugin/K1/coverage/link options. Stage 3 additionally binds its
-actual assurance profile and warning policy. Later tool entries use the
+snapshots and actual ABI/plugin/K1/coverage/link option presence. Release Stage 3
+binds its inline persistence controls; its stripped child has no extra main
+assurance selection. Later tool entries use the
 compiler's canonical semantic environment field list, after their actual
 forced overrides, including CPU, linker, MIR bulk operations and safety profile.
 The full CLI records its actual one-binary mode. Phase 3 additionally binds the

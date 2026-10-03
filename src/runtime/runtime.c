@@ -52,6 +52,7 @@ int64_t rt_simple_abi_version_deferred(void) {
 #endif
 
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -74,6 +75,10 @@ int64_t rt_simple_abi_version_deferred(void) {
 #include <io.h>
 #include <time.h>
 #include <sys/types.h>
+#ifndef PSAPI_VERSION
+#define PSAPI_VERSION 2
+#endif
+#include <psapi.h>
 /* MSVC/clang-cl compatibility shims. Windows-only: every definition below is
  * inside this `#else` branch of `#ifndef _WIN32`, so the POSIX build is
  * byte-identical. Without them this TU has never compiled on Windows at all
@@ -105,6 +110,7 @@ typedef long long ssize_t;
 #ifndef _WIN32
 #include <dirent.h>
 #endif
+#include "platform/runtime_group_self_charge.h"
 
 /* ================================================================
  * Runtime Configuration
@@ -1978,6 +1984,24 @@ int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return rt_is_dir(path) ? 1 : 0;
 }
+/* Inspect the directory entry itself. In particular, a Windows junction or
+ * directory symlink must not pass an ancestor check by resolving its target. */
+int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) || !path[0]) return 0;
+#if defined(_WIN32)
+    wchar_t* wide_path = rt_win_long_path_widen(path);
+    if (!wide_path) return 0;
+    DWORD attributes = GetFileAttributesW(wide_path);
+    free(wide_path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
 int         rt_file_write(const char* path, const char* content) {
     if (!path) return 0;
 #if defined(_WIN32)
@@ -2270,7 +2294,18 @@ static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
 
 int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 #if defined(_WIN32)
-    (void)path_ptr; (void)path_len; return -1;
+    char path[RT_TEXT_PATH_MAX];
+    if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
+            memchr(path_ptr, '\0', (size_t)path_len)) return -1;
+    memcpy(path, path_ptr, (size_t)path_len); path[path_len] = '\0';
+    wchar_t* wide = rt_win_long_path_widen(path);
+    if (!wide) return -1;
+    int valid_parent = rt_win_profile_path_parents_are_real(wide);
+    HANDLE file = valid_parent ? CreateFileW(wide, GENERIC_WRITE, 0, NULL,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL) :
+        INVALID_HANDLE_VALUE;
+    free(wide);
+    return file == INVALID_HANDLE_VALUE ? -1 : (int64_t)(intptr_t)file;
 #else
     char path[RT_TEXT_PATH_MAX];
     if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
@@ -2297,7 +2332,17 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 
 int rt_mem_snapshot_append_flush(int64_t fd64, const char* record, int64_t record_len) {
 #if defined(_WIN32)
-    (void)fd64; (void)record; (void)record_len; return 0;
+    if (fd64 == -1 || !record || record_len <= 0 || record_len > 65536 ||
+            record[record_len - 1] != '\n') return 0;
+    HANDLE file = (HANDLE)(intptr_t)fd64;
+    int64_t off = 0;
+    while (off < record_len) {
+        DWORD written = 0;
+        if (!WriteFile(file, record + off, (DWORD)(record_len - off), &written, NULL) ||
+                written == 0) return 0;
+        off += (int64_t)written;
+    }
+    return FlushFileBuffers(file) != 0;
 #else
     if (fd64 < 0 || fd64 > INT_MAX || !record || record_len <= 0 || record[record_len - 1] != '\n') return 0;
     int fd = (int)fd64; int64_t off = 0;
@@ -2341,10 +2386,18 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         rt_mem_snapshot_token(event_token, sizeof(event_token), event, event_len) < 0 ||
         rt_mem_snapshot_token(phase_token, sizeof(phase_token), phase, phase_len) < 0 ||
         rt_mem_snapshot_token(path_token, sizeof(path_token), source_path, source_path_len) < 0) return 0;
+    int64_t group_current = -1, group_peak = -1;
+    int group_measured = rt_group_self_charge_snapshot(&group_current, &group_peak);
+    const char* group_kind = "unavailable";
+#if defined(_WIN32)
+    if (group_measured) group_kind = "job-commit";
+#elif defined(__linux__)
+    if (group_measured) group_kind = "cgroup-memory";
+#endif
     const char* path_kind = source_path_len > 0 ? "recorded" : "none";
     const char* emitted_path = source_path_len > 0 ? path_token : "-";
     int n = snprintf(line, sizeof(line),
-        "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
+        "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld group_charge_metric=%s group_charge_current_bytes=%lld group_charge_peak_bytes=%lld\n",
         run_token, (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
         event_token, phase_token, (long long)source_index, path_kind, emitted_path,
         (long long)retained_modules, (long long)validation_keys,
@@ -2352,7 +2405,8 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         (long long)hir_symbols, (long long)hir_functions, (long long)hir_constants,
         (long long)hir_enums, (long long)hir_structs, (long long)hir_classes,
         (long long)rt_heap_live_bytes(), (long long)rt_heap_peak_bytes(),
-        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib());
+        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib(),
+        group_kind, (long long)group_current, (long long)group_peak);
     return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
 }
 
@@ -2374,7 +2428,7 @@ int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_
 
 int rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
-    (void)fd; return 0;
+    return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
 #else
     return fd >= 0 && fd <= INT_MAX && close((int)fd) == 0;
 #endif
@@ -2382,7 +2436,22 @@ int rt_mem_snapshot_close(int64_t fd) {
 
 static int64_t rt_process_status_kib(const char* key) {
 #if defined(_WIN32)
-    (void)key; return -1;
+    /* Self-process working set is a resident observation, not the group
+     * JobObject's aggregate committed charge. Keep those metrics separate. */
+#if defined(_WIN64)
+    _Static_assert(sizeof(PROCESS_MEMORY_COUNTERS_EX) == 80,
+        "Win64 PROCESS_MEMORY_COUNTERS_EX layout changed");
+    _Static_assert(offsetof(PROCESS_MEMORY_COUNTERS_EX, WorkingSetSize) == 16 &&
+        offsetof(PROCESS_MEMORY_COUNTERS_EX, PeakWorkingSetSize) == 8,
+        "Win64 process working-set offsets changed");
+#endif
+    PROCESS_MEMORY_COUNTERS_EX counters = {0};
+    counters.cb = (DWORD)sizeof(counters);
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(),
+            (PROCESS_MEMORY_COUNTERS*)&counters, counters.cb)) return -1;
+    if (strcmp(key, "VmRSS:") == 0) return (int64_t)(counters.WorkingSetSize / 1024);
+    if (strcmp(key, "VmHWM:") == 0) return (int64_t)(counters.PeakWorkingSetSize / 1024);
+    return -1;
 #else
     FILE* f = fopen("/proc/self/status", "r");
     if (!f) return -1;

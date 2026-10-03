@@ -1,0 +1,61 @@
+# Shared actual filesystem and 100 MiB evidence fixture; no performance receipt.
+use std.spec.{expect}
+use app.io.mod.{cwd, dir_create, process_run_bounded}
+use app.io.retained_file_ops.*
+use app.scv.db.evidence_store.*
+use std.scv.db_retention.*
+use std.scv.db_evidence_stream.*
+use std.common.crypto.sha256.{sha256_stream_v1_update}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+
+fn setup_item2_hydration_paths() -> (text,text,text):
+    val base = secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-hydration-").unwrap()
+    val source = "{base}/source"
+    val parent = "{base}/external"
+    val target = "{base}/target"
+    for path in [source,parent,target]: expect(dir_create(path,false)).to_be(true)
+    val (_out,_err,code) = process_run_bounded("git", ["init","--quiet",source],30000,4096)
+    expect(code).to_equal(0)
+    (source,parent,target)
+
+fn setup_item2_hydration_quota() -> DbEvidenceStoreQuota:
+    DbEvidenceStoreQuota(max_content_bytes: 134217728,max_envelope_bytes: 134238208,max_dependencies: 256)
+
+fn setup_item2_hydration_node(root: text,parent: text,content: [u8],dependencies: [text] = []) -> DbEvidenceNode:
+    val node = DbEvidenceNode(digest: db_evidence_digest(content,dependencies).unwrap(),content: content,availability: "available",created_day: 0,dependencies: dependencies)
+    db_evidence_store_put(root,parent,node,setup_item2_hydration_quota()).unwrap()
+
+fn setup_item2_hydration_big(parent: text) -> text:
+    val store = "{parent}/scv-evidence-v1"
+    expect(dir_create(store,false)).to_be(true)
+    var file = retained_file_open("{store}/fixture",134217728u64,true).unwrap()
+    # SCVE1, zero dependencies, 104857600 (100MiB) content bytes.
+    file.write([83u8,67u8,86u8,69u8,1u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,6u8,64u8,0u8,0u8]).unwrap()
+    val stream = db_evidence_stream_start(104857600u64).unwrap()
+    val chunk = [37u8;1048576]
+    for ordinal in 0..100:
+        file.write(chunk).unwrap()
+        expect(sha256_stream_v1_update(stream,chunk)).to_be(true)
+    expect(file.position).to_equal(104857621u64)
+    expect(retained_file_sync(file)).to_be(true)
+    expect(file.close()).to_be(true)
+    val digest = db_evidence_stream_finish(stream,[]).unwrap()
+    expect(file_publish_noreplace("{store}/fixture","{store}/{digest}.scve").unwrap()).to_be(true)
+    digest
+
+fn check_item2_hydration_big(path: text):
+    var file = retained_file_open(path,104857600u64).unwrap()
+    expect(file.size).to_equal(104857600u64)
+    var count = 0
+    while true:
+        val chunk = file.read(1048576).unwrap()
+        if chunk.len() == 0: break
+        expect(chunk).to_equal([37u8;1048576])
+        count = count + 1
+    expect(count).to_equal(100)
+    expect(file.position).to_equal(104857600u64)
+    expect(retained_file_unchanged(file).unwrap()).to_be(true)
+    expect(file.close()).to_be(true)
+
+export setup_item2_hydration_paths, setup_item2_hydration_quota, setup_item2_hydration_node, setup_item2_hydration_big, check_item2_hydration_big

@@ -169,6 +169,10 @@ impl PlatformLinkConfig {
                 "ole32",
                 "oleaut32",
                 "shell32",
+                // Debug native-all archives retain Windows variant conversion
+                // and WinRT error helpers even when optimized archives do not.
+                "propsys",
+                "runtimeobject",
                 "crypt32",
                 "secur32",
                 "ncrypt",

@@ -1,0 +1,36 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_paged_model.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{db_empty_state, db_plan_patch}
+use test.fixtures.scv.db_paged_fixture.*
+
+describe "Versioned paged protocol and shared row semantics":
+    it "roundtrips the full policy with an independently supplied pin":
+        val policy = setup_item2_paged_policy()
+        val wire = db_paged_policy_encode(policy).unwrap()
+        expect(db_paged_policy_decode(wire, policy.revision).unwrap()).to_equal(policy)
+        expect(db_paged_policy_decode(wire, "00".repeat(32)).is_err()).to_be(true)
+        expect(db_paged_policy_decode(wire + "00", policy.revision).is_err()).to_be(true)
+        expect(db_paged_policy_decode("SCVDB-PAGED-POLICY-v2\n00\n", policy.revision).is_err()).to_be(true)
+        val genesis = db_paged_genesis(policy).unwrap()
+        val encoded = db_paged_manifest_encode(genesis).unwrap()
+        expect(db_paged_manifest_decode(encoded, policy).unwrap()).to_equal(genesis)
+        expect(db_paged_manifest_decode(encoded + "00", policy).is_err()).to_be(true)
+
+    it "accepts a new repeated deletion batch while retaining original tombstone provenance":
+        val policy = setup_item2_paged_policy().config.merge
+        val create = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], "", 1)
+        val first = db_plan_patch(db_empty_state(), create, policy).unwrap().proposed
+        val remove = setup_item2_paged_patch([DbOperation.Tombstone(setup_item2_paged_ref(1), setup_item2_paged_condition(create.batch_id))], first.revision, 2)
+        val deleted = db_plan_patch(first, remove, policy).unwrap().proposed
+        val repeat = setup_item2_paged_patch([DbOperation.Tombstone(setup_item2_paged_ref(1), setup_item2_paged_condition(remove.batch_id))], deleted.revision, 3)
+        val repeated = db_plan_patch(deleted, repeat, policy).unwrap()
+        expect(repeated.conflicts.len()).to_equal(0)
+        expect(repeated.proposed.rows[0]).to_equal(deleted.rows[0])
+        expect(repeated.proposed.accepted.len()).to_equal(3)
+        expect(repeated.replay).to_be(false)
+        step("An already deleted row still rejects a stale explicit precondition")
+        val stale = setup_item2_paged_patch([DbOperation.Tombstone(setup_item2_paged_ref(1), setup_item2_paged_condition(create.batch_id))], repeated.proposed.revision, 4)
+        val rejected = db_plan_patch(repeated.proposed, stale, policy).unwrap()
+        expect(rejected.conflicts[0].code).to_equal("SCVDB_ROW_PRECONDITION")
+        expect(rejected.proposed).to_equal(repeated.proposed)

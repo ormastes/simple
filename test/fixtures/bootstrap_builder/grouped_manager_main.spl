@@ -1,0 +1,166 @@
+# Pure authority integration fixture. Reap receipts below are test values, not
+# evidence of real process isolation; native lifecycle fixtures own that proof.
+use std.common.build_manager.grouped_execution_contract.{GroupedActionBindingV1, GroupedReapReceiptV1}
+use compiler.driver.action_graph.grouped_execution_adapter.{grouped_execution_new_v1, grouped_execution_ready_v1, grouped_execution_claim_v1, grouped_execution_commit_v1, grouped_execution_recover_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionResultV1, BuildActionPoolV1, BuildActionStateV1, build_action_result_validate_v1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.action_graph.artifact_service_bridge.{demand_artifact_route_v1, demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+use compiler.driver.cache.package_scc_scheduler.{PackageSccGroupV1, PackageSccWaveV1, PackageCompileScheduleV1, PackageCompileResultV1, package_scc_identity_v1}
+use lib.compiler_artifact_service.profile.{ArtifactServiceProfileV1, artifact_service_profile_digest_v1}
+use lib.compiler_artifact_service.service.{ArtifactRequestStateV1}
+
+fn grouped_fixture_check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print "FAIL {label}"
+    1
+
+fn grouped_fixture_action(id: text, dependencies: [text], snapshot: text) -> BuildActionV1:
+    BuildActionV1(id, "parse-command-v1", [snapshot], dependencies, ["{id}.pool"],
+        BuildActionPoolV1.parse, 0, snapshot, 16, "")
+
+fn grouped_fixture_staged_rejection(graph: PersistedBuildGraphV1, cache: text, snapshot: text, artifact: text) -> i64:
+    val coordinator = coordinator_new_v1(graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 64)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), nil,
+        NativePromotionQueueV1([]), "", demand_compile_counters_empty_v1(), nil, nil, 0, "", 0, 0)
+    # Two diagnostic bytes pass the coordinator budget but exceed this actual
+    # service frame budget, forcing rejection AFTER a staged coordinator commit.
+    val profile = ArtifactServiceProfileV1("rollback-fixture", cache, ["parse"], 0, false,
+        "rollback-cas", 2, 64, 1)
+    val original = demand_artifact_route_v1(execution, profile, false, "rollback-owner", 1)
+    val claim = demand_artifact_claim_owned_v1(original, "parse-a", artifact, 64)
+    if not claim.claim.valid: return 1
+    if original.execution.coordinator!.runtime[0].state != BuildActionStateV1.pending or
+            original.service.entries[0].lease != nil or
+            original.service.entries[1].state != ArtifactRequestStateV1.queued:
+        return 2
+    val result = BuildActionResultV1("parse-a", snapshot, true, false, artifact, "", ["xx"], 8)
+    if build_action_result_validate_v1(graph.actions[0], result) != "ok": return 3
+    val rejected = demand_artifact_commit_owned_v1(claim.route, result)
+    if rejected.accepted: return 4
+    for retained in [claim.route, rejected.route]:
+        if retained.execution.coordinator!.runtime[0].state != BuildActionStateV1.running or
+                retained.execution.coordinator!.runtime[0].owner_token != artifact or
+                retained.execution.coordinator!.runtime[0].result != nil or
+                retained.service.entries[0].state != ArtifactRequestStateV1.leased or
+                retained.service.entries[0].cas_artifact_digest != "":
+            return 5
+    val admitted = demand_artifact_commit_owned_v1(rejected.route,
+        BuildActionResultV1("parse-a", snapshot, true, false, artifact, "", [], 8))
+    if not admitted.accepted or admitted.route.execution.coordinator!.runtime[0].state != BuildActionStateV1.succeeded:
+        return 6
+    if claim.route.execution.coordinator!.runtime[0].state != BuildActionStateV1.running:
+        return 7
+    0
+
+fn main() -> i64:
+    val snapshot = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val cache = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    val artifact = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    val first_group = PackageSccGroupV1(package_scc_identity_v1(["package-a"], cache), ["package-a"], [])
+    val peer_group = PackageSccGroupV1(package_scc_identity_v1(["package-b"], cache), ["package-b"], [])
+    val child_group = PackageSccGroupV1(package_scc_identity_v1(["package-c"], cache), ["package-c"], [first_group.identity])
+    val schedule = PackageCompileScheduleV1(true, "ok", cache,
+        ["package-a", "package-b", "package-c"], [first_group, peer_group, child_group],
+        [PackageSccWaveV1(0, [first_group, peer_group]), PackageSccWaveV1(1, [child_group])])
+    val actions = [grouped_fixture_action("parse-a", [], snapshot),
+        grouped_fixture_action("parse-b", [], snapshot),
+        grouped_fixture_action("parse-c", ["parse-a"], snapshot)]
+    val graph = PersistedBuildGraphV1("fixture-generation", "", snapshot, actions)
+    val rollback_failure = grouped_fixture_staged_rejection(graph, cache, snapshot, artifact)
+    if rollback_failure != 0:
+        print "FAIL staged coordinator/service rollback: {rollback_failure}"
+        return rollback_failure
+    val coordinator = coordinator_new_v1(graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 64)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), nil,
+        NativePromotionQueueV1([]), "", demand_compile_counters_empty_v1(), nil, nil, 0, "", 0, 0)
+    val profile = ArtifactServiceProfileV1("grouped-fixture", cache, ["parse"], 0, false,
+        "fixture-cas", 2, 64, 4096)
+    var daemon_profile = profile
+    daemon_profile.daemon_optional = true
+    if artifact_service_profile_digest_v1(profile).len() != 64 or
+            artifact_service_profile_digest_v1(daemon_profile).len() != 64 or
+            artifact_service_profile_digest_v1(profile) == artifact_service_profile_digest_v1(daemon_profile):
+        print "FAIL daemon policy must alter canonical service identity"
+        return 1
+    val route = demand_artifact_route_v1(execution, profile, false, "fixture-parent", 1)
+    # Coordinator can deny a claim which the service alone could lease. Both
+    # authorities must remain unchanged when their joint claim is rejected.
+    var denied_coordinator = coordinator_new_v1(graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 64)])
+    denied_coordinator.cancelled = true
+    val denied_execution = DemandCompileExecutionV1(true, "ok", Some(denied_coordinator), nil,
+        NativePromotionQueueV1([]), "", demand_compile_counters_empty_v1(), nil, nil, 0, "", 0, 0)
+    val denied_route = demand_artifact_route_v1(denied_execution, profile, false, "denied-fixture-parent", 1)
+    val denied = demand_artifact_claim_owned_v1(denied_route, "parse-a", artifact, 64)
+    if denied.claim.valid or denied.route.service.entries[0].state != ArtifactRequestStateV1.queued or
+            denied.route.service.entries[0].lease != nil or
+            denied.route.execution.coordinator!.runtime[0].owner_token != "":
+        print "FAIL rejected coordinator claim must roll back service lease"
+        return 1
+    val bindings = [GroupedActionBindingV1(first_group.identity, "parse-a", "parse", snapshot, cache, false),
+        GroupedActionBindingV1(peer_group.identity, "parse-b", "parse", snapshot, cache, false),
+        GroupedActionBindingV1(child_group.identity, "parse-c", "parse", snapshot, cache, false)]
+    var state = grouped_execution_new_v1(schedule, route, bindings, ["worker-a", "worker-b"], 2)
+    var failures = grouped_fixture_check(state.reason == "ok", "canonical authorities accepted")
+    failures = failures + grouped_fixture_check(grouped_execution_ready_v1(state).len() == 2, "two ready SCC actions")
+    val unbudgeted = grouped_execution_claim_v1(state, "parse-a", "extra-worker", 1, 64)
+    failures = failures + grouped_fixture_check(not unbudgeted.accepted, "undeclared process slot rejected")
+    val first_claim = grouped_execution_claim_v1(state, "parse-a", "worker-a", 1, 64)
+    if not first_claim.accepted or first_claim.lease == nil:
+        print "FAIL first claim: {first_claim.reason}"
+        return failures + 1
+    state = first_claim.execution
+    val first_lease = first_claim.lease!
+    val duplicate = grouped_execution_claim_v1(state, "parse-a", "worker-b", 1, 64)
+    failures = failures + grouped_fixture_check(not duplicate.accepted, "double claim rejected")
+    val peer_claim = grouped_execution_claim_v1(state, "parse-b", "worker-b", 1, 64)
+    if not peer_claim.accepted or peer_claim.lease == nil: return failures + 1
+    state = peer_claim.execution
+    failures = failures + grouped_fixture_check(grouped_execution_ready_v1(state).len() == 0, "child waits for admitted parent")
+    val peer_result = BuildActionResultV1("parse-b", snapshot, true, false, artifact, "", [], 8)
+    val fake_archive = PackageCompileResultV1(peer_group.identity, "package-b", "fake-action", artifact, artifact, true)
+    val fake_publication = grouped_execution_commit_v1(state, peer_claim.lease!, peer_result, artifact, [fake_archive])
+    failures = failures + grouped_fixture_check(not fake_publication.accepted and fake_publication.reason == "intermediate-action-cannot-publish-packages", "parse never invents package archives")
+    val peer_commit = grouped_execution_commit_v1(state, peer_claim.lease!, peer_result, artifact, [])
+    if not peer_commit.accepted: return failures + 1
+    state = peer_commit.execution
+    val reaped = GroupedReapReceiptV1(first_lease.group_id, first_lease.action_id,
+        first_lease.worker_id, first_lease.generation, first_lease.lease_id,
+        first_lease.snapshot_digest, first_lease.cache_identity, artifact)
+    val stale_generation = grouped_execution_recover_v1(state, reaped, 1)
+    failures = failures + grouped_fixture_check(not stale_generation.accepted, "same generation retry rejected")
+    var wrong_receipt = reaped
+    wrong_receipt.lease_id = cache
+    val wrong_lease = grouped_execution_recover_v1(state, wrong_receipt, 2)
+    failures = failures + grouped_fixture_check(not wrong_lease.accepted, "wrong old lease rejected")
+    val recovered = grouped_execution_recover_v1(state, reaped, 2)
+    if not recovered.accepted or recovered.lease == nil:
+        print "FAIL retry: {recovered.reason}"
+        return failures + 1
+    state = recovered.execution
+    failures = failures + grouped_fixture_check(state.route.execution.coordinator!.runtime[1].state == BuildActionStateV1.succeeded, "retry preserves successful peer coordinator")
+    failures = failures + grouped_fixture_check(state.route.service.entries[1].state == ArtifactRequestStateV1.completed, "retry preserves successful peer artifact")
+    val result = BuildActionResultV1("parse-a", snapshot, true, false, artifact, "", [], 8)
+    val old_result = grouped_execution_commit_v1(state, first_lease, result, artifact, [])
+    failures = failures + grouped_fixture_check(not old_result.accepted, "old generation result cannot publish")
+    val new_lease = recovered.lease!
+    val reaped_again = GroupedReapReceiptV1(new_lease.group_id, new_lease.action_id,
+        new_lease.worker_id, new_lease.generation, new_lease.lease_id,
+        new_lease.snapshot_digest, new_lease.cache_identity, artifact)
+    val exhausted = grouped_execution_recover_v1(state, reaped_again, 3)
+    failures = failures + grouped_fixture_check(not exhausted.accepted and exhausted.reason == "group-retry-budget-exhausted", "bounded independent recovery")
+    val failed = BuildActionResultV1("parse-a", snapshot, false, false, "", "", ["compiler failed"], 8)
+    val committed_failure = grouped_execution_commit_v1(state, new_lease, failed, "", [])
+    if not committed_failure.accepted:
+        print "FAIL failed action admission: {committed_failure.reason}"
+        return failures + 1
+    state = committed_failure.execution
+    failures = failures + grouped_fixture_check(state.route.execution.coordinator!.runtime[0].state == BuildActionStateV1.failed, "failed coordinator terminal admitted")
+    failures = failures + grouped_fixture_check(state.route.service.entries[0].state == ArtifactRequestStateV1.failed, "failed service terminal has no artifact")
+    failures = failures + grouped_fixture_check(state.route.service.entries[0].cas_artifact_digest == "", "failure never fabricates artifact")
+    failures = failures + grouped_fixture_check(grouped_execution_ready_v1(state).len() == 0, "failed parent blocks dependent")
+    if failures == 0: print "PASS grouped canonical authority fixture"
+    failures

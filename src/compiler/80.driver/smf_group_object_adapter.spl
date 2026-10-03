@@ -1,0 +1,621 @@
+# Strict object-to-SMF adapter for grouped native compilation.
+# Each accepted object contributes its own real sections, symbols and relocations.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, elf_parse_object, elf_section_name, elf_section_addralign,
+    elf_reloc_sym, elf_reloc_type
+}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.backend.linker.smf_writer.{
+    SmfWriter, SmfSection, SectionType, SmfWriterSymbol,
+    SmfWriterSymbolBinding, SmfWriterSymbolType, SmfRelocation,
+    RelocationType, SECTION_FLAG_READ, SECTION_FLAG_WRITE, SECTION_FLAG_EXEC
+}
+use std.common.string_core.{bytes_to_text}
+
+# kind: 0=ignored, 1=code, 2=writable data, 3=read-only data.
+struct GroupObjectSectionV1:
+    name: text
+    kind: i64
+    alignment: i64
+    data: [u8]
+
+# Section is the source object section index, or -1 for an undefined symbol.
+# Auxiliary COFF slots and the ELF null symbol remain invalid placeholders so
+# relocation indices retain their original meaning.
+struct GroupObjectSymbolV1:
+    name: text
+    section: i64
+    value: i64
+    size: i64
+    binding: i64
+    kind: i64
+    valid: bool
+
+struct GroupObjectRelocationV1:
+    section: i64
+    offset: i64
+    symbol: i64
+    kind: i64
+    addend: i64
+
+struct GroupObjectV1:
+    sections: [GroupObjectSectionV1]
+    symbols: [GroupObjectSymbolV1]
+    relocations: [GroupObjectRelocationV1]
+
+fn group_object_in_bounds(bytes: [u8], offset: i64, size: i64) -> bool:
+    offset >= 0 and size >= 0 and offset <= bytes.len()
+        and size <= bytes.len() - offset
+
+fn group_object_u16(bytes: [u8], at: i64) -> i64:
+    (bytes[at] as i64) | ((bytes[at + 1] as i64) << 8)
+
+fn group_object_u32(bytes: [u8], at: i64) -> i64:
+    group_object_u16(bytes, at) | (group_object_u16(bytes, at + 2) << 16)
+
+fn group_object_u64(bytes: [u8], at: i64) -> i64:
+    group_object_u32(bytes, at) | (group_object_u32(bytes, at + 4) << 32)
+
+fn group_object_i32(bytes: [u8], at: i64) -> i64:
+    val value = group_object_u32(bytes, at)
+    if value >= 2147483648: value - 4294967296 else: value
+
+fn group_object_cstring(bytes: [u8], start: i64, limit: i64) -> Result<text, text>:
+    if start < 0 or start >= limit or limit > bytes.len():
+        return Err("object string offset out of bounds")
+    var end = start
+    while end < limit and bytes[end] != 0:
+        end = end + 1
+    if end == limit:
+        return Err("object string is not terminated")
+    Ok(bytes_to_text(bytes[start:end]))
+
+fn group_object_align(value: i64, alignment: i64) -> Result<i64, text>:
+    if alignment < 1 or alignment > 65536 or
+            (alignment & (alignment - 1)) != 0:
+        return Err("object section alignment is unsupported")
+    val padding = (alignment - (value % alignment)) % alignment
+    if value > 2147483647 - padding:
+        return Err("object code layout exceeds bound")
+    Ok(value + padding)
+
+fn group_object_empty_symbol() -> GroupObjectSymbolV1:
+    GroupObjectSymbolV1("", -1, 0, 0, 0, 0, false)
+
+fn group_object_reloc_kind_elf(kind: i64) -> Result<i64, text>:
+    # SMF wire values: Abs64=1, Rel32=2, PltRel32=3, GotRel32=4, Abs32=5.
+    if kind == 1: return Ok(1)
+    if kind == 2: return Ok(2)
+    if kind == 4: return Ok(3)
+    if kind == 9: return Ok(4)
+    if kind == 10: return Ok(5)
+    Err("unsupported x86_64 ELF relocation type {kind}")
+
+fn group_object_reloc_type(kind: i64) -> RelocationType:
+    if kind == 1: return RelocationType.Abs64
+    if kind == 2: return RelocationType.Rel32
+    if kind == 3: return RelocationType.PltRel32
+    if kind == 4: return RelocationType.GotRel32
+    RelocationType.Abs32
+
+fn group_object_target(target_os: text, target_arch: text) ->
+        Result<(Platform, Arch), text>:
+    if target_arch != "x86_64":
+        return Err("group object SMF supports x86_64 only")
+    if target_os != "linux" and target_os != "windows" and
+            target_os != "freebsd":
+        return Err("unsupported group object SMF target OS {target_os}")
+    val platform = if target_os == "linux": Platform.Linux
+        elif target_os == "windows": Platform.Windows
+        else: Platform.FreeBSD
+    Ok((platform, Arch.X86_64))
+
+fn group_object_parse_elf(bytes: [u8]) -> Result<GroupObjectV1, text>:
+    if not group_object_in_bounds(bytes, 0, 64) or bytes[4] != 2 or
+            bytes[5] != 1 or group_object_u16(bytes, 16) != 1 or
+            group_object_u16(bytes, 18) != 62:
+        return Err("expected little-endian x86_64 ELF64 relocatable object")
+    val object = elf_parse_object(bytes)?
+    if object.sections.len() == 0 or object.sections.len() > 65534 or
+            object.symbols.len() == 0 or object.symbols.len() > 1000000:
+        return Err("ELF section or symbol inventory is empty or too large")
+    var sections: [GroupObjectSectionV1] = []
+    var code_count = 0
+    var index = 0
+    for section in object.sections:
+        val alloc = (section.sh_flags & 2) != 0
+        val name = elf_section_name(object, index)
+        var kind = 0
+        if alloc and not name.starts_with(".eh_frame") and
+                not name.starts_with(".note"):
+            if (section.sh_flags & 0x400) != 0:
+                return Err("ELF TLS section is unsupported: {name}")
+            if section.sh_type != 1 and section.sh_type != 8:
+                return Err("ELF allocated section has unsupported type: {name}")
+            if (section.sh_flags & 4) != 0:
+                kind = 1
+                code_count = code_count + 1
+            elif (section.sh_flags & 1) != 0:
+                kind = 2
+            else:
+                kind = 3
+        var data: [u8] = []
+        if kind != 0:
+            if name == "" or section.sh_size < 0 or section.sh_size > 67108864:
+                return Err("ELF allocated section has invalid name or size")
+            if section.sh_type == 8:
+                var n = 0
+                while n < section.sh_size:
+                    data.push(0)
+                    n = n + 1
+            else:
+                if not group_object_in_bounds(bytes, section.sh_addr,
+                        section.sh_size):
+                    return Err("ELF allocated section extends beyond object")
+                data = bytes[section.sh_addr:section.sh_addr + section.sh_size]
+        val align = if kind == 0: 1 else:
+            if elf_section_addralign(object, index) <= 1: 1
+            else: elf_section_addralign(object, index)
+        if kind != 0:
+            _ = group_object_align(0, align)?
+        sections.push(GroupObjectSectionV1(name, kind, align, data))
+        index = index + 1
+    if code_count == 0:
+        return Err("ELF object has no allocated code section")
+    var symbols: [GroupObjectSymbolV1] = []
+    index = 0
+    for symbol in object.symbols:
+        val source_section = symbol.st_shndx
+        val sym_kind = symbol.st_info & 15
+        val binding = (symbol.st_info >> 4) & 15
+        if index == 0 and symbol.name == "" and source_section == 0:
+            symbols.push(group_object_empty_symbol())
+        elif binding > 2 or sym_kind > 3:
+            symbols.push(group_object_empty_symbol())
+        elif source_section == 0:
+            if symbol.name == "":
+                symbols.push(group_object_empty_symbol())
+            else:
+                symbols.push(GroupObjectSymbolV1(symbol.name, -1, 0, 0,
+                    binding, sym_kind, true))
+        elif source_section >= sections.len() or source_section < 0:
+            return Err("ELF symbol has unsupported section index")
+        elif sections[source_section].kind == 0:
+            symbols.push(group_object_empty_symbol())
+        elif sections[source_section].kind == 1 and sym_kind == 3:
+            # Code is mapped per function; a section anchor has no one base.
+            symbols.push(group_object_empty_symbol())
+        else:
+            if sections[source_section].kind == 1 and
+                    sym_kind != 2 and sym_kind != 3:
+                return Err("ELF named code symbol is not a function")
+            val name = if sym_kind == 3:
+                "__smf_object_section_{source_section}"
+            else: symbol.name
+            if name == "":
+                symbols.push(group_object_empty_symbol())
+            else:
+                if symbol.st_value < 0 or symbol.st_value >
+                        sections[source_section].data.len():
+                    return Err("ELF symbol value exceeds section")
+                symbols.push(GroupObjectSymbolV1(name, source_section,
+                    symbol.st_value, symbol.st_size, binding, sym_kind, true))
+        index = index + 1
+    var relocations: [GroupObjectRelocationV1] = []
+    for reloc in object.relocations:
+        val source = reloc.target_section_idx
+        if source < 0 or source >= sections.len():
+            return Err("ELF relocation target section is invalid")
+        if sections[source].kind == 0:
+            continue
+        if reloc.section_idx < 0 or reloc.section_idx >= object.sections.len()
+                or object.sections[reloc.section_idx].sh_type != 4:
+            return Err("ELF allocated relocation requires RELA")
+        val sym_index = elf_reloc_sym(reloc)
+        if sym_index < 0 or sym_index >= symbols.len() or
+                not symbols[sym_index].valid:
+            return Err("ELF relocation symbol is missing")
+        if symbols[sym_index].kind == 3 and
+                sections[symbols[sym_index].section].kind == 1:
+            return Err("ELF code section-anchor relocation is unsupported")
+        val kind = group_object_reloc_kind_elf(elf_reloc_type(reloc))?
+        val width = if kind == 1: 8 else: 4
+        if not group_object_in_bounds(sections[source].data,
+                reloc.r_offset, width):
+            return Err("ELF relocation patch extends beyond allocated section")
+        relocations.push(GroupObjectRelocationV1(source, reloc.r_offset,
+            sym_index, kind, reloc.r_addend))
+    Ok(GroupObjectV1(sections, symbols, relocations))
+
+fn group_object_coff_string(bytes: [u8], string_base: i64,
+        string_size: i64, relative: i64) -> Result<text, text>:
+    if relative < 4 or relative >= string_size:
+        return Err("COFF string-table offset is invalid")
+    group_object_cstring(bytes, string_base + relative,
+        string_base + string_size)
+
+fn group_object_coff_short_name(bytes: [u8], at: i64) -> text:
+    var end = at
+    while end < at + 8 and bytes[end] != 0:
+        end = end + 1
+    bytes_to_text(bytes[at:end])
+
+fn group_object_coff_name(bytes: [u8], at: i64,
+        string_base: i64, string_size: i64,
+        section_name: bool) -> Result<text, text>:
+    if not group_object_in_bounds(bytes, at, 8):
+        return Err("COFF name field out of bounds")
+    if not section_name and group_object_u32(bytes, at) == 0:
+        return group_object_coff_string(bytes, string_base,
+            string_size, group_object_u32(bytes, at + 4))
+    val short = group_object_coff_short_name(bytes, at)
+    if section_name and short.starts_with("/") and short.len() > 1:
+        val relative = short.substring(1).to_i64()
+        if relative == nil:
+            return Err("COFF long section name offset is invalid")
+        return group_object_coff_string(bytes, string_base,
+            string_size, relative!)
+    Ok(short)
+
+fn group_object_reloc_kind_coff(kind: i64) -> Result<i64, text>:
+    if kind == 1: return Ok(1)  # IMAGE_REL_AMD64_ADDR64
+    if kind == 2: return Ok(5)  # IMAGE_REL_AMD64_ADDR32
+    if kind >= 4 and kind <= 9: return Ok(2) # REL32 .. REL32_5
+    Err("unsupported x86_64 COFF relocation type {kind}")
+
+fn group_object_parse_coff(bytes: [u8]) -> Result<GroupObjectV1, text>:
+    if not group_object_in_bounds(bytes, 0, 20) or
+            group_object_u16(bytes, 0) != 0x8664:
+        return Err("expected x86_64 COFF relocatable object")
+    val section_count = group_object_u16(bytes, 2)
+    val sym_base = group_object_u32(bytes, 8)
+    val sym_count = group_object_u32(bytes, 12)
+    val optional_size = group_object_u16(bytes, 16)
+    if section_count == 0 or section_count > 4096 or
+            sym_count == 0 or sym_count > 1000000 or optional_size != 0:
+        return Err("COFF section, symbol, or optional header unsupported")
+    val section_base = 20
+    if not group_object_in_bounds(bytes, section_base,
+            section_count * 40) or
+            not group_object_in_bounds(bytes, sym_base, sym_count * 18):
+        return Err("COFF section or symbol table extends beyond object")
+    val string_base = sym_base + sym_count * 18
+    if not group_object_in_bounds(bytes, string_base, 4):
+        return Err("COFF string table is missing")
+    val string_size = group_object_u32(bytes, string_base)
+    if string_size < 4 or not group_object_in_bounds(bytes,
+            string_base, string_size):
+        return Err("COFF string table extends beyond object")
+    var sections: [GroupObjectSectionV1] = [
+        GroupObjectSectionV1("", 0, 1, [])]
+    var code_count = 0
+    var i = 0
+    while i < section_count:
+        val at = section_base + i * 40
+        val name = group_object_coff_name(bytes, at,
+            string_base, string_size, true)?
+        val raw_size = group_object_u32(bytes, at + 16)
+        val raw_at = group_object_u32(bytes, at + 20)
+        val characteristics = group_object_u32(bytes, at + 36)
+        val code = (characteristics & 0x20) != 0 or
+            (characteristics & 0x20000000) != 0
+        val initialized = (characteristics & 0x40) != 0
+        val uninitialized = (characteristics & 0x80) != 0
+        var kind = 0
+        if name.starts_with(".pdata") or name.starts_with(".xdata"):
+            kind = 0 # Windows unwind metadata is outside the SMF loader ABI.
+        elif code:
+            kind = 1
+            code_count = code_count + 1
+        elif initialized or uninitialized:
+            if (characteristics & 0x80000000) != 0:
+                kind = 2
+            else:
+                kind = 3
+        var data: [u8] = []
+        if kind != 0:
+            if name == "" or raw_size > 67108864:
+                return Err("COFF allocated section has invalid name or size")
+            if uninitialized and raw_size == 0:
+                val virtual_size = group_object_u32(bytes, at + 8)
+                if virtual_size > 67108864:
+                    return Err("COFF uninitialized section exceeds bound")
+                var z = 0
+                while z < virtual_size:
+                    data.push(0)
+                    z = z + 1
+            else:
+                if not group_object_in_bounds(bytes, raw_at, raw_size):
+                    return Err("COFF allocated section extends beyond object")
+                data = bytes[raw_at:raw_at + raw_size]
+        val align_code = (characteristics >> 20) & 15
+        val alignment = if align_code >= 1 and align_code <= 14:
+            1 << (align_code - 1)
+        elif kind == 1: 16
+        else: 8
+        if kind != 0:
+            _ = group_object_align(0, alignment)?
+        sections.push(GroupObjectSectionV1(name, kind, alignment, data))
+        i = i + 1
+    if code_count == 0:
+        return Err("COFF object has no executable section")
+    var symbols: [GroupObjectSymbolV1] = []
+    i = 0
+    while i < sym_count:
+        val at = sym_base + i * 18
+        val name = group_object_coff_name(bytes, at,
+            string_base, string_size, false)?
+        val value = group_object_u32(bytes, at + 8)
+        var section = group_object_u16(bytes, at + 12)
+        if section >= 32768:
+            section = section - 65536
+        val type_code = group_object_u16(bytes, at + 14)
+        val storage = bytes[at + 16] as i64
+        val aux_count = bytes[at + 17] as i64
+        if i + aux_count >= sym_count:
+            return Err("COFF symbol auxiliary entries extend beyond table")
+        var size = 0
+        if aux_count > 0 and (type_code & 0x20) != 0:
+            size = group_object_u32(bytes, at + 18 + 4)
+        val binding = if storage == 2: 1
+            elif storage == 105: 2
+            else: 0
+        val section_anchor = section > 0 and
+            section < sections.len() and
+            name == sections[section].name and storage == 3
+        val sym_kind = if section_anchor: 3
+            elif (type_code & 0x20) != 0: 2
+            elif section > 0 and section < sections.len() and
+                    sections[section].kind == 1: 0
+            else: 1
+        if section < 0:
+            symbols.push(group_object_empty_symbol())
+        elif section == 0 and value != 0:
+            return Err("COFF common symbol is unsupported")
+        elif section >= sections.len():
+            return Err("COFF symbol section index is invalid")
+        elif section > 0 and sections[section].kind == 0:
+            symbols.push(group_object_empty_symbol())
+        elif section > 0 and sections[section].kind == 1 and sym_kind != 2:
+            # COFF labels/section anchors cannot become fake functions.
+            symbols.push(group_object_empty_symbol())
+        elif name == "":
+            symbols.push(group_object_empty_symbol())
+        else:
+            val resolved_name = if section_anchor:
+                "__smf_object_section_{section}"
+            else: name
+            if section > 0 and value > sections[section].data.len():
+                return Err("COFF symbol value exceeds section")
+            symbols.push(GroupObjectSymbolV1(resolved_name,
+                if section == 0: -1 else: section,
+                value, size, binding, sym_kind, true))
+        var aux = 0
+        while aux < aux_count:
+            symbols.push(group_object_empty_symbol())
+            aux = aux + 1
+        i = i + 1 + aux_count
+    var relocations: [GroupObjectRelocationV1] = []
+    i = 0
+    while i < section_count:
+        val source = i + 1
+        val at = section_base + i * 40
+        val reloc_at = group_object_u32(bytes, at + 24)
+        val reloc_count = group_object_u16(bytes, at + 32)
+        if (group_object_u32(bytes, at + 36) & 0x01000000) != 0:
+            return Err("COFF relocation overflow encoding is unsupported")
+        if reloc_count > 0 and not group_object_in_bounds(bytes,
+                reloc_at, reloc_count * 10):
+            return Err("COFF relocation table extends beyond object")
+        var j = 0
+        while j < reloc_count:
+            val r_at = reloc_at + j * 10
+            val patch = group_object_u32(bytes, r_at)
+            val sym_index = group_object_u32(bytes, r_at + 4)
+            val coff_type = group_object_u16(bytes, r_at + 8)
+            if sections[source].kind != 0:
+                if sym_index >= symbols.len() or not symbols[sym_index].valid:
+                    return Err("COFF relocation symbol is missing")
+                if symbols[sym_index].kind == 3 and
+                        sections[symbols[sym_index].section].kind == 1:
+                    return Err("COFF code section-anchor relocation is unsupported")
+                if symbols[sym_index].section >= 0 and
+                        sections[symbols[sym_index].section].kind == 1 and
+                        symbols[sym_index].kind != 2 and symbols[sym_index].kind != 3:
+                    return Err("COFF code-label relocation is unsupported")
+                val kind = group_object_reloc_kind_coff(coff_type)?
+                val width = if kind == 1: 8 else: 4
+                if not group_object_in_bounds(sections[source].data,
+                        patch, width):
+                    return Err("COFF relocation patch extends beyond allocated section")
+                var addend = if width == 8:
+                    group_object_u64(sections[source].data, patch)
+                else:
+                    group_object_i32(sections[source].data, patch)
+                if coff_type >= 4 and coff_type <= 9:
+                    addend = addend - 4 - (coff_type - 4)
+                relocations.push(GroupObjectRelocationV1(source,
+                    patch, sym_index, kind, addend))
+            j = j + 1
+        i = i + 1
+    Ok(GroupObjectV1(sections, symbols, relocations))
+
+fn group_object_symbol_size(image: GroupObjectV1,
+        symbol: GroupObjectSymbolV1) -> Result<i64, text>:
+    if symbol.section < 0:
+        return Ok(0)
+    val section = image.sections[symbol.section]
+    if symbol.value < 0 or symbol.value > section.data.len():
+        return Err("object symbol value exceeds its section")
+    if symbol.size > 0:
+        if symbol.size > section.data.len() - symbol.value:
+            return Err("object symbol size exceeds its section")
+        return Ok(symbol.size)
+    if section.kind != 1 or symbol.kind != 2:
+        return Ok(0)
+    var end = section.data.len()
+    for peer in image.symbols:
+        if peer.valid and peer.section == symbol.section and
+                peer.kind == 2 and peer.value > symbol.value and
+                peer.value < end:
+            end = peer.value
+    if end <= symbol.value:
+        return Err("code symbol has no machine-code body: {symbol.name}")
+    Ok(end - symbol.value)
+
+fn group_object_binding(code: i64) -> SmfWriterSymbolBinding:
+    if code == 1: return SmfWriterSymbolBinding.Global
+    if code == 2: return SmfWriterSymbolBinding.Weak
+    SmfWriterSymbolBinding.Local
+
+fn group_object_symbol_type(symbol: GroupObjectSymbolV1,
+        source_kind: i64) -> SmfWriterSymbolType:
+    if symbol.kind == 3: return SmfWriterSymbolType.Section
+    if source_kind == 1 and symbol.kind == 2:
+        return SmfWriterSymbolType.Function
+    if source_kind == 2 or source_kind == 3:
+        return SmfWriterSymbolType.Object
+    SmfWriterSymbolType.NoType
+
+fn group_object_writer(image: GroupObjectV1,
+        platform: Platform, arch: Arch) -> Result<SmfWriter, text>:
+    var writer = SmfWriter.create_target(platform, arch)
+    var code: [i64] = []
+    var section_indices: [i64] = []
+    var code_bases: [i64] = []
+    var max_code_alignment = 16
+    for section in image.sections:
+        section_indices.push(-1)
+        code_bases.push(-1)
+        if section.kind == 1:
+            val base = group_object_align(code.len(),
+                section.alignment)?
+            while code.len() < base:
+                code.push(0)
+            code_bases[code_bases.len() - 1] = base
+            for byte in section.data:
+                code.push(byte as i64)
+            if section.alignment > max_code_alignment:
+                max_code_alignment = section.alignment
+    if code.len() == 0 or code.len() > 67108864:
+        return Err("object has no bounded machine code")
+    writer.sections.push(SmfSection(".text", SectionType.Code,
+        SECTION_FLAG_READ + SECTION_FLAG_EXEC, code, max_code_alignment))
+    var source = 0
+    while source < image.sections.len():
+        val section = image.sections[source]
+        if section.kind == 1:
+            section_indices[source] = 0
+        elif section.kind == 2 or section.kind == 3:
+            var data: [i64] = []
+            for byte in section.data:
+                data.push(byte as i64)
+            val ty = if section.kind == 2:
+                SectionType.Data
+            else:
+                SectionType.RoData
+            val flags = if section.kind == 2:
+                SECTION_FLAG_READ + SECTION_FLAG_WRITE
+            else:
+                SECTION_FLAG_READ
+            section_indices[source] = writer.sections.len()
+            writer.sections.push(SmfSection(section.name, ty, flags,
+                data, section.alignment))
+        source = source + 1
+    var symbol_indices: [i64] = []
+    var written_names: Dict<text, bool> = {}
+    var resolved_sizes: [i64] = []
+    for symbol in image.symbols:
+        symbol_indices.push(-1)
+        resolved_sizes.push(0)
+        if not symbol.valid:
+            continue
+        if written_names.contains_key(symbol.name):
+            return Err("object has duplicate symbol name: {symbol.name}")
+        written_names[symbol.name] = true
+        var smf_section = -1
+        var value = 0
+        var source_kind = 0
+        if symbol.section >= 0:
+            if symbol.section >= image.sections.len() or
+                    section_indices[symbol.section] < 0:
+                return Err("object symbol refers to an omitted section")
+            smf_section = section_indices[symbol.section]
+            source_kind = image.sections[symbol.section].kind
+            value = symbol.value
+            if source_kind == 1:
+                value = value + code_bases[symbol.section]
+        val size = group_object_symbol_size(image, symbol)?
+        resolved_sizes[resolved_sizes.len() - 1] = size
+        val writer_index = writer.add_symbol(SmfWriterSymbol(
+            symbol.name, group_object_binding(symbol.binding),
+            group_object_symbol_type(symbol, source_kind),
+            smf_section, value, size, 0, false, false))
+        symbol_indices[symbol_indices.len() - 1] = writer_index
+    if writer.symbols.len() == 0:
+        return Err("object has no named symbols")
+    # Code patches must have one mapped function owner. Data/RoData patches
+    # address their own SMF section; v1.2 records that source section index.
+    for reloc in image.relocations:
+        if reloc.section < 0 or reloc.section >= image.sections.len() or
+                image.sections[reloc.section].kind == 0:
+            return Err("object relocation source is not allocated")
+        if reloc.symbol < 0 or reloc.symbol >= symbol_indices.len() or
+                symbol_indices[reloc.symbol] < 0:
+            return Err("object relocation references an omitted symbol")
+        var patch_offset = reloc.offset
+        if image.sections[reloc.section].kind == 1:
+            var owner_count = 0
+            val width = if reloc.kind == 1: 8 else: 4
+            for owner_index in 0..image.symbols.len():
+                val owner = image.symbols[owner_index]
+                if owner.valid and owner.section == reloc.section and
+                        owner.kind == 2 and
+                        resolved_sizes[owner_index] >= width and
+                        reloc.offset >= owner.value and
+                        reloc.offset - owner.value <= resolved_sizes[owner_index] - width:
+                    owner_count = owner_count + 1
+            if owner_count != 1:
+                return Err("code relocation has {owner_count} function owners")
+            patch_offset = code_bases[reloc.section] + reloc.offset
+        writer.add_relocation(SmfRelocation(
+            patch_offset,
+            symbol_indices[reloc.symbol],
+            group_object_reloc_type(reloc.kind),
+            reloc.addend,
+            section_indices[reloc.section]))
+    Ok(writer)
+
+pub fn smf_group_object_from_bytes_v1(
+    object_bytes: [u8], target_os: text, target_arch: text
+) -> Result<[u8], text>:
+    """Convert a bounded relocatable ELF64/COFF object to a real module SMF.
+
+    Each exported function is backed by its object symbol and machine-code
+    extent. Unsupported relocations fail the conversion; no entry is invented.
+    """
+    if object_bytes.len() < 20 or object_bytes.len() > 134217728:
+        return Err("group object byte size is invalid")
+    val (platform, arch) = group_object_target(target_os, target_arch)?
+    val elf = object_bytes.len() >= 4 and object_bytes[0] == 0x7f and
+        object_bytes[1] == 0x45 and object_bytes[2] == 0x4c and
+        object_bytes[3] == 0x46
+    if elf and target_os == "windows":
+        return Err("Windows group object requires COFF")
+    if not elf and target_os != "windows":
+        return Err("non-Windows group object requires ELF64")
+    val image = if elf: group_object_parse_elf(object_bytes)?
+        else: group_object_parse_coff(object_bytes)?
+    var writer = group_object_writer(image, platform, arch)?
+    val wire = match writer.write():
+        case Ok(value): value
+        case Err(error): return Err("SMF writer rejected object: {error.message()}")
+    if wire.len() < 128:
+        return Err("SMF writer returned truncated output")
+    var bytes: [u8] = []
+    for byte in wire:
+        if byte < 0 or byte > 255:
+            return Err("SMF writer returned an invalid byte")
+        bytes.push(byte as u8)
+    Ok(bytes)

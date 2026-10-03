@@ -7,9 +7,9 @@
 
 use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, tracker_container_runtime, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
-use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running, process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_spawn_redirected, process_wait, process_kill, process_is_running, process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
-use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release, proc_slot_reset)
+use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_try_acquire, proc_slot_release, proc_slot_reset)
 use std.io_runtime.{exit}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
@@ -45,6 +45,17 @@ fn spawn_tracked_process(cmd: text, args: [text]) -> i64:
 
     pid
 
+fn spawn_tracked_redirected_process(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64) -> i64:
+    if not proc_slot_try_acquire(): return -3
+    val token = process_spawn_redirected(cmd, args, stdout_path, stderr_path,
+        timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    if token > 0:
+        tracker_register_pid(token)
+    else:
+        proc_slot_release()
+    token
+
 fn untrack_process(pid: i64):
     """
     Unregister process after successful wait/cleanup.
@@ -52,8 +63,11 @@ fn untrack_process(pid: i64):
     Call this after process_wait() returns successfully to remove
     PID from tracking list.
     """
-    tracker_unregister_pid(pid)
-    proc_slot_release()
+    # Repeated observation of a consumed token cannot release another owner's
+    # admission. This parent owns the tracker mutation and releases once.
+    if tracker_get_pids().contains(pid):
+        tracker_unregister_pid(pid)
+        proc_slot_release()
 
 fn wait_tracked_process(pid: i64, timeout_ms: i64) -> i64:
     val exit_code = process_wait(pid, timeout_ms)

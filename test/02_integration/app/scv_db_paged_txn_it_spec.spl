@@ -1,0 +1,193 @@
+# Real filesystem/page CAS and Ed25519. Runtime/performance receipts are separate.
+use std.spec.{describe, it, expect, step, fail}
+use app.io.mod.{file_write_bytes}
+use std.scv.db_pages.{db_pages_bucket, db_pages_entry, db_page_encode}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.db_paged_model.*
+use std.scv.db_paged_proof.*
+use std.scv.db_page_records.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{db_field_value, FieldMergeRule}
+use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use app.scv.db.paged_store.*
+use app.scv.db.page_store.{db_page_store_load_page, db_page_store_load_pages}
+use app.scv.db.local_store.{db_store_read, db_store_commit, db_store_commit_held, db_store_commit_with_absent_channels}
+use test.fixtures.scv.db_paged_fixture.*
+
+describe "Operating B authenticated Merkle paged transaction owner":
+    it "publishes a real signed batch with aliases and collision indexes under one generation":
+        step("Explicitly initialize the pinned protocol and apply an original signed patch")
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1)
+        val applied = db_paged_apply(root, genesis.head, patch, policy).unwrap()
+        val opened = db_paged_open(root, policy).unwrap()
+        expect(opened.manifest.parent_revision).to_equal(genesis.manifest.revision)
+        expect(opened.manifest.revision).to_equal(applied.revision)
+        val alias = entity_ref_settled(SettledAlias(database_namespace: policy.config.admission.namespace, authority_epoch: 1, entity_kind: "bug", sequence: 1))
+        expect(db_paged_current_row(root, policy, alias).unwrap()).to_equal(db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap())
+        val accepted = db_paged_lookup(root, opened, db_page_batch_key(patch.batch_id).unwrap()).unwrap().unwrap()
+        val counter = db_paged_lookup(root, opened, db_page_actor_counter_key(patch.actor, 1).unwrap()).unwrap().unwrap()
+        expect(accepted.payload == counter.payload).to_be(false)
+        match db_typed_page_record_decode(counter).unwrap():
+            ActorCounter(batch): expect(batch.batch_id).to_equal(patch.batch_id)
+            _: fail("Expected retained actor-counter record")
+        expect(db_store_read(root, "semantic").code).to_equal("empty")
+        expect(db_store_read(root, "pages").code).to_equal("empty")
+        step("Replay resynchronizes the exact accepted generation without allocating another alias")
+        expect(db_paged_apply(root, genesis.head, patch, policy).unwrap().replay).to_be(true)
+        expect(db_paged_open(root, policy).unwrap().head).to_equal(applied.head)
+
+    it "swaps unique values atomically while rejecting a collision outside the touched rows":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val first = setup_item2_paged_patch([setup_item2_paged_create(1, "A"), setup_item2_paged_create(2, "B")], genesis.manifest.revision, 1)
+        val created = db_paged_apply(root, genesis.head, first, policy).unwrap()
+        step("Remove all old uniqueness claims before installing both swapped values")
+        val one = DbOperation.UpdateFields(setup_item2_paged_ref(1), [FieldEdit(field: "code", before: DbValue.Text("A"), after: DbValue.Text("B"))], setup_item2_paged_condition(first.batch_id))
+        val two = DbOperation.UpdateFields(setup_item2_paged_ref(2), [FieldEdit(field: "code", before: DbValue.Text("B"), after: DbValue.Text("A"))], setup_item2_paged_condition(first.batch_id))
+        val swap = setup_item2_paged_patch([one,two], created.revision, 2)
+        val swapped = db_paged_apply(root, created.head, swap, policy).unwrap()
+        expect(db_field_value(db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap().unwrap().fields, "code")).to_equal(DbValue.Text("B"))
+        expect(db_field_value(db_paged_current_row(root, policy, setup_item2_paged_ref(2)).unwrap().unwrap().fields, "code")).to_equal(DbValue.Text("A"))
+        step("An untouched row's indexed unique claim still prevents a conflicting insertion")
+        val collision = setup_item2_paged_patch([setup_item2_paged_create(3, "A")], swapped.revision, 3)
+        expect(db_paged_apply(root, swapped.head, collision, policy)).to_equal(Err("SCVDB_UNIQUE_COLLISION"))
+        expect(db_paged_open(root, policy).unwrap().head).to_equal(swapped.head)
+
+    it "protects incoming references and permits a joint unlink-and-delete transaction":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val first = setup_item2_paged_patch([setup_item2_paged_create(1, "A"), setup_item2_paged_create(2, "B", DbValue.Reference(setup_item2_paged_ref(1)))], genesis.manifest.revision, 1)
+        val created = db_paged_apply(root, genesis.head, first, policy).unwrap()
+        val remove = DbOperation.Tombstone(setup_item2_paged_ref(1), setup_item2_paged_condition(first.batch_id))
+        step("A reverse live-reference count prevents deleting a target of an untouched row")
+        val blocked = setup_item2_paged_patch([remove], created.revision, 2)
+        expect(db_paged_apply(root, created.head, blocked, policy)).to_equal(Err("SCVDB_REFERENCE_TOMBSTONED"))
+        val unlink = DbOperation.UpdateFields(setup_item2_paged_ref(2), [FieldEdit(field: "link", before: DbValue.Reference(setup_item2_paged_ref(1)), after: DbValue.Absent)], setup_item2_paged_condition(first.batch_id))
+        val joint = setup_item2_paged_patch([remove,unlink], created.revision, 2)
+        val deleted = db_paged_apply(root, created.head, joint, policy).unwrap()
+        expect(db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap().unwrap().tombstoned).to_be(true)
+        val unknown = setup_item2_paged_patch([setup_item2_paged_create(3, "C", DbValue.Reference(setup_item2_paged_ref(99)))], deleted.revision, 3)
+        expect(db_paged_apply(root, deleted.head, unknown, policy)).to_equal(Err("SCVDB_REFERENCE_MISSING"))
+        expect(db_paged_open(root, policy).unwrap().head).to_equal(deleted.head)
+        step("A new deletion batch preserves immutable tombstone provenance after checking its precondition")
+        val repeat = setup_item2_paged_patch([DbOperation.Tombstone(setup_item2_paged_ref(1), setup_item2_paged_condition(joint.batch_id))], deleted.revision, 3)
+        val repeated = db_paged_apply(root, deleted.head, repeat, policy).unwrap()
+        expect(repeated.replay).to_be(false)
+        expect(db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap().unwrap().revision).to_equal(joint.batch_id)
+        expect(db_paged_lookup(root, db_paged_open(root, policy).unwrap(), db_page_batch_key(repeat.batch_id).unwrap()).unwrap() != nil).to_be(true)
+
+    it "caps aggregate page reads before retaining another bucket and authenticates before page IO":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1)
+        val applied = db_paged_apply(root, genesis.head, patch, policy).unwrap()
+        val opened = db_paged_open(root, policy).unwrap()
+        val batch_key = db_page_batch_key(patch.batch_id).unwrap()
+        val row_key = db_page_row_key(setup_item2_paged_ref(1)).unwrap()
+        expect(db_pages_bucket(batch_key).unwrap() == db_pages_bucket(row_key).unwrap()).to_be(false)
+        val batch_page = db_page_store_load_page(root, opened.manifest.pages, batch_key).unwrap().unwrap()
+        val budget = db_page_encode(batch_page, policy.quota).unwrap().len() as u64
+        expect(db_page_store_load_pages(root, opened.manifest.pages, [batch_key], budget).unwrap()[0].byte_count).to_equal(budget)
+        expect(db_page_store_load_pages(root, opened.manifest.pages, [batch_key,row_key], budget)).to_equal(Err("SCVDB_PAGE_BATCH_QUOTA"))
+        step("Corrupt the dependency bucket so any premature IO would return a page error")
+        val entry = db_pages_entry(opened.manifest.pages, batch_key).unwrap().unwrap()
+        expect(file_write_bytes("{root}/.scv/db-pages/pages/{entry.digest}.scvp", [0u8])).to_be(true)
+        var forged = patch
+        forged.signature = [0u8;64]
+        expect(db_paged_apply(root, applied.head, forged, policy)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+        expect(db_page_store_load_page(root, opened.manifest.pages, batch_key).is_err()).to_be(true)
+
+    it "verifies signatures counter uniqueness retained bases and physical expected heads":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val first = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1)
+        var forged = first
+        forged.signature = [0u8;64]
+        expect(db_paged_apply(root, genesis.head, forged, policy)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+        val created = db_paged_apply(root, genesis.head, first, policy).unwrap()
+        val same_counter = setup_item2_paged_patch([setup_item2_paged_create(2, "B")], created.revision, 1)
+        expect(db_paged_apply(root, created.head, same_counter, policy)).to_equal(Err("SCVDB_ACTOR_COUNTER_COLLISION"))
+        val unknown_base = setup_item2_paged_patch([setup_item2_paged_create(2, "B")], sha256_text("unknown root"), 2)
+        expect(db_paged_apply(root, created.head, unknown_base, policy)).to_equal(Err("SCVDB_BASE_REVISION_MISSING"))
+        step("An actual retained genesis root permits causal work but a stale physical head does not publish it")
+        val historical = setup_item2_paged_patch([setup_item2_paged_create(2, "B")], genesis.manifest.revision, 2)
+        expect(db_paged_apply(root, genesis.head, historical, policy)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+        expect(db_paged_apply(root, created.head, historical, policy).unwrap().replay).to_be(false)
+
+    it "rotates trusted keys without migrating structure and refuses semantic policy drift":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val first = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1)
+        val created = db_paged_apply(root, genesis.head, first, policy).unwrap()
+        var changed = policy
+        var config = changed.config
+        var admission = config.admission
+        var keys = admission.keys
+        var old = keys[0]
+        old.revoked = true
+        keys[0] = old
+        admission.keys = keys
+        config.admission = admission
+        changed.config = config
+        val rotated = setup_item2_paged_repin(changed)
+        expect(db_paged_structure_digest(rotated)).to_equal(db_paged_structure_digest(policy))
+        expect(db_paged_open(root, rotated).unwrap().head).to_equal(created.head)
+        expect(db_paged_apply(root, created.head, first, rotated)).to_equal(Err("SCVDB_KEY_REVOKED"))
+        val second = setup_item2_paged_patch([setup_item2_paged_create(2, "B")], created.revision, 2, true)
+        val written = db_paged_apply(root, created.head, second, rotated).unwrap()
+        expect(db_paged_open(root, rotated).unwrap().manifest.policy_revision).to_equal(rotated.revision)
+        var drift = rotated
+        var drift_config = drift.config
+        var merge = drift_config.merge
+        var fields = merge.fields
+        var field = fields[0]
+        field.rule = FieldMergeRule.OrderedListConflict
+        fields[0] = field
+        merge.fields = fields
+        drift_config.merge = merge
+        drift.config = drift_config
+        drift = setup_item2_paged_repin(drift)
+        expect(db_paged_open(root, drift)).to_equal(Err("SCVDB_PAGED_MIGRATION_REQUIRED"))
+        expect(db_paged_open(root, rotated).unwrap().head).to_equal(written.head)
+
+    it "requires actual page content proofs and rejects omitted or altered buckets":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1)
+        db_paged_apply(root, genesis.head, patch, policy).unwrap()
+        val opened = db_paged_open(root, policy).unwrap()
+        val key = db_page_row_key(setup_item2_paged_ref(1)).unwrap()
+        expect(db_paged_reads(opened.manifest, policy, [DbPagedLookupProof(keys: [key], page: nil)])).to_equal(Err("SCVDB_PAGED_PAGE_REQUIRED"))
+        var page = db_page_store_load_page(root, opened.manifest.pages, key).unwrap().unwrap()
+        var records = page.records
+        var record = records[0]
+        record.payload = [0u8]
+        records[0] = record
+        page.records = records
+        expect(db_paged_reads(opened.manifest, policy, [DbPagedLookupProof(keys: [key], page: Some(page))])).to_equal(Err("SCVDB_PAGE_DIGEST"))
+        expect(db_paged_read(db_paged_reads(opened.manifest, policy, []).unwrap(), key)).to_equal(Err("SCVDB_PAGED_PROOF_REQUIRED"))
+
+    it "excludes legacy heads under the same SJ lease including held publication":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        expect(db_store_commit(root, "", sha256_text("legacy"), "legacy", "semantic").code).to_equal("SCVDB_PAGED_MIGRATION_REQUIRED")
+        expect(scv_sj_lease_acquire(root, "paged-test").starts_with("ok:")).to_be(true)
+        expect(db_store_commit_held(root, "paged-test", "", sha256_text("projection"), "projection", "pages").code).to_equal("SCVDB_PAGED_MIGRATION_REQUIRED")
+        expect(scv_sj_lease_release(root, "paged-test").starts_with("ok:")).to_be(true)
+        expect(db_store_commit_with_absent_channels(root, genesis.head, genesis.manifest.revision, "ignored", "paged", ["../semantic"]).code).to_equal("SCVDB_STORE_ABSENCE_SCOPE")
+        expect(db_store_commit_with_absent_channels(root, genesis.head, genesis.manifest.revision, "ignored", "paged", ["semantic","semantic"]).code).to_equal("SCVDB_STORE_ABSENCE_SCOPE")
+        expect(db_store_commit_with_absent_channels(root, genesis.head, genesis.manifest.revision, "ignored", "paged", ["paged"]).code).to_equal("SCVDB_STORE_ABSENCE_SCOPE")
+        val legacy = setup_item2_paged_root()
+        expect(db_store_commit(legacy, "", sha256_text("old"), "old", "semantic").code).to_equal("ok")
+        expect(db_paged_initialize(legacy, policy)).to_equal(Err("SCVDB_PAGED_MIGRATION_REQUIRED"))

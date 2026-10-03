@@ -23,6 +23,7 @@ bootstrap_resume_verdict_written=0
 bootstrap_resume_stage=init
 bootstrap_resume_log=
 bootstrap_resume_release_lock=1
+bootstrap_resume_lock_owned=0
 stage3_guard_unit=
 stage3_guard_evidence=
 stage3_containment_backend=systemd
@@ -35,7 +36,7 @@ bootstrap_resume_verdict() {
   fi
 }
 bootstrap_resume_trap() {
-  status=$?
+  status=${2:-$?}
   sig=${1:-none}
   if [ "$stage3_containment_backend" = cgroupfs ] &&
      [ -n "${stage3_guard_unit:-}" ]; then
@@ -56,19 +57,11 @@ bootstrap_resume_trap() {
   if [ "${bootstrap_resume_verdict_written}" -eq 0 ]; then
     bootstrap_resume_verdict "ABORTED: stage=${bootstrap_resume_stage} exit=${status} signal=${sig} reason=${bootstrap_resume_stage}"
   fi
-  if [ "${bootstrap_resume_release_lock:-1}" -eq 1 ]; then
-    bootstrap_cache_release_all
-    if [ -n "${archive:-}" ] && [ -d "$archive" ]; then
-      for terminal in "${stage3_log:-}" "${stage3_transcript:-}" "${stage3_status:-}" "${stage3_sanity:-}" "${manifest:-}"; do
-        [ ! -f "$terminal" ] || cp -p "$terminal" "$archive/terminal.$(basename "$terminal")"
-      done
-      if ! bootstrap_cache_freeze_attempt "$archive"; then
-        echo "bootstrap-evidence-error: could not freeze attempt $archive" >&2
-        [ "$status" -ne 0 ] || status=1
-      fi
-    fi
-    rm -rf "${lock:-}"
-  elif [ -n "${lock:-}" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
+  if [ "${bootstrap_resume_lock_owned:-0}" -eq 1 ] &&
+     [ "${bootstrap_resume_release_lock:-1}" -eq 1 ]; then
+    rm -rf -- "$lock"
+  elif [ "${bootstrap_resume_lock_owned:-0}" -eq 1 ] &&
+       [ -n "${lock:-}" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
     echo "ERROR: retaining ${lock:-output lock}: Stage 3 descendants were not proven stopped" >&2
   fi
   [ "$sig" = none ] || exit "$status"
@@ -82,6 +75,9 @@ BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenanc
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/bootstrap/bootstrap-cache-release-vector.shs"
+. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
 bootstrap_stage3_resume_output_path "$source_output" "$root" \
@@ -97,47 +93,28 @@ bootstrap_planner_v2_verify "$planner_admission" "$root" || exit 64
   //bootstrap:stage3 ] || exit 64
 
 platform=$(bootstrap_stage3_host_platform)
+exe_suffix=
+archive_prefix=lib
+archive_suffix=.a
+case "$platform" in
+  *-pc-windows-msvc) exe_suffix=.exe; archive_prefix=; archive_suffix=.lib ;;
+  *-pc-windows-gnu) exe_suffix=.exe ;;
+esac
 stage3="$output/stage3/$platform"
-# Windows artifact naming.  bootstrap-from-scratch.sh already derives these
-# (exe_suffix at :870/:877, archive_prefix/archive_suffix at :871/:872 and
-# :902-906) and every Stage-2 artifact on disk is named accordingly:
-#   simple.exe, simple.exe.inputs.sha256, simple_native_all.lib,
-#   simple_compiler_backfill.lib
-# This script hardcoded the POSIX names, so on Windows its very first
-# fail-closed input check aborted with (measured 2026-09-03, MSVC lane):
-#   ERROR - nothing was checked (required Stage-2 input missing or is a
-#   symlink: .../stage2-runtime-authority/simple.inputs.sha256)
-# i.e. Stage 3 resume had never been runnable on Windows at all.  The stage2
-# transcript confirms the convention is a full path INCLUDING the suffix:
-# `-o /d/.../build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe`.
-#
-# CROSS-PLATFORM IMPACT: none.  A non-Windows $platform (e.g.
-# x86_64-unknown-linux-gnu) matches no case arm, so the suffix stays empty and
-# the prefix/suffix stay lib/.a -- every variable below expands to the exact
-# string it had before.
-bootstrap_stage3_exe=''
-bootstrap_stage3_arpre=lib
-bootstrap_stage3_arsuf=.a
-case "$platform" in
-    *-windows-*) bootstrap_stage3_exe=.exe ;;
-esac
-case "$platform" in
-    *-windows-msvc) bootstrap_stage3_arpre=''; bootstrap_stage3_arsuf=.lib ;;
-esac
-stage2="$output/stage2/$platform/simple$bootstrap_stage3_exe"
-admitted="$stage3/stage2-admitted/simple$bootstrap_stage3_exe"
+stage2="$output/stage2/$platform/simple$exe_suffix"
+admitted="$stage3/stage2-admitted/simple$exe_suffix"
 stage2_admission="$stage3/stage2-admitted/admission.env"
 runtime="$stage3/stage2-runtime-authority"
-seed="$runtime/simple$bootstrap_stage3_exe"
+seed="$runtime/simple$exe_suffix"
 stamp="$seed.inputs.sha256"
-native_all="$runtime/${bootstrap_stage3_arpre}simple_native_all${bootstrap_stage3_arsuf}"
-backfill="$runtime/${bootstrap_stage3_arpre}simple_compiler_backfill${bootstrap_stage3_arsuf}"
+native_all="$runtime/${archive_prefix}simple_native_all${archive_suffix}"
+backfill="$runtime/${archive_prefix}simple_compiler_backfill${archive_suffix}"
 stage2_sanity="$stage3/stage2-sanity.env"
 stage2_receiver="$stage3/stage2-receiver.env"
 stage2_receiver_log="$stage3/stage2-receiver.log"
 stage2_transcript="$stage3/stage2-command.transcript"
 stage2_log="$output/logs/$platform/stage2-native-build.log"
-candidate="$stage3/simple$bootstrap_stage3_exe"
+candidate="$stage3/simple$exe_suffix"
 manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
@@ -164,7 +141,7 @@ runtime_origin_after="$stage3/runtime-origin-after.txt"
 runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
 archive="$stage3/attempts/recovery-threads1-$(date -u '+%Y%m%dT%H%M%S')-$$"
-mkdir -p "$stage3/attempts"
+mkdir -p -- "$(dirname "$archive")" || bootstrap_stage3_error "could not create recovery attempts directory"
 if [ -e "$archive" ] || [ -L "$archive" ]; then
   [ -d "$archive" ] && [ ! -L "$archive" ] ||
     bootstrap_stage3_error "recovery-threads1 must be a real directory: $archive"
@@ -626,8 +603,20 @@ if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest \
   exit 1
 fi
 mkdir "$lock" || { echo "error: bootstrap output is locked: $lock" >&2; exit 1; }
+bootstrap_resume_lock_owned=1
 printf '%s\n' "$$" >"$lock/pid"
 bootstrap_resume_stage=stage3-build
+bootstrap_release_resume_cleanup() {
+  resume_status=$?
+  bootstrap_cache_release_all || resume_status=1
+  for terminal in "$stage3_log" "$stage3_transcript" "$stage3_status" "$stage3_sanity" "$manifest"; do
+    [ ! -f "$terminal" ] || cp -p "$terminal" "$archive/terminal.${terminal##*/}"
+  done
+  bootstrap_cache_freeze_attempt "$archive" || resume_status=1
+  bootstrap_resume_trap none "$resume_status"
+  exit "$resume_status"
+}
+trap bootstrap_release_resume_cleanup EXIT
 
 for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"; do
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
@@ -654,15 +643,12 @@ bootstrap_stage3_git_state "$root" "$git_before"
 bootstrap_stage3_tool_authority_snapshot "$tool_before" "$path" "$root"
 resume_cache_action=${RESUME_STAGE3_CACHE_ACTION:-reuse}
 [ "${RESUME_STAGE3_FRESH_CACHE:-0}" != 1 ] || resume_cache_action=clean
-resume_cache_options=$(bootstrap_cache_explicit_options \
-  "$(stage2_env_value SIMPLE_ABI_POLICY)" "$(stage2_env_value SIMPLE_PLUGIN_MANIFEST_POLICY)" \
-  "$(stage2_env_value SIMPLE_KERNEL_K1_POLICY)" "$(stage2_env_value SIMPLE_COVERAGE_CUTOVER_STATE)" \
-  "$(stage2_env_value SIMPLE_K1_COMPOSITION_SHA256_BEFORE)" "$stage2_library_path" "$stage2_link_compat") || exit 1
-resume_cache_assurance=$(bootstrap_cache_stage3_assurance) || exit 1
+resume_cache_options=$(bootstrap_cache_release_options_v1 stripped '' absent) || exit 1
+resume_cache_persistence=$(bootstrap_cache_persistence_policy) || exit 1
 resume_cache_admission=$(bootstrap_cache_abi_admission_options \
   "$stage2_admission" "$resume_abi_policy") || exit 1
 resume_cache_options="$resume_cache_options
-$resume_cache_assurance
+$resume_cache_persistence
 $resume_cache_admission"
 resume_cache_payload=$(bootstrap_cache_phase_inputs "$root" "$platform" "$stage2_backend" \
   dynload "$source_before" "$runtime_admitted" "$tool_before" "$resume_cache_options") ||
@@ -1050,6 +1036,7 @@ if [ "$effective_status" -ne 0 ]; then
   echo "error: Stage 3 native-build failed (shell=$status worker=$worker_status effective=$effective_status class=$diagnostic_class signal=$signal_identity route=$stage3_requested_route fallback=$stage3_fallback_route)" >&2
   exit "$effective_status"
 fi
+bootstrap_cache_report_log "$stage3_log"
 ! grep -qE '^(Build complete: [0-9]+ compiled|Linked: .* via clang)' "$stage3_log" || exit 1
 [ "$(bootstrap_stage3_hash_file "$admitted")" = "$admitted_sha" ] || exit 1
 runtime_check="$archive/runtime-after.$$"
@@ -1074,11 +1061,20 @@ bootstrap_stage_sanity() (
   # Validate before any candidate execution, and preserve presence (including
   # malformed/empty contracts) rather than silently falling back to standalone.
   if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
-    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
-    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
-    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0)
+      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-id raw_status=125' >&2
+      return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *)
+      echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-session-helper raw_status=125' >&2
+      return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || {
+      echo 'bootstrap-sanity-error: phase=session-validation reason=session-check-failed raw_status=125' >&2
+      return 125
+    }
   fi
-  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *)
+    echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-rss-cap-mode raw_status=125' >&2
+    return 125 ;; esac
   for name in $(env | sed 's/=.*//'); do
     case "$name" in
       SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
@@ -1094,7 +1090,11 @@ bootstrap_stage_sanity() (
   frontend0_receipt="$evidence.frontend-bootstrap-0.status.env"
   frontend1_log="$evidence.frontend-bootstrap-1.log"
   frontend1_receipt="$evidence.frontend-bootstrap-1.status.env"
-  candidate_frontend_capture_setup "${frontend0_log%/*}" || return 1
+  candidate_frontend_capture_setup "${frontend0_log%/*}" || {
+    sanity_capture_status=$?
+    echo "bootstrap-sanity-error: phase=frontend-capture reason=capture-setup-failed raw_status=${sanity_capture_status}" >&2
+    return "${sanity_capture_status}"
+  }
   frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
   rm -f "$frontend_log" "$frontend0_log" "$frontend0_receipt" \

@@ -4,15 +4,16 @@
 _mail_pop3_fetch() {
   local id="${1:-}" scheme=pop3
   local -a tls_args=()
-  case "$id" in *[!0-9]*) echo "error: POP3 message number must be numeric" >&3; return 2 ;; esac
-  if [ -n "$id" ] && [ "$id" -le 0 ]; then return 2; fi
+  if [ -n "$id" ] && ! [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: POP3 message number must be a positive decimal" >&3; return 2
+  fi
   case "$MAIL_ACCT_TLS" in
     implicit) scheme=pop3s ;;
     starttls) tls_args=(--ssl-reqd) ;;
     *) echo "error: POP3 requires TLS (implicit or starttls)" >&3; return 2 ;;
   esac
   _mail_curl -s --url "${scheme}://${MAIL_ACCT_POP3_SERVER}:${MAIL_ACCT_POP3_PORT}/${id}" \
-    --user "${MAIL_ACCT_USERNAME}:${MAIL_ACCT_PASSWORD}" "${tls_args[@]}" --max-filesize 16777216
+    --user "${MAIL_ACCT_USERNAME}:${MAIL_ACCT_PASSWORD}" ${tls_args[@]+"${tls_args[@]}"} --max-filesize 16777216
 }
 
 cmd_pop3_inbox() {
@@ -37,12 +38,17 @@ cmd_pop3_inbox() {
   while read -r id size extra; do
     id=${id%$'\r'}; size=${size%$'\r'}
     [ -n "$id" ] || continue
-    case "$id:$size" in *[!0-9:]*|:*|*:) echo "error: malformed POP3 listing" >&3; return 1 ;; esac
-    [ -z "$extra" ] && [ "$id" -gt 0 ] || return 1
+    if ! [[ "$id" =~ ^[1-9][0-9]*$ && "$size" =~ ^[0-9]+$ ]] || [ -n "$extra" ]; then
+      echo "error: malformed POP3 listing" >&3; return 1
+    fi
     ids="${ids}${id}"$'\n'
   done <<< "$listing"
   # Message numbers can change between sessions; never persist them as UIDs.
-  ids=$(printf '%s' "$ids" | sort -nr | sed -n "1,${limit}p")
+  ids=$(printf '%s' "$ids" | sort -nr)
+  if [ -n "$(printf '%s\n' "$ids" | uniq -d)" ]; then
+    echo "error: duplicate POP3 message number" >&3; return 1
+  fi
+  ids=$(printf '%s\n' "$ids" | sed -n "1,${limit}p")
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     raw=$(_mail_pop3_fetch "$id") || return $?

@@ -5,7 +5,11 @@ use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_s
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
-use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_publish_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
+    compile_source_inventory_checkout_cache_root_v1}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
 use app.bug.workaround_store.{refresh_workarounds}
 # Unambiguous, non-builtin stderr write for the worker-failure relay path
 # (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
@@ -315,8 +319,12 @@ pub fn native_build_worker_success_receipt(
     if requested_output == "":
         return false
     val receipt = "[native-build] Artifact published: {requested_output}"
-    stdout.replace("\r\n", "\n").split("\n").contains(receipt) or
-        stderr.replace("\r\n", "\n").split("\n").contains(receipt)
+    val normalized_stdout = stdout.replace("\r\n", "\n")
+    val normalized_stderr = stderr.replace("\r\n", "\n")
+    # The worker frames publication receipts with newlines. A glued fragment
+    # is ambiguous with another output path and cannot prove this artifact.
+    normalized_stdout.split("\n").contains(receipt) or
+        normalized_stderr.split("\n").contains(receipt)
 
 # Do not enter the timeout runner with a guessed fallback path. On a stale
 # self-hosted deployment that path can be missing or non-runnable; some seed
@@ -914,20 +922,23 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
             eprint "error: native-build could not create its internal policy handoff: {reason}"
             return 1
-    # The full CLI publishes the compile-source inventory through
-    # compiler_entrypoint_admit_v1 before native-build; this seed-run entry
-    # skipped it, so the worker's snapshot acquire always failed with
-    # snapshot-inventory-unavailable. Run the same refresh, same cold-init gate.
+    # Publish complete immutable authority once, before any shard is spawned.
+    # A generation alone leaves the child without a snapshot and makes every
+    # child repeat cold inventory admission while the parent retains its work.
     if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") == "":
-        var scv_root = path_absolute(".").replace("\\", "/")
-        if scv_root.starts_with("//?/"):
-            scv_root = scv_root.substring(4)
+        val scv_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+        val source_roots = native_build_authority_source_roots_v1(args, scv_root)
+        if source_roots.len() == 0:
+            eprint "SCV-E-ADMISSION: source-inventory-scope-unsupported"
+            return 1
         val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
-        val inventory_roots = if cold_init: ["src", "test"] else: ["src"]
-        val refresh = compiler_inventory_refresh_v1(
-            scv_root, scv_root + "/build/scv", inventory_roots, cold_init)
-        if not refresh.valid:
-            eprint "SCV-E-ADMISSION: " + refresh.reason
+        val authority = compiler_source_authority_acquire_v1(scv_root,
+            compile_source_inventory_checkout_cache_root_v1(scv_root), source_roots, cold_init)
+        if not authority.valid:
+            eprint "SCV-E-ADMISSION: " + authority.reason
+            return 1
+        if not compiler_source_authority_publish_v1(authority):
+            eprint "SCV-E-ADMISSION: snapshot-authority-env-publish-failed"
             return 1
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
@@ -941,6 +952,30 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         # Preserve every public argument byte and its order. Only the worker
         # removes the one internal handoff argument before cli_native_build.
         worker_args = worker_args.push(arg)
+    # A grouped request has one private result file owned by the compiler
+    # child. It must never enter the ordinary warm-artifact or parse/HIR shard
+    # paths: those paths assume one linked binary and can restore a stale one.
+    val grouped_result = env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? ""
+    if grouped_result != "":
+        if file_exists(grouped_result) and not file_delete(grouped_result):
+            eprint "error: grouped native result path is not fresh"
+            return 1
+        val prior_worker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+        env_set("SIMPLE_BINARY", simple_bin)
+        env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+        val (group_stdout, group_stderr, group_code) =
+            process_run_timeout_live(simple_bin, worker_args,
+                native_build_timeout_ms(args))
+        env_set("SIMPLE_NATIVE_BUILD_WORKER", prior_worker)
+        if group_code != 0:
+            eprint "error: grouped native child exited {group_code}"
+            eprint_bounded(group_stderr)
+            if group_stdout.trim() != "": eprint_bounded(group_stdout)
+            return 1
+        if not file_exists(grouped_result):
+            eprint "error: grouped native child returned without a fresh result"
+            return 1
+        return 0
     val requested_output = output_path_arg(args)
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
@@ -1154,6 +1189,8 @@ fn native_build_is_value_consuming_flag(arg: text) -> bool:
         or arg == "--parser-require" or arg == "--host-cpu-max"
         or arg == "--frontend-offload"
         or arg == "--frontend-offload-fallback"
+        or arg == "--collection-profile" or arg == "--collection-workload"
+        or arg == "--collection-target"
 
 fn native_build_has_entry(args: [text]) -> bool:
     var i = 0
@@ -1170,6 +1207,38 @@ fn native_build_has_entry(args: [text]) -> bool:
         i = i + 1
     false
 
+pub fn native_build_authority_source_roots_v1(args: [text], root: text) -> [text]:
+    # Extract only source selection; the worker remains the CLI validator.
+    # Reuse its default root policy and this coordinator's value-flag table,
+    # so an output path or backend value cannot become a positional entry.
+    var entry = ""
+    var sources: [text] = []
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if native_build_text_eq(arg, "--entry") or native_build_text_eq(arg, "--source"):
+            if index + 1 >= args.len(): return []
+            index = index + 1
+            if native_build_text_eq(arg, "--entry"): entry = args[index]
+            else: sources.push(args[index])
+        elif arg.starts_with("--entry="):
+            entry = arg.substring(8)
+        elif arg.starts_with("--source="):
+            sources.push(arg.substring(9))
+        elif native_build_is_value_consuming_flag(arg):
+            index = index + 1
+        elif not arg.starts_with("-") and entry == "":
+            entry = arg
+        index = index + 1
+    if entry == "" or root == "": return []
+    val absolute = compile_source_inventory_plain_checkout_v1(path_absolute(entry))
+    if not absolute.starts_with(root + "/"): return []
+    val relative = absolute.substring(root.len() + 1)
+    var roots = native_build_snapshot_source_roots_v1(relative, sources)
+    if roots.len() == 0: return []
+    if not roots.contains(relative): roots.push(relative)
+    roots
+
 # Local mirror of compile_targets.spl's `cli_native_build_is_entry_arg`
 # (`arg == "--entry" or arg.starts_with("--entry=")`) -- not imported
 # directly to avoid pulling this lightweight entrypoint into the same
@@ -1177,8 +1246,48 @@ fn native_build_has_entry(args: [text]) -> bool:
 fn cli_native_build_is_entry_arg_stub(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
 
-fn main() -> i64:
-    val args = native_build_entry_args()
+pub fn run_native_build_entry_v1(raw_args: [text]) -> i64:
+    var args: [text] = []
+    var group_manifest = ""
+    var group_result = ""
+    var group_source_root = ""
+    var group_index = 0
+    while group_index < raw_args.len():
+        val arg = raw_args[group_index]
+        if arg == "--group-manifest" or arg == "--group-result" or
+                arg == "--source-root":
+            if group_index + 1 >= raw_args.len():
+                eprint "error: {arg} requires an absolute path"
+                return 2
+            val value = raw_args[group_index + 1]
+            val drive_rooted = is_drive_absolute(value) and value.len() >= 3 and
+                (value[2:3] == "/" or value[2:3] == "\\")
+            if value == "" or not (value.starts_with("/") or drive_rooted) or
+                    value.contains("\0") or value.contains("\n"):
+                eprint "error: {arg} requires an absolute path"
+                return 2
+            if arg == "--group-manifest":
+                if group_manifest != "": return 2
+                group_manifest = value
+            elif arg == "--group-result":
+                if group_result != "": return 2
+                group_result = value
+            else:
+                if group_source_root != "": return 2
+                group_source_root = value
+            group_index = group_index + 2
+            continue
+        args = args.push(arg)
+        group_index = group_index + 1
+    if group_manifest != "" or group_result != "" or group_source_root != "":
+        if group_manifest == "" or group_result == "" or group_source_root == "":
+            eprint "error: grouped native request requires manifest, result, and source root"
+            return 2
+        if not env_set("SIMPLE_NATIVE_GROUP_MANIFEST", group_manifest) or
+                not env_set("SIMPLE_NATIVE_GROUP_RESULT", group_result) or
+                not env_set("SIMPLE_NATIVE_GROUP_SOURCE_ROOT", group_source_root):
+            eprint "error: grouped native request environment handoff failed"
+            return 2
     if args.len() == 0:
         print_help()
         return 0
@@ -1191,3 +1300,6 @@ fn main() -> i64:
         return 1
 
     run_native_build_worker(args)
+
+fn main() -> i64:
+    run_native_build_entry_v1(native_build_entry_args())

@@ -1,0 +1,56 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.capacity_request.{BuilderCapacityRequestV1,
+    builder_capacity_request_encode_v1, builder_capacity_request_decode_v1,
+    BuilderLinuxParentReceiptV1, builder_linux_parent_receipt_encode_v1,
+    builder_linux_parent_receipt_decode_v1}
+
+val CAPACITY_IDENTITY_V1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+describe "Owned capacity request transport":
+    it "roundtrips exact task identity host and explicit acquisition policy":
+        val request = BuilderCapacityRequestV1(CAPACITY_IDENTITY_V1, "linux-local", "owned-platform-boundary-v1")
+        val encoded = builder_capacity_request_encode_v1(request)
+        match builder_capacity_request_decode_v1(encoded, CAPACITY_IDENTITY_V1, "linux-local"):
+            Ok(value):
+                expect(value.identity_digest).to_equal(CAPACITY_IDENTITY_V1)
+                expect(value.host_id).to_equal("linux-local")
+                expect(value.policy).to_equal("owned-platform-boundary-v1")
+            Err(reason): fail(reason)
+
+    it "rejects host substitution and missing explicit authority":
+        val encoded = builder_capacity_request_encode_v1(BuilderCapacityRequestV1(
+            CAPACITY_IDENTITY_V1, "linux-local", "owned-platform-boundary-v1"))
+        match builder_capacity_request_decode_v1(encoded, CAPACITY_IDENTITY_V1, "other-host"):
+            Ok(_): fail("different host admitted")
+            Err(reason): expect(reason).to_contain("differs")
+        match builder_capacity_request_decode_v1("", CAPACITY_IDENTITY_V1, "linux-local"):
+            Ok(_): fail("absent authority admitted")
+            Err(reason): expect(reason).to_contain("header")
+
+    it "rejects task substitution unknown policy and appended data":
+        val encoded = builder_capacity_request_encode_v1(BuilderCapacityRequestV1(
+            CAPACITY_IDENTITY_V1, "linux-local", "owned-platform-boundary-v1"))
+        match builder_capacity_request_decode_v1(encoded,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "linux-local"):
+            Ok(_): fail("different task admitted")
+            Err(reason): expect(reason).to_contain("differs")
+        match builder_capacity_request_decode_v1(encoded + "extra\n", CAPACITY_IDENTITY_V1, "linux-local"):
+            Ok(_): fail("noncanonical payload admitted")
+            Err(reason): expect(reason).to_contain("differs")
+        expect(builder_capacity_request_encode_v1(BuilderCapacityRequestV1(
+            CAPACITY_IDENTITY_V1, "linux-local", "ambient-root"))).to_equal("")
+
+    it "binds the observed parent identity and rejects an ambient root receipt":
+        var receipt = BuilderLinuxParentReceiptV1(CAPACITY_IDENTITY_V1, "linux-local",
+            "/sys/fs/cgroup/simple-parent-" + CAPACITY_IDENTITY_V1, 24, 16619)
+        val encoded = builder_linux_parent_receipt_encode_v1(receipt)
+        match builder_linux_parent_receipt_decode_v1(encoded, CAPACITY_IDENTITY_V1, "linux-local"):
+            Ok(value):
+                expect(value.device).to_equal(24)
+                expect(value.inode).to_equal(16619)
+            Err(reason): fail(reason)
+        match builder_linux_parent_receipt_decode_v1(encoded, CAPACITY_IDENTITY_V1, "other-host"):
+            Ok(_): fail("foreign host parent receipt admitted")
+            Err(reason): expect(reason).to_contain("differs")
+        receipt.path = "/sys/fs/cgroup"
+        expect(builder_linux_parent_receipt_encode_v1(receipt)).to_equal("")

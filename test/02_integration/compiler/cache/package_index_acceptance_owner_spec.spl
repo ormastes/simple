@@ -1,0 +1,67 @@
+# @req PSI-REQ-002 PSI-REQ-004
+# Owner-level evidence; these cases do not establish compiler completion or
+# filesystem read counters required by the broader system scenarios.
+use std.spec.*
+use app.test.package_index_acceptance.{package_index_acceptance_persistence_v1}
+use app.test.package_index_acceptance_invalidation.{package_index_acceptance_invalidation_v1}
+use app.io.mod.{dir_remove, getpid}
+
+fn acceptance_owner_test_root() -> text:
+    "build/test-artifacts/package-index-acceptance-owner-{getpid()}"
+
+describe "production package-index acceptance owners":
+    before_each:
+        dir_remove(acceptance_owner_test_root(), true)
+    after_each:
+        dir_remove(acceptance_owner_test_root(), true)
+
+    it "refuses an absent persisted generation":
+        step("Reject the corrupted generation")
+        val observed = package_index_acceptance_persistence_v1(
+            "missing-index-denied", acceptance_owner_test_root())
+        expect(observed.operation_valid).to_equal(false)
+        expect(observed.reason).to_equal("missing-or-invalid-generation")
+        expect(observed.observed_digest).to_equal("")
+
+    it "refuses a tampered generation without rewriting persisted evidence":
+        step("Tamper with persisted generation bytes")
+        val observed = package_index_acceptance_persistence_v1(
+            "tampered-index-denied", acceptance_owner_test_root())
+        expect(observed.operation_valid).to_equal(false)
+        expect(observed.reason).to_equal("generation-digest-mismatch")
+        expect(observed.pointer_preserved).to_equal(true)
+        expect(observed.generation_preserved).to_equal(true)
+
+    it "rejects malformed metadata even when its content digest matches":
+        step("Reject the corrupted generation")
+        val observed = package_index_acceptance_persistence_v1(
+            "corrupt-metadata-denied", acceptance_owner_test_root())
+        expect(observed.operation_valid).to_equal(false)
+        expect(observed.reason).to_equal("corrupt-header")
+        expect(observed.pointer_preserved).to_equal(true)
+        expect(observed.generation_preserved).to_equal(true)
+
+    it "invalidates only util and its consumer for an export change":
+        step("Edit one indexed package")
+        val observed = package_index_acceptance_invalidation_v1(
+            "direct-reverse-invalidation", acceptance_owner_test_root())
+        expect(observed.valid).to_equal(true)
+        expect(observed.dirty_modules).to_equal(["app", "util"])
+        expect(observed.dirty_packages).to_equal(["app", "util"])
+        expect(observed.package_schedule).to_equal(["util", "app"])
+
+    it "propagates a model export change through both reverse branches":
+        step("Edit one indexed package")
+        val observed = package_index_acceptance_invalidation_v1(
+            "indirect-reverse-invalidation", acceptance_owner_test_root())
+        expect(observed.valid).to_equal(true)
+        expect(observed.dirty_modules).to_equal(["api", "app", "model", "util"])
+        expect(observed.package_schedule).to_equal(["model", "api", "util", "app"])
+
+    it "retains consumers when util changes without an export change":
+        step("Stop invalidation after an unchanged export")
+        val observed = package_index_acceptance_invalidation_v1(
+            "private-body-export-early-cutoff", acceptance_owner_test_root())
+        expect(observed.valid).to_equal(true)
+        expect(observed.dirty_modules).to_equal(["util"])
+        expect(observed.package_schedule).to_equal(["util"])

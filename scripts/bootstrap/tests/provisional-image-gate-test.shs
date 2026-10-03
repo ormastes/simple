@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-image.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source/src/runtime" "$tmp/external-runtime" "$tmp/output"
+cat >"$tmp/producer" <<'SH'
+#!/bin/sh
+: >"$PRODUCER_CALLED"
+exit 0
+SH
+chmod +x "$tmp/producer"
+export PRODUCER_CALLED="$tmp/producer.called"
+printf 'snapshot\n' >"$tmp/snapshot"
+printf 'hello\n' >"$tmp/hello"
+printf 'compiler tool\n' >"$tmp/compiler-tool"
+printf 'linker tool\n' >"$tmp/linker-tool"
+chmod +x "$tmp/compiler-tool" "$tmp/linker-tool"
+producer_sha=$(sha256sum "$tmp/producer" | cut -d ' ' -f 1)
+snapshot_sha=$(sha256sum "$tmp/snapshot" | cut -d ' ' -f 1)
+hello_sha=$(sha256sum "$tmp/hello" | cut -d ' ' -f 1)
+compiler_tool_sha=$(sha256sum "$tmp/compiler-tool" | cut -d ' ' -f 1)
+linker_tool_sha=$(sha256sum "$tmp/linker-tool" | cut -d ' ' -f 1)
+run_gate() {
+  sh "$script_root/prepare-provisional-manager-images.shs" --mode=authority \
+    --producer="$tmp/producer" --producer-digest="$producer_sha" \
+    --source-root="$tmp/source" --source-snapshot="$tmp/snapshot" \
+    --source-snapshot-digest="$snapshot_sha" --hello-receipt="$tmp/hello" \
+    --hello-receipt-digest="$hello_sha" --output-root="$tmp/output/images" \
+    --compiler-tool="$tmp/compiler-tool" --compiler-tool-digest="$compiler_tool_sha" \
+    --linker-tool="$tmp/linker-tool" --linker-tool-digest="$linker_tool_sha" \
+    --runtime-path="$1" --memory-bytes=1073741824 --reserve-bytes=1073741824 \
+    --target=x86_64-unknown-linux-gnu
+}
+printf 'changed\n' >"$tmp/hello"
+if run_gate "$tmp/source/src/runtime" >"$tmp/out" 2>&1; then
+  echo 'FAIL: changed hello admitted to image build' >&2; exit 1
+fi
+[ ! -e "$PRODUCER_CALLED" ] || { echo 'FAIL: producer started after hello drift' >&2; exit 1; }
+printf 'hello\n' >"$tmp/hello"
+if run_gate "$tmp/external-runtime" >"$tmp/out" 2>&1; then
+  echo 'FAIL: unpinned external runtime admitted' >&2; exit 1
+fi
+[ ! -e "$PRODUCER_CALLED" ] || { echo 'FAIL: producer started with external runtime' >&2; exit 1; }
+echo 'PASS: diagnostic image build refuses changed hello and external runtime before spawn'

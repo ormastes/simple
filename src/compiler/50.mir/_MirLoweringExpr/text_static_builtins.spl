@@ -1,0 +1,38 @@
+# Builtin type names are not runtime receiver values.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLowering.module_lowering.*
+
+impl MirLowering:
+    me try_lower_text_static_builtin(receiver: HirExpr, method: text, args: [HirCallArg]) -> LocalId?:
+        if method != "from_char_code":
+            return nil
+        var builtin_text = false
+        match receiver.kind:
+            case HirExprKind.NamedVar(symbol, name):
+                if name == "text":
+                    if val definition = self.symbols.get_symbol_raw(symbol.id):
+                        # HIR's synthetic builtin declaration has no owner or
+                        # callable type. A local/user declaration keeps its
+                        # ordinary method resolution, even if named text.
+                        builtin_text = definition.name == "text" and definition.kind == SymbolKind.Function and definition.defining_module == nil and definition.type_ == nil
+            case _: ()
+        if not builtin_text:
+            return nil
+        if args.len() != 1:
+            self.error_fatal("text.from_char_code expects one integer argument", Some(receiver.span))
+            return Some(self.builder.emit_const_int(0))
+        val code = self.lower_expr(args[0].value)
+        val result_type = self.bootstrap_text_type()
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_char_from_code"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: result_type, is_variadic: false)))))
+        var builder = self.builder
+        val result = builder.emit_call(callee, [mir_operand_copy(code)], result_type)
+        self.builder = builder
+        if val local = result:
+            self.mark_runtime_value_local(local.id)
+            self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Str, span: receiver.span), 2, 0)
+        result

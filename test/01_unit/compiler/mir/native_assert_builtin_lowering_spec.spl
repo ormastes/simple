@@ -1,0 +1,41 @@
+"""Native assertion must never resolve the unrelated libc __assert ABI."""
+use std.spec.*
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+fn lower_assertion_source(source: text) -> text:
+    val path = "native_assert_builtin_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var serialized = ""
+    for function in mir.functions.values():
+        if function.name == "validate" or function.name.ends_with(".validate"):
+            serialized = serialize_mir_function(function)
+    serialized
+
+describe "native assertion builtin lowering", tag: ["only-compiled"]:
+    it "branches around the failure path and never emits libc __assert":
+        # @req REQ-NATIVE-ASSERT-ABI-001
+        step("Lower a boolean assertion through the production frontend, HIR and MIR")
+        val lowered = lower_assertion_source("fn validate(ok: bool):\n    assert ok\n")
+        step("Require both continuation and failure blocks with the runtime panic")
+        expect(lowered).to_contain("assert_success")
+        expect(lowered).to_contain("assert_failure")
+        expect(lowered).to_contain("rt_panic")
+        expect(lowered).to_contain("assertion failed")
+        expect(lowered.contains("__assert")).to_equal(false)
+
+    it "retains the supplied diagnostic on the failure path":
+        # @req REQ-NATIVE-ASSERT-ABI-002
+        step("Lower an assertion with a distinctive diagnostic")
+        val lowered = lower_assertion_source("fn validate(ok: bool):\n    assert ok, \"assert-native-marker\"\n")
+        expect(lowered).to_contain("assert-native-marker")
+        expect(lowered).to_contain("rt_interp_cstr")
+        expect(lowered.contains("__assert")).to_equal(false)

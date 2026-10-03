@@ -1,0 +1,92 @@
+# Actual intended parent compiler parse-only execution; no substituted identity.
+use app.io.env_ops.{env_vars}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessInputV1,
+    WindowsProcessLeaseV1, windows_process_start_v1, windows_process_poll_v1, windows_process_collect_v1,
+    windows_process_cancel_v1}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional, dir_exists}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms, current_time_ms}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.parser_qualification_parent_cache.{ParserQualificationParentCacheV1,
+    parser_qualification_parent_cache_v1}
+
+fn parser_qualification_parent_cleanup_v1(lease: WindowsProcessLeaseV1) -> text:
+    val cancelled = windows_process_cancel_v1(lease)
+    val deadline = current_time_ms() + 5000
+    while current_time_ms() < deadline:
+        match windows_process_poll_v1(lease):
+            case Ok(observed):
+                if observed.terminal:
+                    match windows_process_collect_v1(lease):
+                        case Ok(_): return ""
+                        case Err(reason): return reason
+            case Err(reason): return reason
+        sleep_ms(20)
+    "parent compiler cleanup did not reach terminal tree evidence"
+
+fn parser_qualification_parent_run_v1(workspace: text, root: text, producer: text,
+    digest: text, target: text, good: text) -> Result<ParserQualificationParentCacheV1, text>:
+    val relative = "qualification-parent/good.spl"
+    if dir_exists(workspace + "/qualification-parent") or dir_exists(root + "/parent-cache") or
+            file_exists(root + "/actual-parent.fpc"):
+        return Err("actual parent source/cache evidence must be fresh in a unique workspace")
+    if not dir_create(workspace + "/qualification-parent", true) or not dir_create(root + "/parent-cache", true):
+        return Err("cannot prepare actual parent compiler fixture")
+    if not file_atomic_write(workspace + "/" + relative, good): return Err("cannot write actual parent source")
+    val changed = ["SIMPLE_FRONTEND_CACHE", "SIMPLE_FRONTEND_CACHE_SCOPE", "SIMPLE_FRONTEND_CACHE_DIR",
+        "SIMPLE_BINARY", "SIMPLE_PARSE_SHARD", "SIMPLE_PARSE_SHARD_QUEUE", "SIMPLE_HIR_SHARD",
+        "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", "SIMPLE_NATIVE_BUILD_MANAGER_PARSE",
+        "SIMPLE_STAGE3_STREAMING_SURFACES", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STAGE4_STREAMING_SURFACES"]
+    var environment: [text] = []
+    for pair in env_vars():
+        if not changed.contains(pair.0.to_upper()): environment = environment.push(pair.0 + "=" + pair.1)
+    for value in ["SIMPLE_FRONTEND_CACHE=1", "SIMPLE_FRONTEND_CACHE_SCOPE=", "SIMPLE_FRONTEND_CACHE_DIR=" + root + "/parent-cache/frontend",
+            "SIMPLE_BINARY=" + producer, "SIMPLE_PARSE_SHARD=0/1", "SIMPLE_PARSE_SHARD_QUEUE=", "SIMPLE_HIR_SHARD=",
+            "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct", "SIMPLE_NATIVE_BUILD_MANAGER_PARSE=0",
+            "SIMPLE_STAGE3_STREAMING_SURFACES=0", "SIMPLE_BOOTSTRAP_STAGE4=0", "SIMPLE_STAGE4_STREAMING_SURFACES=0"]:
+        environment = environment.push(value)
+    val request = WindowsProcessRequestV1(producer, digest,
+        # Bootstrap's positional pure-Simple route requires no --source flag;
+        # adding one delegates to rt_native_build and cannot prove parent parity.
+        ["native-build", relative, "--entry-closure", "--target", target,
+         "--parse-shard=0/1", "--cache-dir", root + "/parent-cache", "-o", root + "/parent-unused.exe"],
+        environment, workspace, [WindowsProcessInputV1(workspace + "/" + relative, sha256_text(good))],
+        root + "/parent.stdout.log", root + "/parent.stderr.log", 60000)
+    val lease = windows_process_start_v1(request)?
+    while true:
+        val observed = match windows_process_poll_v1(lease):
+            case Ok(value): value
+            case Err(reason):
+                val cleanup = parser_qualification_parent_cleanup_v1(lease)
+                return Err("parent compiler observation failed: " + reason + "; cleanup=" + cleanup)
+        if observed.terminal: break
+        sleep_ms(20)
+    val terminal = match windows_process_collect_v1(lease):
+        case Ok(value): value
+        case Err(reason):
+            val cleanup = parser_qualification_parent_cleanup_v1(lease)
+            return Err("parent compiler collection failed: " + reason + "; cleanup=" + cleanup)
+    if terminal.exit_code != 0 or terminal.timed_out or not terminal.tree_empty or not terminal.leader_reaped:
+        return Err("actual parent compiler parse-only run failed or did not reap its tree")
+    var directories = [root + "/parent-cache"]
+    var cache_paths: [text] = []
+    var cursor = 0
+    while cursor < directories.len():
+        if directories.len() > 1024: return Err("actual parent cache directory count exceeds bound")
+        val directory = directories[cursor]
+        cursor = cursor + 1
+        val names = match dir_list_optional(directory):
+            case Some(value): value
+            case _: return Err("cannot enumerate actual parent cache")
+        for name in names:
+            val path = directory + "/" + name
+            if dir_exists(path): directories = directories.push(path)
+            elif name.ends_with(".fpc"): cache_paths = cache_paths.push(path)
+    if cache_paths.len() != 1: return Err("fresh actual parent produced an unexpected frontend cache inventory")
+    val raw = file_read_regular_no_follow_bounded(cache_paths[0], 134217728)?
+    val result = parser_qualification_parent_cache_v1(raw, digest)?
+    if not file_atomic_write(root + "/actual-parent.fpc", raw): return Err("cannot retain actual parent cache proof")
+    Ok(result)
+
+export parser_qualification_parent_run_v1

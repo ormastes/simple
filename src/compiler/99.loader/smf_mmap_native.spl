@@ -205,7 +205,13 @@ fn native_free_exec_memory(address: i64, size: i64) -> bool:
         return false
     val released = _sffi_munmap_raw(address, size) == 0
     if released:
-        EXEC_MEMORY_ALLOCS = EXEC_MEMORY_ALLOCS.remove(address)
+        # Dict.remove has different native/interpreter return semantics.
+        # Rebuild the accounting map so rollback cannot corrupt it.
+        var kept: Dict<i64, i64> = {}
+        for mapped_address in EXEC_MEMORY_ALLOCS.keys():
+            if mapped_address != address:
+                kept[mapped_address] = EXEC_MEMORY_ALLOCS[mapped_address]
+        EXEC_MEMORY_ALLOCS = kept
     released
 
 fn native_exec_memory_count() -> i64:
@@ -256,6 +262,12 @@ fn native_make_rw(address: i64, size: i64) -> bool:
     if address == 0 or size <= 0:
         return false
     _sffi_mprotect(address, size, PROT_READ | PROT_WRITE) == 0
+
+@unsafe(reason: "caller owns mapped-address extent and protection state", capabilities: [raw_ptr])
+fn native_make_ro(address: i64, size: i64) -> bool:
+    if address == 0 or size <= 0:
+        return false
+    _sffi_mprotect(address, size, PROT_READ) == 0
 
 @unsafe(reason: "caller owns mapped-address extent and read lifetime", capabilities: [raw_ptr])
 fn native_mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]:

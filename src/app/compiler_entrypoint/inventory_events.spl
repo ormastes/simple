@@ -4,7 +4,8 @@
 use app.io.mod.{dir_create, file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_at_pointer_v1, compile_source_inventory_read_pointer_content_v1}
-use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1,
+    compile_source_inventory_revalidate_pointer_v1}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io.file_ops.{
     file_atomic_write, file_delete, file_is_regular_no_follow, file_size,
@@ -725,6 +726,31 @@ fn _compiler_inventory_refresh_locked_v1(
         root, journal, consumed_rows)
     if filesystem_events == nil:
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
+    if not cold_init and git_events.len() == 0 and filesystem_events!.len() == 0 and
+            not membership_changed:
+        # Match the exact canonical record publication would write. A changed
+        # HEAD/checkpoint or noncanonical cursor still takes the publish path.
+        val unchanged_pointer = [
+            cursor.inventory_digest,
+            "simple-compile-event-cursor-v3",
+            "git_head={head}",
+            "filesystem_rows={rows}",
+            "filesystem_digest={filesystem_digest}",
+            "inventory_digest={cursor.inventory_digest}",
+            "inventory_generation={cursor.inventory_generation}",
+            "untracked_src_digest={untracked_src_digest}",
+            "untracked_test_digest={untracked_test_digest}",
+            "untracked_membership_digest={membership_digest}"
+        ].join("\n")
+        if unchanged_pointer == pointer_content:
+            # Retain all fresh event checks above and revalidate the generation
+            # under publication.lock; avoid apply/encode/publish/readback only.
+            val current = compile_source_inventory_revalidate_pointer_v1(
+                cache_root, pointer_content)
+            if not current.valid:
+                return compiler_inventory_invalid_v1("observed-event-apply:" + current.reason)
+            return CompilerInventoryRefreshV1(
+                true, "ok", current.digest, current.inventory!.generation)
     # Publish only after all journal checks pass. The immutable blob must
     # exist before inventory CURRENT may name it, but a failed apply must not
     # leave this refresh's newly created blob behind.

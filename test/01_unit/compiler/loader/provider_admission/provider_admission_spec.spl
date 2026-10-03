@@ -1,6 +1,15 @@
+"""## Purpose and audience
+
+Provider authors can preserve the reason a capability is unavailable.
+
+Constructing an admission leaves it unrequested. On demand, malformed
+metadata produces a typed refusal; later callers receive that same refusal.
+The state fixtures below exercise the production admission owner without
+claiming catalog registration, archive mapping, or payload execution.
+"""
+
 use std.spec.*
 use std.nogc_sync_mut.atomic.{MemoryOrdering}
-use std.io.{read_file}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.loader.provider_admission.*
 use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
@@ -20,12 +29,112 @@ fn terminal_state_receipt(identity: text) -> ProviderAdmissionReceiptV1:
     val digest = sha256_text("state-only-fixture")
     ProviderAdmissionReceiptV1(identity, "package", digest, digest, digest, [], ProviderModeV1.pure_simple, ProviderEffectPolicyV1(identity, true), true, false)
 
-val STATE_PATH = "src/compiler/99.loader/provider_admission/state.spl"
-val ADMISSION_PATH = "src/compiler/99.loader/provider_admission/admission.spl"
-
 describe "metadata-only provider admission":
-    # @req REQ-002 REQ-012
+    # @manual_section: Stable typed refusal
+    it "should preserve a malformed descriptor refusal on repeated demand":
+        # @req REQ-002 REQ-012
+        """A caller can handle the same unavailable capability consistently,
+        regardless of whether this is its first request or a later request.
+        Constructing the fixture does not attempt metadata admission.
+        """
+        step("Prepare a provider admission")
+        val admission = terminal_state_fixture()
+        admission.descriptor = ProviderDescriptorV1(
+            "", "package", sha256_text("state-only-fixture"), [],
+            ProviderModeV1.pure_simple, "", true)
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.unrequested)
+        expect(admission.failure).to_be_nil()
+        expect(admission.receipt).to_be_nil()
+        step("Demand the provider capability")
+        val first = provider_admit_metadata_v1(admission)
+        expect(first.is_err()).to_be(true)
+        expect(first.unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_descriptor)
+        step("Demand the rejected provider again")
+        val repeated = provider_admit_metadata_v1(admission)
+        expect(repeated.is_err()).to_be(true)
+        expect(repeated.unwrap_err()).to_equal(first.unwrap_err())
+        step("Inspect the stable typed refusal")
+        expect(admission.failure.unwrap().error).to_equal(ProviderAdmissionErrorV1.invalid_descriptor)
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.rejected)
+        expect(admission.receipt).to_be_nil()
+
+    it "should preserve an invalid package image refusal on repeated demand":
+        # @req REQ-002 REQ-012
+        """A syntactically valid descriptor still requires a validated package.
+        This fixture has no valid archive receipt and must remain unavailable.
+        """
+        step("Prepare an admission without a valid package image")
+        val admission = terminal_state_fixture()
+        step("Demand the provider capability")
+        val first = provider_admit_metadata_v1(admission)
+        expect(first.unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_package_image)
+        step("Demand the rejected provider again")
+        expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(first.unwrap_err())
+        expect(admission.receipt).to_be_nil()
+
+    it "should replay each published refusal without replacing its identity":
+        # @req REQ-012
+        """The terminal-state fixture covers each concrete refusal produced by
+        metadata admission. Publishing it does not simulate a successful load.
+        A losing publisher cannot change what later callers observe.
+        """
+        for refusal in [
+                ProviderAdmissionErrorV1.invalid_descriptor,
+                ProviderAdmissionErrorV1.invalid_package_image,
+                ProviderAdmissionErrorV1.invalid_archive_capability,
+                ProviderAdmissionErrorV1.package_identity_mismatch,
+                ProviderAdmissionErrorV1.abi_mismatch,
+                ProviderAdmissionErrorV1.dependency_mismatch,
+                ProviderAdmissionErrorV1.invalid_dual_mode_policy]:
+            step("Publish the original typed refusal")
+            val admission = terminal_state_fixture()
+            expect(provider_admission_try_claim_v1(admission)).to_be(true)
+            expect(provider_admission_reject_v1(admission, refusal)).to_be(true)
+            step("Refuse replacement by a competing publisher")
+            expect(provider_admission_reject_v1(admission, ProviderAdmissionErrorV1.admission_conflict)).to_be(false)
+            step("Demand the rejected provider again")
+            expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(refusal)
+            expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(refusal)
+            step("Inspect the stable typed refusal")
+            val failure = admission.failure.unwrap()
+            expect(failure.error).to_equal(refusal)
+            expect(failure.provider_identity).to_equal("primary")
+            expect(failure.package_identity).to_equal("package")
+            expect(failure.archive_digest).to_equal(sha256_text("state-only-fixture"))
+            expect(admission.receipt).to_be_nil()
+
+    it "should refuse a rejected state with missing failure metadata":
+        # @req REQ-012
+        """An inconsistent state cannot manufacture a cached refusal. The
+        caller receives an admission conflict rather than an invented cause.
+        """
+        step("Expose a rejected state without its failure record")
+        val admission = terminal_state_fixture()
+        admission.atomic_state.store(-1, MemoryOrdering.Release)
+        step("Demand the inconsistent provider")
+        expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.admission_conflict)
+        expect(admission.failure).to_be_nil()
+        expect(admission.receipt).to_be_nil()
+
+    it "should retain a cached admission receipt without transferring ownership":
+        # @req REQ-002 REQ-012
+        """The successful terminal-state path remains available. A later
+        observer receives the original receipt but does not become its owner.
+        """
+        step("Publish the primary admission receipt")
+        val admission = terminal_state_fixture()
+        expect(provider_admission_try_claim_v1(admission)).to_be(true)
+        expect(provider_admission_publish_v1(admission, terminal_state_receipt("primary"))).to_be(true)
+        step("Demand the admitted provider again")
+        val repeated = provider_admit_metadata_v1(admission).unwrap()
+        expect(repeated.provider_identity).to_equal("primary")
+        expect(repeated.owner).to_be(false)
+        expect(repeated.waited).to_be(true)
+        expect(admission.receipt.unwrap().owner).to_be(true)
+        expect(admission.failure).to_be_nil()
+
     it "should keep reserved finalization unpublished and reject competing writers":
+        # @req REQ-002 REQ-012
         step("Reserve finalization while the provider remains admitting")
         val admission = terminal_state_fixture()
         expect(provider_admission_try_claim_v1(admission)).to_be(true)
@@ -37,8 +146,8 @@ describe "metadata-only provider admission":
         expect(admission.receipt).to_be_nil()
         expect(admission.failure).to_be_nil()
 
-    # @req REQ-002 REQ-012
     it "should preserve the first receipt after refusing duplicate publication":
+        # @req REQ-002 REQ-012
         step("Claim admission and publish the primary receipt")
         val admission = terminal_state_fixture()
         expect(provider_admission_try_claim_v1(admission)).to_be(true)
@@ -47,8 +156,8 @@ describe "metadata-only provider admission":
         expect(provider_admission_publish_v1(admission, terminal_state_receipt("replacement"))).to_be(false)
         expect(admission.receipt.unwrap().provider_identity).to_equal("primary")
 
-    # @req REQ-002 REQ-012
     it "should preserve rejection without attaching a later receipt":
+        # @req REQ-002 REQ-012
         step("Reject the claimed admission with its typed failure")
         val admission = terminal_state_fixture()
         expect(provider_admission_try_claim_v1(admission)).to_be(true)
@@ -58,8 +167,8 @@ describe "metadata-only provider admission":
         expect(admission.receipt).to_be_nil()
         expect(admission.failure.unwrap().error).to_equal(ProviderAdmissionErrorV1.abi_mismatch)
 
-    # @req REQ-002 REQ-012
     it "should preserve admission without attaching a later failure":
+        # @req REQ-002 REQ-012
         step("Publish the claimed admission")
         val admission = terminal_state_fixture()
         expect(provider_admission_try_claim_v1(admission)).to_be(true)
@@ -69,7 +178,12 @@ describe "metadata-only provider admission":
         expect(admission.failure).to_be_nil()
         expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.admitted)
 
-    it "admits one effect owner and keeps the shadow metadata-only":
+    it "should keep shadow policy metadata-only with one effect owner":
+        # @req REQ-005
+        """The admission policy identifies a single owner. This checks policy
+        metadata; it does not claim that two provider implementations ran.
+        """
+        step("Inspect a shadow policy with distinct provider identities")
         val descriptor = ProviderDescriptorV1(
             "pure.provider", "pkg.provider", sha256_text("abi"),
             [sha256_text("dependency")], ProviderModeV1.shadow_compare,
@@ -79,13 +193,19 @@ describe "metadata-only provider admission":
         expect(policy.unwrap().effect_owner_identity).to_equal("pure.provider")
         expect(policy.unwrap().shadow_metadata_only).to_equal(true)
 
-    it "rejects a dual mode policy with the same primary and shadow":
+    it "should reject a shadow policy with the same primary and shadow":
+        # @req REQ-005
+        """A provider cannot serve as its own comparison implementation."""
+        step("Request a shadow policy with duplicate provider identities")
         val descriptor = ProviderDescriptorV1(
             "same.provider", "pkg.provider", sha256_text("abi"), [],
             ProviderModeV1.shadow_compare, "same.provider", true)
-        expect(provider_admission_policy_v1(descriptor).is_err()).to_equal(true)
+        expect(provider_admission_policy_v1(descriptor).unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_dual_mode_policy)
 
-    it "issues an execution ticket only to the admitted effect owner":
+    it "should issue a ticket carrying the admitted effect owner":
+        # @req REQ-005
+        """A valid ticket retains the primary identity from its receipt."""
+        step("Request a ticket from a receipt with one matching effect owner")
         val policy = ProviderEffectPolicyV1("pure.provider", true)
         val receipt = ProviderAdmissionReceiptV1(
             "pure.provider", "pkg.provider", sha256_text("archive"),
@@ -95,53 +215,74 @@ describe "metadata-only provider admission":
         expect(ticket.is_ok()).to_equal(true)
         expect(ticket.unwrap().effect_owner_identity).to_equal("pure.provider")
 
-    it "uses one atomic owner and caches typed rejection":
-        val state = read_file(STATE_PATH)
-        val admission = read_file(ADMISSION_PATH)
-        expect(state).to_contain("atomic_state.compare_exchange(")
-        expect(state).to_contain("ProviderAdmissionFailureV1?")
-        expect(admission).to_contain("cached_rejection")
-        expect(admission).to_contain("PROVIDER_ADMISSION_WAIT_BUDGET_V1")
-        expect(admission).to_contain("thread_yield()")
+    it "should allow only one claimant to begin admission":
+        # @req REQ-002
+        """A second claimant observes the same in-progress admission without
+        gaining publication ownership or creating terminal metadata.
+        """
+        step("Claim an unrequested provider admission")
+        val admission = terminal_state_fixture()
+        expect(provider_admission_try_claim_v1(admission)).to_be(true)
+        step("Refuse another claim while the owner is admitting")
+        expect(provider_admission_try_claim_v1(admission)).to_be(false)
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.admitting)
+        expect(admission.receipt).to_be_nil()
+        expect(admission.failure).to_be_nil()
 
-    it "binds package image receipt and pinned capability authority":
-        val admission = read_file(ADMISSION_PATH)
-        expect(admission).to_contain("package_image_validate_v1(")
-        expect(admission).to_contain("authority.capability.archive_digest")
-        expect(admission).to_contain("authority.capability.receipt_digest")
-        expect(admission).to_contain("authority.capability.identity.content_digest")
-        expect(admission).to_contain("package_identity_mismatch")
-        expect(admission).to_contain("dependency_mismatch")
+    it "should return a bounded wait refusal without rejecting the owner":
+        # @req REQ-002 REQ-012
+        """A caller whose wait budget expires does not overwrite the owner.
+        The owner can still publish its original result afterward.
+        """
+        step("Leave one owner admitting while another caller waits")
+        val admission = terminal_state_fixture()
+        expect(provider_admission_try_claim_v1(admission)).to_be(true)
+        expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.wait_exhausted)
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.admitting)
+        expect(admission.failure).to_be_nil()
+        step("Let the original owner publish its refusal")
+        expect(provider_admission_reject_v1(admission, ProviderAdmissionErrorV1.abi_mismatch)).to_be(true)
+        expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.abi_mismatch)
 
-    it "keeps admission metadata-only":
-        val admission = read_file(ADMISSION_PATH)
-        expect(admission.contains("pinned_archive_read_member_v1")).to_equal(false)
-        expect(admission.contains("read_file(")).to_equal(false)
-        expect(admission.contains("rt_process_run")).to_equal(false)
-        expect(admission.contains("provider_execute")).to_equal(false)
-        expect(admission.contains("provider_initialize")).to_equal(false)
+    it "should refuse an admitted state with missing receipt metadata":
+        # @req REQ-012
+        """An inconsistent successful state cannot yield an invented receipt."""
+        step("Expose an admitted state without its receipt")
+        val admission = terminal_state_fixture()
+        admission.atomic_state.store(2, MemoryOrdering.Release)
+        expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.admission_conflict)
+        expect(admission.receipt).to_be_nil()
+        expect(admission.failure).to_be_nil()
 
-    it "permits only the primary provider to own effects in dual mode":
-        val state = read_file(STATE_PATH)
-        val admission = read_file(ADMISSION_PATH)
-        expect(state).to_contain("shadow_metadata_only: bool")
-        expect(state).to_contain("effect_owner_identity: text")
-        expect(admission).to_contain("descriptor.provider_identity, true")
-        expect(state).to_contain(
-            "receipt.effect_policy.effect_owner_identity != receipt.provider_identity")
+    it "should refuse a ticket whose effect owner differs from its provider":
+        # @req REQ-005
+        """A receipt cannot transfer effect ownership to a shadow provider."""
+        step("Request a ticket with a mismatched effect owner")
+        var receipt = terminal_state_receipt("primary")
+        receipt.effect_policy = ProviderEffectPolicyV1("shadow", true)
+        expect(provider_execution_ticket_v1(receipt).unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_dual_mode_policy)
 
-    it "separates execution authority from admission authority":
-        val state = read_file(STATE_PATH)
-        expect(state).to_contain("ProviderExecutionTicketV1")
-        expect(state).to_contain("fn provider_execution_ticket_v1(")
-        expect(state).to_contain("invalid_dual_mode_policy")
+    it "should reject shadow identities attached to a direct provider mode":
+        # @req REQ-005
+        """Direct pure and foreign modes do not accept a hidden shadow owner."""
+        for mode in [ProviderModeV1.pure_simple, ProviderModeV1.foreign]:
+            step("Request a direct policy that also names a shadow")
+            val descriptor = ProviderDescriptorV1(
+                "primary", "package", sha256_text("abi"), [], mode, "shadow", true)
+            expect(provider_admission_policy_v1(descriptor).unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_dual_mode_policy)
 
-    it "has typed rejection for malformed and incompatible authority":
-        val state = read_file(STATE_PATH)
-        for error in [
-                "invalid_descriptor", "invalid_package_image",
-                "invalid_archive_capability", "package_identity_mismatch",
-                "abi_mismatch", "dependency_mismatch",
-                "invalid_dual_mode_policy", "admission_conflict",
-                "wait_exhausted", "cached_rejection"]:
-            expect(state).to_contain(error)
+    it "should reject malformed ABI and dependency digests before image admission":
+        # @req REQ-002 REQ-012
+        """Malformed descriptor digests produce the descriptor error even when
+        the fixture's package image is also invalid; repeated demand retains it.
+        """
+        for digest in ["", "short", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]:
+            step("Demand a descriptor with a malformed ABI digest")
+            val admission = terminal_state_fixture()
+            admission.descriptor = ProviderDescriptorV1("primary", "package", digest, [], ProviderModeV1.pure_simple, "", true)
+            expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_descriptor)
+            expect(provider_admit_metadata_v1(admission).unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_descriptor)
+            step("Demand a descriptor with a malformed dependency digest")
+            val dependency = terminal_state_fixture()
+            dependency.descriptor = ProviderDescriptorV1("primary", "package", sha256_text("abi"), [digest], ProviderModeV1.pure_simple, "", true)
+            expect(provider_admit_metadata_v1(dependency).unwrap_err()).to_equal(ProviderAdmissionErrorV1.invalid_descriptor)

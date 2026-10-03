@@ -1,0 +1,141 @@
+# Immutable original signed work; no decoder authorizes a patch or a receipt.
+use std.scv.db_patch.{DbPatch, db_patch_validate}
+use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_admission.{DbAdmissionPolicy}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_encode}
+use std.scv.db_receipt.{DbSettlementReceipt, db_receipt_digest}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+use app.scv.db.settlement_journal_codec.*
+use app.scv.db.settlement_paged_projection.*
+
+struct DbSettlementWorkItem:
+    patch: DbPatch
+    phase: text
+    attempts: u64
+    journal: DbSettlementJournal?
+    paged_journal: DbPagedSettlementJournal?
+    candidate_commit: text
+    observed_index_head: text
+    last_error: text
+    preparation_structure: text
+
+struct DbSettlementQueue:
+    context_digest: text
+    items: [DbSettlementWorkItem]
+
+struct DbSettlementQueueView:
+    head: text
+    queue: DbSettlementQueue
+
+fn db_settlement_queue_context(admission: DbAdmissionPolicy) -> Result<text, text>:
+    val payload = db_canonical_text(admission.repository)? + db_canonical_text(admission.namespace)? + db_frame(2u8, db_u64_bytes(admission.epoch)) + db_canonical_text(admission.schema_revision)? + db_canonical_text(admission.reducer_revision)?
+    Ok(sha256_u8_hex(db_domain_bytes("settlement-work-context", payload)?))
+
+fn db_settlement_queue_structure(policy: DbPolicyConfig) -> Result<text, text>:
+    # Pin the versioned reduction subtree, not mutable credentials/metadata.
+    # The existing strict policy encoder validates all tags and context first.
+    val encoded = db_policy_encode(policy)?
+    val prefix = "SCVDB-POLICY-v1\n"
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val envelope = db_read_children(db_read_frame(bytes, 0)?.payload)?
+    val pair = db_read_children(envelope[1].payload)?
+    Ok(sha256_u8_hex(db_domain_bytes("settlement-work-structure", db_frame(pair[1].tag, pair[1].payload))?))
+
+fn _queue_hex(value: text, width: i64) -> bool:
+    if value.len() != width: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_settlement_work_receipt(item: DbSettlementWorkItem) -> Result<DbSettlementReceipt, text>:
+    if item.journal != nil and item.paged_journal != nil: return Err("SCVDB_QUEUE_BACKEND")
+    if val journal = item.journal: return Ok(journal.receipt)
+    if val journal = item.paged_journal: return Ok(journal.receipt)
+    Err("SCVDB_QUEUE_PHASE")
+
+fn _queue_item_bytes(item: DbSettlementWorkItem, paged: bool) -> Result<[u8], text>:
+    val wire = db_patch_encode(item.patch)?
+    if wire.len() > 1048576: return Err("SCVDB_QUEUE_PATCH_QUOTA")
+    if not ["queued", "prepared", "awaiting-index", "local-index-observed", "conflicted"].contains(item.phase): return Err("SCVDB_QUEUE_PHASE")
+    if item.last_error.len() > 128 or item.last_error.contains("\n") or item.last_error.contains("\0"): return Err("SCVDB_QUEUE_ERROR")
+    var journal_bytes = db_frame(0u8, [])
+    var paged_bytes = db_frame(0u8, [])
+    if (item.patch.reducer_revision == "scv-merkle-reducer-v1") != paged: return Err("SCVDB_QUEUE_BACKEND")
+    if item.journal != nil and (paged or item.paged_journal != nil): return Err("SCVDB_QUEUE_BACKEND")
+    if item.paged_journal != nil and not paged: return Err("SCVDB_QUEUE_BACKEND")
+    if val journal = item.journal:
+        journal_bytes = db_canonical_text(db_settlement_journal_encode(journal)?)?
+    if val journal = item.paged_journal:
+        paged_bytes = db_canonical_text(db_paged_settlement_journal_encode(journal)?)?
+    if item.journal != nil or item.paged_journal != nil:
+        val receipt = db_settlement_work_receipt(item)?
+        val phase = if item.journal != nil: item.journal.unwrap().phase else: item.paged_journal.unwrap().phase
+        if not _queue_hex(item.preparation_structure, 64): return Err("SCVDB_QUEUE_STRUCTURE")
+        if not ["prepared", "awaiting-index", "local-index-observed"].contains(item.phase) or (item.attempts == 0 and item.phase != "local-index-observed"): return Err("SCVDB_QUEUE_PHASE")
+        if not receipt.batch_digests.contains(db_patch_validate(item.patch)?) or receipt.namespace != item.patch.namespace or receipt.epoch != item.patch.epoch or receipt.repository != item.patch.repository or receipt.schema_revision != item.patch.schema_revision or receipt.reducer_revision != item.patch.reducer_revision: return Err("SCVDB_QUEUE_RECEIPT")
+        if phase == DbSettlementPhase.Indexed: return Err("SCVDB_QUEUE_PROTECTED_CLAIM")
+        if item.phase == "prepared" and phase != DbSettlementPhase.Prepared: return Err("SCVDB_QUEUE_PHASE")
+        if item.phase != "prepared" and phase != DbSettlementPhase.PublishedAwaitingIndex: return Err("SCVDB_QUEUE_PHASE")
+        if item.candidate_commit.len() == 0 or item.candidate_commit.len() >= 65536 or item.candidate_commit.contains("\0"): return Err("SCVDB_QUEUE_COMMIT")
+        if item.phase == "local-index-observed":
+            if not _queue_hex(item.observed_index_head, receipt.accepted_head.len()): return Err("SCVDB_QUEUE_INDEX")
+        elif item.observed_index_head != "": return Err("SCVDB_QUEUE_INDEX")
+    elif not ["queued", "conflicted"].contains(item.phase) or item.candidate_commit != "" or item.observed_index_head != "" or item.preparation_structure != "": return Err("SCVDB_QUEUE_PHASE")
+    var payload = db_canonical_text(wire)? + db_canonical_text(item.phase)? + db_frame(2u8, db_u64_bytes(item.attempts)) + journal_bytes + db_frame(4u8, base_encoding_text_to_bytes(item.candidate_commit)) + db_canonical_text(item.observed_index_head)? + db_canonical_text(item.last_error)? + db_canonical_text(item.preparation_structure)?
+    if paged: payload = payload + paged_bytes
+    Ok(db_frame(109u8, payload))
+
+fn db_settlement_queue_encode(queue: DbSettlementQueue) -> Result<text, text>:
+    if queue.items.len() > 64: return Err("SCVDB_QUEUE_BACKPRESSURE")
+    if not _queue_hex(queue.context_digest, 64): return Err("SCVDB_QUEUE_CONTEXT")
+    var payload = db_canonical_text(queue.context_digest)?
+    var seen: [text] = []
+    val paged = queue.items.len() > 0 and queue.items[0].patch.reducer_revision == "scv-merkle-reducer-v1"
+    for item in queue.items:
+        if seen.contains(item.patch.batch_id): return Err("SCVDB_QUEUE_DUPLICATE")
+        seen.push(item.patch.batch_id)
+        payload = payload + _queue_item_bytes(item, paged)?
+        if payload.len() > 8388500: return Err("SCVDB_QUEUE_BACKPRESSURE")
+    val prefix = if paged: "SCVDB-SETTLEMENT-WORK-v2\n" else: "SCVDB-SETTLEMENT-WORK-v1\n"
+    val encoded = prefix + db_snapshot_hex(db_domain_bytes(if paged: "settlement-work-paged-v2" else: "settlement-work", db_frame(110u8, payload))?) + "\n"
+    if encoded.len() > 16777216: return Err("SCVDB_QUEUE_BACKPRESSURE")
+    Ok(encoded)
+
+fn db_settlement_queue_decode(encoded: text) -> Result<DbSettlementQueue, text>:
+    if encoded.len() > 16777216: return Err("SCVDB_QUEUE_BACKPRESSURE")
+    val paged = encoded.starts_with("SCVDB-SETTLEMENT-WORK-v2\n")
+    val prefix = if paged: "SCVDB-SETTLEMENT-WORK-v2\n" else: "SCVDB-SETTLEMENT-WORK-v1\n"
+    if encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_QUEUE_ENCODING")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val domain = db_domain_bytes(if paged: "settlement-work-paged-v2" else: "settlement-work", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_QUEUE_ENCODING")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_QUEUE_ENCODING")
+    val frame = db_read_frame(bytes, domain.len())?
+    if frame.tag != 110u8 or frame.next_offset != bytes.len(): return Err("SCVDB_QUEUE_ENCODING")
+    val fields = db_read_children(frame.payload)?
+    if fields.len() == 0 or fields.len() > 65: return Err("SCVDB_QUEUE_ENCODING")
+    var items: [DbSettlementWorkItem] = []
+    for index in 1..fields.len():
+        if fields[index].tag != 109u8: return Err("SCVDB_QUEUE_ENCODING")
+        val parts = db_read_children(fields[index].payload)?
+        if parts.len() != (if paged: 9 else: 8) or parts[4].tag != 4u8: return Err("SCVDB_QUEUE_ENCODING")
+        var journal: DbSettlementJournal? = nil
+        var paged_journal: DbPagedSettlementJournal? = nil
+        if parts[3].tag == 3u8: journal = Some(db_settlement_journal_decode(db_read_text(parts[3])?)?)
+        elif parts[3].tag != 0u8 or parts[3].payload.len() != 0: return Err("SCVDB_QUEUE_ENCODING")
+        if paged:
+            if parts[8].tag == 3u8: paged_journal = Some(db_paged_settlement_journal_decode(db_read_text(parts[8])?)?)
+            elif parts[8].tag != 0u8 or parts[8].payload.len() != 0: return Err("SCVDB_QUEUE_ENCODING")
+        items.push(DbSettlementWorkItem(patch: db_patch_decode(db_read_text(parts[0])?)?, phase: db_read_text(parts[1])?, attempts: db_read_unsigned(parts[2])?, journal: journal, paged_journal: paged_journal, candidate_commit: validated_utf8_bytes_to_text_linear(parts[4].payload)?, observed_index_head: db_read_text(parts[5])?, last_error: db_read_text(parts[6])?, preparation_structure: db_read_text(parts[7])?))
+    val queue = DbSettlementQueue(context_digest: db_read_text(fields[0])?, items: items)
+    if db_settlement_queue_encode(queue)? != encoded: return Err("SCVDB_QUEUE_NONCANONICAL")
+    Ok(queue)
+
+export DbSettlementWorkItem, DbSettlementQueue, DbSettlementQueueView
+export db_settlement_queue_context, db_settlement_queue_structure, db_settlement_queue_encode, db_settlement_queue_decode
+export db_settlement_work_receipt

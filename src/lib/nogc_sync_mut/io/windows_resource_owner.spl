@@ -1,0 +1,47 @@
+# Parent-owned resource sampling. No subprocess or process-slot acquisition.
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, GlobalMemoryStatusEx, GetSystemTimes, GetTickCount64}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_read_u64}
+var _windows_resource_sample: (i64, i64, f64) = (0, 0, 100.0)
+var _windows_resource_tick: u64 = 0u64
+var _windows_resource_idle: u64 = 0u64
+var _windows_resource_total: u64 = 0u64
+var _windows_resource_initialized = false
+
+@unsafe(reason: "bounded Win32 snapshot buffers with checked release; counters copied into parent state", capabilities: [ffi, raw_ptr])
+fn windows_resource_snapshot() -> (i64, i64, f64):
+    val tick = GetTickCount64()
+    if _windows_resource_initialized and tick - _windows_resource_tick < 100u64:
+        return _windows_resource_sample
+    val heap = GetProcessHeap()
+    if heap == 0: return (0, 0, 100.0)
+    val buffer = HeapAlloc(heap, 8u32, 88u64)
+    if buffer == 0: return (0, 0, 100.0)
+    volatile_write_u32(buffer, 64u32)
+    val memory_ok = GlobalMemoryStatusEx(buffer)
+    val cpu_ok = GetSystemTimes(buffer + 64, buffer + 72, buffer + 80)
+    val total_bytes = volatile_read_u64(buffer + 8)
+    val available_bytes = volatile_read_u64(buffer + 16)
+    val idle = volatile_read_u64(buffer + 64)
+    val total = volatile_read_u64(buffer + 72) + volatile_read_u64(buffer + 80)
+    val freed = HeapFree(heap, 0u32, buffer)
+    if memory_ok == 0 or cpu_ok == 0 or freed == 0 or total_bytes == 0u64 or available_bytes > total_bytes:
+        return (0, 0, 100.0)
+    var cpu = 100.0
+    if _windows_resource_initialized and total > _windows_resource_total and idle >= _windows_resource_idle:
+        val delta = total - _windows_resource_total
+        val idle_delta = idle - _windows_resource_idle
+        if idle_delta <= delta:
+            cpu = ((delta - idle_delta) as f64) * 100.0 / (delta as f64)
+    _windows_resource_idle = idle
+    _windows_resource_total = total
+    _windows_resource_tick = tick
+    _windows_resource_initialized = true
+    _windows_resource_sample = ((total_bytes / 1048576u64) as i64,
+        ((total_bytes - available_bytes) / 1048576u64) as i64, cpu)
+    _windows_resource_sample
+@else:
+fn windows_resource_snapshot() -> (i64, i64, f64):
+    (0, 0, 100.0)
+@end
+export windows_resource_snapshot

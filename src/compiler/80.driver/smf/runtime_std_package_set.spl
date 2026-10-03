@@ -12,6 +12,13 @@ use compiler.driver.cache.package_archive_cache.{
     package_archive_receipt_decode_v1
 }
 use compiler.driver.cache.cas_store.{cas_blob_path, cas_get, cas_put}
+use compiler.driver.cache.runtime_std_authority_receipt.{
+    RuntimeStdAuthorityReceiptV1,
+    runtime_std_authority_receipt_publish_v1,
+    RuntimeStdAuthorityReceiptV2,
+    RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2,
+    runtime_std_authority_receipt_publish_v2
+}
 use compiler.driver.cache.package_archive_types.{
     PackageActionKeyV1, PackageArchiveMemberReceiptV1,
     PackageArchiveReceiptV1, package_archive_receipt_canonical_fields_v1,
@@ -22,6 +29,10 @@ use compiler.driver.smf.package_image_v1.{
     PackageSectionKindV1, package_image_validate_v1
 }
 use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2,
+    runtime_std_native_action_budget_valid_v2,
+    runtime_std_native_action_abi_digest_v2}
 
 val RUNTIME_PACKAGE_IDENTITY_V1: text = "simple.runtime"
 val STD_PACKAGE_IDENTITY_V1: text = "simple.std"
@@ -122,6 +133,40 @@ fn runtime_std_build_action_v1(
         return nil
     Some(action)
 
+# V2 binds the native package action to the exact manager request and its
+# enforced whole-process ceiling. V1 remains readable for older receipts.
+fn runtime_std_action_digest_v2(
+    authority: RuntimeStdPackageAuthorityV1, package_identity: text,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> text:
+    val v1 = runtime_std_action_digest_v1(authority, package_identity)
+    if v1 == "" or not runtime_std_native_action_budget_valid_v2(budget) or
+            authority.action_abi_digest !=
+                runtime_std_native_action_abi_digest_v2(
+                    authority.compiler_digest):
+        return ""
+    sha256_text("simple/runtime-std-package-action/v2\n" +
+        "base={v1}\nmanager-request={budget.manager_request_digest}\n" +
+        "enforced-memory={budget.enforced_process_limit_bytes}\n")
+
+fn runtime_std_build_action_v2(
+    authority: RuntimeStdPackageAuthorityV1, package_identity: text,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> BuildActionV1?:
+    val action_digest = runtime_std_action_digest_v2(
+        authority, package_identity, budget)
+    if action_digest == "": return nil
+    val action = BuildActionV1(
+        "runtime-std:{package_identity}", action_digest,
+        [authority.compiler_digest, authority.action_abi_digest,
+            runtime_std_package_abi_v1(authority, package_identity),
+            authority.config_digest, budget.manager_request_digest],
+        [], [package_identity], BuildActionPoolV1.semantic, 0,
+        authority.snapshot_revision,
+        budget.enforced_process_limit_bytes, action_digest)
+    if build_action_digest_v1(action) == "": return nil
+    Some(action)
+
 fn runtime_std_sections_valid_v1(sections: [RuntimeStdSectionContentV1]) -> bool:
     if sections.len() != 10:
         return false
@@ -153,11 +198,10 @@ fn runtime_std_empty_admission_v1(reason: text) -> RuntimeStdPackageAdmissionV1:
 
 fn runtime_std_stage_package_v1(
     root: text, authority: RuntimeStdPackageAuthorityV1,
-    input: RuntimeStdPackageInputV1, transaction_input: CasBatchTransactionV1
+    input: RuntimeStdPackageInputV1, transaction_input: CasBatchTransactionV1,
+    action_digest: text
 ) -> RuntimeStdStageResultV1:
     var transaction = transaction_input
-    val action_digest = runtime_std_action_digest_v1(
-        authority, input.package_identity)
     if (action_digest == "" or input.package_abi_digest !=
             runtime_std_package_abi_v1(authority, input.package_identity) or
             not runtime_std_sections_valid_v1(input.sections)):
@@ -210,21 +254,19 @@ fn runtime_std_stage_package_v1(
             cas_blob_path(root, archive_digest), Some(image), Some(receipt)),
         transaction)
 
-fn runtime_std_publish_set_v1(
+fn _runtime_std_publish_set_with_actions_v2(
     root: text, authority: RuntimeStdPackageAuthorityV1,
     runtime_input: RuntimeStdPackageInputV1,
     std_input: RuntimeStdPackageInputV1,
     runtime_result: BuildActionResultV1,
-    std_result: BuildActionResultV1
+    std_result: BuildActionResultV1,
+    runtime_action: BuildActionV1?, std_action: BuildActionV1?,
+    native_budget: RuntimeStdNativeActionBudgetV2?
 ) -> RuntimeStdPackageSetV1:
     if (runtime_input.package_identity != RUNTIME_PACKAGE_IDENTITY_V1 or
             std_input.package_identity != STD_PACKAGE_IDENTITY_V1):
         val invalid = runtime_std_empty_admission_v1("runtime-std-set-invalid")
         return RuntimeStdPackageSetV1(false, invalid.reason, invalid, invalid)
-    val runtime_action = runtime_std_build_action_v1(
-        authority, RUNTIME_PACKAGE_IDENTITY_V1)
-    val std_action = runtime_std_build_action_v1(
-        authority, STD_PACKAGE_IDENTITY_V1)
     if (runtime_action == nil or std_action == nil or
             build_action_result_validate_v1(
                 runtime_action!, runtime_result) != "ok" or
@@ -243,7 +285,8 @@ fn runtime_std_publish_set_v1(
             "runtime-std-transaction-refused")
         return RuntimeStdPackageSetV1(false, invalid.reason, invalid, invalid)
     val runtime_stage = runtime_std_stage_package_v1(
-        root, authority, runtime_input, begun.unwrap())
+        root, authority, runtime_input, begun.unwrap(),
+        runtime_action!.command_identity)
     val runtime = runtime_stage.admission
     if not runtime.valid:
         _ = cas_batch_abort_v1(runtime_stage.transaction)
@@ -251,21 +294,72 @@ fn runtime_std_publish_set_v1(
             false, runtime.reason, runtime,
             runtime_std_empty_admission_v1("not-staged"))
     val standard_stage = runtime_std_stage_package_v1(
-        root, authority, std_input, runtime_stage.transaction)
+        root, authority, std_input, runtime_stage.transaction,
+        std_action!.command_identity)
     val standard = standard_stage.admission
     if not standard.valid:
         _ = cas_batch_abort_v1(standard_stage.transaction)
         return RuntimeStdPackageSetV1(false, standard.reason, runtime, standard)
+    if runtime.receipt == nil or standard.receipt == nil:
+        _ = cas_batch_abort_v1(standard_stage.transaction)
+        return RuntimeStdPackageSetV1(
+            false, "runtime-std-authority-receipt-input-missing", runtime, standard)
+    val authority_receipt = RuntimeStdAuthorityReceiptV1(
+        authority.compiler_digest, authority.action_abi_digest,
+        authority.runtime_abi_digest, authority.std_abi_digest,
+        authority.config_digest, authority.target_triple,
+        authority.snapshot_revision,
+        runtime.action_digest, standard.action_digest,
+        runtime.receipt!.archive_digest,
+        standard.receipt!.archive_digest,
+        runtime.receipt!.receipt_digest,
+        standard.receipt!.receipt_digest)
+    val published_authority = if native_budget == nil:
+        runtime_std_authority_receipt_publish_v1(root, authority_receipt)
+    else:
+        runtime_std_authority_receipt_publish_v2(root,
+            RuntimeStdAuthorityReceiptV2(authority_receipt,
+                native_budget!, RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2))
+    if published_authority.is_err():
+        _ = cas_batch_abort_v1(standard_stage.transaction)
+        return RuntimeStdPackageSetV1(
+            false, published_authority.unwrap_err(), runtime, standard)
     if cas_batch_publish_v1(standard_stage.transaction).is_err():
         return RuntimeStdPackageSetV1(
             false, "runtime-std-publication-failed", runtime, standard)
     RuntimeStdPackageSetV1(true, "rebuilt", runtime, standard)
 
-fn runtime_std_load_package_v1(
+fn runtime_std_publish_set_v1(
     root: text, authority: RuntimeStdPackageAuthorityV1,
-    package_identity: text
+    runtime_input: RuntimeStdPackageInputV1,
+    std_input: RuntimeStdPackageInputV1,
+    runtime_result: BuildActionResultV1,
+    std_result: BuildActionResultV1
+) -> RuntimeStdPackageSetV1:
+    _runtime_std_publish_set_with_actions_v2(root, authority,
+        runtime_input, std_input, runtime_result, std_result,
+        runtime_std_build_action_v1(authority, RUNTIME_PACKAGE_IDENTITY_V1),
+        runtime_std_build_action_v1(authority, STD_PACKAGE_IDENTITY_V1), nil)
+
+fn runtime_std_publish_set_v2(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    runtime_input: RuntimeStdPackageInputV1,
+    std_input: RuntimeStdPackageInputV1,
+    runtime_result: BuildActionResultV1,
+    std_result: BuildActionResultV1,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> RuntimeStdPackageSetV1:
+    _runtime_std_publish_set_with_actions_v2(root, authority,
+        runtime_input, std_input, runtime_result, std_result,
+        runtime_std_build_action_v2(authority, RUNTIME_PACKAGE_IDENTITY_V1,
+            budget),
+        runtime_std_build_action_v2(authority, STD_PACKAGE_IDENTITY_V1,
+            budget), Some(budget))
+
+fn _runtime_std_load_package_for_action_v2(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    package_identity: text, action_digest: text
 ) -> RuntimeStdPackageAdmissionV1:
-    val action_digest = runtime_std_action_digest_v1(authority, package_identity)
     if action_digest == "":
         return runtime_std_empty_admission_v1("runtime-std-authority-invalid")
     val receipt_digest = cas_batch_lookup_receipt_digest_v1(
@@ -318,6 +412,22 @@ fn runtime_std_load_package_v1(
         true, "cached", package_identity, action_digest,
         cas_blob_path(root, receipt!.archive_digest), Some(image), Some(receipt!))
 
+fn runtime_std_load_package_v1(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    package_identity: text
+) -> RuntimeStdPackageAdmissionV1:
+    _runtime_std_load_package_for_action_v2(root, authority,
+        package_identity,
+        runtime_std_action_digest_v1(authority, package_identity))
+
+fn runtime_std_load_package_v2(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    package_identity: text, budget: RuntimeStdNativeActionBudgetV2
+) -> RuntimeStdPackageAdmissionV1:
+    _runtime_std_load_package_for_action_v2(root, authority,
+        package_identity,
+        runtime_std_action_digest_v2(authority, package_identity, budget))
+
 fn runtime_std_load_baseline_v1(
     root: text, authority: RuntimeStdPackageAuthorityV1
 ) -> RuntimeStdPackageSetV1:
@@ -332,10 +442,28 @@ fn runtime_std_load_baseline_v1(
         return RuntimeStdPackageSetV1(false, standard.reason, runtime, standard)
     RuntimeStdPackageSetV1(true, "cached", runtime, standard)
 
+fn runtime_std_load_baseline_v2(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> RuntimeStdPackageSetV1:
+    val runtime = runtime_std_load_package_v2(root, authority,
+        RUNTIME_PACKAGE_IDENTITY_V1, budget)
+    if not runtime.valid:
+        return RuntimeStdPackageSetV1(false, runtime.reason, runtime,
+            runtime_std_empty_admission_v1("not-loaded"))
+    val standard = runtime_std_load_package_v2(root, authority,
+        STD_PACKAGE_IDENTITY_V1, budget)
+    if not standard.valid:
+        return RuntimeStdPackageSetV1(false, standard.reason, runtime, standard)
+    RuntimeStdPackageSetV1(true, "cached", runtime, standard)
+
 export RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1
 export RuntimeStdPackageAuthorityV1, RuntimeStdSectionContentV1
 export RuntimeStdPackageInputV1, RuntimeStdPackageAdmissionV1
 export RuntimeStdPackageSetV1
 export runtime_std_action_digest_v1, runtime_std_build_action_v1
+export runtime_std_action_digest_v2, runtime_std_build_action_v2
 export runtime_std_publish_set_v1, runtime_std_load_package_v1
+export runtime_std_publish_set_v2
 export runtime_std_load_baseline_v1
+export runtime_std_load_package_v2, runtime_std_load_baseline_v2

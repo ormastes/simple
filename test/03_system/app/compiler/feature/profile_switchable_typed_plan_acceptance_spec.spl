@@ -1,0 +1,97 @@
+"""# Typed collection physical-plan acceptance
+
+For compiler maintainers, a profile replay must reach the actual compiled
+representation and expose a receipt from the lowering owner. The existing
+`optimize --explain-collection-plan` text is advisory and is not that receipt.
+This scenario deliberately fails MissingEvidence until the production compiler
+emits a versioned typed site decision tied to the native artifact.
+"""
+
+# @tag: system, compiler, collection, typed-plan, pending-production-receipt
+
+use std.spec.*
+use std.spec.{step, before_all}
+use std.io_runtime.{process_run_timeout, file_exists, file_delete, file_write,
+    mkdir_p, getpid, env_get, env_set, file_hash_sha256}
+use app.optimize.sprof_collection_profile.{sprof_source_module_identity}
+use test.system.qualified_pure_simple_runtime.{admit_source_matched_pure_simple_runtime}
+
+val TYPED_PLAN_SOURCE = "test/02_integration/compiler/probe_profile_switchable_cli_feedback.spl"
+var typed_plan_suite_runtime = ""
+var typed_plan_suite_binary_digest = ""
+var typed_plan_suite_provenance_digest = ""
+
+describe "typed collection plan reaches executable storage":
+    before_all:
+        typed_plan_suite_runtime = admit_source_matched_pure_simple_runtime()
+        if typed_plan_suite_runtime != "":
+            typed_plan_suite_binary_digest = file_hash_sha256(typed_plan_suite_runtime)
+            typed_plan_suite_provenance_digest = file_hash_sha256(
+                typed_plan_suite_runtime + ".provenance.env")
+
+    it "should bind an admitted exact-site choice to its lowered native representation":
+        """My workload changes physical storage only with a typed, executable proof."""
+        # @req REQ-PSC-001 REQ-PSC-003 REQ-PSC-004 REQ-PSC-005 REQ-PSC-006 REQ-PSC-008
+        step("Prepare attributed containers")
+        # @capture(exec): build/test-artifacts/stage4-source-admission-<pid>.txt
+        val runtime = typed_plan_suite_runtime
+        if runtime == "" or typed_plan_suite_binary_digest == "" or
+                typed_plan_suite_provenance_digest == "":
+            fail("MissingEvidence: suite entry did not admit a source-matched Stage4 runtime")
+            return
+        if file_hash_sha256(runtime) != typed_plan_suite_binary_digest or
+                file_hash_sha256(runtime + ".provenance.env") !=
+                    typed_plan_suite_provenance_digest:
+            fail("MissingEvidence: admitted Stage4 candidate changed during this suite")
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        val profile = "build/typed-plan-{getpid()}.sprof"
+        val binary = "build/typed-plan-{getpid()}.exe"
+        val identity = sprof_source_module_identity(TYPED_PLAN_SOURCE)
+        expect(mkdir_p("build")).to_be(true)
+        _ = file_delete(profile)
+        _ = file_delete(binary)
+
+        step("Capture workload profile")
+        val (capture_out, capture_err, capture_code) = process_run_timeout(runtime, [
+            "run", TYPED_PLAN_SOURCE,
+            "--collection-profile-out=" + profile,
+            "--collection-module=" + identity,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3"
+        ], 300000)
+        expect(capture_code).to_equal(0)
+        expect(file_exists(profile)).to_be(true)
+        expect(capture_out + capture_err).to_contain("COLLECTION_PROFILE_CLI: PASS")
+
+        step("Admit profile for same site")
+        step("Compile and execute selected representation")
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", TYPED_PLAN_SOURCE,
+            "--source", "src/lib", "--output", binary,
+            "--collection-profile=" + profile,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3"
+        ], 600000)
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary)).to_be(true)
+        val (native_out, native_err, native_code) = process_run_timeout(binary, [], 120000)
+
+        step("Verify logical results and selection evidence")
+        # @capture(exec): build/test-artifacts/compiler/typed-physical-plan-<pid>.txt
+        expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+        val evidence = "build/test-artifacts/compiler/typed-physical-plan-{getpid()}.txt"
+        expect(file_write(evidence, "source={TYPED_PLAN_SOURCE}\nmodule={identity}\n" +
+            "capture_exit={capture_code}\ncapture_stdout:\n{capture_out}\n" +
+            "capture_stderr:\n{capture_err}\nbuild_exit={build_code}\n" +
+            "build_stdout:\n{build_out}\nbuild_stderr:\n{build_err}\n" +
+            "native_exit={native_code}\nnative_stdout:\n{native_out}\n" +
+            "native_stderr:\n{native_err}\n")).to_be(true)
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_contain("COLLECTION_PROFILE_CLI: PASS")
+        _ = file_delete(binary)
+        _ = file_delete(profile)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+        fail("MissingEvidence: production compile emitted no versioned physical decision receipt binding typed source/site, target, backend, workload, profile epoch, selected storage, and lowered MIR identity to this native artifact")

@@ -17,6 +17,9 @@ use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -245,6 +248,14 @@ pub fn _driver_physical_source_key(path: text) -> text:
     unsafe(capabilities: [ffi]):
         physical = rt_path_absolute(path) ?? ""
     _driver_canonical_source_path(if physical != "": physical else: path)
+
+pub fn _driver_physical_source_key_strict_v1(path: text) -> text:
+    # Full-inventory authority must not fall back to a lexical spelling when
+    # the host cannot resolve a reparse/symlink path.
+    var physical = ""
+    unsafe(capabilities: [ffi]):
+        physical = rt_path_absolute(path) ?? ""
+    if physical == "": "" else: _driver_canonical_source_path(physical)
 
 pub fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
     val raw = hm_hash_text(key) % bucket_count
@@ -617,6 +628,7 @@ fn _driver_entry_import_line_needs_materialization(content: text, start: i64, en
         _driver_text_range_starts_with(content, first, end, "pub use ") or
         _driver_text_range_starts_with(content, first, end, "export use ") or
         _driver_text_range_starts_with(content, first, end, "import ") or
+        _driver_text_range_starts_with(content, first, end, "from ") or
         # `export a, b from M`: a re-export facade depends on M (see below).
         _driver_text_range_starts_with(content, first, end, "export "))
 
@@ -675,6 +687,13 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             tail = line.substring(4)
         elif line.starts_with("import "):
             tail = line.substring(7)
+        elif line.starts_with("from "):
+            # The parser accepts `from M import {names}`. Keep M in the
+            # closure just like `use M.{names}`, including relative paths.
+            val import_at = _driver_text_index_of(line, " import ")
+            if import_at < 0:
+                continue
+            tail = line[5:import_at].trim()
         elif line.starts_with("export ") and line.contains(" from "):
             # `export a, b from M` re-exports M's items, so the facade needs M
             # loaded. Without this, a facade such as src/lib/io_runtime.spl
@@ -733,7 +752,7 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     result
 
 pub fn _driver_entry_import_module_paths(content: text) -> [text]:
-    """Dotted module paths of the use/pub-use/export-use/import declarations in a
+    """Dotted module paths of use/pub-use/export-use/import/from declarations in a
     source text. Name-less `use lazy` imports (`use lazy M`, `use lazy M.*`,
     `use lazy M as a`) are dynamic-by-design and skipped; NAMED lazy imports
     (`use lazy M.{a, b}`) declare static names that must resolve, so their
@@ -820,12 +839,13 @@ fn _driver_entry_sibling_path(line: text) -> text:
 
 pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
     """Relative sibling paths from top-level `mod` and `export member.*`
-    declarations. This rare compatibility syntax uses the allocation-based
-    scan only when a source can contain such a declaration."""
+    declarations, and from generated facade export-origin comments. A frozen
+    origin must have its declaration owner in the entry closure."""
     if not content.contains("mod ") and not content.contains("export "):
         return []
     var result: [text] = []
     var in_doc = false
+    var generated_owner = ""
     var line_start: i64 = 0
     while line_start < content.len():
         val line_end = _driver_line_end(content, line_start)
@@ -843,8 +863,37 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
         if quote_count % 2 == 1:
             in_doc = not in_doc
         if was_in_doc or quote_count > 0:
+            generated_owner = ""
             continue
-        val sibling = _driver_entry_sibling_path(scan_line.trim())
+        val line = scan_line.trim()
+        if raw_line.contains("# Re-exported from ") and
+           raw_line.contains(".spl") and
+           raw_line.trim().starts_with("# Re-exported from "):
+            val owner_parts = raw_line.trim().substring(19).split(".spl")
+            val candidate = owner_parts[0]
+            # The native walker resolves relative siblings itself, whereas
+            # phase 1 only admits direct child files. Reject traversal and
+            # malformed path components here so both walkers see the same
+            # safe generated-origin dependency set.
+            generated_owner = if candidate != "" and
+                not candidate.starts_with("/") and
+                not candidate.starts_with(".") and
+                not candidate.ends_with("/") and
+                not candidate.contains(".") and
+                not candidate.contains("//") and
+                not candidate.contains("\\") and
+                _driver_import_path_is_valid(candidate.replace("/", ".")):
+                candidate
+            else:
+                ""
+            continue
+        if generated_owner != "":
+            if line.starts_with("export "):
+                result.push("." + generated_owner.replace("/", "."))
+                generated_owner = ""
+            elif line != "" and not raw_line.trim().starts_with("#"):
+                generated_owner = ""
+        val sibling = _driver_entry_sibling_path(line)
         if sibling != "":
             result = result.push(sibling)
     result
@@ -1334,6 +1383,28 @@ pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
     _driver_module_aliases_with_closure(
         p, content, _driver_module_name_from_path(p), true)
 
+pub fn _driver_collect_frozen_compiler_source_v1(
+    path: text, expected_digest: text, expected_bytes: i64
+) -> Result<[SourceFile], text>:
+    # The full-inventory cold route cannot use the scanner's following read:
+    # it must prove the exact no-follow frozen bytes selected by SCV.
+    if not path.ends_with(".spl") or expected_digest.len() != 64 or
+            expected_bytes < 0 or expected_bytes > 64 * 1024 * 1024:
+        return Err("frozen-source-input-invalid")
+    val loaded = file_read_regular_no_follow_bounded(
+        path, 64 * 1024 * 1024)
+    if val Err(_) = loaded:
+        return Err("frozen-source-unreadable")
+    val content = loaded.unwrap()
+    if content.len() != expected_bytes or
+            sha256_text(content) != expected_digest:
+        return Err("frozen-source-content-mismatch")
+    val sources = _driver_module_aliases_with_closure(
+        path, content, _driver_module_name_from_path(path), true)
+    if sources.len() == 0:
+        return Err("frozen-source-module-unavailable")
+    Ok(sources)
+
 fn _driver_collect_entry_import_source_with_policy(
     p: text,
     entry_closure: bool
@@ -1414,6 +1485,30 @@ fn _driver_load_bulk_source_file(path: text, native_entry_active: bool) -> [Sour
         return []
     _driver_module_aliases(path, content, _driver_module_name_from_path(path))
 
+pub fn _driver_is_explicit_native_entry_source(path: text, native_entry: text, cached_physical_entry: text = "") -> bool:
+    # Request authority applies to exactly one normalized source file, never
+    # its containing tree or similarly prefixed neighbors.
+    if native_entry == "" or not path.ends_with(".spl"):
+        return false
+    val normalized = _driver_canonical_source_path(path)
+    val requested = _driver_canonical_source_path(native_entry)
+    if normalized == requested:
+        return true
+    # The name prefilter avoids filesystem resolution for unrelated bulk
+    # inventory rows. Resolve aliases only for the selected file's basename.
+    val path_parts = normalized.split("/")
+    val entry_parts = requested.split("/")
+    if path_parts.len() == 0 or entry_parts.len() == 0 or
+            path_parts[path_parts.len() - 1].lower() != entry_parts[entry_parts.len() - 1].lower():
+        return false
+    val physical_path = _driver_physical_source_key_strict_v1(normalized)
+    val physical_entry = if cached_physical_entry != "": cached_physical_entry
+        else: _driver_physical_source_key_strict_v1(requested)
+    if physical_path == "" or physical_entry == "":
+        return false
+    if host_is_windows_host(): physical_path.lower() == physical_entry.lower()
+    else: physical_path == physical_entry
+
 pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
     var result: [SourceFile] = []
@@ -1421,6 +1516,9 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         print "[collect_sources] path {p}"
     if p.ends_with(".spl"):
         _g_source_classification_count = _g_source_classification_count + 1
+        val selected_native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        if _driver_is_explicit_native_entry_source(p, selected_native_entry):
+            return _driver_collect_explicit_compiler_source(p)
         if _driver_source_trace_enabled():
             print "[collect_sources] file {p}"
         # It's a source file
@@ -1467,11 +1565,16 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         var native_entry = ""
         native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val native_entry_active = native_entry != ""
+        val physical_native_entry = if native_entry_active:
+                _driver_physical_source_key_strict_v1(_driver_canonical_source_path(native_entry))
+            else: ""
         for discovered_path in discovered:
             val path = discovered_path.trim()
-            if not _driver_bulk_source_candidate_allowed(path):
+            val explicit_entry = _driver_is_explicit_native_entry_source(path, native_entry, physical_native_entry)
+            if not explicit_entry and not _driver_bulk_source_candidate_allowed(path):
                 continue
-            val loaded = _driver_load_bulk_source_file(path, native_entry_active)
+            val loaded = if explicit_entry: _driver_collect_explicit_compiler_source(path)
+                else: _driver_load_bulk_source_file(path, native_entry_active)
             for s in loaded:
                 result = result.push(s)
     result

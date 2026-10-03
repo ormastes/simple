@@ -72,6 +72,13 @@ bsp_run_cli() {
         exec "$bsp_cli" check --help
     ) >"$2" 2>&1
 }
+# Parser tracing can print source string literals containing the diagnostic
+# code. Only an emitted diagnostic at the start of a log line is admission
+# failure evidence. Keep the selection shared by detection and reporting.
+bootstrap_scv_admission_diagnostic() {
+    LC_ALL=C grep -m1 -E '^(error: )?SCV-E-ADMISSION:([[:space:]]|$)' "$1"
+}
+
 bootstrap_scv_prime() {
     bsp_root=$1 bsp_cli=$2 bsp_home=$3 bsp_tmp=$4 bsp_log=$5
     bsp_cursor="$bsp_root/build/scv/compile-events/CURRENT"
@@ -106,8 +113,10 @@ bootstrap_scv_prime() {
     bsp_run_cli 0 "$bsp_log.warm"
     bsp_rc=$?
     bsp_warm=$(( $(date +%s) - bsp_warm_start ))
-    if grep -q 'SCV-E-ADMISSION' "$bsp_log.warm" || [ "$bsp_rc" -ge 124 ]; then
-        echo "scv-inventory-prime: FAILED warm admission after ${bsp_warm}s (rc=$bsp_rc): $(grep -m1 'SCV-E-ADMISSION' "$bsp_log.warm"). Log: $bsp_log.warm" >&2
+    bsp_diagnostic_rc=0
+    bsp_diagnostic=$(bootstrap_scv_admission_diagnostic "$bsp_log.warm") || bsp_diagnostic_rc=$?
+    if [ "$bsp_diagnostic_rc" -eq 0 ] || [ "$bsp_diagnostic_rc" -gt 1 ] || [ "$bsp_rc" -ge 124 ]; then
+        echo "scv-inventory-prime: FAILED warm admission after ${bsp_warm}s (rc=$bsp_rc): $bsp_diagnostic. Log: $bsp_log.warm" >&2
         return 1
     fi
     echo "scv-inventory-prime: ready in $(( $(date +%s) - bsp_start ))s (cold init: $bsp_cold; warm admission ${bsp_warm}s, admission probe rc=$bsp_rc)"

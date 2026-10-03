@@ -1,0 +1,26 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode}
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, SettledAlias, entity_ref_provisional, entity_ref_settled}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign, pure_ed25519_verify}
+
+fn setup_item2_wire_patch() -> DbPatch:
+    val namespace = "00112233445566778899aabbccddeeff"
+    val actor = "ffeeddccbbaa99887766554433221100"
+    val ref = entity_ref_provisional(EntityUid(database_namespace: namespace, entity_kind: "bug", actor: ActorIncarnation(hex: actor), counter: 18446744073709551615u64))
+    val alias = entity_ref_settled(SettledAlias(database_namespace: namespace, authority_epoch: 1, entity_kind: "bug", sequence: 7))
+    val values = DbValue.List([DbValue.Absent, DbValue.Text("é"), DbValue.Unsigned(18446744073709551615u64), DbValue.Flag(true), DbValue.Set([DbValue.Text("a"), DbValue.Text("b")]), DbValue.Reference(alias), DbValue.ObservedSet([DbSetMember(dot: "dot1", value: DbValue.Reference(ref), removed: true)]), DbValue.CausalSet([DbSetEvent(dot: "add1", value: DbValue.Text("a"), removed: false, observed: [])])])
+    val fields = [DbField(name: "all", value: values)]
+    val condition = RowPrecondition(base_row: "base-row", expected_revision: "row-revision", expected_fields: fields)
+    val operations = [DbOperation.Create(ref, "bug", fields), DbOperation.UpdateFields(ref, [FieldEdit(field: "all", before: values, after: DbValue.Absent)], condition), DbOperation.Tombstone(ref, condition), DbOperation.AddSetMember(ref, "tags", DbValue.Text("x"), "add1"), DbOperation.RemoveObservedSetMember(ref, "tags", ["add1"]), DbOperation.AppendObservation(ref, "bug", fields), DbOperation.AddSetMemberAfterRemoval(ref, "tags", DbValue.Text("x"), "add2", ["remove1"]), DbOperation.RemoveSetMember(ref, "tags", DbValue.Text("x"), "remove1", ["add1"])]
+    var patch = DbPatch(batch_id: "", repository: "repo", namespace: namespace, epoch: 1, actor: actor, actor_counter: 18446744073709551615u64, base_revision: "base-revision", causal_dependencies: ["dependency"], schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "fixture-key", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "signed import")
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([43u8;32])
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+export setup_item2_wire_patch

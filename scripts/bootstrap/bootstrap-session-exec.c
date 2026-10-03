@@ -458,7 +458,7 @@ static int parse_supervise(int argc, wchar_t **argv, options *o) {
         if (!wcscmp(a, L"--spec")) o->spec = v;
         else if (!wcscmp(a, L"--stats")) o->stats = v;
         else if (!wcscmp(a, L"--rss-cap-mode")) o->cap_mode = v;
-        else if (!wcscmp(a, L"--max-rss-kib")) { if (!parse_u32(v, 5859375ULL, &o->max_rss_kib) || !o->max_rss_kib) return 0; }
+        else if (!wcscmp(a, L"--max-rss-kib")) { if (!parse_u32(v, 6835937ULL, &o->max_rss_kib) || !o->max_rss_kib) return 0; }
         else if (!wcscmp(a, L"--interval-ms")) { if (!parse_u32(v, 100ULL, &o->interval_ms) || !o->interval_ms) return 0; }
         else if (!wcscmp(a, L"--observation-budget-ms")) { if (!parse_u32(v, 5000ULL, &o->budget_ms) || o->budget_ms < 1000) return 0; }
         else if (!wcscmp(a, L"--timeout-seconds")) { if (!parse_u32(v, 0x7fffffffULL, &o->timeout_s)) return 0; }

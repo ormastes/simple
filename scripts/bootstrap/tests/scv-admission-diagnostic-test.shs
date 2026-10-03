@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$here/../bootstrap-scv-prime.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/scv-diagnostic.XXXXXX")
+trap 'rm -f "$scratch/line.log" "$scratch/mixed.log" "$scratch/selected.log"; rmdir "$scratch"' EXIT HUP INT TERM
+count=0
+while IFS= read -r row || [ -n "$row" ]; do
+    expected=${row%%|*}
+    line=${row#*|}
+    printf '%s\n' "$line" > "$scratch/line.log"
+    actual=0
+    if bootstrap_scv_admission_diagnostic "$scratch/line.log" > "$scratch/selected.log"; then actual=1; fi
+    [ "$actual" = "$expected" ] || { echo "FAIL classification: $line" >&2; exit 1; }
+    if [ "$actual" = 1 ]; then
+        cmp -s "$scratch/line.log" "$scratch/selected.log" || exit 1
+    fi
+    count=$((count + 1))
+done < "$here/fixtures/scv-admission-lines.tsv"
+printf '[parser-expr] text=SCV-E-ADMISSION: quoted\nSCV-E-ADMISSION: real-failure\n' > "$scratch/mixed.log"
+bootstrap_scv_admission_diagnostic "$scratch/mixed.log" > "$scratch/selected.log"
+grep -qx 'SCV-E-ADMISSION: real-failure' "$scratch/selected.log"
+printf 'SCV-E-ADMISSION: windows-failure\r\n' > "$scratch/line.log"
+bootstrap_scv_admission_diagnostic "$scratch/line.log" > "$scratch/selected.log"
+cmp -s "$scratch/line.log" "$scratch/selected.log"
+# Missing evidence must stay distinguishable from a valid log without a match.
+status=0
+bootstrap_scv_admission_diagnostic "$scratch/absent.log" >/dev/null 2>&1 || status=$?
+[ "$status" -gt 1 ]
+printf 'PASS: %s classifier fixtures; exact selected diagnostic; CRLF; unreadable evidence\n' "$count"

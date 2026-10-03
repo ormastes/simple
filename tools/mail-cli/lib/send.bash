@@ -45,7 +45,7 @@ cmd_send() {
   # Validate attachments up front (trust-boundary check) — fail before any
   # network activity if a file is missing or unreadable.
   local att
-  for att in "${attach_files[@]}"; do
+  for att in ${attach_files[@]+"${attach_files[@]}"}; do
     if [ ! -f "$att" ] || [ ! -r "$att" ]; then
       echo "${C_RED}error:${C_RESET} attachment not found or unreadable: ${att}" >&2
       return 2

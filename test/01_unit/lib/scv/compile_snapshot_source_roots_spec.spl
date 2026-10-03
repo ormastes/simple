@@ -1,0 +1,39 @@
+use std.spec.*
+use std.scv.compile_snapshot.{scv_compile_snapshot_source_candidate_for_v1,
+    scv_compile_snapshot_acquire_v1}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+
+describe "Compile snapshot source selector ownership":
+    it "keeps native drive roots absolute and converts MSYS at the Windows boundary":
+        val root = "C:/checkout"
+        expect(scv_compile_snapshot_source_candidate_for_v1(root, "C:/checkout/src/app", "windows")).to_equal("C:/checkout/src/app")
+        expect(scv_compile_snapshot_source_candidate_for_v1(root, "C:\\checkout\\src\\app", "windows")).to_equal("C:/checkout/src/app")
+        expect(scv_compile_snapshot_source_candidate_for_v1(root, "/c/checkout/src/app", "windows")).to_equal("c:/checkout/src/app")
+        expect(scv_compile_snapshot_source_candidate_for_v1(root, "src/app", "windows")).to_equal("C:/checkout/src/app")
+
+    it "preserves UNC and verbatim identities instead of prefixing the checkout":
+        val root = "//server/share/checkout"
+        expect(scv_compile_snapshot_source_candidate_for_v1(root, "\\\\server\\share\\checkout\\src", "windows")).to_equal("//server/share/checkout/src")
+        expect(scv_compile_snapshot_source_candidate_for_v1("C:/checkout", "\\\\?\\C:\\checkout\\src", "windows")).to_equal("C:/checkout/src")
+        expect(scv_compile_snapshot_source_candidate_for_v1(root, "\\\\?\\UNC\\server\\share\\checkout\\src", "windows")).to_equal("//server/share/checkout/src")
+        val long_drive = "C:/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src"
+        expect(long_drive.len() > 247).to_equal(true)
+        expect(scv_compile_snapshot_source_candidate_for_v1("C:/checkout", long_drive, "windows")).to_equal(long_drive)
+
+    it "preserves POSIX paths and their legal backslash filename bytes":
+        expect(scv_compile_snapshot_source_candidate_for_v1("/checkout", "/checkout/src/app", "posix")).to_equal("/checkout/src/app")
+        expect(scv_compile_snapshot_source_candidate_for_v1("/checkout", "src/a\\b", "posix")).to_equal("/checkout/src/a\\b")
+        expect(scv_compile_snapshot_source_candidate_for_v1("/checkout", "src/app", "posix")).to_equal("/checkout/src/app")
+
+    it "rejects drive relative paths and traversal before physical normalization":
+        expect(scv_compile_snapshot_source_candidate_for_v1("C:/checkout", "C:src/app", "windows")).to_equal("")
+        expect(scv_compile_snapshot_source_candidate_for_v1("C:/checkout", "src/../outside", "windows")).to_equal("")
+        expect(scv_compile_snapshot_source_candidate_for_v1("C:/checkout", "src\\..\\outside", "windows")).to_equal("")
+        expect(scv_compile_snapshot_source_candidate_for_v1("/checkout", "/checkout/src/../outside", "posix")).to_equal("")
+        expect(scv_compile_snapshot_source_candidate_for_v1("/checkout", "", "posix")).to_equal("")
+
+    it "retains the physical checkout owned cache rejection on Windows":
+        if host_is_windows_host():
+            val actual = scv_compile_snapshot_acquire_v1("C:/checkout", "C:/checkout-neighbor/build/scv", ["C:/checkout/src"])
+            expect(actual.valid).to_equal(false)
+            expect(actual.reason).to_equal("snapshot-cache-root-not-owned")

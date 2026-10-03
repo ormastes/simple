@@ -1,0 +1,207 @@
+# Emit one real objectless semantic action after typed HIR and canonical MIR
+# have both been captured. This action only qualifies cold graph publication;
+# it is never a native object or SMF completion claim.
+
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirTypedReceiptV1}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    ColdHirNativeObjectArtifactV1
+}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPayloadFileV1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1,
+    package_module_index_root_for_variant_v1
+}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    RuntimeStdMirBodyPayloadV1, RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1,
+    runtime_std_mir_body_validate_v1
+}
+use compiler.hir.archive.interface_action_archive.{
+    interface_action_archive_payloads_decode_v1
+}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{
+    file_create_exclusive, file_read_regular_no_follow_bounded
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, compile_source_inventory_path_valid_v1
+}
+
+@unsafe(reason: "canonical physical containment for compiler artifacts", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+
+struct ColdHirSemanticActionEmissionV1:
+    module_identity: text
+    source_witness_digest: text
+    semantic_action_key: text
+    action_file: ColdHirCompiledPayloadFileV1
+    object_artifact: ColdHirNativeObjectArtifactV1
+
+fn _cold_semantic_physical_v1(path: text) -> text:
+    var raw = ""
+    unsafe(capabilities: [ffi]):
+        raw = rt_path_absolute(path) ?? ""
+    if raw == "": "" else: raw.replace("\\", "/").lower()
+
+fn _cold_semantic_absolute_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if normalized == "" or normalized.contains("//") or
+            normalized.contains("\n") or normalized.contains("\r"):
+        return false
+    if normalized.starts_with("/"): return true
+    normalized.len() > 3 and (normalized.byte_at(1) as i64) == 58 and
+        (normalized.byte_at(2) as i64) == 47
+
+fn _cold_semantic_ancestors_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    if not _cold_semantic_absolute_v1(normalized): return false
+    val parts = normalized.split("/")
+    var current = "/"
+    var index = 1
+    if not normalized.starts_with("/"):
+        current = parts[0] + "/"
+        index = 1
+    if not dir_is_real_no_follow(current): return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
+fn _cold_semantic_parent_real_v1(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    val slash = normalized.last_index_of("/")
+    if slash < 0: return false
+    var parent = normalized.substring(0, slash)
+    if slash == 0: parent = "/"
+    if slash == 2 and (normalized.byte_at(1) as i64) == 58:
+        parent = normalized.substring(0, 3)
+    _cold_semantic_ancestors_real_v1(parent)
+
+# Must remain byte-identical to the cold package output bridge's witness.
+fn cold_hir_semantic_source_witness_v1(
+    authority: PackageModuleIndexBuildAuthorityV1,
+    source: CompileSourceInventoryEntryV1
+) -> text:
+    sha256_text("simple-cold-hir-source-witness-v1|" +
+        "{authority.inventory_digest}|{authority.scv_revision_id}|" +
+        "{authority.scv_commit_id}|{authority.scv_tree_id}|" +
+        "{source.source_identity.len()}:{source.source_identity}|" +
+        "{source.content_digest}|{source.byte_count}")
+
+fn cold_hir_semantic_action_emit_v1(
+    receipt: ColdHirTypedReceiptV1,
+    source: CompileSourceInventoryEntryV1,
+    source_witness_digest: text,
+    mir_file: ColdHirCompiledPayloadFileV1,
+    authority: PackageModuleIndexBuildAuthorityV1,
+    artifact_root: text
+) -> Result<ColdHirSemanticActionEmissionV1, text>:
+    val seed = receipt.seed
+    if not _cold_semantic_absolute_v1(artifact_root) or
+            artifact_root.len() > 4096 or
+            not _cold_semantic_ancestors_real_v1(artifact_root) or
+            _cold_semantic_physical_v1(artifact_root) == "":
+        return Err("cold-semantic-private-root-invalid")
+    if seed.module_identity == "" or
+            seed.module_identity.contains("|") or
+            seed.module_identity.contains("\n") or
+            seed.module_identity.contains("\r") or
+            not compile_source_inventory_path_valid_v1(source.source_identity) or
+            not source.source_identity.ends_with(".spl") or
+            seed.source_identity != source.source_identity or
+            seed.source_digest != source.content_digest or
+            seed.inventory_digest != authority.inventory_digest or
+            source.byte_count < 0 or
+            not builder_digest_valid_v1(authority.inventory_digest) or
+            not builder_digest_valid_v1(authority.producer_digest) or
+            not builder_digest_valid_v1(seed.source_digest) or
+            not builder_digest_valid_v1(seed.abi_digest) or
+            package_module_index_root_for_variant_v1(authority) == "" or
+            authority.scope_entry_source_identity != "" or
+            authority.scv_revision_id == "" or
+            authority.scv_commit_id == "" or
+            authority.scv_tree_id == "":
+        return Err("cold-semantic-source-authority-invalid")
+    val expected_interface = "symbol|{seed.module_identity}|module|" +
+        "{seed.abi_digest}|{seed.abi_digest}"
+    if receipt.interface_content != expected_interface or
+            sha256_text(receipt.abi_payload) != seed.abi_digest:
+        return Err("cold-semantic-typed-abi-invalid")
+    val expected_witness = cold_hir_semantic_source_witness_v1(
+        authority, source)
+    if not builder_digest_valid_v1(source_witness_digest) or
+            source_witness_digest != expected_witness:
+        return Err("cold-semantic-source-witness-mismatch")
+    if mir_file.path == "" or mir_file.byte_count <= 0 or
+            mir_file.byte_count > RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1 or
+            not builder_digest_valid_v1(mir_file.digest) or
+            not _cold_semantic_parent_real_v1(mir_file.path):
+        return Err("cold-semantic-mir-receipt-invalid")
+    val physical_root = _cold_semantic_physical_v1(artifact_root)
+    val physical_mir = _cold_semantic_physical_v1(mir_file.path)
+    if physical_mir == "" or
+            not physical_mir.starts_with(physical_root + "/"):
+        return Err("cold-semantic-mir-outside-private-root")
+    val mir_read = file_read_regular_no_follow_bounded(
+        mir_file.path, RUNTIME_STD_MIR_MODULE_MAX_BYTES_V1)
+    if mir_read.is_err(): return Err("cold-semantic-mir-unreadable")
+    val mir_content = mir_read.unwrap()
+    val mir_payload = RuntimeStdMirBodyPayloadV1(
+        seed.module_identity, seed.source_identity, seed.source_digest,
+        mir_content, mir_file.digest, mir_file.byte_count)
+    if text_byte_len(mir_content) != mir_file.byte_count or
+            runtime_std_mir_body_validate_v1(mir_payload,
+                seed.module_identity, seed.source_identity,
+                seed.source_digest, mir_file.digest) != "ok":
+        return Err("cold-semantic-mir-schema-invalid")
+    val semantic_key = sha256_text(
+        "simple-cold-hir-semantic-action-v1|" +
+        "{seed.abi_digest}|{expected_witness}|{mir_file.digest}")
+    val content = "action|{semantic_key}|compile-semantic|" +
+        "{seed.module_identity}|{mir_file.digest}"
+    val decoded = interface_action_archive_payloads_decode_v1(
+        receipt.interface_content, content)
+    if decoded.is_err():
+        return Err("cold-semantic-action-payload-invalid")
+    val payloads = decoded.unwrap()
+    if payloads.symbols.len() != 1 or payloads.actions.len() != 1 or
+            payloads.actions[0].target_symbol != seed.module_identity:
+        return Err("cold-semantic-action-payload-invalid")
+    val action_root = artifact_root + "/cold-hir-semantic-actions-v1"
+    if not dir_create_all(action_root) or
+            not _cold_semantic_ancestors_real_v1(action_root):
+        return Err("cold-semantic-action-directory-invalid")
+    val path = action_root + "/" +
+        sha256_text(seed.module_identity) + ".action"
+    val expected_physical = _cold_semantic_physical_v1(action_root) +
+        "/" + sha256_text(seed.module_identity) + ".action"
+    if not file_create_exclusive(path, content):
+        return Err("cold-semantic-action-exclusive-write-failed")
+    if _cold_semantic_physical_v1(path) != expected_physical or
+            not _cold_semantic_ancestors_real_v1(action_root):
+        return Err("cold-semantic-action-escaped-private-root")
+    val readback = file_read_regular_no_follow_bounded(path, 4096)
+    if readback.is_err(): return Err("cold-semantic-action-readback-failed")
+    if readback.unwrap() != content or
+            sha256_text(readback.unwrap()) != sha256_text(content):
+        return Err("cold-semantic-action-readback-mismatch")
+    Ok(ColdHirSemanticActionEmissionV1(
+        seed.module_identity, expected_witness, semantic_key,
+        ColdHirCompiledPayloadFileV1(
+            path, sha256_text(content), text_byte_len(content)),
+        ColdHirNativeObjectArtifactV1(
+            seed.module_identity, "", 0, "none", "", "")))
+
+export ColdHirSemanticActionEmissionV1
+export cold_hir_semantic_source_witness_v1
+export cold_hir_semantic_action_emit_v1

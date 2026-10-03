@@ -1,0 +1,73 @@
+# Measured native evidence only. Missing or duplicate fields fail closed.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn reverse_field(report: text, key: text) -> text:
+    var matches = 0
+    var value = ""
+    for line in report.split("\n"):
+        if line.starts_with(key + "="):
+            matches = matches + 1
+            value = line.substring(key.len() + 1).trim()
+    expect(matches).to_equal(1)
+    value
+
+fn reverse_metric(report: text, key: text) -> i64:
+    val value = reverse_field(report, key).to_i64() ?? -1
+    expect(value >= 0).to_equal(true)
+    value
+
+fn reverse_report(root: text, mode: text, count: i64) -> text:
+    val report = file_read(root + "/{mode}-{count}.env")
+    expect(reverse_field(report, "profile")).to_equal("reverse-reference-module-ownership-v1")
+    expect(reverse_field(report, "mode")).to_equal(mode)
+    expect(reverse_metric(report, "count")).to_equal(count)
+    for key in ["collector_active", "retained_order_and_digest", "recoverable_error_published", "lifecycle_checks", "complete"]:
+        expect(reverse_field(report, key)).to_equal("yes")
+    val producer = env_get_opt("SIMPLE_REVERSE_PRODUCER_SHA256") ?? ""
+    val producer_source = env_get_opt("SIMPLE_REVERSE_PRODUCER_SOURCE_REVISION") ?? ""
+    val source = env_get_opt("SIMPLE_REVERSE_SOURCE_REVISION") ?? ""
+    expect(producer.len()).to_equal(64)
+    expect(producer_source.len()).to_equal(40)
+    expect(source.len()).to_equal(40)
+    for identity in [producer, producer_source, source, reverse_field(report, "state_digest")]:
+        for character in identity:
+            expect("0123456789abcdef".contains(character)).to_equal(true)
+    expect(reverse_field(report, "state_digest").len()).to_equal(64)
+    expect(reverse_field(report, "producer_sha256")).to_equal(producer)
+    expect(reverse_field(report, "producer_source_revision")).to_equal(producer_source)
+    expect(reverse_field(report, "source_revision")).to_equal(source)
+    expect(reverse_metric(report, "fact_count")).to_equal(if count == 4: 95 else: 149)
+    for metric in ["elapsed_us", "live_bytes", "live_allocations"]:
+        expect(reverse_metric(report, metric) > 0).to_equal(true)
+    report
+
+fn reverse_peak(root: text, mode: text, count: i64) -> i64:
+    val report = file_read(root + "/{mode}-{count}.resource.env.process-tree.env")
+    expect(reverse_field(report, "status")).to_equal("complete")
+    expect(reverse_metric(report, "exit_status")).to_equal(0)
+    expect(reverse_metric(report, "quiescent")).to_equal(1)
+    expect(reverse_field(report, "rss_cap_mode")).to_equal("enforce")
+    expect(reverse_metric(report, "rss_cap_enforced")).to_equal(1)
+    expect(reverse_metric(report, "max_rss_kib")).to_equal(6835937)
+    val peak = reverse_metric(report, "peak_rss_kib") * 1024
+    expect(peak > 0 and peak <= 6835937 * 1024).to_equal(true)
+    peak
+
+describe "Reverse-reference facts survive module scratch reclamation":
+    it "preserves ordered facts and aliases with bounded memory and time":
+        val root = env_get_opt("SIMPLE_REVERSE_REPORT_DIR") ?? ""
+        expect(root != "").to_equal(true)
+        for count in [4, 8]:
+            val scoped = reverse_report(root, "scoped", count)
+            val baseline = reverse_report(root, "baseline", count)
+            expect(reverse_field(scoped, "state_digest")).to_equal(reverse_field(baseline, "state_digest"))
+            expect(reverse_metric(scoped, "live_bytes") < reverse_metric(baseline, "live_bytes")).to_equal(true)
+            expect(reverse_metric(scoped, "live_allocations") < reverse_metric(baseline, "live_allocations")).to_equal(true)
+            expect(reverse_metric(scoped, "elapsed_us") <= reverse_metric(baseline, "elapsed_us") * 3 / 2 + 20000).to_equal(true)
+            expect(reverse_peak(root, "scoped", count) <= reverse_peak(root, "baseline", count) + 16777216).to_equal(true)
+        val small = reverse_report(root, "scoped", 4)
+        val large = reverse_report(root, "scoped", 8)
+        expect(reverse_metric(large, "elapsed_us") <= reverse_metric(small, "elapsed_us") * 3 + 20000).to_equal(true)
+        expect(reverse_metric(large, "live_bytes") <= reverse_metric(small, "live_bytes") * 3 + 65536).to_equal(true)

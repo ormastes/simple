@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-shared-parse-root.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source" "$tmp/shared"
+root_check="$script_root/lib/shared-parse-cas-root.shs"
+[ "$(sh "$root_check" "$tmp/shared")" = "$tmp/shared" ] || exit 1
+sh "$root_check" "$tmp/shared" "$tmp/shared" || exit 1
+mv "$tmp/shared" "$tmp/shared.saved"
+ln -s "$tmp/shared.saved" "$tmp/shared"
+if sh "$root_check" "$tmp/shared" "$tmp/shared"; then
+  echo 'FAIL: symlink replacement of shared parse root admitted' >&2; exit 1
+fi
+rm "$tmp/shared"
+mv "$tmp/shared.saved" "$tmp/shared"
+for name in producer scv index-program handoff inventory manager worker broker; do
+  : >"$tmp/$name"
+done
+prepare() {
+  sh "$script_root/prepare-phase4-native-groups.shs" \
+    --producer-receipt="$tmp/producer" --scv-receipt="$tmp/scv" \
+    --index-program="$tmp/index-program" --index-handoff="$tmp/handoff" \
+    --source-root="$tmp/source" --inventory="$tmp/inventory" \
+    --output-root="$tmp/output" --manager-program="$tmp/manager" \
+    --worker-program="$tmp/worker" --broker-program="$tmp/broker" \
+    --manifest="$tmp/output/state/manifest.sdn" \
+    --shared-parse-cas-root="$1" >"$tmp/stdout" 2>"$tmp/stderr"
+}
+if prepare ''; then echo 'FAIL: missing shared parse root admitted' >&2; exit 1; fi
+grep -q 'absolute path required' "$tmp/stderr" || exit 1
+if prepare relative/path; then echo 'FAIL: relative shared parse root admitted' >&2; exit 1; fi
+grep -q 'absolute path required' "$tmp/stderr" || exit 1
+if prepare "$tmp/missing"; then echo 'FAIL: absent shared parse root admitted' >&2; exit 1; fi
+grep -q 'shared parse CAS root is not a real directory' "$tmp/stderr" || exit 1
+if prepare "$tmp/shared"; then echo 'FAIL: dummy index program admitted' >&2; exit 1; fi
+if grep -q 'shared parse CAS root' "$tmp/stderr"; then
+  echo 'FAIL: pre-existing shared parse root rejected by preflight' >&2; exit 1
+fi
+# The root is a config identity field; a changed value must not reuse the same
+# backend preparation root on resume.
+grep -Fq '"shared_parse_cas_root=$shared_parse_cas_root"' \
+  "$script_root/prepare-phase4-native-groups.shs" || exit 1
+grep -Fq 'cmp -s "$tmp" "$config"' \
+  "$script_root/prepare-phase4-native-groups.shs" || exit 1
+generic_run_count=$(grep -c 'SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root"' \
+  "$script_root/bootstrap-phase4-grouped.shs")
+[ "$generic_run_count" -eq 2 ] || {
+  echo 'FAIL: generic binary/index manager CAS environment not sealed' >&2; exit 1;
+}
+source_authority="$tmp/source-authority.txt"
+printf 'source-v1\n' >"$source_authority"
+source_sha=$(sha256sum "$source_authority" | cut -d ' ' -f 1)
+source_check="$script_root/lib/shared-parse-source-authority.shs"
+sh "$source_check" "$source_authority" "$source_sha" || exit 1
+printf 'source-v2\n' >"$source_authority"
+if sh "$source_check" "$source_authority" "$source_sha"; then
+  echo 'FAIL: changed shared parse source authority admitted' >&2; exit 1
+fi
+for key in SIMPLE_SHARED_PARSE_SOURCE_ROOT SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST; do
+  [ "$(grep -c "$key=" "$script_root/bootstrap-phase4-grouped.shs")" -eq 2 ] || {
+    echo "FAIL: $key missing from generic binary/index manager environment" >&2; exit 1;
+  }
+done
+echo 'PASS: explicit shared parse CAS root admission and resume pin'

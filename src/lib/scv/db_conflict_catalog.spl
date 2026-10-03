@@ -1,0 +1,99 @@
+# Strict projection of immutable conflict evidence and resolution receipts.
+# Receipt data does not replace signature/admission verification by the owner.
+use std.scv.db_conflict_model.*
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.*
+use std.scv.distributed_identity.{EntityRef}
+
+struct DbConflictReceipt:
+    conflict_id: text
+    reviewer: text
+    resolution_batch: text
+    provenance: text
+    resulting_revision: text
+
+struct DbConflictCatalog:
+    records: [DbConflictRecord]
+    resolutions: [DbConflictReceipt]
+
+fn db_conflict_record_projection(record: DbConflictRecord) -> Result<[u8], text>:
+    val valid = db_conflict_record_validate(record)?
+    var bytes = db_snapshot_text(record.conflict_id)? + db_snapshot_text(record.repository)? + db_frame(2u8, db_u64_bytes(record.epoch))
+    bytes = bytes + db_snapshot_value_encode(DbValue.Reference(record.entity), 0)? + db_snapshot_text(record.field)? + db_snapshot_text(record.code)?
+    bytes = bytes + db_snapshot_text(record.base_revision)? + db_snapshot_text(record.local_revision)? + db_snapshot_text(record.incoming_revision)?
+    bytes = bytes + db_snapshot_value_encode(record.base, 0)? + db_snapshot_value_encode(record.local, 0)? + db_snapshot_value_encode(record.incoming, 0)?
+    Ok(db_frame(60u8, bytes))
+
+fn db_conflict_record_from_projection(frame: DbDecodedFrame) -> Result<DbConflictRecord, text>:
+    if frame.tag != 60u8: return Err("SCVDB_CONFLICT_RECORD_TAG")
+    val fields = db_read_children(frame.payload)?
+    if fields.len() != 12: return Err("SCVDB_CONFLICT_RECORD_FIELDS")
+    val reference = db_snapshot_value_decode(fields[3], 0)?
+    var entity = EntityRef(provisional: nil, settled: nil)
+    match reference:
+        Reference(ref): entity = ref
+        _: return Err("SCVDB_CONFLICT_REFERENCE")
+    val record = DbConflictRecord(conflict_id: db_read_text(fields[0])?, repository: db_read_text(fields[1])?, epoch: db_read_unsigned(fields[2])?, entity: entity, field: db_read_text(fields[4])?, code: db_read_text(fields[5])?, base_revision: db_read_text(fields[6])?, local_revision: db_read_text(fields[7])?, incoming_revision: db_read_text(fields[8])?, base: db_snapshot_value_decode(fields[9], 0)?, local: db_snapshot_value_decode(fields[10], 0)?, incoming: db_snapshot_value_decode(fields[11], 0)?)
+    val valid = db_conflict_record_validate(record)?
+    Ok(record)
+
+fn db_conflict_catalog_validate(catalog: DbConflictCatalog) -> Result<text, text>:
+    var ids: [text] = []
+    for record in catalog.records:
+        val digest = db_conflict_record_validate(record)?
+        if ids.contains(digest): return Err("SCVDB_CONFLICT_DUPLICATE")
+        ids.push(digest)
+    var resolved: [text] = []
+    for receipt in catalog.resolutions:
+        if not ids.contains(receipt.conflict_id): return Err("SCVDB_CONFLICT_RECEIPT_UNKNOWN")
+        if resolved.contains(receipt.conflict_id): return Err("SCVDB_CONFLICT_ALREADY_RESOLVED")
+        if receipt.reviewer == "" or receipt.resolution_batch == "" or receipt.resulting_revision == "" or not receipt.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_CONFLICT_RECEIPT")
+        resolved.push(receipt.conflict_id)
+    Ok("valid")
+
+fn db_conflict_catalog_encode(catalog: DbConflictCatalog) -> Result<text, text>:
+    val valid = db_conflict_catalog_validate(catalog)?
+    var records: [[u8]] = []
+    for record in catalog.records: records.push(db_conflict_record_projection(record)?)
+    var receipts: [[u8]] = []
+    for receipt in catalog.resolutions:
+        receipts.push(db_frame(62u8, db_snapshot_text(receipt.conflict_id)? + db_snapshot_text(receipt.reviewer)? + db_snapshot_text(receipt.resolution_batch)? + db_snapshot_text(receipt.provenance)? + db_snapshot_text(receipt.resulting_revision)?))
+    val bytes = db_domain_bytes("conflict-catalog", db_frame(63u8, db_canonical_list(records) + db_canonical_list(receipts)))?
+    if bytes.len() > 16777216: return Err("SCVDB_BYTES_QUOTA")
+    Ok("SCVDB-CONFLICTS-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_conflict_catalog_decode(encoded: text) -> Result<DbConflictCatalog, text>:
+    val header = "SCVDB-CONFLICTS-v1\n"
+    if encoded.len() > 33554464: return Err("SCVDB_BYTES_QUOTA")
+    if not encoded.starts_with(header) or not encoded.ends_with("\n"): return Err("SCVDB_CONFLICT_CATALOG_VERSION")
+    if encoded.len() <= header.len(): return Err("SCVDB_CONFLICT_CATALOG_TRUNCATED")
+    val bytes = db_snapshot_unhex(encoded[header.len():encoded.len() - 1])?
+    val domain = db_domain_bytes("conflict-catalog", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_CONFLICT_CATALOG_TRUNCATED")
+    var index = 0
+    while index < domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_CONFLICT_CATALOG_DOMAIN")
+        index = index + 1
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != 63u8 or root.next_offset != bytes.len(): return Err("SCVDB_CONFLICT_CATALOG_ROOT")
+    val sections = db_read_children(root.payload)?
+    if sections.len() != 2: return Err("SCVDB_CONFLICT_CATALOG_FIELDS")
+    if sections[0].tag != 6u8 or sections[1].tag != 6u8: return Err("SCVDB_CONFLICT_CATALOG_LIST")
+    var records: [DbConflictRecord] = []
+    val record_frames = db_read_children(sections[0].payload)?
+    for record in record_frames: records.push(db_conflict_record_from_projection(record)?)
+    var receipts: [DbConflictReceipt] = []
+    val receipt_frames = db_read_children(sections[1].payload)?
+    for receipt in receipt_frames:
+        if receipt.tag != 62u8: return Err("SCVDB_CONFLICT_RECEIPT_TAG")
+        val fields = db_read_children(receipt.payload)?
+        if fields.len() != 5: return Err("SCVDB_CONFLICT_RECEIPT_FIELDS")
+        receipts.push(DbConflictReceipt(conflict_id: db_read_text(fields[0])?, reviewer: db_read_text(fields[1])?, resolution_batch: db_read_text(fields[2])?, provenance: db_read_text(fields[3])?, resulting_revision: db_read_text(fields[4])?))
+    val catalog = DbConflictCatalog(records: records, resolutions: receipts)
+    val valid = db_conflict_catalog_validate(catalog)?
+    Ok(catalog)
+
+export DbConflictReceipt, DbConflictCatalog, db_conflict_catalog_validate
+export db_conflict_catalog_encode, db_conflict_catalog_decode

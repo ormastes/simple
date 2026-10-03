@@ -1,0 +1,27 @@
+use app.io.args_ops.{get_args}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put, binary_object_cas_read, binary_object_cas_verify, binary_object_magic_kind}
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 2: return 2
+    val root = args[1]
+    val bytes: [u8] = [100u8, 134u8, 0u8, 0u8, 255u8, 254u8, 128u8, 192u8, 175u8, 0u8, 129u8, 127u8, 13u8, 10u8]
+    if not file_write_bytes(root + "/input.bin", bytes): return 3
+    val expected = sha256_u8_hex(bytes)
+    print "expected_digest={expected}"
+    print "magic_kind={binary_object_magic_kind(bytes)}"
+    val actual = binary_object_cas_put(root + "/cas", bytes)
+    print "returned_digest={actual}"
+    if actual.len() != 64 or actual != expected:
+        print "FAIL actual binary_object_cas_put rejected exact COFF-shaped invalid UTF8 bytes"
+        return 11
+    if not binary_object_cas_verify(root + "/cas", actual): return 12
+    val restored = binary_object_cas_read(root + "/cas", actual, 4096) ?? []
+    if restored.len() != bytes.len(): return 13
+    for index in 0..bytes.len():
+        if restored[index] != bytes[index]: return 14
+    if not file_write_bytes(root + "/restored.bin", restored): return 15
+    print "PASS actual binary CAS exact byte roundtrip and digest binding"
+    0

@@ -1,0 +1,58 @@
+#!/bin/sh
+# Fake callbacks verify owner cancellation without launching a compiler.
+set -eu
+[ "$#" -eq 1 ] || exit 64
+root=$1
+case "$root" in /*) ;; *) exit 64;; esac
+mkdir "$root" || exit 73
+. "$(dirname "$0")/../bootstrap/bootstrap-module-collection.shs"
+hash_stream() { sha256sum | cut -d ' ' -f 1; }
+fake_validate() { :; }
+fake_object() {
+  # Minimal COFF AMD64 relocatable header accepted by the object-kind check.
+  printf '\144\206\001\000' >"$1"
+  dd if=/dev/zero bs=1 count=16 2>/dev/null >>"$1"
+}
+fake_run() {
+  entry=$1 output=$3
+  printf '%s\n' "$entry" >>"$TEST_RUNS"
+  case "$TEST_MODE:$entry" in
+    cancel:first) fake_object "$output"; : >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE" ;;
+    ordinary:bad1) return 1 ;;
+    ordinary:bad139) return 139 ;;
+    systemic:first) fake_object "$output"; : >"$SIMPLE_MODULE_SYSTEMIC_STOP_FILE" ;;
+    *) fake_object "$output" ;;
+  esac
+}
+run_case() {
+  mode=$1 expected_rc=$2 expected_calls=$3 expected_rows=$4
+  dir=$root/$mode
+  mkdir -p "$dir/work" "$dir/cache"
+  printf 'first\nsecond\nthird\n' >"$dir/manifest"
+  if [ "$mode" = ordinary ]; then printf 'bad1\nbad139\ngood\n' >"$dir/manifest"; fi
+  export TEST_MODE=$mode TEST_RUNS=$dir/runs
+  export SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE=$dir/stop-requested
+  export SIMPLE_MODULE_SYSTEMIC_STOP_FILE=$dir/systemic-stop
+  export SIMPLE_COMPILE_FAIL_FAST=0 MODULE_COMPILE_PRIOR_FAILURE=0
+  : >"$dir/summary"
+  set +e
+  run_module_compile_inventory "$dir/manifest" "$dir/work" "$dir/cache" 1 1 \
+    fake_run fake_validate "$dir/summary"
+  rc=$?
+  set -e
+  [ "$rc" -eq "$expected_rc" ] || { echo "$mode rc=$rc expected=$expected_rc" >&2; exit 1; }
+  [ "$(wc -l <"$TEST_RUNS")" -eq "$expected_calls" ] || exit 1
+  [ "$(wc -l <"$dir/summary")" -eq "$expected_rows" ] || exit 1
+  if [ "$mode" != ordinary ]; then
+    [ ! -d "$dir/work/attempt."*/2 ] || { echo "$mode scheduled next entry" >&2; exit 1; }
+    grep -q 'task=module_compile_1|entry=first|result=PASS|status=0' "$dir/summary" || exit 1
+  else
+    grep -q 'entry=bad1|result=FAIL|status=1' "$dir/summary" || exit 1
+    grep -q 'entry=bad139|result=FAIL|status=139' "$dir/summary" || exit 1
+    grep -q 'entry=good|result=PASS|status=0' "$dir/summary" || exit 1
+  fi
+}
+run_case cancel 143 1 1
+run_case systemic 74 1 1
+run_case ordinary 1 3 3
+printf 'format=SIMPLE-MODULE-COLLECTION-CANCEL-TEST-1\nstatus=pass\ncancel_rows=1\nsystemic_rows=1\nordinary_rows=3\n' >"$root/result.env"

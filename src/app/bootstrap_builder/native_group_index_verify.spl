@@ -1,0 +1,302 @@
+# Read back a manager-owned complete V2 index task before handing its retained
+# attempt cache to grouped native preparation. Generic builder verify must run
+# first; this repeats the identity and output pins needed by the handoff.
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1,
+    NativeGroupIndexReceiptV1, native_group_index_config_decode_v1,
+    native_group_index_receipt_decode_v1, native_group_index_absolute_v1}
+use app.bootstrap_builder.native_group_index_handoff.{NativeGroupIndexHandoffV1,
+    native_group_index_handoff_encode_v1, native_group_index_handoff_read_v1}
+use app.bootstrap_builder.native_group_index_build.{native_group_index_managed_path_v1,
+    native_group_index_manager_task_valid_v1}
+use app.bootstrap_builder.codec.{builder_read_run_v1, builder_read_result_v1}
+use app.bootstrap_builder.manager.{builder_manager_decode_v1}
+use app.bootstrap_builder.contracts.{builder_validate_result_v1,
+    builder_task_identity_v1}
+use compiler.driver.driver_build.native_full_inventory_sources.{native_full_inventory_source_paths_v1}
+use compiler.driver.driver_build.native_group_scc_inventory.{native_group_scc_inventory_v1,
+    NativeGroupSccInventoryV1}
+use compiler.driver.cache.package_config_variant_receipt.{package_config_variant_receipt_read_v1,
+    package_config_variant_receipt_path_v1}
+use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v2}
+use compiler.driver.cache.runtime_std_authority_receipt.{runtime_std_authority_receipt_path_v2}
+use compiler.driver.cache.runtime_std_membership_policy_v1.{
+    runtime_std_membership_policy_from_index_v1}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{RuntimeStdNativeActionBudgetV2}
+use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1,
+    package_archive_aggregate_entry_v1, package_archive_load_v1}
+use compiler.driver.cache.package_module_index.{PACKAGE_MODULE_INDEX_SCHEMA_V2}
+use compiler.driver.cache.cold_hir_compiler_publication_v1.{ColdHirCompilerArchiveReceiptV1,
+    cold_hir_compiler_archive_receipts_digest_v1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.codec.{builder_decode_task_v1, builder_encode_task_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_hash_sha256, file_is_regular_no_follow, file_exists, file_create_exclusive}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+
+fn native_group_index_verify_parent_v1(path: text) -> text:
+    val parts = path.replace("\\", "/").split("/")
+    if parts.len() <= 1: return ""
+    parts[0:parts.len() - 1].join("/")
+
+fn native_group_index_verify_normalize_v1(path: text) -> text:
+    val value = path.replace("\\", "/").lower()
+    if value.starts_with("//?/"): value.substring(4) else: value
+
+fn native_group_index_verify_same_v1(left: text, right: text) -> bool:
+    val normalized_left = native_group_index_verify_normalize_v1(left)
+    val normalized_right = native_group_index_verify_normalize_v1(right)
+    if normalized_left == "" or normalized_left != normalized_right:
+        return false
+    if not file_exists(left): return true
+    native_group_index_verify_normalize_v1(path_absolute(left)) == normalized_left
+
+# The generic manager may reclaim a successful attempt's staged input after
+# its worker reaps and publishes the exact result. The original manager input,
+# request, receipt, and output remain pinned. A staged copy still present must
+# agree byte-for-byte; absence alone never substitutes for the reap marker.
+fn native_group_index_pruned_config_valid_v1(original: text, staged: text,
+        digest: text, reaped_path: text, expected_reaped: text) -> bool:
+    if not file_is_regular_no_follow(original) or
+            file_hash_sha256(original) != digest or
+            not file_is_regular_no_follow(reaped_path):
+        return false
+    val reaped = match file_read_regular_no_follow_bounded(reaped_path, 4096):
+        Ok(value): value
+        Err(_reason): return false
+    if reaped != expected_reaped: return false
+    if file_exists(staged):
+        return file_is_regular_no_follow(staged) and
+            file_hash_sha256(staged) == digest
+    true
+
+fn native_group_index_v2_budget_matches_v1(
+        observed: RuntimeStdNativeActionBudgetV2,
+        expected_request_digest: text, expected_memory_bytes: i64) -> bool:
+    observed.manager_request_digest == expected_request_digest and
+        observed.enforced_process_limit_bytes == expected_memory_bytes and
+        expected_memory_bytes > 0
+
+fn native_group_index_v2_authority_path_v1(index_root: text,
+        receipt_path: text, receipt_digest: text) -> bool:
+    val expected = runtime_std_authority_receipt_path_v2(index_root,
+        receipt_digest)
+    expected != "" and native_group_index_verify_same_v1(receipt_path, expected)
+
+# Receipt aggregation is independent of index entry order: one row per
+# package, sorted by canonical identity, with the CAS receipt SHA as value.
+fn native_group_index_archive_receipts_v1(index_root: text,
+        indexed: NativeGroupSccInventoryV1) -> Result<(i64, text), text>:
+    val generation = indexed.index_generation
+    val authority = PackageArchiveAuthorityV1(generation.producer_digest,
+        generation.root_generation, generation.variant_digest,
+        generation.scv_revision_id, generation.scv_tree_id,
+        generation.inventory_digest)
+    var packages: [text] = []
+    var package_seen: {text: bool} = {}
+    for entry in generation.entries:
+        if not package_seen.contains_key(entry.package_identity):
+            packages = packages.push(entry.package_identity)
+            package_seen[entry.package_identity] = true
+    packages = canonical_identity_sort_texts(packages)
+    var receipts: [ColdHirCompilerArchiveReceiptV1] = []
+    for package_identity in packages:
+        var entries: [PackageModuleIndexEntryV1] = []
+        var dependency_digests: [text] = []
+        for entry_index in indexed.indices_by_package[package_identity]:
+            val entry = generation.entries[entry_index]
+            entries = entries.push(entry)
+            for imported in entry.direct_imports:
+                if not indexed.index_by_module.has(imported):
+                    return Err("index archive import absent from complete graph")
+                val dependency = generation.entries[indexed.index_by_module[imported]]
+                if not dependency_digests.contains(dependency.smf_metadata_digest):
+                    dependency_digests = dependency_digests.push(dependency.smf_metadata_digest)
+        val aggregate = package_archive_aggregate_entry_v1(entries)
+        if aggregate == nil: return Err("index archive package aggregate invalid")
+        val loaded = package_archive_load_v1(index_root, aggregate!, authority,
+            canonical_identity_sort_texts(dependency_digests))
+        if not loaded.valid or loaded.receipt == nil or
+                not file_is_regular_no_follow(loaded.archive_path) or
+                file_hash_sha256(loaded.archive_path) != loaded.receipt!.archive_digest:
+            return Err("index package archive receipt or bytes differ: " + package_identity)
+        receipts = receipts.push(ColdHirCompilerArchiveReceiptV1(
+            package_identity, loaded.receipt!.receipt_digest))
+    if packages.len() == 0: return Err("index package archive set empty")
+    Ok((packages.len(), cold_hir_compiler_archive_receipts_digest_v1(receipts)?))
+
+fn native_group_index_verify_v1(config_path: text, receipt_path: text,
+        handoff_path: text) -> Result<NativeGroupIndexHandoffV1, text>:
+    if not native_group_index_absolute_v1(config_path) or
+            not native_group_index_absolute_v1(receipt_path) or
+            not native_group_index_absolute_v1(handoff_path):
+        return Err("index verify requires absolute paths")
+    val output_root = native_group_index_verify_parent_v1(
+        native_group_index_verify_parent_v1(receipt_path))
+    val job_root = native_group_index_verify_parent_v1(output_root)
+    if not native_group_index_verify_same_v1(receipt_path,
+            job_root + "/output/index-output/receipt.sdn") or
+            not native_group_index_verify_same_v1(config_path,
+                job_root + "/inputs/index.config") or
+            not native_group_index_verify_same_v1(handoff_path,
+                job_root + "/handoff.sdn"):
+        return Err("index verify job layout differs")
+    if not dir_is_real_no_follow(job_root) or
+            not dir_is_real_no_follow(job_root + "/inputs") or
+            not dir_is_real_no_follow(job_root + "/output") or
+            not dir_is_real_no_follow(job_root + "/output/index-output") or
+            not dir_is_real_no_follow(job_root + "/state"):
+        return Err("index verify job layout contains a linked directory")
+    val config_payload = file_read_regular_no_follow_bounded(config_path, 65536)?
+    val config = native_group_index_config_decode_v1(config_payload)?
+    if not file_is_regular_no_follow(config.producer_path) or
+            file_hash_sha256(config.producer_path) != config.producer_digest:
+        return Err("index Phase2 producer pin differs")
+    val receipt_payload = file_read_regular_no_follow_bounded(receipt_path, 16384)?
+    val receipt = native_group_index_receipt_decode_v1(receipt_payload)?
+    if receipt.phase != config.phase or receipt.backend != config.backend or
+            receipt.target != config.target or
+            receipt.producer_digest != config.producer_digest or
+            receipt.snapshot_inventory_digest != config.snapshot_inventory_digest or
+            receipt.source_inventory_digest != config.source_inventory_digest or
+            receipt.source_inventory_generation != config.source_inventory_generation or
+            receipt.source_count != config.expected_spl_count or
+            receipt.variant_digest != config.variant_digest:
+        return Err("index typed receipt differs from task config")
+    val run = builder_read_run_v1(job_root + "/manifest.sdn")?
+    if run.tasks.len() != 1 or run.hosts.len() != 1 or
+            run.hosts[0].transport != "local":
+        return Err("index manager manifest must have one local task")
+    val state_root = job_root + "/state"
+    val journal = file_read_regular_no_follow_bounded(state_root + "/journal.sdn", 16777216)?
+    val state = builder_manager_decode_v1(run, journal)?
+    if state.statuses.len() != 1 or state.statuses[0] != "SUCCEEDED":
+        return Err("index generic manager task has not succeeded")
+    val task = state.tasks[0]
+    val manager_receipt_path = state_root + "/receipts/index-" + config.backend + ".sdn"
+    val result = builder_read_result_v1(manager_receipt_path)?
+    val config_digest = sha256_text(config_payload)
+    if task.id != "index-" + config.backend or
+            native_group_index_manager_task_valid_v1(task, "index.config",
+                "@WORK@/index-output/receipt.sdn", config_digest) != "" or
+            result.status != "OK" or result.host_id != state.host_ids[0] or
+            builder_validate_result_v1(task, result) != "" or
+            result.outputs.len() != 1 or
+            result.outputs[0].path != "index-output/receipt.sdn" or
+            result.outputs[0].digest != sha256_text(receipt_payload):
+        return Err("index generic manager result does not admit promoted receipt")
+    val attempt_root = state_root + "/attempts/" + task.id + "/" +
+        str(task.attempt) + "/" + result.host_id
+    val work_root = attempt_root + "/work"
+    if not dir_is_real_no_follow(attempt_root) or
+            not dir_is_real_no_follow(work_root):
+        return Err("index retained attempt is not a real directory")
+    val request_path = attempt_root + "/request.sdn"
+    val request_bytes = file_read_regular_no_follow_bounded(request_path, 16777216)?
+    val request = builder_decode_task_v1(request_bytes)?
+    if request.id != task.id or request.attempt != task.attempt or
+            builder_encode_task_v1(request) != request_bytes or
+            builder_task_identity_v1(request) != builder_task_identity_v1(task) or
+            not file_is_regular_no_follow(attempt_root + "/producer.exe") or
+            file_hash_sha256(attempt_root + "/producer.exe") != task.producer_digest or
+            not file_is_regular_no_follow(work_root + "/index-output/receipt.sdn") or
+            file_hash_sha256(work_root + "/index-output/receipt.sdn") !=
+                result.outputs[0].digest or
+            not file_is_regular_no_follow(attempt_root + "/compiler.reaped"):
+        return Err("index retained manager attempt evidence differs")
+    if not native_group_index_pruned_config_valid_v1(config_path,
+            work_root + "/index.config", config_digest,
+            attempt_root + "/compiler.reaped",
+            result.identity_digest + "\n" + result.host_id):
+        return Err("index config or terminal process proof differs")
+    val index_root = native_group_index_managed_path_v1(work_root,
+        config.index_cache_root)?
+    val private_output = native_group_index_managed_path_v1(work_root,
+        config.output_root)?
+    if not dir_is_real_no_follow(work_root) or
+            not dir_is_real_no_follow(index_root) or
+            not dir_is_real_no_follow(private_output) or
+            not native_group_index_verify_same_v1(index_root, receipt.index_cache_root) or
+            not native_group_index_verify_same_v1(private_output, receipt.output_root) or
+            not native_group_index_verify_same_v1(index_root, path_absolute(index_root)):
+        return Err("index retained cache or output root differs")
+    val sources = native_full_inventory_source_paths_v1(config.source_root,
+        config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
+        config.scv_tree_id, config.snapshot_inventory_digest,
+        config.source_inventory_digest, config.scv_receipt_digest,
+        config.expected_spl_count)?
+    val indexed = native_group_scc_inventory_v1(config.source_root, index_root,
+        config.scv_receipt_path, config.scv_receipt_digest, sources.source_paths,
+        config.producer_digest, config.variant, config.full_source_authority_path,
+        config.full_source_authority_digest)?
+    if indexed.index_digest != receipt.index_digest or
+            indexed.variant_digest != receipt.variant_digest or
+            indexed.scv_source_inventory_digest != receipt.source_inventory_digest or
+            indexed.index_generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+            indexed.index_generation.scope_entry_source_identity != "" or
+            indexed.index_generation.entries.len() != config.expected_spl_count:
+        return Err("index V2 CURRENT coverage differs from typed receipt")
+    val canonical_variant = package_config_variant_receipt_path_v1(index_root,
+        indexed.index_digest)
+    if not native_group_index_verify_same_v1(canonical_variant,
+            receipt.variant_receipt_path):
+        return Err("index variant receipt path differs")
+    val variant = package_config_variant_receipt_read_v1(
+        receipt.variant_receipt_path, receipt.variant_receipt_digest)?
+    if variant.index_digest != indexed.index_digest or
+            variant.producer_digest != config.producer_digest or
+            variant.variant_digest != config.variant_digest or
+            variant.variant.backend != config.backend or
+            variant.variant.target_triple != config.target:
+        return Err("index typed variant receipt differs")
+    val snapshot = scv_compile_snapshot_open_v1(config.source_root,
+        config.snapshot_root, config.scv_revision_id, config.scv_commit_id,
+        config.scv_tree_id, config.snapshot_inventory_digest)
+    val membership = runtime_std_membership_policy_from_index_v1(
+        sources, snapshot, indexed.index_generation, indexed.index_digest,
+        config.producer_digest, config.variant_digest)?
+    if membership.membership.members.len() != config.expected_spl_count or
+            membership.index_digest != indexed.index_digest:
+        return Err("index runtime/std source closure differs")
+    if not native_group_index_v2_authority_path_v1(index_root,
+            receipt.runtime_std_authority_path,
+            receipt.runtime_std_authority_digest):
+        return Err("index runtime/std V2 authority path required")
+    val baseline = runtime_std_authority_admit_v2(index_root,
+        receipt.runtime_std_authority_path,
+        receipt.runtime_std_authority_digest, config.producer_digest,
+        config.variant_digest, config.target, config.scv_revision_id)?
+    if not native_group_index_v2_budget_matches_v1(baseline.budget,
+            sha256_text(request_bytes), request.memory_limit_bytes):
+        return Err("index runtime/std V2 manager request or memory cap differs")
+    val (archive_count, archive_digest) = native_group_index_archive_receipts_v1(
+        index_root, indexed)?
+    if archive_count != receipt.archive_count or
+            archive_digest != receipt.archive_receipts_digest:
+        return Err("index full package archive set differs")
+    val handoff = NativeGroupIndexHandoffV1(config_digest,
+        sha256_text(receipt_payload), file_hash_sha256(manager_receipt_path),
+        config.phase, config.backend, config.target, config.producer_digest,
+        config.snapshot_inventory_digest, config.source_inventory_digest,
+        config.expected_spl_count, config.variant_digest, indexed.index_digest,
+        index_root, receipt.variant_receipt_path, receipt.variant_receipt_digest,
+        receipt.runtime_std_authority_path, receipt.runtime_std_authority_digest,
+        attempt_root)
+    val encoded = native_group_index_handoff_encode_v1(handoff)
+    if encoded == "": return Err("index handoff wire rejected")
+    if file_exists(handoff_path):
+        val existing = file_read_regular_no_follow_bounded(handoff_path, 32768)?
+        if existing != encoded: return Err("index handoff publication conflicts")
+    elif not file_create_exclusive(handoff_path, encoded):
+        return Err("index handoff exclusive publication failed")
+    val admitted = native_group_index_handoff_read_v1(handoff_path,
+        sha256_text(encoded))?
+    Ok(admitted)
+
+export native_group_index_archive_receipts_v1, native_group_index_verify_v1
+export native_group_index_v2_budget_matches_v1
+export native_group_index_v2_authority_path_v1
+export native_group_index_pruned_config_valid_v1

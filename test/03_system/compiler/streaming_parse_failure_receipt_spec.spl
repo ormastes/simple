@@ -1,0 +1,37 @@
+"""Streaming parser failures retain a source-local stderr receipt.
+
+Requires an admitted source-matched pure-Simple runtime, a warm SCV authority,
+and external resource admission. Does not admit a Rust seed or launch retries.
+Requires entry-routing PR2262 so the explicit test entry is not filtered out.
+"""
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{process_run_timeout, env_get, env_set, getpid}
+use test.system.qualified_pure_simple_runtime.{admit_source_matched_pure_simple_runtime}
+
+describe "streaming parser failure receipt":
+    it "prints the actual malformed-source reason with compile-error dumping disabled":
+        step("Admit the source-matched runtime and preserve the caller environment")
+        val runtime = admit_source_matched_pure_simple_runtime()
+        val bootstrap = env_get("SIMPLE_BOOTSTRAP")
+        val streaming = env_get("SIMPLE_STAGE3_STREAMING_SURFACES")
+        val dump = env_get("SIMPLE_DUMP_COMPILE_ERRORS")
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_STAGE3_STREAMING_SURFACES", "1")
+        env_set("SIMPLE_DUMP_COMPILE_ERRORS", "0")
+        step("Compile the deliberately malformed explicit entry once")
+        val fixture = "test/fixtures/compiler/streaming_parse_failure_receipt.spl"
+        val (out, err, code) = process_run_timeout(runtime, [
+            "native-build", "--source", fixture, "--entry", fixture,
+            "--entry-closure", "--no-stub-fallback", "--max-threads=1",
+            "--output", "build/streaming-parse-rejected-{getpid()}"
+        ], 120000)
+        env_set("SIMPLE_BOOTSTRAP", bootstrap)
+        env_set("SIMPLE_STAGE3_STREAMING_SURFACES", streaming)
+        env_set("SIMPLE_DUMP_COMPILE_ERRORS", dump)
+        step("Require the source-local reason independently of aggregate context reporting")
+        expect(code).to_equal(1)
+        expect(err).to_contain("[streaming-parse-failure]")
+        expect(err).to_contain("streaming_parse_failure_receipt.spl")
+        expect(err).to_contain("expected type annotation")
+        expect(err.contains("[compile-error]")).to_equal(false)
+        expect(out).to_contain("phase 2 FAILED")

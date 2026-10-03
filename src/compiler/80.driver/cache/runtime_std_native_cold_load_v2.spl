@@ -1,0 +1,151 @@
+# Re-admit a sealed runtime/std native package after the producing compiler
+# exits. The archive's object rows are not enough: every code_object CAS blob
+# must still be present with the exact digest and byte count.
+
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.cas_store.{cas_blob_path}
+use compiler.driver.cache.binary_object_cas.{
+    binary_object_cas_blob_path, binary_object_cas_read}
+use compiler.driver.smf.runtime_std_native_outcomes_v2.{
+    RuntimeStdNativeOutcomeKindV2,
+    RUNTIME_STD_NATIVE_OUTCOMES_MAX_BYTES_V2,
+    runtime_std_native_outcomes_decode_v2}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RUNTIME_STD_COMPILED_PACKAGE_MAX_BYTES_V1,
+    runtime_std_compiled_source_closure_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+
+fn _runtime_std_cold_parent_real_v2(path: text) -> bool:
+    val normalized = path.replace("\\", "/")
+    val slash = normalized.rfind("/")
+    if slash < 1 or normalized.contains("//"):
+        return false
+    val parts = normalized.substring(0, slash).split("/")
+    var current = "."
+    var index = 0
+    if normalized.starts_with("/"):
+        current = "/"
+        index = 1
+    elif parts[0].len() == 2 and (parts[0].byte_at(1) as i64) == 58:
+        current = parts[0] + "/"
+        index = 1
+    elif parts[0] == ".":
+        index = 1
+    if not dir_is_real_no_follow(current): return false
+    while index < parts.len():
+        val part = parts[index]
+        if part == "" or part == "." or part == "..": return false
+        if current.ends_with("/"):
+            current = current + part
+        else:
+            current = current + "/" + part
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    true
+
+fn _runtime_std_cold_archive_member_v2(
+    archive: text, receipt: PackageArchiveReceiptV1,
+    member_name: text
+) -> Result<text, text>:
+    val archive_bytes = text_byte_len(archive).to_u64()
+    var found = false
+    var content = ""
+    for member in receipt.members:
+        if member.name != member_name: continue
+        if found or member.extent == 0 or
+                member.offset > archive_bytes or
+                member.extent > archive_bytes - member.offset:
+            return Err("runtime-std-cold-v2-member-range-invalid")
+        found = true
+        val end = member.offset + member.extent
+        content = archive.slice(member.offset.to_i64(), end.to_i64())
+        if text_byte_len(content).to_u64() != member.extent or
+                sha256_text(content) != member.payload_digest:
+            return Err("runtime-std-cold-v2-member-digest-invalid")
+    if not found: return Err("runtime-std-cold-v2-member-missing")
+    Ok(content)
+
+fn runtime_std_native_cold_objects_admit_v2(
+    cache_root: text, receipt: PackageArchiveReceiptV1,
+    expected_target: text
+) -> text:
+    if cache_root == "" or expected_target == "" or
+            receipt.members.len() != 10:
+        return "runtime-std-cold-v2-input-invalid"
+    val archive_path = cas_blob_path(cache_root, receipt.archive_digest)
+    if archive_path == "" or
+            not _runtime_std_cold_parent_real_v2(archive_path):
+        return "runtime-std-cold-v2-archive-parent-invalid"
+    val loaded = file_read_regular_no_follow_bounded(
+        archive_path, RUNTIME_STD_COMPILED_PACKAGE_MAX_BYTES_V1)
+    if loaded.is_err(): return "runtime-std-cold-v2-archive-unreadable"
+    val archive = loaded.unwrap()
+    if sha256_text(archive) != receipt.archive_digest or
+            not _runtime_std_cold_parent_real_v2(archive_path):
+        return "runtime-std-cold-v2-archive-digest-invalid"
+    val object_section = _runtime_std_cold_archive_member_v2(
+        archive, receipt, "objects.smf")
+    val receipt_section = _runtime_std_cold_archive_member_v2(
+        archive, receipt, "receipts.smf")
+    if object_section.is_err() or receipt_section.is_err():
+        return "runtime-std-cold-v2-sections-invalid"
+    if text_byte_len(object_section.unwrap()) >
+            RUNTIME_STD_NATIVE_OUTCOMES_MAX_BYTES_V2 or
+            text_byte_len(receipt_section.unwrap()) > 4096:
+        return "runtime-std-cold-v2-section-bound-invalid"
+    val lines = object_section.unwrap().split("\n")
+    val receipt_lines = receipt_section.unwrap().split("\n")
+    if lines.len() < 6 or lines.len() > 20005 or
+            lines[0] != "simple-runtime-std-native-outcomes-v2" or
+            not lines[1].starts_with("backend=") or
+            lines[2] != "target={expected_target}" or
+            receipt_lines.len() != 9 or
+            receipt_lines[0] != "simple-runtime-std-compiled-receipts-v2" or
+            receipt_lines[1] != "package={receipt.package_key}" or
+            not receipt_lines[2].starts_with("source-closure=") or
+            receipt_lines[4] != lines[1] or
+            receipt_lines[5] != lines[2] or
+            receipt_lines[6] != "producer={receipt.producer_digest}" or
+            receipt_lines[7] != "config={receipt.variant_digest}" or
+            receipt_lines[8] != "action={receipt.action_key}":
+        return "runtime-std-cold-v2-section-header-invalid"
+    val backend = lines[1].substring("backend=".len())
+    var source_identities: [text] = []
+    var source_digests: [text] = []
+    var index = 4
+    while index < lines.len() - 1:
+        val fields = lines[index].split("|")
+        if fields.len() != 11:
+            return "runtime-std-cold-v2-outcome-shape-invalid"
+        source_identities.push(fields[1])
+        source_digests.push(fields[2])
+        index = index + 1
+    val decoded = runtime_std_native_outcomes_decode_v2(
+        object_section.unwrap(), backend, expected_target,
+        source_identities, source_digests)
+    if decoded.is_err(): return decoded.unwrap_err()
+    val closure = runtime_std_compiled_source_closure_digest_v1(
+        source_identities, source_digests)
+    if closure == "" or receipt_lines[2] != "source-closure={closure}":
+        return "runtime-std-cold-v2-source-closure-differs"
+    var code_objects = 0
+    for outcome in decoded.unwrap():
+        if outcome.kind == RuntimeStdNativeOutcomeKindV2.code_object:
+            val path = binary_object_cas_blob_path(
+                cache_root, outcome.object_digest)
+            if path == "" or not _runtime_std_cold_parent_real_v2(path):
+                return "runtime-std-cold-v2-object-parent-invalid"
+            val object = binary_object_cas_read(cache_root,
+                outcome.object_digest, outcome.object_byte_count)
+            if object == nil or object!.len() != outcome.object_byte_count or
+                    not _runtime_std_cold_parent_real_v2(path):
+                return "runtime-std-cold-v2-object-cas-invalid"
+            code_objects = code_objects + 1
+    if code_objects == 0:
+        return "runtime-std-cold-v2-no-code-objects"
+    "ok"
+
+export runtime_std_native_cold_objects_admit_v2

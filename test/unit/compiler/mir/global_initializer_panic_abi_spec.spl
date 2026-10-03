@@ -1,0 +1,49 @@
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.Span
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir._MirLowering.global_initializer_guard.*
+
+describe "module initializer cycle panic ABI":
+    it "passes the raw message pointer and its length to the runtime":
+        var lowering = MirLowering.new(SymbolTable.new())
+        var builder = lowering.builder
+        builder.begin_function(SymbolId(id: 99), "init_fixture",
+            MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        lowering.builder = builder
+        val state = lowering.begin_global_initializer_guard("init_fixture")
+        lowering.finish_global_initializer_guard(state)
+        builder = lowering.builder
+        builder.terminate_return(nil)
+        val function = builder.end_function()
+        var panic_calls = 0
+        var constants: Dict<i64, i64> = {}
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Const(local, MirConstValue.Int(value), _):
+                        constants[local.id] = value
+                    case MirInstKind.Call(_, callee, args):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str("rt_panic"), type_):
+                                panic_calls = panic_calls + 1
+                                expect(args.len()).to_equal(2)
+                                match type_.kind:
+                                    case MirTypeKind.FuncPtr(signature):
+                                        expect(signature.params.len()).to_equal(2)
+                                        expect(signature.params[1].kind).to_equal(MirTypeKind.I64)
+                                    case _:
+                                        expect(false).to_equal(true)
+                                if args.len() == 2:
+                                    match args[1].kind:
+                                        case MirOperandKind.Copy(local):
+                                            expect(constants[local.id]).to_equal("cyclic module-global initialization: init_fixture".len())
+                                        case _:
+                                            expect(false).to_equal(true)
+                            case _:
+                                pass
+                    case _:
+                        pass
+        expect(panic_calls).to_equal(1)

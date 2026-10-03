@@ -1,14 +1,24 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
-**Status:** Design-only and intentionally fail-fast. No scenario is PASS evidence until its subsystem checker invokes the production owner and validates a durable receipt.
+**Status:** Source-only, execution unverified. REQ-001, REQ-002, REQ-010 and REQ-035, plus the REQ-030 hydration boundary and three REQ-032 local honesty scenarios, now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`
 
+REQ-013 different-field merge and undeclared list/set schema rejection now invoke actual signed local publication and reopened state. The combined delete/update/scalar durable-conflict boundary remains open; see `doc/08_tracking/bug/item2_delete_update_conflict_retention_2026-10-03.md`. These source oracles are unexecuted.
+
 ## Operator model
 
-Each `@inline` checker owns its named setup contract: `setup_replica_fixture`, `setup_settlement_fixture`, `setup_test_evidence_fixture`, `setup_bridge_fixture`, or `setup_retention_fixture`. Its future production implementation must create an isolated fixture, drive the real owner, inject the stated boundary/fault, and inspect canonical state plus a durable receipt. Today the checker names that sequence and calls `fail(...)`; setup is not a silent test double.
+Each remaining `@inline` checker owns its named setup contract: `setup_replica_fixture`, `setup_settlement_fixture`, `setup_test_evidence_fixture`, `setup_bridge_fixture`, or `setup_retention_fixture`. Its production implementation must create an isolated fixture, drive the real owner, inject the stated boundary/fault, and inspect canonical state plus a durable receipt. These remaining checkers name that sequence and call `fail(...)`; setup is not a silent test double.
 
-The five visible flows are:
+REQ-001 now creates two independent filesystem roots, reserves actual durable
+offline IDs, restores a saved counter and old handle to exercise rollback, and
+checks a separately signed actor-counter collision against persisted accepted
+state. REQ-002 writes and rereads a versioned compact alias header/cell, resolves its actual paged row, and rejects missing or mismatched context without changing the generation. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
+annotation is not a generated test-run receipt; docgen/execution remains pending. REQ-035 now publishes reviewed metadata to a local Git fixture, rejects unreviewed synthetic secret/PII values and forbidden classifications before queue mutation, and erases an owned key while proving loaded copies and ciphertext remain. Exact reviewed-value admission is not a general secret or PII detector. The REQ-030 boundary hydrates and rereads an actual 100 MiB external envelope and rejects an insufficient content allowance without semantic mutation. Its Git-placement cases and NFR measurements remain open.
+
+REQ-032 now supplies three local filesystem oracles: all four resolution states, aggregate/raw identity separation with actual rollup input coverage, and unavailable results after raw deletion or rollup corruption despite unchanged catalog references. Restricted state uses real encrypted CAS bytes and an owned key; absence of a caller key rejects decryption. Query assertions preserve the local catalog HEAD and bytes. The API still accepts only a raw digest and returns text: independently requested historical semantic revisions, structured result provenance and canonical remote retention authority remain open. These cases do not establish cross-replica deletion safety or a full REQ-032 PASS. Sixteen of the 153 full-contract scenarios now have concrete owner oracles; 137 remain explicit fail-fast. All sixteen remain unexecuted.
+
+The five feature flows use these steps (typed-patch scenarios add transport and publication-specific steps):
 
 1. `step("Create offline semantic changes")`
 2. `step("Settle compact identifiers")`
@@ -20,8 +30,8 @@ The five visible flows are:
 
 | Contract | Fixture/checker | Happy-path scenario | Boundary scenario | Failure scenario |
 |---|---|---|---|---|
-| REQ-001 — Offline identity | `setup_replica_fixture` / `check_replica_contract` | Should prove that it creates distinct durable IDs on disconnected replicas | Should prove that it rotates incarnation after cloned counter rollback | Should prove that it rejects reused actor-counter identity with different bytes |
-| REQ-002 — Compact alias | `setup_replica_fixture` / `check_replica_contract` | Should prove that it resolves a settled u64 under namespace epoch and kind | Should prove that it round-trips a context-elided integer through its versioned header | Should prove that it rejects a bare integer copied without identity context |
+| REQ-001 — Offline identity | Real filesystem roots; `db_actor_open/reserve`, `db_apply_local`, durable reopen | Should prove that it creates distinct durable IDs on disconnected replicas | Should prove that it rotates incarnation after cloned counter rollback | Should prove that it rejects reused actor-counter identity with different bytes |
+| REQ-002 — Compact alias | Actual paged generation, versioned header/cell files and independent expected context | Should prove that it resolves a settled u64 under namespace epoch and kind | Should prove that it round-trips a context-elided integer through its versioned header | Should prove that it rejects a bare integer copied without identity context |
 | REQ-003 — Canonical identity preservation | `setup_replica_fixture` / `check_replica_contract` | Should prove that it adds aliases without changing ChangeIdentity or RevisionIdentity | Should prove that it keeps canonical identities stable across compaction and replay | Should prove that it rejects alias-driven renumbering of canonical SCV identities |
 | REQ-004 — Identity map | `setup_replica_fixture` / `check_replica_contract` | Should prove that it commits bidirectional aliases allocator receipt and tombstone atomically | Should prove that it leaves gaps while preserving high-water marks after deletion | Should prove that it rejects reuse or allocation derived from live row count |
 | REQ-005 — Fixed authority | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it allocates only through the configured protected settled ref | Should prove that it allows a mirror to verify but not allocate identifiers | Should prove that it requires a new namespace when old-authority fencing is unproven |
@@ -29,10 +39,10 @@ The five visible flows are:
 | REQ-007 — Atomic candidate | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it writes allocation aliases rewritten references and registry in one tree | Should prove that it builds a candidate with fetched head as its sole parent | Should prove that it rejects partially published identity state |
 | REQ-008 — Publication and uncertainty | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it publishes by expected-old-head update then verifies accepted batch | Should prove that it replans a losing integrator from the newly fetched head | Should prove that it checks canonical history after lost acknowledgement before allocating again |
 | REQ-009 — Rollback detection | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it verifies the signed chained receipt before next allocation | Should prove that it restores from a current receipt with unchanged high-water marks | Should prove that it blocks ancestry epoch or allocator regression |
-| REQ-010 — Typed patches | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it round-trips every required patch identity dependency and operation field | Should prove that it preserves ordered operations and explicit preconditions | Should prove that it rejects a patch missing signature provenance or version identity |
+| REQ-010 — Typed patches | Real signed file round-trip; codec, `db_apply_local`, durable reopen | Should prove that it round-trips every required patch identity dependency and operation field | Should prove that it preserves ordered operations and explicit preconditions | Should prove that it rejects a patch missing signature provenance or version identity |
 | REQ-011 — Canonical encoding | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it produces identical domain-separated bytes for equivalent typed values | Should prove that it keeps delimiter-like Unicode data unambiguous through length framing | Should prove that it quarantines one batch ID reused with different canonical bytes |
 | REQ-012 — Pure reducer | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it reduces an authorized patch without adapter or credential access | Should prove that it returns the same plan under provider-free fixture implementations | Should prove that it rejects merge planning attempted before authorization |
-| REQ-013 — Merge semantics | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it merges concurrent edits to different schema-declared fields | Should prove that it retains delete-update and same-scalar races as explicit conflicts | Should prove that it rejects undeclared list or set merge guesses |
+| REQ-013 — Merge semantics | Actual signed local owner for different-field merge/schema refusal; combined durable conflict boundary remains fail-fast | Should prove that it merges concurrent edits to different schema-declared fields | Should prove that it retains delete-update and same-scalar races as explicit conflicts | Should prove that it rejects undeclared list or set merge guesses |
 | REQ-014 — Causality | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it orders causal dependencies before deterministic batch-ID ties | Should prove that it preserves concurrency when remote settlement order differs | Should prove that it rejects missing causal bases instead of inventing order |
 | REQ-015 — Replay and compatibility | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it replays an accepted batch as an idempotent no-op | Should prove that it matches full and incremental materialization during migration | Should prove that it rejects unknown versions and reducer downgrades |
 | REQ-016 — Immutable evidence entities | `setup_test_evidence_fixture` / `check_test_evidence_contract` | Should prove that it persists all ten immutable evidence entity kinds with revision links | Should prove that it shares one run manifest across compact observation references | Should prove that it rejects mutation of an admitted evidence revision |
@@ -49,12 +59,12 @@ The five visible flows are:
 | REQ-027 — Bridge delivery | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it moves committed intent from pending through acknowledged with read-back | Should prove that it recovers sent-unconfirmed delivery without duplicating remote effects | Should prove that it quarantines mismatched replay and preserves uncertain effects |
 | REQ-028 — Provider conflict semantics | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it three-way merges one-sided provider changes from last-common state | Should prove that it distinguishes inaccessible remote state from confirmed deletion | Should prove that it surfaces concurrent scalar conflict and prevents causation loops |
 | REQ-029 — Writer ownership | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it commits every mutation through the SJ lease capsule | Should prove that it persists intent and releases the lease during provider waits | Should prove that it rejects independent Git jj or adapter mutation of one checkout |
-| REQ-030 — Semantic and evidence placement | `setup_retention_fixture` / `check_retention_contract` | Should prove that it stores durable semantics in Git and raw evidence in controlled CAS | Should prove that it hydrates raw bytes through a digest-verified manifest | Should prove that it rejects high-volume raw evidence from canonical Git ancestry |
+| REQ-030 — Semantic and evidence placement | Hydration boundary: `setup_item2_hydration_big` / actual streaming owner; other cases remain fail-fast | Should prove that it stores durable semantics in Git and raw evidence in controlled CAS | Should prove that it hydrates raw bytes through a digest-verified manifest | Should prove that it rejects high-volume raw evidence from canonical Git ancestry |
 | REQ-031 — Retention classes | `setup_retention_fixture` / `check_retention_contract` | Should prove that it keeps 28-day exact telemetry and versioned daily rollups afterward | Should prove that it pins complete unresolved release pending and reproduction closure | Should prove that it refuses age-based pruning of unsynchronized work |
-| REQ-032 — Honest resolution | `setup_retention_fixture` / `check_retention_contract` | Should prove that it returns exact aggregated restricted or unavailable explicitly | Should prove that it reports a day-end aggregate without claiming an exact revision | Should prove that it rejects a manifest-only claim that missing bytes remain available |
+| REQ-032 — Honest resolution | Shared actual retention/restricted fixtures; `db_retention_resolve`, real CAS/rollup readback | Should prove that it returns exact aggregated restricted or unavailable explicitly | Should prove that it reports a day-end aggregate without claiming an exact revision | Should prove that it rejects a manifest-only claim that missing bytes remain available |
 | REQ-033 — Rollup correctness | `setup_retention_fixture` / `check_retention_contract` | Should prove that it deduplicates counts and merges declared timing sketches | Should prove that it revises provenance when late input changes a daily rollup | Should prove that it rejects averaging daily percentiles as a global percentile |
 | REQ-034 — Resnapshot | `setup_retention_fixture` / `check_retention_contract` | Should prove that it rebases pending semantic work onto a complete resnapshot | Should prove that it retains alias allocator tombstone merge batch and history knowledge | Should prove that it returns ResnapshotRequired rather than resurrecting stale entities |
-| REQ-035 — Confidentiality and deletion | `setup_retention_fixture` / `check_retention_contract` | Should prove that it filters secrets and unnecessary PII before Git ingestion | Should prove that it erases restricted CAS keys while reporting immutable-copy limits | Should prove that it rejects secret-bearing metadata under default-deny policy |
+| REQ-035 — Confidentiality and deletion | Actual Git queue admission and external encrypted evidence/key files | Should prove that it filters secrets and unnecessary PII before Git ingestion | Should prove that it erases restricted CAS keys while reporting immutable-copy limits | Should prove that it rejects secret-bearing metadata under default-deny policy |
 | REQ-036 — One app path | `setup_retention_fixture` / `check_retention_contract` | Should prove that it runs the same orchestration through capability-selected adapters | Should prove that it uses platform differences only behind existing HAL interfaces | Should prove that it rejects per-OS sibling or raw-runtime fallback implementations |
 | NFR-001 — Fixture receipt | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it records a complete reproducible performance receipt | Should prove that it distinguishes cold warm percentile and timeout methods | Should prove that it rejects a threshold claim with missing fixture or raw evidence fields |
 | NFR-002 — Scale | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it builds the one-million-alias and observation Operating-B corpus | Should prove that it imports exactly ten thousand representative observations | Should prove that it rejects a reduced corpus presented as Operating-B evidence |
@@ -84,10 +94,104 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Design-first acceptance specification. Every checker fails explicitly until it
-# is replaced by a production-owner fixture and durable receipt validation.
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-030 boundary, REQ-032 local honesty and REQ-035 use real filesystem/production owners. Remaining
+# broad checkers fail explicitly until their complete durable oracles exist.
+# Source presence is not execution evidence or a passing requirement receipt.
 
 use std.spec.*
+use app.scv.db.evidence_hydrate.{db_evidence_inspect_file, db_evidence_hydrate_file}
+use test.fixtures.scv.db_hydration_fixture.*
+use test.fixtures.scv.db_retention_fixture.*
+use app.scv.db.retention_store.*
+use app.scv.db.retention_codec.{db_retained_rollup_decode}
+use app.scv.db.evidence_store.{db_evidence_store_get}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional, entity_ref_canonical}
+use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse}
+use app.io.mod (file_read, file_write, file_exists, file_delete, file_write_bytes)
+use app.scv.db.offline_actor.{db_actor_open, db_actor_reserve}
+use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
+use app.scv.db.local_store.{db_store_read}
+use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_merge_fixture.*
+use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
+use std.scv.db_patch.{DbPatch, DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
+use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
+use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest}
+use std.scv.db_reducer.{db_field_value}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify, pure_ed25519_sign}
+use std.scv.db_confidentiality.{db_metadata_policy_digest}
+use std.scv.db_snapshot.{db_snapshot_decode}
+use app.scv.db.settlement_queue.{db_settlement_enqueue, db_settlement_queue_open}
+use app.scv.db.settlement_resume_local.{db_settlement_resume_local}
+use app.scv.db.restricted_evidence.*
+use test.fixtures.scv.db_settlement_queue_fixture.*
+use test.fixtures.scv.db_restricted_fixture.*
+use std.scv.db_alias_cell.*
+use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
+use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_root, setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_ref}
+
+fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContext):
+    val root = setup_item2_paged_root()
+    val policy = setup_item2_paged_policy()
+    val genesis = db_paged_initialize(root, policy).unwrap()
+    val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1)
+    val applied = db_paged_apply(root, genesis.head, patch, policy).unwrap()
+    val context = DbAliasContext(namespace: policy.config.admission.namespace, epoch: policy.config.admission.epoch, kind: "bug")
+    val alias = SettledAlias(database_namespace: context.namespace, authority_epoch: context.epoch, entity_kind: context.kind, sequence: 1u64)
+    (root, applied.head, db_alias_header_encode(context).unwrap(), alias, context)
+
+fn setup_item2_unreviewed_metadata(original: DbPatch, value: text) -> DbPatch:
+    var patch = original
+    patch.operations = [DbOperation.Create(db_operation_ref(original.operations[0]), "bug", [DbField(name: "code", value: DbValue.Text(value)), DbField(name: "link", value: DbValue.Absent)])]
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([45u8;32])
+    patch.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+# Pure prerequisites only: these assertions do not prove durable REQ-004.
+fn setup_item2_uid(counter: u64) -> EntityUid:
+    EntityUid(database_namespace: "11111111111111111111111111111111", entity_kind: "bug", actor: ActorIncarnation(hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), counter: counter)
+
+describe "Item 2 pure identity-map prerequisites (not durable acceptance)":
+    it "keeps reverse identity and advances past a tombstoned sequence":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val second = setup_item2_uid(2)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        expect(allocated.code).to_equal("allocated")
+        expect(allocated.sequence).to_equal(1)
+        val deleted = identity_map_tombstone(allocated.state, first)
+        val next = identity_map_allocate(deleted.state, second)
+        expect(next.code).to_equal("allocated")
+        expect(next.sequence).to_equal(2)
+        expect(next.state.high_water[0].sequence).to_equal(2)
+        expect(next.state.bindings[0].tombstoned).to_equal(true)
+        expect(identity_map_reverse(next.state, "bug", 1)).to_equal(entity_ref_canonical(entity_ref_provisional(first)))
+
+    it "replays a tombstoned identity without resurrecting it or advancing the allocator":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        val deleted = identity_map_tombstone(allocated.state, first)
+        val replay = identity_map_allocate(deleted.state, first)
+        expect(replay.code).to_equal("tombstoned")
+        expect(replay.sequence).to_equal(1)
+        expect(replay.state.bindings.len()).to_equal(1)
+        expect(replay.state.bindings[0].tombstoned).to_equal(true)
+        expect(replay.state.high_water[0].sequence).to_equal(1)
+
+    it "rejects a foreign namespace without changing candidate bindings or high-water":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        val foreign = EntityUid(database_namespace: "22222222222222222222222222222222", entity_kind: first.entity_kind, actor: first.actor, counter: 2)
+        val rejected = identity_map_allocate(allocated.state, foreign)
+        expect(rejected.code).to_equal("SCVDB_NAMESPACE_MISMATCH")
+        expect(rejected.sequence).to_equal(0)
+        expect(rejected.state.bindings.len()).to_equal(1)
+        expect(rejected.state.high_water[0].sequence).to_equal(1)
+        expect(identity_map_reverse(rejected.state, "bug", 1)).to_equal(entity_ref_canonical(entity_ref_provisional(first)))
 
 # @inline
 fn check_replica_contract(requirement: String, oracle: String, failure_sequence: String):
@@ -113,34 +217,89 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-001: Offline identity":
         it "should prove that it creates distinct durable IDs on disconnected replicas":
             step("Create offline semantic changes")
+            val left_root = setup_item2_apply_root()
+            val right_root = setup_item2_apply_root()
+            val namespace = "00112233445566778899aabbccddeeff"
+            val left = db_actor_reserve(db_actor_open(left_root, namespace).unwrap(), "bug").unwrap()
+            val right = db_actor_reserve(db_actor_open(right_root, namespace).unwrap(), "bug").unwrap()
             step("Drive accepted state and inspect its receipt")
-            check_replica_contract("REQ-001", "drive accepted offline identity state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            expect(entity_ref_canonical(entity_ref_provisional(left.uid)) == entity_ref_canonical(entity_ref_provisional(right.uid))).to_be(false)
+            expect(left.uid.counter).to_equal(1u64)
+            expect(right.uid.counter).to_equal(1u64)
+            for reservation in [left, right]:
+                val saved = reservation.session
+                expect(file_read("{saved.root}/.scv/local/actors/{saved.actor.hex}.counter")).to_equal("scv-db/actor/v1\n{namespace}\n{saved.actor.hex}\n1\n")
 
         it "should prove that it rotates incarnation after cloned counter rollback":
             step("Create offline semantic changes")
+            val root = setup_item2_apply_root()
+            val original = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+            val path = "{root}/.scv/local/actors/{original.actor.hex}.counter"
+            val saved = file_read(path)
+            val first = db_actor_reserve(original, "bug").unwrap()
+            expect(file_write(path, saved)).to_be(true)
+            val restored = db_actor_reserve(original, "bug").unwrap()
             step("Drive the boundary state and inspect preserved invariants")
-            check_replica_contract("REQ-001", "drive boundary offline identity state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            expect(first.uid.counter).to_equal(restored.uid.counter)
+            expect(first.uid.actor == restored.uid.actor).to_be(false)
+            expect(file_exists("{root}/.scv/local/actors/{first.session.actor.hex}.counter")).to_be(true)
+            expect(file_exists("{root}/.scv/local/actors/{restored.session.actor.hex}.counter")).to_be(true)
+            expect(file_read(path).starts_with("scv-db/actor-retired/v1\n")).to_be(true)
 
         it "should prove that it rejects reused actor-counter identity with different bytes":
             step("Create offline semantic changes")
+            val root = setup_item2_apply_root()
+            val first_patch = setup_item2_apply_patch(1, "")
+            val accepted = db_apply_local(root, "", first_patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+            val before = db_store_read(root)
+            var collision = first_patch
+            collision.provenance = "different signed bytes for the same actor and counter"
+            collision = setup_item2_apply_resign(collision)
             step("Inject the failure and inspect fail-closed state")
-            check_replica_contract("REQ-001", "inject unsafe offline identity state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            expect(collision.payload_digest == first_patch.payload_digest).to_be(false)
+            expect(db_apply_local(root, accepted.head, collision, setup_item2_apply_merge(), setup_item2_apply_policy([collision]), 10)).to_equal(Err("SCVDB_ACTOR_COUNTER_COLLISION"))
+            val after = db_store_read(root)
+            expect(after.head).to_equal(before.head)
+            expect(after.state).to_equal(before.state)
+            expect(db_read_local_view(root, setup_item2_apply_policy()).unwrap().image.state.accepted.len()).to_equal(1)
 
     describe "REQ-002: Compact alias":
         it "should prove that it resolves a settled u64 under namespace epoch and kind":
             step("Create offline semantic changes")
+            val (root, head, header, alias, context) = setup_item2_compact_alias()
             step("Drive accepted state and inspect its receipt")
-            check_replica_contract("REQ-002", "drive accepted compact alias state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val policy = setup_item2_paged_policy()
+            val row = db_paged_current_row(root, policy, entity_ref_settled(alias)).unwrap().unwrap()
+            expect(row.entity).to_equal(entity_ref_canonical(setup_item2_paged_ref(1)))
+            expect(db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap().unwrap()).to_equal(row)
+            for foreign in [SettledAlias(database_namespace: "ffffffffffffffffffffffffffffffff", authority_epoch: alias.authority_epoch, entity_kind: "bug", sequence: 1u64), SettledAlias(database_namespace: alias.database_namespace, authority_epoch: 2u64, entity_kind: "bug", sequence: 1u64)]:
+                expect(db_paged_current_row(root, policy, entity_ref_settled(foreign)).is_err()).to_be(true)
+            val wrong_kind = SettledAlias(database_namespace: alias.database_namespace, authority_epoch: alias.authority_epoch, entity_kind: "test", sequence: 1u64)
+            expect(db_paged_current_row(root, policy, entity_ref_settled(wrong_kind)).unwrap()).to_be_nil()
+            expect(db_paged_open(root, policy).unwrap().head).to_equal(head)
 
         it "should prove that it round-trips a context-elided integer through its versioned header":
             step("Create offline semantic changes")
+            val (root, head, header, alias, context) = setup_item2_compact_alias()
+            expect(file_write("{root}/alias-header.txt", header)).to_be(true)
+            expect(file_write("{root}/alias-cell.txt", db_alias_cell_encode(header, alias).unwrap())).to_be(true)
             step("Drive the boundary state and inspect preserved invariants")
-            check_replica_contract("REQ-002", "drive boundary compact alias state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val decoded = db_alias_cell_decode(file_read("{root}/alias-header.txt"), file_read("{root}/alias-cell.txt"), context).unwrap()
+            expect(file_read("{root}/alias-cell.txt")).to_equal("1")
+            expect(decoded).to_equal(alias)
+            expect(db_paged_current_row(root, setup_item2_paged_policy(), entity_ref_settled(decoded)).unwrap().unwrap().entity).to_equal(entity_ref_canonical(setup_item2_paged_ref(1)))
+            expect(db_paged_open(root, setup_item2_paged_policy()).unwrap().head).to_equal(head)
 
         it "should prove that it rejects a bare integer copied without identity context":
             step("Create offline semantic changes")
+            val (root, head, header, alias, context) = setup_item2_compact_alias()
+            expect(file_write("{root}/copied-cell.txt", "1")).to_be(true)
             step("Inject the failure and inspect fail-closed state")
-            check_replica_contract("REQ-002", "inject unsafe compact alias state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val cell = file_read("{root}/copied-cell.txt")
+            expect(db_alias_cell_decode("", cell, context)).to_equal(Err("SCVDB_ALIAS_HEADER"))
+            val foreign = DbAliasContext(namespace: context.namespace, epoch: context.epoch + 1u64, kind: context.kind)
+            expect(db_alias_cell_decode(header, cell, foreign)).to_equal(Err("SCVDB_ALIAS_CONTEXT"))
+            expect(db_paged_open(root, setup_item2_paged_policy()).unwrap().head).to_equal(head)
 
     describe "REQ-003: Canonical identity preservation":
         it "should prove that it adds aliases without changing ChangeIdentity or RevisionIdentity":
@@ -256,19 +415,92 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
     describe "REQ-010: Typed patches":
         it "should prove that it round-trips every required patch identity dependency and operation field":
-            step("Settle compact identifiers")
-            step("Drive accepted state and inspect its receipt")
-            check_settlement_contract("REQ-010", "drive accepted typed patches state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            step("Transport signed typed patches")
+            val root = setup_item2_apply_root()
+            val patch = setup_item2_wire_patch()
+            val wire = db_patch_encode(patch).unwrap()
+            expect(file_write("{root}/signed-patch", wire)).to_be(true)
+            val decoded = db_patch_decode(file_read("{root}/signed-patch")).unwrap()
+            step("Read back every signed transport field")
+            # Transport receipt only; this deliberately mixed operation vector
+            # is not claimed to be one semantically admissible transaction.
+            expect(decoded).to_equal(patch)
+            expect(decoded.operations.len()).to_equal(8)
+            expect(decoded.actor_counter).to_equal(18446744073709551615u64)
+            expect(decoded.causal_dependencies).to_equal(["dependency"])
+            expect(db_patch_encode(decoded).unwrap()).to_equal(wire)
+            val (seed, public_key) = pure_ed25519_keypair_from_seed([43u8;32])
+            expect(pure_ed25519_verify(public_key, db_patch_signing_bytes(decoded).unwrap(), decoded.signature)).to_be(true)
 
         it "should prove that it preserves ordered operations and explicit preconditions":
-            step("Settle compact identifiers")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_settlement_contract("REQ-010", "drive boundary typed patches state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            step("Transport signed typed patches")
+            val root = setup_item2_apply_root()
+            val first_patch = setup_item2_apply_patch(1, "")
+            val first = db_apply_local(root, "", first_patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+            val entity = db_operation_ref(first_patch.operations[0])
+            var ordered = setup_item2_apply_patch(2, first.revision)
+            ordered.causal_dependencies = [first_patch.batch_id]
+            ordered.operations = [
+                DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("bug-1"), after: DbValue.Text("intermediate"))], RowPrecondition(base_row: first_patch.batch_id, expected_revision: first_patch.batch_id, expected_fields: [DbField(name: "title", value: DbValue.Text("bug-1"))])),
+                DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("intermediate"), after: DbValue.Text("final"))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: [DbField(name: "title", value: DbValue.Text("intermediate"))]))
+            ]
+            ordered = setup_item2_apply_resign(ordered)
+            expect(file_write("{root}/ordered-patch", db_patch_encode(ordered).unwrap())).to_be(true)
+            val decoded = db_patch_decode(file_read("{root}/ordered-patch")).unwrap()
+            step("Apply ordered updates and reject stale preconditions")
+            expect(decoded.operations).to_equal(ordered.operations)
+            val policy = setup_item2_apply_policy([ordered])
+            val applied = db_apply_local(root, first.head, decoded, setup_item2_apply_merge(), policy, 10).unwrap()
+            expect(applied.code).to_equal("ok")
+            val before = db_read_local_view(root, policy).unwrap()
+            expect(db_field_value(before.image.state.rows[0].fields, "title")).to_equal(DbValue.Text("final"))
+            expect(before.image.state.accepted.len()).to_equal(2)
+            var stale = setup_item2_apply_edit(3, applied.revision, "forbidden")
+            stale.operations = [DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("final"), after: DbValue.Text("forbidden"))], RowPrecondition(base_row: first_patch.batch_id, expected_revision: first_patch.batch_id, expected_fields: [DbField(name: "title", value: DbValue.Text("bug-1"))]))]
+            stale = setup_item2_apply_resign(stale)
+            val stale_policy = setup_item2_apply_policy([ordered, stale])
+            val rejected = db_apply_local(root, applied.head, db_patch_decode(db_patch_encode(stale).unwrap()).unwrap(), setup_item2_apply_merge(), stale_policy, 10).unwrap()
+            expect(rejected.code).to_equal("conflict")
+            val after = db_read_local_view(root, stale_policy).unwrap()
+            expect(after.image.state).to_equal(before.image.state)
+            expect(after.head).to_equal(before.head)
 
         it "should prove that it rejects a patch missing signature provenance or version identity":
-            step("Settle compact identifiers")
-            step("Inject the failure and inspect fail-closed state")
-            check_settlement_contract("REQ-010", "inject unsafe typed patches state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            step("Transport signed typed patches")
+            val root = setup_item2_apply_root()
+            val initial = setup_item2_apply_patch(1, "")
+            val applied = db_apply_local(root, "", initial, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+            val before = db_store_read(root)
+            val valid = setup_item2_apply_patch(2, applied.revision)
+            var unsigned = valid
+            unsigned.signature = []
+            var no_provenance = valid
+            no_provenance.provenance = ""
+            no_provenance = db_patch_seal(no_provenance).unwrap()
+            var no_version = valid
+            no_version.schema_revision = ""
+            expect(db_patch_seal(no_version)).to_equal(Err("SCVDB_VERSION"))
+            var no_reducer = valid
+            no_reducer.reducer_revision = ""
+            var no_signer = valid
+            no_signer.signer = ""
+            no_signer = db_patch_seal(no_signer).unwrap()
+            var no_digest_version = valid
+            no_digest_version.digest_version = 0
+            var no_signature_version = valid
+            no_signature_version.signature_version = 0
+            no_signature_version = db_patch_seal(no_signature_version).unwrap()
+            step("Reject incomplete envelopes without publication")
+            val policy = setup_item2_apply_policy([valid])
+            expect(db_apply_local(root, applied.head, unsigned, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+            expect(db_apply_local(root, applied.head, no_provenance, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNED_PROVENANCE_REQUIRED"))
+            expect(db_apply_local(root, applied.head, no_version, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_VERSION"))
+            expect(db_apply_local(root, applied.head, no_reducer, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_VERSION"))
+            expect(db_apply_local(root, applied.head, no_signer, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNED_PROVENANCE_REQUIRED"))
+            expect(db_apply_local(root, applied.head, no_digest_version, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_DIGEST_ALGORITHM"))
+            expect(db_apply_local(root, applied.head, no_signature_version, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNATURE_ALGORITHM"))
+            expect(db_store_read(root).head).to_equal(before.head)
+            expect(db_store_read(root).state).to_equal(before.state)
 
     describe "REQ-011: Canonical encoding":
         it "should prove that it produces identical domain-separated bytes for equivalent typed values":
@@ -305,8 +537,29 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-013: Merge semantics":
         it "should prove that it merges concurrent edits to different schema-declared fields":
             step("Settle compact identifiers")
-            step("Drive accepted state and inspect its receipt")
-            check_settlement_contract("REQ-013", "drive accepted merge semantics state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val root = setup_item2_apply_root()
+            val create = setup_item2_apply_patch(1, "")
+            val merge = setup_item2_merge_rules()
+            val first = db_apply_local(root, "", create, merge, setup_item2_merge_admission([create]), 10).unwrap()
+            val title = setup_item2_apply_edit(2, first.revision, "changed title")
+            var note = setup_item2_apply_patch(3, first.revision)
+            note.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "note", before: DbValue.Absent, after: DbValue.Text("independent note"))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            note = setup_item2_apply_resign(note)
+            val admission = setup_item2_merge_admission([create, title, note])
+            step("Apply two signed edits with the same original semantic base")
+            expect(title.base_revision).to_equal(note.base_revision)
+            expect(title.causal_dependencies).to_equal([])
+            expect(note.causal_dependencies).to_equal([])
+            val left = db_apply_local(root, first.head, title, merge, admission, 10).unwrap()
+            val combined = db_apply_local(root, left.head, note, merge, admission, 10).unwrap()
+            expect(combined.code).to_equal("ok")
+            step("Reopen actual accepted state and verify both independent fields")
+            val reopened = db_read_local_view(root, admission).unwrap()
+            expect(reopened.head).to_equal(combined.head)
+            expect(reopened.image.state.accepted.len()).to_equal(3)
+            expect(reopened.image.catalog.records.len()).to_equal(0)
+            expect(db_field_value(reopened.image.state.rows[0].fields, "title")).to_equal(DbValue.Text("changed title"))
+            expect(db_field_value(reopened.image.state.rows[0].fields, "note")).to_equal(DbValue.Text("independent note"))
 
         it "should prove that it retains delete-update and same-scalar races as explicit conflicts":
             step("Settle compact identifiers")
@@ -315,8 +568,26 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
         it "should prove that it rejects undeclared list or set merge guesses":
             step("Settle compact identifiers")
-            step("Inject the failure and inspect fail-closed state")
-            check_settlement_contract("REQ-013", "inject unsafe merge semantics state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val root = setup_item2_apply_root()
+            val create = setup_item2_apply_patch(1, "")
+            val merge = setup_item2_merge_rules()
+            val first = db_apply_local(root, "", create, merge, setup_item2_merge_admission([create]), 10).unwrap()
+            var list_edit = setup_item2_apply_patch(2, first.revision)
+            list_edit.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "items", before: DbValue.Absent, after: DbValue.List([DbValue.Text("one")]))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            list_edit = setup_item2_apply_resign(list_edit)
+            var set_edit = setup_item2_apply_patch(3, first.revision)
+            set_edit.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "tags", before: DbValue.Absent, after: DbValue.Set([DbValue.Text("one")]))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            set_edit = setup_item2_apply_resign(set_edit)
+            val admission = setup_item2_merge_admission([create, list_edit, set_edit])
+            val before = db_store_read(root)
+            step("Admit original signatures and reviewed metadata but reject absent merge rules")
+            for patch in [list_edit, set_edit]:
+                expect(db_apply_local(root, first.head, patch, merge, admission, 10)).to_equal(Err("SCVDB_UNKNOWN_FIELD"))
+                expect(db_store_read(root).head).to_equal(before.head)
+                expect(db_store_read(root).state).to_equal(before.state)
+            val reopened = db_read_local_view(root, admission).unwrap()
+            expect(reopened.image.state.accepted.len()).to_equal(1)
+            expect(reopened.image.catalog.records.len()).to_equal(0)
 
     describe "REQ-014: Causality":
         it "should prove that it orders causal dependencies before deterministic batch-ID ties":
@@ -582,8 +853,26 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
         it "should prove that it hydrates raw bytes through a digest-verified manifest":
             step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-030", "drive boundary semantic and evidence placement state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val (root, parent, target) = setup_item2_hydration_paths()
+            val digest = setup_item2_hydration_big(parent)
+            val before = db_store_read(root, "semantic")
+            step("Read the actual external envelope and verify a 100 MiB hydration")
+            val quota = setup_item2_hydration_quota()
+            val manifest = db_evidence_inspect_file(root, parent, digest, quota).unwrap()
+            expect(manifest.digest).to_equal(digest)
+            expect(manifest.content_bytes).to_equal(104857600u64)
+            expect(manifest.dependencies).to_equal([])
+            val hydrated = db_evidence_hydrate_file(root, parent, digest, target, quota).unwrap()
+            expect(hydrated.digest).to_equal(digest)
+            expect(hydrated.content_path.starts_with(target + "/")).to_be(true)
+            check_item2_hydration_big(hydrated.content_path)
+            step("Reject an insufficient byte allowance without semantic mutation")
+            var small = quota
+            small.max_content_bytes = 104857599
+            expect(db_evidence_hydrate_file(root, parent, digest, target, small).unwrap_err()).to_equal("SCVDB_EVIDENCE_QUOTA")
+            expect(db_store_read(root, "semantic").head).to_equal(before.head)
+            expect(db_store_read(root, "semantic").state).to_equal(before.state)
+            # This proves actual hydration, not canonical Git placement or NFR timing.
 
         it "should prove that it rejects high-volume raw evidence from canonical Git ancestry":
             step("Retain exact or aggregated history")
@@ -609,18 +898,94 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-032: Honest resolution":
         it "should prove that it returns exact aggregated restricted or unavailable explicitly":
             step("Retain exact or aggregated history")
-            step("Drive accepted state and inspect its receipt")
-            check_retention_contract("REQ-032", "drive accepted honest resolution state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val (root, parent) = setup_item2_retention_paths()
+            val old = setup_item2_retention_node(root, parent, "old", 10, 0)
+            val registered = db_retention_register(root, parent, "", old.digest, 0, "public").unwrap()
+            val expired = db_retention_run(root, parent, registered.head, 28, 0, "linux").unwrap()
+            val recent = setup_item2_retention_node(root, parent, "recent", 20, 27)
+            val added = db_retention_register(root, parent, expired.head, recent.digest, 27, "public").unwrap()
+            step("Persist restricted ciphertext through the owned key and encryption boundary")
+            val context = setup_item2_restricted_store_context()
+            val key_owner = db_restricted_key_create(root, parent, context).unwrap()
+            val key = db_restricted_key_load(root, parent, key_owner).unwrap()
+            val restricted = db_restricted_store_put(root, parent, context, key, [1u8,2u8,3u8], [], 0, setup_item2_restricted_quota()).unwrap()
+            val protected = db_retention_register(root, parent, added.head, restricted.digest, 0, "restricted").unwrap()
+            val missing = setup_item2_retention_node(root, parent, "missing", 30, 27)
+            val complete = db_retention_register(root, parent, protected.head, missing.digest, 27, "public").unwrap()
+            expect(file_delete(setup_item2_retention_raw(parent, missing.digest))).to_be(true)
+            val before = db_store_read(root, "retention")
+            step("Reopen the catalog and distinguish all four actual resolution outcomes")
+            expect(db_retention_open(root).unwrap().head).to_equal(complete.head)
+            expect(db_evidence_store_get(root, parent, recent.digest, 27, db_retention_store_quota()).unwrap().content).to_equal(recent.content)
+            expect(db_retention_resolve(root, parent, recent.digest)).to_equal(Ok("exact"))
+            expect(file_exists(setup_item2_retention_raw(parent, old.digest))).to_be(false)
+            expect(db_retention_resolve(root, parent, old.digest)).to_equal(Ok("aggregated"))
+            expect(db_retention_resolve(root, parent, restricted.digest)).to_equal(Ok("restricted"))
+            expect(db_restricted_store_get(root, parent, restricted, [], setup_item2_restricted_quota())).to_equal(Err("SCVDB_EVIDENCE_RESTRICTED"))
+            expect(db_retention_resolve(root, parent, missing.digest)).to_equal(Ok("unavailable"))
+            expect(db_store_read(root, "retention").head).to_equal(before.head)
+            expect(db_store_read(root, "retention").state).to_equal(before.state)
+            # Local digest resolution only: no requested historical revision or
+            # canonical-remote retention authority is supplied by this API.
 
         it "should prove that it reports a day-end aggregate without claiming an exact revision":
             step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-032", "drive boundary honest resolution state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val (root, parent) = setup_item2_retention_paths()
+            val first = setup_item2_retention_node(root, parent, "first", 10, 0)
+            val second = setup_item2_retention_node(root, parent, "second", 30, 0)
+            val registered = db_retention_register(root, parent, "", first.digest, 0, "public").unwrap()
+            val both = db_retention_register(root, parent, registered.head, second.digest, 0, "public").unwrap()
+            val expired = db_retention_run(root, parent, both.head, 28, 0, "linux").unwrap()
+            val before = db_store_read(root, "retention")
+            step("Read the actual rollup bytes and its two original payload identities")
+            val rollup_digest = expired.catalog.entries[0].rollup_digest
+            val retained = db_evidence_store_get(root, parent, rollup_digest, 0, db_retention_store_quota()).unwrap()
+            val rollup = db_retained_rollup_decode(retained.content).unwrap()
+            expect(rollup.rollup.day).to_equal(0u64)
+            expect(rollup.rollup.count).to_equal(2u64)
+            expect(rollup.rollup.duration_sum).to_equal(40u64)
+            expect(rollup.inputs.len()).to_equal(2)
+            var inputs: [text] = []
+            for input in rollup.inputs: inputs.push(input.payload_digest)
+            expect(inputs.contains(first.digest)).to_be(true)
+            expect(inputs.contains(second.digest)).to_be(true)
+            step("Keep aggregate identity distinct from missing exact raw bytes")
+            for node in [first, second]:
+                expect(rollup_digest == node.digest).to_be(false)
+                expect(file_exists(setup_item2_retention_raw(parent, node.digest))).to_be(false)
+                expect(db_evidence_store_get(root, parent, node.digest, 0, db_retention_store_quota()).is_err()).to_be(true)
+                expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("aggregated"))
+            expect(db_store_read(root, "retention").head).to_equal(before.head)
+            expect(db_store_read(root, "retention").state).to_equal(before.state)
+            # This distinguishes local aggregate/raw identity; the historical
+            # semantic-revision query parameter and remote proof remain absent.
 
         it "should prove that it rejects a manifest-only claim that missing bytes remain available":
             step("Retain exact or aggregated history")
-            step("Inject the failure and inspect fail-closed state")
-            check_retention_contract("REQ-032", "inject unsafe honest resolution state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val (root, parent) = setup_item2_retention_paths()
+            val node = setup_item2_retention_node(root, parent, "lost-raw", 10, 0)
+            val registered = db_retention_register(root, parent, "", node.digest, 0, "public").unwrap()
+            val before = db_store_read(root, "retention")
+            expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("exact"))
+            step("Remove actual raw bytes while retaining the active catalog entry")
+            expect(file_delete(setup_item2_retention_raw(parent, node.digest))).to_be(true)
+            expect(db_retention_open(root).unwrap().catalog.entries[0].state).to_equal("active")
+            expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("unavailable"))
+            expect(db_store_read(root, "retention").head).to_equal(before.head)
+            expect(db_store_read(root, "retention").state).to_equal(before.state)
+            step("Corrupt actual rollup bytes while retaining its catalog reference")
+            val (other, external) = setup_item2_retention_paths()
+            val old = setup_item2_retention_node(other, external, "lost-rollup", 20, 0)
+            val active = db_retention_register(other, external, "", old.digest, 0, "public").unwrap()
+            val expired = db_retention_run(other, external, active.head, 28, 0, "linux").unwrap()
+            expect(db_retention_resolve(other, external, old.digest)).to_equal(Ok("aggregated"))
+            val aggregate_before = db_store_read(other, "retention")
+            val rollup_digest = expired.catalog.entries[0].rollup_digest
+            expect(file_write_bytes(setup_item2_retention_raw(external, rollup_digest), [1u8,2u8])).to_be(true)
+            expect(db_retention_open(other).unwrap().catalog.entries[0].rollup_digest).to_equal(rollup_digest)
+            expect(db_retention_resolve(other, external, old.digest)).to_equal(Ok("unavailable"))
+            expect(db_store_read(other, "retention").head).to_equal(aggregate_before.head)
+            expect(db_store_read(other, "retention").state).to_equal(aggregate_before.state)
 
     describe "REQ-033: Rollup correctness":
         it "should prove that it deduplicates counts and merges declared timing sketches":
@@ -656,19 +1021,64 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
     describe "REQ-035: Confidentiality and deletion":
         it "should prove that it filters secrets and unnecessary PII before Git ingestion":
-            step("Retain exact or aggregated history")
-            step("Drive accepted state and inspect its receipt")
-            check_retention_contract("REQ-035", "drive accepted confidentiality and deletion state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            step("Publish reviewed metadata to an actual local Git authority")
+            val fixture = setup_item2_queue_fixture(1u64)
+            val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+            val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(prepared.code).to_equal("prepared")
+            val published = db_settlement_resume_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(published.code).to_equal("awaiting-index")
+            val indexed = db_settlement_resume_local(fixture.source, published.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(indexed.code).to_equal("local-index-observed")
+            val before = check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])
+            val snapshot = db_snapshot_decode(check_item2_queue_git(fixture.config.authority.remote, ["show", "refs/heads/settled:scv/semantic.snapshot"]) + "\n").unwrap()
+            expect(snapshot.rows.len()).to_equal(1)
+            expect(db_field_value(snapshot.rows[0].fields, "code")).to_equal(DbValue.Text("queue-1"))
+            step("Reject unreviewed synthetic secret and PII samples before another Git candidate")
+            for value in ["synthetic-secret-do-not-publish", "person@example.invalid"]:
+                val rejected = setup_item2_unreviewed_metadata(fixture.patches[0], value)
+                expect(db_settlement_enqueue(fixture.source, indexed.view.head, rejected, fixture.config.policy.admission)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+                expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(before)
+                expect(db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap().head).to_equal(indexed.view.head)
 
         it "should prove that it erases restricted CAS keys while reporting immutable-copy limits":
-            step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-035", "drive boundary confidentiality and deletion state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            step("Encrypt actual external evidence with an owned active key")
+            val (source, external) = setup_item2_restricted_paths()
+            val context = setup_item2_restricted_store_context()
+            val quota = setup_item2_restricted_quota()
+            val owner = db_restricted_key_create(source, external, context).unwrap()
+            val loaded_copy = db_restricted_key_load(source, external, owner).unwrap()
+            val plaintext: [u8] = [1u8, 2u8, 3u8]
+            val evidence = db_restricted_store_put(source, external, context, loaded_copy, plaintext, [], 10, quota).unwrap()
+            expect(db_restricted_store_get(source, external, evidence, loaded_copy, quota)).to_equal(Ok(plaintext))
+            step("Erase only the owned key and report what copies remain")
+            val report = db_restricted_key_delete(source, external, owner).unwrap()
+            expect(report.owned_key_status).to_equal("active_file_deleted_and_directory_synced")
+            expect(report.git_and_clone_erasure).to_equal("not_guaranteed")
+            expect(report.external_ciphertext_status).to_equal("retained")
+            expect(file_exists("{owner.directory}/active.key")).to_be(false)
+            expect(db_restricted_key_load(source, external, owner)).to_equal(Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE"))
+            expect(db_restricted_store_get(source, external, evidence, [], quota)).to_equal(Err("SCVDB_EVIDENCE_RESTRICTED"))
+            expect(db_restricted_store_get(source, external, evidence, loaded_copy, quota)).to_equal(Ok(plaintext))
 
         it "should prove that it rejects secret-bearing metadata under default-deny policy":
-            step("Retain exact or aggregated history")
-            step("Inject the failure and inspect fail-closed state")
-            check_retention_contract("REQ-035", "inject unsafe confidentiality and deletion state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            step("Keep classified and unreviewed metadata out of the durable queue")
+            val fixture = setup_item2_queue_fixture(1u64)
+            val before = check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])
+            for classification in ["secret", "pii", "restricted", "unreviewed"]:
+                var admission = fixture.config.policy.admission
+                for index in 0..admission.metadata.rules.len():
+                    if admission.metadata.rules[index].kind == "bug" and admission.metadata.rules[index].field == "code":
+                        var rule = admission.metadata.rules[index]
+                        if classification != "unreviewed": rule.classification = classification
+                        else: rule.allowed_value_digests = []
+                        admission.metadata.rules[index] = rule
+                admission.metadata.revision = db_metadata_policy_digest(admission.metadata).unwrap()
+                admission.revision = db_admission_policy_digest(admission).unwrap()
+                val error = if classification == "unreviewed": "SCVDB_METADATA_VALUE_UNREVIEWED" else: "SCVDB_METADATA_FORBIDDEN"
+                expect(db_settlement_enqueue(fixture.source, "", fixture.patches[0], admission)).to_equal(Err(error))
+                expect(db_store_read(fixture.source, "settlement-work").code).to_equal("empty")
+                expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(before)
 
     describe "REQ-036: One app path":
         it "should prove that it runs the same orchestration through capability-selected adapters":
@@ -928,3 +1338,15 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 ```
 
 </details>
+
+## 2026-10-03 executable supplement and evidence status
+
+The executable now also contains three pure production-map prerequisites:
+
+1. Allocate identity A as 1, tombstone A, allocate B as 2, and resolve sequence 1 back to A with high-water 2.
+2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
+3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
+
+These pure prerequisites supplement 153 full-contract scenarios. Twelve REQ-001/REQ-002/REQ-010/REQ-035 scenarios now use real filesystem, codec and authenticated mutation owners; the other 141 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
+
+Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.

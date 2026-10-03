@@ -6,7 +6,7 @@ stable cross-owner ABI; a provider must never infer an unavailable child RSS
 from a tree metric or the collector's own RSS.
 """
 
-use std.common.process.deadline_v4.{ProcessObservationPhaseV4}
+use std.common.process.deadline_v4.{ProcessObservationPhaseV4, process_observation_deadline_values_valid_v4}
 use std.common.string_core.{bytes_to_text}
 
 pub const PROCESS_OBSERVATION_V4_VERSION: i64 = 4
@@ -667,7 +667,7 @@ pub fn process_observation_request_valid_v4(request: ProcessObservationRequestV4
     if request.argv.len() == 0 or request.argv[0] == "" or request.executable_pin <= 0 or
             request.executable_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
             request.cwd_pin_claim <= 0 or request.cwd_identity_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
-            request.capability_bits <= 0 or request.wall_budget_ns <= 0 or
+            request.capability_bits <= 0 or request.wall_budget_ns < 0 or
             request.term_grace_ns < 0 or request.cleanup_budget_ns < 0 or
             request.stdout_limit_bytes < 0 or request.stderr_limit_bytes < 0 or
             request.memory_limit_bytes < 0 or request.max_clock_resolution_ns <= 0 or
@@ -782,9 +782,8 @@ pub fn decode_process_observation_v4(wire: ProcessObservationWireV4) -> Result<P
     if words[POV4_REQUEST_STARTED_NS] < 0 or words[POV4_PREPARED_NS] < words[POV4_REQUEST_STARTED_NS]:
         return Err("process observation V4 absolute deadline order is invalid")
     if status != ProcessObservationStatusV4.Rejected and
-            (words[POV4_EXECUTION_DEADLINE_NS] < words[POV4_REQUEST_STARTED_NS] or
-            words[POV4_KILL_DEADLINE_NS] < words[POV4_EXECUTION_DEADLINE_NS] or
-            words[POV4_CLEANUP_DEADLINE_NS] < words[POV4_KILL_DEADLINE_NS]):
+            not process_observation_deadline_values_valid_v4(words[POV4_REQUEST_STARTED_NS],
+                words[POV4_EXECUTION_DEADLINE_NS], words[POV4_KILL_DEADLINE_NS], words[POV4_CLEANUP_DEADLINE_NS]):
         return Err("process observation V4 absolute deadline order is invalid")
     if status != ProcessObservationStatusV4.Rejected and
             words[POV4_PROCESS_STARTED_NS] < words[POV4_PREPARED_NS] and
@@ -1006,9 +1005,8 @@ pub fn freeze_process_observation_cleanup_receipt_v4(
             (packet.leader_waited_ns >= 0 and packet.process_started_ns >= 0 and
              packet.leader_waited_ns < packet.process_started_ns) or
             packet.request_started_ns < 0 or packet.prepared_ns < packet.request_started_ns or
-            packet.execution_deadline_ns < packet.request_started_ns or
-            packet.kill_deadline_ns < packet.execution_deadline_ns or
-            packet.cleanup_deadline_ns < packet.kill_deadline_ns or
+            not process_observation_deadline_values_valid_v4(packet.request_started_ns,
+                packet.execution_deadline_ns, packet.kill_deadline_ns, packet.cleanup_deadline_ns) or
             (packet.process_started_ns < packet.prepared_ns and
              not (clock_unavailable and packet.process_started_ns == -1)) or
             (clock_unavailable and

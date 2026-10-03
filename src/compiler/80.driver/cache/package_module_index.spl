@@ -5,6 +5,9 @@
 # explicitly when admission returns a non-`ok` reason.
 
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_index_semantic_transition.{
+    package_index_transition_stage_v1
+}
 use std.common.crypto.sha256.{sha256_text}
 # Byte-wise order: native text relational operators compare tagged addresses.
 use std.scv.compile_source_inventory_core.{
@@ -548,6 +551,14 @@ fn _package_module_index_publish_locked_v1(
             if raced_text != content:
                 return false
     val pointer_tmp = "{pointer}.tmp.{digest}"
+    val previous_digest = package_module_index_read_file_v1(pointer, 64) ?? ""
+    var previous_encoded = ""
+    if package_module_index_digest_valid_v1(previous_digest) and previous_digest != digest:
+        previous_encoded = package_module_index_read_file_v1(
+            "{dir}/{previous_digest}.index", PACKAGE_MODULE_INDEX_MAX_BYTES_V1) ?? ""
+    if not package_index_transition_stage_v1(
+            dir, digest, previous_digest, previous_encoded):
+        return false
     if not file_create_excl(pointer_tmp, digest):
         val staged = package_module_index_read_file_v1(pointer_tmp, 64) ?? ""
         if staged != digest:
@@ -596,17 +607,36 @@ fn package_module_index_publish_if_current_v1(
     _package_module_index_publish_v1(
         cache_root, generation, true, expected_current_digest)
 
-fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexReadV1:
-    val dir = package_module_index_storage_dir_v1(cache_root)
+fn _package_module_index_capture_locked_v1(dir: text) -> (text, text, text):
     # `?? ""`, not `x == nil or f(x!)` (native Option-box unwrap defect, same
     # as compile_source_inventory_read_current_v1). "" fails validation.
     val pointer = package_module_index_read_file_v1("{dir}/CURRENT", 64) ?? ""
     if not package_module_index_digest_valid_v1(pointer):
-        return PackageModuleIndexReadV1(false, "missing-or-invalid-generation", "", nil)
+        return ("", "", "missing-or-invalid-generation")
     val content = package_module_index_read_file_v1(
         "{dir}/{pointer}.index", PACKAGE_MODULE_INDEX_MAX_BYTES_V1) ?? ""
     if content == "":
-        return PackageModuleIndexReadV1(false, "generation-unavailable", "", nil)
+        return ("", "", "generation-unavailable")
+    (pointer, content, "")
+
+fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexReadV1:
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    # Do not create storage merely to read an absent generation. A publisher
+    # racing this preflight may legitimately linearize after the missing read.
+    if not rt_file_exists("{dir}/CURRENT"):
+        return PackageModuleIndexReadV1(false, "missing-or-invalid-generation", "", nil)
+    val lock = file_lock("{dir}/CURRENT.lock", 1)
+    if lock < 0:
+        return PackageModuleIndexReadV1(false, "generation-lock-unavailable", "", nil)
+    # GC/publication share this lock. Capture both pointer and owned bytes before
+    # releasing it; hash/decode never extend the filesystem critical section.
+    val captured = _package_module_index_capture_locked_v1(dir)
+    if not file_unlock(lock):
+        return PackageModuleIndexReadV1(false, "generation-unlock-failed", "", nil)
+    if captured.2 != "":
+        return PackageModuleIndexReadV1(false, captured.2, "", nil)
+    val pointer = captured.0
+    val content = captured.1
     if sha256_text(content) != pointer:
         return PackageModuleIndexReadV1(false, "generation-digest-mismatch", "", nil)
     val decoded = package_module_index_decode_v1(content)
@@ -616,7 +646,7 @@ fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexR
         return PackageModuleIndexReadV1(false, "generation-pointer-mismatch", "", nil)
     decoded
 
-fn package_module_index_gc_v1(
+fn _package_module_index_gc_locked_v1(
     cache_root: text, retained_digests: [text], max_remove: i64
 ) -> i64:
     if max_remove <= 0:
@@ -643,6 +673,25 @@ fn package_module_index_gc_v1(
                 package_module_index_decode_v1(content!).valid and
                 rt_file_delete(path)):
             removed = removed + 1
+    removed
+
+fn package_module_index_gc_v1(
+    cache_root: text, retained_digests: [text], max_remove: i64
+) -> i64:
+    if max_remove <= 0:
+        return 0
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    # Publication can reuse an existing immutable generation before replacing
+    # CURRENT. Hold its lock across pointer admission, enumeration and deletion
+    # so GC cannot remove the publisher's candidate or newly current generation.
+    # GC is optional maintenance: bounded contention returns the existing zero
+    # removal result rather than delaying compilation for the publisher timeout.
+    val lock = file_lock("{dir}/CURRENT.lock", 1)
+    if lock < 0:
+        return 0
+    val removed = _package_module_index_gc_locked_v1(
+        cache_root, retained_digests, max_remove)
+    file_unlock(lock)
     removed
 
 fn package_module_index_dirty_packages_v1(

@@ -1,0 +1,69 @@
+# Immutable indexed conflict evidence. These records confer no authorization.
+# Resolution stores the signed patch and prior root; its containing manifest is
+# the resulting root, avoiding a self-referential Merkle digest.
+use std.scv.db_pages.*
+use std.scv.db_canonical.*
+use std.scv.db_conflict_catalog.*
+use std.scv.db_conflict_model.*
+use std.scv.db_conflict_resolution.{DbConflictDecision}
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
+
+enum DbPagedIntent:
+    Apply
+    CaptureConflict
+    ResolveConflict(decision: DbConflictDecision)
+
+struct DbPagedConflictEvidence:
+    record: DbConflictRecord
+    original: DbPatch
+
+fn db_paged_conflict_key(id: text, resolution: bool = false) -> Result<text, text>:
+    if id.len() != 64: return Err("SCVDB_CONFLICT_DIGEST")
+    for index in 0..id.len():
+        val code = id.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return Err("SCVDB_CONFLICT_DIGEST")
+    val kind = if resolution: "resolution" else: "evidence"
+    Ok("scv-db/conflicts/v1/{kind}/{id}")
+
+fn db_paged_conflict_evidence(evidence: DbPagedConflictEvidence) -> Result<DbPageRecord, text>:
+    val record = evidence.record
+    val original = evidence.original
+    val digest = db_patch_validate(original)?
+    if record.repository != original.repository or record.epoch != original.epoch or record.incoming_revision != digest or record.base_revision != original.base_revision: return Err("SCVDB_CONFLICT_PATCH_CONTEXT")
+    val catalog = DbConflictCatalog(records: [record], resolutions: [])
+    val payload = db_frame(181u8, db_canonical_text(db_conflict_catalog_encode(catalog)?)? + db_canonical_text(db_patch_encode(original)?)?)
+    if payload.len() > 2097152: return Err("SCVDB_PAGED_QUOTA")
+    Ok(DbPageRecord(key: db_paged_conflict_key(record.conflict_id)?, kind: DbPageKind.Row, payload: payload))
+
+fn db_paged_conflict_decode(value: DbPageRecord) -> Result<DbPagedConflictEvidence, text>:
+    if value.payload.len() > 2097152: return Err("SCVDB_PAGED_QUOTA")
+    val frame = db_read_frame(value.payload, 0)?
+    if frame.tag != 181u8: return Err("SCVDB_CONFLICT_ENCODING")
+    val fields = db_read_children(frame.payload)?
+    if fields.len() != 2: return Err("SCVDB_CONFLICT_ENCODING")
+    val catalog = db_conflict_catalog_decode(db_read_text(fields[0])?)?
+    if catalog.records.len() != 1 or catalog.resolutions.len() != 0: return Err("SCVDB_CONFLICT_ENCODING")
+    val evidence = DbPagedConflictEvidence(record: catalog.records[0], original: db_patch_decode(db_read_text(fields[1])?)?)
+    if db_paged_conflict_evidence(evidence)? != value: return Err("SCVDB_CONFLICT_ENCODING")
+    Ok(evidence)
+
+fn db_paged_resolution_record(id: text, patch: DbPatch, prior: text) -> Result<DbPageRecord, text>:
+    val digest = db_patch_validate(patch)?
+    if prior != patch.base_revision or prior.len() != 64: return Err("SCVDB_CONFLICT_PATCH_CONTEXT")
+    val payload = db_frame(182u8, db_canonical_text(prior)? + db_canonical_text(db_patch_encode(patch)?)?)
+    if payload.len() > 2097152: return Err("SCVDB_PAGED_QUOTA")
+    Ok(DbPageRecord(key: db_paged_conflict_key(id, true)?, kind: DbPageKind.Accepted, payload: payload))
+
+fn db_paged_resolution_patch(id: text, value: DbPageRecord) -> Result<DbPatch, text>:
+    if value.payload.len() > 2097152: return Err("SCVDB_PAGED_QUOTA")
+    val frame = db_read_frame(value.payload, 0)?
+    if frame.tag != 182u8: return Err("SCVDB_CONFLICT_ENCODING")
+    val fields = db_read_children(frame.payload)?
+    if fields.len() != 2: return Err("SCVDB_CONFLICT_ENCODING")
+    val patch = db_patch_decode(db_read_text(fields[1])?)?
+    if db_paged_resolution_record(id, patch, db_read_text(fields[0])?)? != value: return Err("SCVDB_CONFLICT_ENCODING")
+    Ok(patch)
+
+export DbPagedIntent, DbPagedConflictEvidence, db_paged_conflict_key
+export db_paged_conflict_evidence, db_paged_conflict_decode, db_paged_resolution_record, db_paged_resolution_patch

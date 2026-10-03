@@ -1,0 +1,104 @@
+# @req PSI-REQ-004
+# @evidence-display: links
+# Reader acquisition contract; execution requires an admitted pure-Simple runner.
+use std.spec.{describe, it, expect, step}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_publish_v1,
+    package_module_index_read_current_v1, package_module_index_gc_v1,
+    package_module_index_digest_v1, package_module_index_encode_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{dir_remove, dir_exists, file_exists, file_write, file_delete}
+
+extern fn rt_getpid() -> i64
+
+fn reader_transaction_generation(revision: text) -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        schema_version: 1,
+        producer_digest: sha256_text("reader-producer"),
+        root_generation: "reader-root",
+        scv_revision_id: revision,
+        scv_commit_id: "reader-commit",
+        scv_tree_id: "reader-tree",
+        inventory_digest: sha256_text(revision),
+        entries: [])
+
+describe "package index reader acquisition transaction":
+    it "rejects a contended acquisition and reads successfully after release":
+        step("Select a complete generation under the publication lock")
+        val root = "build/test-artifacts/package-index-reader-lock-{rt_getpid()}"
+        dir_remove(root, true)
+        val expected = reader_transaction_generation("reader-current")
+        expect(package_module_index_publish_v1(root, expected)).to_equal(true)
+        val publisher = file_lock("{root}/package-module-index-v1/CURRENT.lock", 1)
+        expect(publisher >= 0).to_equal(true)
+        val contended = package_module_index_read_current_v1(root)
+        val released = file_unlock(publisher)
+        expect(released).to_equal(true)
+        expect(contended.valid).to_equal(false)
+        expect(contended.reason).to_equal("generation-lock-unavailable")
+        expect(contended.digest).to_equal("")
+        expect(contended.generation == nil).to_equal(true)
+        val admitted = package_module_index_read_current_v1(root)
+        expect(admitted.valid).to_equal(true)
+        expect(admitted.digest).to_equal(package_module_index_digest_v1(expected))
+        expect(package_module_index_encode_v1(admitted.generation!)).to_equal(
+            package_module_index_encode_v1(expected))
+        dir_remove(root, true)
+
+    it "keeps a decoded snapshot usable after its old index file is collected":
+        step("Retain decoded generation bytes after collection")
+        val root = "build/test-artifacts/package-index-reader-owned-{rt_getpid()}"
+        dir_remove(root, true)
+        val old = reader_transaction_generation("reader-old")
+        val newer = reader_transaction_generation("reader-new")
+        expect(package_module_index_publish_v1(root, old)).to_equal(true)
+        val admitted = package_module_index_read_current_v1(root)
+        expect(admitted.valid).to_equal(true)
+        val captured = package_module_index_encode_v1(admitted.generation!)
+        expect(package_module_index_publish_v1(root, newer)).to_equal(true)
+        expect(package_module_index_gc_v1(root, [], 1)).to_equal(1)
+        val old_digest = package_module_index_digest_v1(old)
+        expect(file_exists("{root}/package-module-index-v1/{old_digest}.index")).to_equal(false)
+        expect(package_module_index_encode_v1(admitted.generation!)).to_equal(captured)
+        expect(admitted.digest).to_equal(old_digest)
+        expect(package_module_index_read_current_v1(root).digest).to_equal(
+            package_module_index_digest_v1(newer))
+        dir_remove(root, true)
+
+    it "preserves the missing-generation result without creating storage":
+        step("Reject missing storage without creating a cache directory")
+        val root = "build/test-artifacts/package-index-reader-absent-{rt_getpid()}"
+        dir_remove(root, true)
+        val missing = package_module_index_read_current_v1(root)
+        expect(missing.valid).to_equal(false)
+        expect(missing.reason).to_equal("missing-or-invalid-generation")
+        expect(dir_exists(root)).to_equal(false)
+
+    it "releases acquisition ownership on invalid pointers and missing payloads":
+        step("Release reader ownership after capture failure")
+        val root = "build/test-artifacts/package-index-reader-error-{rt_getpid()}"
+        dir_remove(root, true)
+        val generation = reader_transaction_generation("reader-error")
+        expect(package_module_index_publish_v1(root, generation)).to_equal(true)
+        val digest = package_module_index_digest_v1(generation)
+        val dir = "{root}/package-module-index-v1"
+        expect(file_write("{dir}/CURRENT", "invalid")).to_equal(true)
+        val invalid = package_module_index_read_current_v1(root)
+        expect(invalid.valid).to_equal(false)
+        expect(invalid.reason).to_equal("missing-or-invalid-generation")
+        val after_invalid = file_lock("{dir}/CURRENT.lock", 1)
+        expect(after_invalid >= 0).to_equal(true)
+        expect(file_unlock(after_invalid)).to_equal(true)
+        expect(file_write("{dir}/CURRENT", digest)).to_equal(true)
+        expect(file_delete("{dir}/{digest}.index")).to_equal(true)
+        val absent = package_module_index_read_current_v1(root)
+        expect(absent.valid).to_equal(false)
+        expect(absent.reason).to_equal("generation-unavailable")
+        val after_absent = file_lock("{dir}/CURRENT.lock", 1)
+        expect(after_absent >= 0).to_equal(true)
+        expect(file_unlock(after_absent)).to_equal(true)
+        expect(package_module_index_publish_v1(root, generation)).to_equal(true)
+        expect(package_module_index_read_current_v1(root).digest).to_equal(digest)
+        dir_remove(root, true)

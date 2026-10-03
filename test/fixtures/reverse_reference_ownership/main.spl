@@ -1,0 +1,207 @@
+# Native active-collector lifetime and allocation comparison. Fresh process per mode/count.
+use compiler.common.cache.reverse_reference_facts.*
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn valid_identity(value: text, length: i64) -> bool:
+    if value.len() != length: return false
+    for character in value:
+        if not "0123456789abcdef".contains(character): return false
+    true
+
+fn module_fact_count(index: i64) -> i64:
+    if index == 0: 64 else: 8 + index
+
+fn evidence_for(index: i64, item: i64) -> text:
+    var parts: [text] = []
+    val count = if index == 0: 128 else: 16 + index
+    var part = 0
+    while part < count:
+        parts.push("module={index};item={item};part={part};λ\n")
+        part = part + 1
+    parts.join("\\")
+
+fn capture_module(index: i64, expected_count: i64) -> Result<i64, text>:
+    val source = "/fixture/module_{index}.spl"
+    var item = 0
+    while item < module_fact_count(index):
+        val subject = "symbol_{index}_{item}"
+        val consumer = "consumer_{index}"
+        val evidence = evidence_for(index, item)
+        reverse_reference_register_annotation_v1(subject, consumer, evidence)
+        reverse_reference_register_annotation_v1(subject, consumer, evidence)
+        reverse_reference_owner_register_source_alias_v1(subject, source)
+        reverse_reference_owner_register_source_alias_v1(subject, source)
+        reverse_reference_owner_register_source_alias_v1("shared", source)
+        item = item + 1
+    # Empty subjects still mark the family; the existing phase fact is deduplicated.
+    reverse_reference_owner_register_v1("empty-family", "", source, "")
+    reverse_reference_owner_register_v1("seed", "root", "base", "e0")
+    if reverse_reference_owner_snapshot_v1().facts.len() != expected_count:
+        return Err("pending fact count mismatch")
+    val aliases = reverse_reference_owner_source_aliases_v1("shared")
+    if aliases.len() != index + 2 or aliases[index + 1] != source:
+        return Err("pending alias order mismatch")
+    if index == 1:
+        return Err("recoverable module error {index}: λ")
+    Ok(item)
+
+fn validate_retained(last_index: i64, expected_count: i64) -> bool:
+    val snapshot = reverse_reference_owner_snapshot_v1()
+    if snapshot.facts.len() != expected_count or snapshot.known_families.len() != 3:
+        return false
+    if snapshot.known_families[0] != "seed" or
+            snapshot.known_families[1] != "annotation-consumer" or
+            snapshot.known_families[2] != "empty-family": return false
+    val seed = snapshot.facts[0]
+    if seed.projection_kind != "seed" or seed.subject_identity != "root" or
+            seed.consumer_identity != "base" or
+            seed.evidence_digest != reverse_reference_fact_digest_v1("seed", "root", "base", "e0"):
+        return false
+    val shared = reverse_reference_owner_source_aliases_v1("shared")
+    if shared.len() != last_index + 2 or shared[0] != "base": return false
+    var offset = 1
+    var index = 0
+    while index <= last_index:
+        val source = "/fixture/module_{index}.spl"
+        if shared[index + 1] != source: return false
+        var item = 0
+        while item < module_fact_count(index):
+            val subject = "symbol_{index}_{item}"
+            val consumer = "consumer_{index}"
+            val fact = snapshot.facts[offset]
+            if fact.projection_kind != "annotation-consumer" or
+                    fact.subject_identity != subject or fact.consumer_identity != consumer or
+                    fact.evidence_digest != reverse_reference_fact_digest_v1(
+                        "annotation-consumer", subject, consumer, evidence_for(index, item)):
+                return false
+            val aliases = reverse_reference_owner_source_aliases_v1(subject)
+            if aliases.len() != 1 or aliases[0] != source: return false
+            offset = offset + 1
+            item = item + 1
+        index = index + 1
+    true
+
+fn state_digest() -> text:
+    val snapshot = reverse_reference_owner_snapshot_v1()
+    var parts: [text] = []
+    for family in snapshot.known_families:
+        parts.push("family:" + family)
+    for fact in snapshot.facts:
+        parts.push(fact.projection_kind + ":" + fact.subject_identity + ":" +
+            fact.consumer_identity + ":" + fact.evidence_digest)
+        for source in reverse_reference_owner_source_aliases_v1(fact.subject_identity):
+            parts.push("alias:" + source)
+    for source in reverse_reference_owner_source_aliases_v1("shared"):
+        parts.push("shared:" + source)
+    sha256_text(parts.join("\n"))
+
+fn lifecycle_checks() -> bool:
+    reverse_reference_owner_end_v1()
+    if not transient_scope_begin(): return false
+    val idle = reverse_reference_module_begin_v1()
+    if idle != 0 or not transient_scope_pause() or not reverse_reference_module_seal_v1(idle): return false
+    if not transient_scope_end() or not reverse_reference_module_publish_v1(idle): return false
+    if not reverse_reference_owner_begin_v1() or not transient_scope_begin(): return false
+    val token = reverse_reference_module_begin_v1()
+    if token <= 0 or reverse_reference_module_begin_v1() != -1: return false
+    if reverse_reference_module_abort_v1(-1): return false
+    reverse_reference_register_annotation_v1("aborted", "consumer", "first")
+    if not reverse_reference_module_abort_v1(token) or not transient_scope_end(): return false
+    if reverse_reference_owner_snapshot_v1().facts.len() != 0: return false
+    if not transient_scope_begin(): return false
+    val sealed = reverse_reference_module_begin_v1()
+    reverse_reference_register_annotation_v1("invalid", "consumer", "second")
+    if not transient_scope_pause() or not reverse_reference_module_seal_v1(sealed): return false
+    # Registration between seal and publication must invalidate, never silently drop.
+    reverse_reference_owner_mark_known_v1("late-family")
+    if reverse_reference_module_publish_v1(sealed): return false
+    if not reverse_reference_module_abort_v1(sealed) or not transient_scope_end(): return false
+    if reverse_reference_owner_snapshot_v1().facts.len() != 0: return false
+    if not transient_scope_begin(): return false
+    val stale = reverse_reference_module_begin_v1()
+    reverse_reference_register_annotation_v1("stale", "consumer", "third")
+    if not transient_scope_pause() or not reverse_reference_module_seal_v1(stale): return false
+    if not transient_scope_end(): return false
+    reverse_reference_owner_end_v1()
+    if not reverse_reference_owner_begin_v1(): return false
+    if reverse_reference_module_publish_v1(stale) or reverse_reference_module_abort_v1(stale): return false
+    if reverse_reference_owner_snapshot_v1().facts.len() != 0: return false
+    reverse_reference_owner_end_v1()
+    true
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.len() != 3: return 10
+    val mode = args[1]
+    val count = args[2].to_i64() ?? 0
+    if (mode != "scoped" and mode != "baseline") or (count != 4 and count != 8): return 11
+    val producer = env_get_opt("SIMPLE_REVERSE_PRODUCER_SHA256") ?? ""
+    val producer_source = env_get_opt("SIMPLE_REVERSE_PRODUCER_SOURCE_REVISION") ?? ""
+    val source_revision = env_get_opt("SIMPLE_REVERSE_SOURCE_REVISION") ?? ""
+    if not valid_identity(producer, 64) or not valid_identity(producer_source, 40) or
+            not valid_identity(source_revision, 40): return 12
+    if not reverse_reference_owner_begin_v1(): return 13
+    reverse_reference_owner_register_v1("seed", "root", "base", "e0")
+    reverse_reference_owner_register_source_alias_v1("shared", "base")
+    val live_before = rt_heap_live_bytes()
+    val objects_before = rt_heap_registry_count()
+    var elapsed = 0
+    var expected_count = 1
+    var index = 0
+    while index < count:
+        expected_count = expected_count + module_fact_count(index)
+        val started = rt_time_now_unix_micros()
+        if mode == "scoped" and not transient_scope_begin(): return 14
+        val token = if mode == "scoped": reverse_reference_module_begin_v1() else: 0
+        if mode == "scoped" and token <= 0: return 15
+        val result = capture_module(index, expected_count)
+        if mode == "scoped":
+            if not transient_scope_pause() or not transient_promote(result): return 16
+            if not reverse_reference_module_seal_v1(token):
+                val _aborted = reverse_reference_module_abort_v1(token)
+                val _ended = transient_scope_end()
+                return 17
+            if not transient_scope_end() or not reverse_reference_module_publish_v1(token): return 18
+        elapsed = elapsed + rt_time_now_unix_micros() - started
+        if index == 1:
+            if not result.is_err() or result.unwrap_err() != "recoverable module error 1: λ": return 19
+        else:
+            if not result.is_ok() or result.unwrap() != module_fact_count(index): return 20
+        # Verification has its own scratch boundary in BOTH modes; it retains no
+        # compiler facts and cannot dominate the measured live allocation delta.
+        if not transient_scope_begin(): return 21
+        val valid = validate_retained(index, expected_count)
+        val ended = transient_scope_end()
+        if not valid or not ended: return 22
+        index = index + 1
+    val live = rt_heap_live_bytes() - live_before
+    val objects = rt_heap_registry_count() - objects_before
+    if not transient_scope_begin(): return 23
+    val digest = state_digest()
+    if not transient_scope_pause() or not transient_promote(digest) or not transient_scope_end(): return 24
+    if not lifecycle_checks(): return 25
+    print "profile=reverse-reference-module-ownership-v1"
+    print "mode={mode}"
+    print "count={count}"
+    print "producer_sha256={producer}"
+    print "producer_source_revision={producer_source}"
+    print "source_revision={source_revision}"
+    print "fact_count={expected_count}"
+    print "state_digest={digest}"
+    print "live_bytes={live}"
+    print "live_allocations={objects}"
+    print "elapsed_us={elapsed}"
+    print "collector_active=yes"
+    print "retained_order_and_digest=yes"
+    print "recoverable_error_published=yes"
+    print "lifecycle_checks=yes"
+    print "complete=yes"
+    0

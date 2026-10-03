@@ -1,0 +1,292 @@
+# Join one admitted full-inventory compiler pass to the V2 publisher. Cold
+# semantic actions qualify graph entries only; runtime/std object receipts
+# come from separate observed native package actions below.
+
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_aot_native_output.{
+    driver_runtime_std_compile_native_action_v2
+}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1
+}
+use compiler.driver.cache.cold_package_ownership_v1.{
+    ColdPackageOwnershipManifestV1, cold_package_ownership_capture_v1,
+    COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1
+}
+use compiler.driver.cache.cold_hir_semantic_action_emission_v1.{
+    cold_hir_semantic_source_witness_v1,
+    cold_hir_semantic_action_emit_v1
+}
+use compiler.driver.cache.cold_hir_compiled_payload_file_v1.{
+    ColdHirCompiledPayloadFileV1
+}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    ColdHirNativeObjectArtifactV1
+}
+use compiler.driver.cache.cold_hir_compiled_package_outputs_v1.{
+    ColdHirCompiledPackageArtifactV1,
+    cold_hir_package_outputs_from_driver_v1
+}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{
+    cold_hir_package_index_from_outputs_v1
+}
+use compiler.driver.cache.cold_hir_compiler_publication_v1.{
+    ColdHirCompilerPublishInputV1, ColdHirCompilerPublishPinsV1,
+    cold_hir_compiler_publish_full_v2
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_digest_v1
+}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1
+}
+use compiler.driver.cache.runtime_std_membership_policy_v1.{
+    runtime_std_membership_policy_from_index_v1
+}
+use compiler.driver.cache.cold_full_index_retention_v1.{
+    cold_full_index_trim_non_runtime_std_v1
+}
+use compiler.driver.smf.runtime_std_package_membership_v1.{
+    RuntimeStdHirMemberV1, runtime_std_package_members_v1,
+    runtime_std_package_hir_sections_write_v1,
+    runtime_std_package_membership_encode_v1
+}
+use compiler.driver.smf.runtime_std_package_set.{
+    RuntimeStdPackageAuthorityV1,
+    RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1
+}
+use compiler.driver.smf.runtime_std_native_sections_v1.{
+    runtime_std_native_sections_emit_v2
+}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{
+    RuntimeStdNativeActionBudgetV2,
+    runtime_std_native_action_abi_digest_v2
+}
+use compiler.driver.smf.runtime_std_compiled_publication.{
+    RuntimeStdCompiledSectionReceiptV1,
+    RuntimeStdCompiledPackageReceiptV1
+}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1
+}
+
+val COLD_FULL_INDEX_MAX_MANIFEST_BYTES_V1: i64 = 65536
+
+fn _cold_full_index_export_digest_v1(
+    sections: [RuntimeStdCompiledSectionReceiptV1]
+) -> Result<text, text>:
+    for section in sections:
+        if section.member_name == "exports.smf" and
+                builder_digest_valid_v1(section.digest) and
+                section.byte_count > 0:
+            return Ok(section.digest)
+    Err("full-index-runtime-std-exports-absent")
+
+fn _cold_full_index_dependency_digests_v1(
+    generation: PackageModuleIndexGenerationV1, package_identity: text
+) -> Result<[text], text>:
+    var by_module: Dict<text, i64> = {}
+    var index = 0
+    for entry in generation.entries:
+        if by_module.has(entry.module_identity):
+            return Err("full-index-dependency-module-duplicate")
+        by_module[entry.module_identity] = index
+        index = index + 1
+    var seen: Dict<text, bool> = {}
+    var dependencies: [text] = []
+    for entry in generation.entries:
+        if entry.package_identity != package_identity:
+            continue
+        for imported in entry.direct_imports:
+            if not by_module.has(imported):
+                return Err("full-index-dependency-module-absent")
+            val target = generation.entries[by_module[imported]]
+            if target.package_identity != package_identity:
+                if not builder_digest_valid_v1(target.abi_digest):
+                    return Err("full-index-dependency-abi-invalid")
+                if not seen.has(target.abi_digest):
+                    seen[target.abi_digest] = true
+                    dependencies = dependencies.push(target.abi_digest)
+    Ok(canonical_identity_sort_texts(dependencies))
+
+fn cold_full_index_publish_from_driver_v1(
+    driver: CompilerDriver,
+    sources: NativeFullInventorySourcesV1,
+    snapshot: ScvCompileSnapshotV1,
+    inventory: CompileSourceInventoryV1,
+    cache_root: text,
+    artifact_root: text,
+    producer_digest: text,
+    variant: ConfigVariantKeyV1,
+    budget: RuntimeStdNativeActionBudgetV2
+) -> Result<ColdHirCompilerPublishPinsV1, text>:
+    val ctx = driver.ctx
+    val variant_digest = config_variant_digest_v1(variant)
+    if not snapshot.valid or snapshot.source_drifted or
+            snapshot.inventory_digest != sources.snapshot_inventory_digest or
+            compile_source_inventory_digest_v1(inventory) !=
+                sources.source_inventory_digest or
+            sources.source_count < 1 or sources.source_count !=
+                ctx.cold_hir_typed_receipts.len() or
+            ctx.runtime_std_full_inventory_selection == nil or
+            ctx.runtime_std_full_inventory_selection!.artifact_root != artifact_root or
+            ctx.runtime_std_full_inventory_selection!.source_inventory_digest !=
+                sources.source_inventory_digest or
+            cache_root == "" or artifact_root == "" or
+            (variant.backend != "llvm" and
+                variant.backend != "cranelift") or
+            ctx.native_target != variant.target_triple or
+            variant_digest == "" or not builder_digest_valid_v1(producer_digest) or
+            not builder_digest_valid_v1(budget.manager_request_digest) or
+            budget.enforced_process_limit_bytes < 1:
+        return Err("full-index-driver-authority-invalid")
+    var indexed: Dict<text, i64> = {}
+    var record_index = 0
+    for entry in inventory.entries:
+        if indexed.has(entry.source_identity):
+            return Err("full-index-inventory-duplicate")
+        indexed[entry.source_identity] = record_index
+        record_index = record_index + 1
+    if not indexed.has(COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1):
+        return Err("full-index-package-policy-absent")
+    val policy_bytes = file_read_regular_no_follow_bounded(
+        "{snapshot.snapshot_root}/{COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1}",
+        COLD_FULL_INDEX_MAX_MANIFEST_BYTES_V1)?
+    var manifests: [ColdPackageOwnershipManifestV1] = []
+    for entry in inventory.entries:
+        if entry.source_identity.ends_with("/simple.sdn") and
+                entry.source_identity != COLD_PACKAGE_OWNERSHIP_POLICY_IDENTITY_V1:
+            val content = file_read_regular_no_follow_bounded(
+                "{snapshot.snapshot_root}/{entry.source_identity}",
+                COLD_FULL_INDEX_MAX_MANIFEST_BYTES_V1)?
+            manifests = manifests.push(ColdPackageOwnershipManifestV1(
+                entry.source_identity, content))
+    val captured = cold_package_ownership_capture_v1(
+        inventory, sources, policy_bytes, manifests)?
+    val authority = PackageModuleIndexBuildAuthorityV1(
+        producer_digest, snapshot.tree_id, snapshot.revision_id,
+        snapshot.commit_id, snapshot.tree_id,
+        sources.source_inventory_digest, variant)
+    var object_artifacts: [ColdHirNativeObjectArtifactV1] = []
+    var compiled_artifacts: [ColdHirCompiledPackageArtifactV1] = []
+    var seen: Dict<text, bool> = {}
+    var seen_count = 0
+    for receipt in ctx.cold_hir_typed_receipts:
+        val seed = receipt.seed
+        if seen.has(seed.source_identity) or
+                not indexed.has(seed.source_identity) or
+                not captured.members_by_source.has(seed.source_identity) or
+                not ctx.runtime_std_hir_emissions.has(seed.source_identity) or
+                not ctx.runtime_std_mir_emissions.has(seed.source_identity):
+            return Err("full-index-typed-source-missing")
+        seen[seed.source_identity] = true
+        seen_count = seen_count + 1
+        val source = inventory.entries[indexed[seed.source_identity]]
+        val owner = captured.members_by_source[seed.source_identity]
+        val hir = ctx.runtime_std_hir_emissions[seed.source_identity]
+        val mir = ctx.runtime_std_mir_emissions[seed.source_identity]
+        if owner.source_digest != seed.source_digest or
+                hir.module_identity != seed.module_identity or
+                hir.source_digest != seed.source_digest or
+                mir.module_identity != seed.module_identity or
+                mir.source_digest != seed.source_digest:
+            return Err("full-index-typed-receipt-mismatch")
+        val mir_file = ColdHirCompiledPayloadFileV1(
+            mir.mir_file.path, mir.mir_file.digest,
+            mir.mir_file.byte_count)
+        val witness = cold_hir_semantic_source_witness_v1(
+            authority, source)
+        val action = cold_hir_semantic_action_emit_v1(
+            receipt, source, witness, mir_file, authority,
+            artifact_root)?
+        object_artifacts = object_artifacts.push(action.object_artifact)
+        compiled_artifacts = compiled_artifacts.push(
+            ColdHirCompiledPackageArtifactV1(seed.module_identity,
+                owner.package_identity, hir.export_file,
+                hir.initializer_file, hir.provider_file,
+                hir.generated_source_file, mir_file, action.action_file,
+                owner.manifest_source_identity))
+    if seen_count != sources.source_count:
+        return Err("full-index-typed-source-count-mismatch")
+    val outputs = cold_hir_package_outputs_from_driver_v1(
+        ctx.cold_hir_typed_receipts, object_artifacts, inventory,
+        authority, compiled_artifacts)?
+    val generation = cold_hir_package_index_from_outputs_v1(
+        authority, inventory, outputs)?
+    val index_digest = package_module_index_digest_v1(generation)
+    val policy = runtime_std_membership_policy_from_index_v1(
+        sources, snapshot, generation, index_digest,
+        producer_digest, variant_digest)?
+    if runtime_std_package_membership_encode_v1(
+            captured.membership, sources) != policy.membership_content:
+        return Err("full-index-frozen-package-policy-differs")
+    cold_full_index_trim_non_runtime_std_v1(
+        ctx, policy.membership)?
+    var package_receipts: [RuntimeStdCompiledPackageReceiptV1] = []
+    var package_sections: [[RuntimeStdCompiledSectionReceiptV1]] = []
+    for package_identity in [RUNTIME_PACKAGE_IDENTITY_V1,
+            STD_PACKAGE_IDENTITY_V1]:
+        val selected = runtime_std_package_members_v1(
+            policy.membership, sources, package_identity)?
+        var hir_members: [RuntimeStdHirMemberV1] = []
+        for member in selected:
+            if not ctx.runtime_std_hir_emissions.has(member.source_identity):
+                return Err("full-index-runtime-std-HIR-missing")
+            hir_members = hir_members.push(RuntimeStdHirMemberV1(
+                member.source_identity, member.source_digest,
+                ctx.runtime_std_hir_emissions[
+                    member.source_identity].semantic_payloads))
+        package_sections = package_sections.push(
+            runtime_std_package_hir_sections_write_v1(
+                artifact_root, policy.membership, sources,
+                package_identity, hir_members)?)
+    val action_abi_digest = runtime_std_native_action_abi_digest_v2(
+        producer_digest)
+    if not builder_digest_valid_v1(action_abi_digest):
+        return Err("full-index-native-action-abi-unavailable")
+    val runtime_abi_digest = _cold_full_index_export_digest_v1(
+        package_sections[0])?
+    val std_abi_digest = _cold_full_index_export_digest_v1(
+        package_sections[1])?
+    val runtime_authority = RuntimeStdPackageAuthorityV1(
+        producer_digest, action_abi_digest, runtime_abi_digest,
+        std_abi_digest, variant_digest, variant.target_triple,
+        snapshot.revision_id)
+    var package_index = 0
+    for package_identity in [RUNTIME_PACKAGE_IDENTITY_V1,
+            STD_PACKAGE_IDENTITY_V1]:
+        val action = driver_runtime_std_compile_native_action_v2(
+            ctx, policy, sources, package_identity, index_digest,
+            artifact_root, cache_root, "generic", variant.target_triple,
+            runtime_authority, budget)?
+        val selected = runtime_std_package_members_v1(
+            policy.membership, sources, package_identity)?
+        var identities: [text] = []
+        var digests: [text] = []
+        for member in selected:
+            identities = identities.push(member.source_identity)
+            digests = digests.push(member.source_digest)
+        val dependencies = _cold_full_index_dependency_digests_v1(
+            generation, package_identity)?
+        package_receipts = package_receipts.push(
+            runtime_std_native_sections_emit_v2(artifact_root, cache_root,
+                runtime_authority, package_identity,
+                sources.source_inventory_digest, identities, digests,
+                action.members, package_sections[package_index], dependencies,
+                action.action_result, action.observed_output_digest,
+                budget)?)
+        package_index = package_index + 1
+    cold_hir_compiler_publish_full_v2(ColdHirCompilerPublishInputV1(
+        cache_root, artifact_root, index_digest, inventory, sources,
+        snapshot, authority, ctx.cold_hir_typed_receipts,
+        object_artifacts, compiled_artifacts, runtime_authority,
+        package_receipts[0], package_receipts[1]))
+
+export cold_full_index_publish_from_driver_v1

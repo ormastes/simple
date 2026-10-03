@@ -1,0 +1,119 @@
+# Standalone native counterfactual; one mode/size per fresh OS process.
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
+use std.scv.compile_snapshot.{ScvCompileMaterializedSourceV1,
+    scv_compile_snapshot_materialize_source_v1,
+    scv_compile_snapshot_materialize_source_unscoped_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use app.io.mod.{dir_create, dir_exists, file_read_regular_no_follow_bounded}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_heap_registry_count() -> i64
+
+fn snapshot_profile_entry(path: text, content: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest,
+        text_to_utf8_bytes(content).len())
+
+fn snapshot_profile_materialize(scoped: bool, root: text,
+    entry: CompileSourceInventoryEntryV1) -> ScvCompileMaterializedSourceV1:
+    if scoped:
+        scv_compile_snapshot_materialize_source_v1(root, root + "/build/scv", root + "/staging", entry)
+    else:
+        scv_compile_snapshot_materialize_source_unscoped_v1(root, root + "/build/scv", root + "/staging", entry)
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    val scoped = args.contains("--scoped")
+    val baseline = args.contains("--baseline")
+    if scoped == baseline: return 21
+    var root_arg = ""
+    var arg_index = 0
+    while arg_index < args.len():
+        if args[arg_index] == "--root" and arg_index + 1 < args.len():
+            arg_index = arg_index + 1
+            root_arg = args[arg_index]
+        arg_index = arg_index + 1
+    if root_arg == "": return 22
+    val root = path_absolute(root_arg).replace("\\", "/")
+    # Refuse reused fixture/chunk state; each process starts with no chunks.
+    if dir_exists(root + "/src") or dir_exists(root + "/build") or dir_exists(root + "/staging"): return 23
+    if not dir_create(root + "/src", true): return 24
+    if not dir_create(root + "/build/scv", true): return 24
+    if not dir_create(root + "/staging", true): return 24
+    val count = if args.contains("--double"): 512 else: 256
+    var large_rows: [text] = []
+    for index in 0..4096:
+        large_rows.push("fn snapshot_function_{index}(value: i64) -> i64: value + {index} # 한글 — CRLF\r\n")
+    val large = large_rows.join("")
+    val small = "# 한글 — CRLF\r\nfn main() -> i64:\r\n    0\r\n"
+    val large_entry = snapshot_profile_entry("src/large.spl", large)
+    val small_template = snapshot_profile_entry("src/small.spl", small)
+    if large_entry.byte_count <= 65536 or small_template.byte_count >= 1024: return 25
+    if not file_write_bytes(root + "/src/large.spl", text_to_utf8_bytes(large)): return 26
+    var entries: [CompileSourceInventoryEntryV1] = [large_entry]
+    var index = 1
+    while index < count:
+        val path = "src/small_{index}.spl"
+        if not file_write_bytes(root + "/" + path, text_to_utf8_bytes(small)): return 26
+        entries.push(CompileSourceInventoryEntryV1(path, small_template.content_digest,
+            small_template.semantic_digest, small_template.export_digest,
+            small_template.initializer_digest, small_template.provider_digest,
+            small_template.byte_count))
+        index = index + 1
+    var retained: [ScvCompileMaterializedSourceV1] = []
+    val live_before = rt_heap_registry_count()
+    # No earlier materialization or transient scope: exercise cold promotion.
+    val first_started = rt_time_now_unix_micros()
+    retained.push(snapshot_profile_materialize(scoped, root, entries[0]))
+    var elapsed = rt_time_now_unix_micros() - first_started
+    # Match the parent's large inventory-file scope. This prelude grows the
+    # raw-allocation table by object cardinality, not merely buffer size. Both
+    # modes do it once; exclude it from snapshot time but include it in RSS.
+    val high_water = compiler_inventory_file_event_v1("create", "src/large.spl", root + "/src/large.spl")
+    if high_water == nil: return 27
+    if high_water!.content_digest != large_entry.content_digest: return 28
+    val small_started = rt_time_now_unix_micros()
+    index = 1
+    while index < count:
+        retained.push(snapshot_profile_materialize(scoped, root, entries[index]))
+        index = index + 1
+    elapsed = elapsed + rt_time_now_unix_micros() - small_started
+    val live_allocations = rt_heap_registry_count() - live_before
+    if elapsed <= 0 or live_allocations <= 0 or retained.len() != count: return 29
+    var rows: [text] = []
+    index = 0
+    for result in retained:
+        val entry = entries[index]
+        if result.reason != "ok" or result.source_drifted: return 30
+        val expected = "{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}"
+        if result.row != expected: return 31
+        val bytes = file_read_regular_no_follow_bounded(root + "/staging/" + entry.source_identity, 1048576)
+        if bytes.is_err(): return 32
+        if bytes.unwrap() != (if index == 0: large else: small): return 33
+        rows.push(result.row)
+        index = index + 1
+    # Refusal and next-file recovery are semantic checks outside timed work.
+    val stale = snapshot_profile_entry("src/small_1.spl", small + "# changed\n")
+    val rejected = snapshot_profile_materialize(scoped, root, stale)
+    val recovered = snapshot_profile_materialize(scoped, root, entries[1])
+    if rejected.reason != "snapshot-index-drift:src/small_1.spl" or rejected.row != "": return 34
+    if recovered.reason != "ok" or recovered.source_drifted or recovered.row != rows[1]: return 35
+    val digest = sha256_text(rows.join("\n"))
+    val mode = if scoped: "scoped" else: "baseline"
+    print "mode={mode}"
+    print "count={count}"
+    print "digest={digest}"
+    print "live_allocations={live_allocations}"
+    print "elapsed_us={elapsed}"
+    print "large_bytes={large_entry.byte_count}"
+    print "small_bytes={small_template.byte_count}"
+    print "cold_first_scope=yes"
+    print "high_water_prelude=yes"
+    print "chunk_state=empty-at-start"
+    print "SCV_SNAPSHOT_PROFILE_DONE"
+    0

@@ -1,11 +1,13 @@
 # System test plan: Simple distributed textual databases
 
 **Selection:** Authority A / Adapters A / Operating B / Retention A  
-**Status:** Design complete; all executable checkers intentionally fail until wired to production owners.  
+**Status:** Full acceptance remains RED; 153 broad cases intentionally fail until wired to production owners. Three additional pure identity-map prerequisite cases call production functions but are not durable acceptance and have not been executed in this session.
 **Executable:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`  
 **Manual:** `doc/06_spec/03_system/app/scv/feature/simple_distributed_textual_databases_spec.md`
 
 ## Scope and exclusions
+
+The [2026-10-03 concrete acceptance matrix](../evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md) specifies fixtures, actions, exact outcomes, unchanged-state failures, production owners and evidence kinds for all 36 REQs and 15 NFRs. Its two-clone, interruption/retry, 45-day recovery, SJ lease and host-parity campaigns are required acceptance work. Existing scenario names remain stable; the matrix adds concrete oracles without narrowing selected requirements.
 
 Cover offline identity, protected Git settlement, semantic patches/reduction, immutable configuration-aware evidence, GitHub-first and provider-neutral Git/CI/bug adapters, SJ writer ownership, external-CAS retention, resnapshot, confidentiality, recovery, measured Operating-B limits, integrity, cryptographic agility, determinism, and portability. Exclude implementation selection beyond requirements, release publication, a new always-on DB service, automatic expectation approval, and evidence inferred from source scans.
 
@@ -103,4 +105,3 @@ The five canonical steps remain visible. Happy, boundary, and failure names are 
 | NFR-015 | should prove that it runs one pure semantic core through all capability fixtures | should prove that it keeps subprocess network OS and runtime code in adapters | should prove that it rejects forbidden provider SDK or raw runtime dependency in the core | `check_replica_contract` | Missing: explicit fail-fast |
 
 Every REQ-001..REQ-036 and NFR-001..NFR-015 has three executable, behavior-specific cases. The table is a coverage design, not an admission result.
-

@@ -1,0 +1,90 @@
+"""Select a SimpleOS guest using the canonical target registry.
+
+I can name a guest by its architecture alias or userland identity without
+silently selecting another architecture. Host and board identities remain
+distinct from this architecture-only CLI selection.
+"""
+# @manual_section: Canonical guest selection
+use std.spec.{describe, it, expect, step}
+use app.io.env_ops.{env_get, env_set}
+use os.cli.{os_parse_arch_arg, handle_os}
+use os.qemu_runner.{arch_from_name, arch_display_name, qemu_default_arch_from_facts_v1}
+use os.port.simpleos_multiplatform_build.{simpleos_platform_cli_arch_by_name, simpleos_machine_target_projection}
+
+describe "SimpleOS CLI canonical target selection":
+    it "should resolve aliases and canonical userland triples through one registry":
+        # @req: REQ-001 REQ-011 REQ-016
+        """A target alias and its canonical userland triple choose the same guest."""
+        step("Resolve x86_64 names at the production CLI architecture boundary")
+        for name in ["x86_64", "amd64", "simpleos-x86_64", "x86_64-unknown-simpleos"]:
+            val arch = arch_from_name(name)
+            expect(arch.?).to_equal(true)
+            if arch.?: expect(arch_display_name(arch.unwrap())).to_equal("x86_64")
+        step("Resolve adjacent 64-bit and 32-bit guest names")
+        for pair in [
+            ["aarch64-unknown-simpleos", "arm64"],
+            ["simpleos-arm32", "arm32"],
+            ["riscv64-unknown-simpleos", "riscv64"],
+            ["riscv64gc-unknown-simpleos", "riscv64"],
+            ["riscv32imac-unknown-simpleos", "riscv32"],
+            ["i686-unknown-simpleos", "x86_32"]
+        ]:
+            val arch = arch_from_name(pair[0])
+            expect(arch.?).to_equal(true)
+            if arch.?: expect(arch_display_name(arch.unwrap())).to_equal(pair[1])
+        step("Keep the RV64 userland profile unchanged through machine inspection")
+        for name in ["riscv64-unknown-simpleos", "riscv64gc-unknown-simpleos"]:
+            val target = simpleos_machine_target_projection(name)
+            expect(target.canonical_name).to_equal("riscv64gc-simpleos")
+            expect(target.bits).to_equal(64)
+            expect(target.userland_target).to_equal("riscv64gc-unknown-simpleos")
+
+    it "should refuse unknown, hosted, kernel-only and board identities":
+        # @req: REQ-001 REQ-011 REQ-016 REQ-022
+        """An unrelated target must not become a default SimpleOS QEMU guest."""
+        step("Reject identities outside the SimpleOS CLI projection")
+        for name in ["", "unknown", "simpleos-no-such-arch", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-unknown-none", "vf2", "riscv64-starfive-jh7110", "simpleos-vf2"]:
+            expect(simpleos_platform_cli_arch_by_name(name)).to_be_nil()
+            expect(arch_from_name(name)).to_be_nil()
+            expect(handle_os(["run", "--target=" + name, "--show-plan"])).to_equal(1)
+
+    it "should preserve an explicit environment guest and CLI override precedence":
+        # @req: REQ-011 REQ-016 REQ-022
+        """My RV64 default is used unless I explicitly select another guest."""
+        step("Preserve and temporarily set the guest-default environment")
+        val original = env_get("SIMPLEOS_QEMU_ARCH") ?? ""
+        val configured = env_set("SIMPLEOS_QEMU_ARCH", "riscv64")
+        val selected_default = os_parse_arch_arg([])
+        val selected_inline = os_parse_arch_arg(["--target=simpleos-arm32"])
+        val selected_separate = os_parse_arch_arg(["--arch", "x86_64"])
+        val restored = env_set("SIMPLEOS_QEMU_ARCH", original)
+        expect(configured).to_equal(true)
+        expect(restored).to_equal(true)
+        step("Check the default and explicit selections")
+        expect(selected_default).to_equal("riscv64")
+        expect(selected_inline).to_equal("simpleos-arm32")
+        expect(selected_separate).to_equal("x86_64")
+        # @capture(tui)
+        print "default={selected_default}; inline={selected_inline}; separate={selected_separate}"
+
+    it "should retain invalid defaults for honest rejection instead of assuming x86_64":
+        # @req: REQ-011 REQ-016 REQ-022
+        """Unknown discovery or an invalid override must remain visible as a refusal."""
+        step("Resolve unknown discovery without inventing a guest architecture")
+        expect(qemu_default_arch_from_facts_v1("", "unknown")).to_equal("unknown")
+        expect(arch_from_name(qemu_default_arch_from_facts_v1("", "unknown"))).to_be_nil()
+        step("Keep an invalid explicit override authoritative")
+        expect(qemu_default_arch_from_facts_v1("not-a-guest", "amd64")).to_equal("not-a-guest")
+        expect(arch_from_name(qemu_default_arch_from_facts_v1("not-a-guest", "amd64"))).to_be_nil()
+        expect(qemu_default_arch_from_facts_v1("aarch64-unknown-simpleos", "amd64")).to_equal("aarch64-unknown-simpleos")
+        step("Preserve an invalid environment selection at the CLI boundary")
+        val original = env_get("SIMPLEOS_QEMU_ARCH") ?? ""
+        val configured = env_set("SIMPLEOS_QEMU_ARCH", "not-a-guest")
+        val selected = os_parse_arch_arg([])
+        val explicit = os_parse_arch_arg(["--arch=arm32"])
+        val restored = env_set("SIMPLEOS_QEMU_ARCH", original)
+        expect(configured).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(selected).to_equal("not-a-guest")
+        expect(arch_from_name(selected)).to_be_nil()
+        expect(explicit).to_equal("arm32")

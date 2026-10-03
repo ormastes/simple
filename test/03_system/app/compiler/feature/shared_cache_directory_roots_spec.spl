@@ -1,0 +1,48 @@
+# codex-system-test
+# @manual: primary
+# @req REQ-004 REQ-007
+# Native fixture roots must be supplied by the host admission runner. Missing
+# roots fail; this spec never converts absent host evidence into a skip/pass.
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_async_mut.sosix.directory_roots_v1.{sosix_directory_pair_open_v1,
+    sosix_directory_pair_revalidate_v1, sosix_directory_pair_identity_v1,
+    sosix_directory_pair_close_v1, sosix_directory_pair_check_v1}
+
+fn directory_fixture_input(name: text) -> text:
+    val value = env_get_opt(name) ?? ""
+    if value == "": panic("missing native directory fixture: {name}")
+    value
+
+describe "shared cache native directory ownership", tag: ["only-compiled"]:
+    it "should admit disjoint physical roots with a live identity and reject closed tokens":
+        step("Open runner-owned shared and private sibling roots through SOSIX")
+        val shared = directory_fixture_input("SIMPLE_DIRECTORY_PROBE_SHARED")
+        val private_root = directory_fixture_input("SIMPLE_DIRECTORY_PROBE_PRIVATE")
+        val token = sosix_directory_pair_open_v1(shared, private_root)
+        expect(token).to_be_greater_than(0)
+        val identity = sosix_directory_pair_identity_v1(token).unwrap()
+        expect(identity.generation).to_equal(token)
+        expect(identity.shared.object_id_low == 0u64).to_be(false)
+        expect(identity.private_root.object_id_low == 0u64).to_be(false)
+        expect(identity.shared.filesystem_id == identity.private_root.filesystem_id and
+            identity.shared.object_id_low == identity.private_root.object_id_low and
+            identity.shared.object_id_high == identity.private_root.object_id_high).to_be(false)
+        expect(sosix_directory_pair_revalidate_v1(token)).to_equal(0)
+        step("Close ownership and require stale-generation rejection")
+        expect(sosix_directory_pair_close_v1(token)).to_equal(0)
+        expect(sosix_directory_pair_revalidate_v1(token)).to_equal(-9)
+        expect(sosix_directory_pair_close_v1(token)).to_equal(-9)
+
+    it "should reject equal and nested private roots before creating mutable state":
+        step("Ask the native owner to admit the shared directory as private state")
+        val shared = directory_fixture_input("SIMPLE_DIRECTORY_PROBE_SHARED")
+        expect(sosix_directory_pair_open_v1(shared, shared)).to_equal(-1001)
+        expect(sosix_directory_pair_check_v1(shared, shared + "/forbidden-private/deep")).to_equal(-1001)
+
+    it "should reject malformed and nonabsolute root inputs":
+        step("Exercise the actual native boundary path validation")
+        val shared = directory_fixture_input("SIMPLE_DIRECTORY_PROBE_SHARED")
+        expect(sosix_directory_pair_open_v1(shared, "relative/private")).to_be_less_than(0)
+        expect(sosix_directory_pair_open_v1(shared, shared + "/../private")).to_be_less_than(0)
+        expect(sosix_directory_pair_open_v1(shared, "")).to_be_less_than(0)

@@ -1,0 +1,45 @@
+# Shared QEMU resource overrides for inspection and legacy/typed launchers.
+use app.io.env_ops.{env_get}
+
+pub fn qemu_effective_memory(configured: text) -> text:
+    """Use the explicit guest memory override or the catalog lane default."""
+    val raw = env_get("SIMPLEOS_QEMU_MEM") ?? ""
+    val chosen = if raw != "": raw else: configured
+    val memory_mib = qemu_launch_memory_mib_v1(chosen)
+    if memory_mib == 0u64: return chosen
+    if memory_mib % 1024u64 == 0u64:
+        return "{memory_mib / 1024u64}G"
+    "{memory_mib}M"
+
+pub fn qemu_effective_cpus() -> text:
+    """Use the explicit guest CPU override or the established ten-core default."""
+    val raw = env_get("SIMPLEOS_QEMU_CPUS") ?? ""
+    if raw == "": return "10"
+    val count = qemu_launch_cpu_count_v1(raw)
+    if count == 0u16: raw else: count.to_text()
+
+fn _qemu_bounded_decimal_v1(value: text, maximum: u64) -> u64:
+    if value == "": return 0u64
+    var result = 0u64
+    for index in 0..value.len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return 0u64
+        result = result * 10u64 + digit as u64
+        if result > maximum: return 0u64
+    result
+
+pub fn qemu_launch_memory_mib_v1(value: text) -> u64:
+    """Parse bounded QEMU MiB/GiB resource text; zero denotes invalid input."""
+    val normalized = value.trim().upper()
+    if normalized.ends_with("G"):
+        return _qemu_bounded_decimal_v1(normalized[:normalized.len() - 1], 1024u64) * 1024u64
+    if normalized.ends_with("M"):
+        return _qemu_bounded_decimal_v1(normalized[:normalized.len() - 1], 1048576u64)
+    _qemu_bounded_decimal_v1(normalized, 1048576u64)
+
+pub fn qemu_launch_cpu_count_v1(value: text) -> u16:
+    """Parse the bounded vCPU count before narrowing to the machine-plan field."""
+    _qemu_bounded_decimal_v1(value.trim(), 4096u64) as u16
+
+export qemu_effective_memory, qemu_effective_cpus
+export qemu_launch_memory_mib_v1, qemu_launch_cpu_count_v1

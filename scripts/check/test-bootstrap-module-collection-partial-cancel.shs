@@ -1,0 +1,35 @@
+#!/bin/sh
+# Regression for a final batch smaller than the worker count.
+set -eu
+[ "$#" -eq 1 ] || exit 64
+root=$1
+case "$root" in /*) ;; *) exit 64;; esac
+mkdir "$root" || exit 73
+. "$(dirname "$0")/../bootstrap/bootstrap-module-collection.shs"
+hash_stream() { sha256sum | cut -d ' ' -f 1; }
+fake_validate() { :; }
+fake_run() {
+  printf '%s\n' "$1" >>"$TEST_RUNS"
+  printf '\144\206\001\000' >"$3"
+  dd if=/dev/zero bs=1 count=16 2>/dev/null >>"$3"
+  if [ "$TEST_MODE" = cancel ]; then : >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE"
+  else : >"$SIMPLE_MODULE_SYSTEMIC_STOP_FILE"; fi
+}
+for mode in cancel systemic; do
+  dir=$root/$mode
+  mkdir -p "$dir/work" "$dir/cache"
+  printf 'first\n' >"$dir/manifest"
+  : >"$dir/summary"
+  export TEST_MODE=$mode TEST_RUNS=$dir/runs
+  export SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE=$dir/stop-requested
+  export SIMPLE_MODULE_SYSTEMIC_STOP_FILE=$dir/systemic-stop
+  if [ "$mode" = cancel ]; then expected=143; else expected=74; fi
+  set +e
+  run_module_compile_inventory "$dir/manifest" "$dir/work" "$dir/cache" 2 1 fake_run fake_validate "$dir/summary"
+  actual=$?
+  set -e
+  [ "$actual" -eq "$expected" ] || { echo "$mode rc=$actual expected=$expected" >&2; exit 1; }
+  [ "$(wc -l <"$TEST_RUNS")" -eq 1 ] && [ "$(wc -l <"$dir/summary")" -eq 1 ] || exit 1
+  grep -q 'task=module_compile_1|entry=first|result=PASS|status=0' "$dir/summary" || exit 1
+done
+printf 'format=SIMPLE-MODULE-COLLECTION-PARTIAL-CANCEL-TEST-1\nstatus=pass\n' >"$root/result.env"

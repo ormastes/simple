@@ -2,6 +2,8 @@ use std.spec
 use compiler.frontend.core.flat_pool_codec.*
 
 extern fn rt_time_now_unix_micros() -> i64
+@unsafe(reason: "measure encoder-owned runtime heap allocations", capabilities: [ffi])
+extern fn rt_heap_registry_count() -> i64
 
 # Cost gate for the flat-AST pool codec's DECODE path.
 #
@@ -23,6 +25,24 @@ extern fn rt_time_now_unix_micros() -> i64
 # case alone ran tens of seconds).
 describe "flat pool codec decode cost":
     # @manual scenario evidence
+
+    it "encodes a large plain-text pool without retaining one heap object per item":
+        step("Build the source pool before measuring encoder-owned heap objects")
+        var pool: [text] = []
+        while pool.len() < 2000:
+            pool = pool.push("plain_field_name")
+        val before =
+            unsafe(capabilities: [ffi]):
+                rt_heap_registry_count()
+        val blob = flat_pool_enc_text(pool)
+        val after =
+            unsafe(capabilities: [ffi]):
+                rt_heap_registry_count()
+        val encoder_objects = after - before
+        step("Verify the canonical frame and bounded encoder allocations")
+        expect(blob.starts_with("2000\nplain_field_name\n")).to_equal(true)
+        expect(blob.ends_with("plain_field_name\n")).to_equal(true)
+        expect(encoder_objects).to_be_less_than(64)
 
     it "decodes a large escape-free text pool in well under the pre-fix cost":
         # 2000 values x 400 chars = 800k characters that the old loop walked

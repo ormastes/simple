@@ -31,10 +31,20 @@ run_module_compile_inventory() (
   mc_manifest=$1 mc_work=$2 mc_cache_root=$3 mc_workers=$4 mc_threads=$5
   mc_run=$6 mc_validate=$7 mc_summary=$8
   case "$mc_workers:$mc_threads" in *[!0-9:]*|0:*|*:0|:*|*:) return 2 ;; esac
+  mc_stop_file=${SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE:-}
+  mc_systemic_file=${SIMPLE_MODULE_SYSTEMIC_STOP_FILE:-}
+  for mc_marker in "$mc_stop_file" "$mc_systemic_file"; do
+    [ -z "$mc_marker" ] || { case "$mc_marker" in /*) ;; *) return 2 ;; esac; }
+  done
+  mc_abort_requested() {
+    if [ -n "$mc_stop_file" ] && [ -e "$mc_stop_file" ]; then mc_abort_rc=143; return 0; fi
+    if [ -n "$mc_systemic_file" ] && [ -e "$mc_systemic_file" ]; then mc_abort_rc=74; return 0; fi
+    return 1
+  }
   [ -f "$mc_manifest" ] || return 2
   mkdir -p "$mc_work" "$mc_cache_root" || return 2
   mc_attempt=$(mktemp -d "$mc_work/attempt.XXXXXX") || return 2
-  mc_failed=0 mc_count=0 mc_batch=0 mc_jobs= mc_blocked=0 mc_block_log=
+  mc_failed=0 mc_count=0 mc_batch=0 mc_jobs= mc_blocked=0 mc_block_log= mc_abort_rc=0
   # A scheduler filesystem/hash error must not orphan already launched work.
   # Children own their timeout; finish/reap them without deleting their caches.
   trap 'for mc_pending in $mc_jobs; do wait "${mc_pending%:*}" 2>/dev/null || :; done' 0
@@ -43,6 +53,8 @@ run_module_compile_inventory() (
   mc_stopped=${MODULE_COMPILE_PRIOR_FAILURE:-0}
   while IFS= read -r mc_entry || [ -n "$mc_entry" ]; do
     [ -n "$mc_entry" ] || continue
+    # Observe owner cancellation before allocating another attempt or child.
+    if mc_abort_requested; then break; fi
     mc_count=$((mc_count + 1))
     mc_dir="$mc_attempt/$mc_count"
     mkdir -p "$mc_dir/home" "$mc_dir/tmp" || return 2
@@ -91,11 +103,16 @@ run_module_compile_inventory() (
         wait "${mc_job%:*}" || { mc_failed=1; mc_stopped=1; }
       done
       mc_jobs= mc_batch=0
+      # An owner stop raised while a batch ran must prevent its next entry.
+      if mc_abort_requested; then break; fi
     fi
   done <"$mc_manifest"
   for mc_job in $mc_jobs; do
     wait "${mc_job%:*}" || mc_failed=1
   done
+  # The last batch may be shorter than mc_workers; it has no in-loop join.
+  mc_abort_requested || :
+  if [ "$mc_count" -eq 0 ] && [ "$mc_abort_rc" -ne 0 ]; then return "$mc_abort_rc"; fi
   if [ "$mc_count" -eq 0 ]; then
     printf 'task=module_compile_inventory|result=FAIL|status=empty-inventory|log=-\n' >>"$mc_summary"
     return 1
@@ -112,5 +129,6 @@ run_module_compile_inventory() (
     fi
     mc_index=$((mc_index + 1))
   done
+  [ "$mc_abort_rc" -eq 0 ] || return "$mc_abort_rc"
   [ "$mc_failed" -eq 0 ]
 )

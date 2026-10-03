@@ -1,0 +1,169 @@
+use app.scv.db.bridge_store.{db_bridge_store_load}
+use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, db_github_bridge_payload, db_github_bridge_external_id, db_github_bridge_readback}
+use app.scv.db.github_provider.{DbGithubTransport, DbGithubProcessReply}
+use std.scv.db_admission.{DbAdmissionPolicy, db_admission_policy_digest, db_authorize_patch}
+use std.scv.db_bridge.{DbBridgeDelivery, db_bridge_intent_digest}
+use std.scv.db_patch.*
+use std.scv.db_reducer.{MergePolicy, DbRow, db_field_value}
+use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
+use std.scv.db_canonical.{db_domain_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+
+
+struct DbGithubBindingTarget:
+    binding: EntityRef
+    common_state: EntityRef
+
+struct DbGithubBindingPlan:
+    head: text
+    base_revision: text
+    intent_revision: text
+    provenance: text
+    operations: [DbOperation]
+
+struct DbGithubBindingContext:
+    head: text
+    revision: text
+    rows: [DbRow]
+    delivery: DbBridgeDelivery
+    request: DbGithubBridgeRequest
+    binding_fields: [DbField]
+    common_fields: [DbField]
+fn db_binding_text(name: text, value: text) -> DbField:
+    DbField(name: name, value: DbValue.Text(value))
+
+fn db_binding_required(fields: [DbField], name: text, reference: bool) -> Result<DbField, text>:
+    var count = 0
+    var selected = DbField(name: name, value: DbValue.Absent)
+    for field in fields:
+        if field.name == name:
+            count = count + 1
+            selected = field
+    if count != 1: return Err("SCVDB_BINDING_INTENT_CONTEXT_MISSING")
+    match selected.value:
+        Reference(_):
+            if reference: return Ok(selected)
+        Text(value):
+            if not reference and value != "": return Ok(selected)
+        _: ()
+    Err("SCVDB_BINDING_INTENT_CONTEXT_MISSING")
+
+fn db_binding_original_fields(patch: DbPatch) -> Result<[DbField], text>:
+    if patch.operations.len() != 2: return Err("SCVDB_BINDING_REPLAY_MISMATCH")
+    match patch.operations[1]:
+        Create(_, kind, fields):
+            if kind != "provider_binding": return Err("SCVDB_BINDING_REPLAY_MISMATCH")
+            Ok(fields)
+        UpdateFields(_, edits, _):
+            var fields: [DbField] = []
+            for edit in edits: fields.push(DbField(name: edit.field, value: edit.after))
+            Ok(fields)
+        _: Err("SCVDB_BINDING_REPLAY_MISMATCH")
+
+fn db_binding_delivery(root: text, admission: DbAdmissionPolicy, request: DbGithubBridgeRequest, target: DbGithubBindingTarget) -> Result<DbGithubBridgeRequest, text>:
+    if db_admission_policy_digest(admission)? != admission.revision: return Err("SCVDB_POLICY_REVISION")
+    if not db_ref_context(target.binding, admission.namespace, admission.epoch) or not db_ref_context(target.common_state, admission.namespace, admission.epoch) or db_ref_kind(target.binding) != "provider_binding" or db_ref_kind(target.common_state) != "provider_common_state":
+        return Err("SCVDB_BINDING_TARGET")
+    # Public request.delivery acknowledgements are ignored, never trusted.
+    val stored = db_bridge_store_load(root, request.delivery.intent.revision)?
+    val delivery = stored.delivery
+    if delivery.state != "acknowledged": return Err("SCVDB_BINDING_ACK_REQUIRED")
+    if db_bridge_intent_digest(delivery.intent)? != delivery.intent.revision: return Err("SCVDB_BRIDGE_INTENT_DIGEST")
+    if request.source.host != delivery.intent.provider.instance or request.source.repository_id != delivery.intent.provider.project:
+        return Err("SCVDB_BINDING_PROVIDER_SCOPE")
+    var scoped = request
+    scoped.delivery = delivery
+    if not ["create-issue", "update-issue", "create-comment"].contains(scoped.kind): return Err("SCVDB_BINDING_REMOTE_KIND")
+    if db_github_bridge_payload(scoped, scoped.title, scoped.body, scoped.state)? != delivery.intent.payload_digest: return Err("SCVDB_BINDING_PAYLOAD")
+    val external_id = db_github_bridge_external_id(delivery.provider_revision, delivery.intent.provider)?
+    Ok(scoped)
+
+fn db_binding_context_make(head: text, revision: text, rows: [DbRow], admission: DbAdmissionPolicy, scoped: DbGithubBridgeRequest, target: DbGithubBindingTarget, intent_fields: [DbField]) -> Result<DbGithubBindingContext, text>:
+    val delivery = scoped.delivery
+    val external_id = db_github_bridge_external_id(delivery.provider_revision, delivery.intent.provider)?
+    # Refined intent schema: legacy revision-only rows fail explicitly. Never
+    # invent a local entity, authority policy or capability from provider input.
+    val local = db_binding_required(intent_fields, "local_entity", true)?
+    val authority = db_binding_required(intent_fields, "authority_policy", true)?
+    val capability = db_binding_required(intent_fields, "capability_digest", false)?
+    match authority.value:
+        Reference(ref):
+            if db_ref_kind(ref) != "bridge_policy" or not db_ref_context(ref, admission.namespace, admission.epoch): return Err("SCVDB_BINDING_AUTHORITY_KIND")
+        _: return Err("SCVDB_BINDING_AUTHORITY_KIND")
+    match capability.value:
+        Text(digest):
+            if digest.len() != 64: return Err("SCVDB_BINDING_CAPABILITY_DIGEST")
+            for index in 0..digest.len():
+                val code = digest.char_code_at(index)
+                if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return Err("SCVDB_BINDING_CAPABILITY_DIGEST")
+        _: return Err("SCVDB_BINDING_CAPABILITY_DIGEST")
+    val common = [db_binding_text("title", scoped.title), db_binding_text("body", scoped.body), db_binding_text("state", scoped.state), db_binding_text("payload_digest", delivery.intent.payload_digest), db_binding_text("provider_revision", delivery.provider_revision), db_binding_text("correlation_id", delivery.intent.correlation_id), db_binding_text("causation_id", delivery.intent.causation_id), db_binding_text("intent_revision", delivery.intent.revision)]
+    val common_revision = sha256_u8_hex(db_domain_bytes("provider-common-state", db_fields_bytes(common)?)?)
+    val remote_kind = if scoped.kind == "create-comment": "comment" else: "issue"
+    val fields = [local, db_binding_text("provider_instance", delivery.intent.provider.instance), db_binding_text("project", delivery.intent.provider.project), db_binding_text("remote_kind", remote_kind), db_binding_text("remote_id", external_id), db_binding_text("remote_revision", delivery.provider_revision), DbField(name: "last_common_state", value: DbValue.Reference(target.common_state)), db_binding_text("common_revision", common_revision), capability, authority, db_binding_text("correlation_id", delivery.intent.correlation_id), db_binding_text("causation_id", delivery.intent.causation_id), db_binding_text("intent_revision", delivery.intent.revision)]
+    Ok(DbGithubBindingContext(head: head, revision: revision, rows: rows, delivery: delivery, request: scoped, binding_fields: fields, common_fields: common))
+
+fn db_binding_operations(context: DbGithubBindingContext, target: DbGithubBindingTarget) -> Result<[DbOperation], text>:
+    val binding_id = entity_ref_canonical(target.binding)
+    val common_id = entity_ref_canonical(target.common_state)
+    var operations = [DbOperation.Create(target.common_state, "provider_common_state", context.common_fields)]
+    var existing: DbRow? = nil
+    for row in context.rows:
+        if row.entity == common_id: return Err("SCVDB_BINDING_COMMON_ALREADY_EXISTS")
+        if row.entity == binding_id: existing = Some(row)
+        if row.kind == "provider_binding" and not row.tombstoned and row.entity != binding_id:
+            var same = true
+            for name in ["provider_instance", "project", "remote_kind", "remote_id"]:
+                if db_field_value(row.fields, name) != db_field_value(context.binding_fields, name): same = false
+            if same: return Err("SCVDB_BINDING_DUPLICATE_REMOTE")
+    if val row = existing:
+        if row.tombstoned or row.kind != "provider_binding" or row.fields.len() != context.binding_fields.len(): return Err("SCVDB_BINDING_EXISTING_SCOPE")
+        if db_field_value(row.fields, "intent_revision") == DbValue.Text(context.delivery.intent.revision): return Err("SCVDB_BINDING_ALREADY_COMMITTED")
+        for name in ["local_entity", "provider_instance", "project", "remote_kind", "remote_id", "authority_policy", "capability_digest"]:
+            if db_field_value(row.fields, name) != db_field_value(context.binding_fields, name): return Err("SCVDB_BINDING_EXISTING_SCOPE")
+        var common_verified = false
+        match db_field_value(row.fields, "last_common_state"):
+            Reference(ref):
+                for common in context.rows:
+                    if common.entity == entity_ref_canonical(ref) and common.kind == "provider_common_state" and not common.tombstoned:
+                        val revision = sha256_u8_hex(db_domain_bytes("provider-common-state", db_fields_bytes(common.fields)?)?)
+                        common_verified = db_field_value(row.fields, "common_revision") == DbValue.Text(revision)
+            _: ()
+        if not common_verified: return Err("SCVDB_BINDING_COMMON_STATE_MISMATCH")
+        var edits: [FieldEdit] = []
+        for field in context.binding_fields:
+            edits.push(FieldEdit(field: field.name, before: db_field_value(row.fields, field.name), after: field.value))
+        operations.push(DbOperation.UpdateFields(target.binding, edits, RowPrecondition(base_row: row.revision, expected_revision: row.revision, expected_fields: row.fields)))
+    else:
+        operations.push(DbOperation.Create(target.binding, "provider_binding", context.binding_fields))
+    Ok(operations)
+
+fn db_binding_readback(root: text, context: DbGithubBindingContext, execute: fn([text], i64, i64) -> DbGithubProcessReply) -> Result<bool, text>:
+    val observed = db_github_bridge_readback(context.request, DbGithubTransport(execute: execute, lease_held: \: scv_sj_lease_is_held(root)))?
+    val delivery = context.delivery
+    if not observed.found or observed.payload_digest != delivery.intent.payload_digest or observed.revision != delivery.provider_revision or observed.external_id != db_github_bridge_external_id(delivery.provider_revision, delivery.intent.provider)?:
+        return Err("SCVDB_BINDING_READBACK_CHANGED")
+    Ok(true)
+
+fn db_binding_provenance(revision: text) -> text:
+    "SCVDB-PROVIDER-BINDING-v1:" + revision
+
+fn db_binding_replay_matches(context: DbGithubBindingContext, target: DbGithubBindingTarget, patch: DbPatch) -> Result<bool, text>:
+    if patch.operations.len() != 2: return Ok(false)
+    val common = DbOperation.Create(target.common_state, "provider_common_state", context.common_fields)
+    if db_operation_bytes(patch.operations[0])? != db_operation_bytes(common)?: return Ok(false)
+    match patch.operations[1]:
+        Create(entity, kind, fields):
+            return Ok(kind == "provider_binding" and entity_ref_canonical(entity) == entity_ref_canonical(target.binding) and db_fields_bytes(fields)? == db_fields_bytes(context.binding_fields)?)
+        UpdateFields(entity, edits, condition):
+            if entity_ref_canonical(entity) != entity_ref_canonical(target.binding) or condition.expected_revision == "" or edits.len() != context.binding_fields.len(): return Ok(false)
+            var after: [DbField] = []
+            for edit in edits: after.push(DbField(name: edit.field, value: edit.after))
+            return Ok(db_fields_bytes(after)? == db_fields_bytes(context.binding_fields)?)
+        _: Ok(false)
+
+
+export DbGithubBindingTarget, DbGithubBindingPlan, DbGithubBindingContext
+export db_binding_delivery, db_binding_context_make, db_binding_required, db_binding_original_fields
+export db_binding_operations, db_binding_readback, db_binding_provenance, db_binding_replay_matches

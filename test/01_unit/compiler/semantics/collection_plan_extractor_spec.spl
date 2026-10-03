@@ -12,7 +12,8 @@ use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolId}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
 use compiler.semantics.perf_facts.types.*
 use compiler.semantics.perf.collection_plan.*
-use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan}
+use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan, collection_plan_source_facts}
+use compiler.semantics.perf.collection_plan_analysis.{collect_collection_expr_plans_v1}
 
 fn cp_span(line: i64) -> Span:
     Span.at(line, line, 1)
@@ -71,6 +72,92 @@ fn cp_registry() -> CollectionOperationRegistry:
     registry
 
 describe "typed CollectionPlan extraction":
+    it "rejects stale literal counts and forged exact cardinality":
+        step("Revalidate exact cardinality against the retained source literal")
+        val item = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val literal = HirExpr(kind: HirExprKind.ArrayLit([item], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        var plan = extract_unary_collection_plan(cp_call(literal, "map", 40, 3), 20, cp_registry()).unwrap()
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+        var source = plan.nodes[0]
+        var changed = literal
+        changed.kind = HirExprKind.ArrayLit([item, item], Some(cp_int_type()))
+        source.source_expr = Some(changed)
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+        source.source_expr = Some(literal)
+        var facts = source.facts
+        facts.cardinality = HirPerfCardinality.Exact(99)
+        source.facts = facts
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+
+    it "allows unknown literal cardinality and preserves nonliteral evidence policy":
+        step("Check consistency without demanding or manufacturing exact evidence")
+        val literal = HirExpr(kind: HirExprKind.ArrayLit([], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        var plan = extract_unary_collection_plan(cp_call(literal, "map", 40, 3), 20, cp_registry()).unwrap()
+        var source = plan.nodes[0]
+        var facts = source.facts
+        facts.cardinality = HirPerfCardinality.Unknown("not supplied")
+        source.facts = facts
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+        source.source_expr = Some(cp_source())
+        facts.cardinality = HirPerfCardinality.Exact(4)
+        source.facts = facts
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+
+    it "derives exact cardinality only from typed array literal slots":
+        step("Extract empty and nonempty literal sources")
+        val item = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val empty = HirExpr(kind: HirExprKind.ArrayLit([], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        val nonempty = HirExpr(kind: HirExprKind.ArrayLit([item, item, item], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        val empty_plan = extract_unary_collection_plan(cp_call(empty, "map", 40, 3), 20, cp_registry()).unwrap()
+        val full_plan = extract_unary_collection_plan(cp_call(nonempty, "map", 40, 3), 20, cp_registry()).unwrap()
+        expect(empty_plan.nodes[0].facts.cardinality).to_equal(HirPerfCardinality.Exact(0))
+        expect(full_plan.nodes[0].facts.cardinality).to_equal(HirPerfCardinality.Exact(3))
+
+    it "does not infer cardinality from variables calls repeats or fixed array types":
+        step("Retain unknown source evidence outside ordinary array literals")
+        val unknown = HirPerfCardinality.Unknown("source cardinality unavailable")
+        expect(collection_plan_source_facts(cp_source()).cardinality).to_equal(unknown)
+        val call = cp_call(cp_source(), "produce", 99, 2)
+        expect(collection_plan_source_facts(call).cardinality).to_equal(unknown)
+        val item = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val count = HirExpr(kind: HirExprKind.IntLit(4, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val repeat = HirExpr(kind: HirExprKind.ArrayRepeat(item, count, Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        expect(collection_plan_source_facts(repeat).cardinality).to_equal(unknown)
+        var fixed_source = cp_source()
+        fixed_source.type_ = HirType(kind: HirTypeKind.Array(cp_int_type(), Some(4)), span: cp_span(1))
+        expect(collection_plan_source_facts(fixed_source).cardinality).to_equal(unknown)
+
+    it "keeps all rewrite evidence unknown for literals with effectful elements":
+        step("Count slots conditional on successful construction without evaluating elements")
+        var callee = cp_source()
+        callee.type_ = HirType(kind: HirTypeKind.Function([], cp_int_type(), []), span: cp_span(1))
+        val effectful = HirExpr(kind: HirExprKind.Call(callee, [], []), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val literal = HirExpr(kind: HirExprKind.ArrayLit([effectful], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        val facts = collection_plan_source_facts(literal)
+        expect(facts.cardinality).to_equal(HirPerfCardinality.Exact(1))
+        expect(facts.effects.unknown).to_equal(true)
+        expect(facts.cost).to_equal(HirPerfCostClass.Unknown("source cost unavailable"))
+        expect(facts.allocation).to_equal(HirPerfAllocationClass.Unknown)
+        expect(facts.equality_proven).to_equal(false)
+        expect(facts.alias_proven).to_equal(false)
+        expect(facts.callback_pure).to_equal(false)
+        expect(facts.escape_proven).to_equal(false)
+        expect(facts.profitability_proven).to_equal(false)
+        expect(facts.evidence_receipt).to_equal("")
+
+    it "does not grant cardinality to untyped or non-array-typed literals":
+        step("Require typed array HIR before producing even a slot count")
+        var literal = HirExpr(kind: HirExprKind.ArrayLit([], nil), has_type_: false, type_: cp_array_type(), span: cp_span(1))
+        val unknown = HirPerfCardinality.Unknown("source cardinality unavailable")
+        expect(collection_plan_source_facts(literal).cardinality).to_equal(unknown)
+        literal.has_type_ = true
+        literal.type_ = cp_unit_type()
+        expect(collection_plan_source_facts(literal).cardinality).to_equal(unknown)
+
     it "orders a resolved map-filter chain from source to result":
         step("Extract two admitted unary calls without granting rewrite proofs")
         val mapped = cp_call(cp_source(), "map", 40, 3)
@@ -140,3 +227,122 @@ describe "typed CollectionPlan extraction":
         expect(plan.nodes[1].key_type.?).to_equal(true)
         val missing = collection_plan_unproven_facts(plan.nodes[1])
         expect(missing.contains("key type")).to_equal(false)
+
+describe "collection analysis discovers maximal regions":
+    it "keeps independent admitted regions on both sides of an opaque call":
+        step("Separate inner map from outer filter across a user method")
+        val inner = cp_call(cp_source(), "map", 40, 3)
+        val opaque = cp_call(inner, "user_transform", 900, 4)
+        val result = collect_collection_expr_plans_v1(
+            cp_call(opaque, "filter", 41, 5), 20, cp_registry())
+        expect(result.plans.len()).to_equal(2)
+        expect(result.blockers.len()).to_equal(0)
+        expect(result.plans[0].nodes.len()).to_equal(2)
+        expect(result.plans[1].nodes.len()).to_equal(2)
+        expect(result.plans[0].nodes[1].operation_symbol_id.unwrap()).to_equal(41)
+        expect(result.plans[1].nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+
+    it "counts admitted operations rather than an opaque source against the bound":
+        step("Accept 128 admitted calls above one opaque source and reject 129")
+        var chain = cp_call(cp_source(), "load_rows", 900, 2)
+        for i in 0..128:
+            chain = cp_call(chain, "map", 40, i + 3)
+        val accepted = extract_unary_collection_plan(chain, 20, cp_registry())
+        expect(accepted.is_ok()).to_equal(true)
+        expect(accepted.unwrap().nodes.len()).to_equal(129)
+        val too_long = cp_call(chain, "map", 40, 131)
+        expect(extract_unary_collection_plan(
+            too_long, 20, cp_registry()).is_err()).to_equal(true)
+
+    it "retains a user method as the opaque source of an admitted chain":
+        step("Extract map-filter above a typed user-produced collection")
+        val produced = cp_call(cp_source(), "load_rows", 900, 2)
+        val chain = cp_call(cp_call(produced, "map", 40, 3), "filter", 41, 4)
+        val result = collect_collection_expr_plans_v1(chain, 20, cp_registry())
+        expect(result.plans.len()).to_equal(1)
+        expect(result.blockers.len()).to_equal(0)
+        val plan = result.plans[0]
+        expect(plan.nodes.len()).to_equal(3)
+        expect(plan.nodes[0].source_expr.unwrap()).to_equal(produced)
+        expect(plan.nodes[0].facts.effects.unknown).to_equal(true)
+        expect(plan.nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+
+    it "keeps an unresolved source call opaque without granting operation authority":
+        step("Preserve a typed source while admitting only the resolved outer map")
+        val produced = HirExpr(kind: HirExprKind.MethodCall(
+            cp_source(), "load_rows", [], MethodResolution.Unresolved),
+            has_type_: true, type_: cp_array_type(), span: cp_span(2))
+        val plan = extract_unary_collection_plan(
+            cp_call(produced, "map", 40, 3), 20, cp_registry()).unwrap()
+        expect(plan.nodes.len()).to_equal(2)
+        expect(plan.nodes[0].source_expr.unwrap()).to_equal(produced)
+        expect(collection_plan_unproven_facts(plan.nodes[0])).to_contain("effects")
+        expect(plan.nodes[0].operation_symbol_id.?).to_equal(false)
+
+    it "still rejects an untyped opaque source":
+        step("Require a source type even when source operation metadata is absent")
+        var produced = cp_call(cp_source(), "load_rows", 900, 2)
+        produced.has_type_ = false
+        val result = extract_unary_collection_plan(
+            cp_call(produced, "map", 40, 3), 20, cp_registry())
+        expect(result.is_err()).to_equal(true)
+
+    it "discovers one maximal plan for a nested admitted chain":
+        step("Analyze a resolved map-filter region")
+        val chain = cp_call(cp_call(cp_source(), "map", 40, 3), "filter", 41, 4)
+        val result = collect_collection_expr_plans_v1(chain, 20, cp_registry())
+        expect(result.plans.len()).to_equal(1)
+        expect(result.plans[0].nodes.len()).to_equal(3)
+        expect(result.blockers.len()).to_equal(0)
+
+    it "finds an admitted inner region beneath an unregistered user method":
+        step("Traverse a user call without attributing builtin meaning to its name")
+        val mapped = cp_call(cp_source(), "map", 40, 3)
+        val user_call = cp_call(mapped, "filter", 900, 4)
+        val result = collect_collection_expr_plans_v1(user_call, 20, cp_registry())
+        expect(result.plans.len()).to_equal(1)
+        expect(result.plans[0].nodes.len()).to_equal(2)
+        expect(result.plans[0].nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+        expect(result.blockers.len()).to_equal(0)
+
+    it "retains a located blocker for malformed admitted metadata use":
+        step("Reject an admitted operation whose result type is unavailable")
+        var bad_call = cp_call(cp_source(), "map", 40, 8)
+        bad_call.has_type_ = false
+        val result = collect_collection_expr_plans_v1(bad_call, 20, cp_registry())
+        expect(result.plans.len()).to_equal(0)
+        expect(result.blockers.len()).to_equal(1)
+        expect(result.blockers[0]).to_contain("function=20")
+        expect(result.blockers[0]).to_contain("line=8")
+        expect(result.blockers[0]).to_contain("no resolved result type")
+
+    it "traverses argument-owned regions when pruning an extracted receiver chain":
+        step("Retain nested callback expression discovery after maximal extraction")
+        val inner = cp_call(cp_source(), "map", 40, 7)
+        val outer = HirExpr(kind: HirExprKind.MethodCall(
+            cp_source(), "filter", [HirCallArg(has_name: false, name: "",
+                value: inner, span: cp_span(7))],
+            MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 41))),
+            has_type_: true, type_: cp_array_type(), span: cp_span(8))
+        val result = collect_collection_expr_plans_v1(outer, 20, cp_registry())
+        expect(result.plans.len()).to_equal(2)
+        expect(result.plans[0].nodes[1].operation_symbol_id.unwrap()).to_equal(41)
+        expect(result.plans[1].nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+
+    it "rejects an invalid registry before discovering regions":
+        step("Preserve registry failure rather than publishing admitted plans")
+        var registry = cp_registry()
+        registry.errors.push("fixture registry failure")
+        val result = collect_collection_expr_plans_v1(
+            cp_call(cp_source(), "map", 40, 3), 20, registry)
+        expect(result.plans.len()).to_equal(0)
+        expect(result.blockers.len()).to_equal(1)
+        expect(result.blockers[0]).to_contain("registry is invalid")
+
+    it "does not manufacture plans for an empty registry":
+        step("Analyze a call without any admitted operation contracts")
+        val result = collect_collection_expr_plans_v1(
+            cp_call(cp_source(), "map", 40, 3), 20,
+            CollectionOperationRegistry.new("empty-v1"))
+        expect(result.plans.len()).to_equal(0)
+        expect(result.blockers.len()).to_equal(0)

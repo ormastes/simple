@@ -1,0 +1,47 @@
+#!/bin/sh
+# Release wrapper integration: sealed authority and mutable working directories
+# follow different production owners. This never runs a compiler.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/release-attempt-archive.XXXXXX")
+trap 'status=$?; printf "Release archival fixture: %s (exit %s)\n" "$work" "$status"' EXIT
+fail() { echo "FAIL release archival: $*" >&2; exit 1; }
+absolute_path() { printf '%s\n' "$1"; }
+stage3_provenance_dir="$work/stage3"
+log_dir="$work/logs"
+stage2_provenance_home="$stage3_provenance_dir/stage2-home"
+stage2_provenance_tmp="$stage3_provenance_dir/stage2-tmp"
+stage3_provenance_home="$stage3_provenance_dir/stage3-home"
+stage3_provenance_tmp="$stage3_provenance_dir/stage3-tmp"
+stage2_admitted_dir="$stage3_provenance_dir/stage2-admitted"
+stage2_runtime_authority="$stage3_provenance_dir/stage2-runtime-authority"
+mkdir -p "$log_dir" "$stage2_admitted_dir" "$stage2_runtime_authority"
+for working in "$stage2_provenance_home" "$stage2_provenance_tmp" "$stage3_provenance_home" "$stage3_provenance_tmp"; do
+  mkdir -m 700 "$working"
+  printf 'retained working content\n' > "$working/sentinel"
+done
+printf 'admitted compiler\n' > "$stage2_admitted_dir/simple"
+printf 'runtime authority\n' > "$stage2_runtime_authority/runtime.a"
+chmod -R a-w "$stage2_admitted_dir" "$stage2_runtime_authority"
+printf 'prior receipt\n' > "$stage3_provenance_dir/provenance.env"
+chmod 400 "$stage3_provenance_dir/provenance.env"
+printf 'prior compiler log\n' > "$log_dir/stage2-native-build.log"
+mkdir "$stage3_provenance_dir/stage2-native-cache"
+printf 'cached object\n' > "$stage3_provenance_dir/stage2-native-cache/object.o"
+before=$(bootstrap_cache_hash_file "$stage3_provenance_dir/stage2-native-cache/object.o")
+awk '/^  chmod u\+w "\$\{stage3_provenance_dir\}"/{on=1} on && /^  # Caches are prepared/{exit} on{print}' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/archive.shs"
+[ -s "$work/archive.shs" ] || fail 'actual release archival expression missing'
+. "$work/archive.shs"
+[ -f "$attempt_archive/provenance.env" ] && [ -f "$attempt_archive/stage2-native-build.log" ] || fail 'prior receipts lost'
+[ "$(wc -l < "$attempt_archive/attempt-directories.tsv" | tr -d ' ')" = 2 ] || fail 'sealed mapping incomplete'
+[ "$(wc -l < "$attempt_archive/mutable-working-state-locations.tsv" | tr -d ' ')" = 4 ] || fail 'working-state record incomplete'
+for old in stage2-home stage2-tmp stage3-home stage3-tmp; do
+  [ ! -e "$stage3_provenance_dir/$old" ] || fail 'old working path still occupied'
+  [ -f "$stage3_provenance_dir/$old.working-${attempt_archive##*/}/sentinel" ] || fail 'working state lost'
+done
+bootstrap_cache_freeze_attempt "$attempt_archive"
+(cd "$attempt_archive" && sha256sum -c attempt-files.sha256 >/dev/null)
+[ "$(bootstrap_cache_hash_file "$stage3_provenance_dir/stage2-native-cache/object.o")" = "$before" ] || fail 'native object changed'
+echo 'PASS actual release archival loop: sealed mappings, mutable HOME/TMP retention, frozen receipt verification, native objects untouched'

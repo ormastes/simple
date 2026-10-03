@@ -1,0 +1,261 @@
+"""# Attributed collection guard acceptance
+
+For compiler and collection maintainers, these scenarios drive the production
+compiler on typed factories and execute real attributed containers. A factory
+diagnostic must come from compilation, and an embedded-profile refusal must
+come from container construction. The admitted pure-Simple compiler is required.
+"""
+
+# @tag: system, compiler, collection, profile
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_text_set.spl
+
+use std.spec.*
+use std.spec.{step, before_all}
+use std.io_runtime.{process_run_timeout, file_exists, file_delete, file_write,
+    mkdir_p, getpid, env_get, env_set, file_hash_sha256}
+use test.system.qualified_pure_simple_runtime.{admit_source_matched_pure_simple_runtime}
+use app.optimize.sprof_collection_profile.{sprof_source_module_identity}
+
+val WRONG_FAMILY = "test/fixtures/profile_switchable/wrong_family_factory_probe.spl"
+val WRONG_GENERIC = "test/fixtures/profile_switchable/wrong_generic_factory_probe.spl"
+val SCALAR_FACTORY = "test/fixtures/profile_switchable/scalar_factory_probe.spl"
+val USER_SAME_NAME = "test/fixtures/profile_switchable/user_same_name_factory_probe.spl"
+val USER_SAME_NAME_ANNOTATED = "test/fixtures/profile_switchable/user_same_name_annotated_probe.spl"
+val ALIASED_FACTORY = "test/fixtures/profile_switchable/aliased_factory_probe.spl"
+val REEXPORTED_FACTORY = "test/fixtures/profile_switchable/reexported_factory_probe.spl"
+val BAD_COUNTS = "test/fixtures/profile_switchable/forced_prior_bad_counts_probe.spl"
+val GENERIC_BAD_COUNTS = "test/fixtures/profile_switchable/forced_prior_generic_bad_counts_probe.spl"
+val INCOMPLETE_HASH = "test/fixtures/profile_switchable/forced_prior_incomplete_hash_probe.spl"
+val PROFILE_SOURCE = "test/02_integration/compiler/probe_profile_switchable_cli_feedback.spl"
+val OTHER_SOURCE = "test/fixtures/profile_switchable/semantics_probe.spl"
+
+var guard_suite_runtime = ""
+var guard_suite_binary_digest = ""
+var guard_suite_provenance_digest = ""
+
+fn admitted_guard_runtime() -> text:
+    if guard_suite_runtime == "" or guard_suite_binary_digest == "" or
+            guard_suite_provenance_digest == "":
+        fail("MissingEvidence: suite entry did not admit a source-matched Stage4 runtime")
+        return ""
+    if file_hash_sha256(guard_suite_runtime) != guard_suite_binary_digest or
+            file_hash_sha256(guard_suite_runtime + ".provenance.env") !=
+                guard_suite_provenance_digest:
+        fail("MissingEvidence: admitted Stage4 candidate changed during this suite")
+        return ""
+    guard_suite_runtime
+
+fn expect_factory_refusal(runtime: text, fixture: text, diagnostic: text, label: text):
+    val (out, err, code) = process_run_timeout(runtime, ["check", fixture], 120000)
+    expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+    val evidence = "build/test-artifacts/compiler/factory-guard-{label}-{getpid()}.txt"
+    expect(file_write(evidence, "fixture={fixture}\nexit={code}\nstdout:\n{out}\nstderr:\n{err}\n")).to_be(true)
+    expect(code != 0).to_be(true)
+    expect(code != -1).to_be(true)
+    expect(out + err).to_contain(diagnostic)
+    expect((out + err).contains("UNREACHABLE_")).to_be(false)
+
+fn expect_embedded_refusal(runtime: text, fixture: text, marker: text, label: text):
+    val (out, err, code) = process_run_timeout(runtime, ["run", fixture], 120000)
+    expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+    val evidence = "build/test-artifacts/compiler/profile-guard-{label}-{getpid()}.txt"
+    expect(file_write(evidence, "fixture={fixture}\nexit={code}\nstdout:\n{out}\nstderr:\n{err}\n")).to_be(true)
+    expect(code != 0).to_be(true)
+    expect(code != -1).to_be(true)
+    expect(out + err).to_contain(
+        "embedded collection workload does not match container site and target")
+    expect((out + err).contains(marker)).to_be(false)
+
+describe "attributed collection production admission":
+    before_all:
+        guard_suite_runtime = admit_source_matched_pure_simple_runtime()
+        if guard_suite_runtime != "":
+            guard_suite_binary_digest = file_hash_sha256(guard_suite_runtime)
+            guard_suite_provenance_digest = file_hash_sha256(
+                guard_suite_runtime + ".provenance.env")
+
+    # @manual_section: Factory results must match the attributed family
+    it "should reject wrong-family, generic and scalar typed factories during compilation":
+        """A typed factory cannot silently change the family of my container."""
+        # @req REQ-PSC-001 REQ-PSC-005
+        step("Prepare attributed containers")
+        # @capture(exec): build/test-artifacts/stage4-source-admission-<pid>.txt
+        val runtime = admitted_guard_runtime()
+        step("Compile each incompatible typed factory")
+        # @capture(exec): build/test-artifacts/compiler/factory-guard-<case>-<pid>.txt
+        expect_factory_refusal(runtime, WRONG_FAMILY,
+            "attributed collection factory returns AdaptiveTextMap, expected AdaptiveTextSet",
+            "text-family")
+        expect_factory_refusal(runtime, WRONG_GENERIC,
+            "attributed collection factory returns AdaptiveSet, expected AdaptiveMap",
+            "generic-family")
+        expect_factory_refusal(runtime, SCALAR_FACTORY,
+            "attributed collection factory returns text, expected AdaptiveTextSet",
+            "scalar")
+
+    it "should leave a user-defined same-name wrapper on its declared factory path":
+        """My ordinary custom method call does not inherit the stdlib guard."""
+        # @req REQ-PSC-001 REQ-PSC-005
+        step("Prepare attributed containers")
+        val runtime = admitted_guard_runtime()
+        val (check_out, check_err, check_code) = process_run_timeout(
+            runtime, ["check", USER_SAME_NAME], 120000)
+        expect(check_code).to_equal(0)
+        step("Compile and execute selected representation")
+        val (run_out, run_err, run_code) = process_run_timeout(
+            runtime, ["run", USER_SAME_NAME], 120000)
+        step("Verify logical results and selection evidence")
+        # @capture(exec): build/test-artifacts/compiler/same-name-factory-<pid>.txt
+        expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+        val evidence = "build/test-artifacts/compiler/same-name-factory-{getpid()}.txt"
+        expect(file_write(evidence, "check_exit={check_code}\ncheck_stdout:\n{check_out}\n" +
+            "check_stderr:\n{check_err}\nrun_exit={run_code}\n" +
+            "run_stdout:\n{run_out}\nrun_stderr:\n{run_err}\n")).to_be(true)
+        expect(run_code).to_equal(0)
+        expect(run_out).to_contain("USER_SAME_NAME_FACTORY: PASS")
+        expect((check_out + check_err + run_out + run_err).contains(
+            "attributed collection factory returns")).to_be(false)
+
+    it "should reject a user-defined same-name type as an attributed container":
+        """A matching leaf name alone cannot grant the compiler's storage attribute."""
+        # @req REQ-PSC-001 REQ-PSC-005
+        step("Prepare attributed containers")
+        val runtime = admitted_guard_runtime()
+        step("Compile the annotated custom class")
+        # @capture(exec): build/test-artifacts/compiler/factory-guard-custom-<pid>.txt
+        expect_factory_refusal(runtime, USER_SAME_NAME_ANNOTATED,
+            "unsupported attributed container", "custom")
+
+    it "should preserve an official imported alias through interpreted and native execution":
+        """My imported alias still selects hash storage and keeps its set value."""
+        # @req REQ-PSC-001 REQ-PSC-002 REQ-PSC-005 REQ-PSC-008
+        step("Prepare attributed containers")
+        val runtime = admitted_guard_runtime()
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Compile and execute selected representation")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run_timeout(
+            runtime, ["run", ALIASED_FACTORY], 120000)
+        expect(interpreted_code).to_equal(0)
+        expect(interpreted_out).to_contain("ALIASED_COLLECTION_FACTORY: PASS")
+        val binary = "build/aliased_collection_factory_{getpid()}.exe"
+        _ = file_delete(binary)
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", ALIASED_FACTORY,
+            "--source", "src/lib", "--output", binary
+        ], 600000)
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary)).to_be(true)
+        if file_exists(binary):
+            val (native_out, native_err, native_code) = process_run_timeout(binary, [], 120000)
+            step("Verify logical results and selection evidence")
+            # @capture(exec): build/test-artifacts/compiler/aliased-factory-<pid>.txt
+            expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+            val evidence = "build/test-artifacts/compiler/aliased-factory-{getpid()}.txt"
+            expect(file_write(evidence, "interpreter_exit={interpreted_code}\n" +
+                "interpreter_stdout:\n{interpreted_out}\ninterpreter_stderr:\n{interpreted_err}\n" +
+                "build_exit={build_code}\nbuild_stdout:\n{build_out}\nbuild_stderr:\n{build_err}\n" +
+                "native_exit={native_code}\nnative_stdout:\n{native_out}\n" +
+                "native_stderr:\n{native_err}\n")).to_be(true)
+            expect(native_code).to_equal(0)
+            expect(native_out).to_contain("ALIASED_COLLECTION_FACTORY: PASS")
+            _ = file_delete(binary)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "should preserve a re-exported typed factory through both execution engines":
+        """A factory imported from another module keeps its official set family."""
+        # @req REQ-PSC-001 REQ-PSC-002 REQ-PSC-005 REQ-PSC-008
+        step("Prepare attributed containers")
+        val runtime = admitted_guard_runtime()
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Compile and execute selected representation")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run_timeout(
+            runtime, ["run", REEXPORTED_FACTORY], 120000)
+        expect(interpreted_code).to_equal(0)
+        expect(interpreted_out).to_contain("REEXPORTED_COLLECTION_FACTORY: PASS")
+        val binary = "build/reexported_collection_factory_{getpid()}.exe"
+        _ = file_delete(binary)
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", REEXPORTED_FACTORY,
+            "--source", "src/lib", "--source", "test", "--output", binary
+        ], 600000)
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary)).to_be(true)
+        if file_exists(binary):
+            val (native_out, native_err, native_code) = process_run_timeout(binary, [], 120000)
+            step("Verify logical results and selection evidence")
+            # @capture(exec): build/test-artifacts/compiler/reexported-factory-<pid>.txt
+            expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+            val evidence = "build/test-artifacts/compiler/reexported-factory-{getpid()}.txt"
+            expect(file_write(evidence, "interpreter_exit={interpreted_code}\n" +
+                "interpreter_stdout:\n{interpreted_out}\ninterpreter_stderr:\n{interpreted_err}\n" +
+                "build_exit={build_code}\nbuild_stdout:\n{build_out}\nbuild_stderr:\n{build_err}\n" +
+                "native_exit={native_code}\nnative_stdout:\n{native_out}\n" +
+                "native_stderr:\n{native_err}\n")).to_be(true)
+            expect(native_code).to_equal(0)
+            expect(native_out).to_contain("REEXPORTED_COLLECTION_FACTORY: PASS")
+            _ = file_delete(binary)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    # @manual_section: Embedded evidence is validated before forced storage
+    it "should reject inconsistent counts and incomplete hash evidence under forced policy":
+        """An explicit algorithm cannot make malformed measured feedback safe."""
+        # @req REQ-PSC-004 REQ-PSC-005
+        step("Prepare attributed containers")
+        val runtime = admitted_guard_runtime()
+        step("Admit profile for the same site")
+        # @capture(exec): build/test-artifacts/compiler/profile-guard-<case>-<pid>.txt
+        expect_embedded_refusal(runtime, BAD_COUNTS,
+            "UNREACHABLE_BAD_PROFILE_COUNTS", "counts")
+        expect_embedded_refusal(runtime, GENERIC_BAD_COUNTS,
+            "UNREACHABLE_GENERIC_BAD_PROFILE_COUNTS", "generic-counts")
+        expect_embedded_refusal(runtime, INCOMPLETE_HASH,
+            "UNREACHABLE_INCOMPLETE_HASH_PROFILE", "hash")
+
+    it "should refuse a captured profile when the native entry source changes":
+        """A profile from one module cannot authorize another module's build."""
+        # @req REQ-PSC-003 REQ-PSC-004 REQ-PSC-005
+        step("Capture workload profile")
+        val runtime = admitted_guard_runtime()
+        val profile = "build/source-mismatch-{getpid()}.sprof"
+        val binary = "build/source-mismatch-{getpid()}.exe"
+        val identity = sprof_source_module_identity(PROFILE_SOURCE)
+        expect(mkdir_p("build")).to_be(true)
+        _ = file_delete(profile)
+        _ = file_delete(binary)
+        val (capture_out, capture_err, capture_code) = process_run_timeout(runtime, [
+            "run", PROFILE_SOURCE,
+            "--collection-profile-out=" + profile,
+            "--collection-module=" + identity,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3"
+        ], 300000)
+        expect(capture_code).to_equal(0)
+        expect(file_exists(profile)).to_be(true)
+        step("Attempt to admit the captured profile for another source")
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", OTHER_SOURCE,
+            "--source", "src/lib", "--output", binary,
+            "--collection-profile=" + profile,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3"
+        ], 600000)
+        step("Verify logical results and selection evidence")
+        # @capture(exec): build/test-artifacts/compiler/profile-source-mismatch-<pid>.txt
+        expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+        val evidence = "build/test-artifacts/compiler/profile-source-mismatch-{getpid()}.txt"
+        expect(file_write(evidence, "capture_exit={capture_code}\n" +
+            "capture_stdout:\n{capture_out}\ncapture_stderr:\n{capture_err}\n" +
+            "build_exit={build_code}\nbuild_stdout:\n{build_out}\n" +
+            "build_stderr:\n{build_err}\n")).to_be(true)
+        expect(build_code != 0).to_be(true)
+        expect(build_code != -1).to_be(true)
+        expect(build_out + build_err).to_contain(
+            "collection profile was not admitted: incompatible")
+        expect(file_exists(binary)).to_be(false)
+        expect(file_delete(profile)).to_be(true)

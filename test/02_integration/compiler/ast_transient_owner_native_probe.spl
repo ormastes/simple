@@ -1,0 +1,37 @@
+# Native regression for the first borrowed parse: process-lifetime AST slots
+# must be allocated before a transient scope can reclaim parser scratch.
+use compiler.core.ast.{ast_prepare_persistent_owner_v1, ast_reset, module_get_path, module_set_path}
+use compiler.frontend.core._Ast.decl_nodes.{flat_decl_pools_dump, flat_decl_pools_restore}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn main() -> i64:
+    ast_prepare_persistent_owner_v1()
+    var cycle: i64 = 0
+    while cycle < 2:
+        if not rt_transient_array_scope_begin():
+            return 1
+        ast_reset()
+        module_set_path("inside")
+        if module_get_path() != "inside":
+            return 2
+        # A cache restore used to replace this global with a transient array.
+        val snapshot = flat_decl_pools_dump()
+        if not flat_decl_pools_restore(FlatPoolReader.new_canonical(snapshot)):
+            return 6
+        if module_get_path() != "inside":
+            return 7
+        if not rt_transient_array_scope_pause():
+            return 3
+        if not rt_transient_array_scope_end():
+            return 4
+        ast_reset()
+        module_set_path("persistent")
+        if module_get_path() != "persistent":
+            return 5
+        cycle = cycle + 1
+    print("ast_transient_owner_native_probe=PASS cycles=2")
+    0

@@ -1,0 +1,110 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+repo_root=$(CDPATH= cd -- "$script_root/../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-image-resume.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+source_root="$tmp/source"
+mkdir -p "$source_root/src/app/bootstrap_builder" "$source_root/src/compiler" \
+  "$source_root/src/lib" "$source_root/src/os" "$source_root/src/runtime" \
+  "$source_root/src/package_ownership" "$source_root/src/plugins" \
+  "$source_root/src/compositions" "$source_root/examples/10_tooling" \
+  "$tmp/authority" "$tmp/output"
+for entry in manifest_main main linux_worker native_group_linux_main \
+    grouped_native_worker native_group_linux_broker native_group_index_main \
+    native_group_provisional_main; do
+  printf 'fn main() {}\n' >"$source_root/src/app/bootstrap_builder/$entry.spl"
+done
+cat >"$tmp/producer" <<'SH'
+#!/bin/sh
+if [ "$1" != native-build ]; then exit 2; fi
+image=
+while [ "$#" -gt 0 ]; do
+  case "$1" in --output) image=$2; shift 2 ;; *) shift ;; esac
+done
+[ -n "$image" ] || exit 2
+printf 'cap=%s mode=%s\n' "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE"
+if [ -e "$FAIL_BUILDER" ] && [ "${image##*/}" = builder ]; then
+  printf 'partial\n' >"$image"
+  exit 7
+fi
+cat >"$image" <<'BIN'
+#!/bin/sh
+if [ "$1" = --template ]; then printf 'SIMPLE-BUILD-RUN-4\n' >"$4"; fi
+exit 0
+BIN
+chmod +x "$image"
+SH
+chmod +x "$tmp/producer"
+export FAIL_BUILDER="$tmp/fail-builder"
+cp "$tmp/producer" "$tmp/compiler-tool"
+cp "$tmp/producer" "$tmp/linker-tool"
+printf 'hello\n' >"$tmp/hello.receipt"
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+snapshot="$tmp/source.snapshot"
+bootstrap_stage3_source_snapshot "$snapshot" "$source_root"
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+builder="$script_root/prepare-provisional-manager-images.shs"
+run_images() {
+  mode=$1 output_root=$2
+  if [ "$mode" = remaining ]; then
+    set -- --authority-program="$authority_images/images/provisional-authority" \
+      --authority-receipt="$tmp/authority/provisional-authority.receipt" \
+      --authority-digest="$(hash_file "$tmp/authority/provisional-authority.receipt")" \
+      --authority-image-receipt="$authority_images/provisional-authority-images.env"
+  else
+    set --
+  fi
+  sh "$builder" --mode="$mode" --producer="$tmp/producer" \
+    --producer-digest="$(hash_file "$tmp/producer")" \
+    --source-root="$source_root" --source-snapshot="$snapshot" \
+    --source-snapshot-digest="$(hash_file "$snapshot")" \
+    --hello-receipt="$tmp/hello.receipt" \
+    --hello-receipt-digest="$(hash_file "$tmp/hello.receipt")" \
+    --output-root="$output_root" --target=x86_64-unknown-linux-gnu \
+    --runtime-path="$source_root/src/runtime" --memory-bytes=1073741824 \
+    --reserve-bytes=1073741824 \
+    --compiler-tool="$tmp/compiler-tool" --compiler-tool-digest="$(hash_file "$tmp/compiler-tool")" \
+    --linker-tool="$tmp/linker-tool" --linker-tool-digest="$(hash_file "$tmp/linker-tool")" \
+    "$@"
+}
+case "$(uname -s 2>/dev/null)" in Linux*) ;; *) echo 'SKIP: Linux-only synthetic watchdog fixture'; exit 0 ;; esac
+authority_images="$tmp/output/authority-images"
+run_images authority "$authority_images" >"$tmp/authority.log" 2>&1 || {
+  echo 'FAIL: synthetic authority image build failed' >&2; exit 1;
+}
+[ -f "$authority_images/image-receipts/provisional-authority.env" ] || exit 1
+grep -q 'cap=1048576 mode=enforce' "$authority_images/logs/provisional-authority.attempt1.stdout.log" || {
+  echo 'FAIL: image child lacked explicit RSS cap' >&2; exit 1
+}
+printf 'authority\n' >"$tmp/authority/provisional-authority.receipt"
+manager_images="$tmp/output/manager-images"
+mkdir -p "$manager_images/images"
+printf 'older interrupted partial\n' >"$manager_images/images/builder"
+: >"$FAIL_BUILDER"
+if run_images remaining "$manager_images" >"$tmp/first.log" 2>&1; then
+  echo 'FAIL: injected builder failure was ignored' >&2; exit 1
+fi
+[ -f "$manager_images/image-receipts/manifest.env" ] &&
+  [ ! -f "$manager_images/image-receipts/builder.env" ] &&
+  [ -f "$manager_images/images/failed/builder.attempt1.recovered" ] &&
+  [ -f "$manager_images/images/failed/builder.attempt1.partial" ] || {
+  echo 'FAIL: successful manifest or failed partial not retained' >&2; exit 1
+}
+grep -qx 'older interrupted partial' \
+  "$manager_images/images/failed/builder.attempt1.recovered" || {
+  echo 'FAIL: older interrupted partial was overwritten' >&2; exit 1
+}
+rm -f "$FAIL_BUILDER"
+run_images remaining "$manager_images" >"$tmp/second.log" 2>&1 || {
+  echo 'FAIL: failed-only image retry did not complete' >&2; exit 1
+}
+[ -f "$manager_images/image-receipts/builder.env" ] &&
+  [ -f "$manager_images/provisional-manager-images.env" ] &&
+  [ ! -e "$manager_images/logs/manifest.attempt2.stdout.log" ] &&
+  [ -f "$manager_images/logs/builder.attempt2.stdout.log" ] || {
+  echo 'FAIL: successful manifest rebuilt or failed builder did not retry' >&2; exit 1
+}
+echo 'PASS: image watchdog cap, sealed success reuse, and failed-only retry'

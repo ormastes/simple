@@ -138,8 +138,8 @@ fn parse_symbol_table(data: [u8], header: SmfMemoryHeader, string_table: [u8]) -
         # Resolve name from string table
         val name = read_string_from_table_i64off(string_table, name_offset as i64)
 
-        # Derive section index from symbol type
-        val section_idx = derive_section_index(sym_type)
+        val section_idx = smf_decode_symbol_section_index_v1(
+            data, entry_off, header.section_count, sym_type)?
 
         # Parse binding
         val binding = parse_binding(binding_raw)
@@ -219,6 +219,24 @@ extern fn rt_bytes_to_text(data: [u8]) -> text
 fn char_from_byte(b: u8) -> text:
     val single: [u8] = [b]
     rt_bytes_to_text(single)
+
+"""Read an explicit writer section index, retaining legacy SMF compatibility.
+
+The writer marks reserved byte 43 with 0x53 when bytes 41-42 carry the
+zero-based section index. Unmarked files retain the historical type-derived
+section behavior. 0xffff is the undefined/import-symbol sentinel.
+"""
+fn smf_decode_symbol_section_index_v1(data: [u8], entry_off: i64,
+        section_count: i32, sym_type: u8) -> Result<i32, text>:
+    if data[entry_off + 43] != 0x53:
+        return Ok(derive_section_index(sym_type))
+    val raw = (data[entry_off + 41] as i64) |
+        ((data[entry_off + 42] as i64) << 8)
+    if raw == 65535:
+        return Ok(-1)
+    if raw >= section_count as i64:
+        return Err("SMF symbol section index {raw} exceeds section count {section_count}")
+    Ok(raw as i32)
 
 """Derive section index from symbol type byte.
 

@@ -1,0 +1,229 @@
+# Closed data contract for collection operation metadata. No filesystem I/O.
+use std.common.sdn.value.{SdnValue}
+use compiler.semantics.perf_facts.types.*
+
+struct CollectionRegistryRowV1:
+    stable_name: text
+    operation: text
+    receiver: text
+    signature_fingerprint: text
+    key_contract: text
+    expected_cost: text
+    worst_cost: text
+    cardinality: text
+    cardinality_value: i64
+    enumeration: text
+    enumeration_count: i64
+    explicit_argument_count: i64
+    effects: HirPerfEffectFacts
+    allocation: text
+    preserves_order: bool
+    materializes: bool
+    backends: [text]
+    provenance: text
+    evidence_receipt: text
+
+struct CollectionRegistrySnapshotV1:
+    schema_version: text
+    metadata_version: text
+    source_digest: text
+    source_text: text
+    rows: [CollectionRegistryRowV1]
+
+struct CollectionRegistryBindingV1:
+    module_path: text
+    symbol_id: i64
+    stable_name: text
+    receiver: HirPerfReceiverKind
+    signature_fingerprint: text
+    backend: text
+    evidence_receipt: text
+    metadata_version: text
+    source_digest: text
+
+fn _registry_fields(value: SdnValue, allowed: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("collection-registry-object-required")
+    if fields.len() != allowed.len():
+        return Err("collection-registry-field-set-invalid")
+    for name in allowed:
+        if not fields.has(name):
+            return Err("collection-registry-field-set-invalid")
+    Ok(fields)
+
+fn _registry_text(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value):
+            if value.trim() == "":
+                return Err("collection-registry-empty-text:" + name)
+            Ok(value)
+        case _: Err("collection-registry-text-required:" + name)
+
+fn _registry_int(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("collection-registry-integer-required:" + name)
+
+fn _registry_bool(fields: Dict<text, SdnValue>, name: text) -> Result<bool, text>:
+    match fields[name]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("collection-registry-boolean-required:" + name)
+
+fn _registry_operation(value: text) -> Result<HirPerfOperationKind, text>:
+    match value:
+        case "map": Ok(HirPerfOperationKind.Map)
+        case "filter": Ok(HirPerfOperationKind.Filter)
+        case "flat-map": Ok(HirPerfOperationKind.FlatMap)
+        case "distinct-by": Ok(HirPerfOperationKind.DistinctBy)
+        case "collect-array": Ok(HirPerfOperationKind.CollectArray)
+        case "contains-lookup": Ok(HirPerfOperationKind.ContainsLookup)
+        case "linear-lookup": Ok(HirPerfOperationKind.LinearLookup)
+        case "indexed-lookup": Ok(HirPerfOperationKind.IndexedLookup)
+        case "materialize": Ok(HirPerfOperationKind.Materialize)
+        case "sort": Ok(HirPerfOperationKind.Sort)
+        case "append": Ok(HirPerfOperationKind.Append)
+        case "enumerate": Ok(HirPerfOperationKind.Enumerate)
+        case _: Err("collection-registry-operation-unsupported")
+
+fn _registry_receiver(value: text) -> Result<HirPerfReceiverKind, text>:
+    match value:
+        case "array": Ok(HirPerfReceiverKind.Array)
+        case "slice": Ok(HirPerfReceiverKind.Slice)
+        case "dict": Ok(HirPerfReceiverKind.Dict)
+        case "text": Ok(HirPerfReceiverKind.Text)
+        case "tuple": Ok(HirPerfReceiverKind.Tuple)
+        case _: Err("collection-registry-receiver-unsupported")
+
+fn _registry_cost(value: text) -> Result<HirPerfCostClass, text>:
+    match value:
+        case "constant": Ok(HirPerfCostClass.Constant)
+        case "amortized-constant": Ok(HirPerfCostClass.AmortizedConstant)
+        case "expected-constant": Ok(HirPerfCostClass.ExpectedConstant)
+        case "linear": Ok(HirPerfCostClass.LinearReceiver)
+        case "n-log-n": Ok(HirPerfCostClass.NLogNReceiver)
+        case _: Err("collection-registry-cost-unsupported")
+
+fn _registry_cardinality(value: text, exact: i64) -> Result<HirPerfCardinality, text>:
+    if value == "exact":
+        if exact < 0:
+            return Err("collection-registry-cardinality-invalid")
+        return Ok(HirPerfCardinality.Exact(exact))
+    if exact != -1:
+        return Err("collection-registry-cardinality-invalid")
+    match value:
+        case "same-as-receiver": Ok(HirPerfCardinality.SameAsReceiver)
+        case "at-most-receiver": Ok(HirPerfCardinality.AtMostReceiver)
+        case "product": Ok(HirPerfCardinality.Product)
+        case _: Err("collection-registry-cardinality-unsupported")
+
+fn _registry_enumeration(value: text, count: i64) -> Result<HirPerfEnumerationClass, text>:
+    if value == "repeated":
+        if count < 0:
+            return Err("collection-registry-enumeration-invalid")
+        return Ok(HirPerfEnumerationClass.Repeated(count))
+    if count != -1:
+        return Err("collection-registry-enumeration-invalid")
+    match value:
+        case "none": Ok(HirPerfEnumerationClass.None)
+        case "once": Ok(HirPerfEnumerationClass.Once)
+        case "input-dependent": Ok(HirPerfEnumerationClass.InputDependent)
+        case _: Err("collection-registry-enumeration-unsupported")
+
+fn _registry_allocation(value: text) -> Result<HirPerfAllocationClass, text>:
+    match value:
+        case "none": Ok(HirPerfAllocationClass.None)
+        case "init-only": Ok(HirPerfAllocationClass.InitOnly)
+        case "bounded-pool": Ok(HirPerfAllocationClass.BoundedPool)
+        case "unbounded": Ok(HirPerfAllocationClass.Unbounded)
+        case _: Err("collection-registry-allocation-unsupported")
+
+fn _registry_row_parse(value: SdnValue) -> Result<CollectionRegistryRowV1, text>:
+    val fields = _registry_fields(value, ["stable_name", "operation", "receiver",
+        "signature_fingerprint", "key_contract", "expected_cost", "worst_cost",
+        "cardinality", "cardinality_value", "enumeration", "enumeration_count",
+        "explicit_argument_count", "reads", "writes", "allocates", "throws",
+        "suspends", "observable", "allocation", "preserves_order", "materializes",
+        "backends", "provenance", "evidence_receipt"])?
+    val backend_values = match fields["backends"]:
+        case SdnValue.Array(values): values
+        case _: return Err("collection-registry-backends-invalid")
+    if backend_values.len() == 0:
+        return Err("collection-registry-backends-empty")
+    var backends: [text] = []
+    for item in backend_values:
+        val backend = match item:
+            case SdnValue.String(name): name
+            case _: return Err("collection-registry-backend-unsupported")
+        if not ["interpreter", "jit", "llvm", "native", "bootstrap"].contains(backend):
+            return Err("collection-registry-backend-unsupported")
+        if backends.contains(backend):
+            return Err("collection-registry-backend-duplicate")
+        backends.push(backend)
+    val row = CollectionRegistryRowV1(
+        stable_name: _registry_text(fields, "stable_name")?,
+        operation: _registry_text(fields, "operation")?,
+        receiver: _registry_text(fields, "receiver")?,
+        signature_fingerprint: _registry_text(fields, "signature_fingerprint")?,
+        key_contract: _registry_text(fields, "key_contract")?,
+        expected_cost: _registry_text(fields, "expected_cost")?,
+        worst_cost: _registry_text(fields, "worst_cost")?,
+        cardinality: _registry_text(fields, "cardinality")?,
+        cardinality_value: _registry_int(fields, "cardinality_value")?,
+        enumeration: _registry_text(fields, "enumeration")?,
+        enumeration_count: _registry_int(fields, "enumeration_count")?,
+        explicit_argument_count: _registry_int(fields, "explicit_argument_count")?,
+        effects: HirPerfEffectFacts(reads: _registry_bool(fields, "reads")?,
+            writes: _registry_bool(fields, "writes")?, allocates: _registry_bool(fields, "allocates")?,
+            throws: _registry_bool(fields, "throws")?, suspends: _registry_bool(fields, "suspends")?,
+            observable: _registry_bool(fields, "observable")?, unknown: false),
+        allocation: _registry_text(fields, "allocation")?,
+        preserves_order: _registry_bool(fields, "preserves_order")?,
+        materializes: _registry_bool(fields, "materializes")?, backends: backends,
+        provenance: _registry_text(fields, "provenance")?,
+        evidence_receipt: _registry_text(fields, "evidence_receipt")?)
+    _registry_operation(row.operation)?
+    _registry_receiver(row.receiver)?
+    _registry_cost(row.expected_cost)?
+    _registry_cost(row.worst_cost)?
+    if row.worst_cost == "expected-constant" or row.worst_cost == "amortized-constant":
+        return Err("collection-registry-worst-cost-unproven")
+    if (row.expected_cost == "linear" and row.worst_cost == "constant") or
+            (row.expected_cost == "n-log-n" and row.worst_cost != "n-log-n"):
+        return Err("collection-registry-cost-contradiction")
+    if not ["not-keyed", "equality", "hash-equality", "ordered-equality"].contains(row.key_contract):
+        return Err("collection-registry-key-contract-unsupported")
+    val keyed = ["distinct-by", "contains-lookup", "linear-lookup", "indexed-lookup"].contains(row.operation)
+    if keyed == (row.key_contract == "not-keyed"):
+        return Err("collection-registry-key-contract-contradiction")
+    _registry_cardinality(row.cardinality, row.cardinality_value)?
+    _registry_enumeration(row.enumeration, row.enumeration_count)?
+    _registry_allocation(row.allocation)?
+    if row.explicit_argument_count < 0:
+        return Err("collection-registry-argument-count-invalid")
+    if (row.allocation == "none") == row.effects.allocates:
+        return Err("collection-registry-allocation-contradiction")
+    if row.materializes and not row.effects.allocates:
+        return Err("collection-registry-materialization-contradiction")
+    Ok(row)
+
+fn _registry_row_identity(row: CollectionRegistryRowV1) -> text:
+    val values = [row.stable_name, row.operation, row.receiver,
+        row.signature_fingerprint, row.key_contract, row.expected_cost, row.worst_cost,
+        row.cardinality, row.cardinality_value.to_text(), row.enumeration,
+        row.enumeration_count.to_text(), row.explicit_argument_count.to_text(),
+        "{row.effects.reads}", "{row.effects.writes}", "{row.effects.allocates}",
+        "{row.effects.throws}", "{row.effects.suspends}", "{row.effects.observable}",
+        "{row.effects.unknown}", row.allocation, "{row.preserves_order}",
+        "{row.materializes}", row.provenance, row.evidence_receipt]
+    var result = ""
+    for value in values:
+        result = result + "{value.len()}:{value}"
+    for backend in row.backends:
+        result = result + "{backend.len()}:{backend}"
+    result
+
+export CollectionRegistryRowV1, CollectionRegistrySnapshotV1, CollectionRegistryBindingV1
+export _registry_fields, _registry_text, _registry_row_parse, _registry_row_identity
+export _registry_operation, _registry_receiver, _registry_cost
+export _registry_cardinality, _registry_enumeration, _registry_allocation

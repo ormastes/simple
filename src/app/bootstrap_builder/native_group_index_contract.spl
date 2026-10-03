@@ -1,0 +1,225 @@
+# Bounded input and output wire contracts for a separate full-inventory
+# grouped-native index builder. No receipt is valid without compiler readback.
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
+    config_variant_digest_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1,
+    builder_identifier_valid_v1, builder_paths_overlap_v1,
+    builder_relative_path_valid_v1}
+
+struct NativeGroupIndexConfigV1:
+    phase: text
+    backend: text
+    target: text
+    producer_path: text
+    producer_digest: text
+    source_root: text
+    snapshot_root: text
+    scv_revision_id: text
+    scv_commit_id: text
+    scv_tree_id: text
+    scv_receipt_path: text
+    scv_receipt_digest: text
+    snapshot_inventory_digest: text
+    source_inventory_digest: text
+    source_inventory_generation: i64
+    expected_spl_count: i64
+    full_source_authority_path: text
+    full_source_authority_digest: text
+    index_cache_root: text
+    output_root: text
+    expected_current_digest: text
+    variant: ConfigVariantKeyV1
+    variant_digest: text
+
+struct NativeGroupIndexReceiptV1:
+    producer_digest: text
+    snapshot_inventory_digest: text
+    source_inventory_digest: text
+    source_inventory_generation: i64
+    source_count: i64
+    phase: text
+    backend: text
+    target: text
+    variant_digest: text
+    index_digest: text
+    archive_count: i64
+    archive_receipts_digest: text
+    variant_receipt_path: text
+    variant_receipt_digest: text
+    runtime_std_authority_path: text
+    runtime_std_authority_digest: text
+    index_cache_root: text
+    output_root: text
+
+fn native_group_index_absolute_v1(path: text) -> bool:
+    if path == "" or path.len() > 4096 or path.contains("\0") or
+            path.contains("\r") or path.contains("\n") or
+            path.contains("\t") or path.contains(".."):
+        return false
+    path.starts_with("/") or (path.len() >= 4 and path[1:2] == ":" and
+        (path[2:3] == "/" or path[2:3] == "\\"))
+
+fn native_group_index_private_template_v1(path: text) -> bool:
+    path.starts_with("@WORK@/") and
+        builder_relative_path_valid_v1(path.substring(7))
+
+fn native_group_index_decimal_v1(raw: text, minimum: i64,
+        maximum: i64) -> Result<i64, text>:
+    val parsed = raw.to_i64() ?? -1
+    if parsed < minimum or parsed > maximum or str(parsed) != raw:
+        return Err("index config decimal invalid")
+    Ok(parsed)
+
+fn native_group_index_list_v1(fields: {text: text}, prefix: text,
+        count: i64) -> Result<[text], text>:
+    var values: [text] = []
+    for index in 0..count:
+        val key = prefix + str(index)
+        if not fields.contains_key(key):
+            return Err("index config list has a missing row: " + key)
+        val value = fields[key]
+        if value == "" or value.len() > 1024 or value.contains("\0") or
+                value.contains("\r") or value.contains("\n"):
+            return Err("index config list row invalid: " + key)
+        values = values.push(value)
+    val sorted = canonical_identity_sort_texts(values)
+    for index in 0..values.len():
+        if values[index] != sorted[index] or
+                (index > 0 and values[index] == values[index - 1]):
+            return Err("index config list is not canonical: " + prefix)
+    Ok(values)
+
+fn native_group_index_config_decode_v1(payload: text) -> Result<NativeGroupIndexConfigV1, text>:
+    if payload.len() == 0 or payload.len() > 65536 or
+            not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\0"):
+        return Err("index config framing invalid")
+    var fields: {text: text} = {}
+    val lines = payload.split("\n")
+    for index in 0..lines.len() - 1:
+        val line = lines[index]
+        val at = line.find("=")
+        if at <= 0 or at > 96:
+            return Err("index config row invalid")
+        val key = line[0:at]
+        val value = line[at + 1:]
+        if fields.contains_key(key) or value == "" or value.len() > 4096:
+            return Err("index config row duplicated, empty, or oversized")
+        fields[key] = value
+    val required = ["format", "phase", "backend", "target", "producer_path",
+        "producer_digest", "source_root", "snapshot_root", "scv_revision_id",
+        "scv_commit_id", "scv_tree_id", "scv_receipt_path", "scv_receipt_digest",
+        "snapshot_inventory_digest", "source_inventory_digest",
+        "source_inventory_generation", "expected_spl_count",
+        "full_source_authority_path", "full_source_authority_digest",
+        "index_cache_root", "output_root", "expected_current_digest",
+        "index_schema", "variant_target_triple", "variant_backend",
+        "variant_build_mode", "variant_language_abi", "variant_digest",
+        "variant_features_count", "variant_normalized_options_count",
+        "variant_environment_inputs_count"]
+    for key in required:
+        if not fields.contains_key(key): return Err("index config missing " + key)
+    val feature_count = native_group_index_decimal_v1(fields["variant_features_count"], 0, 64)?
+    val option_count = native_group_index_decimal_v1(fields["variant_normalized_options_count"], 0, 128)?
+    val environment_count = native_group_index_decimal_v1(fields["variant_environment_inputs_count"], 0, 128)?
+    if fields.len() != required.len() + feature_count + option_count + environment_count:
+        return Err("index config has unknown or omitted rows")
+    val features = native_group_index_list_v1(fields, "variant_feature_", feature_count)?
+    val options = native_group_index_list_v1(fields, "variant_normalized_option_", option_count)?
+    val environment = native_group_index_list_v1(fields, "variant_environment_input_", environment_count)?
+    if fields["format"] != "SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1" or
+            fields["index_schema"] != "V2" or
+            (fields["phase"] != "phase3" and fields["phase"] != "phase4") or
+            (fields["backend"] != "llvm" and fields["backend"] != "cranelift") or
+            not builder_identifier_valid_v1(fields["target"]):
+        return Err("index config phase, backend, target, or V2 schema invalid")
+    for key in ["producer_path", "source_root", "snapshot_root", "scv_receipt_path",
+            "full_source_authority_path"]:
+        if not native_group_index_absolute_v1(fields[key]):
+            return Err("index config path invalid: " + key)
+    for key in ["index_cache_root", "output_root"]:
+        if not native_group_index_private_template_v1(fields[key]):
+            return Err("index private root must use @WORK@: " + key)
+    if fields["index_cache_root"] != "@WORK@/index-owned":
+        return Err("index V2 authority must survive generic cache pruning")
+    if builder_paths_overlap_v1(fields["index_cache_root"], fields["output_root"]) or
+            builder_paths_overlap_v1(fields["source_root"], fields["index_cache_root"]) or
+            builder_paths_overlap_v1(fields["source_root"], fields["output_root"]):
+        return Err("index cache, source, and output roots overlap")
+    for key in ["producer_digest", "scv_receipt_digest", "snapshot_inventory_digest",
+            "source_inventory_digest", "full_source_authority_digest", "variant_digest"]:
+        if not builder_digest_valid_v1(fields[key]):
+            return Err("index config digest invalid: " + key)
+    if fields["expected_current_digest"] != "NONE" and
+            not builder_digest_valid_v1(fields["expected_current_digest"]):
+        return Err("index expected CURRENT digest invalid")
+    val generation = native_group_index_decimal_v1(
+        fields["source_inventory_generation"], 0, 1000000000)?
+    val count = native_group_index_decimal_v1(fields["expected_spl_count"], 1, 20000)?
+    val variant = ConfigVariantKeyV1(fields["variant_target_triple"],
+        fields["variant_backend"], features, fields["variant_build_mode"],
+        fields["variant_language_abi"], options, environment)
+    if variant.target_triple != fields["target"] or
+            variant.backend != fields["backend"] or
+            config_variant_digest_v1(variant) != fields["variant_digest"]:
+        return Err("index typed variant digest or target differs")
+    Ok(NativeGroupIndexConfigV1(fields["phase"], fields["backend"], fields["target"],
+        fields["producer_path"], fields["producer_digest"], fields["source_root"],
+        fields["snapshot_root"], fields["scv_revision_id"], fields["scv_commit_id"],
+        fields["scv_tree_id"], fields["scv_receipt_path"], fields["scv_receipt_digest"],
+        fields["snapshot_inventory_digest"], fields["source_inventory_digest"],
+        generation, count, fields["full_source_authority_path"],
+        fields["full_source_authority_digest"], fields["index_cache_root"],
+        fields["output_root"], fields["expected_current_digest"], variant,
+        fields["variant_digest"]))
+
+fn native_group_index_receipt_encode_v1(value: NativeGroupIndexReceiptV1) -> text:
+    for digest in [value.producer_digest, value.snapshot_inventory_digest,
+            value.source_inventory_digest, value.variant_digest, value.index_digest,
+            value.archive_receipts_digest, value.variant_receipt_digest,
+            value.runtime_std_authority_digest]:
+        if not builder_digest_valid_v1(digest): return ""
+    if value.source_inventory_generation < 0 or value.source_count < 1 or
+            value.source_count > 20000 or value.archive_count < 1 or
+            value.archive_count > 20000 or
+            (value.phase != "phase3" and value.phase != "phase4") or
+            (value.backend != "llvm" and value.backend != "cranelift") or
+            not builder_identifier_valid_v1(value.target):
+        return ""
+    for path in [value.variant_receipt_path, value.runtime_std_authority_path,
+            value.index_cache_root, value.output_root]:
+        if not native_group_index_absolute_v1(path): return ""
+    var payload = "SIMPLE-NATIVE-INDEX-BUILD-RECEIPT-1\n"
+    for field in [value.producer_digest, value.snapshot_inventory_digest,
+            value.source_inventory_digest, str(value.source_inventory_generation),
+            str(value.source_count), value.phase, value.backend, value.target,
+            value.variant_digest, value.index_digest, str(value.archive_count),
+            value.archive_receipts_digest, value.variant_receipt_path,
+            value.variant_receipt_digest, value.runtime_std_authority_path,
+            value.runtime_std_authority_digest, value.index_cache_root,
+            value.output_root]:
+        payload = payload + builder_wire_line_v1(field)
+    if payload.len() > 16384: return ""
+    payload
+
+fn native_group_index_receipt_decode_v1(payload: text) -> Result<NativeGroupIndexReceiptV1, text>:
+    if payload.len() == 0 or payload.len() > 16384:
+        return Err("index receipt bound invalid")
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-NATIVE-INDEX-BUILD-RECEIPT-1":
+        return Err("index receipt header invalid")
+    val value = NativeGroupIndexReceiptV1(reader.scalar(), reader.scalar(), reader.scalar(),
+        reader.number(1000000000, false), reader.number(20000, false),
+        reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar(),
+        reader.number(20000, false), reader.scalar(), reader.scalar(), reader.scalar(),
+        reader.scalar(), reader.scalar(), reader.scalar(), reader.scalar())
+    if reader.complete_error() != "" or native_group_index_receipt_encode_v1(value) != payload:
+        return Err("index receipt noncanonical or invalid")
+    Ok(value)
+
+export NativeGroupIndexConfigV1, NativeGroupIndexReceiptV1
+export native_group_index_config_decode_v1, native_group_index_receipt_encode_v1
+export native_group_index_receipt_decode_v1, native_group_index_absolute_v1
+export native_group_index_private_template_v1

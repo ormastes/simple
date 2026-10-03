@@ -670,7 +670,14 @@ impl Lowerer {
     /// `doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md`.
     fn import_alias_symbol(&self, name: &str) -> String {
         match self.resolve_function_alias(name) {
-            Some(original) if original != name && self.own_declared_function_names.contains(original) => {
+            Some(original)
+                if original != name
+                    && (self.own_declared_function_names.contains(original)
+                        || self.qualified_import_functions.as_ref().is_some_and(|imports| imports.contains_key(name))) =>
+            {
+                // Native per-module imports are keyed by the authored alias.
+                // Erasing it loses the exact module owner and lets a same-named
+                // free function or unrelated method capture the call in mangle.
                 name.to_string()
             }
             Some(original) => original.to_string(),

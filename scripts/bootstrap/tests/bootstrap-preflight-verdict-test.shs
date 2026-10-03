@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-preflight-verdict.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cat >"$tmp/harness.sh" <<'SH'
+#!/bin/sh
+set -eu
+full_bootstrap=1
+output_dir=$1
+repo_root=$1
+PLATFORM=x86_64-unknown-linux-gnu
+backend=llvm
+bootstrap_mode=one-binary
+seed_bin=$1/seed
+bootstrap_last_milestone=rust-rust-compiler-backfill-build
+bootstrap_progress_mark() { bootstrap_last_milestone=$1; }
+bootstrap_step_mark() { :; }
+sh() {
+  printf 'preflight invoked\n' >"$output_dir/preflight.called"
+  return 7
+}
+trap 'status=$?; printf "VERDICT — ABORTED: stage=%s exit=%s\n" "$bootstrap_last_milestone" "$status" >&2' EXIT
+SH
+awk '
+  /# Cargo is itself the producer of the selected Rust seed/ { located = 1 }
+  located && /^if \[ "\$\{full_bootstrap\}" -eq 1 \]; then$/ { copying = 1 }
+  copying { print }
+  copying && /^bootstrap_step_mark bootstrap-preflight$/ { finished = 1; exit }
+  END { if (!finished) exit 2 }
+' "$script_root/bootstrap-from-scratch.sh" >>"$tmp/harness.sh"
+if sh "$tmp/harness.sh" "$tmp" >"$tmp/stdout" 2>"$tmp/stderr"; then
+  echo 'FAIL: injected preflight failure was ignored' >&2
+  exit 1
+fi
+[ -f "$tmp/preflight.called" ] || { echo 'FAIL: preflight was not invoked' >&2; exit 1; }
+grep -q 'VERDICT — ABORTED: stage=bootstrap-preflight exit=1' "$tmp/stderr" || {
+  echo 'FAIL: verdict retained the successful Cargo milestone' >&2
+  exit 1
+}
+echo 'PASS: failed preflight owns the bootstrap verdict after Cargo'

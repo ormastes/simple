@@ -1,6 +1,7 @@
 # Authoritative reverse-reference facts published by registry and IR owners.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_promote}
 
 struct ReverseReferenceOwnerFactV1:
     projection_kind: text
@@ -12,18 +13,140 @@ struct ReverseReferenceOwnerSnapshotV1:
     facts: [ReverseReferenceOwnerFactV1]
     known_families: [text]
 
+struct ReverseReferenceSourceAliasV1:
+    identity: text
+    source: text
+
+# Only additions made by the current module are reachable from this root.
+# Phase containers are updated after the module allocation scope has ended.
+class ReverseReferenceModuleBatchV1:
+    token: i64
+    generation: i64
+    sealed: bool
+    valid: bool
+    facts: [ReverseReferenceOwnerFactV1]
+    known_families: [text]
+    aliases: [ReverseReferenceSourceAliasV1]
+
+# Lookup scratch is deliberately not reachable from the promoted batch root.
+class ReverseReferenceModuleIndexV1:
+    aliases: {text: [text]}
+
 var _reverse_reference_owner_facts_v1: [ReverseReferenceOwnerFactV1] = []
 var _reverse_reference_known_families_v1: [text] = []
 var _reverse_reference_owner_active_v1: bool = false
 var _reverse_reference_source_aliases_v1: {text: [text]} = {}
+var _reverse_reference_owner_generation_v1: i64 = 0
+var _reverse_reference_module_next_token_v1: i64 = 0
+var _reverse_reference_module_batch_v1: ReverseReferenceModuleBatchV1? = nil
+var _reverse_reference_module_index_v1: ReverseReferenceModuleIndexV1? = nil
 
 fn reverse_reference_owner_clear_v1():
     _reverse_reference_owner_facts_v1 = []
     _reverse_reference_known_families_v1 = []
     _reverse_reference_source_aliases_v1 = {}
+    _reverse_reference_module_batch_v1 = nil
+    _reverse_reference_module_index_v1 = nil
+
+# Begin only after the caller has acquired its allocation scope. A refusal
+# leaves the pre-existing owner untouched; zero means the collector is idle.
+fn reverse_reference_module_begin_v1() -> i64:
+    if _reverse_reference_module_batch_v1 != nil:
+        return -1
+    if not _reverse_reference_owner_active_v1:
+        return 0
+    _reverse_reference_module_next_token_v1 = _reverse_reference_module_next_token_v1 + 1
+    val token = _reverse_reference_module_next_token_v1
+    _reverse_reference_module_batch_v1 = ReverseReferenceModuleBatchV1(
+        token: token, generation: _reverse_reference_owner_generation_v1,
+        sealed: false, valid: true, facts: [], known_families: [], aliases: [])
+    _reverse_reference_module_index_v1 = ReverseReferenceModuleIndexV1(aliases: {})
+    token
+
+# The caller must pause first. Promoting the module root never walks the
+# accumulated phase graph. A failed seal must be aborted before scope end.
+fn reverse_reference_module_seal_v1(token: i64) -> bool:
+    if token == 0:
+        return _reverse_reference_module_batch_v1 == nil
+    if _reverse_reference_module_batch_v1 == nil:
+        return false
+    val batch = _reverse_reference_module_batch_v1.unwrap()
+    if batch.token != token or batch.generation != _reverse_reference_owner_generation_v1 or
+            not _reverse_reference_owner_active_v1 or batch.sealed or not batch.valid:
+        return false
+    batch.sealed = true
+    # The global Option carrier itself was created in the module scope too.
+    val owned = transient_promote(_reverse_reference_module_batch_v1)
+    if not owned:
+        batch.valid = false
+    _reverse_reference_module_index_v1 = nil
+    owned
+
+fn reverse_reference_module_abort_v1(token: i64) -> bool:
+    if token == 0:
+        return _reverse_reference_module_batch_v1 == nil
+    if _reverse_reference_module_batch_v1 == nil:
+        return false
+    if _reverse_reference_module_batch_v1.unwrap().token != token:
+        return false
+    _reverse_reference_module_batch_v1 = nil
+    _reverse_reference_module_index_v1 = nil
+    true
+
+# Call after the allocation scope ends. Capture already performed deduplication;
+# publication does not rescan the growing fact graph or rebuild a phase snapshot.
+fn reverse_reference_module_publish_v1(token: i64) -> bool:
+    if token == 0:
+        return _reverse_reference_module_batch_v1 == nil
+    if _reverse_reference_module_batch_v1 == nil:
+        return false
+    val batch = _reverse_reference_module_batch_v1.unwrap()
+    if batch.token != token or batch.generation != _reverse_reference_owner_generation_v1 or
+            not _reverse_reference_owner_active_v1 or not batch.sealed or not batch.valid:
+        return false
+    for family in batch.known_families:
+        _reverse_reference_known_families_v1.push(family)
+    for fact in batch.facts:
+        _reverse_reference_owner_facts_v1.push(fact)
+    for alias in batch.aliases:
+        var sources: [text] = if _reverse_reference_source_aliases_v1.contains_key(alias.identity):
+            _reverse_reference_source_aliases_v1[alias.identity]
+        else:
+            []
+        sources.push(alias.source)
+        _reverse_reference_source_aliases_v1[alias.identity] = sources
+    _reverse_reference_module_batch_v1 = nil
+    true
+
+fn reverse_reference_module_accepts_registration_v1() -> bool:
+    if _reverse_reference_module_batch_v1 == nil:
+        return true
+    val batch = _reverse_reference_module_batch_v1.unwrap()
+    if batch.sealed:
+        batch.valid = false
+        return false
+    batch.valid
 
 fn reverse_reference_owner_register_source_alias_v1(identity: text, source: text):
     if not _reverse_reference_owner_active_v1 or identity == "" or source == "":
+        return
+    if not reverse_reference_module_accepts_registration_v1():
+        return
+    if _reverse_reference_module_batch_v1 != nil:
+        if _reverse_reference_source_aliases_v1.contains_key(identity) and
+                _reverse_reference_source_aliases_v1[identity].contains(source):
+            return
+        val batch = _reverse_reference_module_batch_v1.unwrap()
+        val index = _reverse_reference_module_index_v1.unwrap()
+        var pending_sources: [text] = if index.aliases.contains_key(identity):
+            index.aliases[identity]
+        else:
+            []
+        if pending_sources.contains(source):
+            return
+        pending_sources.push(source)
+        index.aliases[identity] = pending_sources
+        batch.aliases.push(ReverseReferenceSourceAliasV1(identity, source))
         return
     var sources: [text] = if _reverse_reference_source_aliases_v1.contains_key(identity):
         _reverse_reference_source_aliases_v1[identity]
@@ -34,6 +157,21 @@ fn reverse_reference_owner_register_source_alias_v1(identity: text, source: text
         _reverse_reference_source_aliases_v1[identity] = sources
 
 fn reverse_reference_owner_source_aliases_v1(identity: text) -> [text]:
+    if _reverse_reference_module_batch_v1 != nil:
+        var combined: [text] = []
+        if _reverse_reference_source_aliases_v1.contains_key(identity):
+            for source in _reverse_reference_source_aliases_v1[identity]:
+                combined.push(source)
+        if _reverse_reference_module_index_v1 != nil:
+            val index = _reverse_reference_module_index_v1.unwrap()
+            if index.aliases.contains_key(identity):
+                for source in index.aliases[identity]:
+                    combined.push(source)
+        else:
+            for alias in _reverse_reference_module_batch_v1.unwrap().aliases:
+                if alias.identity == identity:
+                    combined.push(alias.source)
+        return combined
     if _reverse_reference_source_aliases_v1.contains_key(identity):
         return _reverse_reference_source_aliases_v1[identity]
     []
@@ -42,6 +180,7 @@ fn reverse_reference_owner_begin_v1() -> bool:
     if _reverse_reference_owner_active_v1:
         return false
     reverse_reference_owner_clear_v1()
+    _reverse_reference_owner_generation_v1 = _reverse_reference_owner_generation_v1 + 1
     _reverse_reference_owner_active_v1 = true
     true
 
@@ -52,6 +191,14 @@ fn reverse_reference_owner_end_v1():
 fn reverse_reference_owner_mark_known_v1(family: text):
     if not _reverse_reference_owner_active_v1:
         return
+    if not reverse_reference_module_accepts_registration_v1():
+        return
+    if _reverse_reference_module_batch_v1 != nil:
+        val batch = _reverse_reference_module_batch_v1.unwrap()
+        if not _reverse_reference_known_families_v1.contains(family) and
+                not batch.known_families.contains(family):
+            batch.known_families.push(family)
+        return
     if not _reverse_reference_known_families_v1.contains(family):
         _reverse_reference_known_families_v1 =
             _reverse_reference_known_families_v1.push(family)
@@ -59,6 +206,8 @@ fn reverse_reference_owner_mark_known_v1(family: text):
 fn reverse_reference_owner_register_v1(family: text, subject: text,
         consumer: text, evidence: text):
     if not _reverse_reference_owner_active_v1:
+        return
+    if not reverse_reference_module_accepts_registration_v1():
         return
     reverse_reference_owner_mark_known_v1(family)
     if subject == "" or consumer == "":
@@ -72,6 +221,16 @@ fn reverse_reference_owner_register_v1(family: text, subject: text,
                 existing.consumer_identity == consumer and
                 existing.evidence_digest == digest:
             return
+    if _reverse_reference_module_batch_v1 != nil:
+        val batch = _reverse_reference_module_batch_v1.unwrap()
+        for existing in batch.facts:
+            if existing.projection_kind == family and
+                    existing.subject_identity == subject and
+                    existing.consumer_identity == consumer and
+                    existing.evidence_digest == digest:
+                return
+        batch.facts.push(fact)
+        return
     _reverse_reference_owner_facts_v1 = _reverse_reference_owner_facts_v1.push(fact)
 
 fn reverse_reference_fact_digest_v1(family: text, subject: text,
@@ -135,12 +294,26 @@ fn reverse_reference_register_relocation_v1(emitted_symbol: text,
         "emitted-symbol-relocation", emitted_symbol, relocation_owner, relocation_digest)
 
 fn reverse_reference_owner_snapshot_v1() -> ReverseReferenceOwnerSnapshotV1:
+    if _reverse_reference_module_batch_v1 != nil:
+        var facts: [ReverseReferenceOwnerFactV1] = []
+        var families: [text] = []
+        for fact in _reverse_reference_owner_facts_v1:
+            facts.push(fact)
+        for fact in _reverse_reference_module_batch_v1.unwrap().facts:
+            facts.push(fact)
+        for family in _reverse_reference_known_families_v1:
+            families.push(family)
+        for family in _reverse_reference_module_batch_v1.unwrap().known_families:
+            families.push(family)
+        return ReverseReferenceOwnerSnapshotV1(facts, families)
     ReverseReferenceOwnerSnapshotV1(
         _reverse_reference_owner_facts_v1,
         _reverse_reference_known_families_v1)
 
 export ReverseReferenceOwnerFactV1, ReverseReferenceOwnerSnapshotV1
 export reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1
+export reverse_reference_module_begin_v1, reverse_reference_module_seal_v1
+export reverse_reference_module_publish_v1, reverse_reference_module_abort_v1
 export reverse_reference_owner_mark_known_v1
 export reverse_reference_owner_register_source_alias_v1
 export reverse_reference_owner_source_aliases_v1

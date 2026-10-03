@@ -1,0 +1,198 @@
+"""Aggregate phase admission reuses real host, commit, disk and CPU policy.
+
+These pure decisions do not establish native Job/cgroup enforcement. The
+transport integration must additionally prove actual overlapping children,
+native cancellation, exact reap receipts and source-bound task authority.
+"""
+use std.spec
+use app.bootstrap_builder.phase_admission.{ManagedPhasePolicyV1,
+    ManagedPhaseResourceV1, managed_phase_budget_v1,
+    managed_phase_policy_encode_v1, managed_phase_policy_decode_v1,
+    ManagedPhaseAdmissionV1, managed_phase_restore_journal_v1,
+    managed_phase_completion_result_error_v1}
+use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacitySampleV1, NativeGroupedCapacityV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1,
+    BuildResultV1, builder_task_identity_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+
+fn paired_policy() -> ManagedPhasePolicyV1:
+    ManagedPhasePolicyV1(14000000000, 7000000000, 268435456,
+        8589934592, 16000000000, 4, true)
+
+fn small_phase() -> ManagedPhaseResourceV1:
+    ManagedPhaseResourceV1(6000000000, 10000000, 4000000000, 1)
+
+fn large_phase() -> ManagedPhaseResourceV1:
+    ManagedPhaseResourceV1(7000000000, 10000000, 4000000000, 1)
+
+fn ample() -> NativeGroupedCapacitySampleV1:
+    NativeGroupedCapacitySampleV1(30000000000, 40000000000, 30000000000, true)
+
+fn journal_capacity_must_not_run(path: text) -> Result<NativeGroupedCapacitySampleV1, text>:
+    Err("pure journal restoration must never probe or launch: " + path)
+
+fn journal_owner() -> ManagedPhaseAdmissionV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    var tasks: [BuildTaskV1] = []
+    for phase in ["phase3", "phase4"]:
+        val key = if phase == "phase3": digest else: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        tasks = tasks.push(BuildTaskV1(id: phase, attempt: 1, phase: phase,
+            producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+            dependencies: [], program: "compiler", args: ["input.spl"],
+            inputs: [BuildInputV1("input.spl", digest)], outputs: ["completion.env"],
+            cache_key: key, timeout_ms: 1000,
+            memory_limit_bytes: if phase == "phase3": 6000000000 else: 7000000000, links: []))
+    val host = BuildHostV1("local", "local", "", ".", "builder", digest, 2)
+    ManagedPhaseAdmissionV1("unused-test-state", "unused-test-source", -1,
+        paired_policy(), tasks, [small_phase(), large_phase()], host,
+        builder_process_portable_v1(), NativeGroupedCapacityV1(journal_capacity_must_not_run),
+        ["PENDING", "PENDING"], [nil, nil], [ample(), ample()], digest)
+
+describe "Two phases reserve actual hard caps until authoritative reap":
+    it "admits asymmetric six and seven GB phases with the full host reserve":
+        val threshold: i64 = 21858370048
+        val sample = NativeGroupedCapacitySampleV1(threshold, 40000000000, threshold, true)
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [small_phase()], sample).unwrap()).to_equal("")
+
+    it "keeps the second phase pending when physical memory alone is short":
+        val sample = NativeGroupedCapacitySampleV1(21858370047, 40000000000, 30000000000, true)
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [small_phase()], sample).unwrap()).to_start_with("RESOURCE_WAIT:")
+
+    it "keeps the second phase pending when commit alone is short":
+        val sample = NativeGroupedCapacitySampleV1(30000000000, 40000000000, 21858370047, true)
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [small_phase()], sample).unwrap()).to_start_with("RESOURCE_WAIT:")
+
+    it "counts both source staging growth allowances and the retained disk floor":
+        # 16 GB floor + 2 * (8 * 10 MB source + 4 GB estimated output).
+        val below = NativeGroupedCapacitySampleV1(30000000000, 24159999999, 30000000000, true)
+        val exact = NativeGroupedCapacitySampleV1(30000000000, 24160000000, 30000000000, true)
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [small_phase()], below).unwrap()).to_equal("RESOURCE_WAIT: aggregate disk growth")
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [small_phase()], exact).unwrap()).to_equal("")
+
+    it "retains CPU thread charges independently of available memory":
+        var active = small_phase()
+        active.threads = 4
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [active], ample()).unwrap()).to_equal("RESOURCE_WAIT: CPU threads exhausted")
+
+    it "admits queued work after the previously charged phase is reaped":
+        val sample = NativeGroupedCapacitySampleV1(16000000000, 40000000000, 16000000000, true)
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [small_phase()], sample).unwrap()).to_start_with("RESOURCE_WAIT:")
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [], sample).unwrap()).to_equal("")
+
+    it "rejects a phase that can never fit its sealed aggregate envelope":
+        var policy = paired_policy()
+        policy.aggregate_limit_bytes = 7000000000
+        expect(managed_phase_budget_v1(policy, large_phase(),
+            [], ample()).is_err()).to_equal(true)
+
+    it "queues a pair that exceeds an envelope each task individually fits":
+        var policy = paired_policy()
+        policy.aggregate_limit_bytes = 8000000000
+        expect(managed_phase_budget_v1(policy, large_phase(),
+            [small_phase()], ample()).unwrap()).to_equal("RESOURCE_WAIT: aggregate phase envelope")
+
+    it "rejects a candidate cap above the sealed per-task ceiling":
+        var candidate = large_phase()
+        candidate.memory_limit_bytes = 7000000001
+        expect(managed_phase_budget_v1(paired_policy(), candidate,
+            [], ample()).is_err()).to_equal(true)
+
+    it "rejects missing commit measurement instead of inventing headroom":
+        val absent = NativeGroupedCapacitySampleV1(30000000000, 40000000000, 0, false)
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [], absent).is_err()).to_equal(true)
+
+    it "rejects a third active lane and overflowing disk estimates":
+        expect(managed_phase_budget_v1(paired_policy(), large_phase(),
+            [small_phase(), small_phase()], ample()).is_err()).to_equal(true)
+        var candidate = large_phase()
+        candidate.source_bytes = 1152921504606846976
+        expect(managed_phase_budget_v1(paired_policy(), candidate,
+            [], ample()).is_err()).to_equal(true)
+
+    it "round trips pinned policy bytes and rejects appended or missing fields":
+        val payload = managed_phase_policy_encode_v1(paired_policy(), [small_phase(), large_phase()])
+        val decoded = managed_phase_policy_decode_v1(payload).unwrap()
+        expect(decoded.0.commit_required).to_equal(true)
+        expect(decoded.0.aggregate_limit_bytes).to_equal(14000000000)
+        expect(decoded.1[0].memory_limit_bytes).to_equal(6000000000)
+        expect(decoded.1[1].memory_limit_bytes).to_equal(7000000000)
+        expect(managed_phase_policy_encode_v1(decoded.0, decoded.1)).to_equal(payload)
+        expect(managed_phase_policy_decode_v1(payload + "0\n").is_err()).to_equal(true)
+        expect(managed_phase_policy_decode_v1("SIMPLE-MANAGED-PHASE-POLICY-1\n").is_err()).to_equal(true)
+
+    it "uses explicit Linux commit absence without inventing a Windows measurement":
+        var policy = paired_policy()
+        policy.commit_required = false
+        val linux = NativeGroupedCapacitySampleV1(30000000000, 40000000000, 0, false)
+        expect(managed_phase_budget_v1(policy, large_phase(), [small_phase()], linux).unwrap()).to_equal("")
+
+describe "Typed phase journal restoration does not invent process authority":
+    it "preserves the successful sibling and a pending capacity wait":
+        val prior = journal_owner()
+        prior.states = ["REAPED", "RESOURCE_WAIT"]
+        val restored = journal_owner()
+        expect(managed_phase_restore_journal_v1(restored, prior.snapshot()).unwrap()).to_equal(true)
+        expect(restored.states).to_equal(["REAPED", "RESOURCE_WAIT"])
+        expect(restored.attempts[0]).to_be_nil()
+        # The real recovery path must independently acquire exact transport
+        # receipts; a decoded REAPED word alone does not create an owner.
+
+    it "retains unknown ownership and never silently makes it pending":
+        val prior = journal_owner()
+        prior.states = ["OWNERSHIP_UNKNOWN", "RUNNING"]
+        val restored = journal_owner()
+        expect(managed_phase_restore_journal_v1(restored, prior.snapshot()).unwrap()).to_equal(true)
+        expect(restored.states[0]).to_equal("OWNERSHIP_UNKNOWN")
+
+    it "rejects changed policy, task identity and malformed trailing bytes":
+        val prior = journal_owner()
+        val changed_policy = journal_owner()
+        var policy = changed_policy.policy
+        policy.aggregate_limit_bytes = 15000000000
+        changed_policy.policy = policy
+        expect(managed_phase_restore_journal_v1(changed_policy, prior.snapshot()).is_err()).to_equal(true)
+        val changed_task = journal_owner()
+        var tasks = changed_task.tasks
+        var task = tasks[0]
+        task.program = "different-compiler"
+        tasks[0] = task
+        changed_task.tasks = tasks
+        expect(managed_phase_restore_journal_v1(changed_task, prior.snapshot()).is_err()).to_equal(true)
+        val fresh = journal_owner()
+        expect(managed_phase_restore_journal_v1(fresh, prior.snapshot() + "extra\n").is_err()).to_equal(true)
+        expect(fresh.states).to_equal(["PENDING", "PENDING"])
+
+describe "Aggregate completion requires real successful output evidence":
+    it "rejects missing or changed outputs and changed published receipts":
+        val task = journal_owner().tasks[0]
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val outputs = [BuildInputV1("completion.env", digest)]
+        val result = BuildResultV1(task.id, task.attempt, builder_task_identity_v1(task),
+            "local", "OK", 0, outputs, 0, 1, 0)
+        expect(managed_phase_completion_result_error_v1(task, result, result, outputs)).to_equal("")
+        expect(managed_phase_completion_result_error_v1(task, result, result, []) == "").to_equal(false)
+        val changed = [BuildInputV1("completion.env", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
+        expect(managed_phase_completion_result_error_v1(task, result, result, changed) == "").to_equal(false)
+        var published = result
+        published.cache_hits = 1
+        expect(managed_phase_completion_result_error_v1(task, result, published, outputs)).to_equal(
+            "retained parent and transport phase results differ")
+
+    it "never turns a qualified compiler failure or timeout into aggregate success":
+        val task = journal_owner().tasks[0]
+        val failure = BuildResultV1(task.id, task.attempt, builder_task_identity_v1(task),
+            "local", "ERROR", 1, [], 0, 1, 0)
+        expect(managed_phase_completion_result_error_v1(task, failure, failure, []) == "").to_equal(false)
+        var timeout = failure
+        timeout.status = "TIMEOUT"
+        timeout.exit_code = 124
+        expect(managed_phase_completion_result_error_v1(task, timeout, timeout, []) == "").to_equal(false)

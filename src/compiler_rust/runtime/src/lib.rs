@@ -143,6 +143,7 @@ pub mod security_runtime;
 pub mod text_slice_audit;
 pub mod value;
 mod file_view;
+mod fd_stat_v1;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
 // symbol registration is enabled. Tiny standalone binaries do not need these
@@ -448,6 +449,14 @@ fn runtime_symbol_table_contains_vulkan_discard_command() {
     assert!(RUNTIME_SYMBOL_ENTRIES
         .iter()
         .any(|entry| entry.name == "rt_vulkan_discard_command" && !entry.ptr.is_null()));
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table", target_os = "linux"))]
+#[test]
+fn runtime_symbol_table_contains_bootstrap_directory_provider() {
+    assert!(RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .any(|entry| entry.name == "rt_dir_is_real_no_follow" && !entry.ptr.is_null()));
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]

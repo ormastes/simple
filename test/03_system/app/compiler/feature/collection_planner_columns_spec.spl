@@ -1,0 +1,122 @@
+"""
+REQ-001 typed-column acceptance subcases using the real synchronous API.
+These scenarios do not certify numeric join semantics, all engines, exact
+callback counts, or distinct dtype/index error variants. See the authored
+companion manual for remaining CP-001-A/B/C acceptance obligations.
+"""
+# @req REQ-001
+# @cover src/lib/nogc_sync_mut/df/typed_series.spl
+
+use std.spec.*
+use std.ndarray.*
+use std.nogc_sync_mut.df.mod.{Symbol, Series, SeriesErased, DataFrame}
+use std.nogc_sync_mut.df.typed_series.*
+
+fn collection_column_map_trap(value: Int64) -> Int64:
+    if value.value == 777:
+        panic("map_values invoked callback on masked payload")
+    Int64.new(value.value * 3)
+
+fn collection_column_predicate_trap(value: Int64) -> bool:
+    panic("predicate must not run for all-missing or malformed column")
+    value.value > 0
+
+describe "collection planner typed column acceptance subcases":
+    it "CP-001-A-map excludes a poisoned missing payload from map callbacks":
+        step("prepare typed collection fixtures")
+        val column = TypedSeries<Int64>.from_masked(
+            Symbol.from("masked_map"),
+            [Int64.new(-7), Int64.new(777), Int64.new(12)],
+            [Bool.new(false), Bool.new(true), Bool.new(false)]).unwrap()
+        val mapped = column.map_values(collection_column_map_trap).unwrap()
+        step("compare results and operation counts")
+        expect(mapped.len().value).to_equal(3)
+        expect(mapped.name.label()).to_equal("masked_map")
+        expect(mapped.values[0].value).to_equal(-21)
+        expect(mapped.values[1].value).to_equal(777)
+        expect(mapped.values[2].value).to_equal(36)
+        expect(mapped.missing[0].value).to_equal(false)
+        expect(mapped.missing[1].value).to_equal(true)
+        expect(mapped.missing[2].value).to_equal(false)
+        val hidden = mapped.get(Index.new(1)).unwrap()
+        expect(hidden.?).to_equal(false)
+
+    it "CP-001-A-roundtrip keeps signed wide integers and missingness through DataFrame":
+        step("prepare typed collection fixtures")
+        val name = Symbol.from("wide_signed")
+        val column = TypedSeries<Int64>.from_masked(name,
+            [Int64.new(9007199254740993), Int64.new(-9007199254740993), Int64.new(777), Int64.new(0)],
+            [Bool.new(false), Bool.new(false), Bool.new(true), Bool.new(false)]).unwrap()
+        val dynamic = i64_typed_series_into_dynamic(column).unwrap()
+        val frame = DataFrame.from_columns([SeriesErased.I64Series(dynamic)]).unwrap()
+        val restored = i64_typed_series_from_dynamic(frame.col(name).unwrap()).unwrap()
+        step("compare results and operation counts")
+        expect(restored.name.label()).to_equal("wide_signed")
+        expect(restored.len().value).to_equal(4)
+        expect(restored.values[0].value).to_equal(9007199254740993)
+        expect(restored.values[1].value).to_equal(-9007199254740993)
+        expect(restored.values[3].value).to_equal(0)
+        expect(restored.missing[0].value).to_equal(false)
+        expect(restored.missing[1].value).to_equal(false)
+        expect(restored.missing[2].value).to_equal(true)
+        expect(restored.missing[3].value).to_equal(false)
+        val missing_value = restored.get(Index.new(2)).unwrap()
+        expect(missing_value.?).to_equal(false)
+
+    it "CP-001-B-all-missing invokes no predicates and retains vacuous query results":
+        step("prepare typed collection fixtures")
+        val column = TypedSeries<Int64>.from_masked(Symbol.from("all_missing"),
+            [Int64.new(4), Int64.new(-8), Int64.new(0)],
+            [Bool.new(true), Bool.new(true), Bool.new(true)]).unwrap()
+        val any_result = column.any_present(collection_column_predicate_trap).unwrap()
+        val all_result = column.all_present(collection_column_predicate_trap).unwrap()
+        val filtered = column.filter_present(collection_column_predicate_trap).unwrap()
+        step("compare results and operation counts")
+        expect(any_result).to_equal(false)
+        expect(all_result).to_equal(true)
+        expect(filtered.len().value).to_equal(0)
+        expect(filtered.missing.len()).to_equal(0)
+
+    it "CP-001-C-index rejects both sides of the valid range while keeping endpoints":
+        step("prepare typed collection fixtures")
+        val column = TypedSeries<Int64>.from_values(Symbol.from("bounds"),
+            [Int64.new(-5), Int64.new(8)])
+        expect(column.get(Index.new(-1)).is_err()).to_equal(true)
+        expect(column.get(Index.new(2)).is_err()).to_equal(true)
+        val first = column.get(Index.new(0)).unwrap()
+        val last = column.get(Index.new(1)).unwrap()
+        expect(first.unwrap().value).to_equal(-5)
+        expect(last.unwrap().value).to_equal(8)
+
+    it "CP-001-C-constructor rejects masks both shorter and longer than values":
+        step("prepare typed collection fixtures")
+        val name = Symbol.from("mask_shape")
+        val values = [Int64.new(777), Int64.new(777)]
+        val short_mask = TypedSeries<Int64>.from_masked(name, values, [Bool.new(false)])
+        val long_mask = TypedSeries<Int64>.from_masked(name, values,
+            [Bool.new(false), Bool.new(false), Bool.new(false)])
+        expect(short_mask.is_err()).to_equal(true)
+        expect(long_mask.is_err()).to_equal(true)
+
+    it "CP-001-C-read-transform revalidates direct malformed construction before callbacks":
+        step("prepare typed collection fixtures")
+        val column = TypedSeries<Int64>(name: Symbol.from("malformed"),
+            values: [Int64.new(777), Int64.new(777)], missing: [Bool.new(false)])
+        expect(column.get(Index.new(0)).is_err()).to_equal(true)
+        expect(column.map_values(collection_column_map_trap).is_err()).to_equal(true)
+        expect(column.filter([Bool.new(true), Bool.new(true)]).is_err()).to_equal(true)
+        expect(column.filter_present(collection_column_predicate_trap).is_err()).to_equal(true)
+        expect(column.any_present(collection_column_predicate_trap).is_err()).to_equal(true)
+        expect(column.all_present(collection_column_predicate_trap).is_err()).to_equal(true)
+        expect(i64_typed_series_into_dynamic(column).is_err()).to_equal(true)
+
+    it "CP-001-C-dtype rejects both incompatible views and forged outer dtype metadata":
+        step("prepare typed collection fixtures")
+        var floating = Series.from_f64_values(Symbol.from("float"), [Float64.new(1.25)])
+        var integer = Series.from_i64_values(Symbol.from("integer"), [Int64.new(9007199254740993)])
+        expect(i64_typed_series_from_dynamic(floating).is_err()).to_equal(true)
+        expect(f64_typed_series_from_dynamic(integer).is_err()).to_equal(true)
+        floating.dtype = DType.I64
+        integer.dtype = DType.F64
+        expect(i64_typed_series_from_dynamic(floating).is_err()).to_equal(true)
+        expect(f64_typed_series_from_dynamic(integer).is_err()).to_equal(true)

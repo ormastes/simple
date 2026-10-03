@@ -1,0 +1,80 @@
+# @req REQ-RUNTIME-STD-NATIVE-STATIC-ONLY-OBJECT
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{
+    CodegenTarget, OptimizationLevel, compileoptions_default_options}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{
+    compile_ir_to_object, llvm_object_code_bytes}
+use compiler.backend.backend.cranelift_codegen_adapter.{
+    cranelift_compile_module_direct}
+use compiler.driver.cache.binary_object_cas.{
+    binary_object_cas_put, binary_object_cas_verify,
+    binary_object_magic_kind}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.mir.mir_types.{MirStatic, MirConstant, MirType,
+    MirConstValue}
+
+fn _runtime_std_static_only_fixture_v2() -> MirModule:
+    val symbol = SymbolId(id: 901)
+    val scalar = MirType.i64()
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[symbol] = MirStatic(
+        symbol: symbol, name: "runtime_std_static_only", type_: scalar,
+        init: Some(MirConstant(symbol: symbol,
+            name: "runtime_std_static_only", type_: scalar,
+            value: MirConstValue.Int(29))),
+        is_mutable: true, alignment: 8,
+        visibility: Visibility.Public)
+    MirModule(name: "runtime.std.static_only", functions: {},
+        statics: statics, constants: {}, types: {})
+
+fn _runtime_std_static_only_cas_root_v2(name: text) -> text:
+    val root = "build/tmp/runtime_std_static_only_v2_spec/" +
+        "{name}-{getpid()}-{time_now_unix_micros()}"
+    dir_create_all(root)
+    root
+
+describe "runtime/std static-only native objects", tag: ["only-compiled"]:
+    it "emits a real LLVM object from a module with zero functions":
+        val module = _runtime_std_static_only_fixture_v2()
+        val config = LlvmTargetConfig.for_target(
+            CodegenTarget.X86_64, Some("generic"))
+        val ir = MirToLlvm.create(module.name,
+            CodegenTarget.X86_64, nil).translate_module(module)
+        step("The static survives LLVM lowering without a synthetic function")
+        expect(ir).to_contain("@g_runtime_std_static_only = global i64 29")
+        expect(ir.contains("define ")).to_equal(false)
+        val emitted = compile_ir_to_object(ir, config,
+            OptimizationLevel.None_)
+        expect(emitted.is_ok()).to_equal(true)
+        val bytes = llvm_object_code_bytes(emitted.unwrap())
+        expect(binary_object_magic_kind(bytes) == "").to_equal(false)
+        val root = _runtime_std_static_only_cas_root_v2("llvm")
+        val digest = binary_object_cas_put(root, bytes)
+        expect(digest == "").to_equal(false)
+        expect(binary_object_cas_verify(root, digest)).to_equal(true)
+
+    it "emits a real Cranelift object from the same static-only MIR":
+        val module = _runtime_std_static_only_fixture_v2()
+        var options = compileoptions_default_options()
+        options.target = CodegenTarget.X86_64
+        options.opt_level = OptimizationLevel.None_
+        options.backend_kind = Some("cranelift")
+        val config = LlvmTargetConfig.for_target(
+            CodegenTarget.X86_64, Some("generic"))
+        val emitted = cranelift_compile_module_direct(options, module,
+            Some(config.triple.to_text()), Some("generic"), [])
+        expect(emitted.is_ok()).to_equal(true)
+        val bytes = emitted.unwrap().object_code
+        expect(binary_object_magic_kind(bytes) == "").to_equal(false)
+        val root = _runtime_std_static_only_cas_root_v2("cranelift")
+        val digest = binary_object_cas_put(root, bytes)
+        expect(digest == "").to_equal(false)
+        expect(binary_object_cas_verify(root, digest)).to_equal(true)

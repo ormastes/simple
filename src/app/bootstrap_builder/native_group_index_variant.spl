@@ -1,0 +1,83 @@
+# Exact AOT option profile for a manager-owned full-inventory cold V2 index.
+# Features and environment inputs have no typed CompileOptions projection yet;
+# rejecting them prevents a caller assertion from masquerading as compiler
+# configuration authority.
+use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1}
+use compiler.common.driver_compile_options.{CompileOptions,
+    driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
+use compiler.common.driver_core_modes.{CompileMode, driver_output_format_native}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
+    config_variant_digest_v1}
+
+struct NativeGroupIndexVariantOptionsV1:
+    options: CompileOptions
+    variant: ConfigVariantKeyV1
+    digest: text
+
+fn native_group_index_variant_target_v1(target: text) -> bool:
+    ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"].contains(target)
+
+fn native_group_index_variant_profile_v1(phase: text, backend: text,
+        target: text, build_mode: text, language_abi: text
+        ) -> Result<NativeGroupIndexVariantOptionsV1, text>:
+    if (phase != "phase3" and phase != "phase4") or
+            (backend != "llvm" and backend != "cranelift") or
+            not native_group_index_variant_target_v1(target):
+        return Err("index variant phase, backend, or target unsupported")
+    if (build_mode != "debug" and build_mode != "release") or
+            language_abi != "simple-v1":
+        return Err("index variant build mode or language ABI unsupported")
+    val release = build_mode == "release"
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Aot
+    options.cli_mode_text = "aot"
+    options.output_format = driver_output_format_native()
+    options.backend = backend
+    options.native_target = target
+    options.build_mode = build_mode
+    options.profile = if release: "prod" else: "dev"
+    options.opt_level = if release: 2 else: 0
+    options.release = release
+    options.debug_info = not release
+    options.low_memory = true
+    options = compileoptions_normalize_mir_optimization(options)
+    if options.mode.to_text() != "aot" or
+            options.output_format.to_text() != "native" or
+            options.backend != backend or options.native_target != target or
+            options.build_mode != build_mode or options.release != release or
+            (options.opt_level ?? -1) != (if release: 2 else: 0) or
+            options.debug_info == release or not options.low_memory:
+        return Err("index CompileOptions normalization changed the profile")
+    val normalized = [
+        "debug_info=" + (if options.debug_info: "1" else: "0"),
+        "low_memory=" + (if options.low_memory: "1" else: "0"),
+        "mode=" + options.mode.to_text(),
+        "opt_level=" + str(options.opt_level ?? -1),
+        "output_format=" + options.output_format.to_text()
+    ]
+    val variant = ConfigVariantKeyV1(options.native_target,
+        options.backend, [], options.build_mode, language_abi, normalized, [])
+    val digest = config_variant_digest_v1(variant)
+    if digest == "": return Err("index variant profile digest unavailable")
+    Ok(NativeGroupIndexVariantOptionsV1(options, variant, digest))
+
+fn native_group_index_variant_admit_v1(config: NativeGroupIndexConfigV1
+        ) -> Result<NativeGroupIndexVariantOptionsV1, text>:
+    val derived = native_group_index_variant_profile_v1(config.phase,
+        config.backend, config.target, config.variant.build_mode,
+        config.variant.language_abi)?
+    if config.variant.target_triple != derived.variant.target_triple or
+            config.variant.backend != derived.variant.backend or
+            config.variant.features != derived.variant.features or
+            config.variant.build_mode != derived.variant.build_mode or
+            config.variant.language_abi != derived.variant.language_abi or
+            config.variant.normalized_options != derived.variant.normalized_options or
+            config.variant.environment_inputs != derived.variant.environment_inputs or
+            config.variant_digest != derived.digest:
+        return Err("index supplied variant does not match typed CompileOptions")
+    Ok(derived)
+
+export NativeGroupIndexVariantOptionsV1
+export native_group_index_variant_target_v1, native_group_index_variant_profile_v1
+export native_group_index_variant_admit_v1

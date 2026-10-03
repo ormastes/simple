@@ -1,0 +1,180 @@
+# codex-system-test
+# @manual: primary
+# @req REQ-001 REQ-002 REQ-003 REQ-004
+# Evidence class: host-fixture. This executes production key, preprocessing,
+# cell and AST restoration code. It does not establish two native hosts.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.frontend.frontend_shared_parse_cas_v1.{
+    frontend_shared_parse_key_v1, frontend_shared_parse_logical_path_v1,
+    frontend_shared_parse_path_portable_v1, frontend_shared_parse_cell_encode_v1,
+    frontend_shared_parse_cell_decode_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{
+    frontend_cfg_portable_parse_identity_v1}
+use compiler.core.parser_preprocessor.{
+    _pp_preprocess_conditionals_target_receipted_v1}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped,
+    flat_pool_capture_arm, flat_pool_capture_take, build_module_from_flat_pool_blob}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind}
+
+val PORTABLE_SOURCE = "fn portable_answer() -> i64:\n    73\n"
+val PORTABLE_PATH = "src/shared_cache_probe.spl"
+
+# @inline
+fn captured_portable_module() -> text:
+    flat_pool_capture_arm()
+    val fresh = parse_and_build_module_scoped(PORTABLE_SOURCE, PORTABLE_PATH, false)
+    expect(portable_answer(fresh)).to_equal(73)
+    val blob = flat_pool_capture_take()
+    expect(blob.len()).to_be_greater_than(16)
+    blob
+
+# @inline
+fn portable_answer(module: ParserModule) -> i64:
+    expect(module.functions.len()).to_equal(1)
+    val function = module.functions["portable_answer"]
+    expect(function.name).to_equal("portable_answer")
+    expect(function.body.stmts.len()).to_equal(1)
+    match function.body.stmts[0].kind:
+        case StmtKind.Expr(expression):
+            match expression.kind:
+                case ExprKind.IntLit(value): return value
+                case _: panic("restored function lost its integer literal")
+        case _: panic("restored function lost its expression statement")
+
+# @inline
+fn portable_key(source: text, input: text, parser: text, target: text,
+        path: text, features: text) -> text:
+    frontend_shared_parse_key_v1(sha256_text(source), sha256_text(input),
+        sha256_text(parser), sha256_text(target), path, sha256_text(features))
+
+# @inline
+fn base_key() -> text:
+    portable_key(PORTABLE_SOURCE, PORTABLE_SOURCE, "parser-a", "cfg-a",
+        PORTABLE_PATH, "features-a")
+
+describe "shared parse cache boundary host fixtures", tag: ["only-compiled"]:
+    describe "REQ-001: share only equivalent parser inputs":
+        it "should share a key when Windows and Linux select identical bytes and decisions":
+            step("Preprocess the same portable source for Windows and Linux")
+            val windows = _pp_preprocess_conditionals_target_receipted_v1(
+                PORTABLE_SOURCE, "windows", "x86_64").unwrap()
+            val linux = _pp_preprocess_conditionals_target_receipted_v1(
+                PORTABLE_SOURCE, "linux", "x86_64").unwrap()
+            expect(windows.source).to_equal(PORTABLE_SOURCE)
+            expect(linux.source).to_equal(PORTABLE_SOURCE)
+            expect(frontend_cfg_portable_parse_identity_v1(windows.source,
+                windows.decisions)).to_equal(frontend_cfg_portable_parse_identity_v1(
+                    linux.source, linux.decisions))
+            val conditional = "@cfg(windows)\nfn selected() -> i64:\n    1\n"
+            val selected_windows = _pp_preprocess_conditionals_target_receipted_v1(
+                conditional, "windows", "x86_64").unwrap()
+            val selected_linux = _pp_preprocess_conditionals_target_receipted_v1(
+                conditional, "linux", "x86_64").unwrap()
+            expect(frontend_cfg_portable_parse_identity_v1(selected_windows.source,
+                selected_windows.decisions) == frontend_cfg_portable_parse_identity_v1(
+                    selected_linux.source, selected_linux.decisions)).to_be(false)
+
+        it "should change the key for every semantic identity axis":
+            step("Change source, parser input, parser codec, cfg, features and namespace independently")
+            val baseline = base_key()
+            expect(baseline.len()).to_equal(64)
+            val changed = [
+                portable_key("changed", PORTABLE_SOURCE, "parser-a", "cfg-a", PORTABLE_PATH, "features-a"),
+                portable_key(PORTABLE_SOURCE, "changed", "parser-a", "cfg-a", PORTABLE_PATH, "features-a"),
+                portable_key(PORTABLE_SOURCE, PORTABLE_SOURCE, "parser-b", "cfg-a", PORTABLE_PATH, "features-a"),
+                portable_key(PORTABLE_SOURCE, PORTABLE_SOURCE, "parser-a", "cfg-b", PORTABLE_PATH, "features-a"),
+                portable_key(PORTABLE_SOURCE, PORTABLE_SOURCE, "parser-a", "cfg-a", "src/other.spl", "features-a"),
+                portable_key(PORTABLE_SOURCE, PORTABLE_SOURCE, "parser-a", "cfg-a", PORTABLE_PATH, "features-b")]
+            for key in changed:
+                expect(key.len()).to_equal(64)
+                expect(key == baseline).to_be(false)
+
+        it "should reject missing identities instead of inventing a host default":
+            step("Ask the production key owner to admit missing parser and cfg authority")
+            val digest = sha256_text(PORTABLE_SOURCE)
+            expect(frontend_shared_parse_key_v1(digest, digest, "", digest,
+                PORTABLE_PATH, digest)).to_equal("")
+            expect(frontend_shared_parse_key_v1(digest, digest, digest, "",
+                PORTABLE_PATH, digest)).to_equal("")
+            expect(frontend_shared_parse_key_v1(digest, digest, digest, digest,
+                PORTABLE_PATH, "")).to_equal("")
+
+    describe "REQ-002: restore actual parser semantics":
+        it "should restore the function body from a real encoded parse cell":
+            step("Parse a function and encode its actual flat pools")
+            val blob = captured_portable_module()
+            val cell = frontend_shared_parse_cell_encode_v1(base_key(), blob)
+            step("Decode and rebuild the module, then inspect its returned literal")
+            val admitted = frontend_shared_parse_cell_decode_v1(base_key(), cell)
+            val restored = build_module_from_flat_pool_blob(admitted, PORTABLE_SOURCE, PORTABLE_PATH)
+            expect(restored.is_some()).to_be(true)
+            expect(portable_answer(restored.unwrap())).to_equal(73)
+
+        it "should discard unrelated mutable parser state before restoring a cell":
+            step("Capture a portable module, then parse a different function")
+            val blob = captured_portable_module()
+            val unrelated = parse_and_build_module_scoped(
+                "fn private_only() -> i64:\n    999\n", "src/private_only.spl", false)
+            expect(unrelated.functions["private_only"].name).to_equal("private_only")
+            step("Restore the portable module and check that only its own function remains")
+            val restored = build_module_from_flat_pool_blob(blob, PORTABLE_SOURCE, PORTABLE_PATH).unwrap()
+            expect(portable_answer(restored)).to_equal(73)
+            expect(restored.functions.contains("private_only")).to_be(false)
+
+        it "should reject digest-valid but malformed pools and allow the next real parse":
+            step("Admit a valid envelope whose payload is not a complete flat pool")
+            val malformed = "spl-flatpool-v2\nnot-a-flat-pool\n"
+            val cell = frontend_shared_parse_cell_encode_v1(base_key(), malformed)
+            val admitted = frontend_shared_parse_cell_decode_v1(base_key(), cell)
+            expect(admitted).to_equal(malformed)
+            step("Require hydration rejection and prove that parser state recovers")
+            expect(build_module_from_flat_pool_blob(admitted, PORTABLE_SOURCE, PORTABLE_PATH)).to_be_nil()
+            expect(portable_answer(parse_and_build_module_scoped(
+                PORTABLE_SOURCE, PORTABLE_PATH, false))).to_equal(73)
+
+    describe "REQ-003: reject invalid immutable cells":
+        it "should reject payload corruption without damaging the original cell":
+            step("Corrupt bytes after a real cell was checksummed")
+            val blob = captured_portable_module()
+            val cell = frontend_shared_parse_cell_encode_v1(base_key(), blob)
+            expect(frontend_shared_parse_cell_decode_v1(base_key(), cell + "x")).to_equal("")
+            expect(frontend_shared_parse_cell_decode_v1(base_key(), cell)).to_equal(blob)
+
+        it "should reject a truncated envelope and a foreign key":
+            step("Truncate a real cell and read it at an unrelated address")
+            val cell = frontend_shared_parse_cell_encode_v1(base_key(), captured_portable_module())
+            expect(frontend_shared_parse_cell_decode_v1(base_key(),
+                cell.substring(0, cell.len() - 1))).to_equal("")
+            expect(frontend_shared_parse_cell_decode_v1(sha256_text("foreign"), cell)).to_equal("")
+
+        it "should reject foreign codec and envelope versions even with a valid payload digest":
+            step("Use an incompatible codec with a fresh valid envelope checksum")
+            val foreign = frontend_shared_parse_cell_encode_v1(base_key(), "spl-flatpool-v999\n0\n")
+            expect(frontend_shared_parse_cell_decode_v1(base_key(), foreign)).to_equal("")
+            val current = frontend_shared_parse_cell_encode_v1(base_key(), captured_portable_module())
+            expect(frontend_shared_parse_cell_decode_v1(base_key(), current.replace(
+                "simple-shared-flat-pool-v1", "simple-shared-flat-pool-v999"))).to_equal("")
+
+    describe "REQ-004: keep host paths outside the portable namespace":
+        it "should normalize distinct frozen source roots to one logical identity":
+            step("Resolve Windows and Linux source locations through the production path owner")
+            expect(frontend_shared_parse_logical_path_v1("D:/frozen/src/shared_cache_probe.spl")).to_equal(PORTABLE_PATH)
+            expect(frontend_shared_parse_logical_path_v1("/srv/frozen/src/shared_cache_probe.spl")).to_equal(PORTABLE_PATH)
+            expect(frontend_shared_parse_path_portable_v1(PORTABLE_PATH)).to_be(true)
+
+        it "should reject traversal and ambiguous source anchors":
+            step("Present source paths that could select a different authority row")
+            for path in ["src/../outside.spl", "D:/root/src/nested/src/shared_cache_probe.spl",
+                    "/root/../src/shared_cache_probe.spl", "src//shared_cache_probe.spl"]:
+                expect(frontend_shared_parse_logical_path_v1(path)).to_equal("")
+
+        it "should reject private object and session names as portable parse keys":
+            step("Try to address native artifacts, runtime state and guards through the shared namespace")
+            for path in ["build/native/probe.o", "build/native/probe.obj", "build/native/probe.exe",
+                    "build/hir/probe.hir", "runtime/handle", "sessions/guard", "/tmp/local.spl",
+                    "D:/private/local.spl", "src/injected\nrow.spl"]:
+                expect(frontend_shared_parse_path_portable_v1(path)).to_be(false)
+                expect(portable_key(PORTABLE_SOURCE, PORTABLE_SOURCE, "parser-a", "cfg-a",
+                    path, "features-a")).to_equal("")

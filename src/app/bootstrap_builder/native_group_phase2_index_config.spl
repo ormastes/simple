@@ -1,0 +1,105 @@
+# The index builder receives the exact compiler-derived Phase4 variant,
+# frozen SCV identity, and private per-task output roots.
+use app.bootstrap_builder.native_group_index_contract.{
+    native_group_index_config_decode_v1
+}
+use app.bootstrap_builder.native_group_index_variant.{
+    native_group_index_variant_profile_v1,
+    native_group_index_variant_admit_v1
+}
+use app.bootstrap_builder.native_group_phase2_admission.{
+    Phase2Stage2AdmissionV1
+}
+use app.bootstrap_builder.native_group_phase2_source_snapshot.{
+    Phase2SourceSnapshotV1
+}
+use app.bootstrap_builder.native_group_phase2_scv.{Phase2NativeScvV1}
+
+fn native_group_index_config_encode_for_producer_v1(
+    producer_path: text,
+    producer_digest: text,
+    copied: Phase2SourceSnapshotV1,
+    scv: Phase2NativeScvV1,
+    authority_copy_path: text,
+    phase: text,
+    backend: text,
+    target: text
+) -> Result<text, text>:
+    val profile = native_group_index_variant_profile_v1(
+        phase, backend, target, "release", "simple-v1")?
+    val snapshot = scv.snapshot
+    val variant = profile.variant
+    var rows = [
+        "format=SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1",
+        "phase={phase}", "backend={backend}", "target={target}",
+        "producer_path={producer_path}",
+        "producer_digest={producer_digest}",
+        "source_root={copied.source_root}",
+        "snapshot_root={snapshot.snapshot_root}",
+        "scv_revision_id={snapshot.revision_id}",
+        "scv_commit_id={snapshot.commit_id}",
+        "scv_tree_id={snapshot.tree_id}",
+        "scv_receipt_path={snapshot.receipt_path}",
+        "scv_receipt_digest={scv.scv_receipt_digest}",
+        "snapshot_inventory_digest={snapshot.inventory_digest}",
+        "source_inventory_digest={scv.source_inventory_digest}",
+        "source_inventory_generation={scv.source_inventory_generation}",
+        "expected_spl_count={scv.full_sources.source_count}",
+        "full_source_authority_path={authority_copy_path}",
+        "full_source_authority_digest={copied.authority_digest}",
+        # This is authoritative V2 state consumed after the generic manager
+        # reaps and prunes its disposable .builder-cache. Keep it private to
+        # the attempt, but outside that cleanup subtree.
+        "index_cache_root=@WORK@/index-owned",
+        "output_root=@WORK@/index-output",
+        "expected_current_digest=NONE",
+        "index_schema=V2",
+        "variant_target_triple={variant.target_triple}",
+        "variant_backend={variant.backend}",
+        "variant_build_mode={variant.build_mode}",
+        "variant_language_abi={variant.language_abi}",
+        "variant_digest={profile.digest}",
+        "variant_features_count={variant.features.len()}"
+    ]
+    for index in 0..variant.features.len():
+        rows = rows.push("variant_feature_{index}={variant.features[index]}")
+    rows = rows.push(
+        "variant_normalized_options_count={variant.normalized_options.len()}")
+    for index in 0..variant.normalized_options.len():
+        rows = rows.push(
+            "variant_normalized_option_{index}={variant.normalized_options[index]}")
+    rows = rows.push(
+        "variant_environment_inputs_count={variant.environment_inputs.len()}")
+    for index in 0..variant.environment_inputs.len():
+        rows = rows.push(
+            "variant_environment_input_{index}={variant.environment_inputs[index]}")
+    val payload = rows.join("\n") + "\n"
+    val parsed = native_group_index_config_decode_v1(payload)?
+    val admitted = native_group_index_variant_admit_v1(parsed)?
+    if parsed.source_root != copied.source_root or
+            parsed.snapshot_root != snapshot.snapshot_root or
+            parsed.snapshot_inventory_digest != snapshot.inventory_digest or
+            parsed.source_inventory_digest != scv.source_inventory_digest or
+            parsed.expected_spl_count != scv.full_sources.source_count or
+            parsed.full_source_authority_digest != copied.authority_digest or
+            parsed.phase != phase or
+            parsed.backend != backend or parsed.target != target or
+            admitted.digest != profile.digest:
+        return Err("Phase2 native index config roundtrip differs")
+    Ok(payload)
+
+fn phase2_native_index_config_encode_v1(
+    admission: Phase2Stage2AdmissionV1,
+    copied: Phase2SourceSnapshotV1,
+    scv: Phase2NativeScvV1,
+    authority_copy_path: text,
+    phase: text,
+    backend: text,
+    target: text
+) -> Result<text, text>:
+    native_group_index_config_encode_for_producer_v1(
+        admission.producer_path, admission.producer_digest,
+        copied, scv, authority_copy_path, phase, backend, target)
+
+export phase2_native_index_config_encode_v1
+export native_group_index_config_encode_for_producer_v1

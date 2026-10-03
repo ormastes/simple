@@ -1,6 +1,6 @@
 # Shared email config, rows, credentials and process boundary.
-use app.io.mod.{file_exists, file_read}
-use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_async_mut.sosix.host_facade.{sosix_file_exists, sosix_file_read, sosix_env_get_opt}
+use app.devhub.email_config_sdn.{parse_email_sdn_json}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{time_now_unix_micros}
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_object_keys, json_to_string, json_get_type, json_serialize, json_object, json_string, json_array, json_boolean, json_pretty}
@@ -64,9 +64,9 @@ fn email_config_dir() -> text:
     Reads through env_get_opt, not env_get: env_get has co-compiled
     Optional/text variants on this seed and a wrong dispatch turns the home
     path into garbage, which makes the config file unreadable."""
-    val home = env_get_opt("HOME") ?? ""
+    val home = sosix_env_get_opt("HOME") ?? ""
     if home == "":
-        val userprofile = env_get_opt("USERPROFILE") ?? ""
+        val userprofile = sosix_env_get_opt("USERPROFILE") ?? ""
         if userprofile != "":
             return "{userprofile}/.config/devhub"
     "{home}/.config/devhub"
@@ -76,19 +76,17 @@ fn email_shared_config_path() -> text:
     "{email_config_dir()}/email.sdn"
 
 fn email_config_path() -> text:
-    val shared = email_shared_config_path()
-    if file_exists(shared):
-        return shared
-    "{email_config_dir()}/email.json"
+    # Legacy JSON requires an explicit --config-file path.
+    email_shared_config_path()
 
 fn email_expand_path(path: text) -> text:
     """Expand the literal home placeholder without invoking a shell."""
     # Assemble the marker to avoid Simple's own source-string interpolation.
     val marker = "{" + "home" + "}"
     if path == marker or path.starts_with(marker + "/"):
-        var home = env_get_opt("HOME") ?? ""
+        var home = sosix_env_get_opt("HOME") ?? ""
         if home == "":
-            home = env_get_opt("USERPROFILE") ?? ""
+            home = sosix_env_get_opt("USERPROFILE") ?? ""
         if home == "":
             return ""
         return home + path[marker.len():]
@@ -119,57 +117,21 @@ fn parse_email_shared_config(content: text, path: text) -> EmailConfig:
             elif protocol == "graph":
                 provider = "outlook"
             elif protocol == "" or protocol == "imap":
-                if configured_provider == "gmail":
+                if configured_provider == "outlook":
+                    provider = "outlook"
+                elif configured_provider == "gmail":
                     provider = "gmail"
             else:
                 provider = "unsupported"
             accounts = accounts + [EmailAccount(
                 name: name, provider: provider, email: _email_json_text(entry, "email"),
-                password_cmd: "", config_file: path,
+                password_cmd: _email_json_text(entry, "password_cmd"), config_file: path,
                 tenant_id: _email_json_text(entry, "tenant_id"),
                 client_id: _email_json_text(entry, "client_id"),
                 client_secret_env: _email_json_text(entry, "client_secret_env"),
                 shared_mailbox: _email_json_text(entry, "shared_mailbox"),
             )]
     EmailConfig(default_account: _email_json_text(root, "default_account"), accounts: accounts)
-
-
-fn _email_cfg_leading_spaces(line: text) -> i64:
-    var i = 0
-    while i < line.len() and line[i:i + 1] == " ":
-        i = i + 1
-    i
-
-
-fn _email_cfg_strip_value(raw: text) -> text:
-    val v = raw.trim()
-    if v.starts_with("\"") and v.ends_with("\"") and v.len() >= 2:
-        return v[1:v.len() - 1]
-    v
-
-
-fn _apply_account_field(acc: EmailAccount, key: text, value: text) -> EmailAccount:
-    match key:
-        "protocol":
-            if value == "pop3":
-                return EmailAccount(name: acc.name, provider: "pop3", email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
-            acc
-        "provider":
-            EmailAccount(name: acc.name, provider: if acc.provider == "pop3": "pop3" else: value, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
-        "email":
-            EmailAccount(name: acc.name, provider: acc.provider, email: value, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
-        "password_cmd":
-            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: value, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
-        "tenant_id":
-            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: value, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
-        "client_id":
-            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: value, client_secret_env: acc.client_secret_env, shared_mailbox: acc.shared_mailbox)
-        "client_secret_env":
-            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: value, shared_mailbox: acc.shared_mailbox)
-        "shared_mailbox":
-            EmailAccount(name: acc.name, provider: acc.provider, email: acc.email, password_cmd: acc.password_cmd, tenant_id: acc.tenant_id, client_id: acc.client_id, client_secret_env: acc.client_secret_env, shared_mailbox: value)
-        _:
-            acc
 
 
 fn load_email_config() -> EmailConfig:
@@ -189,56 +151,34 @@ fn load_email_config() -> EmailConfig:
     load_email_config_from(email_config_path())
 
 fn load_email_config_from(path: text) -> EmailConfig:
-    if not file_exists(path):
-        return EmailConfig.default()
-    # file_read, not file_read_text: file_read_text has co-compiled
-    # Optional/text variants on this seed and a wide-closure dispatch can land
-    # on a raw rt_* reader that yields nil for a normal existing file. The
-    # facade below returns "" on error, never nil.
-    val content = file_read(path)
+    match load_email_config_checked(path):
+        case Ok(config):
+            config
+        case Err(_):
+            EmailConfig.default()
+
+fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
+    if not sosix_file_exists(path):
+        return Err("MAIL_CONFIG_MISSING")
+    val content = sosix_file_read(path)
     if content == "":
-        return EmailConfig.default()
-    if content.trim().starts_with("{"):
-        return parse_email_shared_config(content, path)
-    _parse_email_config_content(content)
+        return Err("MAIL_CONFIG_EMPTY")
+    # Legacy JSON is selected explicitly by extension; SDN never falls back.
+    if path.ends_with(".json"):
+        return Ok(parse_email_shared_config(content, path))
+    match parse_email_sdn_json(content):
+        case Ok(root):
+            Ok(parse_email_shared_config(json_serialize(root), path))
+        case Err(code):
+            Err(code)
+
 
 fn _parse_email_config_content(content: text) -> EmailConfig:
-    """Loop body of load_email_config, kept in its own function so the
-    file-read indirection (and its seed-dispatch caveats) stays in one
-    place."""
-    var default_account = ""
-    var accounts: [EmailAccount] = []
-    var current = EmailAccount.empty()
-    var have_current = false
-
-    for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
-            # `pass`, not `pass_dn`: in this wide module the seed mis-dispatches
-            # `pass_dn` and aborts the loop at the first blank line, so no
-            # account block is ever parsed (config-parsing spec evidence).
-            pass
-        else:
-            val indent = _email_cfg_leading_spaces(line)
-            if indent == 0 and trimmed.contains(":"):
-                val parts = trimmed.split(":", 2)
-                val key = parts[0].trim()
-                if key == "default_account":
-                    default_account = _email_cfg_strip_value(parts[1])
-            else if indent > 0 and trimmed.ends_with(":") and not trimmed.contains(" "):
-                if have_current:
-                    accounts = accounts + [current]
-                current = EmailAccount(name: trimmed[0:trimmed.len() - 1], provider: "", email: "", password_cmd: "", tenant_id: "", client_id: "", client_secret_env: "", shared_mailbox: "")
-                have_current = true
-            else if indent > 0 and have_current and trimmed.contains(":"):
-                val parts = trimmed.split(":", 2)
-                val key = parts[0].trim()
-                current = _apply_account_field(current, key, _email_cfg_strip_value(parts[1]))
-
-    if have_current:
-        accounts = accounts + [current]
-
-    EmailConfig(default_account: default_account, accounts: accounts)
+    match parse_email_sdn_json(content):
+        case Ok(root):
+            parse_email_shared_config(json_serialize(root), "")
+        case Err(_):
+            EmailConfig.default()
 
 
 fn resolve_email_account(config: EmailConfig, requested_name: text) -> (bool, EmailAccount):
@@ -373,7 +313,7 @@ fn _resolve_mail_bin() -> text:
     itf-adapter binary path (acli_path/mc_path). DEVHUB_MAIL_BIN overrides
     it — used by specs to point at a fake script instead of PATH-prepend
     trickery, and by real deployments that install mail-cli elsewhere."""
-    val override_bin = env_get_opt("DEVHUB_MAIL_BIN") ?? ""
+    val override_bin = sosix_env_get_opt("DEVHUB_MAIL_BIN") ?? ""
     if override_bin != "":
         return email_expand_path(override_bin)
     "tools/mail-cli/bin/mail"
@@ -382,7 +322,7 @@ fn _resolve_mail_bin() -> text:
 fn email_mail_process_args(argv: [text]) -> [text]:
     # An executable plus an optional script prefix works on every host without
     # relying on Unix shebang handling or Windows .cmd association.
-    val script = env_get_opt("DEVHUB_MAIL_SCRIPT") ?? ""
+    val script = sosix_env_get_opt("DEVHUB_MAIL_SCRIPT") ?? ""
     if script != "":
         return [email_expand_path(script)] + argv
     argv

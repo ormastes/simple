@@ -49,6 +49,15 @@ sub exec_program {
 if (exists($ENV{SIMPLE_BOOTSTRAP_SESSION_ID}) || exists($ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC})) {
     my $helper = $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} // '';
     $helper =~ m{\A/} or die "incomplete bootstrap session contract\n";
+    # The native Windows helper starts another MSYS shell. Without this narrow
+    # exclusion MSYS converts /d/... to D:/... on exec, and that child receives
+    # a session contract rejected by the shell owners before any probe runs.
+    if ($^O eq 'msys' || $^O eq 'cygwin') {
+        my $name = 'SIMPLE_BOOTSTRAP_SESSION_EXEC=';
+        my $excluded = $ENV{MSYS2_ENV_CONV_EXCL} // '';
+        $ENV{MSYS2_ENV_CONV_EXCL} = length($excluded) ? "$excluded;$name" : $name
+            unless ";$excluded;" =~ /;\Q$name\E;/;
+    }
     exec {$helper} $helper, '--', @ARGV or die "bootstrap session exec: $!\n";
 }
 

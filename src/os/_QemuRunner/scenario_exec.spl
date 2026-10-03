@@ -5,6 +5,11 @@ use os._QemuRunner.os_build_run.*
 use os._QemuRunner.scenario_catalog.*
 use os._QemuRunner.scenario_disks.*
 use os.fs_wrapper_artifact.{fs_wrapper_artifact_admitted}
+use os.qemu_cli_plan_v1.{
+    qemu_cli_named_lane_supported_v1, qemu_cli_inspect_named_lane_v1,
+    qemu_cli_dispatch_command_v1, qemu_cli_dispatch_plan_v1
+}
+use os.port.qemu_machine_plan_v1.{QemuLaunchPlanV1}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
@@ -580,10 +585,25 @@ fn build_scenario(scenario: QemuScenario) -> bool:
 fn run_scenario(scenario: QemuScenario) -> bool:
     _run_scenario_impl(scenario, false)
 
+pub fn scenario_sealed_run_supported_v1(scenario: QemuScenario) -> bool:
+    """Use the same finite named-shape authority as command inspection."""
+    qemu_cli_named_lane_supported_v1(
+        _catalog_platform_name_for_scenario(scenario), scenario.name)
+
+pub fn run_scenario_sealed_v1(scenario: QemuScenario) -> bool:
+    """Run a represented named shape; unsupported shapes never fall back."""
+    if not scenario_sealed_run_supported_v1(scenario):
+        print "[run] ERROR: named scenario '{scenario.name}' has no sealed run shape"
+        return false
+    _run_scenario_with_dispatch_v1(scenario, false, true)
+
 fn run_scenario_headless(scenario: QemuScenario) -> bool:
     _run_scenario_impl(scenario, true)
 
 fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
+    _run_scenario_with_dispatch_v1(scenario, headless, false)
+
+fn _run_scenario_with_dispatch_v1(scenario: QemuScenario, headless: bool, sealed: bool) -> bool:
     """Build and run a named QEMU scenario."""
     if not _compiler_filesystem_scenario_is_live_ready(scenario):
         return false
@@ -599,7 +619,19 @@ fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
         return false
     val kernel_path = scenario_kernel_path(scenario, target)
     if not fs_wrapper_artifact_admitted(target.entry, kernel_path): return false
-    val cmd_parts = _build_scenario_command_impl(scenario, kernel_path, headless)
+    var launch_plan: QemuLaunchPlanV1? = nil
+    var cmd_parts: [text] = []
+    if sealed:
+        val prepared = qemu_cli_inspect_named_lane_v1(
+            _catalog_platform_name_for_scenario(scenario), scenario.name,
+            kernel_path, target.qemu_memory, target.qemu_bios, target.qemu_extra, false)
+        if not prepared.ok() or prepared.launch_plan() == nil:
+            print "[run] ERROR: {prepared.error()}"
+            return false
+        launch_plan = prepared.launch_plan()
+        cmd_parts = qemu_cli_dispatch_command_v1(launch_plan.unwrap())
+    else:
+        cmd_parts = _build_scenario_command_impl(scenario, kernel_path, headless)
     if cmd_parts.len() == 0:
         return false
     val qemu_bin = cmd_parts[0]
@@ -610,7 +642,10 @@ fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
         clear_qemu_serial_log(desktop_uefi_serial_log_path())
     if scenario.name == "arm64-wm-ramfb":
         clear_qemu_serial_log(arm64_wm_ramfb_serial_log_path())
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
+    val (stdout, stderr, exit_code) = if launch_plan != nil:
+        qemu_cli_dispatch_plan_v1(launch_plan.unwrap(), timeout)
+    else:
+        rt_process_run_timeout(qemu_bin, qemu_args, timeout)
     val serial_output = if scenario.name == "x64-desktop-uefi":
         read_qemu_serial_log(desktop_uefi_serial_log_path())
     else if scenario.name == "arm64-wm-ramfb":

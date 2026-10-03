@@ -1,0 +1,134 @@
+"""## Purpose and audience
+
+Compiler and provider authors can reject malformed dependency identities even
+when an image and its correctly hashed receipt agree on the malformed value.
+These scenarios exercise the production package-image metadata validator. The
+section payloads are metadata fixtures, not executable SMF or mapped providers.
+No source loading, archive opening, or provider execution is claimed here.
+"""
+
+# Lifecycle: doc/01_research/local/runtime_optional_provider_binary_size_optimization.md
+# Lifecycle: doc/03_plan/seven_plans_host_completion_2026-09-29.md
+# Lifecycle: doc/04_architecture/seven_items_delivery_integration.md
+# Lifecycle: doc/05_design/seven_items_delivery_integration.md
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.package_archive_types.{
+    PackageArchiveMemberReceiptV1, PackageArchiveReceiptV1,
+    package_archive_receipt_digest_v1
+}
+use compiler.driver.cache.pinned_archive_capability.{pinned_archive_receipt_valid_v1}
+use compiler.driver.smf.package_image_v1.{
+    PACKAGE_IMAGE_SCHEMA_V1, PackageImageV1, PackageImageErrorV1,
+    PackageSectionKindV1, PackageSectionDescriptorV1,
+    package_section_kind_name_v1, package_image_validate_v1
+}
+
+fn dependency_image_fixture(dependencies: [text]) -> (PackageImageV1, PackageArchiveReceiptV1):
+    var content = ""
+    var offset: u64 = 0
+    var sections: [PackageSectionDescriptorV1] = []
+    var members: [PackageArchiveMemberReceiptV1] = []
+    for kind in [
+            PackageSectionKindV1.debug, PackageSectionKindV1.exports,
+            PackageSectionKindV1.generics, PackageSectionKindV1.hir_summaries,
+            PackageSectionKindV1.imports, PackageSectionKindV1.initialization,
+            PackageSectionKindV1.mir, PackageSectionKindV1.objects,
+            PackageSectionKindV1.receipts, PackageSectionKindV1.types]:
+        val name = package_section_kind_name_v1(kind) + ".smf"
+        val payload = "metadata-fixture:" + name
+        val extent = payload.bytes().len().to_u64()
+        val digest = sha256_text(payload)
+        sections.push(PackageSectionDescriptorV1(kind, name, offset, extent, digest))
+        members.push(PackageArchiveMemberReceiptV1(name, offset, extent, digest))
+        content = content + payload
+        offset = offset + extent
+    val action = sha256_text("fixture-action")
+    val archive = sha256_text(content)
+    val producer = sha256_text("fixture-producer")
+    val variant = sha256_text("fixture-variant")
+    var receipt = PackageArchiveReceiptV1(
+        "fixture.package", action, archive, sha256_text("fixture-metadata"),
+        "fixture.producer", producer, variant, dependencies, members, "")
+    receipt.receipt_digest = package_archive_receipt_digest_v1(receipt)
+    val image = PackageImageV1(
+        PACKAGE_IMAGE_SCHEMA_V1, "fixture.package", action, archive,
+        receipt.receipt_digest, "fixture.producer", producer, variant,
+        dependencies, sections)
+    (image, receipt)
+
+# @manual_section: Admit canonical dependency identities
+describe "package-image dependency metadata admission":
+    it "should admit canonical dependency digests with matching receipt metadata":
+        # @req REQ-002
+        """Canonical dependency digests remain accepted when all section and
+        receipt metadata agree. This is metadata admission only.
+        """
+        # @capture(text): Valid receipt and package-image validator results
+        step("Prepare matching metadata with two canonical dependency digests")
+        val (image, receipt) = dependency_image_fixture([
+            sha256_text("dependency-a"), sha256_text("dependency-b")])
+        expect(pinned_archive_receipt_valid_v1(receipt)).to_be(true)
+        step("Admit the package-image metadata")
+        expect(package_image_validate_v1(image, receipt).is_ok()).to_be(true)
+
+    it "should admit a leaf package with no dependency digests":
+        # @req REQ-002
+        """An empty dependency list describes a leaf; it is distinct from a
+        list containing an empty digest.
+        """
+        # @capture(text): Leaf metadata admission result
+        step("Prepare a package whose dependency list is empty")
+        val (image, receipt) = dependency_image_fixture([])
+        expect(pinned_archive_receipt_valid_v1(receipt)).to_be(true)
+        expect(package_image_validate_v1(image, receipt).is_ok()).to_be(true)
+
+    it "should reject a malformed dependency even when the receipt agrees":
+        # @req REQ-002 REQ-012
+        """A matching receipt authenticates the supplied metadata, but cannot
+        turn an invalid dependency name into a canonical SHA-256 identity.
+        """
+        for malformed in ["", "short",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"]:
+            # @capture(text): Invalid checksum with an otherwise valid receipt
+            step("Prepare matching image and receipt with a malformed dependency")
+            val (image, receipt) = dependency_image_fixture([malformed])
+            expect(pinned_archive_receipt_valid_v1(receipt)).to_be(true)
+            expect(image.dependency_interface_digests).to_equal(receipt.dependency_interface_digests)
+            step("Reject the malformed dependency identity")
+            expect(package_image_validate_v1(image, receipt).unwrap_err()).to_equal(PackageImageErrorV1.invalid_checksum)
+
+    it "should inspect dependencies after the first canonical identity":
+        # @req REQ-002 REQ-012
+        """One valid dependency does not authorize the rest of the closure."""
+        # @capture(text): Invalid checksum from a later dependency
+        step("Place a malformed digest after a canonical dependency")
+        val (image, receipt) = dependency_image_fixture([sha256_text("first"), "invalid-later"])
+        expect(pinned_archive_receipt_valid_v1(receipt)).to_be(true)
+        expect(package_image_validate_v1(image, receipt).unwrap_err()).to_equal(PackageImageErrorV1.invalid_checksum)
+
+    it "should preserve identity mismatch for different canonical dependencies":
+        # @req REQ-002 REQ-012
+        """Well-formed digests still have to match the receipt. The new format
+        check must preserve the existing identity-mismatch refusal.
+        """
+        # @capture(text): Identity mismatch for canonical but different digests
+        step("Change only the image dependency to another canonical digest")
+        val (original, receipt) = dependency_image_fixture([sha256_text("first")])
+        var image = original
+        image.dependency_interface_digests = [sha256_text("different")]
+        expect(package_image_validate_v1(image, receipt).unwrap_err()).to_equal(PackageImageErrorV1.invalid_identity)
+
+    it "should reject an invalid receipt before inspecting dependency metadata":
+        # @req REQ-002 REQ-012
+        """Receipt authenticity remains the first authority check. A malformed
+        dependency cannot obscure the earlier receipt-invalid refusal.
+        """
+        # @capture(text): Receipt-invalid refusal retains precedence
+        step("Replace the receipt digest without rehashing its fields")
+        val (image, original) = dependency_image_fixture(["invalid-dependency"])
+        var receipt = original
+        receipt.receipt_digest = sha256_text("not-the-receipt")
+        expect(package_image_validate_v1(image, receipt).unwrap_err()).to_equal(PackageImageErrorV1.receipt_invalid)

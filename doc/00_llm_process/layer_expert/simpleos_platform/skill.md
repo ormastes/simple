@@ -38,3 +38,13 @@ SimpleOS protocol status is tracked in
 turn unknown TLS ALPN into H1, advertise H3 without QUIC, or give SFTP ambient
 host filesystem access. Live server evidence requires admitted target tooling
 and configured credentials.
+
+## CLI target identity (2026-10-01)
+
+The catalog accessor's `simpleos_platform_cli_arch_by_name` is the narrow
+SimpleOS guest identity projection. It returns a small `Architecture?` and
+rejects hosted/kernel-only/board names; general build lookup stays broader.
+Do not recreate CLI alias tables in the runner or silently replace invalid
+environment/default identities with x86_64. See
+`doc/03_plan/sys_test/simpleos_cli_target_identity_2026-10-01.md`; its native
+and docgen evidence is UNRUN until a qualified runner is available.

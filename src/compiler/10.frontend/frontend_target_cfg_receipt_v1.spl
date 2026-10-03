@@ -1,0 +1,114 @@
+# Frozen target-conditional decision evidence for explicit full-index sources.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+
+pub struct FrontendCfgDecisionV1:
+    line: i64
+    directive_kind: text
+    condition: text
+    parent_active: bool
+    condition_result: bool
+    effective_active: bool
+    excluded_declaration_kind: text
+    excluded_start_line: i64
+    excluded_end_line: i64
+
+pub struct FrontendCfgDecisionReceiptV1:
+    source_identity: text
+    source_digest: text
+    target_triple: text
+    target_os: text
+    target_arch: text
+    preprocessed_digest: text
+    decisions: [FrontendCfgDecisionV1]
+    decision_digest: text
+
+pub struct FrontendTargetPreprocessV1:
+    source: text
+    decisions: [FrontendCfgDecisionV1]
+
+pub fn frontend_cfg_target_from_triple_v1(triple: text) -> Result<(text, text), text>:
+    val parts = triple.split("-")
+    if parts.len() < 2:
+        return Err("unsupported target triple: {triple}")
+    val arch = parts[0]
+    if arch != "x86_64" and arch != "x86" and arch != "aarch64" and
+            arch != "arm" and arch != "riscv64" and arch != "riscv32" and
+            arch != "ppc64le" and arch != "thumbv6m" and
+            arch != "thumbv7m" and arch != "thumbv7em":
+        return Err("unsupported target architecture: {arch}")
+    var os = ""
+    for part in parts:
+        val candidate = if part == "win32" or part == "windows": "windows"
+            elif part == "darwin" or part == "macos": "macos"
+            elif part == "linux" or part == "freebsd" or part == "openbsd" or
+                    part == "netbsd" or part == "android" or
+                    part == "simpleos" or part == "none": part
+            else: ""
+        if candidate != "":
+            if os != "" and os != candidate:
+                return Err("ambiguous target OS: {triple}")
+            os = candidate
+    if os == "":
+        return Err("unsupported target OS: {triple}")
+    Ok((os, arch))
+
+fn frontend_cfg_frame_v1(value: text) -> text:
+    text_byte_len(value).to_text() + ":" + value
+
+pub fn frontend_cfg_decision_digest_v1(decisions: [FrontendCfgDecisionV1]) -> text:
+    var encoded = "frontend-cfg-decisions-v1|" + decisions.len().to_text()
+    for decision in decisions:
+        encoded = encoded + frontend_cfg_frame_v1(decision.line.to_text())
+        encoded = encoded + frontend_cfg_frame_v1(decision.directive_kind)
+        encoded = encoded + frontend_cfg_frame_v1(decision.condition)
+        encoded = encoded + frontend_cfg_frame_v1(if decision.parent_active: "1" else: "0")
+        encoded = encoded + frontend_cfg_frame_v1(if decision.condition_result: "1" else: "0")
+        encoded = encoded + frontend_cfg_frame_v1(if decision.effective_active: "1" else: "0")
+        encoded = encoded + frontend_cfg_frame_v1(decision.excluded_declaration_kind)
+        encoded = encoded + frontend_cfg_frame_v1(decision.excluded_start_line.to_text())
+        encoded = encoded + frontend_cfg_frame_v1(decision.excluded_end_line.to_text())
+    sha256_text(encoded)
+
+pub fn frontend_cfg_portable_parse_identity_v1(preprocessed: text,
+        decisions: [FrontendCfgDecisionV1]) -> text:
+    # Different target triples may select identical parser input and cfg
+    # decisions. Bind those exact facts instead of the triple spelling.
+    sha256_text("portable-target-cfg-v1|" +
+        text_byte_len(preprocessed).to_text() + ":" + preprocessed + "|" +
+        frontend_cfg_decision_digest_v1(decisions))
+
+pub fn frontend_cfg_receipt_valid_v1(
+    receipt: FrontendCfgDecisionReceiptV1, source_identity: text,
+    source_digest: text, target_triple: text
+) -> bool:
+    if source_identity == "" or source_digest == "" or target_triple == "":
+        return false
+    if receipt.source_identity != source_identity or
+            receipt.source_digest != source_digest or
+            receipt.target_triple != target_triple or
+            receipt.target_os == "" or receipt.target_arch == "" or
+            receipt.preprocessed_digest == "":
+        return false
+    match frontend_cfg_target_from_triple_v1(target_triple):
+        case Ok(target):
+            if receipt.target_os != target.0 or receipt.target_arch != target.1:
+                return false
+        case Err(_): return false
+    receipt.decision_digest == frontend_cfg_decision_digest_v1(receipt.decisions)
+
+pub fn frontend_cfg_excluded_emit_count_v1(receipt: FrontendCfgDecisionReceiptV1) -> i64:
+    var count = 0
+    for decision in receipt.decisions:
+        if not decision.effective_active and
+                (decision.excluded_declaration_kind == "code" or
+                    decision.excluded_declaration_kind == "data" or
+                    decision.excluded_declaration_kind == "init"):
+            count = count + 1
+    count
+
+export FrontendCfgDecisionV1, FrontendCfgDecisionReceiptV1, FrontendTargetPreprocessV1
+export frontend_cfg_decision_digest_v1, frontend_cfg_receipt_valid_v1
+export frontend_cfg_portable_parse_identity_v1
+export frontend_cfg_excluded_emit_count_v1
+export frontend_cfg_target_from_triple_v1

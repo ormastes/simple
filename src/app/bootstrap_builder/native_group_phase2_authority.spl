@@ -1,0 +1,204 @@
+# One private full-source snapshot and one compiler-owned SCV handoff.
+# An existing complete output requires fresh canonical Stage2 readback;
+# interrupted partial roots are never repaired or recursively removed.
+use app.bootstrap_builder.native_group_index_contract.{
+    native_group_index_absolute_v1
+}
+use app.bootstrap_builder.native_group_index_variant.{
+    native_group_index_variant_profile_v1
+}
+use app.bootstrap_builder.native_group_phase2_admission.{
+    phase2_stage2_admission_open_v1
+}
+use app.bootstrap_builder.native_group_phase2_source_snapshot.{
+    phase2_source_snapshot_publish_v1, PHASE2_AUTHORITY_MAX_BYTES_V1
+}
+use app.bootstrap_builder.native_group_phase2_scv.{
+    phase2_native_scv_publish_v1
+}
+use app.bootstrap_builder.native_group_phase2_index_config.{
+    phase2_native_index_config_encode_v1
+}
+use app.bootstrap_builder.native_group_phase2_receipt.{
+    Phase2ReceiptArtifactV1, Phase2ReceiptInventoryV1,
+    Phase2ReceiptScvV1, Phase2NativeAuthorityReceiptV1,
+    phase2_native_authority_receipt_publish_v1
+}
+use app.bootstrap_builder.native_group_phase2_verify.{
+    phase2_native_authority_verify_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{
+    file_create_exclusive, file_hash_sha256, file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded
+}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_readonly_nofollow_v1}
+
+struct Phase2NativeAuthorityBuiltV1:
+    receipt: Phase2NativeAuthorityReceiptV1
+    receipt_path: text
+    receipt_digest: text
+
+fn _phase2_plain_absolute_v1(path: text) -> bool:
+    native_group_index_absolute_v1(path) and
+        not path.contains("\\") and not path.contains("//") and
+        not path.contains("/./") and not path.ends_with("/.") and
+        not path.ends_with("/")
+
+fn _phase2_output_parent_real_v1(path: text) -> bool:
+    if not _phase2_plain_absolute_v1(path):
+        return false
+    val parts = path.split("/")
+    if parts.len() < 2: return false
+    var current = if path.starts_with("/"): "/" else: parts[0] + "/"
+    var index = if path.starts_with("/"): 1 else: 1
+    while index < parts.len() - 1:
+        if parts[index] == "": return false
+        current = if current.ends_with("/"):
+            current + parts[index]
+        else:
+            current + "/" + parts[index]
+        if not dir_is_real_no_follow(current): return false
+        index = index + 1
+    dir_is_real_no_follow(current)
+
+fn _phase2_publish_text_v1(path: text, payload: text) -> Result<text, text>:
+    if not file_create_exclusive(path, payload):
+        return Err("Phase2 authority output publication failed: " + path)
+    val digest = sha256_text(payload)
+    if not file_is_regular_no_follow(path) or
+            file_hash_sha256(path) != digest or
+            not snapshot_readonly_nofollow_v1(path, 1):
+        return Err("Phase2 authority output readback failed: " + path)
+    Ok(digest)
+
+fn phase2_native_authority_build_v1(
+    stage2_receipt_path: text,
+    checkout_root: text,
+    output_root: text,
+    target: text,
+    receipt_path: text,
+    resume_canonical_snapshot_path: text
+) -> Result<Phase2NativeAuthorityBuiltV1, text>:
+    if not _phase2_plain_absolute_v1(checkout_root) or
+            not dir_is_real_no_follow(checkout_root) or
+            not _phase2_output_parent_real_v1(output_root) or
+            not _phase2_plain_absolute_v1(receipt_path) or
+            receipt_path != output_root + "/authority.receipt":
+        return Err("Phase2 authority paths or private output parent invalid")
+    val stage2 = phase2_stage2_admission_open_v1(stage2_receipt_path)?
+    val _phase3_llvm = native_group_index_variant_profile_v1(
+        "phase3", "llvm", target, "release", "simple-v1")?
+    val _phase3_cranelift = native_group_index_variant_profile_v1(
+        "phase3", "cranelift", target, "release", "simple-v1")?
+    val _llvm = native_group_index_variant_profile_v1(
+        "phase4", "llvm", target, "release", "simple-v1")?
+    val _cranelift = native_group_index_variant_profile_v1(
+        "phase4", "cranelift", target, "release", "simple-v1")?
+    if dir_is_real_no_follow(output_root):
+        if not file_is_regular_no_follow(receipt_path) or
+                resume_canonical_snapshot_path == "":
+            return Err("Phase2 authority output is partial or unverified; use a new empty output root, or supply fresh --canonical-snapshot for complete receipt")
+        val digest = file_hash_sha256(receipt_path)
+        val existing = phase2_native_authority_verify_v1(
+            receipt_path, digest, resume_canonical_snapshot_path)?
+        if existing.stage2_receipt.path != stage2.receipt_path or
+                existing.stage2_receipt.digest != stage2.receipt_digest or
+                existing.stage2_admission_identity != stage2.admission_identity or
+                existing.producer.path != stage2.producer_path or
+                existing.producer.digest != stage2.producer_digest or
+                existing.source_authority.digest !=
+                    stage2.source_authority_digest or
+                existing.target != target:
+            return Err("Phase2 authority existing output has different inputs")
+        return Ok(Phase2NativeAuthorityBuiltV1(
+            existing, receipt_path, digest))
+    if not dir_create_all(output_root) or
+            not dir_is_real_no_follow(output_root):
+        return Err("Phase2 authority private output root unavailable")
+    val original_authority = file_read_regular_no_follow_bounded(
+        stage2.source_authority_path, PHASE2_AUTHORITY_MAX_BYTES_V1)?
+    if sha256_text(original_authority) != stage2.source_authority_digest:
+        return Err("Phase2 Stage2 source authority changed")
+    val authority_copy_path = output_root + "/source-inputs-before.txt"
+    val authority_copy_digest = _phase2_publish_text_v1(
+        authority_copy_path, original_authority)?
+    if authority_copy_digest != stage2.source_authority_digest or
+            file_hash_sha256(stage2.source_authority_path) !=
+                authority_copy_digest:
+        return Err("Phase2 retained Stage2 source authority differs")
+    val copied = phase2_source_snapshot_publish_v1(checkout_root,
+        authority_copy_path, authority_copy_digest,
+        output_root + "/source-root")?
+    val scv = phase2_native_scv_publish_v1(copied)?
+    val module_content = scv.full_sources.source_identities.join("\n") + "\n"
+    val module_path = output_root + "/module.inventory"
+    val module_digest = _phase2_publish_text_v1(
+        module_path, module_content)?
+    val excluded_path = output_root + "/excluded-modules.inventory"
+    val excluded_digest = _phase2_publish_text_v1(
+        excluded_path, scv.module_selection.excluded_ledger)?
+    val llvm_content = phase2_native_index_config_encode_v1(
+        stage2, copied, scv, authority_copy_path,
+        "phase4", "llvm", target)?
+    val llvm_path = output_root + "/index-config-llvm.sdn"
+    val llvm_digest = _phase2_publish_text_v1(llvm_path, llvm_content)?
+    val cranelift_content = phase2_native_index_config_encode_v1(
+        stage2, copied, scv, authority_copy_path,
+        "phase4", "cranelift", target)?
+    val cranelift_path = output_root + "/index-config-cranelift.sdn"
+    val cranelift_digest = _phase2_publish_text_v1(
+        cranelift_path, cranelift_content)?
+    val phase3_llvm_content = phase2_native_index_config_encode_v1(
+        stage2, copied, scv, authority_copy_path,
+        "phase3", "llvm", target)?
+    val phase3_llvm_path = output_root + "/index-config-phase3-llvm.sdn"
+    val phase3_llvm_digest = _phase2_publish_text_v1(
+        phase3_llvm_path, phase3_llvm_content)?
+    val phase3_cranelift_content = phase2_native_index_config_encode_v1(
+        stage2, copied, scv, authority_copy_path,
+        "phase3", "cranelift", target)?
+    val phase3_cranelift_path =
+        output_root + "/index-config-phase3-cranelift.sdn"
+    val phase3_cranelift_digest = _phase2_publish_text_v1(
+        phase3_cranelift_path, phase3_cranelift_content)?
+    val receipt = Phase2NativeAuthorityReceiptV1(
+        output_root, copied.source_root, target,
+        Phase2ReceiptArtifactV1(stage2.receipt_path,
+            stage2.receipt_digest),
+        stage2.admission_identity,
+        Phase2ReceiptArtifactV1(stage2.producer_path,
+            stage2.producer_digest),
+        Phase2ReceiptArtifactV1(authority_copy_path,
+            authority_copy_digest),
+        Phase2ReceiptInventoryV1(copied.source_inventory_path,
+            copied.source_inventory_digest, copied.source_count),
+        Phase2ReceiptInventoryV1(copied.full_source_inventory_path,
+            copied.full_source_inventory_digest, copied.full_source_count),
+        Phase2ReceiptInventoryV1(copied.full_source_links_path,
+            copied.full_source_links_digest, copied.link_count),
+        Phase2ReceiptInventoryV1(module_path, module_digest,
+            scv.full_sources.source_count),
+        Phase2ReceiptInventoryV1(excluded_path, excluded_digest,
+            scv.module_selection.excluded_count),
+        Phase2ReceiptArtifactV1(copied.source_root +
+            "/src/package_ownership/native_module_roles.sdn",
+            scv.module_role_policy_digest),
+        Phase2ReceiptScvV1(scv.snapshot.snapshot_root,
+            Phase2ReceiptArtifactV1(scv.snapshot.receipt_path,
+                scv.scv_receipt_digest), scv.snapshot.revision_id,
+            scv.snapshot.commit_id, scv.snapshot.tree_id,
+            scv.snapshot.inventory_digest, scv.source_inventory_digest,
+            scv.source_inventory_generation, scv.package_policy_digest),
+        Phase2ReceiptArtifactV1(llvm_path, llvm_digest),
+        Phase2ReceiptArtifactV1(cranelift_path, cranelift_digest),
+        Phase2ReceiptArtifactV1(
+            phase3_llvm_path, phase3_llvm_digest),
+        Phase2ReceiptArtifactV1(
+            phase3_cranelift_path, phase3_cranelift_digest))
+    val digest = phase2_native_authority_receipt_publish_v1(
+        receipt_path, receipt)?
+    Ok(Phase2NativeAuthorityBuiltV1(receipt, receipt_path, digest))
+
+export Phase2NativeAuthorityBuiltV1, phase2_native_authority_build_v1

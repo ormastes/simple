@@ -34,6 +34,7 @@ use std.common.structural.resolve.resolve_core.{
     sort_references_stable
 }
 use compiler.backend.linker.smf_writer.{
+    DataSectionKind,
     RelocationType,
     SmfRelocation,
     SmfWriter,
@@ -129,6 +130,23 @@ describe "smf_link_modules two-module link":
                 expect(b[7] as i64).to_equal(0xC3)
             case Err(e):
                 expect(_error_text(e)).to_equal("ok")
+
+    it "rejects a v1.2 Data source before the legacy Code-only link":
+        var w = SmfWriter.create()
+        val _code = w.add_code_section("text", [0xC3, 0, 0, 0, 0, 0, 0, 0])
+        val _data = w.add_data_section("data", [0, 0, 0, 0, 0, 0, 0, 0],
+            DataSectionKind.Mutable)
+        val _main = w.add_symbol(_sym("main", SmfWriterSymbolType.Function, 0, 8))
+        w.add_relocation(SmfRelocation(offset: 0, symbol_index: 0,
+            reloc_type: RelocationType.Abs64, addend: 0,
+            source_section_index: 1))
+        val run = smf_link_modules([smf_link_module_from_writer(0, w)], "main", 0x1000)
+        expect(run.receipts.len()).to_equal(0)
+        match run.result:
+            case Ok(_image):
+                expect("linked").to_equal("reloc:non-Code relocation source is unsupported")
+            case Err(e):
+                expect(_error_text(e)).to_equal("reloc:non-Code relocation source is unsupported")
 
 # ----------------------------------------------------------------------------
 # 2. Unresolved

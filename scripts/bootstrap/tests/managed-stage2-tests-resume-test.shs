@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-managed-stage2-tests.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+platform=x86_64-unknown-linux-gnu
+candidate="$tmp/stage3/$platform/stage2-admitted/simple"
+tests_root="$tmp/stage2-compiler-tests/$platform"
+mkdir -p "$(dirname -- "$candidate")" "$tests_root/verification"
+printf 'candidate\n' >"$candidate"
+candidate_sha=$(sha256sum "$candidate" | cut -d ' ' -f 1)
+summary="$tests_root/verification/summary.env"
+{
+  printf '%s\n' 'phase=stage2' 'hash_policy=canonical' \
+    "expected_compiler_sha256=$candidate_sha" "actual_compiler_sha256=$candidate_sha" \
+    'terminal_failures=0' 'overall=PASS' 'test_execution=delegated-seed'
+  for task in compiler_cli_build test_runner_build compiler_bootstrap_tests interpreter_interpreter_tests loader_interpreter_tests; do
+    printf 'task|%s|result|PASS\n' "$task"
+  done
+} >"$summary"
+receipt="$tests_root/stage2-compiler-tests.env"
+printf 'schema=simple-bootstrap-stage2-compiler-tests-v1\nstatus=pass\ncandidate=%s\ncandidate_sha256=%s\nverification_summary=%s\nverification_summary_sha256=%s\ntest_execution=delegated-seed\n' \
+  "$candidate" "$candidate_sha" "$summary" "$(sha256sum "$summary" | cut -d ' ' -f 1)" >"$receipt"
+verify() { sh "$script_root/lib/verify-stage2-compiler-tests.shs" "$tmp" "$platform" "$candidate" "$candidate_sha"; }
+[ "$(verify)" = delegated-seed ] || { echo 'FAIL: matching Stage 2 test matrix rejected' >&2; exit 1; }
+mv "$receipt" "$tmp/receipt.saved"
+if verify >/dev/null 2>&1; then echo 'FAIL: missing Stage 2 test PASS admitted' >&2; exit 1; fi
+mv "$tmp/receipt.saved" "$receipt"
+printf 'status=rejected\n' >"$tests_root/rejection.env"
+if verify >/dev/null 2>&1; then echo 'FAIL: retained Stage 2 rejection admitted' >&2; exit 1; fi
+rm "$tests_root/rejection.env"
+printf 'changed\n' >>"$summary"
+if verify >/dev/null 2>&1; then echo 'FAIL: changed Stage 2 summary admitted' >&2; exit 1; fi
+echo 'PASS: Stage 2 compiler-test receipt, execution mode and rejection gate'

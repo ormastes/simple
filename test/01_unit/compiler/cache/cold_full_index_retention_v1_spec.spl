@@ -1,0 +1,103 @@
+# Post-semantic retention must keep both native package inputs intact.
+# @cover src/compiler/80.driver/cache/cold_full_index_retention_v1.spl
+
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_compile_options.{
+    driver_core_compile_options_default
+}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.cache.cold_full_index_retention_v1.{
+    cold_full_index_trim_non_runtime_std_v1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticSeedV1, ColdHirTypedReceiptV1
+}
+use compiler.driver.cache.cold_hir_compiled_payload_file_v1.{
+    ColdHirCompiledPayloadFileV1
+}
+use compiler.driver.smf.runtime_std_hir_emission_types_v1.{
+    RuntimeStdHirModuleEmissionV1
+}
+use compiler.driver.smf.runtime_std_package_membership_v1.{
+    RuntimeStdPackageMemberV1, RuntimeStdPackageMembershipV1
+}
+use compiler.driver.smf.runtime_std_section_types_v1.{
+    RuntimeStdCompiledSectionPayloadV1
+}
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.mir.mir_instructions.{MirModule}
+
+fn retention_test_receipt_v1(source: text, module_name: text) -> ColdHirTypedReceiptV1:
+    ColdHirTypedReceiptV1(ColdHirSemanticSeedV1(module_name, source,
+        sha256_text(source), sha256_text("inventory"),
+        sha256_text(module_name), []), "", "")
+
+fn retention_test_emission_v1(source: text,
+        module_name: text) -> RuntimeStdHirModuleEmissionV1:
+    val file = ColdHirCompiledPayloadFileV1(
+        "/private/" + module_name, sha256_text(module_name), 1)
+    RuntimeStdHirModuleEmissionV1(module_name, source,
+        sha256_text(source), "/private", [
+            RuntimeStdCompiledSectionPayloadV1(
+                PackageSectionKindV1.debug, "debug.smf", source)],
+        [], file, file, file, file)
+
+fn retention_test_membership_v1() -> RuntimeStdPackageMembershipV1:
+    RuntimeStdPackageMembershipV1(sha256_text("snapshot"),
+        sha256_text("inventory"), sha256_text("scv"), [
+            RuntimeStdPackageMemberV1("src/runtime/a.spl",
+                sha256_text("src/runtime/a.spl"), "simple.runtime"),
+            RuntimeStdPackageMemberV1("src/lib/b.spl",
+                sha256_text("src/lib/b.spl"), "simple.std"),
+            RuntimeStdPackageMemberV1("src/app/c.spl",
+                sha256_text("src/app/c.spl"), "simple.app")])
+
+fn retention_test_context_v1() -> CompileContext:
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    val sources = ["src/runtime/a.spl", "src/lib/b.spl", "src/app/c.spl"]
+    val names = ["runtime.a", "std.b", "app.c"]
+    var index = 0
+    while index < sources.len():
+        val source = sources[index]
+        val module_name = names[index]
+        ctx.cold_hir_typed_receipts =
+            ctx.cold_hir_typed_receipts.push(
+                retention_test_receipt_v1(source, module_name))
+        ctx.runtime_std_hir_emissions[source] =
+            retention_test_emission_v1(source, module_name)
+        ctx.mir_modules[module_name] = MirModule(name: module_name,
+            functions: {}, statics: {}, constants: {}, types: {})
+        index = index + 1
+    ctx
+
+describe "full index post-semantic retention", tag: ["only-compiled"]:
+    it "keeps runtime and std MIR and HIR payloads while releasing other modules":
+        val ctx = retention_test_context_v1()
+        val result = cold_full_index_trim_non_runtime_std_v1(
+            ctx, retention_test_membership_v1())
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(1)
+        expect(ctx.storage_registry_frozen).to_equal(true)
+        expect(ctx.mir_modules.has("runtime.a")).to_equal(true)
+        expect(ctx.mir_modules.has("std.b")).to_equal(true)
+        expect(ctx.mir_modules.has("app.c")).to_equal(false)
+        expect(ctx.runtime_std_hir_emissions[
+            "src/runtime/a.spl"].semantic_payloads.len()).to_equal(1)
+        expect(ctx.runtime_std_hir_emissions[
+            "src/lib/b.spl"].semantic_payloads.len()).to_equal(1)
+        expect(ctx.runtime_std_hir_emissions[
+            "src/app/c.spl"].semantic_payloads.len()).to_equal(0)
+        expect(ctx.runtime_std_hir_emissions[
+            "src/app/c.spl"].export_file.path).to_equal("/private/app.c")
+
+    it "rejects missing selected MIR before releasing any payload":
+        val ctx = retention_test_context_v1()
+        ctx.mir_modules.remove("std.b")
+        val result = cold_full_index_trim_non_runtime_std_v1(
+            ctx, retention_test_membership_v1())
+        expect(result.is_err()).to_equal(true)
+        expect(ctx.storage_registry_frozen).to_equal(false)
+        expect(ctx.mir_modules.has("app.c")).to_equal(true)
+        expect(ctx.runtime_std_hir_emissions[
+            "src/app/c.spl"].semantic_payloads.len()).to_equal(1)

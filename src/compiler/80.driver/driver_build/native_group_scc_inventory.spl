@@ -1,0 +1,410 @@
+# Compiler-owned grouping authority for a frozen native source inventory.
+# The persistent package index supplies resolved imports and declared package
+# SCCs. This module never infers graph edges from source text.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_module_index.{
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, PackageModuleIndexGenerationV1,
+    package_module_index_read_current_v1, package_module_index_validate_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, config_variant_digest_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{
+    builder_digest_valid_v1, builder_identifier_valid_v1,
+    builder_relative_path_valid_v1
+}
+use std.scv.compile_source_inventory.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1,
+    compile_source_inventory_read_current_v1,
+    compile_source_inventory_snapshot_cache_root_v1,
+    compile_source_inventory_plain_checkout_v1
+}
+use std.scv.compile_snapshot.{scv_compile_snapshot_open_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+struct NativeGroupSccMemberV1:
+    source_path: text
+    module_id: text
+    module_identity: text
+    source_digest: text
+    scc_id: text
+
+struct NativeGroupSccGroupV1:
+    scc_id: text
+    dependency_scc_ids: [text]
+    members: [NativeGroupSccMemberV1]
+    order: i64
+
+struct NativeGroupSccInventoryV1:
+    scv_snapshot_root: text
+    scv_revision_id: text
+    scv_commit_id: text
+    scv_tree_id: text
+    source_snapshot_digest: text
+    scv_source_inventory_digest: text
+    full_source_authority_digest: text
+    producer_digest: text
+    variant_digest: text
+    inventory_digest: text
+    index_digest: text
+    groups: [NativeGroupSccGroupV1]
+    members: [NativeGroupSccMemberV1]
+    # Preflight-only in-memory graph. Group route receipts never encode it.
+    index_generation: PackageModuleIndexGenerationV1
+    index_by_module: Dict<text, i64>
+    indices_by_package: Dict<text, [i64]>
+    group_by_scc: Dict<text, i64>
+
+fn _native_scc_identity_cmp_v1(left: text, right: text) -> i64:
+    val length = if left.len() < right.len(): left.len() else: right.len()
+    var cursor = 0
+    while cursor < length:
+        val a = left.byte_at(cursor) as i64
+        val b = right.byte_at(cursor) as i64
+        if a < b: return -1
+        if a > b: return 1
+        cursor = cursor + 1
+    if left.len() < right.len(): -1 else:
+        if left.len() > right.len(): 1 else: 0
+
+fn _native_scc_heap_push_v1(heap: [text], value: text) -> [text]:
+    var result = heap.push(value)
+    var child = result.len() - 1
+    while child > 0:
+        val parent = (child - 1) / 2
+        if _native_scc_identity_cmp_v1(result[parent], result[child]) <= 0:
+            break
+        val swap = result[parent]
+        result[parent] = result[child]
+        result[child] = swap
+        child = parent
+    result
+
+fn _native_scc_heap_pop_v1(heap: [text]) -> ([text], text):
+    val first = heap[0]
+    var result = heap
+    val last = result[result.len() - 1]
+    result.pop()
+    if result.len() == 0:
+        return (result, first)
+    result[0] = last
+    var parent = 0
+    while true:
+        val left = parent * 2 + 1
+        if left >= result.len(): break
+        val right = left + 1
+        var child = left
+        if right < result.len() and
+                _native_scc_identity_cmp_v1(result[right], result[left]) < 0:
+            child = right
+        if _native_scc_identity_cmp_v1(result[parent], result[child]) <= 0:
+            break
+        val swap = result[parent]
+        result[parent] = result[child]
+        result[child] = swap
+        parent = child
+    (result, first)
+
+fn _native_scc_inventory_digest_v1(paths: [text]) -> text:
+    sha256_text(paths.join("\n") + "\n")
+
+# Pure admission seam for focused tests. The production entry reads each
+# immutable authority once, then delegates here without a per-module reload.
+fn native_group_scc_from_index_v1(
+    generation: PackageModuleIndexGenerationV1,
+    index_digest: text,
+    source_inventory: CompileSourceInventoryV1,
+    inventory_paths: [text],
+    producer_digest: text,
+    expected_variant: ConfigVariantKeyV1,
+    scv_snapshot_root: text,
+    scv_revision_id: text,
+    scv_commit_id: text,
+    scv_tree_id: text,
+    source_snapshot_digest: text,
+    scv_source_inventory_digest: text,
+    full_source_authority_digest: text
+) -> Result<NativeGroupSccInventoryV1, text>:
+    if inventory_paths.len() == 0:
+        return Err("native-scc-inventory-empty")
+    if (not builder_digest_valid_v1(producer_digest) or
+            not builder_digest_valid_v1(source_snapshot_digest) or
+            not builder_digest_valid_v1(scv_source_inventory_digest) or
+            not builder_digest_valid_v1(full_source_authority_digest) or
+            not builder_digest_valid_v1(index_digest)):
+        return Err("native-scc-binding-invalid")
+    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+            generation.scope_entry_source_identity != "":
+        return Err("native-scc-complete-index-required")
+    if generation.producer_digest != producer_digest:
+        return Err("native-scc-producer-mismatch")
+    val expected_variant_digest = config_variant_digest_v1(expected_variant)
+    if expected_variant_digest == "" or
+            generation.variant_digest != expected_variant_digest:
+        return Err("native-scc-variant-mismatch")
+    if inventory_paths.len() != generation.entries.len():
+        return Err("native-scc-index-coverage-incomplete")
+    val source_inventory_digest = compile_source_inventory_digest_v1(source_inventory)
+    if source_inventory_digest == "" or
+            source_inventory_digest != generation.inventory_digest or
+            source_inventory_digest != scv_source_inventory_digest:
+        return Err("native-scc-source-inventory-mismatch")
+    val index_reason = package_module_index_validate_v1(generation)
+    if index_reason != "ok":
+        return Err("native-scc-index-{index_reason}")
+
+    var indexed_by_source: Dict<text, i64> = {}
+    var indexed_folded_source: Dict<text, bool> = {}
+    var indexed_by_module: Dict<text, i64> = {}
+    var indices_by_package: Dict<text, [i64]> = {}
+    var indexed_scc_count: Dict<text, i64> = {}
+    var index = 0
+    for entry in generation.entries:
+        if indexed_by_source.has(entry.source_identity):
+            return Err("native-scc-index-source-duplicate:{entry.source_identity}")
+        val folded_source = entry.source_identity.lower()
+        if indexed_folded_source.has(folded_source):
+            return Err("native-scc-index-source-case-collision:{entry.source_identity}")
+        indexed_folded_source[folded_source] = true
+        indexed_by_source[entry.source_identity] = index
+        indexed_by_module[entry.module_identity] = index
+        var package_members = indices_by_package[entry.package_identity] ?? []
+        package_members = package_members.push(index)
+        indices_by_package[entry.package_identity] = package_members
+        indexed_scc_count[entry.scc_identity] =
+            (indexed_scc_count[entry.scc_identity] ?? 0) + 1
+        index = index + 1
+
+    var inventory_source_digests: Dict<text, text> = {}
+    for source in source_inventory.entries:
+        inventory_source_digests[source.source_identity] = source.content_digest
+
+    var selected_sources: Dict<text, bool> = {}
+    var folded_sources: Dict<text, bool> = {}
+    var selected_scc_count: Dict<text, i64> = {}
+    var group_ids: [text] = []
+    var groups_by_id: Dict<text, i64> = {}
+    var groups: [NativeGroupSccGroupV1] = []
+    var members_by_source: Dict<text, i64> = {}
+    var members: [NativeGroupSccMemberV1] = []
+    var wire_ids: Dict<text, bool> = {}
+    for path in inventory_paths:
+        if not builder_relative_path_valid_v1(path) or
+                not path.ends_with(".spl"):
+            return Err("native-scc-path-invalid:{path}")
+        if selected_sources.has(path):
+            return Err("native-scc-path-duplicate:{path}")
+        val folded_path = path.lower()
+        if folded_sources.has(folded_path):
+            return Err("native-scc-path-case-collision:{path}")
+        folded_sources[folded_path] = true
+        selected_sources[path] = true
+        if not indexed_by_source.has(path) or
+                not inventory_source_digests.has(path):
+            return Err("native-scc-path-unindexed:{path}")
+        val entry = generation.entries[indexed_by_source[path]]
+        if entry.source_digest != inventory_source_digests[path]:
+            return Err("native-scc-source-digest-mismatch:{path}")
+        if not builder_identifier_valid_v1(entry.scc_identity):
+            return Err("native-scc-id-invalid:{entry.scc_identity}")
+        val wire_id = sha256_text("simple/native-group-module/v1|" +
+            "{entry.module_identity.len()}:{entry.module_identity}")
+        if wire_ids.has(wire_id):
+            return Err("native-scc-module-id-duplicate:{entry.module_identity}")
+        wire_ids[wire_id] = true
+        val member = NativeGroupSccMemberV1(
+            path, wire_id, entry.module_identity, entry.source_digest,
+            entry.scc_identity)
+        members_by_source[path] = members.len()
+        members = members.push(member)
+        selected_scc_count[entry.scc_identity] =
+            (selected_scc_count[entry.scc_identity] ?? 0) + 1
+        if not groups_by_id.has(entry.scc_identity):
+            groups_by_id[entry.scc_identity] = groups.len()
+            group_ids = group_ids.push(entry.scc_identity)
+            groups = groups.push(NativeGroupSccGroupV1(
+                entry.scc_identity, [], [], -1))
+
+    for entry in generation.entries:
+        if not selected_sources.has(entry.source_identity):
+            return Err("native-scc-index-path-omitted:{entry.source_identity}")
+
+    for scc_id in group_ids:
+        if selected_scc_count[scc_id] != indexed_scc_count[scc_id]:
+            return Err("native-scc-partial-group:{scc_id}")
+
+    for path in canonical_identity_sort_texts(inventory_paths):
+        val member = members[members_by_source[path]]
+        val group_index = groups_by_id[member.scc_id]
+        var group = groups[group_index]
+        group.members = group.members.push(member)
+        groups[group_index] = group
+
+    # Resolve the compiler-index imports to the condensation graph. A selected
+    # SCC cannot depend on an omitted SCC; such input is not a closed plan.
+    var edges: Dict<text, bool> = {}
+    var dependents: [[i64]] = []
+    var indegrees: [i64] = []
+    for group in groups:
+        dependents = dependents.push([])
+        indegrees = indegrees.push(0)
+    for path in inventory_paths:
+        val entry = generation.entries[indexed_by_source[path]]
+        val owner = groups_by_id[entry.scc_identity]
+        for imported in entry.direct_imports:
+            if not indexed_by_module.has(imported):
+                return Err("native-scc-import-unindexed:{entry.module_identity}")
+            val dependency = generation.entries[indexed_by_module[imported]]
+            if dependency.scc_identity == entry.scc_identity:
+                continue
+            if not groups_by_id.has(dependency.scc_identity):
+                return Err("native-scc-dependency-omitted:{entry.module_identity}")
+            val key = "{entry.scc_identity.len()}:{entry.scc_identity}|" +
+                "{dependency.scc_identity.len()}:{dependency.scc_identity}"
+            if edges.has(key): continue
+            edges[key] = true
+            var group = groups[owner]
+            group.dependency_scc_ids = group.dependency_scc_ids.push(
+                dependency.scc_identity)
+            groups[owner] = group
+            indegrees[owner] = indegrees[owner] + 1
+            val dependency_index = groups_by_id[dependency.scc_identity]
+            dependents[dependency_index] = dependents[dependency_index].push(owner)
+
+    var ready: [text] = []
+    for group in groups:
+        if indegrees[groups_by_id[group.scc_id]] == 0:
+            ready = _native_scc_heap_push_v1(ready, group.scc_id)
+    var ordered_groups: [NativeGroupSccGroupV1] = []
+    var ordered_members: [NativeGroupSccMemberV1] = []
+    while ready.len() > 0:
+        val popped = _native_scc_heap_pop_v1(ready)
+        ready = popped.0
+        val group_index = groups_by_id[popped.1]
+        var group = groups[group_index]
+        group.dependency_scc_ids = canonical_identity_sort_texts(
+            group.dependency_scc_ids)
+        group.order = ordered_groups.len()
+        ordered_groups = ordered_groups.push(group)
+        for member in group.members:
+            ordered_members = ordered_members.push(member)
+        for dependent_index in dependents[group_index]:
+            indegrees[dependent_index] = indegrees[dependent_index] - 1
+            if indegrees[dependent_index] == 0:
+                ready = _native_scc_heap_push_v1(
+                    ready, groups[dependent_index].scc_id)
+    if ordered_groups.len() != groups.len() or
+            ordered_members.len() != inventory_paths.len():
+        return Err("native-scc-condensation-cycle")
+    var ordered_group_by_scc: Dict<text, i64> = {}
+    var ordered_index = 0
+    for group in ordered_groups:
+        ordered_group_by_scc[group.scc_id] = ordered_index
+        ordered_index = ordered_index + 1
+    Ok(NativeGroupSccInventoryV1(
+        scv_snapshot_root, scv_revision_id, scv_commit_id, scv_tree_id,
+        source_snapshot_digest, scv_source_inventory_digest,
+        full_source_authority_digest, producer_digest,
+        expected_variant_digest,
+        _native_scc_inventory_digest_v1(inventory_paths), index_digest,
+        ordered_groups, ordered_members, generation,
+        indexed_by_module, indices_by_package, ordered_group_by_scc))
+
+fn native_group_scc_inventory_v1(
+    source_root: text,
+    index_read_root: text,
+    scv_receipt_path: text,
+    scv_receipt_digest: text,
+    inventory_paths: [text],
+    producer_digest: text,
+    expected_variant: ConfigVariantKeyV1,
+    full_source_authority_path: text,
+    full_source_authority_digest: text
+) -> Result<NativeGroupSccInventoryV1, text>:
+    """Admit one frozen SCV snapshot and one complete warm package graph."""
+    if (source_root == "" or index_read_root == "" or
+            scv_receipt_path == "" or
+            not builder_digest_valid_v1(scv_receipt_digest) or
+            not builder_digest_valid_v1(full_source_authority_digest)):
+        return Err("native-scc-snapshot-authority-missing")
+    val root = compile_source_inventory_plain_checkout_v1(source_root)
+    val receipt_path = compile_source_inventory_plain_checkout_v1(
+        scv_receipt_path)
+    if root == "" or receipt_path == "":
+        return Err("native-scc-receipt-path-invalid")
+    val receipt = file_read_regular_no_follow_bounded(
+        scv_receipt_path, 4096)
+    if val Err(_) = receipt:
+        return Err("native-scc-receipt-unreadable")
+    val receipt_text = receipt.unwrap()
+    if sha256_text(receipt_text) != scv_receipt_digest:
+        return Err("native-scc-receipt-digest-mismatch")
+    val receipt_lines = receipt_text.split("\n")
+    if (receipt_lines.len() != 7 or
+            receipt_lines[0] != "simple-scv-compile-snapshot-v1" or
+            not receipt_lines[1].starts_with("revision=") or
+            not receipt_lines[2].starts_with("commit=") or
+            not receipt_lines[3].starts_with("tree=") or
+            not receipt_lines[4].starts_with("inventory=") or
+            not receipt_lines[5].starts_with("count=") or
+            not receipt_lines[6].starts_with("snapshot=snapshots/")):
+        return Err("native-scc-receipt-format-invalid")
+    val revision_id = receipt_lines[1].substring(9)
+    val commit_id = receipt_lines[2].substring(7)
+    val tree_id = receipt_lines[3].substring(5)
+    val source_snapshot_digest = receipt_lines[4].substring(10)
+    val receipt_count = receipt_lines[5].substring(6).to_i64() ?? -1
+    if (not revision_id.starts_with("scv-revision-v1-") or
+            commit_id == "" or tree_id == "" or receipt_count < 0 or
+            not builder_digest_valid_v1(source_snapshot_digest) or
+            receipt_lines[6] != "snapshot=snapshots/{revision_id}"):
+        return Err("native-scc-receipt-binding-invalid")
+    var cache_root = ""
+    for candidate in ["{root}/build/scv", "{root}/.simple/scv"]:
+        if receipt_path == "{candidate}/receipts/{revision_id}.receipt":
+            cache_root = candidate
+    if cache_root == "":
+        return Err("native-scc-receipt-owner-invalid")
+    val scv_snapshot_root = "{cache_root}/snapshots/{revision_id}"
+    if full_source_authority_path == "":
+        return Err("native-scc-full-source-authority-path-missing")
+    val full_source_authority = file_read_regular_no_follow_bounded(
+        full_source_authority_path, 64 * 1024 * 1024)
+    if val Err(_) = full_source_authority:
+        return Err("native-scc-full-source-authority-unreadable")
+    if sha256_text(full_source_authority.unwrap()) != full_source_authority_digest:
+        return Err("native-scc-full-source-authority-mismatch")
+    val indexed = package_module_index_read_current_v1(index_read_root)
+    if not indexed.valid or indexed.generation == nil:
+        return Err("native-scc-index-{indexed.reason}")
+    val generation = indexed.generation!
+    if (generation.scv_revision_id != revision_id or
+            generation.scv_commit_id != commit_id or
+            generation.scv_tree_id != tree_id):
+        return Err("native-scc-index-scv-binding-mismatch")
+    val snapshot = scv_compile_snapshot_open_v1(
+        source_root, scv_snapshot_root, revision_id,
+        commit_id, tree_id,
+        source_snapshot_digest)
+    if not snapshot.valid:
+        return Err("native-scc-snapshot-{snapshot.reason}")
+    val inventory_root = compile_source_inventory_snapshot_cache_root_v1(
+        source_root, scv_snapshot_root, revision_id)
+    if inventory_root == "":
+        return Err("native-scc-snapshot-owner-invalid")
+    val admitted = compile_source_inventory_read_current_v1(inventory_root)
+    if not admitted.valid or admitted.inventory == nil:
+        return Err("native-scc-source-inventory-{admitted.reason}")
+    if admitted.digest != generation.inventory_digest:
+        return Err("native-scc-source-inventory-index-mismatch")
+    native_group_scc_from_index_v1(
+        generation, indexed.digest, admitted.inventory!, inventory_paths,
+        producer_digest, expected_variant,
+        scv_snapshot_root, revision_id, commit_id, tree_id,
+        source_snapshot_digest, generation.inventory_digest,
+        full_source_authority_digest)
+
+export NativeGroupSccMemberV1, NativeGroupSccGroupV1, NativeGroupSccInventoryV1
+export native_group_scc_inventory_v1, native_group_scc_from_index_v1

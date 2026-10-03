@@ -9,6 +9,7 @@ set -u
 . "$(dirname -- "$0")/bootstrap-cache-policy.shs"
 . "$(dirname -- "$0")/bootstrap-module-collection.shs"
 . "$(dirname -- "$0")/bootstrap-scv-prime.shs"
+. "$(dirname -- "$0")/phase-c-backend-commands.shs"
 bootstrap_windows_preserve_cl_mode
 
 die() {
@@ -160,6 +161,7 @@ validate_hosted_runtime_authority() {
 }
 
 phase=""
+verification_backend=""
 stage3_provenance=""
 compiler=""
 expected_sha=""
@@ -181,6 +183,7 @@ test_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-1}
 for arg in "$@"; do
   case "$arg" in
     --phase=*) phase=${arg#*=} ;;
+    --backend=*) verification_backend=${arg#*=} ;;
     --stage3-provenance=*) stage3_provenance=${arg#*=} ;;
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
@@ -214,6 +217,11 @@ if [ "$phase" = stage3 ]; then
   [ -n "$stage3_provenance" ] || die "Stage3 requires admitted provenance"
   [ "$hash_policy" = canonical ] || die "Stage3 requires canonical provenance"
 fi
+if [ "$phase" = stage2 ]; then
+  [ -n "$verification_backend" ] || die "Stage2 verification requires explicit --backend=llvm|cranelift"
+fi
+[ -n "$verification_backend" ] || verification_backend=llvm
+bootstrap_phase_c_backend_valid "$verification_backend" || die "verification backend must be llvm or cranelift"
 case "$strategy" in normal|full) ;; *) die "verification requires normal or full" ;; esac
 case "$profile" in full|slim) ;; *) die "--profile requires full or slim" ;; esac
 [ "$profile" != slim ] || [ "$phase" = stage2 ] || die "--profile=slim is stage2-only"
@@ -224,12 +232,15 @@ case "$spec_timeout_seconds" in ''|*[!0-9]*|0) die "spec timeout must be a posit
 case "$native_internal_timeout" in ''|*[!0-9]*) die "native internal timeout must be an integer" ;; esac
 [ "$native_internal_timeout" -gt 60 ] || die "native internal timeout must exceed 60 seconds"
 case "$build_threads" in ''|*[!0-9]*|0) die "build threads must be a positive integer" ;; esac
-case "$module_workers" in [1-9]|1[0-2]) ;; *) die "module workers must be from 1 to 12" ;; esac
+verification_worker_limit=12
+# Stage2 qualification can use an explicitly requested large Windows pool.
+# Keep later-phase limits unchanged until their separate memory admission.
+[ "$phase" != stage2 ] || verification_worker_limit=80
+case "$module_workers" in ''|*[!0-9]*|0) die "module workers must be a positive integer" ;; esac
+[ "$module_workers" -gt 0 ] && [ "$module_workers" -le "$verification_worker_limit" ] || die "module workers must be from 1 to $verification_worker_limit"
 [ "$phase" != stage3 ] || [ "$build_threads" -le 12 ] || die "Stage3 build threads must be from 1 to 12"
-case "$test_workers" in
-  [1-9]|1[0-2]) ;;
-  *) die "test workers must be an integer from 1 to 12" ;;
-esac
+case "$test_workers" in ''|*[!0-9]*|0) die "test workers must be a positive integer" ;; esac
+[ "$test_workers" -gt 0 ] && [ "$test_workers" -le "$verification_worker_limit" ] || die "test workers must be from 1 to $verification_worker_limit"
 test_mode_flag=--sequential
 test_worker_flag=
 if [ "$test_workers" -gt 1 ]; then
@@ -487,6 +498,7 @@ stage2_row_delegation_env() {
 {
   echo "schema=bootstrap-phase-verification-v1"
   echo "phase=$phase"
+  echo "verification_backend=$verification_backend"
   echo "strategy=$strategy"
   echo "hash_policy=$hash_policy"
   echo "expected_compiler_sha256=$expected_sha"
@@ -788,13 +800,26 @@ run_task() {
         SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_RUNTIME_PATH="$runtime_path"
         SIMPLE_NATIVE_BUILD_THREADS="$pure_tool_threads" SIMPLE_NATIVE_BUILD_CACHE_DIR="$pure_tool_cache"
         SIMPLE_RT_OBJ_CACHE_DIR="$pure_tool_cache/runtime-objects"
+        # The admitted Stage2 producer cache is sealed read-only. Its inherited
+        # frontend/HIR paths cannot store entries for this verifier build.
+        SIMPLE_FRONTEND_CACHE_DIR="$pure_tool_cache/frontend"
+        SIMPLE_HIR_CACHE_DIR="$pure_tool_cache/hir"
+        # An opt-in snapshot must belong to this exact tool attempt. The
+        # runtime opens it O_EXCL; a new directory preserves retry evidence.
+        if [ -n "${SIMPLE_MEM_SNAPSHOT_FILE:-}" ]; then
+          snapshot_dir=$(mktemp -d "$logs/$task.mem-snapshot.XXXXXX") || exit 88
+          SIMPLE_MEM_SNAPSHOT_FILE="$snapshot_dir/trace.tsv"
+          export SIMPLE_MEM_SNAPSHOT_FILE
+          printf 'verification_memory_snapshot=%s\n' "$SIMPLE_MEM_SNAPSHOT_FILE"
+        fi
         SIMPLE_NATIVE_BUILD_TARGET="$target_c_platform" SIMPLE_BINARY="$compiler_snapshot"
         SIMPLE_PROJECT_ROOT="$source_root" SIMPLE_ABI_POLICY=v1
         SIMPLE_RUNTIME_RISCV64_VECTOR=0
         unset SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE SIMPLE_NATIVE_BUILD_WORKER
         SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
         export SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_BUILD_THREADS \
-           SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
+           SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR \
+           SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
            SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_RT_OBJ_CACHE_DIR \
            SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR
         bootstrap_phase_run_command run_with_timeout "$@"
@@ -982,6 +1007,7 @@ write_command_owner_receipt() {
     [ "$(manifest_value schema "$receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
     [ "$(manifest_value status "$receipt")" = frozen ] || return 1
     [ "$(manifest_value phase "$receipt")" = "$phase" ] || return 1
+    bootstrap_phase_c_validate_backend_receipt "$verification_backend" "$receipt" || return 1
     [ "$(manifest_value compiler_snapshot_sha256 "$receipt")" = "$snapshot_sha" ] || return 1
     [ "$(manifest_value runtime_identity_sha256 "$receipt")" = "$runtime_cache_identity" ] || return 1
     validate_target_c_receipt "$receipt" || return 1
@@ -1000,6 +1026,7 @@ write_command_owner_receipt() {
       echo 'schema=simple-bootstrap-command-owners-v3'
       echo 'status=frozen'
       echo "phase=$phase"
+      echo "verification_backend=$verification_backend"
       echo "compiler_snapshot_sha256=$snapshot_sha"
       echo "runtime_identity_sha256=$runtime_cache_identity"
       write_target_c_receipt_fields || exit 1
@@ -1023,6 +1050,7 @@ validate_command_owner_receipt() {
   [ "$(manifest_value schema "$vcor_receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
   [ "$(manifest_value status "$vcor_receipt")" = frozen ] || return 1
   [ "$(manifest_value phase "$vcor_receipt")" = "$phase" ] || return 1
+  bootstrap_phase_c_validate_backend_receipt "$verification_backend" "$vcor_receipt" || return 1
   [ "$(manifest_value compiler_snapshot_sha256 "$vcor_receipt")" = "$snapshot_sha" ] || return 1
   [ "$(manifest_value runtime_identity_sha256 "$vcor_receipt")" = "$runtime_cache_identity" ] || return 1
   validate_target_c_receipt "$vcor_receipt" || return 1
@@ -1170,6 +1198,9 @@ snapshot_target_c_inputs() (
     *-pc-windows-msvc) grep -Eq '^clang version 23\.1\.1([[:space:]]|$)' "$tci_record.version" || exit 1 ;;
     *) grep -qi 'clang version' "$tci_record.version" || exit 1 ;;
   esac
+  # This is the C runtime/toolchain profile, not the selected native codegen
+  # backend. The latter is bound separately in tool_input_identity and the
+  # command-owner receipt, so a Cranelift tool never inherits an LLVM cache.
   tci_profile_sha=$(printf '%s\n' core-c-bootstrap v1 llvm "$target_c_platform" \
     opt=3 riscv-vector=0 stage4-legacy=0 "$target_c_source_sha" | hash_stream) || exit 1
   tci_runtime_sha=$(hash_file "$tci_record.runtime") || exit 1
@@ -1223,8 +1254,8 @@ prepare_phase_c_tool_binding() {
   snapshot_target_c_inputs "$target_c_binding" || return 1
   target_c_identity=$(hash_file "$target_c_binding") || return 1
   chmod 400 "$target_c_binding" || return 1
-  tool_input_identity=$(printf '%s\n' "$runtime_cache_identity" "$target_c_identity" \
-    "$target_c_source_sha" | hash_stream) || return 1
+  tool_input_identity=$(bootstrap_phase_c_tool_input_identity "$verification_backend" \
+    "$runtime_cache_identity" "$target_c_identity" "$target_c_source_sha") || return 1
   write_target_c_receipt_fields >>"$summary"
 }
 
@@ -1278,8 +1309,8 @@ run_phase_c_tool_build() {
     matrix_failed=1 matrix_task_passed=0
     return
   fi
-  run_matrix_task "$pure_tool_task" --verification-expect-executable="$pure_tool_output" \
-    "$compiler_snapshot" native-build "$pure_tool_entry" --backend=llvm -o "$pure_tool_output"
+  bootstrap_phase_c_run_tool_build "$verification_backend" "$pure_tool_task" \
+    "$compiler_snapshot" "$pure_tool_entry" "$pure_tool_output" "$pure_tool_threads"
   if ! validate_phase_c_tool_binding; then
     printf 'task=%s_authority|result=FAIL|status=authority-mismatch|elapsed_seconds=0|log=-\n' "$pure_tool_task" >>"$summary"
     matrix_failed=1 matrix_task_passed=0
@@ -1338,7 +1369,11 @@ run_module_compile_command() (
   # Positional Phase2/3 dispatch consumes the driver's existing object env;
   # their bootstrap CLI does not parse the full CLI's --emit-object switch.
   if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
-    set -- "$compiler_snapshot" native-build "$module_entry" --backend=llvm -o "$module_output"
+    module_status=0
+    bootstrap_phase_c_run_module_build "$verification_backend" "$compiler_snapshot" \
+      "$module_entry" "$module_output" "$logs" "$pure_tool_threads" || module_status=$?
+    cat "$logs/module_compile_object.log"
+    exit "$module_status"
   else
     set -- "$compiler_snapshot" native-build --emit-object \
       --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
@@ -1879,6 +1914,33 @@ run_phase3_expanded_tests() {
   [ "$status" -eq 0 ]
 }
 
+# Supplemental proof: the six interpreter/SMF rows do not establish that a
+# native executable was built and run with the selected backend. These three
+# full-profile suites use the reviewed runner's explicit native AOT route.
+run_native_aot_suite() {
+  native_task=$1 native_suite=$2
+  mkdir -p "$work_root/native-aot" || die "cannot isolate native AOT suite"
+  native_dir=$(mktemp -d "$work_root/native-aot/$native_task.XXXXXX") ||
+    die "cannot create fresh native AOT suite directory"
+  native_status=0
+  run_matrix_task "$native_task" --verification-command-owner-receipt="$command_owner_receipt" \
+    --verification-require-test-json \
+    sh "$source_root/scripts/bootstrap/run-native-aot-suite.shs" \
+      "$source_root" "$verification_backend" "$compiler_cli" "$compiler_cli_sha" \
+      "$test_runner" "$native_suite" "$native_dir" "$build_threads" "$runtime_path" \
+      "$runtime_cache_identity" || native_status=$?
+  if [ "$native_status" -eq 0 ] && [ "$matrix_task_passed" = 1 ]; then
+    [ -f "$native_dir/evidence.tsv" ] && [ ! -L "$native_dir/evidence.tsv" ] ||
+      die "native AOT suite returned no evidence: $native_task"
+    native_evidence_sha=$(hash_file "$native_dir/evidence.tsv") ||
+      die "cannot hash native AOT evidence: $native_task"
+    printf 'native_aot_task=%s|backend=%s|producer_sha256=%s|evidence=%s|evidence_sha256=%s\n' \
+      "$native_task" "$verification_backend" "$compiler_cli_sha" \
+      "$native_dir/evidence.tsv" "$native_evidence_sha" >>"$summary"
+  fi
+  [ "$native_status" -eq 0 ]
+}
+
 # Both strategies collect independent tasks by default; explicit fail-fast
 # terminalizes unlaunched work as SKIPPED and preserves the failure status.
 # Call-site prerequisite checks block tasks whose required artifacts are absent;
@@ -2192,6 +2254,9 @@ else
         "$loader_oracle" --mode=compile --unstable \
         --assert-ran --no-cache --no-db --no-session-daemon \
         "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+      run_native_aot_suite compiler_bootstrap_native_aot_tests test/01_unit/compiler/bootstrap
+      run_native_aot_suite interpreter_native_aot_tests test/01_unit/compiler/interpreter
+      run_native_aot_suite loader_native_aot_tests "$loader_oracle"
     fi
     if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner" "$command_owner_receipt"; then
       matrix_failed=1
@@ -2229,6 +2294,9 @@ else
     record_unsupported_task loader_interpreter_tests "$test_owner_reason"
     if [ "$stage2_slim_profile" -ne 1 ]; then
       record_unsupported_task loader_compile_tests "$test_owner_reason"
+      record_unsupported_task compiler_bootstrap_native_aot_tests "$test_owner_reason"
+      record_unsupported_task interpreter_native_aot_tests "$test_owner_reason"
+      record_unsupported_task loader_native_aot_tests "$test_owner_reason"
     fi
     if [ "$strategy" = full ]; then
       record_unsupported_task compiler_unit_tests "$test_owner_reason"

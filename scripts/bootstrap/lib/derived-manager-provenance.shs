@@ -1,0 +1,37 @@
+#!/bin/sh
+# Derived support images never inherit canonical source-equality admission.
+# Call after replaying the producer's canonical admission. All arguments are
+# explicit; no ambient producer, source, or runtime selection is permitted.
+bootstrap_derived_manager_provenance_verify() (
+  set -eu
+  [ "$#" -eq 8 ] || exit 1
+  receipt=$1 producer=$2 product_snapshot=$3 runtime_snapshot=$4
+  tool_snapshot=$5 helper_root=$6 observed=$7 helper_snapshot=$8
+  regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+  digest() { sha256sum "$1" | cut -d ' ' -f 1; }
+  field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
+  equal() { actual=$(field "$1") || exit 1; [ "$actual" = "$2" ] || exit 1; }
+  for path in "$receipt" "$producer" "$product_snapshot" "$runtime_snapshot" "$tool_snapshot" "$helper_snapshot"; do
+    regular "$path" || exit 1
+  done
+  [ -d "$helper_root" ] && [ ! -L "$helper_root" ] || exit 1
+  equal format SIMPLE-DERIVED-MANAGER-IMAGES-1
+  equal canonical_admission 0
+  equal manager_support_image_mode one-binary
+  equal producer_path "$producer"
+  equal producer_sha256 "$(digest "$producer")"
+  equal product_source_snapshot_sha256 "$(digest "$product_snapshot")"
+  equal runtime_snapshot_sha256 "$(digest "$runtime_snapshot")"
+  equal tool_authority_sha256 "$(digest "$tool_snapshot")"
+  equal helper_source_root "$helper_root"
+  equal helper_source_snapshot_path "$helper_snapshot"
+  equal helper_source_snapshot_sha256 "$(digest "$helper_snapshot")"
+  helper_commit=$(git -C "$helper_root" rev-parse HEAD) || exit 1
+  helper_tree=$(git -C "$helper_root" rev-parse HEAD^{tree}) || exit 1
+  equal helper_source_commit "$helper_commit"
+  equal helper_source_tree "$helper_tree"
+  # A Git identity is not byte equality. Recompute the canonical source map.
+  bootstrap_stage3_source_snapshot "$observed" "$helper_root" || exit 1
+  cmp -s "$observed" "$helper_snapshot" || exit 1
+  rm -f "$observed"
+)

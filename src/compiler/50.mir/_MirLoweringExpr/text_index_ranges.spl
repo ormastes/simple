@@ -1,0 +1,54 @@
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+
+impl MirLowering:
+    me try_lower_text_range_index(base: HirExpr, start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?) -> LocalId?:
+        # Exclusive, unit-step text ranges use the same byte-slice owner as
+        # colon slices. Other collection/range forms remain explicit errors.
+        if inclusive or step != nil:
+            return nil
+        val receiver = self.lower_expr(base)
+        if not self.local_is_str(receiver) and not self.local_hir_type_is_str(receiver):
+            return nil
+        val text_type = MirType(kind: MirTypeKind.Opaque("str"))
+        val raw_callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: text_type, is_variadic: false)))))
+        var builder = self.builder
+        val raw_result = builder.emit_call(raw_callee, [mir_operand_copy(receiver)], text_type)
+        self.builder = builder
+        if val raw = raw_result:
+            var start_local = receiver
+            if val start_expr = start:
+                start_local = self.lower_expr(start_expr)
+            else:
+                var start_builder = self.builder
+                start_local = start_builder.emit_const_int(0)
+                self.builder = start_builder
+            var end_local = receiver
+            if val end_expr = end:
+                end_local = self.lower_expr(end_expr)
+            else:
+                val len_callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("spl_str_len"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))))
+                var end_builder = self.builder
+                val length = end_builder.emit_call(len_callee, [mir_operand_copy(raw)], MirType.i64())
+                self.builder = end_builder
+                if val local = length:
+                    end_local = local
+                else:
+                    self.error_fatal("text range length did not produce a value", Some(base.span))
+                    return nil
+            val slice_callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("spl_str_slice"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: text_type, is_variadic: false)))))
+            var slice_builder = self.builder
+            val result = slice_builder.emit_call(slice_callee,
+                [mir_operand_copy(raw), mir_operand_copy(start_local), mir_operand_copy(end_local)], text_type)
+            self.builder = slice_builder
+            if val local = result:
+                self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Str, span: base.span), 2, 0)
+            return result
+        nil

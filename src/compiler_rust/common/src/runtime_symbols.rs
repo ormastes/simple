@@ -827,6 +827,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_run_inherit",
     "rt_process_spawn",
     "rt_process_spawn_async",
+    "rt_process_spawn_async_value",
     "rt_process_spawn_guarded",
     "rt_process_spawn_inherit",
     "rt_process_is_running",
@@ -2356,6 +2357,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Auto-registered: emitted by src/compiler backends, defined in src/runtime (JIT NULL-jump fix 2026-07-24).
     "rt_dict_contains",
     "rt_dir_exists",
+    "rt_dir_is_real_no_follow",
     "rt_interp_cstr",
     "rt_mkdir_p",
     "rt_path_parent",

@@ -1,0 +1,179 @@
+# Evidence examination ONLY. Neither a signed policy nor a successful GitHub
+# GET proves repository-scoped App credentials, current worker artifact, or
+# exclusive integrator deployment. No production completion capability is
+# issued here. Those independently observed owners remain required by REQ022.
+# GitHub branch rules apply to refs/heads, not arbitrary refs/scv namespaces.
+# Two rulesets prevent the writer App's update bypass bypassing safety rules.
+# https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets
+# https://docs.github.com/en/rest/repos/rules
+use app.io.mod.{process_run_bounded}
+use app.scv.db.github_provider.{DbGithubProcessReply, db_github_response}
+use app.scv.db.receipt_index_git.{db_receipt_index_ref}
+use app.scv.db.local_store.{db_local_path_scope}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use std.scv.db_canonical.*
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+use std.common.json.parser.{json_parse_strict_with_error}
+use std.common.json.types.{json_get_type, json_to_object}
+
+struct DbReceiptProtectionProfile:
+    owner: text
+    repository: text
+    repository_id: u64
+    namespace: text
+    epoch: u64
+    app_id: u64
+    update_ruleset_id: u64
+    safety_ruleset_id: u64
+    worker_digest: text
+    deployment_id: text
+    key_id: text
+    issued_at: u64
+    expires_at: u64
+    signature: [u8]
+
+struct DbReceiptProtectionExamination:
+    profile_digest: text
+    index_ref: text
+    repository_id: u64
+    update_ruleset_digest: text
+    safety_ruleset_digest: text
+
+fn _protection_component(value: text) -> bool:
+    if value == "" or value.len() > 100 or value.starts_with(".") or value.starts_with("-") or value.contains(".."): return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or [45, 46, 95].contains(code)): return false
+    true
+
+fn db_receipt_protection_signing_bytes(profile: DbReceiptProtectionProfile) -> Result<[u8], text>:
+    if not _protection_component(profile.owner) or not _protection_component(profile.repository) or not _protection_component(profile.deployment_id) or not _protection_component(profile.key_id): return Err("SCVDB_PROTECTION_PROFILE")
+    val reference = db_receipt_index_ref(profile.namespace, profile.epoch)?
+    for identity in [profile.repository_id, profile.app_id, profile.update_ruleset_id, profile.safety_ruleset_id]:
+        if identity == 0 or identity > 9007199254740991u64: return Err("SCVDB_PROTECTION_PROFILE")
+    if profile.update_ruleset_id == profile.safety_ruleset_id or profile.expires_at <= profile.issued_at or profile.expires_at - profile.issued_at > 86400u64: return Err("SCVDB_PROTECTION_PROFILE")
+    if profile.worker_digest.len() != 64: return Err("SCVDB_PROTECTION_PROFILE")
+    for index in 0..64:
+        val code = profile.worker_digest.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return Err("SCVDB_PROTECTION_PROFILE")
+    val identity = db_canonical_text(profile.owner)? + db_canonical_text(profile.repository)? + db_frame(2u8, db_u64_bytes(profile.repository_id)) + db_canonical_text(reference)?
+    val rules = db_frame(2u8, db_u64_bytes(profile.app_id)) + db_frame(2u8, db_u64_bytes(profile.update_ruleset_id)) + db_frame(2u8, db_u64_bytes(profile.safety_ruleset_id))
+    val deployment = db_canonical_text(profile.worker_digest)? + db_canonical_text(profile.deployment_id)? + db_canonical_text(profile.key_id)?
+    db_domain_bytes("receipt-protection-profile", db_frame(107u8, identity + rules + deployment + db_frame(2u8, db_u64_bytes(profile.issued_at)) + db_frame(2u8, db_u64_bytes(profile.expires_at))))
+
+fn db_receipt_protection_verify_profile(profile: DbReceiptProtectionProfile, pinned_public_key: [u8], trusted_now: u64) -> Result<text, text>:
+    val bytes = db_receipt_protection_signing_bytes(profile)?
+    if pinned_public_key.len() != 32 or profile.signature.len() != 64 or not pure_ed25519_verify(pinned_public_key, bytes, profile.signature): return Err("SCVDB_PROTECTION_SIGNATURE")
+    if trusted_now < profile.issued_at or trusted_now >= profile.expires_at: return Err("SCVDB_PROTECTION_EXPIRED")
+    Ok(sha256_u8_hex(bytes))
+
+fn _protection_field(object: any, key: text) -> Result<any, text>:
+    if json_get_type(object) != "object": return Err("SCVDB_PROTECTION_SCHEMA")
+    val fields: Dict<text, any> = json_to_object(object)
+    if not fields.has(key): return Err("SCVDB_PROTECTION_SCHEMA")
+    Ok(fields[key])
+
+fn _protection_text(object: any, key: text) -> Result<text, text>:
+    val value = _protection_field(object, key)?
+    if json_get_type(value) != "string": return Err("SCVDB_PROTECTION_SCHEMA")
+    val result: text = value.1
+    Ok(result)
+
+fn _protection_number(object: any, key: text) -> Result<u64, text>:
+    val value = _protection_field(object, key)?
+    if json_get_type(value) != "number": return Err("SCVDB_PROTECTION_SCHEMA")
+    val number: f64 = value.1
+    if number < 1 or number > 9007199254740991: return Err("SCVDB_PROTECTION_SCHEMA")
+    val integer = number as u64
+    if integer as f64 != number: return Err("SCVDB_PROTECTION_SCHEMA")
+    Ok(integer)
+
+fn _protection_array(object: any, key: text) -> Result<[any], text>:
+    val value = _protection_field(object, key)?
+    if json_get_type(value) != "array": return Err("SCVDB_PROTECTION_SCHEMA")
+    val result: [any] = value.1
+    if result.len() > 32: return Err("SCVDB_PROTECTION_QUOTA")
+    Ok(result)
+
+fn _protection_parse(body: text) -> Result<any, text>:
+    if body.len() == 0 or body.len() >= 262144: return Err("SCVDB_PROTECTION_QUOTA")
+    # Reuse the existing bounded/depth-checked GitHub response parser even for
+    # captured test fixtures. Raw provider errors never escape into diagnostics.
+    val checked = db_github_response(DbGithubProcessReply(stdout: "HTTP/1.1 200 OK\n\n" + body, stderr: "", exit_code: 0), 262256)?
+    val (value, error) = json_parse_strict_with_error(checked)
+    if error != "" or json_get_type(value) != "object": return Err("SCVDB_PROTECTION_SCHEMA")
+    Ok(value)
+
+fn _protection_rules(profile: DbReceiptProtectionProfile, body: text, writer: bool) -> Result<text, text>:
+    val object = _protection_parse(body)?
+    val expected_id = if writer: profile.update_ruleset_id else: profile.safety_ruleset_id
+    if _protection_number(object, "id")? != expected_id or _protection_text(object, "target")? != "branch" or _protection_text(object, "enforcement")? != "active": return Err("SCVDB_PROTECTION_RULESET")
+    if _protection_text(object, "source_type")? != "Repository" or _protection_text(object, "source")? != profile.owner + "/" + profile.repository: return Err("SCVDB_PROTECTION_RULESET_SOURCE")
+    val conditions = _protection_field(object, "conditions")?
+    val names = _protection_field(conditions, "ref_name")?
+    val included = _protection_array(names, "include")?
+    if included.len() != 1 or _protection_array(names, "exclude")?.len() != 0: return Err("SCVDB_PROTECTION_TARGET")
+    if json_get_type(included[0]) != "string": return Err("SCVDB_PROTECTION_TARGET")
+    val reference: text = included[0].1
+    if reference != db_receipt_index_ref(profile.namespace, profile.epoch)?: return Err("SCVDB_PROTECTION_TARGET")
+    val bypass = _protection_array(object, "bypass_actors")?
+    if writer:
+        if bypass.len() != 1: return Err("SCVDB_PROTECTION_BYPASS")
+        if _protection_text(bypass[0], "actor_type")? != "Integration" or _protection_number(bypass[0], "actor_id")? != profile.app_id or _protection_text(bypass[0], "bypass_mode")? != "always": return Err("SCVDB_PROTECTION_BYPASS")
+    elif bypass.len() != 0: return Err("SCVDB_PROTECTION_BYPASS")
+    val required = if writer: ["creation", "update"] else: ["deletion", "non_fast_forward", "required_linear_history"]
+    var seen: [text] = []
+    for rule in _protection_array(object, "rules")?:
+        val kind = _protection_text(rule, "type")?
+        if seen.contains(kind) or not required.contains(kind): return Err("SCVDB_PROTECTION_RULES")
+        if kind == "update":
+            # GitHub permits an upstream fetch/merge exception. It must be
+            # explicitly disabled, not mistaken for a single-App restriction.
+            val parameters = _protection_field(rule, "parameters")?
+            val exception = _protection_field(parameters, "update_allows_fetch_and_merge")?
+            if json_get_type(exception) != "boolean": return Err("SCVDB_PROTECTION_RULES")
+            val allowed: bool = exception.1
+            if allowed: return Err("SCVDB_PROTECTION_RULES")
+            val fields: Dict<text, any> = json_to_object(parameters)
+            if fields.len() != 1: return Err("SCVDB_PROTECTION_RULES")
+        else:
+            val fields: Dict<text, any> = json_to_object(rule)
+            if fields.has("parameters"): return Err("SCVDB_PROTECTION_RULES")
+        seen.push(kind)
+    if seen.len() != required.len(): return Err("SCVDB_PROTECTION_RULES")
+    Ok(sha256_text(body))
+
+fn db_receipt_protection_examine(profile: DbReceiptProtectionProfile, pinned_public_key: [u8], trusted_now: u64, repository_body: text, update_body: text, safety_body: text) -> Result<DbReceiptProtectionExamination, text>:
+    val digest = db_receipt_protection_verify_profile(profile, pinned_public_key, trusted_now)?
+    val repository = _protection_parse(repository_body)?
+    if _protection_number(repository, "id")? != profile.repository_id or _protection_text(repository, "full_name")? != profile.owner + "/" + profile.repository: return Err("SCVDB_PROTECTION_REPOSITORY")
+    # A GitHub transfer/rename must receive a newly reviewed signed profile.
+    if _protection_text(repository, "html_url")? != "https://github.com/" + profile.owner + "/" + profile.repository: return Err("SCVDB_PROTECTION_REPOSITORY")
+    Ok(DbReceiptProtectionExamination(profile_digest: digest, index_ref: db_receipt_index_ref(profile.namespace, profile.epoch)?, repository_id: profile.repository_id, update_ruleset_digest: _protection_rules(profile, update_body, true)?, safety_ruleset_digest: _protection_rules(profile, safety_body, false)?))
+
+fn _protection_get(root: text, endpoint: text) -> Result<text, text>:
+    if scv_sj_lease_is_held(root): return Err("SCVDB_PROTECTION_NETWORK_UNDER_LEASE")
+    val args = ["api", "--hostname", "github.com", "--method", "GET", "--include", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint]
+    val (output, error, code) = process_run_bounded("gh", args, 30000, 262256)
+    db_github_response(DbGithubProcessReply(stdout: output, stderr: error, exit_code: code), 262256)
+
+fn db_receipt_protection_observe(root: text, profile: DbReceiptProtectionProfile, pinned_public_key: [u8], trusted_now: u64) -> Result<DbReceiptProtectionExamination, text>:
+    if db_local_path_scope(root, []) != "": return Err("SCVDB_PROTECTION_SCOPE")
+    val authenticated = db_receipt_protection_verify_profile(profile, pinned_public_key, trusted_now)?
+    val endpoint = "repos/" + profile.owner + "/" + profile.repository
+    val repository = _protection_get(root, endpoint)?
+    val update = _protection_get(root, endpoint + "/rulesets/{profile.update_ruleset_id}")?
+    val safety = _protection_get(root, endpoint + "/rulesets/{profile.safety_ruleset_id}")?
+    val examination = db_receipt_protection_examine(profile, pinned_public_key, trusted_now, repository, update, safety)?
+    if _protection_get(root, endpoint + "/rulesets/{profile.update_ruleset_id}")? != update or _protection_get(root, endpoint + "/rulesets/{profile.safety_ruleset_id}")? != safety: return Err("SCVDB_PROTECTION_READBACK_MOVED")
+    val repository_again = _protection_get(root, endpoint)?
+    val rechecked = db_receipt_protection_examine(profile, pinned_public_key, trusted_now, repository_again, update, safety)?
+    # Actual bounded read-only API evidence. Ambient gh authentication is NOT
+    # attested as the configured installation, and this result cannot grant a
+    # publication/completion capability. No secret/token is returned or logged.
+    Ok(examination)
+
+export DbReceiptProtectionProfile, DbReceiptProtectionExamination
+export db_receipt_protection_signing_bytes, db_receipt_protection_verify_profile
+export db_receipt_protection_examine, db_receipt_protection_observe

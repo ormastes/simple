@@ -1,0 +1,153 @@
+# Generic pure-Simple indices with explicit, caller-owned key contracts.
+# Import this module explicitly; legacy text-only HashMap remains unchanged.
+# Hash/equality callbacks must be deterministic and stable while keys are stored.
+# Equality must be an equivalence relation; equal keys MUST have equal hashes.
+# Mutating stored keys or changing callback behavior violates that contract.
+# No default Hash/Eq authority, string identity, or native Dict<K> is inferred.
+# Expected amortized O(1) operations for well-distributed hashes, worst O(n).
+# Growth is O(n); storage O(n + retained capacity). Callback cost is additional.
+# No iteration order is promised. Empty buckets are retained after removal.
+
+export HashMap, HashSet
+
+struct IndexedEntry<K, V>:
+    key: K
+    value: V
+    hash_value: i64
+
+# count is always positive for instances created by with_contract.
+fn indexed_bucket(hash_value: i64, count: i64) -> i64:
+    var bucket = hash_value % count
+    if bucket < 0:
+        bucket = bucket + count
+    bucket
+
+class HashMap<K, V>:
+    buckets: [[IndexedEntry<K, V>]]
+    size: i64
+    hash_fn: fn(K) -> i64
+    equal_fn: fn(K, K) -> bool
+
+    static fn with_contract(hash_fn: fn(K) -> i64, equal_fn: fn(K, K) -> bool) -> HashMap<K, V>:
+        """Create an empty map with an explicit stable key contract."""
+        var buckets: [[IndexedEntry<K, V>]] = []
+        var i = 0
+        while i < 16:
+            val bucket: [IndexedEntry<K, V>] = []
+            buckets.push(bucket)
+            i = i + 1
+        HashMap(buckets: buckets, size: 0, hash_fn: hash_fn, equal_fn: equal_fn)
+
+    fn len() -> i64:
+        """Return the number of distinct keys."""
+        self.size
+
+    fn get(key: K) -> V?:
+        """Return Some(value), including Some(nil) for an optional payload."""
+        val hash_value = self.hash_fn(key)
+        val bucket = self.buckets[indexed_bucket(hash_value, self.buckets.len())]
+        for entry in bucket:
+            if entry.hash_value == hash_value:
+                if self.equal_fn(entry.key, key):
+                    return Some(entry.value)
+        nil
+
+    fn contains(key: K) -> bool:
+        """Test presence independently of the stored value."""
+        val hash_value = self.hash_fn(key)
+        val bucket = self.buckets[indexed_bucket(hash_value, self.buckets.len())]
+        for entry in bucket:
+            if entry.hash_value == hash_value:
+                if self.equal_fn(entry.key, key):
+                    return true
+        false
+
+    me insert(key: K, value: V):
+        """Insert or overwrite an equal key, retaining its first representative."""
+        val hash_value = self.hash_fn(key)
+        var index = indexed_bucket(hash_value, self.buckets.len())
+        var bucket = self.buckets[index]
+        var i = 0
+        while i < bucket.len():
+            if bucket[i].hash_value == hash_value:
+                if self.equal_fn(bucket[i].key, key):
+                    bucket[i] = IndexedEntry(key: bucket[i].key, value: value, hash_value: hash_value)
+                    self.buckets[index] = bucket
+                    return
+            i = i + 1
+        # Overwrites do not grow. At load one, double before a new insertion.
+        if self.size >= self.buckets.len():
+            self._grow()
+            index = indexed_bucket(hash_value, self.buckets.len())
+            bucket = self.buckets[index]
+        bucket.push(IndexedEntry(key: key, value: value, hash_value: hash_value))
+        self.buckets[index] = bucket
+        self.size = self.size + 1
+
+    me remove(key: K) -> bool:
+        """Remove one matching key; absence does not change length."""
+        val hash_value = self.hash_fn(key)
+        val index = indexed_bucket(hash_value, self.buckets.len())
+        var bucket = self.buckets[index]
+        var i = 0
+        while i < bucket.len():
+            if bucket[i].hash_value == hash_value:
+                if self.equal_fn(bucket[i].key, key):
+                    val last = bucket.len() - 1
+                    if i != last:
+                        bucket[i] = bucket[last]
+                    bucket.pop()
+                    self.buckets[index] = bucket
+                    self.size = self.size - 1
+                    return true
+            i = i + 1
+        false
+
+    me _grow():
+        val old_count = self.buckets.len()
+        # Saturate growth rather than overflow the positive bucket divisor.
+        # Existing chains remain valid; further inserts may increase chain cost.
+        if old_count > 4611686018427387903:
+            return
+        val new_count = old_count * 2
+        var grown: [[IndexedEntry<K, V>]] = []
+        var i = 0
+        while i < new_count:
+            val bucket: [IndexedEntry<K, V>] = []
+            grown.push(bucket)
+            i = i + 1
+        for bucket in self.buckets:
+            for entry in bucket:
+                val index = indexed_bucket(entry.hash_value, new_count)
+                grown[index].push(entry)
+        self.buckets = grown
+
+class HashSet<K>:
+    entries: HashMap<K, bool>
+
+    static fn with_contract(hash_fn: fn(K) -> i64, equal_fn: fn(K, K) -> bool) -> HashSet<K>:
+        """Create an empty set with an explicit stable key contract."""
+        val entries: HashMap<K, bool> = HashMap.with_contract(hash_fn, equal_fn)
+        HashSet(entries: entries)
+
+    fn len() -> i64:
+        """Return the number of distinct keys."""
+        self.entries.len()
+
+    fn contains(key: K) -> bool:
+        """Test membership using the supplied hash/equality contract."""
+        self.entries.contains(key)
+
+    me insert(key: K):
+        """Insert a key, retaining one representative for equal keys."""
+        # Explicit writeback also supports value-semantic embedded maps.
+        var entries = self.entries
+        entries.insert(key, true)
+        self.entries = entries
+
+    me remove(key: K) -> bool:
+        """Remove a key and report whether it was present."""
+        var entries = self.entries
+        val removed = entries.remove(key)
+        self.entries = entries
+        removed

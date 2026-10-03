@@ -157,6 +157,8 @@ typedef struct RtOwnedSlot {
     int64_t execution_deadline_ns;
     int64_t kill_deadline_ns;
     int64_t cleanup_deadline_ns;
+    int64_t unlimited_term_grace_ns;
+    int64_t unlimited_cleanup_budget_ns;
     int64_t timeout_ms;
     int64_t term_grace_ms;
     int64_t term_at_ms;
@@ -302,6 +304,20 @@ static int64_t owned_clock_resolution_ns(clockid_t clock_id) {
 static int owned_deadline_reached_ns(int64_t deadline_ns) {
     int64_t now = owned_now_ns();
     return now < 0 || now >= deadline_ns;
+}
+
+/* Zero disables useful-work expiry, not owned teardown. Arm cleanup once,
+ * on cancellation or reap; repeated polls/cancellation never extend it. */
+static void owned_arm_unlimited_cleanup(RtOwnedSlot* slot, int64_t now_ns,
+                                         int cancelling) {
+    if (slot->request_started_ns < 0 || slot->execution_deadline_ns != 0 ||
+        slot->kill_deadline_ns != 0) return;
+    if (now_ns < 0) { slot->clock_failed = 1; return; }
+    int64_t grace = cancelling ? slot->unlimited_term_grace_ns : 0;
+    slot->kill_deadline_ns = now_ns > INT64_MAX - grace
+        ? INT64_MAX : now_ns + grace;
+    slot->cleanup_deadline_ns = slot->kill_deadline_ns > INT64_MAX - slot->unlimited_cleanup_budget_ns
+        ? INT64_MAX : slot->kill_deadline_ns + slot->unlimited_cleanup_budget_ns;
 }
 
 static uint64_t owned_add_sat(uint64_t a, uint64_t b) {
@@ -896,6 +912,7 @@ static enum OwnedSignalOutcome owned_async_signal_or_reap(RtOwnedSlot* slot, int
             if (slot->leader_waited_ns < 0 && slot->request_started_ns >= 0)
                 slot->clock_failed = 1;
             slot->tree_empty_ns = slot->leader_waited_ns;
+            owned_arm_unlimited_cleanup(slot, slot->leader_waited_ns, 0);
             slot->drain_deadline_ms = slot->cleanup_deadline_ns >= 0
                 ? (slot->cleanup_deadline_ns + 999999) / 1000000
                 : now + RT_OWNED_POST_REAP_DRAIN_MS;
@@ -1141,7 +1158,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
         if (configured_cwd_fd >= 0) close(configured_cwd_fd);
         return false;
     }
-    if (!cmd || !argv || !argv[0] || timeout_ms <= 0 ||
+    if (!cmd || !argv || !argv[0] || timeout_ms < 0 ||
         timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS || term_grace_ms < 0 ||
         term_grace_ms > 30000 || max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) {
         receipt->runtime_error = EINVAL;
@@ -1449,7 +1466,7 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
     }
     int64_t earliest = before_poll + 25;
     int64_t timeout_at = slot->started_ms + slot->timeout_ms;
-    if (timeout_at < earliest) earliest = timeout_at;
+    if (slot->timeout_ms > 0 && timeout_at < earliest) earliest = timeout_at;
     /* Once KILL was sent there is no remaining grace deadline.  Retaining the
      * expired TERM deadline would clamp every later caller poll to zero and
      * prevent bounded progress to the reaping observation. */
@@ -1549,6 +1566,7 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
             slot->finished_ms = now;
             slot->leader_waited_ns = owned_now_ns();
             slot->tree_empty_ns = slot->leader_waited_ns;
+            owned_arm_unlimited_cleanup(slot, slot->leader_waited_ns, 0);
             slot->drain_deadline_ms = slot->cleanup_deadline_ns >= 0
                 ? (slot->cleanup_deadline_ns + 999999) / 1000000
                 : now + RT_OWNED_POST_REAP_DRAIN_MS;
@@ -1557,7 +1575,7 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
         else slot->runtime_error = errno ? errno : ECHILD;
     } else if (!slot->reaped && wr < 0) slot->runtime_error = errno;
     if (!slot->reaped && slot->request_started_ns < 0 &&
-        (slot->cancel_requested || now - slot->started_ms >= slot->timeout_ms) &&
+        (slot->cancel_requested || (slot->timeout_ms > 0 && now - slot->started_ms >= slot->timeout_ms)) &&
         !slot->term_sent) {
         slot->timed_out = !slot->cancel_requested;
         enum OwnedSignalOutcome outcome = owned_async_signal_or_reap(slot, SIGTERM, now);
@@ -2765,7 +2783,6 @@ static int pov4_parse_request_bytes(const uint8_t* bytes, uint64_t length,
     RT_OWNED_HOST_FREE(prior_key); prior_key = NULL;
     if (cursor.offset != cursor.length) { errno = EPROTO; goto fail; }
     if (request->capability_bits == 0 ||
-        wall == 0 ||
         wall > 3600000000000ULL || grace > 30000000000ULL ||
         cleanup > 30000000000ULL || stdout_limit > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
         stderr_limit > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
@@ -2880,6 +2897,8 @@ static void pov4_reconcile_gone_child_locked(
             slot->status = status;
             slot->leader_waited_ns = waited_ns;
             slot->finished_ms = waited_ns >= 0 ? waited_ns / 1000000 : -1;
+            owned_arm_unlimited_cleanup(slot, waited_ns, 0);
+            if (slot->execution_deadline_ns == 0) deadline_ns = slot->cleanup_deadline_ns;
             slot->drain_deadline_ms = deadline_ns >= 0
                 ? (deadline_ns + 999999) / 1000000 : -1;
             return;
@@ -3006,7 +3025,10 @@ static enum Pov4StartOutcome pov4_start_exact(
     slot->exec_confirmed_ns=-1; slot->leader_waited_ns=-1; slot->tree_empty_ns=-1;
     slot->execution_deadline_ns=execution_deadline_ns;
     slot->kill_deadline_ns=kill_deadline_ns; slot->cleanup_deadline_ns=cleanup_deadline_ns;
-    slot->timeout_ms=RT_OWNED_ABI_MAX_TIMEOUT_MS; slot->term_grace_ms=0;
+    slot->unlimited_term_grace_ns=request->term_grace_ns;
+    slot->unlimited_cleanup_budget_ns=request->cleanup_budget_ns;
+    slot->timeout_ms=request->wall_budget_ns == 0 ? 0 : RT_OWNED_ABI_MAX_TIMEOUT_MS;
+    slot->term_grace_ms=0;
     slot->term_at_ms=-1; slot->drain_deadline_ms=-1;
     slot->output_limit=output_limit; slot->stdout_limit=request->stdout_limit;
     slot->stderr_limit=request->stderr_limit; slot->retained=retained;
@@ -3028,7 +3050,10 @@ static enum Pov4StartOutcome pov4_start_exact(
     slot->pidfd=pidfd; slot->start_identity=identity;
     pthread_mutex_unlock(slot->state_lock);
     int child_reaped=0, terminal_status=0; int64_t confirmed_ns=-1; uint64_t retries=0;
-    if(!failure && !owned_confirm_exec_v4(pid,exec_pipe[0],execution_deadline_ns,
+    /* Exec confirmation is a finite control lease even for unlimited work. */
+    int64_t confirm_deadline_ns = execution_deadline_ns > 0
+        ? execution_deadline_ns : request_started_ns + 30000000000LL;
+    if(!failure && !owned_confirm_exec_v4(pid,exec_pipe[0],confirm_deadline_ns,
             &confirmed_ns,&retries,&child_reaped,&failure,&failure_class,
             &terminal_status)) {
         if(!failure) failure=EIO;
@@ -3039,7 +3064,8 @@ static enum Pov4StartOutcome pov4_start_exact(
     if(child_reaped){
         slot->reaped=1; slot->status=terminal_status; slot->leader_waited_ns=owned_now_ns();
         slot->finished_ms=slot->leader_waited_ns/1000000;
-        slot->drain_deadline_ms=(cleanup_deadline_ns+999999)/1000000;
+        owned_arm_unlimited_cleanup(slot, slot->leader_waited_ns, 0);
+        slot->drain_deadline_ms=(slot->cleanup_deadline_ns+999999)/1000000;
     }
     if(!failure){
         slot->exec_confirmed_ns=confirmed_ns;
@@ -3047,6 +3073,8 @@ static enum Pov4StartOutcome pov4_start_exact(
         return POV4_START_CONFIRMED;
     }
     slot->runtime_error=failure;
+    owned_arm_unlimited_cleanup(slot, owned_now_ns(), 1);
+    cleanup_deadline_ns=slot->cleanup_deadline_ns;
     if(!slot->reaped){
         slot->term_attempted=1;
         enum Pov4SignalOutcome term =
@@ -3272,6 +3300,8 @@ static void pov4_snapshot(Pov4Slot* owner, const RtOwnedProcessPollReceiptV2* po
     }
     pthread_mutex_lock(core->state_lock);
     int64_t* w = owner->words;
+    w[POV4_KILL_DEADLINE_NS] = core->kill_deadline_ns;
+    w[POV4_CLEANUP_DEADLINE_NS] = core->cleanup_deadline_ns;
     w[POV4_TERM_ATTEMPTED] = core->term_attempted;
     w[POV4_TERM_SENT] = core->term_sent;
     w[POV4_KILL_ATTEMPTED] = core->kill_attempted;
@@ -3348,7 +3378,9 @@ static int pov4_apply_deadlines(Pov4Slot* owner, int cancel_requested) {
     pthread_mutex_lock(core->state_lock);
     int64_t now_ns = owned_now_ns();
     int64_t now_ms = now_ns >= 0 ? now_ns / 1000000 : -1;
-    int due_term = cancel_requested || (now_ns >= core->execution_deadline_ns);
+    int due_term = cancel_requested || (core->execution_deadline_ns > 0 &&
+        now_ns >= core->execution_deadline_ns);
+    if (cancel_requested) owned_arm_unlimited_cleanup(core, now_ns, 1);
     if (!core->reaped && due_term && !core->term_attempted) {
         core->term_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
@@ -3365,7 +3397,8 @@ static int pov4_apply_deadlines(Pov4Slot* owner, int cancel_requested) {
             owner->words[POV4_ERRNO] = ETIMEDOUT;
         }
     }
-    if (!core->reaped && now_ns >= core->kill_deadline_ns && !core->kill_attempted) {
+    if (!core->reaped && core->kill_deadline_ns > 0 &&
+        now_ns >= core->kill_deadline_ns && !core->kill_attempted) {
         core->kill_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
             pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
@@ -3398,7 +3431,7 @@ static SplArray* pov4_drive(Pov4Slot* owner, int64_t wait_ns, int cancel_request
     int64_t next = owner->words[POV4_EXECUTION_DEADLINE_NS];
     if (owner->words[POV4_TERM_ATTEMPTED]) next = owner->words[POV4_KILL_DEADLINE_NS];
     if (owner->words[POV4_KILL_ATTEMPTED]) next = owner->words[POV4_CLEANUP_DEADLINE_NS];
-    if (next >= 0 && now >= 0 && wait_ns > next - now) wait_ns = next > now ? next - now : 0;
+    if (next > 0 && now >= 0 && wait_ns > next - now) wait_ns = next > now ? next - now : 0;
     int64_t wait_ms = (wait_ns + 999999) / 1000000;
     uint64_t out_room = owner->stdout_limit - owner->stdout_count;
     uint64_t err_room = owner->stderr_limit - owner->stderr_count;
@@ -3419,13 +3452,14 @@ static SplArray* pov4_drive(Pov4Slot* owner, int64_t wait_ns, int cancel_request
     if (!poll.terminal && owner->cleanup_only) {
         owner->words[POV4_STATUS] = POV4_STATUS_CLEANUP_PENDING;
         owner->words[POV4_PHASE] = POV4_PHASE_CLEANUP;
-        if (now >= owner->words[POV4_CLEANUP_DEADLINE_NS] &&
+        if (owner->words[POV4_CLEANUP_DEADLINE_NS] > 0 &&
+                now >= owner->words[POV4_CLEANUP_DEADLINE_NS] &&
                 owner->words[POV4_FAILURE_PHASE] == 0) {
             owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_CLEANUP;
             owner->words[POV4_FAILURE_REASON] = POV4_REASON_CLEANUP_DEADLINE;
             owner->words[POV4_ERRNO] = ETIMEDOUT;
         }
-    } else if (!poll.terminal &&
+    } else if (!poll.terminal && owner->words[POV4_CLEANUP_DEADLINE_NS] > 0 &&
             now >= owner->words[POV4_CLEANUP_DEADLINE_NS]) {
         owner->words[POV4_STATUS] = POV4_STATUS_CLEANUP_PENDING;
         owner->words[POV4_PHASE] = POV4_PHASE_CLEANUP;
@@ -3573,6 +3607,9 @@ static void pov4_abandon_unpublished(uint32_t index) {
     RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
     if (core) {
         pthread_mutex_lock(core->state_lock);
+        owned_arm_unlimited_cleanup(core, owned_now_ns(), 1);
+        owner->words[POV4_KILL_DEADLINE_NS] = core->kill_deadline_ns;
+        owner->words[POV4_CLEANUP_DEADLINE_NS] = core->cleanup_deadline_ns;
         core->kill_attempted = 1;
         enum Pov4SignalOutcome signal_outcome =
             pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
@@ -3820,6 +3857,7 @@ static SplArray* pov4_start_pinned_impl(
     int64_t nominal = owned_clock_resolution_ns(CLOCK_MONOTONIC);
     int64_t effective = nominal > POV4_EFFECTIVE_CLOCK_NS ? nominal : POV4_EFFECTIVE_CLOCK_NS;
     if (nominal <= 0 || effective > request.max_clock_resolution_ns ||
+        (request.wall_budget_ns == 0 && started > INT64_MAX - 30000000000LL) ||
         started > INT64_MAX - request.wall_budget_ns ||
         started + request.wall_budget_ns > INT64_MAX - request.term_grace_ns ||
         started + request.wall_budget_ns + request.term_grace_ns >
@@ -3831,11 +3869,12 @@ static SplArray* pov4_start_pinned_impl(
             started, 1, &request);
         pov4_request_free(&request); return rejected;
     }
-    int64_t execution_deadline = started + request.wall_budget_ns;
-    int64_t kill_deadline = execution_deadline + request.term_grace_ns;
-    int64_t cleanup_deadline = kill_deadline + request.cleanup_budget_ns;
+    int64_t execution_deadline = request.wall_budget_ns == 0 ? 0 : started + request.wall_budget_ns;
+    int64_t kill_deadline = execution_deadline == 0 ? 0 : execution_deadline + request.term_grace_ns;
+    int64_t cleanup_deadline = execution_deadline == 0 ? 0 : kill_deadline + request.cleanup_budget_ns;
     int64_t prepared = owned_now_ns();
-    if (prepared < started || prepared >= execution_deadline) {
+    if (prepared < started || prepared >= (execution_deadline > 0
+            ? execution_deadline : started + 30000000000LL)) {
         close(executable_fd); close(cwd_fd);
         SplArray* rejected = pov4_rejected(ETIMEDOUT, POV4_FAIL_EXECUTION,
             POV4_REASON_EXEC_DEADLINE, started, 1, &request);
@@ -4037,7 +4076,7 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
     }
     receipt->version = RT_OWNED_PROCESS_RECEIPT_VERSION;
     receipt->exit_code = -1;
-    if (!cmd || !argv || timeout_ms <= 0 ||
+    if (!cmd || !argv || timeout_ms < 0 ||
         (out_cap && !out) || (err_cap && !err)) {
         receipt->runtime_error = EINVAL;
         if (observation) observation->runtime_error = EINVAL;
@@ -4419,6 +4458,7 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 #include <string.h>
 #include <wchar.h>
 
+#define RT_OWNED_POST_REAP_DRAIN_MS 100
 #define RT_OWNED_ABI_MAX_TIMEOUT_MS 3600000
 #define RT_OWNED_ABI_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
 #ifndef RT_OWNED_HOST_MALLOC
@@ -4558,12 +4598,13 @@ static void owned_win_close(HANDLE* h) {
     }
 }
 
-/* Drain whatever is already buffered in one pipe. Anonymous pipes have no
+/* Drain one bounded quantum from one pipe. Anonymous pipes have no
  * overlapped mode, so PeekNamedPipe is what keeps this single-threaded loop
  * from blocking in ReadFile. Returns 0 when the pipe reached EOF. */
 static int owned_win_drain(OwnedWinStream* s) {
     if (!s->read_end) return 0;
-    for (;;) {
+    DWORD remaining = 64U * 1024U;
+    while (remaining > 0) {
         DWORD avail = 0;
         if (!PeekNamedPipe(s->read_end, NULL, 0, NULL, &avail, NULL)) {
             owned_win_close(&s->read_end);
@@ -4572,12 +4613,14 @@ static int owned_win_drain(OwnedWinStream* s) {
         if (avail == 0) return 1;
         char chunk[4096];
         DWORD want = avail > (DWORD)sizeof(chunk) ? (DWORD)sizeof(chunk) : avail;
+        if (want > remaining) want = remaining;
         DWORD got = 0;
         if (!ReadFile(s->read_end, chunk, want, &got, NULL) || got == 0) {
             owned_win_close(&s->read_end);
             return 0;
         }
         s->seen += got;
+        remaining -= got;
         if (s->cap > 0) {
             uint64_t buffer_room = s->cap - 1 - s->kept;
             uint64_t policy_room = s->kept < s->limit ? s->limit - s->kept : 0;
@@ -4592,6 +4635,9 @@ static int owned_win_drain(OwnedWinStream* s) {
             s->truncated = 1;
         }
     }
+    /* A continuously writing descendant must yield to leader/deadline checks
+     * and the other stream, including during the final best-effort drain. */
+    return 1;
 }
 
 static int64_t owned_win_filetime_ms(const FILETIME* ft) {
@@ -4616,8 +4662,8 @@ static bool owned_win_run_bounded_impl(const char* cmd, const char* const* argv,
     receipt->version = RT_OWNED_PROCESS_RECEIPT_VERSION;
     receipt->exit_code = -1;
     /* Validation mirrors the POSIX branch byte for byte, including
-     * `timeout_ms <= 0` being EINVAL rather than "no deadline". */
-    if (!cmd || !argv || !argv[0] || timeout_ms <= 0 ||
+     * negative timeouts being EINVAL; zero leaves useful work unlimited. */
+    if (!cmd || !argv || !argv[0] || timeout_ms < 0 ||
         (out_cap && !out) || (err_cap && !err)) {
         receipt->runtime_error = EINVAL;
         if (observation) observation->runtime_error = EINVAL;
@@ -4753,16 +4799,30 @@ static bool owned_win_run_bounded_impl(const char* cmd, const char* const* argv,
     owned_win_close(&child_stdin);
 
     ULONGLONG started = GetTickCount64();
+    ULONGLONG reaped_at = 0;
     int child_done = 0;
     for (;;) {
         int so_open = owned_win_drain(&so);
         int se_open = owned_win_drain(&se);
         if (!child_done && WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
             child_done = 1;
+            reaped_at = GetTickCount64();
         }
         if (child_done && !so_open && !se_open) break;
+        /* Unlimited useful work does not grant descendants an unlimited pipe
+         * drain after leader exit. Keep the existing finite cleanup budget. */
+        if (child_done && timeout_ms == 0 &&
+                GetTickCount64() - reaped_at >= RT_OWNED_POST_REAP_DRAIN_MS) {
+            if (so_open) so.truncated = 1;
+            if (se_open) se.truncated = 1;
+            if (TerminateJobObject(job, 1)) {
+                receipt->term_sent = 1;
+                receipt->kill_sent = 1;
+            } else rt_err = EIO;
+            break;
+        }
         ULONGLONG elapsed = GetTickCount64() - started;
-        if (!receipt->kill_sent && elapsed >= (ULONGLONG)timeout_ms) {
+        if (!receipt->kill_sent && timeout_ms > 0 && elapsed >= (ULONGLONG)timeout_ms) {
             receipt->timed_out = 1;
             receipt->term_sent = 1;
             receipt->kill_sent = 1;
@@ -5441,4 +5501,11 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
 }
 #endif
 
+#endif
+
+/* Linux grouped-native owner is an opt-in broker ABI. Keep it in the
+ * process-owned translation unit so every self-hosted runtime links the same
+ * cgroup/pidfd implementation as the existing owned-process ABI. */
+#if defined(__linux__) && !defined(RT_PROCESS_OWNED_CORE_ONLY)
+#include "runtime_linux_group_owner_impl.h"
 #endif
