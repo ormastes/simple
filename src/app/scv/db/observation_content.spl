@@ -52,8 +52,44 @@ fn _observation_add(values: [DbEvidenceDependency], incoming: DbEvidenceDependen
     next.push(incoming)
     Ok(next)
 
+# The structural owner has resolved aliases against captured state. Mapping
+# content revisions bind identity as well as object address, so the closed
+# record set can locate that immutable revision without inventing an alias map.
+fn _observation_mapping(records: [DbReproductionRecord], reference: DbEvidenceRevision, kind: text) -> Result<DbReproductionRecord, text>:
+    var found: DbReproductionRecord? = nil
+    for record in records:
+        if db_reproduction_kind(record) == kind and db_reproduction_reference(record).revision == reference.revision:
+            if val previous = found:
+                if db_reproduction_record_encode(previous)? != db_reproduction_record_encode(record)?: return Err("SCVDB_REPRODUCTION_REVISION")
+            found = Some(record)
+    if found == nil: return Err("SCVDB_REPRODUCTION_REFERENCE_MISSING")
+    Ok(found.unwrap())
+
 fn db_observation_artifacts(records: [DbReproductionRecord], maximum: u64) -> Result<[DbEvidenceDependency], text>:
     var values: [DbEvidenceDependency] = []
+    var mapped: [text] = []
+    # First collect every Bound's explicit current declaration. Mapping rows
+    # contain no historical availability and never override these declarations.
+    for record in records:
+        match record:
+            BoundReproduction(value, source):
+                var required: [text] = []
+                match _observation_mapping(records, source, "source_snapshot")?:
+                    SourceSnapshot(snapshot): required.push(snapshot.snapshot_digest)
+                    _: return Err("SCVDB_REPRODUCTION_SOURCE_BINDING")
+                match _observation_mapping(records, value.test_definition, "test_definition")?:
+                    TestDefinition(definition): required.push(definition.definition_digest)
+                    _: return Err("SCVDB_REPRODUCTION_REVISION")
+                for digest in required:
+                    var declared = false
+                    for dependency in value.dependencies:
+                        if dependency.digest == digest:
+                            values = _observation_add(values, dependency, maximum)?
+                            declared = true
+                    if not declared: return Err("SCVDB_REPRODUCTION_ARTIFACT_UNDECLARED")
+                if not mapped.contains("source_snapshot:" + source.revision): mapped.push("source_snapshot:" + source.revision)
+                if not mapped.contains("test_definition:" + value.test_definition.revision): mapped.push("test_definition:" + value.test_definition.revision)
+            _: ()
     for record in records:
         var required: [text] = []
         var dependencies: [DbEvidenceDependency] = []
@@ -64,11 +100,17 @@ fn db_observation_artifacts(records: [DbReproductionRecord], maximum: u64) -> Re
             Reproduction(value):
                 required.push(value.invocation_digest)
                 dependencies = value.dependencies
+            BoundReproduction(value, _):
+                required.push(value.invocation_digest)
+                dependencies = value.dependencies
+            SourceSnapshot(value):
+                if not mapped.contains("source_snapshot:" + value.reference.revision): required.push(value.snapshot_digest)
+            TestDefinition(value):
+                if not mapped.contains("test_definition:" + value.reference.revision): required.push(value.definition_digest)
             Observation(value): required.push(value.payload_digest)
         for digest in required: values = _observation_add(values, DbEvidenceDependency(digest: digest, availability: "available"), maximum)?
         for dependency in dependencies: values = _observation_add(values, dependency, maximum)?
     Ok(values)
-
 fn _observation_entry(catalog: DbRetentionCatalog, digest: text) -> DbRetentionEntry?:
     for entry in catalog.entries:
         if entry.digest == digest: return Some(entry)

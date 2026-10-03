@@ -1,3 +1,4 @@
+use std.scv.db_paged_txn.{db_paged_planning_round_limit}
 # Same-epoch checkpoint effect owner. All network-free validation/staging occurs
 # before Prepared. The shared SJ barrier fences every mutable channel until
 # exact active-generation recovery and Installed marker publication complete.
@@ -50,7 +51,7 @@ fn _checkpoint_paged_preview(initial: DbCheckpointReader, manifest: DbPagedManif
     if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
     reader = db_checkpoint_reader_reserve(reader, 0u64, reader.policy_bytes * 4u64 + 8388608u64)?
     var progress = db_paged_begin(manifest, patch, policy, now)?
-    for round in 0..8:
+    for round in 0..db_paged_planning_round_limit():
         match progress:
             NeedKeys(request, keys):
                 # Reserve only distinct existing descriptors requested in this
@@ -215,7 +216,7 @@ fn _checkpoint_current_preserved(initial: DbCheckpointReader, current: DbStoreVi
                 val found = next.rows.get(old.entity)
                 if found == nil: return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
                 val row = found.unwrap()
-                if row.kind != old.kind or (old.tombstoned and not row.tombstoned) or (old.kind == "run_manifest" and row != old): return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
+                if row.kind != old.kind or (old.tombstoned and not row.tombstoned) or (db_checkpoint_immutable_kind(old.kind) and row != old): return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
             for record in previous.catalog.records:
                 if not next.catalog.records.contains(record): return Err("SCVDB_CHECKPOINT_CONFLICT_REGRESSION")
             for receipt in previous.catalog.resolutions:
@@ -242,7 +243,7 @@ fn _checkpoint_current_preserved(initial: DbCheckpointReader, current: DbStoreVi
                                 CurrentRow(entity, row):
                                     match db_typed_page_record_decode(next.unwrap())?:
                                         CurrentRow(found, incoming):
-                                            if found != entity or incoming.kind != row.kind or (row.tombstoned and not incoming.tombstoned) or (row.kind == "run_manifest" and incoming != row): return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
+                                            if found != entity or incoming.kind != row.kind or (row.tombstoned and not incoming.tombstoned) or (db_checkpoint_immutable_kind(row.kind) and incoming != row): return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
                                         _: return Err("SCVDB_CHECKPOINT_INDEX_REGRESSION")
                                 HighWater(namespace, epoch, kind, sequence):
                                     match db_typed_page_record_decode(next.unwrap())?:

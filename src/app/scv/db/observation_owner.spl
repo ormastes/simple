@@ -20,20 +20,25 @@ fn db_observation_now() -> Result<u64, text>:
     if sample < 0: return Err("SCVDB_COMMAND_CLOCK")
     Ok((sample / 1000000) as u64)
 
+fn _observation_append_record(records: [DbReproductionRecord], record: DbReproductionRecord) -> Result<[DbReproductionRecord], text>:
+    val encoded = db_reproduction_record_encode(record)?
+    for prior in records:
+        if db_reproduction_record_encode(prior)? == encoded: return Ok(records)
+    if records.len() >= 64: return Err("SCVDB_REPRODUCTION_QUOTA")
+    var next = records
+    next.push(record)
+    Ok(next)
+
 fn db_observation_expand(patch: DbPatch, lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<[DbReproductionRecord], text>:
     var records = db_reproduction_patch_records(patch)?
-    if records.len() == 0: return Ok(records)
+    var cursor = 0
+    while cursor < records.len():
+        val requested = db_reproduction_lookup_refs([records[cursor]])
+        cursor = cursor + 1
+        for reference in requested:
+            records = _observation_append_record(records, db_reproduction_exact(reference, records, lookup)?)?
     db_reproduction_validate_records(records, lookup)?
-    val requested = db_reproduction_lookup_refs(records)
-    for reference in requested:
-        val record = db_reproduction_exact(reference, records, lookup)?
-        var present = false
-        for prior in records:
-            if db_reproduction_record_encode(prior)? == db_reproduction_record_encode(record)?: present = true
-        if not present: records.push(record)
-        if records.len() > 64: return Err("SCVDB_REPRODUCTION_QUOTA")
     Ok(records)
-
 fn db_observation_apply_reference(root: text, expected_head: text, patch: DbPatch, config: DbPolicyConfig, sources: DbObservationSources, limits: DbObservationLimits) -> Result<DbApplyResult, text>:
     db_policy_encode(config)?
     db_require_nonbinding_entity_kinds(patch)?
@@ -49,7 +54,7 @@ fn db_observation_apply_reference(root: text, expected_head: text, patch: DbPatc
 
 fn db_observation_paged_plan(root: text, manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedCommitPlan, text>:
     var planning = db_paged_transition_begin(manifest, patch, policy, now)?
-    for _round in 0..12:
+    for _round in 0..db_paged_planning_round_limit():
         match planning:
             Ready(plan): return Ok(plan)
             NeedKeys(request, keys): planning = db_paged_transition_advance(planning, db_paged_load_proofs(root, request, keys)?)?
@@ -57,15 +62,25 @@ fn db_observation_paged_plan(root: text, manifest: DbPagedManifest, patch: DbPat
 
 fn db_observation_paged_records(root: text, view: DbPagedView, patch: DbPatch, policy: DbPagedPolicy) -> Result<[DbReproductionRecord], text>:
     var query = DbPagedQuery(root: root, view: view, policy: policy, buckets: {}, records: {}, requested: {}, bytes_read: 0u64, keys_read: 0u64)
-    var entities: [EntityRef] = []
-    for reference in db_reproduction_lookup_refs(db_reproduction_patch_records(patch)?): entities.push(reference.entity)
-    query = db_paged_query_rows(query, entities)?
-    var aliases: [EntityRef] = []
-    for reference in db_reproduction_comparison_refs(db_reproduction_patch_records(patch)?, \entity: db_paged_row_at(query, entity))?:
-        if reference.entity.settled != nil: aliases.push(reference.entity)
-    query = db_paged_query_rows(query, aliases)?
-    db_observation_expand(patch, \entity: db_paged_row_at(query, entity))
-
+    var records = db_reproduction_patch_records(patch)?
+    var cursor = 0
+    while cursor < records.len():
+        val requested = db_reproduction_lookup_refs([records[cursor]])
+        cursor = cursor + 1
+        var entities: [EntityRef] = []
+        for reference in requested: entities.push(reference.entity)
+        # Returned query retains cumulative page/byte/key accounting through
+        # every transitive layer; a prior-generation Bound is not a leaf.
+        query = db_paged_query_rows(query, entities)?
+        for reference in requested:
+            records = _observation_append_record(records, db_reproduction_exact(reference, records, \entity: db_paged_row_at(query, entity))?)?
+    var comparisons: [EntityRef] = []
+    for record in records:
+        for reference in db_reproduction_record_references(record):
+            if reference.entity.settled != nil: comparisons.push(reference.entity)
+    query = db_paged_query_rows(query, comparisons)?
+    db_reproduction_validate_records(records, \entity: db_paged_row_at(query, entity))?
+    Ok(records)
 fn db_observation_apply_paged(root: text, expected_head: text, patch: DbPatch, policy: DbPagedPolicy, sources: DbObservationSources, limits: DbObservationLimits) -> Result<DbPagedApplyResult, text>:
     db_require_nonbinding_entity_kinds(patch)?
     val now = db_observation_now()?
