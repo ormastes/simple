@@ -8,7 +8,7 @@ use std.spec.*
 use std.spec.step
 use std.io_runtime.{file_read_bytes, file_exists, dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
-use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_exists}
 use std.nogc_async_mut.link_working_set.file_store.{
     link_spill_required_scratch_v1, link_stage_file_v1, link_publish_staged_v1,
     link_discard_staged_v1
@@ -52,12 +52,15 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         expect(published.is_ok()).to_equal(true)
         if published.is_ok(): expect(published.unwrap()).to_equal(8u64)
         expect(file_read_bytes(output)).to_equal([0u8, 255u8, 128u8, 1u8, 2u8, 0u8, 4u8, 5u8])
-        expect(file_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "rejects scratch and window boundaries before creating a staged transaction":
         step("Derive the independent two-frame byte budget and reject undersized or overflowing plans")
-        expect(link_spill_required_scratch_v1(8u64, 4).unwrap()).to_equal(80u64)
+        val exact = link_spill_required_scratch_v1(8u64, 4)
+        expect(exact.is_ok()).to_equal(true)
+        if exact.is_err(): return
+        expect(exact.unwrap()).to_equal(80u64)
         expect(link_spill_required_scratch_v1(8u64, 0).is_err()).to_equal(true)
         expect(link_spill_required_scratch_v1(8u64, 1048577).is_err()).to_equal(true)
         expect(link_spill_required_scratch_v1(0xffffffffffffffffu64, 1).is_err()).to_equal(true)
@@ -99,7 +102,7 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("checksum mismatch")
         expect(file_read_bytes(output)).to_equal([9u8, 8u8, 7u8])
-        expect(file_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "closes retained handles and cleans private output when cancellation arrives after output creation":
@@ -119,7 +122,7 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("cancelled")
         expect(file_exists(output)).to_equal(false)
-        expect(file_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "rejects a truncated spill before publication":
@@ -144,7 +147,7 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("spill size mismatch")
         expect(file_exists(output)).to_equal(false)
-        expect(file_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "never replaces an existing destination even after every spill frame validates":
@@ -164,5 +167,5 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("destination exists")
         expect(file_read_bytes(output)).to_equal([6u8, 5u8])
-        expect(file_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
