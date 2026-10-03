@@ -520,3 +520,14 @@ bounded facade must continue returning UnsupportedBudget until these exist and
 their tests run. Existing lifecycle callbacks still lack actual dynamic-pack
 loading and production binding. Full compiler/application, platform execution,
 SPipe generation, coverage and performance evidence remain open gates.
+
+## 17. Itemized verification readiness continuation (2026-10-03)
+
+The current implementation/test breakdown lives in
+`doc/03_plan/compiler/linker/item4_verification_readiness.md`. Its source-written
+states are separate from Phase 4 evidence and do not reduce G0..G6 requirements.
+`linker_pack_transport.md` in this directory specifies actual pack loading,
+generation retention and the native provider command. It supersedes the earlier
+statement that only callbacks exist; complete composition/CLI admission and
+mapped-provider execution remain open. `macho_hosted_image.md` specifies the
+new eager dyld import/rebase and ad-hoc signing subset and its explicit gaps.

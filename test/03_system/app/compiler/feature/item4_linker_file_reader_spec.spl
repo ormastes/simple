@@ -5,8 +5,8 @@ use std.spec.step
 use std.io_runtime.{file_read_bytes, dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_atomic_write, file_remove, file_exists, file_size}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
-use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read, retained_file_read_at, retained_file_identity_unchanged, retained_file_close, retained_file_sync}
-use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1, elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1, elf_file_copy_section_v1}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read_at, retained_file_identity_unchanged, retained_file_sync}
+use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1}
 
 val ITEM4_FILE_FIXTURE = "test/fixtures/linker/elf/common_x64.o"
 
@@ -47,20 +47,22 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         if opened.is_err():
             item4_file_clean(directory.unwrap())
             return
+        var opened_owner = opened.unwrap()
         val output = retained_file_open(directory.unwrap() + "/slice.bin", 17u64, true)
         expect(output.is_ok()).to_equal(true)
         if output.is_err():
-            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            expect(opened_owner.elf_file_close_v1()).to_equal(true)
             item4_file_clean(directory.unwrap())
             return
+        var output_owner = output.unwrap()
         step("Emit three bounded windows through the production retained reader and writer")
-        val copied = elf_file_copy_section_v1(opened.unwrap(), 2, output.unwrap(), item4_file_not_cancelled)
+        val copied = output_owner.elf_file_copy_section_v1(opened_owner, 2, item4_file_not_cancelled)
         expect(copied.is_ok()).to_equal(true)
         if copied.is_ok(): expect(copied.unwrap()).to_equal(17u64)
-        expect(output.unwrap().position).to_equal(17u64)
-        expect(retained_file_sync(output.unwrap())).to_equal(true)
-        expect(retained_file_close(output.unwrap())).to_equal(true)
-        expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        expect(output_owner.position).to_equal(17u64)
+        expect(retained_file_sync(output_owner)).to_equal(true)
+        expect(output_owner.close()).to_equal(true)
+        expect(opened_owner.elf_file_close_v1()).to_equal(true)
         var expected: [u8] = []
         for index in 64..81: expected.push(bytes[index])
         expect(file_read_bytes(directory.unwrap() + "/slice.bin")).to_equal(expected)
@@ -78,31 +80,34 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         if opened.is_err():
             item4_file_clean(directory.unwrap())
             return
+        var opened_owner = opened.unwrap()
         val path = directory.unwrap() + "/slice.bin"
         val small = retained_file_open(path, 16u64, true)
         expect(small.is_ok()).to_equal(true)
         if small.is_err():
-            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            expect(opened_owner.elf_file_close_v1()).to_equal(true)
             item4_file_clean(directory.unwrap())
             return
+        var small_owner = small.unwrap()
         step("A one-byte-short output budget fails before emitting any part of the section")
-        val refused = elf_file_copy_section_v1(opened.unwrap(), 2, small.unwrap(), item4_file_not_cancelled)
+        val refused = small_owner.elf_file_copy_section_v1(opened_owner, 2, item4_file_not_cancelled)
         expect(refused.is_err()).to_equal(true)
         if refused.is_err(): expect(refused.unwrap_err()).to_contain("output capacity")
-        expect(small.unwrap().position).to_equal(0u64)
-        expect(retained_file_close(small.unwrap())).to_equal(true)
+        expect(small_owner.position).to_equal(0u64)
+        expect(small_owner.close()).to_equal(true)
         expect(file_size(path)).to_equal(0)
         expect(file_remove(path)).to_equal(true)
         val output = retained_file_open(path, 17u64, true)
         expect(output.is_ok()).to_equal(true)
         if output.is_ok():
+            var output_owner = output.unwrap()
             step("Cancel using the actual first emitted window as the signal and discard the partial transaction")
-            val cancelled = elf_file_copy_section_v1(opened.unwrap(), 2, output.unwrap(), \: file_size(path) >= 8)
+            val cancelled = output_owner.elf_file_copy_section_v1(opened_owner, 2, \: file_size(path) >= 8)
             expect(cancelled.is_err()).to_equal(true)
             if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled; discard output")
-            expect(output.unwrap().position).to_equal(8u64)
-            expect(retained_file_close(output.unwrap())).to_equal(true)
-        expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            expect(output_owner.position).to_equal(8u64)
+            expect(output_owner.close()).to_equal(true)
+        expect(opened_owner.elf_file_close_v1()).to_equal(true)
         item4_file_clean(directory.unwrap())
 
     it "decodes real names symbols and RELA records individually without a resident symbol table":
@@ -110,7 +115,8 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         val opened = elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 32)
         expect(opened.is_ok()).to_equal(true)
         if opened.is_err(): return
-        val object = opened.unwrap()
+        var opened_owner = opened.unwrap()
+        var object = opened_owner
         val symbol = elf_file_symbol_v1(object, 7, 2u64, 16)
         expect(symbol.is_ok()).to_equal(true)
         if symbol.is_ok():
@@ -130,7 +136,7 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         expect(elf_file_symbol_v1(object, 7, 4u64, 16).is_err()).to_equal(true)
         expect(elf_file_rela_v1(object, 3, 1u64).is_err()).to_equal(true)
         expect(elf_file_string_v1(object, 1, 12u64, 5).is_err()).to_equal(true)
-        expect(elf_file_close_v1(object)).to_equal(true)
+        expect(object.elf_file_close_v1()).to_equal(true)
 
     it "rejects a missing string terminator within the declared string section":
         step("Prove and mutate exactly the real table's final terminator")
@@ -146,10 +152,11 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 32)
         expect(opened.is_ok()).to_equal(true)
         if opened.is_ok():
-            val string = elf_file_string_v1(opened.unwrap(), 1, 92u64, 16)
+            var opened_owner = opened.unwrap()
+            val string = elf_file_string_v1(opened_owner, 1, 92u64, 16)
             expect(string.is_err()).to_equal(true)
             if string.is_err(): expect(string.unwrap_err()).to_contain("unterminated")
-            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            expect(opened_owner.elf_file_close_v1()).to_equal(true)
         item4_file_clean(directory.unwrap())
 
     it "rejects a relocation that references a symbol beyond its linked symbol table":
@@ -163,10 +170,11 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 32)
         expect(opened.is_ok()).to_equal(true)
         if opened.is_ok():
-            val relocation = elf_file_rela_v1(opened.unwrap(), 3, 0u64)
+            var opened_owner = opened.unwrap()
+            val relocation = elf_file_rela_v1(opened_owner, 3, 0u64)
             expect(relocation.is_err()).to_equal(true)
             if relocation.is_err(): expect(relocation.unwrap_err()).to_contain("symbol index")
-            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            expect(opened_owner.elf_file_close_v1()).to_equal(true)
         item4_file_clean(directory.unwrap())
 
     it "reads real ELF metadata and separate text windows without retaining whole object bytes":
@@ -174,7 +182,8 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         val opened = elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 8)
         expect(opened.is_ok()).to_equal(true)
         if opened.is_err(): return
-        val object = opened.unwrap()
+        var opened_owner = opened.unwrap()
+        var object = opened_owner
         expect(object.machine).to_equal(62)
         expect(object.section_count).to_equal(8)
         expect(object.metadata_table_bytes).to_equal(512u64)
@@ -182,14 +191,14 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         val section = elf_file_section_v1(object, 2)
         expect(section.is_ok()).to_equal(true)
         if section.is_err():
-            expect(elf_file_close_v1(object)).to_equal(true)
+            expect(object.elf_file_close_v1()).to_equal(true)
             return
         expect(section.unwrap().file_offset).to_equal(64u64)
         expect(section.unwrap().size).to_equal(17u64)
         val original = file_read_bytes(ITEM4_FILE_FIXTURE)
         expect(original.len()).to_equal(840)
         if original.len() != 840:
-            expect(elf_file_close_v1(object)).to_equal(true)
+            expect(object.elf_file_close_v1()).to_equal(true)
             return
         val first = elf_file_section_window_v1(object, 2, 0u64, 8)
         val last = elf_file_section_window_v1(object, 2, 16u64, 1)
@@ -200,7 +209,7 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         expect(elf_file_section_window_v1(object, 2, 0u64, 9).is_err()).to_equal(true)
         expect(elf_file_section_window_v1(object, 2, 17u64, 1).is_err()).to_equal(true)
         expect(elf_file_section_v1(object, 8).is_err()).to_equal(true)
-        expect(elf_file_close_v1(object)).to_equal(true)
+        expect(object.elf_file_close_v1()).to_equal(true)
         expect(elf_file_section_v1(object, 2).is_err()).to_equal(true)
 
     it "preserves the sequential cursor across retained positional reads":
@@ -208,10 +217,11 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         val opened = retained_file_open(ITEM4_FILE_FIXTURE, 840u64)
         expect(opened.is_ok()).to_equal(true)
         if opened.is_err(): return
-        val file = opened.unwrap()
-        val first = retained_file_read(file, 1)
+        var opened_owner = opened.unwrap()
+        var file = opened_owner
+        val first = file.read(1)
         val positional = retained_file_read_at(file, 2u64, 2)
-        val second = retained_file_read(file, 1)
+        val second = file.read(1)
         expect(first.is_ok()).to_equal(true)
         expect(positional.is_ok()).to_equal(true)
         expect(second.is_ok()).to_equal(true)
@@ -222,7 +232,7 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         expect(retained_file_read_at(file, 840u64, 1).is_err()).to_equal(true)
         expect(retained_file_read_at(file, 0xffffffffffffffffu64, 1).is_err()).to_equal(true)
         expect(retained_file_identity_unchanged(file).is_ok()).to_equal(true)
-        expect(retained_file_close(file)).to_equal(true)
+        expect(file.close()).to_equal(true)
 
     it "rejects the section metadata budget before building an index":
         step("Admit no implicit resident table and enforce the caller's serialized metadata admission cap")
@@ -245,17 +255,18 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         if opened.is_err():
             item4_file_clean(directory.unwrap())
             return
+        var opened_owner = opened.unwrap()
         val truncated = file_write_bytes(directory.unwrap() + "/object.o", [127u8])
         @when(os="windows"):
         expect(truncated).to_equal(false)
-        expect(retained_file_identity_unchanged(opened.unwrap()).is_ok()).to_equal(true)
+        expect(retained_file_identity_unchanged(opened_owner).is_ok()).to_equal(true)
         @else:
         expect(truncated).to_equal(true)
-        val rejected = retained_file_read_at(opened.unwrap(), 0u64, 1)
+        val rejected = retained_file_read_at(opened_owner, 0u64, 1)
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("FILE_CHANGED")
         @end
-        expect(retained_file_close(opened.unwrap())).to_equal(true)
+        expect(opened_owner.close()).to_equal(true)
         item4_file_clean(directory.unwrap())
 
     it "never switches a retained input to replacement path contents":
@@ -271,6 +282,7 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         if opened.is_err():
             item4_file_clean(directory.unwrap())
             return
+        var opened_owner = opened.unwrap()
         val replaced = file_atomic_write(directory.unwrap() + "/object.o", "replacement")
         @when(os="windows"):
         expect(replaced).to_equal(false)
@@ -278,12 +290,12 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         expect(replaced).to_equal(true)
         @end
         step("A path replacement may invalidate original metadata but can never supply replacement bytes")
-        val retained = retained_file_read_at(opened.unwrap(), 0u64, 4)
+        val retained = retained_file_read_at(opened_owner, 0u64, 4)
         if retained.is_ok():
             expect(retained.unwrap()).to_equal([127u8, 69u8, 76u8, 70u8])
         else:
             expect(retained.unwrap_err()).to_contain("FILE_CHANGED")
-        expect(retained_file_close(opened.unwrap())).to_equal(true)
+        expect(opened_owner.close()).to_equal(true)
         item4_file_clean(directory.unwrap())
 
     it "rejects overflowing table offsets and file-backed section ranges from real malformed objects":
@@ -323,8 +335,9 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 8)
         expect(opened.is_ok()).to_equal(true)
         if opened.is_ok():
-            val zeros = elf_file_section_window_v1(opened.unwrap(), 2, 1048568u64, 8)
+            var opened_owner = opened.unwrap()
+            val zeros = elf_file_section_window_v1(opened_owner, 2, 1048568u64, 8)
             expect(zeros.is_ok()).to_equal(true)
             if zeros.is_ok(): expect(zeros.unwrap()).to_equal([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
-            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            expect(opened_owner.elf_file_close_v1()).to_equal(true)
         item4_file_clean(directory.unwrap())

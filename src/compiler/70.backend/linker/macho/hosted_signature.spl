@@ -1,0 +1,56 @@
+# Apple embedded ad-hoc CodeDirectory (SHA-256); no certificate/trust admission.
+use compiler.backend.linker.macho.input.{macho_range}
+use std.common.crypto.sha256.{sha256_bytes}
+
+fn macho_hosted_be(bytes: [u8], at: i64, width: i64, value: i64) -> [u8]:
+    var out = bytes
+    for index in 0..width: out[at + index] = ((value >> (8 * (width - index - 1))) & 255) as u8
+    out
+
+fn macho_hosted_signature_size(code_limit: i64, identifier: text) -> i64:
+    20 + 88 + identifier.len() + 1 + ((code_limit + 4095) / 4096) * 32
+
+fn macho_hosted_sign(bytes: [u8], offset: i64, text_size: i64, identifier: text) -> Result<[u8], text>:
+    """Embed page hashes after all signed header bytes have been finalized."""
+    if offset < 0 or offset > 0x7fffffff or text_size < 0 or text_size > offset:
+        return Err("invalid Mach-O signature code range")
+    if identifier == "" or identifier.len() > 4096 or identifier.contains("\0"):
+        return Err("invalid Mach-O signing identifier")
+    for index in 0..identifier.len():
+        if identifier.byte_at(index) > 127: return Err("unsupported non-ASCII signing identifier")
+    val size = macho_hosted_signature_size(offset, identifier)
+    if not macho_range(bytes, offset, size) or offset + size != bytes.len(): return Err("invalid Mach-O signature storage")
+    var out = bytes
+    for index in offset..bytes.len(): out[index] = 0u8
+    out = macho_hosted_be(out, offset, 4, 0xfade0cc0)
+    out = macho_hosted_be(out, offset + 4, 4, size)
+    out = macho_hosted_be(out, offset + 8, 4, 1)
+    out = macho_hosted_be(out, offset + 12, 4, 0)
+    out = macho_hosted_be(out, offset + 16, 4, 20)
+    val directory = offset + 20
+    val hash_offset = 88 + identifier.len() + 1
+    val pages = (offset + 4095) / 4096
+    out = macho_hosted_be(out, directory, 4, 0xfade0c02)
+    out = macho_hosted_be(out, directory + 4, 4, size - 20)
+    out = macho_hosted_be(out, directory + 8, 4, 0x20400)
+    out = macho_hosted_be(out, directory + 12, 4, 0x20002)
+    out = macho_hosted_be(out, directory + 16, 4, hash_offset)
+    out = macho_hosted_be(out, directory + 20, 4, 88)
+    out = macho_hosted_be(out, directory + 28, 4, pages)
+    out = macho_hosted_be(out, directory + 32, 4, offset)
+    out[directory + 36] = 32u8
+    out[directory + 37] = 2u8
+    out[directory + 39] = 12u8
+    out = macho_hosted_be(out, directory + 72, 8, text_size)
+    out = macho_hosted_be(out, directory + 80, 8, 1)
+    for index in 0..identifier.len(): out[directory + 88 + index] = identifier.byte_at(index) as u8
+    for page in 0..pages:
+        val begin = page * 4096
+        val length = if offset - begin < 4096: offset - begin else: 4096
+        var block: [i64] = [0; length]
+        for index in 0..length: block[index] = out[begin + index] as i64
+        val digest = sha256_bytes(block)
+        for index in 0..32: out[directory + hash_offset + page * 32 + index] = digest[index] as u8
+    Ok(out)
+
+export macho_hosted_sign, macho_hosted_signature_size

@@ -1,8 +1,8 @@
 """Single-owner linker provider dispatch with generation-pinned sessions.
 
 The caller supplies an independently registered provider schema requirement and
-already loaded operation callbacks. This module owns no native loader and makes
-no dynamic-pack, resource-budget, or whole-linker certification claim.
+loaded operation callbacks or explicitly admitted dynamic packs. The canonical
+provider loader owns native mappings. Resource certification remains separate.
 """
 use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_is_zero}
 use std.common.kernel_plugin.schema_header.{
@@ -15,6 +15,7 @@ use std.nogc_sync_mut.kernel_plugin.status.{KpfSyncStatus}
 use std.common.linker.link_request_v1.{LinkRequestV1}
 use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1}
 use std.common.linker.link_receipt_v1.{LinkReceiptV1}
+use compiler.backend.linker.linker_pack.{LinkerPackConfigV1, LinkerPackV1}
 
 pub struct LinkerProviderV1:
     header: KpfSchemaHeaderV1
@@ -37,6 +38,8 @@ class _LinkerSessionSlotV1:
 pub class LinkerLifecycleV1:
     var generations: KpfGenerationTable
     var providers: [Option<LinkerProviderV1>]
+    var packs: [Option<LinkerPackV1>]
+    var pending_pack: Option<LinkerPackV1>
     var sessions: [_LinkerSessionSlotV1]
     requirement: KpfSchemaRequirementV1
     recovery: LinkerProviderV1
@@ -49,10 +52,12 @@ pub class LinkerLifecycleV1:
         if capacity == 0 or session_capacity == 0:
             return Err("linker lifecycle capacities must be nonzero")
         var providers: [Option<LinkerProviderV1>] = []
+        var packs: [Option<LinkerPackV1>] = []
         var sessions: [_LinkerSessionSlotV1] = []
         var index: u32 = 0
         while index < capacity:
             providers.push(nil)
+            packs.push(nil)
             index = index + 1
         index = 0
         while index < session_capacity:
@@ -62,7 +67,7 @@ pub class LinkerLifecycleV1:
             index = index + 1
         var owner = LinkerLifecycleV1(
             generations: KpfGenerationTable.create(capacity, session_capacity),
-            providers: providers, sessions: sessions,
+            providers: providers, packs: packs, pending_pack: nil, sessions: sessions,
             requirement: requirement, recovery: recovery,
             active: KpfGenerationHandle(index: 0, epoch: 0), registry_revision: 0,
             recovery_running: false)
@@ -83,6 +88,44 @@ pub class LinkerLifecycleV1:
         if not published.status.accepted():
             return Err("linker generation publish rejected: code={published.status.code()}")
         self.providers[published.current.index] = Some(provider)
+        self.active = published.current
+        self.registry_revision = self.registry_revision + 1
+        Ok(published.current)
+
+    pub me cleanup_pending_pack() -> Result<bool, text>:
+        if self.pending_pack == nil: return Ok(true)
+        var pack = self.pending_pack.unwrap()
+        val closed = pack.close()
+        self.pending_pack = Some(pack)
+        if closed.is_err(): return closed
+        self.pending_pack = nil
+        Ok(true)
+
+    pub me publish_pack(config: LinkerPackConfigV1) -> Result<KpfGenerationHandle, text>:
+        """Load and pin a real provider, then publish its operation atomically.
+
+        A failure preserves the active generation and retains cleanup ownership.
+        Only one failed pack may be retained, preventing unbounded failed loads.
+        """
+        self.cleanup_pending_pack()?
+        val schema = kpf_validate_schema_header_v1(config.header, self.requirement)
+        if not schema.accepted(): return Err("linker pack schema rejected: code={schema.code()}")
+        if self.registry_revision == 0xffffffffffffffffu64: return Err("linker registry revision exhausted")
+        val pack = LinkerPackV1.load(config)
+        self.pending_pack = Some(pack)
+        if not pack.ready:
+            val reason = pack.diagnostic
+            val closed = self.cleanup_pending_pack()
+            if closed.is_err(): return Err(reason + "; " + closed.unwrap_err())
+            return Err(reason)
+        val published = self.generations.publish(config.provider_id, config.composition_digest, self.registry_revision + 1)
+        if not published.status.accepted():
+            val closed = self.cleanup_pending_pack()
+            if closed.is_err(): return Err("pack publication failed; " + closed.unwrap_err())
+            return Err("linker generation publish rejected: code={published.status.code()}")
+        self.packs[published.current.index] = Some(pack)
+        self.providers[published.current.index] = nil
+        self.pending_pack = nil
         self.active = published.current
         self.registry_revision = self.registry_revision + 1
         Ok(published.current)
@@ -114,6 +157,11 @@ pub class LinkerLifecycleV1:
         val generation = self.sessions[session.index].generation
         val view = self.generations.view(generation)
         if not view.status.accepted(): return Err("stale linker generation")
+        if self.packs[generation.index] != nil:
+            self.sessions[session.index].running = true
+            val result = self.packs[generation.index].unwrap().invoke(request, policy, inputs, output)
+            self.sessions[session.index].running = false
+            return result
         val selected = self.providers[generation.index]
         if selected == nil: return Err("linker generation has no operation")
         val provider = selected.unwrap()
@@ -135,12 +183,24 @@ pub class LinkerLifecycleV1:
         Ok(true)
 
     pub me collect(generation: KpfGenerationHandle) -> Result<bool, text>:
+        val view = self.generations.view(generation)
+        if not view.status.accepted(): return Err("stale linker generation")
+        if not view.retired: return Err("linker generation is not retired")
+        if view.pin_count != 0: return Err("linker generation is still pinned")
+        # Close before releasing the generation slot. A failed unload retains
+        # both the mapping owner and slot, so publication cannot overwrite it.
+        if self.packs[generation.index] != nil:
+            var pack = self.packs[generation.index].unwrap()
+            val closed = pack.close()
+            self.packs[generation.index] = Some(pack)
+            if closed.is_err(): return closed
         val collected = self.generations.collect(generation)
         if collected == KpfSyncStatus.GenerationStillPinned:
             return Err("linker generation is still pinned")
         if not collected.accepted():
             return Err("linker generation collect rejected: code={collected.code()}")
         self.providers[generation.index] = nil
+        self.packs[generation.index] = nil
         Ok(true)
 
     pub me recover() -> Result<KpfGenerationHandle, text>:

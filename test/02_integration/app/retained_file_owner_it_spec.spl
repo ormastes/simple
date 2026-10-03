@@ -1,0 +1,76 @@
+"""Retained file value-owner regression intent. Native execution: UNRUN.
+
+The scenarios exercise actual handles, not copied-state stand-ins.
+"""
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read_at, retained_file_unchanged}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+describe "Retained file sequential value ownership":
+    it "preserves cumulative write quotas and invalidates the exact owner on close":
+        step("Create an exclusive native file and perform separate writes")
+        val target = secure_temp_dir(".", "item4-retained-owner-").unwrap()
+        var file = retained_file_open("{target}/owner", 4u64, true).unwrap()
+        file.write([10u8, 20u8]).unwrap()
+        expect(file.position).to_equal(2u64)
+        expect(file.size).to_equal(2u64)
+        file.write([30u8, 40u8]).unwrap()
+        expect(file.position).to_equal(4u64)
+        expect(file.write([50u8]).is_err()).to_equal(true)
+        expect(file.position).to_equal(4u64)
+        expect(file.close()).to_equal(true)
+        expect(file.closed).to_equal(true)
+        expect(file.handle).to_equal(-1)
+        step("A repeated close cannot close a later native owner")
+        var other = retained_file_open("{target}/other", 1u64, true).unwrap()
+        expect(file.close()).to_equal(false)
+        expect(file.write([1u8]).is_err()).to_equal(true)
+        expect(other.write([7u8]).unwrap()).to_equal(true)
+        expect(other.close()).to_equal(true)
+        var reader = retained_file_open("{target}/owner", 4u64).unwrap()
+        expect(reader.read_exact(4).unwrap()).to_equal([10u8, 20u8, 30u8, 40u8])
+        expect(reader.position).to_equal(4u64)
+        expect(retained_file_unchanged(reader).unwrap()).to_equal(true)
+        expect(reader.close()).to_equal(true)
+        expect(file_remove("{target}/owner")).to_equal(true)
+        expect(file_remove("{target}/other")).to_equal(true)
+        expect(dir_remove(target, false)).to_equal(true)
+
+    it "keeps positional reads independent from the advancing sequential owner":
+        step("Create a real four-byte file")
+        val target = secure_temp_dir(".", "item4-retained-owner-").unwrap()
+        var output = retained_file_open("{target}/cursor", 4u64, true).unwrap()
+        output.write([10u8, 20u8, 30u8, 40u8]).unwrap()
+        expect(output.close()).to_equal(true)
+        var file = retained_file_open("{target}/cursor", 4u64).unwrap()
+        expect(file.read(2).unwrap()).to_equal([10u8, 20u8])
+        expect(file.position).to_equal(2u64)
+        expect(retained_file_read_at(file, 0u64, 2).unwrap()).to_equal([10u8, 20u8])
+        expect(file.position).to_equal(2u64)
+        expect(file.read_exact(2).unwrap()).to_equal([30u8, 40u8])
+        expect(file.position).to_equal(4u64)
+        expect(file.read(1).unwrap()).to_equal([])
+        expect(file.position).to_equal(4u64)
+        expect(file.close()).to_equal(true)
+        expect(file.read(1).is_err()).to_equal(true)
+        expect(file_remove("{target}/cursor")).to_equal(true)
+        expect(dir_remove(target, false)).to_equal(true)
+
+    it "retains consumed cursor progress when exact-read returns truncation":
+        step("Request more bytes than remain and observe state on the Err path")
+        val target = secure_temp_dir(".", "item4-retained-owner-").unwrap()
+        var output = retained_file_open("{target}/short", 2u64, true).unwrap()
+        output.write([1u8, 2u8]).unwrap()
+        expect(output.close()).to_equal(true)
+        var file = retained_file_open("{target}/short", 2u64).unwrap()
+        expect(file.read_exact(3).unwrap_err()).to_equal("SCVDB_FILE_TRUNCATED")
+        expect(file.position).to_equal(2u64)
+        expect(file.read_exact(0).unwrap()).to_equal([])
+        expect(file.read_exact(-1).is_err()).to_equal(true)
+        expect(file.read_exact(1048577).is_err()).to_equal(true)
+        expect(file.position).to_equal(2u64)
+        expect(file.close()).to_equal(true)
+        expect(file_remove("{target}/short")).to_equal(true)
+        expect(dir_remove(target, false)).to_equal(true)

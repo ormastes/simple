@@ -1,0 +1,205 @@
+"""ITEM4-REQ-004/006 hosted Mach-O image construction. Evidence: UNRUN.
+
+Independent wire assertions are authored, not executed. Image generation never
+constitutes Darwin loader, signature-admission, TLS or unwind qualification.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link}
+use compiler.backend.linker.macho.hosted_signature.{macho_hosted_sign, macho_hosted_signature_size}
+
+fn item4_macho_hosted_fixture(name: text) -> [u8]:
+    val bytes = file_read_bytes("test/fixtures/linker/macho/" + name)
+    expect(bytes.len()).to_be_greater_than(32)
+    bytes
+
+fn item4_macho_hosted_range(bytes: [u8], at: i64, size: i64) -> bool:
+    val valid = at >= 0 and size >= 0 and at <= bytes.len() and size <= bytes.len() - at
+    expect(valid).to_equal(true)
+    valid
+
+fn item4_macho_hosted_word(bytes: [u8], at: i64, width: i64 = 4) -> i64:
+    val valid = at >= 0 and width > 0 and width <= 8 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    for index in 0..width: value = value | ((bytes[at + index] as i64) << (8 * index))
+    value
+
+fn item4_macho_hosted_command(bytes: [u8], kind: i64) -> i64:
+    var at: i64 = 32
+    for index in 0..item4_macho_hosted_word(bytes, 16):
+        if item4_macho_hosted_word(bytes, at) == kind: return at
+        val size = item4_macho_hosted_word(bytes, at + 4)
+        if size < 8 or size > bytes.len() - at: break
+        at = at + size
+    fail("hosted image command absent: {kind}")
+    -1
+
+fn item4_macho_hosted_request(arm: bool) -> MachOHostedRequest:
+    MachOHostedRequest(target: if arm: RelocArch.AArch64 else: RelocArch.X86_64,
+        entry: "_main", minimum_os: 0xb0000, sdk: 0xb0000,
+        max_image_bytes: 1048576, identifier: "item4.hosted.fixture", rpaths: ["@executable_path"])
+
+fn item4_macho_hosted_be(bytes: [u8], at: i64, width: i64 = 4) -> i64:
+    expect(at >= 0 and at <= bytes.len() - width and width > 0 and width <= 8).to_equal(true)
+    if at < 0 or at > bytes.len() - width or width < 1 or width > 8: return 0
+    var value: i64 = 0
+    for index in 0..width: value = (value << 8) | (bytes[at + index] as i64)
+    value
+
+fn item4_macho_hosted_set(bytes: [u8], at: i64, value: i64) -> [u8]:
+    expect(at >= 0 and at <= bytes.len() - 4).to_equal(true)
+    if at < 0 or at > bytes.len() - 4: return []
+    var out = bytes
+    for index in 0..4: out[at + index] = ((value >> (8 * index)) & 255) as u8
+    out
+
+describe "Hosted Mach-O dyld image construction":
+    it "binds actual x64 and ARM64 TLV descriptor imports through dedicated pointer slots":
+        step("Link actual clang TLVP relocations against a real dylib TLS export")
+        val x64 = macho_hosted_link([item4_macho_hosted_fixture("hosted_tlv_x64.o")], [],
+            [item4_macho_hosted_fixture("hosted_tls_x64.dylib")], item4_macho_hosted_request(false)).unwrap()
+        expect(item4_macho_hosted_word(x64, 0x4004)).to_equal(0x7ff8)
+        val arm = macho_hosted_link([item4_macho_hosted_fixture("hosted_tlv_a64.o")], [],
+            [item4_macho_hosted_fixture("hosted_tls_a64.dylib")], item4_macho_hosted_request(true)).unwrap()
+        expect(item4_macho_hosted_word(arm, 0x4004)).to_equal(0x90000040)
+        expect(item4_macho_hosted_word(arm, 0x4008)).to_equal(0xf9400000)
+        step("Leave descriptor allocation and thread bootstrap owned by the provider")
+        expect(item4_macho_hosted_word(arm, 0xc000, 8)).to_equal(0)
+        val info = item4_macho_hosted_command(arm, 0x80000022)
+        expect(item4_macho_hosted_word(arm, info + 20)).to_be_greater_than(10)
+
+    it "hashes signed pages against an independent SHA-256 zero-page vector":
+        step("Sign one zero-filled 4096-byte code page")
+        val bytes: [u8] = [0u8; 4096 + macho_hosted_signature_size(4096, "test")]
+        val signed = macho_hosted_sign(bytes, 4096, 4096, "test").unwrap()
+        val directory = 4096 + 20
+        expect(item4_macho_hosted_be(signed, 4096)).to_equal(0xfade0cc0)
+        expect(item4_macho_hosted_be(signed, directory)).to_equal(0xfade0c02)
+        expect(item4_macho_hosted_be(signed, directory + 8)).to_equal(0x20400)
+        expect(item4_macho_hosted_be(signed, directory + 12)).to_equal(0x20002)
+        expect(item4_macho_hosted_be(signed, directory + 28)).to_equal(1)
+        expect(item4_macho_hosted_be(signed, directory + 32)).to_equal(4096)
+        expect(item4_macho_hosted_be(signed, directory + 72, 8)).to_equal(4096)
+        expect(item4_macho_hosted_be(signed, directory + 80, 8)).to_equal(1)
+        step("Compare all hash bytes with the .NET SHA256.HashData reference vector")
+        val expected: [u8] = [0xad, 0x7f, 0xac, 0xb2, 0x58, 0x6f, 0xc6, 0xe9, 0x66, 0xc0, 0x04, 0xd7, 0xd1, 0xd1, 0x6b, 0x02, 0x4f, 0x58, 0x05, 0xff, 0x7c, 0xb4, 0x7c, 0x7a, 0x85, 0xda, 0xbd, 0x8b, 0x48, 0x89, 0x2c, 0xa7]
+        val hashes = directory + item4_macho_hosted_be(signed, directory + 16)
+        if not item4_macho_hosted_range(signed, hashes, 32): return
+        for index in 0..32: expect(signed[hashes + index]).to_equal(expected[index])
+
+    # @req ITEM4-REQ-004 ITEM4-REQ-006
+    it "emits a PIE x64 main image with eager imports and local pointer rebases":
+        step("Link actual clang GOT, call, imported pointer and local pointer relocations")
+        val image = macho_hosted_link([item4_macho_hosted_fixture("hosted_start_x64.o")], [],
+            [item4_macho_hosted_fixture("provider_x64.dylib")], item4_macho_hosted_request(false)).unwrap()
+        step("Check dyld entry commands and independent relocated instruction fields")
+        expect(item4_macho_hosted_word(image, 12)).to_equal(2)
+        expect(item4_macho_hosted_word(image, 24) & 0x200084).to_equal(0x200084)
+        val main = item4_macho_hosted_command(image, 0x80000028)
+        expect(item4_macho_hosted_word(image, main + 8, 8)).to_equal(0x4000)
+        val loader = item4_macho_hosted_command(image, 14)
+        if loader < 0 or not item4_macho_hosted_range(image, loader, 32): return
+        expect(item4_macho_hosted_word(image, loader + 8)).to_equal(12)
+        expect(image[loader + 12]).to_equal(47u8)
+        val rpath = item4_macho_hosted_command(image, 0x8000001c)
+        expect(item4_macho_hosted_word(image, rpath + 8)).to_equal(12)
+        val uuid = item4_macho_hosted_command(image, 0x1b)
+        if uuid < 0 or not item4_macho_hosted_range(image, uuid, 24): return
+        expect(image[uuid + 14] & 0xf0u8).to_equal(0x50u8)
+        expect(image[uuid + 16] & 0xc0u8).to_equal(0x80u8)
+        expect(item4_macho_hosted_word(image, 0x4002)).to_equal(0x3ffa)
+        expect(item4_macho_hosted_word(image, 0xc008, 8)).to_equal(0x100004000)
+        expect(item4_macho_hosted_word(image, 0xc000, 8)).to_equal(0)
+        step("Check real nonempty bind/rebase streams in LINKEDIT")
+        val info = item4_macho_hosted_command(image, 0x80000022)
+        val rebase = item4_macho_hosted_word(image, info + 8)
+        if not item4_macho_hosted_range(image, rebase, 4): return
+        expect(image[rebase]).to_equal(0x11u8)
+        expect(image[rebase + 1]).to_equal(0x22u8)
+        expect(image[rebase + 2]).to_equal(8u8)
+        expect(image[rebase + 3]).to_equal(0x51u8)
+        expect(item4_macho_hosted_word(image, info + 20)).to_be_greater_than(20)
+        expect(item4_macho_hosted_word(image, info + 28)).to_equal(0)
+        expect(item4_macho_hosted_word(image, info + 36)).to_equal(0)
+        step("Compare each eager binding operand against independently specified wire bytes")
+        val expected: [u8] = [0x20, 1, 0x40, 95, 104, 101, 108, 112, 101, 114, 0, 0x51, 0x60, 0, 0x72, 16, 0x90,
+            0x20, 1, 0x40, 95, 118, 97, 108, 117, 101, 0, 0x51, 0x60, 0, 0x72, 24, 0x90,
+            0x20, 1, 0x40, 95, 118, 97, 108, 117, 101, 0, 0x51, 0x60, 0, 0x72, 0, 0x90, 0]
+        val bind = item4_macho_hosted_word(image, info + 16)
+        expect(item4_macho_hosted_word(image, info + 20)).to_equal(expected.len())
+        if not item4_macho_hosted_range(image, bind, expected.len()): return
+        for index in 0..expected.len(): expect(image[bind + index]).to_equal(expected[index])
+
+    it "selects archive definitions before imports and rebases a local GOT pointer":
+        step("Resolve the same entry against a direct object and a real BSD archive")
+        val entry = item4_macho_hosted_fixture("hosted_start_x64.o")
+        val direct = macho_hosted_link([entry, item4_macho_hosted_fixture("provider_x64.o")], [], [], item4_macho_hosted_request(false)).unwrap()
+        val archived = macho_hosted_link([entry], [item4_macho_hosted_fixture("provider_x64.a")], [], item4_macho_hosted_request(false)).unwrap()
+        expect(archived).to_equal(direct)
+        expect(item4_macho_hosted_word(direct, 0x4002)).to_equal(14)
+        expect(item4_macho_hosted_word(direct, 0xc018, 8)).to_equal(0x10000c010)
+        val info = item4_macho_hosted_command(direct, 0x80000022)
+        expect(item4_macho_hosted_word(direct, info + 20)).to_equal(1)
+
+    it "rejects TLV kind mismatch instead of binding a TLS descriptor as ordinary data":
+        step("Change the actual x64 TLV relocation to GOT_LOAD while retaining the TLS provider")
+        val original = item4_macho_hosted_fixture("hosted_tlv_x64.o")
+        val segment = item4_macho_hosted_command(original, 0x19)
+        if segment < 0: return
+        expect(item4_macho_hosted_word(original, segment + 72 + 60)).to_equal(1)
+        if item4_macho_hosted_word(original, segment + 72 + 60) != 1: return
+        val relocation = item4_macho_hosted_word(original, segment + 72 + 56)
+        if not item4_macho_hosted_range(original, relocation, 8): return
+        val info = item4_macho_hosted_word(original, relocation + 4)
+        expect(info >> 28).to_equal(9)
+        if info >> 28 != 9: return
+        val changed = item4_macho_hosted_set(original, relocation + 4, (info & 0x0fffffff) | 0x30000000)
+        expect(macho_hosted_link([changed], [], [item4_macho_hosted_fixture("hosted_tls_x64.dylib")], item4_macho_hosted_request(false)).unwrap_err()).to_contain("kind mismatch")
+
+    it "rejects unsupported local TLS definitions and invalid runtime paths before publication":
+        step("Do not mistake imported-descriptor support for local TLS allocation")
+        expect(macho_hosted_link([item4_macho_hosted_fixture("hosted_tlv_x64.o"), item4_macho_hosted_fixture("hosted_tls_provider_x64.o")], [], [], item4_macho_hosted_request(false)).unwrap_err()).to_contain("local TLS")
+        val objects = [item4_macho_hosted_fixture("hosted_start_x64.o")]
+        val providers = [item4_macho_hosted_fixture("provider_x64.dylib")]
+        var request = item4_macho_hosted_request(false)
+        request.rpaths = []
+        expect(macho_hosted_link(objects, [], providers, request).unwrap_err()).to_contain("runtime search path")
+        request.rpaths = ["@executable_path", "@executable_path"]
+        expect(macho_hosted_link(objects, [], providers, request).is_err()).to_equal(true)
+
+    it "rejects signature storage and identifier errors without partially returning an image":
+        step("Exercise the signature builder's extent and identity preconditions")
+        val bytes: [u8] = [0u8; 4096]
+        expect(macho_hosted_sign(bytes, 4096, 4096, "test").is_err()).to_equal(true)
+        expect(macho_hosted_sign(bytes, -1, 0, "test").is_err()).to_equal(true)
+        expect(macho_hosted_sign(bytes, 0, 0, "bad\0id").is_err()).to_equal(true)
+
+    it "emits ARM64 GOT page relocations and an indirect branch stub":
+        step("Link actual ARM64 GOTPAGE and GOTPAGEOFF12 input")
+        val image = macho_hosted_link([item4_macho_hosted_fixture("hosted_start_a64.o")], [],
+            [item4_macho_hosted_fixture("provider_a64.dylib")], item4_macho_hosted_request(true)).unwrap()
+        expect(item4_macho_hosted_word(image, 0x8008)).to_equal(0xd61f0200)
+        expect(item4_macho_hosted_word(image, 0x4008)).to_equal(0x14000ffe)
+        expect(item4_macho_hosted_word(image, 0x4000) & 0x9f00001f).to_equal(0x90000001)
+        expect(item4_macho_hosted_word(image, 0x4004) & 0xffc003ff).to_equal(0xf9400021)
+        step("Require a real embedded signature command, not an admission claim")
+        val signature = item4_macho_hosted_command(image, 0x1d)
+        val offset = item4_macho_hosted_word(image, signature + 8)
+        if not item4_macho_hosted_range(image, offset, 4): return
+        expect(image[offset]).to_equal(0xfau8)
+        expect(image[offset + 1]).to_equal(0xdeu8)
+        expect(image[offset + 2]).to_equal(0x0cu8)
+        expect(image[offset + 3]).to_equal(0xc0u8)
+
+    it "fails closed on missing imports incompatible provider CPU and insufficient budgets":
+        step("Keep production failures visible")
+        val objects = [item4_macho_hosted_fixture("hosted_start_x64.o")]
+        expect(macho_hosted_link(objects, [], [], item4_macho_hosted_request(false)).is_err()).to_equal(true)
+        expect(macho_hosted_link(objects, [], [item4_macho_hosted_fixture("provider_a64.dylib")], item4_macho_hosted_request(false)).is_err()).to_equal(true)
+        var request = item4_macho_hosted_request(false)
+        request.max_image_bytes = 32768
+        expect(macho_hosted_link(objects, [], [item4_macho_hosted_fixture("provider_x64.dylib")], request).is_err()).to_equal(true)

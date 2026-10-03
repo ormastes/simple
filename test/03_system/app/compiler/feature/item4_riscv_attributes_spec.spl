@@ -1,0 +1,250 @@
+"""ITEM4-REQ-004/006/007: real RV64 attribute merging through elf_static_link.
+
+Authored before implementation. Runtime status UNRUN; toolchain fixture checks
+do not execute these Simple scenarios. Tag16 follows the current psABI: LLVM21
+warns about it, so its output is not an oracle for gp-usage compatibility.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use std.common.crypto.sha1.{sha1_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_riscv_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/riscv64/" + name)
+    expect(raw.len()).to_be_greater_than(64)
+    var bytes: [i64] = []
+    for byte in raw: bytes.push(byte as i64)
+    bytes
+
+fn item4_riscv_attributes(image: [i64]) -> [i64]:
+    val parsed = elf_parse_object(image)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return []
+    val object = parsed.unwrap()
+    var result: [i64] = []
+    var count: i64 = 0
+    var index: i64 = 0
+    for section in object.sections:
+        if elf_section_name(object, index) == ".riscv.attributes":
+            count = count + 1
+            expect(section.sh_type).to_equal(0x70000003)
+            expect(section.sh_flags).to_equal(0)
+            val valid = section.sh_addr >= 0 and section.sh_addr <= image.len() and section.sh_size >= 0 and section.sh_size <= image.len() - section.sh_addr
+            expect(valid).to_equal(true)
+            if not valid: return []
+            var i: i64 = 0
+            while i < section.sh_size:
+                result.push(image[section.sh_addr + i])
+                i = i + 1
+        index = index + 1
+    expect(count).to_equal(1)
+    result
+
+fn item4_riscv_attribute_text(bytes: [i64]) -> text:
+    var result = ""
+    for byte in bytes: result = result + char_from_code(byte)
+    result
+
+fn item4_riscv_integer(bytes: [i64], tag: i64) -> i64:
+    # Fixture/output canonical envelope: A + length + riscv NUL + Tag_file + length.
+    expect(bytes.len()).to_be_greater_than(16)
+    if bytes.len() <= 16: return -1
+    expect(bytes[0]).to_equal(65)
+    expect(bytes[11]).to_equal(1)
+    var cursor: i64 = 16
+    while cursor < bytes.len():
+        val current = bytes[cursor]
+        cursor = cursor + 1
+        if current == 5:
+            while cursor < bytes.len() and bytes[cursor] != 0: cursor = cursor + 1
+            cursor = cursor + 1
+        else:
+            expect(cursor < bytes.len()).to_equal(true)
+            if cursor >= bytes.len(): return -1
+            expect(bytes[cursor]).to_be_less_than(128)
+            if bytes[cursor] >= 128: return -1
+            if current == tag: return bytes[cursor]
+            cursor = cursor + 1
+    -1
+
+fn item4_riscv_mutate_attribute(bytes: [i64], tag: i64, value: i64) -> [i64]:
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return bytes
+    val object = parsed.unwrap()
+    var result = bytes
+    for section in object.sections:
+        if section.sh_type != 0x70000003: continue
+        val valid = section.sh_addr >= 0 and section.sh_addr <= bytes.len() and section.sh_size >= 16 and section.sh_size <= bytes.len() - section.sh_addr
+        expect(valid).to_equal(true)
+        if not valid: return bytes
+        var cursor = section.sh_addr + 16
+        val end = section.sh_addr + section.sh_size
+        while cursor < end:
+            val current = bytes[cursor]
+            cursor = cursor + 1
+            if current == 5:
+                while cursor < end and bytes[cursor] != 0: cursor = cursor + 1
+                cursor = cursor + 1
+            else:
+                expect(cursor < end).to_equal(true)
+                if cursor >= end: return bytes
+                if current == tag:
+                    expect(bytes[cursor]).to_be_less_than(128)
+                    if bytes[cursor] >= 128: return bytes
+                    result[cursor] = value
+                    return result
+                cursor = cursor + 1
+    expect(false).to_equal(true)
+    bytes
+
+describe "RV64 merged object attributes":
+    it "emits a deterministic nonallocated ISA superset with merged standard properties":
+        # @req ITEM4-REQ-006 ITEM4-REQ-007
+        step("Load the RV64I entry and RV64IMAC provider produced by clang")
+        val start = item4_riscv_fixture("attr_start.o")
+        val provider = item4_riscv_fixture("attr_provider.o")
+        step("Link through the production static ELF driver")
+        val linked = elf_static_link([start, provider], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val attributes = item4_riscv_attributes(linked.unwrap())
+        step("Inspect emitted bytes for ISA union and psABI merge policies")
+        expect(item4_riscv_attribute_text(attributes)).to_contain("rv64i2p1_m2p0_a2p1_c2p0_zicsr2p0_zmmul1p0_zaamo1p0_zalrsc1p0_zca1p0")
+        expect(item4_riscv_integer(attributes, 4)).to_equal(16)
+        expect(item4_riscv_integer(attributes, 6)).to_equal(1)
+        expect(item4_riscv_integer(attributes, 14)).to_equal(1)
+        expect(item4_riscv_integer(attributes, 16)).to_equal(1)
+        val reversed = elf_static_link([provider, start], [], "_start", RelocArch.Riscv64)
+        expect(reversed.is_ok()).to_equal(true)
+        if reversed.is_err(): return
+        expect(item4_riscv_attributes(reversed.unwrap())).to_equal(attributes)
+
+    it "rejects incompatible stack alignment and gp usage before emission":
+        # @req ITEM4-REQ-006
+        step("Pair the sixteen-byte global-pointer entry with incompatible providers")
+        for name in ["attr_stack32.o", "attr_gp_shadow.o"]:
+            step("Attempt an ordinary static link")
+            val linked = elf_static_link([item4_riscv_fixture("attr_start.o"), item4_riscv_fixture(name)], [], "_start", RelocArch.Riscv64)
+            step("Require a specific ABI compatibility diagnostic")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain(if name == "attr_stack32.o": "stack alignment" else: "x3 register usage")
+
+    it "merges strengthened A6 with A7 but rejects classical A6 with A7":
+        # @req ITEM4-REQ-006
+        step("Load real A6S and A7 attribute records")
+        val start = item4_riscv_fixture("attr_start.o")
+        val provider = item4_riscv_fixture("attr_atomic7.o")
+        step("Link the compatible atomic ABI pair")
+        val compatible = elf_static_link([start, provider], [], "_start", RelocArch.Riscv64)
+        expect(compatible.is_ok()).to_equal(true)
+        if compatible.is_err(): return
+        expect(item4_riscv_integer(item4_riscv_attributes(compatible.unwrap()), 14)).to_equal(3)
+        step("Change only A6S to A6C and require incompatible-atomic rejection")
+        val classical = item4_riscv_mutate_attribute(start, 14, 1)
+        val rejected = elf_static_link([classical, provider], [], "_start", RelocArch.Riscv64)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_ok(): return
+        expect(rejected.unwrap_err()).to_contain("atomic ABI")
+
+    it "rejects conflicting floating-point register architectures":
+        # @req ITEM4-REQ-006
+        step("Load real RV64IF and RV64IZfinx objects using the same soft-float ABI")
+        val start = item4_riscv_fixture("attr_float_start.o")
+        val provider = item4_riscv_fixture("attr_finx_provider.o")
+        step("Merge their ISA requirements through the full link")
+        val linked = elf_static_link([start, provider], [], "_start", RelocArch.Riscv64)
+        step("Require the incompatible-register ISA diagnostic")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("f and zfinx")
+
+    it "merges selected archive members without importing an unused incompatible member":
+        # @req ITEM4-REQ-003 ITEM4-REQ-006
+        step("Load an archive containing the selected provider and an unused stack32 duplicate")
+        val start = item4_riscv_fixture("attr_start.o")
+        val archive = item4_riscv_fixture("libattr_provider.a")
+        step("Extract only the definition required by the entry")
+        val linked = elf_static_link([start], [archive], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        step("Require the selected member's sixteen-byte ABI and ISA extension union")
+        val attributes = item4_riscv_attributes(linked.unwrap())
+        expect(item4_riscv_integer(attributes, 4)).to_equal(16)
+        expect(item4_riscv_attribute_text(attributes)).to_contain("_m2p0_a2p1_c2p0_")
+
+    it "rejects malformed attribute envelopes and unterminated ISA strings":
+        # @req ITEM4-REQ-006
+        step("Locate the real entry's attribute record before bounded mutations")
+        val original = item4_riscv_fixture("attr_start.o")
+        val parsed = elf_parse_object(original)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        var offset: i64 = -1
+        var size: i64 = 0
+        for section in parsed.unwrap().sections:
+            if section.sh_type == 0x70000003:
+                offset = section.sh_addr
+                size = section.sh_size
+        val valid = offset >= 0 and offset <= original.len() and size >= 26 and size <= original.len() - offset
+        expect(valid).to_equal(true)
+        if not valid: return
+        expect(original[offset + 16]).to_equal(5)
+        if original[offset + 16] != 5: return
+        for mode in [0, 1, 2, 3]:
+            var bytes = original
+            if mode == 0: bytes[offset] = 66
+            elif mode == 1: bytes[offset + 5] = 98
+            elif mode == 2:
+                var i: i64 = 1
+                while i <= 4:
+                    bytes[offset + i] = 255
+                    i = i + 1
+            else:
+                var i: i64 = 25
+                while i < size:
+                    bytes[offset + i] = 97
+                    i = i + 1
+            step("Attempt a static link with the malformed metadata")
+            val linked = elf_static_link([bytes, item4_riscv_fixture("attr_provider.o")], [], "_start", RelocArch.Riscv64)
+            step("Require a format, vendor, length or string failure instead of dropping metadata")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            val diagnostics = ["format must be A", "unsupported RISC-V attribute vendor", "vendor length exceeds section", "string is unterminated"]
+            expect(linked.unwrap_err()).to_contain(diagnostics[mode])
+
+    it "includes emitted attributes in the final build-id digest":
+        # @req ITEM4-REQ-007
+        step("Link real objects whose merged metadata extends the ELF section table")
+        val linked = elf_static_link([item4_riscv_fixture("attr_start.o"), item4_riscv_fixture("attr_provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val attributes = item4_riscv_attributes(image)
+        expect(attributes.len()).to_be_greater_than(16)
+        val parsed = elf_parse_object(image)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        var digest_offset: i64 = -1
+        var index: i64 = 0
+        for section in parsed.unwrap().sections:
+            if elf_section_name(parsed.unwrap(), index) == ".note.gnu.build-id": digest_offset = section.sh_addr + 16
+            index = index + 1
+        val valid = digest_offset >= 0 and digest_offset <= image.len() and 20 <= image.len() - digest_offset
+        expect(valid).to_equal(true)
+        if not valid: return
+        step("Independently hash the whole emitted image with the digest field zeroed")
+        var preimage = image
+        index = 0
+        while index < 20:
+            preimage[digest_offset + index] = 0
+            index = index + 1
+        val expected = sha1_bytes(preimage)
+        index = 0
+        while index < 20:
+            expect(image[digest_offset + index]).to_equal(expected.get(index))
+            index = index + 1
