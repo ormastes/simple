@@ -7,6 +7,48 @@ use compiler.backend.linker.native_freestanding.{
 use compiler.backend.linker.reloc_engine.{RelocArch}
 
 describe "ITEM4 explicit freestanding file adapter":
+    it "publishes a real Mach-O archive link with an explicit static entry":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006
+        step("Link a Mach-O entry and archive through the explicit file adapter")
+        expect(dir_create_all("build/item4_freestanding")).to_equal(true)
+        val output = "build/item4_freestanding/macho"
+        expect(remove_file_if_exists(output)).to_equal(true)
+        val config = NativeFreestandingLinkConfig(format: NativeFreestandingFormat.MachO,
+            target: RelocArch.X86_64, entry: "_start", output_byte_limit: 1048576,
+            executable: false)
+        val linked = link_freestanding_to_native_v1(["test/fixtures/linker/macho/start_x64.o"],
+            ["test/fixtures/linker/macho/provider_x64.a"], output, config)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        expect(linked.unwrap().engine_id).to_equal("internal:macho")
+        val bytes = file_read_bytes(output)
+        expect(bytes.len()).to_be_greater_than(16384)
+        if bytes.len() <= 16384: return
+        expect(bytes[0:4]).to_equal([207, 250, 237, 254])
+        expect(bytes[12]).to_equal(2)
+        expect(remove_file_if_exists(output)).to_equal(true)
+
+    it "routes RV64 files to the static ELF driver":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006
+        step("Link real RV64 instructions and their archive provider")
+        expect(dir_create_all("build/item4_freestanding")).to_equal(true)
+        val output = "build/item4_freestanding/riscv"
+        expect(remove_file_if_exists(output)).to_equal(true)
+        val config = NativeFreestandingLinkConfig(format: NativeFreestandingFormat.Elf,
+            target: RelocArch.Riscv64, entry: "_start", output_byte_limit: 1048576,
+            executable: false)
+        val linked = link_freestanding_to_native_v1(["test/fixtures/linker/riscv64/start.o"],
+            ["test/fixtures/linker/riscv64/libprovider.a"], output, config)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        expect(linked.unwrap().engine_id).to_equal("internal:elf")
+        val bytes = file_read_bytes(output)
+        expect(bytes.len()).to_be_greater_than(64)
+        if bytes.len() <= 64: return
+        expect(bytes[18]).to_equal(243)
+        expect(bytes[19]).to_equal(0)
+        expect(remove_file_if_exists(output)).to_equal(true)
+
     it "publishes actual ELF bytes and the internal engine identity":
         # @req ITEM4-REQ-002, ITEM4-REQ-006
         step("Link real ELF files using explicit static configuration")
