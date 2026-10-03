@@ -1,4 +1,4 @@
-/* Hosted Rust seed's narrow Linux providers. The full C runtime owns these
+/* Hosted Rust seed's narrow POSIX providers (Linux and macOS). The full C runtime owns these
  * entry points in runtime_native.c and runtime_thread.c; those translation
  * units cannot be linked into the Rust seed without duplicate rt_* owners. */
 #include "runtime.h"
