@@ -36,10 +36,21 @@ not current artifact availability. Reproduction commands are never executed by
 admission. Responses identify the committed local HEAD, revision and replay
 status; they are not protected remote settlement receipts.
 
-Verification of declared CAS artifacts does not yet prove the complete mapping
-from source and test-definition revisions to their reproduction artifacts.
-That mapping and complete reproducibility remain open acceptance work, even
-when every declared dependency is available.
+Explicit v2 source-snapshot and test-definition mapping records bind immutable
+semantic revisions to separately addressed CAS artifacts. A bound reproduction
+references those exact records and explicitly declares the artifacts' current
+availability. A new signed reproduction can report later source loss while
+preserving the original source/test mapping identities. Standalone mapping
+capture requires available bytes; a bound batch can declare unavailable bytes
+honestly. Generic legacy `test` identities are not silently converted into the
+new `test_definition` identity kind.
+
+Previously accepted v1 records retain their signed encoding and replay behavior.
+Fresh custom failures require the explicit v2 mapping; a name, private path or
+semantic revision treated as a CAS address cannot substitute for it. Mapping
+artifacts are opaque captured bytes. Complete source-tree capture, correspondence
+to a Git commit, environment/instruction completeness and successful reproduction
+still require separate evidence, even when all declared artifacts are available.
 
 Captured settled-alias dependency validation is covered by the Paged source
 path. Reference command admission still lacks that alias-resolution path;
@@ -347,6 +358,7 @@ insufficient for claiming the adapter operational.
 - [Configuration and reproduction admission checkpoint](../../../05_design/simple_distributed_textual_databases_reproduction_admission.md)
 - [Paged historical regression design](../../../05_design/simple_distributed_textual_databases_paged_history_regressions.md)
 - [Retention repair design](../../../05_design/simple_distributed_textual_databases_retention_repair.md)
+- [Versioned source/test artifact binding](../../../05_design/simple_distributed_textual_databases_source_binding.md)
 - [System-test plan](../../../03_plan/sys_test/simple_distributed_textual_databases.md)
 - [Parallel agent plan](../../../03_plan/agent_tasks/simple_distributed_textual_databases.md)
 - [System-spec manual](../../../06_spec/03_system/app/scv/feature/simple_distributed_textual_databases_spec.md)

@@ -1,7 +1,7 @@
 # System test plan: Simple distributed textual databases
 
 **Selection:** Authority A / Adapters A / Operating B / Retention A  
-**Status:** Full acceptance remains unproved: 20 of 153 scenarios invoke actual production owners; 133 retain explicit fail-fast checkers. Three additional pure identity-map prerequisite cases are not durable acceptance. All sources remain unexecuted; this is not a recorded TDD RED/GREEN result.
+**Status:** Full acceptance remains unproved: 21 of 153 scenarios invoke actual production owners; 132 retain explicit fail-fast checkers. Three additional pure identity-map prerequisite cases are not durable acceptance. All sources remain unexecuted; this is not a recorded TDD RED/GREEN result.
 **Executable:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`  
 **Manual:** `doc/06_spec/03_system/app/scv/feature/simple_distributed_textual_databases_spec.md`
 
@@ -70,7 +70,7 @@ The five canonical steps remain visible. Happy, boundary, and failure names are 
 | REQ-016 | should prove that it persists all ten immutable evidence entity kinds with revision links | should prove that it shares one run manifest across compact observation references | should prove that it rejects mutation of an admitted evidence revision | `check_test_evidence_contract` | Missing: explicit fail-fast |
 | REQ-017 | should prove that it deduplicates identical provider identity and payload digest | should prove that it retains a genuine rerun under a distinct attempt identity | should prove that it quarantines identical observation identity with changed bytes | `check_test_evidence_contract` | Missing: explicit fail-fast |
 | REQ-018 | should prove that it classifies immutable actual outcome against a pinned expectation | should prove that it records XPASS signature mismatch infrastructure and incomplete distinctly | should prove that it prevents observation ingestion from rewriting expectation policy | `check_test_evidence_contract` | Missing: explicit fail-fast |
-| REQ-019 | should prove that it binds a custom failure to exact config and reproduction revisions | should prove that it records restricted expired and missing dependency availability honestly | should prove that it rejects moving names private paths or mutable jj IDs as reproducibility | `check_test_evidence_contract` | Missing: explicit fail-fast |
+| REQ-019 | should prove that it binds a custom failure to exact config and reproduction revisions | should prove that it records restricted expired and missing dependency availability honestly | should prove that it rejects moving names private paths or mutable jj IDs as reproducibility | Happy: `check_item2_artifact_apply`; remaining: `check_test_evidence_contract` | Happy owner source exists, UNEXECUTED; boundary/failure remain fail-fast |
 | REQ-020 | should prove that it closes a run only after all declared chunks and digests reconcile | should prove that it records skipped missing retried and superseded shards explicitly | should prove that it keeps absent observations NOT_RUN or INCOMPLETE rather than PASS | `check_test_evidence_contract` | Missing: explicit fail-fast |
 | REQ-021 | should prove that it accepts CI observations and evidence under append-only authority | should prove that it records untrusted fork evidence without release qualification | should prove that it rejects CI attempts to approve expectations close bugs or promote configs | `check_test_evidence_contract` | Missing: explicit fail-fast |
 | REQ-022 | should prove that it settles through exact-head CAS protection and read-back capabilities | should prove that it classifies a stale-head race separately from transport failure | should prove that it disables allocator mode without admitted protection or read-back | `check_bridge_contract` | Missing: explicit fail-fast |
@@ -128,3 +128,36 @@ All ten are UNEXECUTED pending an admitted runtime.
 Fixtures create real signed observations, CAS envelopes, rollups and prepared
 deletion state. Independent test sources preceded the owner commit; without
 execution this establishes test-first authoring, not RED/GREEN evidence.
+
+## Source/test artifact binding acceptance contract, 2026-10-03
+
+This continues REQ-019 without changing the selected requirements. The concrete
+test source is `test/02_integration/app/scv_db_artifact_binding_it_spec.spl`, with
+real signed records/CAS objects from `test/fixtures/scv/db_artifact_binding_fixture.spl`.
+Implementation and source cases are in progress; nothing in this contract is an
+executed acceptance result or closure of the full requirement.
+
+| Setup/action | Required observable result |
+|---|---|
+| Admit explicit v2 source/test mapping records and a bound reproduction through Reference and Paged owners | Stored signed records retain exact UIDs and semantic revisions; reopened CAS verifies the separately bound artifact digests |
+| Substitute source reference/revision, test mapping, or a semantic revision as a CAS locator | Reject without semantic or accepted-batch publication; never infer an artifact address from a semantic digest |
+| Bind source/test artifact digests without signed availability declarations | Refuse missing declarations; contradictory declarations for shared digests reject |
+| Capture available mappings, lose source bytes, then submit a new signed bound reproduction declaring missing | Preserve the original source/test mapping identities, observe actual absence, and avoid a reproducibility claim |
+| Supply truthful missing/restricted artifacts in the same binding batch | Preserve explicit unavailable state and protect the available closure; corruption and unreadability remain errors |
+| Reference mappings in captured prior generations or through valid Paged aliases | Resolve the bounded transitive closure with one cumulative proof budget; reject wrong context/revision |
+| Decode/replay prior accepted v1 records | Preserve canonical signed bytes and original accepted identity; a fresh legacy custom failure without mapping is rejected |
+| Prepare/recover actual queued settlement | Enforce the same binding and content owner before new publication, preserving the original signed patch |
+| Install a signed checkpoint that rewrites or drops an existing mapping | Reject immutable-row regression; a valid preservation case retains original bindings |
+
+Availability is not part of source/test mapping identity. A standalone descriptor
+capture requires available bytes; a bound batch supplies its explicit signed
+availability, including truthful unavailable states. The source artifact is an
+exact opaque byte object: this does not prove complete source-tree capture,
+Git commit correspondence, a defined execution environment or successful
+reproduction. Those claims require separate formats and acceptance evidence.
+
+The integrated checkpoint contains nine new binding integration scenarios and
+an actual-owner REQ-019 happy system scenario. Genuine legacy-v1 accepted replay
+and explicit checkpoint mapping-drop cases still need dedicated source oracles;
+current checkpoint coverage verifies preservation and rewrite refusal. The
+full boundary/failure system scenarios remain explicit fail-fast.

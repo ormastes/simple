@@ -1,6 +1,6 @@
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-019 happy, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -39,6 +39,10 @@ use std.scv.db_alias_cell.*
 use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
 use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_root, setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_ref}
+use test.fixtures.scv.db_artifact_binding_fixture.*
+use test.fixtures.scv.db_observation_fixture.{check_item2_observation_cleanup}
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.{db_reproduction_row}
 
 fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContext):
     val root = setup_item2_paged_root()
@@ -582,7 +586,54 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
         it "should prove that it binds a custom failure to exact config and reproduction revisions":
             step("Classify configuration-bound evidence")
             step("Drive accepted state and inspect its receipt")
-            check_test_evidence_contract("REQ-019", "drive accepted configuration and reproduction state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            for paged in [false, true]:
+                val fixture = setup_item2_artifact_fixture(paged)
+                val wire = db_patch_encode(fixture.patch).unwrap()
+                val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+                expect(db_store_read(fixture.source, if paged: "paged" else: "semantic").head).to_equal(head)
+                for record in fixture.records:
+                    val reference = db_reproduction_reference(record)
+                    if paged:
+                        val row = db_paged_current_row(fixture.source, fixture.policy, reference.entity).unwrap().unwrap()
+                        expect(db_reproduction_row(row).unwrap()).to_equal(record)
+                        expect(row.revision).to_equal(fixture.patch.batch_id)
+                    else:
+                        val image = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image
+                        var found = false
+                        for row in image.state.rows:
+                            if row.entity == entity_ref_canonical(reference.entity):
+                                expect(db_reproduction_row(row).unwrap()).to_equal(record)
+                                expect(row.revision).to_equal(fixture.patch.batch_id)
+                                found = true
+                        expect(found).to_be(true)
+                        expect(image.state.accepted[0].batch_id).to_equal(fixture.patch.batch_id)
+                val source_ref = db_reproduction_reference(fixture.records[3])
+                val test_ref = db_reproduction_reference(fixture.records[4])
+                match fixture.records[1]:
+                    BoundReproduction(value, source):
+                        expect(source).to_equal(source_ref)
+                        expect(value.source_revision).to_equal(source_ref.revision)
+                        expect(value.test_definition).to_equal(test_ref)
+                        expect(value.config).to_equal(db_reproduction_reference(fixture.records[0]))
+                    _: fail("expected exact bound reproduction")
+                match fixture.records[2]:
+                    Observation(value):
+                        expect(value.actual).to_equal("FAIL")
+                        expect(value.custom_config).to_be(true)
+                        expect(value.reproduction).to_equal(Some(db_reproduction_reference(fixture.records[1])))
+                        expect(value.source_revision).to_equal(source_ref.revision)
+                        expect(value.test_definition).to_equal(test_ref)
+                    _: fail("expected immutable custom failure")
+                for record in [fixture.records[3], fixture.records[4]]:
+                    val digest = setup_item2_artifact_digest(record)
+                    expect(digest == db_reproduction_reference(record).revision).to_be(false)
+                    val actual = db_evidence_store_get(fixture.source, fixture.sources.evidence_parent, digest[10:], 0u64, db_retention_store_quota()).unwrap()
+                    expect(actual.digest).to_equal(digest[10:])
+                val retained = db_store_read(fixture.source, "retention")
+                expect(check_item2_artifact_apply(fixture, head).unwrap()).to_equal(head)
+                expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+                expect(db_patch_encode(fixture.patch).unwrap()).to_equal(wire)
+                check_item2_observation_cleanup(fixture)
 
         it "should prove that it records restricted expired and missing dependency availability honestly":
             step("Classify configuration-bound evidence")

@@ -365,3 +365,16 @@ research independently reviewed the root command routes and performed a
 read-only runner-admission audit. Root reviewed and integrated the two commits.
 One source fix cycle added the permanent companion-pin invariant. No runtime
 test pass or final production/model approval is implied by these source reviews.
+
+### Source/test binding follow-up
+
+The next isolated branches start at `76899528004`: core owns the five pure
+model/codec/projection/admission/planner files; research owns effect expansion,
+artifact inspection, checkpoint preservation, the focused lifecycle fix and
+local design/research; evidence owns new binding fixtures/specs plus existing
+fixture compatibility. Root owns domain research, the actual-owner REQ-019 happy
+system scenario, companion manual and shared plans/guide. Core and research
+cross-review production changes; core reviews independent fixtures and research
+reviews the root system scenario. Root integrates scoped commits. Two effect
+fix cycles and one root system-oracle correction are source-review evidence,
+not runtime RED/GREEN or final production approval.

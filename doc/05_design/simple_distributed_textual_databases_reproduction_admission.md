@@ -117,3 +117,18 @@ the marker, and no-marker retry explicitly makes no fresh availability claim.
 This supersedes only the earlier missing-repair statement. Source/test artifact
 mapping, Reference alias support, large-object/scalable retention and all runtime
 qualification remain open. The new owner is not a pin-release or unlink API.
+
+## 2026-10-03 source/test mapping implementation delta
+
+Explicit v2 source/test mapping and bound-reproduction records now extend the
+original v1 codec; see [source binding design](simple_distributed_textual_databases_source_binding.md).
+Source/test semantic identity is independent of artifact availability. Exact
+captured lookup resolves the bounded transitive records, and signed current
+declarations drive actual content inspection. A new bound reproduction can
+record later loss without replacing source/test identities. Existing permanent
+protection then becomes an explicit incomplete marker until trusted repair.
+
+This supersedes the earlier missing-mapping-owner statement only. Opaque artifact
+binding does not prove complete source-tree capture or execution/environment
+completeness. Reference alias support, large-object/scalable retention and all
+runtime qualification remain open. The full REQ-019 acceptance is unproved.

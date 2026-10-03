@@ -247,3 +247,51 @@ label it `UNADMITTED`; `native.receipt.env` records raw exit zero only. HIR
 reported `SCV-E-ADMISSION: compile-event-journal-missing`. This supplies no
 admitted full runner. No binary was probed, build launched or other process
 interrupted. Runtime/core/MCP/host/coverage/performance gates remain unverified.
+
+## Versioned source/test artifact binding continuation
+
+Integrated pure codec/projection `e2423b6757c`, effect/checkpoint owners
+`1d5f6bb4b8e`, lifecycle repair `c0ad70a4f30` and independent regression sources
+`750faf70365`, on the release-based local integration branch. New v2 source/test
+mapping records bind exact semantic revisions to separate CAS addresses; bound
+reproductions declare each mapped artifact's current availability. Source/test
+identities stay unchanged when a new signed reproduction reports later loss.
+Legacy v1 value encodings, headers and revision domains were preserved by source
+inspection; genuine prior-v1 accepted replay still needs a dedicated test.
+
+Captured transitive lookup uses a bounded record closure and cumulative Paged
+proof cache. A shared planning-round guard replaces divergent 8/12-round caps:
+9 fixed proof phases plus two per bounded 64-record layer and one Ready iteration
+give a conservative 138-round ceiling. Valid typed dependencies need at most
+14 iterations. Byte/key/node quotas are unchanged, and this is not a performance
+measurement. Checkpoint preservation now includes immutable reproduction and
+source/test mappings in every existing backend preservation path.
+
+Two bounded effect review fixes prevented incorrect availability inheritance
+between distinct descriptors sharing a CAS digest and allowed honest loss of a
+previously registered, permanently pinned root. The latter retains a whole-catalog
+incomplete marker; new missing/restricted roots still cannot acquire fabricated
+protection. Corruption, quota and scope errors remain errors. The earlier repair
+owner verifies restored closure before clearing that marker.
+
+Nine new integration scenarios cover real objects, exact mappings, wrong/missing
+references, declaration conflicts, actual restricted/missing/corrupt evidence,
+source-loss identity preservation, replay/key revocation and signed checkpoint
+preservation/rewrite refusal. Existing observation/settlement fixtures were
+updated before Paged genesis and now check original signed wires and artifact
+pins. Explicit checkpoint mapping-drop and genuine legacy-v1 accepted replay
+oracles remain missing; there is no claim that those cases executed elsewhere.
+
+REQ-019's happy system placeholder now calls actual Reference/Paged owners,
+reopens canonical rows and CAS bytes, checks exact config/source/test/reproduction
+links, and verifies accepted replay without changing retention. Independent
+source review added the Paged replay oracle. The companion manual's source fold
+matches exactly. System inventory is now 21 actual-owner sources and 132 explicit
+fail-fast cases, plus three pure prerequisites. All sources remain UNEXECUTED.
+
+Local and domain research, focused design, operator guide and acceptance plans
+record the distinction between opaque artifact binding and complete source-tree,
+Git-commit or environment/instruction capture. Full reproduction, Reference alias
+support, scalable retention, protected publication, migration and the selected
+Operating B targets remain open. No additional runner probe or bootstrap was
+performed in this continuation; no runtime/core/MCP/coverage/release PASS exists.
