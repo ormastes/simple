@@ -4,7 +4,7 @@ set -eu
 die() { echo "managed-phases: $*" >&2; exit 2; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 sha() { sha256sum "$1" | cut -d ' ' -f 1; }
-root= source= inventory= builder= emitter= template= cap= reserve= threads= disk= floor= poll= lifetime=
+root= source= inventory= builder= emitter= template= cap= reserve= threads= disk= floor= poll= lifetime= memory_policy=enforce
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 for arg in "$@"; do
   case "$arg" in
@@ -15,14 +15,17 @@ for arg in "$@"; do
     --threads=*) threads=${arg#*=} ;; --estimated-group-disk-bytes=*) disk=${arg#*=} ;;
     --minimum-free-disk-bytes=*) floor=${arg#*=} ;; --poll-ms=*) poll=${arg#*=} ;;
     --lifetime-ms=*) lifetime=${arg#*=} ;;
+    --memory-policy=*) memory_policy=${arg#*=} ;;
   esac
 done
+case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
 for path in "$root" "$source" "$inventory" "$builder" "$emitter" "$template"; do
   case "$path" in /*|[A-Za-z]:/*) ;; *) die "absolute admitted inputs required" ;; esac
 done
-for number in "$cap" "$reserve" "$threads" "$disk" "$floor" "$poll" "$lifetime"; do
+for number in "$cap" "$reserve" "$threads" "$disk" "$floor" "$poll"; do
   case "$number" in ''|0|0*|*[!0-9]*) die "positive resource bounds required" ;; esac
 done
+case "$lifetime" in 0) ;; ''|0*|*[!0-9]*) die "nonnegative work lifetime required" ;; esac
 overhead=268435456
 [ "$cap" -gt "$overhead" ] || die "phase cap cannot hold manager overhead"
 inner_cap=$((cap - overhead))
@@ -101,8 +104,8 @@ printf '%s\n' SIMPLE-MANAGED-PHASE-POLICY-1 "$aggregate" "$cap" "$overhead" "$re
 publish_exact "$policy.candidate.$$" "$policy"
 # This receipt pins the shell executable and every sourced file through the
 # two generated task manifests. The compiled owner alone admits resources.
-# Parent lifetime includes capacity waiting. Each task's effective deadline
-# is min(its 24h generic limit, remaining parent lease); expiry cannot reset it.
+# Parent work lifetime includes capacity waiting. Zero disables that work
+# deadline; finite ownership/control leases and cleanup remain independent.
 sh "$stage/scripts/bootstrap/lib/managed-phase-launch.shs" \
   "--builder=$builder" "--builder-sha256=$(sha "$builder")" \
   "--emitter=$emitter" "--emitter-sha256=$(sha "$emitter")" \
@@ -111,7 +114,8 @@ sh "$stage/scripts/bootstrap/lib/managed-phase-launch.shs" \
   "--stage-root=$stage" "--inventory=$stage/.managed/source.inventory" "--links=$stage/.managed/source.links" \
   "--root=$phase_state" --phase3-command=.managed/phase3.shs --phase4-command=.managed/phase4.shs \
   "--phase3-memory-bytes=$cap" "--phase4-memory-bytes=$cap" \
-  "--policy=$policy" "--policy-sha256=$(sha "$policy")" "--poll-ms=$poll" "--lifetime-ms=$lifetime" || {
+  "--policy=$policy" "--policy-sha256=$(sha "$policy")" "--poll-ms=$poll" "--lifetime-ms=$lifetime" \
+  "--memory-policy=$memory_policy" || {
     code=$?
     echo "managed-phases: aggregate owner exit=$code; retained authority and children require typed recovery" >&2
     exit "$code"
