@@ -184,11 +184,12 @@ its explicit admission seam accepts only known runtime-read names after a caller
 has established their authority. Production wiring remains fail-closed until
 MIR origin/resolution evidence exists.
 
-Within an admitted region, keys frame typed scalar/string identities and local
+Within an admitted region, keys frame typed scalar identities and local
 definition versions. Cached results are usable only while their destination
 version remains current. Consuming moves, unknown effects and unclassified
-instructions fence reuse. Aggregate and floating constant keys fail closed
-rather than equating coarse category labels or lossy text representations.
+instructions fence reuse. Aggregate, string and floating constant operands fail
+closed rather than equating allocation identity with payload equality, coarse
+category labels or lossy text representations.
 Length and other read reuse share these legality rules. The system fixtures
 exercise the block API; they do not establish production admission.
 

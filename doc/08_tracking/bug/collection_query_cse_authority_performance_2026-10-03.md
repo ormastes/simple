@@ -25,7 +25,8 @@ Follow-up acceptance:
    measure repeated-read and repeated-length workloads before and after wiring.
 4. Restore performance only when semantic and backend parity gates pass.
 
-Aggregate and floating constants also fail closed for query identity until
+Aggregate, string and floating constants also fail closed for query identity until
 exact typed value/allocation identity can be established. Array/tuple/struct
-category labels and decimal float rendering are not adequate identity proofs.
+category labels, equal string payloads and decimal float rendering are not
+adequate identity proofs for the entire runtime-read family.
 This issue remains open; it is not a completed full planner requirement.

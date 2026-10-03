@@ -101,7 +101,17 @@ and spec lanes `work/item3-query-cse-20261003` and
 Tests-first commits `a3861fefd52`, `aa45407a49a`, and parent `45fda607c84`
 cover query ownership, framed constant identities, local/result redefinition,
 consuming moves and effect barriers. The parent system slice is CP-MIR-01–05.
-All remain unexecuted. Independent source review is required before integration.
+All remain unexecuted. Source commit `97ffa878e45` was integrated as
+`623e56a178c` after the tests. Independent review found two follow-ups: retain
+malformed-local rejection and reject string literal payload equality as general
+runtime pointer identity. Test-first correction `d9efd1639dd` also adds a
+supported scalar/local positive control. The unit and system additions total
+25 scenarios, without claiming 25 passing checks.
+Source follow-up `87d96188ab0` resolves both review findings. Three preexisting
+hoisting fixtures were also corrected to assert preserved instructions and
+terminators with zero hoist counters, matching the already-disabled production
+hoisting implementation. Runtime tests and compiler/lib/MCP/LSP smoke gates
+remain blocked; source review is not a substitute for those checks.
 
 Runtime-looking names alone are not ownership evidence. The implementation
 seam defaults to an empty admitted-read set; production admission is deferred
