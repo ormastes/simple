@@ -11,10 +11,10 @@ Each remaining `@inline` checker owns its named setup contract: `setup_replica_f
 REQ-001 now creates two independent filesystem roots, reserves actual durable
 offline IDs, restores a saved counter and old handle to exercise rollback, and
 checks a separately signed actor-counter collision against persisted accepted
-state. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. These six authored oracles retain the existing step names. This manual
+state. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
 annotation is not a generated test-run receipt; docgen/execution remains pending.
 
-The five visible flows are:
+The five feature flows use these steps (typed-patch scenarios add transport and publication-specific steps):
 
 1. `step("Create offline semantic changes")`
 2. `step("Settle compact identifiers")`
@@ -353,13 +353,13 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
     describe "REQ-010: Typed patches":
         it "should prove that it round-trips every required patch identity dependency and operation field":
-            step("Settle compact identifiers")
+            step("Transport signed typed patches")
             val root = setup_item2_apply_root()
             val patch = setup_item2_wire_patch()
             val wire = db_patch_encode(patch).unwrap()
             expect(file_write("{root}/signed-patch", wire)).to_be(true)
             val decoded = db_patch_decode(file_read("{root}/signed-patch")).unwrap()
-            step("Drive accepted state and inspect its receipt")
+            step("Read back every signed transport field")
             # Transport receipt only; this deliberately mixed operation vector
             # is not claimed to be one semantically admissible transaction.
             expect(decoded).to_equal(patch)
@@ -371,7 +371,7 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
             expect(pure_ed25519_verify(public_key, db_patch_signing_bytes(decoded).unwrap(), decoded.signature)).to_be(true)
 
         it "should prove that it preserves ordered operations and explicit preconditions":
-            step("Settle compact identifiers")
+            step("Transport signed typed patches")
             val root = setup_item2_apply_root()
             val first_patch = setup_item2_apply_patch(1, "")
             val first = db_apply_local(root, "", first_patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
@@ -385,7 +385,7 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
             ordered = setup_item2_apply_resign(ordered)
             expect(file_write("{root}/ordered-patch", db_patch_encode(ordered).unwrap())).to_be(true)
             val decoded = db_patch_decode(file_read("{root}/ordered-patch")).unwrap()
-            step("Drive the boundary state and inspect preserved invariants")
+            step("Apply ordered updates and reject stale preconditions")
             expect(decoded.operations).to_equal(ordered.operations)
             val policy = setup_item2_apply_policy([ordered])
             val applied = db_apply_local(root, first.head, decoded, setup_item2_apply_merge(), policy, 10).unwrap()
@@ -404,7 +404,7 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
             expect(after.head).to_equal(before.head)
 
         it "should prove that it rejects a patch missing signature provenance or version identity":
-            step("Settle compact identifiers")
+            step("Transport signed typed patches")
             val root = setup_item2_apply_root()
             val initial = setup_item2_apply_patch(1, "")
             val applied = db_apply_local(root, "", initial, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
@@ -428,7 +428,7 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
             var no_signature_version = valid
             no_signature_version.signature_version = 0
             no_signature_version = db_patch_seal(no_signature_version).unwrap()
-            step("Inject the failure and inspect fail-closed state")
+            step("Reject incomplete envelopes without publication")
             val policy = setup_item2_apply_policy([valid])
             expect(db_apply_local(root, applied.head, unsigned, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
             expect(db_apply_local(root, applied.head, no_provenance, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNED_PROVENANCE_REQUIRED"))

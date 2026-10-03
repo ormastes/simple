@@ -26,16 +26,18 @@ crash durability, cross-platform qualification, or a measured scale result.
 | Settlement receipts | `db_receipt.spl` | Actual signed receipt bytes, pinned authority, hash-chain binding and allocator regression checks; Git ancestry remains an independent transport proof |
 | Allocation projection | `db_allocation.spl`, `db_identity_snapshot.spl` | Admission before allocation, preserved canonical UIDs, contextual aliases, recursive typed-reference projection and complete allocator snapshot |
 | Patch interchange | `db_patch_codec.spl` | Strict versioned round-trip of every patch field, operation, structured reference and signature; original digest checked before normalization |
-| Receipt index | `db_receipt_index.spl` | Three identical immutable entry projections, signed successor/history validation and corruption rejection; protected Git publication remains separate |
+| Receipt index | `db_receipt_index.spl` | Three identical immutable projections, signed successor/history checks, exact-ref Git append and readback; signed profile/ruleset examination is evidence only, not production admission |
 | CI persistence | `src/app/scv/db/ci_store.spl`, `ci_readback.spl` | Multiplexed durable discovery and cursor CAS after actual Git tree/blob, signed receipt and external evidence closure checks |
-| Bounded pages | `db_pages.spl`, `src/app/scv/db/page_store.spl` | Immutable hash-bucket pages, canonical manifest, bounded affected-page updates and durable page/manifest publication; paged semantic reducer integration remains open |
+| Bounded pages | `db_pages.spl`, `src/app/scv/db/page_store.spl` | Immutable hash-bucket pages, canonical manifest, bounded affected-page updates and durable page/manifest publication; authoritative transaction source is now integrated separately; runtime/scale remain unverified |
 | Host paths | `src/lib/nogc_sync_mut/io/path_identity.spl` | Existing-path kernel resolution on Windows and realpath on POSIX, explicit errors and no lexical fallback; local generation/actor owners consume it |
 | Recovery journal | `src/app/scv/db/settlement_journal.spl` | Signed candidate and exact tree/blob inventory persisted before publication; actual remote ancestry read-back advances only to awaiting-index |
 | Quarantine | `src/app/scv/db/quarantine_store.spl` | Bounded uncompressed patch bundles imported into external CAS; reopening revalidates bytes; promotion preparation checks independent signature/metadata/ACL policy |
-| Trusted configuration and CLI | `db_policy_codec.spl`, `src/app/scv/db/commands.spl` | Independently pinned complete admission/merge policy; local status/apply and explicitly unverified patch inspection through `scv db` |
+| Trusted configuration and CLI | `db_policy_codec.spl`, `src/app/scv/db/commands.spl` | Independently pinned complete admission/merge policy; reference and explicit paged status/apply, bounded quarantine import/inspection, and selected-batch application through `scv db` |
 | Typed indexed projections | `db_page_records.spl`, `db_page_projection.spl`, `semantic_page_store.spl` | Generation-bound row/alias/accepted/actor-counter queries and paired incremental projection updates; imported revision claims are not authoritative paged admission |
 | Canonical provider follow-up | `github_binding_owner.spl` | Durable acknowledgement plus fresh scoped GET for new signed binding/common-state writes; generic producer entry rejects reserved entity kinds; historical replay reauthorizes accepted bytes |
-| Retention effects | `retention_store.spl`, `retention_codec.spl`, `evidence_delete.spl` | Durable pending deletion, verified rollup/provenance, same-lease current-pin checks, actual unlink/absence receipts and honest resolution; bounded reference lane, not Operating B qualification |
+| Retention effects | `retention_store.spl`, `retention_codec.spl`, `evidence_delete.spl` | Durable pending deletion, verified rollup/provenance, same-lease current-pin and retained-root dependency closure checks, actual unlink/absence receipts and honest resolution; bounded reference lane, not Operating B qualification |
+
+| Authoritative paged transactions | `db_paged_*.spl`, `paged_store.spl` | Signature admission before bounded proof IO, captured-manifest indexes, unique swaps/reference counts, one authoritative SJ CAS, structural/key rotation pins and symmetric backend exclusion; execution unverified |
 
 ## Review findings addressed during coding
 
@@ -59,7 +61,7 @@ crash durability, cross-platform qualification, or a measured scale result.
 
 Finish candidate publication coordination, durable signed receipt/index recovery,
 protected-authority deployment admission, cross-replica delivery admission,
-authenticated paged transactions, complete command coverage and resnapshot/epoch
+paged adapter/conflict-resolution integration, complete command coverage and resnapshot/epoch
 migration orchestration. The source binding follow-up is implemented; live
 provider qualification remains open. Compressed/archive
 bundle formats are explicitly unsupported by the initial quarantine owner.

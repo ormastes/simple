@@ -131,6 +131,18 @@ fn db_quarantine_open(checkout: text, external_parent: text, handle: DbQuarantin
     if (patches.len() as u64) != handle.patch_count: return Err("SCVDB_QUARANTINE_COUNT")
     Ok(patches)
 
+# Address-only reopening derives all transport data from verified CAS bytes.
+# The zero accounting day is not exposed as creation/retention provenance;
+# neither the returned patch nor a content address is admission evidence.
+fn db_quarantine_read(checkout: text, external_parent: text, digest: text, quota: DbQuarantineQuota) -> Result<[DbPatch], text>:
+    _quarantine_quota(quota)?
+    val node = db_evidence_store_get(checkout, external_parent, digest, 0, _quarantine_store_quota(quota))?
+    if node.dependencies.len() != 0: return Err("SCVDB_QUARANTINE_FORMAT")
+    val content = validated_utf8_bytes_to_text_linear(node.content)?
+    val prefix = "SCVDB-QUARANTINE-v1\n"
+    if not content.starts_with(prefix): return Err("SCVDB_QUARANTINE_VERSION")
+    db_quarantine_bundle_decode(content[prefix.len():content.len()], quota)
+
 # Promotion preparation only. accepted_ids must originate in the caller's
 # validated local store; quarantine has no authoritative accepted registry.
 # Final apply must reauthorize against its own current policy/state and publish
@@ -143,3 +155,4 @@ fn db_quarantine_admit_patch(checkout: text, external_parent: text, handle: DbQu
 export DbQuarantineQuota, DbQuarantineHandle
 export db_quarantine_bundle_encode, db_quarantine_bundle_decode
 export db_quarantine_import, db_quarantine_open, db_quarantine_admit_patch
+export db_quarantine_read

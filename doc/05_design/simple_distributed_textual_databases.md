@@ -1002,7 +1002,7 @@ catalog record deletion. Resolution reads actual raw or verified rollup bytes;
 a catalog label is never an exact-availability receipt. This initial catalog is
 bounded to 256 entries and is not the million-row Operating B implementation.
 
-### 19.4 Authoritative paged transaction protocol (implementation in progress)
+### 19.4 Authoritative paged transaction protocol (source implemented; execution unverified)
 
 The indexed projection layer is insufficient to authenticate a partial-state
 reduction. The separate backend uses `scv-paged-txn-v1`, index grammar
@@ -1020,7 +1020,7 @@ final claims, allowing atomic swaps while preventing duplicate live ownership
 and dangling references. The existing reducer contributes only an explicitly
 row-local kernel; its global validator is never run over an incomplete state.
 Immutable pages precede one SJ CAS of the authoritative manifest, including all
-rows/indexes/acceptance/history. No partial-page publication acknowledges a patch.
+rows/indexes/acceptance/history. No partial-page publication acknowledges a patch. Signature/context/metadata admission precedes dependency reads. The effect loader enforces the remaining aggregate byte budget before allocating each next page and validates the manifest once per batch. Repeated tombstones preserve the original tombstone revision while recording the newly accepted batch.
 
 Structural compatibility is pinned separately from the last writer's full
 admission-policy revision. Independently trusted key revocation/rotation and
@@ -1028,3 +1028,36 @@ reviewed metadata changes must not require rewriting every row when schema,
 merge rules, constraints, context and index grammar remain identical. Changes
 to those structural inputs still require explicit migration. These are design
 contracts for the in-progress backend, not executed performance evidence.
+
+### 19.5 Explicit command and retained-root boundaries
+
+The single `scv db` command owner now exposes `quarantine-import`,
+`quarantine-inspect`, and `quarantine-apply`. Import accepts only the bounded
+uncompressed inert patch-bundle format. Inspection by CAS address reopens and
+verifies actual bytes; it derives patch count/content rather than trusting a
+remembered handle. Its internal zero accounting day is never exposed as a
+creation date or retention authorization. Application independently pins policy,
+selects an exact batch, samples current time, and calls the producer-facing
+admission/CAS owner. No inspection result grants semantic acceptance.
+
+`paged-init`, `paged-status`, `paged-apply`, and `paged-quarantine-apply` require the separately versioned
+paged policy and an independent full policy digest. They do not silently migrate
+reference snapshots or imported projections. Final publication excludes the
+other backend channels under the same SJ lease; reference status must report a
+backend mismatch instead of describing an initialized paged store as empty.
+
+Retention planning protects the verified dependency closure of every retained
+root: recent raw observations, explicit pins, restricted/unsupported content,
+and supported observations outside the selected rollup cohort/day. Resume
+protects all active roots while processing pending deletions. An unreadable
+active root blocks collection because its dependency edges cannot be proved.
+These derived keep roots are ephemeral planning inputs, not persisted policy
+changes or caller-provided safety claims.
+
+Receipt-index effects use an exact protected branch-shaped namespace and
+independent Git readback. A signed protection profile and current GitHub ruleset
+examination are evidence only: they do not attest the ambient credential,
+current worker artifact, or exclusive integrator. Journal v2 can represent an
+indexed receipt but exposes no production-completion transition until those
+independent owners exist. Local bare-Git fixture publication is not deployment
+admission. All new source and tests remain execution-unverified.
