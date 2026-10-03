@@ -1,0 +1,98 @@
+# Metadata owner observations, without inferred filesystem counters or compiler
+# completion. Source-semantic observations use the real parser/surface owner.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageTldrHeaderV1, PackageSmfPayloadSectionV1,
+    PackageExportSmfBytesV1, config_variant_digest_v1,
+    package_export_smf_build_v1, package_export_smf_payload_validate_v1,
+    package_export_smf_section_v1, package_tldr_admit_v1
+}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest}
+
+struct PackageIndexAcceptanceMetadataObservationV1:
+    supported: bool
+    valid: bool
+    reason: text
+    observations: [text]
+
+fn package_index_acceptance_metadata_variant_v1() -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1("x86_64-pc-windows-msvc", "cranelift", [], "debug", "v1", [], [])
+
+fn package_index_acceptance_smf_v1() -> Result<PackageExportSmfBytesV1, text>:
+    package_export_smf_build_v1("pkg", "pkg.module",
+        config_variant_digest_v1(package_index_acceptance_metadata_variant_v1()), [
+            PackageSmfPayloadSectionV1("exports", "pub fn answer() -> i64"),
+            PackageSmfPayloadSectionV1("providers", "provider:fixture")])
+
+fn package_index_acceptance_metadata_header_v1(smf: PackageExportSmfBytesV1) -> PackageTldrHeaderV1:
+    PackageTldrHeaderV1(
+        1, sha256_text("producer"), "pkg", "pkg.module", "pkg/module.spl",
+        package_index_acceptance_metadata_variant_v1(),
+        sha256_text("pub fn answer() -> i64:\n    1\n"), sha256_text("source-witness"),
+        smf.record.payload_digest, smf.record.sections, sha256_text("exports"),
+        sha256_text("abi"), sha256_text("initializer"), sha256_text("provider"),
+        sha256_text("no-generated-sources"), sha256_text("reverse"), [], [],
+        "scc.pkg", ["pkg.module"], sha256_text(smf.payload), sha256_text("action"))
+
+fn package_index_acceptance_source_projection_v1(source: text) -> text:
+    val importer_source = "use pkg.provider.\{answer\}\nfn consume() -> i64:\n    answer()\n"
+    val provider = parse_and_build_module(source, "pkg/provider.spl")
+    val importer = parse_and_build_module(importer_source, "pkg/importer.spl")
+    val surfaces = module_surfaces_from_modules(
+        {"pkg.provider": provider, "pkg.importer": importer}, [
+            SourceFile(path: "pkg/provider.spl", content: source, module_name: "pkg.provider"),
+            SourceFile(path: "pkg/importer.spl", content: importer_source, module_name: "pkg.importer")])
+    if surfaces.is_err(): return ""
+    hir_cache_closure_digest(surfaces.unwrap())
+
+fn package_index_acceptance_metadata_v1(scenario: text) -> PackageIndexAcceptanceMetadataObservationV1:
+    if scenario == "generated-source-invalidation" or scenario == "generated-output-undeclared-denied":
+        return PackageIndexAcceptanceMetadataObservationV1(false, false,
+            "generated-output-declaration-owner-unavailable", [])
+    if scenario == "comment-only-semantic-reuse" or scenario == "whitespace-only-semantic-reuse":
+        val original = "pub fn answer() -> i64:\n    1\n"
+        val edited = if scenario == "comment-only-semantic-reuse":
+            "# implementation documentation\npub fn answer() -> i64:\n    1\n"
+        else:
+            "\npub fn answer() -> i64:\n    1\n\n"
+        val before = package_index_acceptance_source_projection_v1(original)
+        val after = package_index_acceptance_source_projection_v1(edited)
+        val valid = before != "" and after != ""
+        return PackageIndexAcceptanceMetadataObservationV1(true, valid,
+            if valid: "source-projection-observed" else: "source-projection-failed", [
+                "source_before_digest={sha256_text(original)}",
+                "source_after_digest={sha256_text(edited)}",
+                "content_digest_changed={sha256_text(original) != sha256_text(edited)}",
+                "closure_before_digest={before}", "closure_after_digest={after}",
+                "closure_digest_equal={valid and before == after}"])
+    if scenario != "header-metadata-reuse" and scenario != "metadata-section-lazy-read":
+        return PackageIndexAcceptanceMetadataObservationV1(false, false, "unsupported-metadata-scenario", [])
+    val built = package_index_acceptance_smf_v1()
+    if built.is_err():
+        return PackageIndexAcceptanceMetadataObservationV1(true, false, built.unwrap_err(), [])
+    val smf = built.unwrap()
+    if scenario == "header-metadata-reuse":
+        val header = package_index_acceptance_metadata_header_v1(smf)
+        val admitted = package_tldr_admit_v1(Some(header), header.variant,
+            header.source_digest, false, [])
+        return PackageIndexAcceptanceMetadataObservationV1(true, admitted.valid, admitted.reason, [
+            "metadata_kind=PackageTldrHeaderV1",
+            "source_open_required={admitted.source_open_required}",
+            "interface_key={admitted.interface_key}", "action_key={admitted.action_key}"])
+    val selected = package_export_smf_section_v1(smf.record, "providers")
+    if selected == nil:
+        return PackageIndexAcceptanceMetadataObservationV1(true, false, "section-not-found", [])
+    val section = selected!
+    val demanded = smf.payload.slice(section.offset, section.offset + section.extent)
+    val reason = package_export_smf_payload_validate_v1(smf.record, smf.payload)
+    PackageIndexAcceptanceMetadataObservationV1(true, reason == "ok", reason, [
+        "selected_section={section.kind}", "selected_offset={section.offset}",
+        "selected_extent={section.extent}", "selected_digest={sha256_text(demanded)}",
+        "section_digest_matches={sha256_text(demanded) == section.digest}"])
+
+export PackageIndexAcceptanceMetadataObservationV1
+export package_index_acceptance_metadata_v1, package_index_acceptance_smf_v1
+export package_index_acceptance_metadata_header_v1, package_index_acceptance_source_projection_v1

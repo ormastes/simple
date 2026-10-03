@@ -158,3 +158,26 @@ Read-only review of root `a1a36f44002` confirmed the prior owned-state and stale
 request-token P1 findings are closed in source. Wrapper inspection confirmed
 missing cached executable produces BLOCKED/exit 2 and no source fallback.
 These are static review findings, not runtime qualification.
+
+## Metadata and real source projection adapter
+
+Added `package_index_acceptance_metadata` for clean TLDR admission, demanded
+SMF section selection/digest verification, and comment/blank-line source edits.
+The source cases call the real parser, frozen module-surface registry, and HIR
+closure digest owner; a changed callable signature is a negative control.
+No manually toggled header hash is used to claim source-derived equivalence.
+Source-only header mutation appears only in the separate narrow cutoff unit
+assertion, which does not claim compiler classification.
+
+Fixed two metadata defects: early cutoff omitted compiler-producer and
+body-sensitive SMF digest equality; section offset+extent could overflow signed
+range validation. Regression cases exercise both and payload out-of-bounds.
+The adapter reports metadata decisions and in-memory bytes only, not physical
+lazy filesystem read counters or downstream compilation completion.
+
+Generated-source search found opaque `generated_source_digest` fields threaded
+through cold HIR drafts and TLDR keys, but no declared-output admission owner in
+the inspected compiler/SCV pipeline. Those two adapter scenarios explicitly
+return unavailable, not a fake successful declaration check. Implementing the
+generator producer/input/output receipt owner remains outstanding. Main harness
+is parent-owned. All new Simple tests remain unexecuted.

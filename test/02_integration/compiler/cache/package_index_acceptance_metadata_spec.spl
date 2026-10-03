@@ -1,0 +1,86 @@
+# @req PSI-REQ-001 PSI-REQ-002 PSI-REQ-006
+# Owner observations do not substitute for filesystem counters/compile completion.
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use app.test.package_index_acceptance_metadata.{
+    package_index_acceptance_metadata_v1, package_index_acceptance_smf_v1,
+    package_index_acceptance_metadata_header_v1, package_index_acceptance_source_projection_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    PackageSmfSectionV1, package_tldr_early_cutoff_v1,
+    package_smf_sections_validate_v1, package_export_smf_payload_validate_v1
+}
+
+describe "metadata acceptance production owners":
+    it "observes clean TLDR admission without a source-open requirement":
+        step("Reuse dependency export headers without opening source bodies")
+        val observed = package_index_acceptance_metadata_v1("header-metadata-reuse")
+        expect(observed.supported).to_equal(true)
+        expect(observed.valid).to_equal(true)
+        expect(observed.reason).to_equal("ok")
+        expect(observed.observations).to_contain("metadata_kind=PackageTldrHeaderV1")
+        expect(observed.observations).to_contain("source_open_required=false")
+
+    it "selects and authenticates actual built SMF section bytes":
+        step("Read only TLDR and demanded SMF sections")
+        val observed = package_index_acceptance_metadata_v1("metadata-section-lazy-read")
+        expect(observed.valid).to_equal(true)
+        expect(observed.observations).to_contain("selected_section=providers")
+        val provider_digest = sha256_text("provider:fixture")
+        expect(observed.observations).to_contain("selected_digest={provider_digest}")
+        expect(observed.observations).to_contain("section_digest_matches=true")
+
+    it "derives equal closure identity from parsed comment and whitespace edits":
+        step("Edit only comments or whitespace in frozen source")
+        for scenario in ["comment-only-semantic-reuse", "whitespace-only-semantic-reuse"]:
+            val observed = package_index_acceptance_metadata_v1(scenario)
+            expect(observed.supported).to_equal(true)
+            expect(observed.valid).to_equal(true)
+            expect(observed.observations).to_contain("content_digest_changed=true")
+            expect(observed.observations).to_contain("closure_digest_equal=true")
+        # Negative control verifies that the actual parser/surface owner sees
+        # semantic changes; the adapter cannot always return an unchanged key.
+        val original = package_index_acceptance_source_projection_v1("pub fn answer() -> i64:\n    1\n")
+        val changed = package_index_acceptance_source_projection_v1(
+            "pub fn answer(value: i64) -> i64:\n    value\n")
+        expect(original != "").to_equal(true)
+        expect(changed != "").to_equal(true)
+        expect(original == changed).to_equal(false)
+
+    it "does not manufacture generated-output admission from opaque digests":
+        for scenario in ["generated-source-invalidation", "generated-output-undeclared-denied"]:
+            val observed = package_index_acceptance_metadata_v1(scenario)
+            expect(observed.supported).to_equal(false)
+            expect(observed.valid).to_equal(false)
+            expect(observed.reason).to_equal("generated-output-declaration-owner-unavailable")
+            expect(observed.observations.len()).to_equal(0)
+
+    it "rejects cross-producer and changed-SMF early cutoff while preserving source-only eligibility":
+        val built = package_index_acceptance_smf_v1()
+        expect(built.is_ok()).to_equal(true)
+        val original = package_index_acceptance_metadata_header_v1(built.unwrap())
+        var rebuilt = original
+        rebuilt.source_digest = sha256_text("changed private source")
+        expect(package_tldr_early_cutoff_v1(original, rebuilt)).to_equal(true)
+        rebuilt.producer_digest = sha256_text("another compiler")
+        expect(package_tldr_early_cutoff_v1(original, rebuilt)).to_equal(false)
+        rebuilt = original
+        rebuilt.smf_digest = sha256_text("changed generic/inline metadata")
+        expect(package_tldr_early_cutoff_v1(original, rebuilt)).to_equal(false)
+
+    it "rejects overflowing and tampered SMF section boundaries":
+        step("Reject the corrupted generation")
+        val digest = sha256_text("section")
+        expect(package_smf_sections_validate_v1([
+            PackageSmfSectionV1("exports", 9223372036854775806, 2, digest)
+        ])).to_equal("smf-section-invalid")
+        expect(package_smf_sections_validate_v1([
+            PackageSmfSectionV1("exports", -1, 2, digest)
+        ])).to_equal("smf-section-invalid")
+        val built = package_index_acceptance_smf_v1()
+        expect(built.is_ok()).to_equal(true)
+        val smf = built.unwrap()
+        var record = smf.record
+        record.sections = [PackageSmfSectionV1("exports", 0,
+            smf.payload.len() + 1, sha256_text(smf.payload))]
+        expect(package_export_smf_payload_validate_v1(record, smf.payload)).to_equal("smf-section-out-of-bounds")
