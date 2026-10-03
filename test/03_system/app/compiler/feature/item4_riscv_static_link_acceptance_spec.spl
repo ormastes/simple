@@ -379,3 +379,56 @@ describe "RV64 real static ELF link":
         expect(linked.is_err()).to_equal(true)
         if linked.is_ok(): return
         expect(linked.unwrap_err()).to_contain("ULEB128 field is unterminated")
+
+    it "normalizes multiple ALIGN paddings and adjusts symbol sizes and references":
+        # @req ITEM4-REQ-004
+        step("Read two real ALIGN relocations with fourteen and thirty padding bytes")
+        val object = item4_rv_load("align.o")
+        step("Link while retaining calls but deleting surplus alignment padding")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val entry = item4_rv_symbol(image, "_start")
+        val first = item4_rv_symbol(image, "aligned_target")
+        val second = item4_rv_symbol(image, "second_target")
+        val refs = item4_rv_symbol(image, "align_references")
+        step("Check final alignment, relocated call, data pointers and fixed named-symbol addend")
+        expect(entry % 32).to_equal(0)
+        expect(first - entry).to_equal(16)
+        expect(second - entry).to_equal(32)
+        expect(item4_rv_pair_target(image, entry, entry + 4, false)).to_equal(first)
+        expect(item4_rv_at(image, refs, 8)).to_equal(first)
+        expect(item4_rv_at(image, refs + 8, 8)).to_equal(second)
+        expect(item4_rv_at(image, refs + 16, 8)).to_equal(entry + 24)
+        val parsed = elf_parse_object(image).unwrap()
+        for symbol in parsed.symbols:
+            if symbol.name == "_start": expect(symbol.st_size).to_equal(34)
+
+    it "normalizes ALIGN using full-size NOPs when compressed instructions are disabled":
+        # @req ITEM4-REQ-004
+        step("Read the RV64I alignment fixture with twelve bytes of assembler padding")
+        val object = item4_rv_load("align_norvc.o")
+        step("Link and keep only the four bytes required for sixteen-byte alignment")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val entry = item4_rv_symbol(image, "_start")
+        val target = item4_rv_symbol(image, "aligned_target")
+        step("Check the retained NOP is a complete four-byte instruction")
+        expect(target - entry).to_equal(16)
+        expect(item4_rv_at(image, entry + 12, 4)).to_equal(0x13)
+        expect(item4_rv_pair_target(image, entry, entry + 4, false)).to_equal(target)
+
+    it "rejects malformed ALIGN sizes instead of deleting arbitrary input bytes":
+        # @req ITEM4-REQ-004
+        step("Change the first padding addend to zero, odd and out-of-section sizes")
+        for addend in [0, 13, 32766]:
+            val object = item4_rv_mutate(43, 16, addend, "align.o")
+            step("Attempt normalization before symbol resolution")
+            val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+            step("Require an explicit ALIGN rejection")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain("RISC-V ALIGN")
