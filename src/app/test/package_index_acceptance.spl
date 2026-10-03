@@ -1,0 +1,117 @@
+# Production-owner acceptance driver. Partial observations never imply that
+# the broader PSI scenario (compiler execution and filesystem counters) passed.
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_read, file_write, dir_remove, getpid}
+use std.sffi.cli.{cli_get_args}
+use app.test.package_index_acceptance_invalidation.{
+    package_index_acceptance_invalidation_v1
+}
+
+struct PackageIndexAcceptanceObservationV1:
+    operation_valid: bool
+    reason: text
+    prior_digest: text
+    observed_digest: text
+    pointer_preserved: bool
+    generation_preserved: bool
+
+fn package_index_acceptance_generation_v1() -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        2, sha256_text("acceptance-producer"), "acceptance-root",
+        "acceptance-revision", "acceptance-commit", "acceptance-tree",
+        sha256_text("acceptance-inventory"), [], sha256_text("acceptance-variant"))
+
+fn package_index_acceptance_persistence_v1(
+    scenario: text, root: text
+) -> PackageIndexAcceptanceObservationV1:
+    if scenario == "missing-index-denied":
+        val missing = package_module_index_read_current_v1(root)
+        return PackageIndexAcceptanceObservationV1(
+            missing.valid, missing.reason, "", missing.digest, false, false)
+    if scenario != "tampered-index-denied" and scenario != "corrupt-metadata-denied":
+        return PackageIndexAcceptanceObservationV1(
+            false, "unsupported-persistence-scenario", "", "", false, false)
+    if not package_module_index_publish_if_current_v1(
+            root, package_index_acceptance_generation_v1(), ""):
+        return PackageIndexAcceptanceObservationV1(
+            false, "fixture-publication-failed", "", "", false, false)
+    val admitted = package_module_index_read_current_v1(root)
+    if not admitted.valid or admitted.generation == nil:
+        return PackageIndexAcceptanceObservationV1(
+            false, "fixture-admission-failed", "", "", false, false)
+    val pointer_path = "{root}/package-module-index-v1/CURRENT"
+    val generation_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+    val prior_pointer = file_read(pointer_path)
+    val prior_generation = file_read(generation_path)
+    if scenario == "tampered-index-denied":
+        val corrupt_generation = prior_generation + "tampered"
+        if not file_write(generation_path, corrupt_generation):
+            return PackageIndexAcceptanceObservationV1(
+                false, "fixture-tamper-failed", admitted.digest, "", false, false)
+        val observed = package_module_index_read_current_v1(root)
+        return PackageIndexAcceptanceObservationV1(
+            observed.valid, observed.reason, admitted.digest, observed.digest,
+            file_read(pointer_path) == prior_pointer,
+            file_read(generation_path) == corrupt_generation)
+    # Rebind CURRENT to the digest of malformed bytes, so this exercises
+    # metadata decoding after the content digest has genuinely been admitted.
+    val corrupt_generation = "not-a-package-index"
+    val corrupt_digest = sha256_text(corrupt_generation)
+    val corrupt_path = "{root}/package-module-index-v1/{corrupt_digest}.index"
+    if not file_write(corrupt_path, corrupt_generation) or
+            not file_write(pointer_path, corrupt_digest):
+        return PackageIndexAcceptanceObservationV1(
+            false, "fixture-corrupt-write-failed", admitted.digest, "", false, false)
+    val observed = package_module_index_read_current_v1(root)
+    PackageIndexAcceptanceObservationV1(
+        observed.valid, observed.reason, admitted.digest, observed.digest,
+        file_read(pointer_path) == corrupt_digest,
+        file_read(generation_path) == prior_generation)
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if args.len() != 3 or args[1] != "--scenario":
+        print "usage: package_index_acceptance --scenario NAME"
+        return 2
+    val scenario = args[2]
+    val root = "build/test-artifacts/package-index-acceptance-{getpid()}"
+    dir_remove(root, true)
+    if scenario == "direct-reverse-invalidation" or
+            scenario == "indirect-reverse-invalidation" or
+            scenario == "private-body-export-early-cutoff":
+        val invalidation = package_index_acceptance_invalidation_v1(scenario, root)
+        print "scenario={scenario}"
+        print "owner=package_module_index_invalidate_changes_v1"
+        print "owner_valid={invalidation.valid}"
+        print "owner_reason={invalidation.reason}"
+        val invalidated = invalidation.dirty_modules.join(",")
+        val scheduled = invalidation.package_schedule.join(",")
+        print "invalidated={invalidated}"
+        print "scheduled={scheduled}"
+        dir_remove(root, true)
+        print "acceptance_status=incomplete"
+        print "missing_evidence=source-derived-change-classification,compiler-completion,production-filesystem-observations"
+        return 3
+    val observed = package_index_acceptance_persistence_v1(scenario, root)
+    print "scenario={scenario}"
+    print "owner=package_module_index_read_current_v1"
+    print "owner_valid={observed.operation_valid}"
+    print "owner_reason={observed.reason}"
+    print "prior_generation_digest={observed.prior_digest}"
+    print "observed_generation_digest={observed.observed_digest}"
+    print "pointer_preserved={observed.pointer_preserved}"
+    print "generation_preserved={observed.generation_preserved}"
+    dir_remove(root, true)
+    # The canonical system contract additionally requires actual compiler
+    # admissions/reads. This owner-only probe must not manufacture those facts.
+    print "acceptance_status=incomplete"
+    print "missing_evidence=compiler-operation,production-filesystem-observations"
+    3
+
+export PackageIndexAcceptanceObservationV1
+export package_index_acceptance_persistence_v1
