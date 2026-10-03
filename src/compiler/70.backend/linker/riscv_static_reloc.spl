@@ -1,0 +1,70 @@
+# RISC-V psABI static field encoders. No layout or symbol ownership here.
+
+fn riscv_static_width(kind: i64) -> i64:
+    if kind == 0 or kind == 51: return 0
+    if kind == 2 or kind == 18 or kind == 19 or kind == 36 or kind == 40: return 8
+    if kind == 33 or kind == 37 or kind == 52 or kind == 53 or kind == 54: return 1
+    if kind == 34 or kind == 38 or kind == 44 or kind == 45 or kind == 55: return 2
+    4
+
+fn riscv_static_delta(s: i64, a: i64, p: i64) -> Result<i64, text>:
+    val maximum: i64 = 9223372036854775807
+    val minimum: i64 = -9223372036854775807 - 1
+    if (a > 0 and s > maximum - a) or (a < 0 and s < minimum - a):
+        return Err("RISC-V S + A arithmetic overflow")
+    val sum = s + a
+    if (p > 0 and sum < minimum + p) or (p < 0 and sum > maximum + p):
+        return Err("RISC-V S + A - P arithmetic overflow")
+    Ok(sum - p)
+
+fn riscv_static_branch(kind: i64, instruction: i64, delta: i64) -> Result<i64, text>:
+    var limit: i64 = 0
+    var opcode_valid = false
+    if kind == 16:
+        limit = 4096
+        opcode_valid = (instruction & 0x7f) == 0x63
+    elif kind == 17:
+        limit = 1048576
+        opcode_valid = (instruction & 0x7f) == 0x6f
+    elif kind == 44:
+        limit = 256
+        opcode_valid = (instruction & 0xc003) == 0xc001
+    elif kind == 45:
+        limit = 2048
+        opcode_valid = (instruction & 0xe003) == 0xa001
+    else:
+        return Err("unsupported RISC-V branch relocation {kind}")
+    if not opcode_valid: return Err("RISC-V branch relocation {kind} has incompatible opcode")
+    if (delta & 1) != 0 or delta < 0 - limit or delta >= limit:
+        return Err("RISC-V branch relocation {kind} displacement out of range or unaligned")
+    if kind == 16:
+        Ok((instruction & 0x01fff07f) | ((delta & 0x1000) << 19) |
+            ((delta & 0x7e0) << 20) | ((delta & 0x1e) << 7) | ((delta & 0x800) >> 4))
+    elif kind == 17:
+        Ok((instruction & 0xfff) | ((delta & 0x100000) << 11) |
+            ((delta & 0x7fe) << 20) | ((delta & 0x800) << 9) | (delta & 0xff000))
+    elif kind == 44:
+        Ok((instruction & 0xe383) | ((delta & 0x100) << 4) |
+            ((delta & 0x18) << 7) | ((delta & 0xc0) >> 1) |
+            ((delta & 0x6) << 2) | ((delta & 0x20) >> 3))
+    else:
+        Ok((instruction & 0xe003) | ((delta & 0x800) << 1) |
+            ((delta & 0x10) << 7) | ((delta & 0x300) << 1) |
+            ((delta & 0x400) >> 2) | ((delta & 0x40) << 1) |
+            ((delta & 0x80) >> 1) | ((delta & 0xe) << 2) | ((delta & 0x20) >> 3))
+
+fn riscv_static_arithmetic(current: i64, s: i64, a: i64, width: i64, subtract: bool) -> i64:
+    # Byte arithmetic implements modular ADD/SUB without signed host overflow.
+    var result: i64 = 0
+    var carry: i64 = 0
+    var i: i64 = 0
+    val sign = if subtract: -1 else: 1
+    while i < width:
+        val shift = i * 8
+        val digit = ((current >> shift) & 255) + sign * (((s >> shift) & 255) + ((a >> shift) & 255)) + carry
+        result = result | ((digit & 255) << shift)
+        carry = digit >> 8
+        i = i + 1
+    result
+
+export riscv_static_width, riscv_static_delta, riscv_static_branch, riscv_static_arithmetic

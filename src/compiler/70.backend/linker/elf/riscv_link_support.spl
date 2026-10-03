@@ -1,0 +1,41 @@
+use compiler.backend.linker.elf_parser.{ElfObject}
+use compiler.backend.linker.elf.reloc_scan.{ElfScanRef}
+
+fn elf_riscv_flags(objects: [ElfObject]) -> Result<i64, text>:
+    var flags: i64 = 0
+    var float_abi: i64 = -1
+    var oi: i64 = 0
+    for obj in objects:
+        if obj.raw.len() < 64 or obj.raw[4] != 2 or obj.raw[5] != 1:
+            return Err("RISC-V object {oi}: requires little-endian ELF64")
+        var current: i64 = 0
+        var i: i64 = 0
+        while i < 4:
+            current = current | ((obj.raw[48 + i] as i64) << (i * 8))
+            i = i + 1
+        if (current & -24) != 0:
+            return Err("RISC-V object {oi}: unsupported ABI e_flags {current}")
+        if float_abi >= 0 and (current & 6) != float_abi:
+            return Err("RISC-V object {oi}: incompatible floating-point ABI")
+        float_abi = current & 6
+        flags = flags | current
+        for section in obj.sections:
+            if (section.sh_flags & 0x402) == 0x402:
+                return Err("RISC-V static TLS sections are not supported")
+        oi = oi + 1
+    Ok(flags)
+
+fn elf_riscv_hi_index(refs: [ElfScanRef], bases: [i64]) -> Result<{text: i64}, text>:
+    var index: {text: i64} = {}
+    var i: i64 = 0
+    while i < refs.len():
+        val r = refs[i]
+        if r.rtype == 23 or r.rtype == 20:
+            val place = bases[r.out_sec] + r.out_off
+            val key = "{r.oi}#{place}"
+            if index.has(key): return Err("RISC-V duplicate HI20 relocation at {key}")
+            index[key] = i
+        i = i + 1
+    Ok(index)
+
+export elf_riscv_flags, elf_riscv_hi_index
