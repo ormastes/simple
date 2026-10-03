@@ -60,3 +60,19 @@ sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2     # detached 
   the wrapper uses `werror=report` and refuses `< QEMU_MIN_FREE_GB` (30).
 - `SIMPLE_NATIVE_FILE_TIMEOUT` defaults to 1800 in `--stage2`; the 300s
   default turns slow TCG files into "N file(s) failed to compile".
+- `[profile.bootstrap]` is `codegen-units = 1`, so each big crate compiles on
+  ONE guest thread: measured 2026-10-03 at 20 vCPUs, guest load ~1.3,
+  `simple_compiler` alone ~1.7h and cargo step 1 (`simple-driver`) ~4h.
+  For quick riscv64 probes, cross-build the seed on the host instead
+  (`cargo build --profile bootstrap --target riscv64gc-unknown-linux-gnu`,
+  `CC_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-gcc`, keep the repo's
+  `linker = "clang"`; ~15 min on 80 cores) and copy it into the guest.
+- The native link needs `zlib1g-dev libzstd-dev libtinfo-dev` (`-lz -lzstd
+  -ltinfo`); the cloud-init package list installs them.
+- `__riscv_flush_icache` (glibc, called by libgcc `__clear_cache`) used to be
+  weak-stubbed as "unresolved", shadowing the real icache flush; it is now in
+  the known-libc list (`native_project/tools.rs`).
+- A seed `native-build` probe must run from a git checkout with the program
+  under `src/` or `test/` (`SCV-E-ADMISSION: source-inventory-scope-unsupported`)
+  and, the first time, `SIMPLE_SCV_INVENTORY_COLD_INIT=1`. Cold inventory under
+  TCG exceeded 90 min; cross-build from the host for fast probes.
