@@ -1124,3 +1124,13 @@ records are errors, never implicit history or Live defaults. Signed frame bytes
 plus signature fit the existing 16 MiB canonical reader. Reference inline data
 is bounded; paged data and metadata remain separate immutable pages. Codec and
 conflict tests are authored but unexecuted; complete installation remains open.
+
+### 19.10 Streaming external evidence hydration
+
+`evidence_hydrate` verifies actual SCVE1 bytes through a retained no-follow regular-file handle, using the existing incremental evidence digest. Content reads and private output writes use at most 1 MiB per chunk; dependency metadata is limited to 65,536 sorted digests. Exact envelope size, EOF, handle identity and semantic digest precede publication. Restricted ciphertext may be inspected but ordinary hydration refuses it. Failed copies and parent-sync failures remove only the identity-checked owned stage.
+
+The native IO owner currently supports Windows and Linux; other hosts return `SCVDB_FILE_HOST_UNSUPPORTED`. Windows outputs request metadata-query rights alongside write access. Linux checks retained inode, size and modification/change timestamps. These checks require trusted parents against concurrent OS renames; they are not a hostile-filesystem sandbox.
+
+`evidence_closure` uses a private disk queue and visited markers, not a corpus-sized memory set. Explicit limits are one million objects, two million scratch files, 1 TiB cumulative content, depth 4096 and 1024 sorted roots. It clamps each object's content quota to the remaining scan allowance before reading. Receipts describe verified bytes observed during the scan; durable pins, canonical Git publication and deletion authority remain separate owners. Per-object scratch IO and actual RSS/throughput are unmeasured.
+
+Two unit and four filesystem test scenarios are authored, including an actual 100 MiB copy, tamper/truncation/symlink refusal, restricted dependency closure and native binary roundtrip. All are unexecuted. Scalable retention and macOS/FreeBSD IO remain open.
