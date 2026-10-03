@@ -1,0 +1,105 @@
+# Historical v1 admission fixture. This deliberately models the prior contract:
+# signature/ACL/metadata + immutable evidence validation + the original reducer.
+# It never calls current admission to create an accepted legacy observation and
+# never fabricates an accepted/replay flag. Actual checkpoint import owns trust.
+use std.spec.*
+use app.io.mod.{dir_create, file_write_bytes}
+use app.scv.db.local_transition.{db_read_local_view}
+use app.scv.db.checkpoint_objects.{DbCheckpointPageSource}
+use app.scv.db.checkpoint_store.*
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_admission.{db_authorize_patch}
+use std.scv.db_evidence.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_reducer.{MaterializedState, db_empty_state, db_plan_patch}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode}
+use std.scv.db_conflict_catalog.{db_conflict_catalog_encode}
+use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_observation_fixture.*
+
+struct Item2LegacyReplayFixture:
+    observation: Item2ObservationFixture
+    historical: MaterializedState
+    checkpoint: DbDatabaseCheckpoint
+    authority: DbCheckpointAuthority
+    pages: DbCheckpointPageSource
+
+fn setup_item2_legacy_replay() -> Item2LegacyReplayFixture:
+    var fixture = setup_item2_observation_fixture(false)
+    val config = match fixture.records[0]:
+        Config(value): value
+        _: fail("expected configuration")
+    var reproduction = match fixture.records[1]:
+        BoundReproduction(value, _): value
+        _: fail("expected bound fixture input")
+    reproduction.source_revision = "sha256:v1:" + sha256_text("exact fixture source snapshot")
+    reproduction.test_definition = setup_item2_observation_ref("test", 1)
+    reproduction.dependencies = config.dependencies
+    val legacy_reproduction = db_reproduction_record_seal(DbReproductionRecord.Reproduction(reproduction)).unwrap()
+    reproduction = match legacy_reproduction:
+        Reproduction(value): value
+        _: fail("expected legacy reproduction")
+    var observation = match fixture.records[2]:
+        Observation(value): value
+        _: fail("expected observation")
+    observation.source_revision = reproduction.source_revision
+    observation.test_definition = reproduction.test_definition
+    observation.reproduction = Some(reproduction.reference)
+    val legacy_observation = db_reproduction_record_seal(DbReproductionRecord.Observation(observation)).unwrap()
+    observation = match legacy_observation:
+        Observation(value): value
+        _: fail("expected legacy observation")
+    fixture.records = [fixture.records[0], legacy_reproduction, legacy_observation]
+    fixture.patch.operations = []
+    for record in fixture.records:
+        expect(db_reproduction_record_encode(record).unwrap().starts_with("SCVDB-REPRODUCTION-RECORD-v1\n")).to_equal(true)
+        fixture.patch.operations.push(db_reproduction_operation(record).unwrap())
+    fixture.patch.provenance = "historical v1 admission fixture before source artifact mapping"
+    fixture.patch = setup_item2_observation_sign(fixture.patch)
+    fixture.policy = setup_item2_observation_review(fixture.policy, [fixture.patch])
+    # These are genuine checks available under the old contract, followed by
+    # the actual old reducer. No hand-built accepted registry is supplied.
+    db_authorize_patch(fixture.patch, fixture.policy.config.admission, [], 10u64).unwrap()
+    expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Ok(true))
+    val reduced = db_plan_patch(db_empty_state(), fixture.patch, fixture.policy.config.merge).unwrap()
+    expect(reduced.conflicts.len()).to_equal(0)
+    expect(reduced.replay).to_equal(false)
+    val state = reduced.proposed
+    expect(state.accepted.len()).to_equal(1)
+    expect(state.accepted[0].batch_id).to_equal(fixture.patch.batch_id)
+    expect(state.accepted[0].canonical_digest).to_equal(fixture.patch.payload_digest)
+    var metadata = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.revision, 1u64, [], [fixture.patch.batch_id], sha256_text(db_snapshot_encode(state).unwrap()))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(fixture.patch.batch_id, state.revision)).unwrap()]
+    var identities = identity_map_empty(fixture.patch.namespace, 1)
+    for record in fixture.records:
+        val entity = db_reproduction_reference(record).entity
+        identities = identity_map_allocate(identities, entity.provisional.unwrap()).state
+        metadata.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(entity, DbCheckpointDisposition.Live)).unwrap())
+    val build = db_pages_build(metadata, DbPageQuota(max_page_bytes: 1048576, max_page_records: 10000, max_records: 1000000)).unwrap()
+    val parent = fixture.root + "/legacy-checkpoint"
+    expect(dir_create(parent + "/scv-checkpoint-pages-v1", true)).to_equal(true)
+    for page in build.pages:
+        expect(file_write_bytes(parent + "/scv-checkpoint-pages-v1/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_equal(true)
+    val empty_catalog = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image.catalog
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: fixture.patch.repository, namespace: fixture.patch.namespace, epoch: 1, schema_revision: fixture.patch.schema_revision, reducer_revision: fixture.patch.reducer_revision, policy_revision: fixture.policy.config.revision, predecessor_checkpoint: "", history_horizon: state.revision, current_revision: state.revision, metadata: build.manifest, storage: DbCheckpointStorage.Reference(db_snapshot_encode(state).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(empty_catalog).unwrap()), signer: "legacy-checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    val authority = DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: fixture.policy.config, paged_policy: nil)
+    Item2LegacyReplayFixture(observation: fixture, historical: state, checkpoint: checkpoint, authority: authority, pages: DbCheckpointPageSource(external_parent: parent, maximum_pages: 65536, maximum_bytes: 67108864))
+
+fn check_item2_legacy_import(fixture: Item2LegacyReplayFixture) -> text:
+    val root = fixture.observation.source
+    val prepared = db_checkpoint_prepare_install(root, "", db_checkpoint_encode(fixture.checkpoint).unwrap(), fixture.authority, fixture.pages).unwrap()
+    val installed = db_checkpoint_resume_install(root, prepared.journal_head, fixture.authority).unwrap()
+    expect(installed.phase).to_equal("Installed")
+    val actual = db_read_local_view(root, fixture.observation.policy.config.admission).unwrap()
+    expect(actual.image.state).to_equal(fixture.historical)
+    actual.head
+
+export Item2LegacyReplayFixture, setup_item2_legacy_replay, check_item2_legacy_import
