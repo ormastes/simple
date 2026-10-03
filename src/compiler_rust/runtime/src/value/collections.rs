@@ -2764,7 +2764,7 @@ pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeV
         // top of the copy cost. Computed on demand by runtime_string_hash.
         (*ptr).hash = STRING_HASH_UNCOMPUTED;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -6413,7 +6413,8 @@ mod tests;
 mod string_free_contract_tests {
     use super::{
         byte_array_write, rt_array_bytes_copy_checked, rt_array_bytes_validate, rt_array_free, rt_array_new,
-        rt_array_push, rt_byte_array_new_len, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
+        rt_array_push, rt_byte_array_new_len, rt_string_concat, rt_string_data, rt_string_free,
+        rt_string_len, rt_string_new, rt_string_new_literal,
         rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
         rt_transient_heap_promote,
     };
@@ -6553,6 +6554,53 @@ mod string_free_contract_tests {
             "string and aliases reclaim exactly once"
         );
         assert_eq!(rt_string_len(string), -1, "reclaimed string is no longer readable");
+    }
+
+    #[test]
+    fn transient_concat_chain_reclaims_each_result() {
+        let _g = GUARD.lock().unwrap();
+        let left = mkstr("transient concat left");
+        let right = mkstr(" and right");
+        let before = rt_heap_registry_count();
+
+        assert!(rt_transient_array_scope_begin());
+        let intermediate = rt_string_concat(left, right);
+        let result = rt_string_concat(intermediate, right);
+        assert_eq!(rt_heap_registry_count(), before + 2);
+        assert_eq!(rt_string_len(result), b"transient concat left and right and right".len() as i64);
+        assert!(rt_transient_array_scope_end());
+
+        assert_eq!(rt_heap_registry_count(), before, "both concat results must leave the scope");
+        assert_eq!(rt_string_len(intermediate), -1);
+        assert_eq!(rt_string_len(result), -1);
+        assert_eq!(rt_string_free(left), 1);
+        assert_eq!(rt_string_free(right), 1);
+    }
+
+    #[test]
+    fn concat_outside_scope_and_promoted_result_keep_exact_bytes() {
+        let _g = GUARD.lock().unwrap();
+        let left = mkstr("persistent left");
+        let right = mkstr(" + right");
+        let before = rt_heap_registry_count();
+
+        let outside = rt_string_concat(left, right);
+        assert_eq!(rt_heap_registry_count(), before + 1, "ordinary concat stays live");
+        assert!(rt_transient_array_scope_begin());
+        let promoted = rt_string_concat(outside, right);
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(promoted));
+        assert!(rt_transient_array_scope_end());
+
+        let expected = b"persistent left + right + right";
+        assert_eq!(rt_string_len(promoted), expected.len() as i64);
+        let actual = unsafe { std::slice::from_raw_parts(rt_string_data(promoted), expected.len()) };
+        assert_eq!(actual, expected);
+        assert_eq!(rt_heap_registry_count(), before + 2, "outside and promoted results stay live");
+        assert_eq!(rt_string_free(promoted), 1);
+        assert_eq!(rt_string_free(outside), 1);
+        assert_eq!(rt_string_free(left), 1);
+        assert_eq!(rt_string_free(right), 1);
     }
 
     #[test]
