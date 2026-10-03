@@ -19,12 +19,12 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{lower_mir_storage_proj
 use compiler.mir_opt.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
 use compiler.mir.mir_debug_trace_injection.{inject_debug_trace}
 
-fn collection_literal_graph(source: text, budget: i64, level: i64 = 2) -> MirModule:
+fn collection_literal_graph(source: text, budget: i64, level: i64 = 2, requested_target: text = "x86_64-unknown-linux-gnu") -> MirModule:
     val file = "collection_literal_membership.spl"
     val ast = parse_full_frontend(source, file, file, Logger(level: 0))
     var hl = HirLowering.with_filename(file)
     val hir = hl.lower_module(ast)
-    var target = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", -1)
+    var target = mir_target_context_from(requested_target, "x86_64", "linux", "llvm", -1)
     target.collection_opt_level = level
     target.collection_memory_budget_bytes = budget
     var ml = MirLowering.new_for_target(hir.symbols, target)
@@ -95,6 +95,14 @@ fn collection_literal_fault_model(fail_first_insert: bool, empty: bool = false, 
     -1
 
 describe "literal dictionary membership physical consumer", tag: ["only-compiled"]:
+    it "keeps Original when an explicit target merely resembles host facts":
+        val graph = collection_literal_graph("fn pick(key: i64) -> bool:\n    {1: 10}.contains_key(key)\n",
+            512, 2, "x86_64-madeup")
+        val mir = serialize_mir_module(graph)
+        expect(mir).to_contain("typed_mir=original")
+        expect(mir).to_contain("target.admitted=false")
+        expect(mir.contains("typed_mir=consumed")).to_be(false)
+
     it "consumes bounded linear selection from real parsed parameter types":
         step("Lower parsed integer parameter membership to guarded MIR")
         # @req REQ-PSC-003 REQ-PSC-005

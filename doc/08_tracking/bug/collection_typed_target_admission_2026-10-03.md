@@ -1,6 +1,6 @@
 # Typed collection explanation can inherit host facts for an unknown target
 
-Status: source-confirmed admission gap; runtime reproduction NOT RUN.
+Status: source repair implemented; executable verification NOT RUN.
 
 `mir_target_context_os_from` in `src/compiler/00.common/mir_target_context.spl`
 falls back to host OS for unrecognized explicit target text. Its ABI derivation
@@ -23,4 +23,11 @@ budget must not report `typed_mir=consumed` for `x86_64-unrecognized`; a recogni
 Linux triple must remain eligible; actual host requests must be checked against
 known host facts. Cover both the public explanation API and optimize CLI.
 
-This gap blocks treating current explanation output as production-ready evidence.
+The repair adds a default-false admission bit derived from exact recognized
+target forms before legacy normalization. Host requests preserve the backend
+context, including admission and ABI, rather than deriving it again from OS.
+The literal consumer checks both admission and supported OS/ABI/backend facts.
+Receipts include `target.admitted` for Original and selected decisions. Tests
+cover malformed explicit requests, unknown host/backend, explicit replacement
+of malformed ambient targets, musl preservation, parsed MIR, and optimize CLI.
+These assertions are authored but unrun; production readiness remains unproven.

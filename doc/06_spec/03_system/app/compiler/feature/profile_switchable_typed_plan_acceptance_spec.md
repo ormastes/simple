@@ -6,7 +6,8 @@ This is an authored manual for `test/03_system/app/compiler/feature/profile_swit
 
 The separate literal scenario uses the three-entry duplicate-key fixture at
 `test/fixtures/profile_switchable/typed_literal_membership_probe.spl`. It requires
-Original at O0 or zero budget, and a consumed Linear MIR decision at O2 with a
+Original at O0, zero budget, or the malformed explicit target `x86_64-madeup`,
+and a consumed Linear MIR decision at O2 with a
 512-byte scratch budget on the explicitly requested x86_64 Linux target. The
 consumed decision must retain the insertion-failure fallback. It then runs the
 same fixture through the interpreter and an LLVM native build for the actual

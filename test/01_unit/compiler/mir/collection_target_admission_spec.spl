@@ -1,0 +1,54 @@
+use std.spec.*
+use compiler.common.mir_target_context.{mir_target_context_from, mir_collection_target_is_supported}
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.driver.driver_mir_target.{driver_mir_target_context_from_host}
+
+describe "collection target proof admission":
+    it "checks the actual target tuple after context transport":
+        var context = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", 23)
+        expect(mir_collection_target_is_supported(context)).to_be(true)
+        context.abi = "msvc"
+        expect(mir_collection_target_is_supported(context)).to_be(false)
+        context.abi = "gnu"
+        context.backend = "cranelift"
+        expect(mir_collection_target_is_supported(context)).to_be(false)
+
+    it "does not turn unknown explicit target text into proved host facts":
+        for requested in ["x86_64-madeup", "x86_64-notlinux-gnu", "x86_64-linux-msvc",
+            "x86_64-unknown-linux-gnu-extra", "aarch64-unknown-windows-musl"]:
+            val context = mir_target_context_from(requested, "x86_64", "linux", "llvm", 23)
+            expect(context.collection_target_admitted).to_be(false)
+
+    it "admits recognized explicit target families independently of the host":
+        for requested in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl",
+            "x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-unknown-freebsd"]:
+            val context = mir_target_context_from(requested, "unknown", "unknown", "llvm", 23)
+            expect(context.collection_target_admitted).to_be(true)
+
+    it "requires supported actual host facts for implicit host requests":
+        for requested in ["", "host", "native"]:
+            expect(mir_target_context_from(requested, "x86_64", "linux", "llvm", 23).collection_target_admitted).to_be(true)
+            expect(mir_target_context_from(requested, "unknown", "linux", "llvm", 23).collection_target_admitted).to_be(false)
+            expect(mir_target_context_from(requested, "x86_64", "unknown", "llvm", 23).collection_target_admitted).to_be(false)
+
+    it "does not normalize an unknown backend into proof of LLVM support":
+        expect(mir_target_context_from("x86_64-unknown-linux-gnu", "x86_64", "linux",
+            "madeup", 23).collection_target_admitted).to_be(false)
+
+    it "preserves ambient rejection but admits an independently explicit replacement":
+        val ambient = mir_target_context_from("x86_64-madeup", "x86_64", "linux", "llvm", 23)
+        var options = CompileOptions.default()
+        options.opt_level = 2
+        options.collection_memory_budget_bytes = 512
+        expect(driver_mir_target_context_from_host(options, ambient, "llvm").collection_target_admitted).to_be(false)
+        options.native_target = "aarch64-unknown-linux-musl"
+        val explicit = driver_mir_target_context_from_host(options, ambient, "llvm")
+        expect(explicit.collection_target_admitted).to_be(true)
+        expect(explicit.arch).to_equal("aarch64")
+        expect(explicit.abi).to_equal("musl")
+
+    it "retains the backend host ABI without renormalizing it from OS alone":
+        val ambient = mir_target_context_from("x86_64-unknown-linux-musl", "x86_64", "linux", "llvm", 23)
+        val actual = driver_mir_target_context_from_host(CompileOptions.default(), ambient, "llvm")
+        expect(actual.collection_target_admitted).to_be(true)
+        expect(actual.abi).to_equal("musl")

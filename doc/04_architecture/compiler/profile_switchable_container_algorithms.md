@@ -63,3 +63,15 @@ Profile publication uses the shared atomic file-write facade after admission, in
 
 
 No compiler-selected index or join plan may land before the research P0 gates: array-map symbol resolution, closure ABI, predicate `any`/`all`, native `Dict` insertion, and cross-backend collection tests. Profile hints only rank candidates whose semantic and target guards have already passed. Critical/adversarial policy excludes an unbounded hash-only worst case and selects a bounded ordered or direct-index representation when its proof applies.
+
+### Explicit target admission supplement, 2026-10-03
+
+The first literal-membership consumer requires `MirTargetContext.collection_target_admitted`
+as well as a supported architecture/OS/ABI/backend tuple. Admission is default-false
+and derives from exact recognized target forms before legacy host fallback. Host
+requests preserve the backend context and its ABI/admission; a valid explicit
+request is admitted independently of a malformed ambient target. Policy and
+budget transport cannot promote target admission. Both Original and consumed
+receipts report `target.admitted`. Other target forms retain Original in this
+consumer rather than borrowing host proofs. Source repair and regression cases
+exist; executable verification remains pending a qualified runtime.
