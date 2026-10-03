@@ -1,0 +1,52 @@
+#!/bin/sh
+# Exercise the Phase C command builder and backend-scoped receipt identity.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/phase-c-backend-commands.shs"
+tmp=$(mktemp -d) || exit 1
+trap 'rm -f "$tmp"/argv "$tmp"/receipt "$tmp"/expected "$tmp"/command.argv; rmdir "$tmp"' EXIT HUP INT TERM
+
+hash_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{ print $1 }'
+  else shasum -a 256 | awk '{ print $1 }'; fi
+}
+manifest_value() { sed -n "s/^$1=//p" "$2" | head -n 1; }
+manifest_key_count() { awk -F= -v key="$1" '$1 == key { n++ } END { print n+0 }' "$2"; }
+run_matrix_task() { printf '%s\n' "$@" >"$tmp/argv"; }
+run_task() { printf '%s\n' "$@" >"$tmp/argv"; }
+
+bootstrap_phase_c_run_tool_build llvm cli_build /p/compiler /p/cli.spl /p/cli 10
+printf '%s\n' cli_build --verification-expect-executable=/p/cli /p/compiler native-build \
+  /p/cli.spl --backend=llvm --low-memory --threads 10 -o /p/cli >"$tmp/expected"
+cmp -s "$tmp/argv" "$tmp/expected" || { echo 'LLVM tool argv mismatch' >&2; exit 1; }
+
+bootstrap_phase_c_run_tool_build cranelift runner_build /p/compiler /p/runner.spl /p/runner 10
+printf '%s\n' runner_build --verification-expect-executable=/p/runner /p/compiler native-build \
+  /p/runner.spl --backend=cranelift --threads 10 -o /p/runner >"$tmp/expected"
+cmp -s "$tmp/argv" "$tmp/expected" || { echo 'Cranelift tool argv mismatch' >&2; exit 1; }
+
+bootstrap_phase_c_run_module_build cranelift /p/compiler /p/module.spl /p/module.o "$tmp" 20
+printf '%s\n' module_compile_object /p/compiler native-build /p/module.spl \
+  --backend=cranelift --threads 20 -o /p/module.o >"$tmp/expected"
+cmp -s "$tmp/argv" "$tmp/expected" || { echo 'Cranelift module argv mismatch' >&2; exit 1; }
+grep -Fxq -- '--backend=cranelift' "$tmp/command.argv" || exit 1
+
+llvm_id=$(bootstrap_phase_c_tool_input_identity llvm same-runtime same-target same-source)
+crane_id=$(bootstrap_phase_c_tool_input_identity cranelift same-runtime same-target same-source)
+[ "$llvm_id" != "$crane_id" ] || { echo 'backend cache identity collision' >&2; exit 1; }
+
+printf 'verification_backend=llvm\n' >"$tmp/receipt"
+bootstrap_phase_c_validate_backend_receipt llvm "$tmp/receipt" || exit 1
+if bootstrap_phase_c_validate_backend_receipt cranelift "$tmp/receipt"; then
+  echo 'mismatched backend receipt accepted' >&2; exit 1
+fi
+printf 'verification_backend=llvm\n' >>"$tmp/receipt"
+if bootstrap_phase_c_validate_backend_receipt llvm "$tmp/receipt"; then
+  echo 'duplicate backend receipt accepted' >&2; exit 1
+fi
+if bootstrap_phase_c_run_tool_build invalid cli_build /p/compiler /p/cli.spl /p/cli 1; then
+  echo 'invalid backend accepted' >&2; exit 1
+fi
+
+echo 'PASS: Phase C commands, backend cache identity, and receipt validation'
