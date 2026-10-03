@@ -7,10 +7,10 @@ use std.scv.db_reducer.{DbRow, db_field_value}
 use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
 
 fn db_reproduction_owned_kind(kind: text) -> bool:
-    ["config", "reproduction", "observation"].contains(kind)
+    ["config", "reproduction", "observation", "source_snapshot", "test_definition"].contains(kind)
 
 fn db_reproduction_fields(record: DbReproductionRecord) -> Result<[DbField], text>:
-    Ok([DbField(name: "version", value: DbValue.Text("scv-reproduction-v1")), DbField(name: "revision", value: DbValue.Text(db_reproduction_reference(record).revision)), DbField(name: "canonical_record", value: DbValue.Text(db_reproduction_record_encode(record)?))])
+    Ok([DbField(name: "version", value: DbValue.Text("scv-reproduction-" + db_reproduction_record_version(record))), DbField(name: "revision", value: DbValue.Text(db_reproduction_reference(record).revision)), DbField(name: "canonical_record", value: DbValue.Text(db_reproduction_record_encode(record)?))])
 
 fn db_reproduction_operation(record: DbReproductionRecord) -> Result<DbOperation, text>:
     val reference = db_reproduction_reference(record)
@@ -18,11 +18,12 @@ fn db_reproduction_operation(record: DbReproductionRecord) -> Result<DbOperation
     Ok(DbOperation.AppendObservation(reference.entity, db_reproduction_kind(record), db_reproduction_fields(record)?))
 
 fn db_reproduction_row(row: DbRow) -> Result<DbReproductionRecord, text>:
-    if row.tombstoned or not db_reproduction_owned_kind(row.kind) or row.fields.len() != 3 or db_field_value(row.fields, "version") != DbValue.Text("scv-reproduction-v1"): return Err("SCVDB_REPRODUCTION_PROJECTION")
+    if row.tombstoned or not db_reproduction_owned_kind(row.kind) or row.fields.len() != 3: return Err("SCVDB_REPRODUCTION_PROJECTION")
     val wire = match db_field_value(row.fields, "canonical_record"):
         Text(value): value
         _: return Err("SCVDB_REPRODUCTION_PROJECTION")
     val record = db_reproduction_record_decode(wire)?
+    if db_field_value(row.fields, "version") != DbValue.Text("scv-reproduction-" + db_reproduction_record_version(record)): return Err("SCVDB_REPRODUCTION_PROJECTION")
     if db_reproduction_kind(record) != row.kind or entity_ref_canonical(db_reproduction_reference(record).entity) != row.entity or db_field_value(row.fields, "revision") != DbValue.Text(db_reproduction_reference(record).revision): return Err("SCVDB_REPRODUCTION_PROJECTION")
     # Names must be exactly these three, not duplicate names hiding a field.
     var seen: [text] = []
@@ -55,6 +56,12 @@ fn db_reproduction_record_references(record: DbReproductionRecord) -> [DbEvidenc
     var refs = [db_reproduction_reference(record)]
     match record:
         Config(_): ()
+        SourceSnapshot(_): ()
+        TestDefinition(_): ()
+        BoundReproduction(value, source):
+            refs.push(value.config)
+            refs.push(value.test_definition)
+            refs.push(source)
         Reproduction(value):
             refs.push(value.config)
             refs.push(value.test_definition)
@@ -71,6 +78,12 @@ fn db_reproduction_lookup_refs(records: [DbReproductionRecord]) -> [DbEvidenceRe
     for record in records:
         match record:
             Config(_): ()
+            SourceSnapshot(_): ()
+            TestDefinition(_): ()
+            BoundReproduction(value, source):
+                refs.push(value.config)
+                refs.push(value.test_definition)
+                refs.push(source)
             Reproduction(value): refs.push(value.config)
             Observation(value):
                 refs.push(value.config)
@@ -87,26 +100,77 @@ fn db_reproduction_exact(reference: DbEvidenceRevision, records: [DbReproduction
     if db_reproduction_reference(found).revision != reference.revision or db_reproduction_kind(found) != db_ref_kind(reference.entity): return Err("SCVDB_REPRODUCTION_REVISION")
     Ok(found)
 
+# One layer supports a paged owner that first requests the exact keys needed
+# by this layer. The ordinary reference backend can iterate to fixed point.
+fn db_reproduction_expand_step(records: [DbReproductionRecord], lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<[DbReproductionRecord], text>:
+    if records.len() > 64: return Err("SCVDB_REPRODUCTION_QUOTA")
+    var expanded = records
+    for reference in db_reproduction_lookup_refs(records):
+        val found = db_reproduction_exact(reference, records, lookup)?
+        var present = false
+        for prior in expanded:
+            if db_evidence_same_ref(db_reproduction_reference(prior), db_reproduction_reference(found)): present = true
+        if not present:
+            if expanded.len() >= 64: return Err("SCVDB_REPRODUCTION_QUOTA")
+            expanded.push(found)
+    Ok(expanded)
+
+fn db_reproduction_validate_bound(value: DbReproductionRevision, source: DbEvidenceRevision, records: [DbReproductionRecord], lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<bool, text>:
+    if source.revision != value.source_revision or db_ref_kind(source.entity) != "source_snapshot": return Err("SCVDB_REPRODUCTION_SOURCE_BINDING")
+    val snapshot = match db_reproduction_exact(source, records, lookup)?:
+        SourceSnapshot(mapping): mapping.snapshot_digest
+        _: return Err("SCVDB_REPRODUCTION_SOURCE_BINDING")
+    val definition = match db_reproduction_exact(value.test_definition, records, lookup)?:
+        TestDefinition(mapping): mapping.definition_digest
+        _: return Err("SCVDB_REPRODUCTION_MAPPING_REQUIRED")
+    match db_reproduction_exact(value.config, records, lookup)?:
+        Config(_): ()
+        _: return Err("MissingEffectiveConfig")
+    for artifact in [snapshot, definition]:
+        var declared = false
+        for dependency in value.dependencies:
+            if dependency.digest == artifact: declared = true
+        if not declared: return Err("SCVDB_REPRODUCTION_ARTIFACT_UNDECLARED")
+    Ok(true)
+
 fn db_reproduction_validate_records(records: [DbReproductionRecord], lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<bool, text>:
-    for record in records:
+    var captured = records
+    for _round in 0..64:
+        val expanded = db_reproduction_expand_step(captured, lookup)?
+        if expanded.len() == captured.len(): break
+        captured = expanded
+    for record in captured:
         match record:
             Config(_): ()
+            SourceSnapshot(_): ()
+            TestDefinition(_): ()
+            BoundReproduction(value, source):
+                val verified = db_reproduction_validate_bound(value, source, captured, lookup)?
             Reproduction(value):
-                match db_reproduction_exact(value.config, records, lookup)?:
+                match db_reproduction_exact(value.config, captured, lookup)?:
                     Config(_): ()
                     _: return Err("ReproductionMismatch")
             Observation(value):
                 var configs: [DbConfigRevision] = []
                 var reproductions: [DbReproductionRevision] = []
-                match db_reproduction_exact(value.config, records, lookup)?:
+                match db_reproduction_exact(value.config, captured, lookup)?:
                     Config(config):
                         var comparison = config
                         comparison.reference = value.config
                         configs.push(comparison)
                     _: return Err("MissingEffectiveConfig")
                 if val reference = value.reproduction:
-                    match db_reproduction_exact(reference, records, lookup)?:
+                    match db_reproduction_exact(reference, captured, lookup)?:
                         Reproduction(reproduction):
+                            if value.custom_config and value.actual == "FAIL": return Err("SCVDB_REPRODUCTION_MAPPING_REQUIRED")
+                            if not db_reproduction_same_resolved(reproduction.config, value.config, lookup)? or not db_reproduction_same_resolved(reproduction.test_definition, value.test_definition, lookup)?: return Err("ReproductionMismatch")
+                            var comparison = reproduction
+                            comparison.reference = reference
+                            comparison.config = value.config
+                            comparison.test_definition = value.test_definition
+                            reproductions.push(comparison)
+                        BoundReproduction(reproduction, source):
+                            db_reproduction_validate_bound(reproduction, source, captured, lookup)?
                             if not db_reproduction_same_resolved(reproduction.config, value.config, lookup)? or not db_reproduction_same_resolved(reproduction.test_definition, value.test_definition, lookup)?: return Err("ReproductionMismatch")
                             var comparison = reproduction
                             comparison.reference = reference
@@ -114,12 +178,14 @@ fn db_reproduction_validate_records(records: [DbReproductionRecord], lookup: fn(
                             comparison.test_definition = value.test_definition
                             reproductions.push(comparison)
                         _: return Err("MissingReproduction")
+                elif value.custom_config and value.actual == "FAIL": return Err("SCVDB_REPRODUCTION_MAPPING_REQUIRED")
                 db_observation_validate(value, configs, reproductions)?
     Ok(true)
 
 export db_reproduction_owned_kind, db_reproduction_fields, db_reproduction_operation
 export db_reproduction_row, db_reproduction_patch_records, db_reproduction_record_references
 export db_reproduction_lookup_refs, db_reproduction_exact, db_reproduction_validate_records
+export db_reproduction_expand_step, db_reproduction_validate_bound
 
 fn db_reproduction_state_row(rows: [DbRow], entity: EntityRef) -> Result<DbRow?, text>:
     val key = entity_ref_canonical(entity)
