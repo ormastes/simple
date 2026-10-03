@@ -6,7 +6,8 @@ use app.scv.db.observation_owner.*
 use app.scv.db.local_store.{db_store_read}
 use app.scv.db.retention_store.{db_retention_open}
 use app.scv.db.checkpoint_store.*
-use std.scv.db_checkpoint.{db_checkpoint_encode}
+use std.scv.db_checkpoint.{db_checkpoint_encode, db_checkpoint_decode}
+use app.scv.db.local_transition.{db_read_local_view}
 use std.scv.db_evidence.*
 use std.scv.db_reproduction_codec.*
 use std.scv.db_reproduction_projection.*
@@ -45,6 +46,34 @@ describe "REQ019 immutable source and test artifact bindings":
                     if pin.root == setup_item2_artifact_digest(fixture.records[index])[10:] and pin.reason == "reproduction" and pin.expires_day == 0: pinned = true
                 expect(pinned).to_equal(true)
             expect(db_patch_encode(fixture.patch).unwrap()).to_equal(wire)
+            check_item2_observation_cleanup(fixture)
+
+    it "rejects signed source and test row drops after proving the candidate imports into an empty receiver":
+        for dropped in [3, 4]:
+            val fixture = setup_item2_artifact_fixture()
+            val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+            val original = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image.state
+            val (checkpoint, authority, pages) = setup_item2_artifact_checkpoint(fixture, dropped, true)
+            val wire = db_checkpoint_encode(checkpoint).unwrap()
+            expect(db_checkpoint_decode(wire, authority).unwrap()).to_equal(checkpoint)
+            # Actual empty-root install proves this is not merely a bad signature,
+            # malformed snapshot, dangling identity, or incomplete history test.
+            val receiver = setup_item2_artifact_fixture()
+            expect(receiver.policy.config).to_equal(fixture.policy.config)
+            val imported = db_checkpoint_prepare_install(receiver.source, "", wire, authority, pages).unwrap()
+            expect(db_checkpoint_resume_install(receiver.source, imported.journal_head, authority).unwrap().phase).to_equal("Installed")
+            val received = db_read_local_view(receiver.source, authority.policy.admission).unwrap().image.state
+            expect(received.accepted).to_equal(original.accepted)
+            expect(received.rows.len()).to_equal(original.rows.len() - 1)
+            expect(db_reproduction_state_row(received.rows, db_reproduction_reference(fixture.records[dropped]).entity).unwrap()).to_equal(nil)
+            val before = db_store_read(fixture.source)
+            val barrier = db_store_read(fixture.source, "checkpoint-install")
+            expect(db_checkpoint_prepare_install(fixture.source, head, wire, authority, pages).unwrap_err()).to_equal("SCVDB_CHECKPOINT_ROW_REGRESSION")
+            expect(db_store_read(fixture.source)).to_equal(before)
+            expect(db_store_read(fixture.source, "checkpoint-install")).to_equal(barrier)
+            check_item2_artifact_mapping(fixture, fixture.records[3])
+            check_item2_artifact_mapping(fixture, fixture.records[4])
+            check_item2_observation_cleanup(receiver)
             check_item2_observation_cleanup(fixture)
 
     it "rejects signed wrong source revision and test definition identity without accepting or pinning":

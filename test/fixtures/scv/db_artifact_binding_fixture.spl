@@ -94,31 +94,43 @@ export check_item2_artifact_apply, setup_item2_artifact_followup
 
 # Independent checkpoint authority signs a real captured image; altered cases
 # rehash every affected layer, so refusal must come from monotonic row policy.
-fn setup_item2_artifact_checkpoint(fixture: Item2ObservationFixture, changed: i64 = -1) -> (DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
+fn setup_item2_artifact_checkpoint(fixture: Item2ObservationFixture, changed: i64 = -1, drop_mapping: bool = false) -> (DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
     val captured = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap()
     val original = captured.image.state
     var state = original
     if changed >= 0:
         val mapping = fixture.records[changed]
-        val rewritten = match mapping:
-            SourceSnapshot(value):
-                var next = value
-                next.snapshot_digest = setup_item2_artifact_digest(fixture.records[4])
-                db_reproduction_record_seal(DbReproductionRecord.SourceSnapshot(next)).unwrap()
-            TestDefinition(value):
-                var next = value
-                next.definition_digest = setup_item2_artifact_digest(fixture.records[3])
-                db_reproduction_record_seal(DbReproductionRecord.TestDefinition(next)).unwrap()
-            _: fail("mapping rewrite")
         val identity = entity_ref_canonical(db_reproduction_reference(mapping).entity)
-        for index in 0..state.rows.len():
-            if state.rows[index].entity == identity: state.rows[index].fields = db_reproduction_fields(rewritten).unwrap()
+        if drop_mapping:
+            var kept = state.rows
+            kept = []
+            for row in state.rows:
+                if row.entity != identity: kept.push(row)
+            expect(kept.len()).to_equal(state.rows.len() - 1)
+            state.rows = kept
+        else:
+            val rewritten = match mapping:
+                SourceSnapshot(value):
+                    var next = value
+                    next.snapshot_digest = setup_item2_artifact_digest(fixture.records[4])
+                    db_reproduction_record_seal(DbReproductionRecord.SourceSnapshot(next)).unwrap()
+                TestDefinition(value):
+                    var next = value
+                    next.definition_digest = setup_item2_artifact_digest(fixture.records[3])
+                    db_reproduction_record_seal(DbReproductionRecord.TestDefinition(next)).unwrap()
+                _: fail("mapping rewrite")
+            for index in 0..state.rows.len():
+                if state.rows[index].entity == identity: state.rows[index].fields = db_reproduction_fields(rewritten).unwrap()
         state.revision = db_state_digest(state).unwrap()
     var metadata = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(original.revision, 1u64, [], [fixture.patch.batch_id], sha256_text(db_snapshot_encode(original).unwrap()))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(fixture.patch.batch_id, original.revision)).unwrap()]
     if state.revision != original.revision:
         metadata.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.revision, 2u64, [original.revision], [], sha256_text(db_snapshot_encode(state).unwrap()))).unwrap())
     var identities = identity_map_empty(fixture.patch.namespace, 1)
-    for record in fixture.records:
+    for index in 0..fixture.records.len():
+        # A dropped row must not leave an invalid dangling alias/disposition.
+        # Accepted history is retained above; target nonregression is separate.
+        if drop_mapping and index == changed: continue
+        val record = fixture.records[index]
         val entity = db_reproduction_reference(record).entity
         identities = identity_map_allocate(identities, entity.provisional.unwrap()).state
         metadata.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(entity, DbCheckpointDisposition.Live)).unwrap())
