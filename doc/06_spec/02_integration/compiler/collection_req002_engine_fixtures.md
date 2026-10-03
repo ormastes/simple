@@ -66,6 +66,12 @@ fail. Stdout remains separate and must still match the exact oracle: current CLI
 receipt or successful process exit alone is insufficient semantic evidence.
 No positive JIT witness is inferred from this interpreter-only owner record.
 
+Adversarial authored checks also reject same-length content mismatches: stdout
+`NO` versus `OK`, and `interpretex` versus `interpreter` independently in the
+requested and actual receipt fields. These exercise real language string equality
+rather than introducing a comparison workaround. A historical native equality
+warning motivated the cases; no current defect or test outcome is inferred.
+
 No expected-missing-runtime-symbol facility was found in this harness: such a
 fixture would be reported as a lane error, not a verified negative. That negative
 gate remains explicitly missing. Native admission, optional struct payload ABI,
