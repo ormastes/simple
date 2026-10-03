@@ -1,0 +1,35 @@
+#!/bin/sh
+# Execute the public launcher's production final command with an argv spy.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+test_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+test_root=$(mktemp -d "$test_parent/simple-provisional-launch-policy.XXXXXX")
+cleanup() {
+  case "$test_root" in "$test_parent"/simple-provisional-launch-policy.*) rm -rf -- "$test_root" ;; *) exit 2 ;; esac
+}
+trap cleanup EXIT HUP INT TERM
+repo_root="$test_root/repo" manager_images="$test_root/images"
+mkdir -p "$repo_root/scripts/bootstrap" "$manager_images"
+export LAUNCH_ARGS="$test_root/args"
+cat >"$repo_root/scripts/bootstrap/bootstrap-provisional-phase3-phase4.shs" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" >"$LAUNCH_ARGS"
+SH
+printf 'fixture intent\n' >"$manager_images/provisional-tool.intent"
+pin="$test_root/pin"; printf 'fixture pin\n' >"$pin"
+for variable in hello_receipt snapshot snapshot_digest source_authority source_authority_digest runtime_snapshot runtime_snapshot_digest shared_parse_cas_root source_root run_root authority_program authority_receipt authority_digest authority_image_receipt image_receipt; do
+  eval "$variable=\$pin"
+done
+authority_field() { printf '%s\n' "$pin"; }
+image_field() { printf '%s\n' "$pin"; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+threads=40 memory_bytes=6000000000 reserve_bytes=1000000000 target=x86_64-pc-windows-msvc
+lifetime_ms=0 memory_policy=monitor estimated_group_disk_bytes=8589934592 minimum_free_disk_bytes=26843545600
+awk '/^sh .*bootstrap-provisional-phase3-phase4.shs/ {copy=1} copy {print}' \
+  "$base/run-provisional-phase3-phase4.shs" >"$test_root/launch.shs"
+[ -s "$test_root/launch.shs" ] || { echo 'FAIL: final production launch absent' >&2; exit 1; }
+. "$test_root/launch.shs"
+for arg in --lifetime-ms=0 --memory-policy=monitor --threads=40 --memory-bytes=6000000000 --reserve-bytes=1000000000 --poll-ms=1000 --max-attempts=3; do
+  grep -qx -- "$arg" "$LAUNCH_ARGS" || { echo "FAIL: launcher lost $arg" >&2; exit 1; }
+done
+echo 'PASS: public provisional launcher preserves unlimited/monitor and finite control arguments'

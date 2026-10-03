@@ -42,3 +42,26 @@ evidence only; native capacity, image and worker lifecycle qualification is
 UNRUN. SSpec tests cover exact deadline boundaries, unlimited work beyond the
 former caps, finite cleanup independence and real manifest encode/decode with
 policy-sensitive identity; their execution awaits an admitted runtime.
+
+The separate provisional Hello-qualified route also needs explicit propagation.
+Its public launcher now accepts `--lifetime-ms=0 --memory-policy=monitor` for
+post-readiness work, preserving the prior six-hour/enforce defaults. Binary and
+index manifests receive both options; native-group preparation publishes the
+same fields into its typed config. Monitor RUN-5 and legacy enforce RUN-4 are
+accepted. Product compilation requests dynload, without claiming a provider was
+actually loaded. Binary/index manifest replay re-emits a deterministic candidate
+and compares it with retained bytes, refusing a changed requested policy before
+dispatch rather than silently running the previous manifest. Reservations, poll intervals, attempt limits, source/runtime
+bindings and the existing native cleanup budgets are unchanged.
+
+Two focused shell regressions execute the production routing functions, config
+publication, and final public-launch command with owner/emitter spies. They
+observe zero/monitor at the binary, index and group dispatch boundaries, positive
+memory reservations, forty requested threads and finite polling. Negative work
+durations, unknown policies and obsolete manifest wires remain rejected. This is
+argument-routing evidence, not native lifecycle or compiler qualification.
+
+Pre-readiness Hello and manager-image contracts remain separate: their existing
+runtime-root/profile authority and the image builder's 21600-second watchdog are
+not made unlimited by these post-readiness options. A profile extension or formal
+admission is still needed before claiming an entirely unlimited end-to-end run.
