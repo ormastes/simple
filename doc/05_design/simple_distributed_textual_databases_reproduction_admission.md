@@ -132,3 +132,25 @@ This supersedes the earlier missing-mapping-owner statement only. Opaque artifac
 binding does not prove complete source-tree capture or execution/environment
 completeness. Reference alias support, large-object/scalable retention and all
 runtime qualification remain open. The full REQ-019 acceptance is unproved.
+
+### Open provider-identity admission boundary
+
+The current owner protects immutable reproduction bindings, but REQ-017 still
+needs a capability-pinned provider identity index. Canonical identity keys must
+be derived from the independently admitted capability revision and declared
+uniqueness tuple. The incoming observation cannot declare its own identity scope.
+An index lookup and final mutation must share the captured semantic generation;
+retry after HEAD loss must recompute the decision against that generation.
+
+Exact duplicates across import batches must preserve the original immutable
+observation. Changed bytes under the same identity must preserve signed rejected
+input in durable quarantine without publishing a new observation or pinning its
+content. A distinct genuine attempt has a distinct key. Both backends, settlement
+and checkpoint import must enforce the same invariant. A whole-store scan on each
+Paged request or a separately written side index cannot satisfy the selected
+operating profile or atomicity contract. Storage format/version, migration of
+existing observations and quarantine recovery remain implementation work.
+
+The fresh-UID collision integration source is an intended failing safety oracle;
+it is not a durable-quarantine oracle and has not run. See the tracked
+item2_provider_identity_owner_gap_2026-10-03 defect before accepting REQ-017.

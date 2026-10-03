@@ -44,3 +44,24 @@ The read-only runner audit still found no C:/dev/simple/bin/release directory.
 The inherited SCV hello diagnostic reports terminal exit 1 and empty admission;
 the provisional startup diagnostic reports terminal exit 88. Neither is a
 verified live wait or an admitted full runner. No binary was executed here.
+
+### REQ-017 owner-path audit after binding coverage
+
+The selected observation identity contract is broader than signed batch replay.
+The exported db_observation_admit pure helper is only called by unit tests;
+Reference/Paged effect admission does not compare independently allocated rows
+by provider tuple. The typed codec validates names declared by the incoming
+record itself, not an independently admitted capability schema. This leaves
+provider scope and cross-UID reuse unenforced despite valid source/test binding.
+
+The concrete regression and completion obligations are recorded in
+../../08_tracking/bug/item2_provider_identity_owner_gap_2026-10-03.md.
+An authenticated fresh-UID collision source now targets the effect owners;
+its expected failure has not been executed. Existing REQ-017 system cases stay
+explicit fail-fast rather than inheriting proof from accepted-batch replay.
+
+A fresh bounded runner audit found admission NONE for the inherited-core40
+candidate; its test-runner receipt is terminal exit 1. The exported bootstrap
+path contains simple.exe.rejected and the main bin/release path is absent.
+A RUNNING label elsewhere in the aggregate status is not evidence of a live
+handle or usable runner. No binary was executed or restarted by this lane.

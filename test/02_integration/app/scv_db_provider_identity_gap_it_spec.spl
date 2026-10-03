@@ -1,0 +1,36 @@
+# Regression source for the open REQ-017 effect-owner gap.
+# Expected to fail until provider identity is enforced across distinct row UIDs.
+# Rejection alone is not proof of the required durable quarantine receipt.
+use std.spec.*
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.observation_owner.{db_observation_now}
+use std.scv.db_admission.{db_authorize_patch}
+use std.scv.db_evidence.{db_provider_identity_bytes}
+use std.scv.db_reproduction_codec.*
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_artifact_binding_fixture.*
+
+describe "REQ017 provider identity safety before durable quarantine completion":
+    it "refuses changed observation bytes under an existing provider tuple even with a new row UID":
+        for paged in [false, true]:
+            val fixture = setup_item2_artifact_fixture(paged)
+            val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+            val original = match fixture.records[2]:
+                Observation(value): value
+                _: fail("expected admitted observation")
+            var changed = original
+            changed.reference = setup_item2_observation_ref("observation", 2)
+            changed.failure_signature = "different failure under the same provider identity"
+            expect(db_provider_identity_bytes(changed.provider, []).unwrap()).to_equal(db_provider_identity_bytes(original.provider, []).unwrap())
+            expect(changed.reference.entity == original.reference.entity).to_be(false)
+            val record = db_reproduction_record_seal(DbReproductionRecord.Observation(changed)).unwrap()
+            expect(db_reproduction_record_encode(record).unwrap() == db_reproduction_record_encode(fixture.records[2]).unwrap()).to_be(false)
+            val incoming = setup_item2_artifact_followup(fixture, [record])
+            expect(db_authorize_patch(incoming.patch, incoming.policy.config.admission, [], db_observation_now().unwrap()).is_ok()).to_be(true)
+            val channel = if paged: "paged" else: "semantic"
+            val before = db_store_read(fixture.source, channel)
+            val retained = db_store_read(fixture.source, "retention")
+            expect(check_item2_artifact_apply(incoming, head).unwrap_err()).to_equal("QuarantinedIdentityReuse")
+            expect(db_store_read(fixture.source, channel)).to_equal(before)
+            expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+            check_item2_observation_cleanup(fixture)

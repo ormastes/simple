@@ -165,3 +165,15 @@ it is not evidence of execution by an old released binary. Paged legacy replay r
 the original variants in four unit scenarios; they are derived from documented
 framing and separately hashed, not captured historical executions.
 The boundary uses real retention rollup/deletion before observing expired evidence; restricted and missing states also reach both owners. All are unexecuted.
+
+### REQ-017 effect-owner regression gate
+
+Before replacing its three system placeholders, execute
+`test/02_integration/app/scv_db_provider_identity_gap_it_spec.spl` and repair the
+fresh-UID collision path. It authenticates a second patch with the same provider
+tuple and different observation bytes, then requires rejection before semantic
+or retention mutation on each backend. This source is expected to fail against
+the current owner; no runtime RED is recorded. Add durable signed-input quarantine,
+independently pinned capability dimensions, cross-batch exact duplicate and
+distinct-attempt scenarios before claiming full requirement coverage. Batch replay
+and row-UID collision are insufficient substitutes.
