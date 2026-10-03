@@ -330,3 +330,27 @@ local apply, conflict persistence, shared SJ store channels, signed receipts,
 allocator projection, integration review and the draft PR. Runtime evidence,
 generated manuals, host/performance qualification and merge remain separate
 required gates. See the [implementation ledger](../evidence/seven_plans/item2_code_first_2026-10-03.md).
+
+### Paged history and REQ-019 continuation ownership
+
+The current integration branch is `work/item2-paged-history-20261003` in
+`C:/dev/simple-item2-followup-20261003`, based on release commit `5742353e641`.
+The earlier assignment baseline above is historical. Subsequent source work
+remains local after other sessions merged unfinished PRs #2302 and #2306;
+those merges provide no runtime qualification.
+
+| Owner | Isolated worktree | Current scope | Independent source reviewer |
+|---|---|---|---|
+| Root | `simple-item2-followup-20261003` | CLI routes/tests, system scenarios/manual, integration and local checkpoints | Core for CLI; evidence for historical system scenarios |
+| Core | `simple-item2-hydration-20261003` | Paged historical proofs, page reader and signed settlement fixture repairs | Evidence |
+| Evidence | `simple-item2-checkpoint-20261003` | Rollup chains, checkpoint keys and genuine restricted evidence fixtures | Root |
+| Research/implementation | `simple-item2-quarantine-20261003` | REQ-019 canonical records, Reference/Paged admission, external content, retention protection and settlement hooks | Core for pure code; evidence for effects |
+
+REQ-019 helper names use `setup_item2_observation_*` and
+`check_item2_observation_*`; root exclusively owns `db/commands.spl` and its
+new command integration spec. Remaining system fail-fast scenarios stay explicit.
+Available-dependency checks do not close source/test artifact mapping or full
+reproducibility. Incomplete retention protection does not establish complete
+closure, a repair path, scalable collection or Operating B qualification.
+Root is the merge owner and integration reviewer; named final model review,
+runtime acceptance and release approval remain unfulfilled gates.
