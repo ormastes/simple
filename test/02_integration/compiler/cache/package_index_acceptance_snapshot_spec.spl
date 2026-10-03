@@ -1,0 +1,83 @@
+# @req PSI-REQ-004 PSI-REQ-005 PSI-REQ-006
+use std.spec.*
+use app.test.package_index_acceptance_snapshot.{package_index_acceptance_snapshot_v1}
+use app.io.mod.{dir_remove, getpid}
+
+fn snapshot_acceptance_test_root() -> text:
+    "build/test-artifacts/package-index-snapshot-acceptance-{getpid()}"
+
+describe "SCV production snapshot acceptance owners":
+    before_each:
+        dir_remove(snapshot_acceptance_test_root(), true)
+    after_each:
+        dir_remove(snapshot_acceptance_test_root(), true)
+
+    it "materializes admitted inventory and reopens its bound snapshot":
+        step("Freeze one SCV revision before package discovery")
+        val result = package_index_acceptance_snapshot_v1("scv-snapshot-bound-build", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("snapshot_inventory_count=1")
+        expect(result.observations).to_contain("frozen_source_matches=true")
+        expect(result.observations).to_contain("snapshot_reopened=true")
+
+    it "keeps frozen bytes when a live edit occurs between snapshot reads":
+        step("Edit the live worktree during the frozen build")
+        val result = package_index_acceptance_snapshot_v1("scv-concurrent-worktree-edit-isolated", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.reason).to_equal("owner-interleaving")
+        expect(result.observations).to_contain("frozen_source_preserved=true")
+        expect(result.observations).to_contain("live_source_distinct=true")
+
+    it "creates a distinct snapshot after a real source inventory change":
+        step("Detect source drift without mutating the active build")
+        val result = package_index_acceptance_snapshot_v1("scv-source-drift-new-build", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("distinct_revision=true")
+        expect(result.observations).to_contain("prior_source_preserved=true")
+
+    it "rejects a cache outside the owner's designated internal directory":
+        step("Inspect SCV-bound build provenance")
+        val result = package_index_acceptance_snapshot_v1("scv-internal-write-boundary", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.reason).to_equal("snapshot-cache-root-not-owned")
+        expect(result.observations).to_contain("outside_cache_created=false")
+        expect(result.observations).to_contain("source_preserved=true")
+
+    it "preserves a real Git repository's HEAD and index bytes during snapshot acquisition":
+        step("Inspect SCV-bound build provenance")
+        val result = package_index_acceptance_snapshot_v1("scv-git-state-nonmutation", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("head_preserved=true")
+        expect(result.observations).to_contain("index_bytes_preserved=true")
+        expect(result.observations).to_contain("staged_diff_preserved=true")
+
+    it "returns a precise refusal for corrupted snapshot provenance":
+        step("Refuse an untrusted package index")
+        val result = package_index_acceptance_snapshot_v1("scv-concise-failure-diagnostics", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.reason).to_equal("snapshot-open-provenance-invalid")
+        expect(result.observations).to_contain("snapshot_admitted=false")
+
+    it "collects only an unretained generation and leaves the retained snapshot readable":
+        step("Preserve the prior admitted generation")
+        val result = package_index_acceptance_snapshot_v1("scv-internal-metadata-atomic-gc", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("removed_snapshots=1")
+        expect(result.observations).to_contain("retained_snapshot_valid=true")
+        expect(result.observations).to_contain("repeat_removals=0")
+
+    it "recovers abandoned staging but preserves a live owner's staging":
+        step("Interrupt SCV snapshot creation or cleanup")
+        val result = package_index_acceptance_snapshot_v1("scv-snapshot-create-crash", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("abandoned_staging_removed=true")
+        expect(result.observations).to_contain("live_staging_preserved=true")
+        expect(result.observations).to_contain("prior_snapshot_valid=true")
+
+    it "refuses partial cleanup authority and succeeds after its receipt is restored":
+        step("Interrupt SCV snapshot creation or cleanup")
+        val result = package_index_acceptance_snapshot_v1("scv-snapshot-cleanup-crash", snapshot_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("partial_receipt_cleanup_rejected=true")
+        expect(result.observations).to_contain("prior_snapshot_intact=true")
+        expect(result.observations).to_contain("restored_receipt_cleanup_succeeded=true")

@@ -1,88 +1,221 @@
-use app.spipe.testing.*
-use compiler.driver.cache.cas_store.{cas_open}
+# @req PSI-REQ-001 PSI-REQ-004 PSI-REQ-005
+use std.spec.*
+use compiler.driver.cache.cas_store.{cas_put, cas_get}
+use compiler.driver.cache.cas_batch_transaction.{
+    cas_batch_begin_v1, cas_batch_current_v1, cas_batch_stage_object_v1, cas_batch_publish_v1
+}
 use compiler.driver.cache.package_archive_cache.{
-    PackageArchiveAuthorityV1, package_archive_load_v1,
-    package_archive_publish_v1
+    PackageArchiveAuthorityV1, PackageArchivePublishInputV1, package_archive_load_v1,
+    package_archive_publish_scc_v1, package_archive_aggregate_entry_v1,
+    package_archive_read_verified_v1
+}
+use compiler.driver.cache.package_archive_types.{
+    PackageActionKeyV1, PackageArchiveReceiptV1, PackageArchiveMemberReceiptV1,
+    package_archive_receipt_digest_v1, package_archive_receipt_canonical_fields_v1
 }
 use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_write, file_delete, file_read}
+
+extern fn rt_getpid() -> i64
 
 fn archive_entry() -> PackageModuleIndexEntryV1:
-    PackageModuleIndexEntryV1(
-        "pkg.alpha", "pkg.alpha.main", "snapshot/pkg/alpha/main.spl",
-        sha256_text("source"), sha256_text("interface"),
-        sha256_text("export"), sha256_text("abi"), sha256_text("init"),
-        sha256_text("provider"), sha256_text("action-key"),
-        sha256_text("manifest"), "scc.alpha", [], [])
+    PackageModuleIndexEntryV1("pkg.alpha", "pkg.alpha.main", "snapshot/pkg/alpha/main.spl",
+        sha256_text("source"), sha256_text("interface"), sha256_text("export"),
+        sha256_text("abi"), sha256_text("init"), sha256_text("provider"),
+        sha256_text("action-key"), sha256_text("manifest"), "scc.alpha", [], [])
 
 fn archive_authority(variant: text) -> PackageArchiveAuthorityV1:
-    PackageArchiveAuthorityV1(
-        sha256_text("producer"), "root-generation", variant,
+    PackageArchiveAuthorityV1(sha256_text("producer"), "root-generation", variant,
         "revision", "tree", sha256_text("inventory"))
 
+fn archive_root(name: text) -> text:
+    val root = "build/test-artifacts/archive-admission-{name}-{rt_getpid()}"
+    dir_remove(root, true)
+    root
+
+fn archive_interface() -> text:
+    val digest = sha256_text("semantic-alpha")
+    "symbol|alpha|function|i64|{digest}"
+
+fn archive_action() -> text:
+    val digest = sha256_text("compile-alpha")
+    "action|alpha-entry|compile|alpha|{digest}"
+
+fn archive_fixture(root: text, dependencies: [text]) -> PackageModuleIndexEntryV1:
+    val entry = archive_entry()
+    expect(package_archive_publish_scc_v1(root, entry.scc_identity,
+        archive_authority(sha256_text("variant")),
+        [PackageArchivePublishInputV1(entry, dependencies, archive_interface(), archive_action(), true)])).to_equal(true)
+    package_archive_aggregate_entry_v1([entry])!
+
+# Forge through the actual content store and mapping transaction. All outer
+# hashes agree; admission must still reject invalid members/manifest semantics.
+fn archive_forge_receipt(root: text, original: PackageArchiveReceiptV1) -> bool:
+    var receipt = original
+    receipt.receipt_digest = package_archive_receipt_digest_v1(receipt)
+    if cas_put(root, package_archive_receipt_canonical_fields_v1(receipt)) != receipt.receipt_digest:
+        return false
+    val begun = cas_batch_begin_v1(root, cas_batch_current_v1(root), "scc.alpha", [receipt.package_key])
+    if begun.is_err(): return false
+    val transaction = begun.unwrap()
+    if cas_batch_stage_object_v1(transaction, receipt.package_key,
+            PackageActionKeyV1(receipt.action_key), receipt).is_err():
+        return false
+    cas_batch_publish_v1(transaction).is_ok()
+
 describe "sealed clean-package archive cache":
-    it "loads a clean package without opening source":
-        val root = "/tmp/simple-package-archive-cache-clean"
-        expect(cas_open(root)).to_equal(true)
-        val entry = archive_entry()
+    it "enforces read budgets before decoding actual CAS files":
+        step("Read one stored object at and below its byte extent budget")
+        val root = archive_root("bounded")
+        val content = "bounded payload"
+        val digest = cas_put(root, content)
+        expect(package_archive_read_verified_v1(root, digest, content.len()).unwrap()).to_equal(content)
+        expect(package_archive_read_verified_v1(root, digest, content.len() - 1).is_err()).to_equal(true)
+        expect(package_archive_read_verified_v1(root, "../outside", 64).unwrap_err()).to_equal(
+            "archive-read-authority-invalid")
+        expect(package_archive_read_verified_v1(root, digest, 0).is_err()).to_equal(true)
+        dir_remove(root, true)
+
+    it "admits exact archive bytes and member digests on repeated warm loads":
+        step("Publish a real SCC archive and read the aggregated package twice")
+        val root = archive_root("clean")
+        val dependencies = [sha256_text("dependency")]
+        val entry = archive_fixture(root, dependencies)
         val authority = archive_authority(sha256_text("variant"))
-        expect(package_archive_publish_v1(
-            root, entry, authority, [sha256_text("dependency")],
-            "interface", "action-object")).to_equal(true)
-        val loaded = package_archive_load_v1(
-            root, entry, authority, [sha256_text("dependency")])
-        expect(loaded.valid).to_equal(true)
-        expect(loaded.source_required).to_equal(false)
-        expect(loaded.interface_path).to_contain("/cas/sha256/")
-        expect(loaded.action_path).to_contain("/cas/sha256/")
+        val first = package_archive_load_v1(root, entry, authority, dependencies)
+        expect(first.valid).to_equal(true)
+        expect(first.source_required).to_equal(false)
+        val receipt = first.receipt!
+        expect(sha256_text(file_read(first.archive_path))).to_equal(receipt.archive_digest)
+        expect(receipt.members.len()).to_equal(3)
+        expect(receipt.members[0].payload_digest).to_equal(sha256_text(archive_action()))
+        expect(receipt.members[1].payload_digest).to_equal(sha256_text(archive_interface()))
+        val second = package_archive_load_v1(root, entry, authority, dependencies)
+        expect(second.valid).to_equal(true)
+        expect(second.receipt!.receipt_digest).to_equal(receipt.receipt_digest)
+        dir_remove(root, true)
 
-    it "fails closed on provenance or dependency mismatch":
-        val root = "/tmp/simple-package-archive-cache-provenance"
-        expect(cas_open(root)).to_equal(true)
+    it "fails closed on each provenance or dependency mismatch":
+        step("Change one expected authority dimension after publication")
+        val root = archive_root("provenance")
+        val dependencies = [sha256_text("dependency")]
+        val entry = archive_fixture(root, dependencies)
+        for dimension in ["variant", "producer", "root", "dependency"]:
+            var authority = archive_authority(sha256_text("variant"))
+            var expected = dependencies
+            if dimension == "variant": authority.variant_digest = sha256_text("other")
+            if dimension == "producer": authority.producer_digest = sha256_text("other")
+            if dimension == "root": authority.root_generation = "other"
+            if dimension == "dependency": expected = [sha256_text("other")]
+            val result = package_archive_load_v1(root, entry, authority, expected)
+            expect(result.valid).to_equal(false)
+            expect(result.source_required).to_equal(false)
+            expect(result.reason).to_equal("archive-provenance-mismatch")
+        dir_remove(root, true)
+
+    it "rejects an unbound producer identity before publication":
+        step("Attempt archive publication without a producer generation")
+        val root = archive_root("unbound")
         val entry = archive_entry()
+        var authority = archive_authority(sha256_text("variant"))
+        authority.root_generation = ""
+        expect(package_archive_publish_scc_v1(root, entry.scc_identity, authority,
+            [PackageArchivePublishInputV1(entry, [], archive_interface(), archive_action(), true)])).to_equal(false)
+        dir_remove(root, true)
+
+    it "routes only an absent action mapping back to source":
+        step("Look up a package without any admitted archive mapping")
+        val root = archive_root("missing-mapping")
+        val entry = package_archive_aggregate_entry_v1([archive_entry()])!
+        val result = package_archive_load_v1(root, entry, archive_authority(sha256_text("variant")), [])
+        expect(result.valid).to_equal(false)
+        expect(result.reason).to_equal("archive-missing")
+        expect(result.source_required).to_equal(true)
+        dir_remove(root, true)
+
+    it "rejects missing or corrupt archive bytes behind an admitted receipt":
+        for mutation in ["missing", "corrupt"]:
+            step("Remove or tamper the actual archive after mapping publication")
+            val root = archive_root(mutation)
+            val entry = archive_fixture(root, [])
+            val authority = archive_authority(sha256_text("variant"))
+            val admitted = package_archive_load_v1(root, entry, authority, [])
+            expect(admitted.valid).to_equal(true)
+            if mutation == "missing":
+                expect(file_delete(admitted.archive_path)).to_equal(true)
+            else:
+                file_write(admitted.archive_path, "tampered archive")
+            val result = package_archive_load_v1(root, entry, authority, [])
+            expect(result.valid).to_equal(false)
+            expect(result.source_required).to_equal(false)
+            expect(result.reason).to_equal("archive-content-unavailable")
+            expect(result.archive_path).to_equal("")
+            dir_remove(root, true)
+
+    it "rejects forged member names gaps overlaps overflow digest and coverage":
+        for mutation in ["name", "gap", "overlap", "overflow", "digest", "coverage"]:
+            step("Publish a hash-consistent forged receipt through the real mapping transaction")
+            val root = archive_root(mutation)
+            val entry = archive_fixture(root, [])
+            val authority = archive_authority(sha256_text("variant"))
+            var receipt = package_archive_load_v1(root, entry, authority, []).receipt!
+            var members = receipt.members
+            var member = members[1]
+            if mutation == "name": member.name = "actions.smf"
+            if mutation == "gap": member.offset = member.offset + 1u64
+            if mutation == "overlap": member.offset = 0u64
+            if mutation == "overflow": member.extent = 18446744073709551615u64
+            if mutation == "digest": member.payload_digest = sha256_text("forged")
+            members[1] = member
+            if mutation == "coverage":
+                val bytes = cas_get(root, receipt.archive_digest)!
+                receipt.archive_digest = cas_put(root, bytes + "unaccounted suffix")
+            receipt.members = members
+            expect(archive_forge_receipt(root, receipt)).to_equal(true)
+            val result = package_archive_load_v1(root, entry, authority, [])
+            expect(result.valid).to_equal(false)
+            expect(result.source_required).to_equal(false)
+            expect(result.reason).to_equal(if mutation == "digest":
+                "archive-member-digest-mismatch" else: "archive-layout-invalid")
+            dir_remove(root, true)
+
+    it "rejects a hash-consistent manifest with forged semantic authority":
+        step("Rewrite the manifest and outer hashes while preserving the expected package receipt")
+        val root = archive_root("manifest")
+        val entry = archive_fixture(root, [])
         val authority = archive_authority(sha256_text("variant"))
-        expect(package_archive_publish_v1(
-            root, entry, authority, [sha256_text("dependency")],
-            "interface", "action-object")).to_equal(true)
-        val wrong_variant = package_archive_load_v1(
-            root, entry, archive_authority(sha256_text("other")),
-            [sha256_text("dependency")])
-        expect(wrong_variant.valid).to_equal(false)
-        expect(wrong_variant.source_required).to_equal(false)
-        expect(wrong_variant.reason).to_equal("archive-provenance-mismatch")
-        val wrong_dependency = package_archive_load_v1(
-            root, entry, authority, [sha256_text("other-dependency")])
-        expect(wrong_dependency.valid).to_equal(false)
-        expect(wrong_dependency.source_required).to_equal(false)
+        var receipt = package_archive_load_v1(root, entry, authority, []).receipt!
+        val bytes = cas_get(root, receipt.archive_digest)!
+        val original = receipt.members[2]
+        val prefix = bytes.slice(0, original.offset.to_i64())
+        val manifest = bytes.slice(original.offset.to_i64(), bytes.len()).replace("package=pkg.alpha", "package=pkg.other")
+        var members = receipt.members
+        members[2] = PackageArchiveMemberReceiptV1("manifest.sdn", original.offset,
+            manifest.len().to_u64(), sha256_text(manifest))
+        receipt.members = members
+        receipt.archive_digest = cas_put(root, prefix + manifest)
+        expect(archive_forge_receipt(root, receipt)).to_equal(true)
+        val result = package_archive_load_v1(root, entry, authority, [])
+        expect(result.valid).to_equal(false)
+        expect(result.source_required).to_equal(false)
+        expect(result.reason).to_equal("archive-manifest-invalid")
+        dir_remove(root, true)
 
-    it "rejects an unbound authority dimension":
-        val root = "/tmp/simple-package-archive-cache-authority"
-        expect(cas_open(root)).to_equal(true)
-        val entry = archive_entry()
-        val invalid = PackageArchiveAuthorityV1(
-            sha256_text("producer"), "", sha256_text("variant"),
-            "revision", "tree", sha256_text("inventory"))
-        expect(package_archive_publish_v1(
-            root, entry, invalid, [sha256_text("dependency")],
-            "interface", "action-object")).to_equal(false)
-
-    it "routes only a missing archive back to frozen source":
-        val root = "/tmp/simple-package-archive-cache-missing"
-        expect(cas_open(root)).to_equal(true)
-        val loaded = package_archive_load_v1(
-            root, archive_entry(), archive_authority(sha256_text("variant")),
-            [sha256_text("dependency")])
-        expect(loaded.valid).to_equal(false)
-        expect(loaded.reason).to_equal("archive-missing")
-        expect(loaded.source_required).to_equal(true)
-
-    it "admits packages with no dependencies":
-        val root = "/tmp/simple-package-archive-cache-leaf"
-        expect(cas_open(root)).to_equal(true)
-        val entry = archive_entry()
-        val authority = archive_authority(sha256_text("variant"))
-        expect(package_archive_publish_v1(
-            root, entry, authority, [], "interface", "action-object"
-        )).to_equal(true)
-        expect(package_archive_load_v1(
-            root, entry, authority, []).valid).to_equal(true)
+    it "rejects malformed semantic payloads even when every digest matches":
+        for mutation in ["interface", "action", "unresolved-action"]:
+            step("Publish digest-valid payloads with invalid symbol or action grammar")
+            val root = archive_root(mutation)
+            val entry = archive_entry()
+            val authority = archive_authority(sha256_text("variant"))
+            val interface_content = if mutation == "interface": "not-symbols" else: archive_interface()
+            val action_content = if mutation == "action": "not-actions" else:
+                if mutation == "unresolved-action": archive_action().replace("|alpha|", "|missing|") else: archive_action()
+            expect(package_archive_publish_scc_v1(root, entry.scc_identity, authority,
+                [PackageArchivePublishInputV1(entry, [], interface_content, action_content, true)])).to_equal(true)
+            val aggregate = package_archive_aggregate_entry_v1([entry])!
+            val result = package_archive_load_v1(root, aggregate, authority, [])
+            expect(result.valid).to_equal(false)
+            expect(result.source_required).to_equal(false)
+            expect(result.reason).to_equal("archive-semantic-invalid")
+            dir_remove(root, true)

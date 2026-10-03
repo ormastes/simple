@@ -6,9 +6,11 @@ complete bounded ELF engine. No native execution or performance PASS is claimed.
 """
 use std.spec.*
 use std.spec.step
-use std.io_runtime.{file_read_bytes, file_exists, dir_create_all}
+use std.io_runtime.{file_read_bytes, file_exists, dir_create_all, dir_exists, host_os, cwd, process_run}
+use std.path.{resolve}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
-use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.retained_file.{retained_directory_is_real_no_follow}
 use std.nogc_async_mut.link_working_set.file_store.{
     link_spill_required_scratch_v1, link_stage_file_v1, link_publish_staged_v1,
     link_discard_staged_v1
@@ -35,6 +37,63 @@ fn item4_spill_cleanup(parent: text, source: text, output: text):
     expect(dir_remove(parent, false)).to_equal(true)
 
 describe "ITEM4-REQ-009 linker spill storage execution":
+    it "admits real scratch directories and rejects file missing and NUL parents without runtime-only probes":
+        step("Create a real private directory and binary source through existing filesystem owners")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        expect(retained_directory_is_real_no_follow(parent)).to_equal(true)
+        expect(retained_directory_is_real_no_follow(parent + "/")).to_equal(true)
+        expect(retained_directory_is_real_no_follow(source)).to_equal(false)
+        expect(retained_directory_is_real_no_follow(parent + "/absent")).to_equal(false)
+        expect(retained_directory_is_real_no_follow(parent + "\0suffix")).to_equal(false)
+        step("Reject a regular file as the scratch parent before staging")
+        val rejected = link_stage_file_v1(source, source, 4, 80u64, item4_spill_never_cancel)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("not a regular directory")
+        item4_spill_cleanup(parent, source, parent + "/unused")
+
+    it "rejects a real scratch-directory symlink or junction including a trailing separator":
+        step("Require a supported retained-file host and create a real directory alias")
+        val platform = host_os()
+        expect(platform == "windows" or platform == "linux").to_equal(true)
+        if platform != "windows" and platform != "linux": return
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val alias = parent + "/alias"
+        val normalized_parent = parent.replace("\\", "/")
+        val drive_absolute = normalized_parent.len() >= 3 and normalized_parent.byte_at(1) == 58 and normalized_parent.byte_at(2) == 47
+        val target = if drive_absolute or normalized_parent.starts_with("/"): normalized_parent else: resolve(normalized_parent, cwd().replace("\\", "/"))
+        var code: i64 = -1
+        if platform == "windows":
+            val (_out, _err, status) = process_run("cmd.exe", ["/d", "/c", "mklink", "/J", alias.replace("/", "\\"), target.replace("/", "\\")])
+            code = status
+        else:
+            val (_out, _err, status) = process_run("ln", ["-s", target, alias])
+            code = status
+        expect(code).to_equal(0)
+        expect(dir_exists(alias)).to_equal(true)
+        if code != 0 or not dir_exists(alias): return
+        step("Distinguish the real target from its final symlink or reparse-point entry")
+        expect(retained_directory_is_real_no_follow(alias)).to_equal(false)
+        expect(retained_directory_is_real_no_follow(alias + "/")).to_equal(false)
+        val rejected = link_stage_file_v1(source, alias, 4, 80u64, item4_spill_never_cancel)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("not a regular directory")
+        step("Remove only the alias and prove its real target survives cleanup")
+        if platform == "windows":
+            expect(dir_remove(alias, false)).to_equal(true)
+        else:
+            expect(file_remove(alias)).to_equal(true)
+        expect(retained_directory_is_real_no_follow(parent)).to_equal(true)
+        expect(file_exists(source)).to_equal(true)
+        item4_spill_cleanup(parent, source, parent + "/unused")
+
     it "streams binary windows into checksummed frames and transactionally reconstructs the exact bytes":
         step("Create an isolated binary fixture including zero and high-bit bytes")
         val directory = item4_spill_parent()
