@@ -1,14 +1,65 @@
 # Simple distributed textual databases: operator and developer guide
 
-**Status:** Design guide; not implemented  
+**Status:** Partial source implementation; runtime and deployment unverified
+
 **Selected profile:** Authority A / Adapters A / Operating B / Retention A  
-**Date:** 2026-09-13
+**Date:** 2026-10-03
 
 This guide describes the intended operation of the SCV distributed textual
-database. The commands, file layout, capability interfaces, adapters, and
-failure messages below are proposed contracts. They are not currently an
-available CLI or deployed service. Do not use this document as evidence that a
-Git, CI, or issue-server round trip works today.
+database and identifies implemented source entry points. Local command,
+settlement, checkpoint and historical-query owners now exist in source, but no
+admitted runtime has qualified them. The production GitHub/provider workflows
+below remain requirements, not deployment receipts. This document does not
+establish that a Git, CI, or issue-server round trip works today.
+
+## Configured observation commands
+
+The source command owner routes these commands through configuration and
+reproduction admission, using an independently supplied policy digest:
+
+```text
+scv db observation-apply <policy-file> <policy-digest> <patch-file> <expected-head|empty> <external-evidence-parent>
+scv db paged-observation-apply <paged-policy-file> <policy-digest> <patch-file> <expected-head> <external-evidence-parent>
+```
+
+The patch file contains the original signed typed patch; the command never
+signs it or approves its metadata. Paged application requires an initialized
+Paged store and the exact captured HEAD. Evidence storage must be outside the
+checkout under the existing controlled-CAS scope rules. Ordinary `apply` and
+`paged-apply` do not bypass the dedicated evidence owner.
+
+Configuration/reproduction records bind exact content revisions. Declared
+dependency availability must agree with observed content or retained evidence;
+missing and restricted dependencies are explicit and do not establish
+reproducibility. An accepted replay acknowledges the original immutable fact,
+not current artifact availability. Reproduction commands are never executed by
+admission. Responses identify the committed local HEAD, revision and replay
+status; they are not protected remote settlement receipts.
+
+Verification of declared CAS artifacts does not yet prove the complete mapping
+from source and test-definition revisions to their reproduction artifacts.
+That mapping and complete reproducibility remain open acceptance work, even
+when every declared dependency is available.
+
+Captured settled-alias dependency validation is covered by the Paged source
+path. Reference command admission still lacks that alias-resolution path;
+its current authored success cases use exact UID references. This is an open
+compatibility gap, not a restriction of the selected requirement.
+
+An available object with a verified missing or restricted transitive dependency
+can receive an explicit incomplete-reproduction protection marker in the
+retention catalog. Such a marker stops collection for the whole local catalog,
+including resuming previously prepared deletions. It does not certify a complete
+closure. The trusted marker-repair operation is still missing; restoring bytes
+alone does not resume collection.
+
+The interim observation/pin path inherits the existing retention owner's
+256-object and 8 MiB per-object limits, with a 1 GiB aggregate content-read
+reservation ceiling; bounded catalog metadata reads are separate. Command
+patch input is bounded at 1 MiB. Larger dependency pinning and
+Operating B qualification remain required work; these limits do not replace
+the selected full feature requirements. The source command regressions must
+execute on an admitted runner before this interface is qualified for use.
 
 ## What is being built
 
@@ -273,6 +324,8 @@ insufficient for claiming the adapter operational.
 - [Selected non-functional requirements](../../../02_requirements/nfr/simple_distributed_textual_databases.md)
 - [Architecture](../../../04_architecture/simple_distributed_textual_databases.md)
 - [Detail design](../../../05_design/simple_distributed_textual_databases.md)
+- [Configuration and reproduction admission checkpoint](../../../05_design/simple_distributed_textual_databases_reproduction_admission.md)
+- [Paged historical regression design](../../../05_design/simple_distributed_textual_databases_paged_history_regressions.md)
 - [System-test plan](../../../03_plan/sys_test/simple_distributed_textual_databases.md)
 - [Parallel agent plan](../../../03_plan/agent_tasks/simple_distributed_textual_databases.md)
 - [System-spec manual](../../../06_spec/03_system/app/scv/feature/simple_distributed_textual_databases_spec.md)

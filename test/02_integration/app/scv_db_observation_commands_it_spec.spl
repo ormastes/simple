@@ -1,0 +1,112 @@
+# Actual command-owner dispatch, signed policy/patch files and durable stores.
+# These source oracles require an admitted runtime before claiming execution.
+use std.spec.*
+use app.io.mod.{file_write, file_delete}
+use app.scv.db.commands.{db_command}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.local_apply.{db_read_local_view}
+use app.scv.db.paged_store.{db_paged_current_row}
+use app.scv.db.retention_store.{db_retention_open}
+use std.scv.db_policy_codec.{db_policy_encode}
+use std.scv.db_paged_model.{db_paged_policy_encode}
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_reproduction_codec.{db_reproduction_reference}
+use std.scv.db_reproduction_projection.{db_reproduction_row}
+use std.scv.distributed_identity.{entity_ref_canonical}
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+use test.fixtures.scv.db_observation_fixture.*
+
+fn setup_item2_observation_command(fixture: Item2ObservationFixture, paged: bool) -> [text]:
+    val policy = if paged: db_paged_policy_encode(fixture.policy).unwrap() else: db_policy_encode(fixture.policy.config).unwrap()
+    expect(file_write(fixture.source + "/observation-policy", policy)).to_be(true)
+    expect(file_write(fixture.source + "/observation-patch", db_patch_encode(fixture.patch).unwrap())).to_be(true)
+    val command = if paged: "paged-observation-apply" else: "observation-apply"
+    val pin = if paged: fixture.policy.revision else: fixture.policy.config.revision
+    val head = if fixture.initial_head == "": "empty" else: fixture.initial_head
+    [command, "observation-policy", pin, "observation-patch", head, fixture.sources.evidence_parent]
+
+fn check_item2_observation_command_rows(fixture: Item2ObservationFixture, paged: bool):
+    for record in fixture.records:
+        val reference = db_reproduction_reference(record)
+        if paged:
+            val row = db_paged_current_row(fixture.source, fixture.policy, reference.entity).unwrap().unwrap()
+            expect(db_reproduction_row(row).unwrap()).to_equal(record)
+            expect(row.revision).to_equal(fixture.patch.batch_id)
+        else:
+            val image = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image
+            var found = false
+            for row in image.state.rows:
+                if row.entity == entity_ref_canonical(reference.entity):
+                    expect(db_reproduction_row(row).unwrap()).to_equal(record)
+                    expect(row.revision).to_equal(fixture.patch.batch_id)
+                    found = true
+            expect(found).to_be(true)
+            expect(image.state.accepted.len()).to_equal(1)
+            expect(image.state.accepted[0].batch_id).to_equal(fixture.patch.batch_id)
+
+describe "Configured observation CLI admission":
+    it "routes signed Reference and Paged records through content admission with honest available or missing dependencies":
+        for paged in [false, true]:
+            for declared in ["available", "missing"]:
+                val fixture = setup_item2_observation_fixture(paged, declared)
+                val args = setup_item2_observation_command(fixture, paged)
+                val channel = if paged: "paged" else: "semantic"
+                val before = db_store_read(fixture.source, channel)
+                var generic = args[0:5]
+                generic[0] = if paged: "paged-apply" else: "apply"
+                expect(db_command(fixture.source, generic)).to_equal("ERROR SCVDB_OBSERVATION_OWNER_REQUIRED")
+                expect(db_store_read(fixture.source, channel)).to_equal(before)
+                val result = db_command(fixture.source, args)
+                expect(result.starts_with(if paged: "OK paged-observation head=" else: "OK local-observation head=")).to_be(true)
+                expect(result.contains("replay=false")).to_be(true)
+                check_item2_observation_command_rows(fixture, paged)
+                val retained = db_retention_open(fixture.source).unwrap()
+                expect(retained.catalog.pins.len()).to_be_greater_than(0)
+                if declared == "missing":
+                    for pin in retained.catalog.pins:
+                        expect(pin.root == fixture.absent_digest).to_be(false)
+                check_item2_observation_cleanup(fixture)
+
+    it "rejects missing context wrong policy pins forged signatures and checkout-contained evidence without semantic publication":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged)
+            val args = setup_item2_observation_command(fixture, paged)
+            val channel = if paged: "paged" else: "semantic"
+            val before = db_store_read(fixture.source, channel)
+            val retained = db_store_read(fixture.source, "retention")
+            expect(db_command(fixture.source, args[0:5])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+            var wrong_pin = args
+            wrong_pin[2] = "0".repeat(64)
+            expect(db_command(fixture.source, wrong_pin).starts_with("ERROR ")).to_be(true)
+            var wrong_scope = args
+            wrong_scope[5] = fixture.source
+            expect(db_command(fixture.source, wrong_scope)).to_equal("ERROR SCVDB_STORE_SCOPE")
+            var forged = fixture.patch
+            forged.signature = [0u8;64]
+            expect(file_write(fixture.source + "/observation-patch", db_patch_encode(forged).unwrap())).to_be(true)
+            expect(db_command(fixture.source, args)).to_equal("ERROR SCVDB_SIGNATURE_INVALID")
+            expect(db_store_read(fixture.source, channel)).to_equal(before)
+            expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+            check_item2_observation_cleanup(fixture)
+
+    it "requires a captured HEAD and acknowledges exact replay after artifact loss without claiming reproducibility":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged)
+            var args = setup_item2_observation_command(fixture, paged)
+            expect(db_command(fixture.source, args).starts_with("OK ")).to_be(true)
+            val channel = if paged: "paged" else: "semantic"
+            val captured = db_store_read(fixture.source, channel)
+            val retained = db_store_read(fixture.source, "retention")
+            expect(db_command(fixture.source, args)).to_equal("ERROR SCVDB_STORE_HEAD_ADVANCED")
+            val path = fixture.sources.evidence_parent + "/scv-evidence-v1/" + fixture.available_digest + ".scve"
+            expect(file_delete(path)).to_be(true)
+            args[4] = captured.head
+            val replay = db_command(fixture.source, args)
+            expect(replay.starts_with("OK ")).to_be(true)
+            expect(replay.contains("replay=true")).to_be(true)
+            expect(replay.contains("reproducible=true")).to_be(false)
+            expect(path_entry_present(path)).to_equal(Ok(false))
+            expect(db_store_read(fixture.source, channel)).to_equal(captured)
+            expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+            check_item2_observation_command_rows(fixture, paged)
+            check_item2_observation_cleanup(fixture)

@@ -168,3 +168,38 @@ production admission. Commits `0fb512ed519` and `fc1dcb301f0` are local source
 checkpoints. No runtime tests were executed; system inventory remains 20 actual
 owner sources and 133 explicit fail-fast cases. REQ-019 content admission and
 complete source/test reproduction closure remain unfinished.
+
+## REQ-019 configured admission source checkpoint
+
+Integrated `f50f12b83f2` from the isolated reproduction lane. Canonical records
+bind their UID and semantic fields to a domain-separated revision; dedicated
+Reference/Paged owners validate signed records, exact captured dependencies and
+actual external evidence before semantic publication. The shared settlement
+queue checks content before unpublished candidates are prepared or published.
+Published replay reauthorizes the original patch without asserting current
+availability. Source caller review found no direct command bypass of that queue
+boundary.
+
+Available content is protected in the existing retention catalog. Actual
+transitive missing/restricted edges produce an explicit permanent incomplete
+marker, which blocks all collection and prepared-deletion resume. Malformed,
+corrupt, unreadable, quota and scope failures do not become missing evidence.
+No trusted marker repair/removal owner exists yet; restoring bytes alone cannot
+resume collection. This conservative mechanism is not scalable retention.
+
+The configured CLI routes and guide accompany 19 new regression sources:
+2 canonical-codec, 12 admission/retention, 2 actual local Git settlement and
+3 CLI cases. Independent review repaired captured-alias comparison for Paged
+records without resealing signed bytes, an available-digest CLI assertion, and
+the prepared-deletion fixture's uppercase `PASS` precondition. Reference local
+images lack an authoritative alias map; their alias case explicitly records
+fail-closed behavior rather than accepted support.
+
+All 19 cases remain UNEXECUTED. Full source/test artifact mapping, Reference
+alias resolution, larger-object/scalable pinning and incomplete-marker repair
+remain open. Interim limits are 256 nodes and 8 MiB per object; the 1 GiB
+reservation covers content reads, not every catalog/metadata operation. These
+limits do not replace the selected Operating B requirements. The system
+inventory remains 20 actual-owner sources and 133 explicit fail-fast cases;
+REQ-019's full acceptance is not closed. No runtime/core/MCP/coverage/performance
+PASS or release admission is claimed.
