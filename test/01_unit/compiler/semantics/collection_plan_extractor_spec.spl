@@ -12,7 +12,7 @@ use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolId}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
 use compiler.semantics.perf_facts.types.*
 use compiler.semantics.perf.collection_plan.*
-use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan}
+use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan, collection_plan_source_facts}
 use compiler.semantics.perf.collection_plan_analysis.{collect_collection_expr_plans_v1}
 
 fn cp_span(line: i64) -> Span:
@@ -72,6 +72,55 @@ fn cp_registry() -> CollectionOperationRegistry:
     registry
 
 describe "typed CollectionPlan extraction":
+    it "derives exact cardinality only from typed array literal slots":
+        step("Extract empty and nonempty literal sources")
+        val item = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val empty = HirExpr(kind: HirExprKind.ArrayLit([], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        val nonempty = HirExpr(kind: HirExprKind.ArrayLit([item, item, item], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        val empty_plan = extract_unary_collection_plan(cp_call(empty, "map", 40, 3), 20, cp_registry()).unwrap()
+        val full_plan = extract_unary_collection_plan(cp_call(nonempty, "map", 40, 3), 20, cp_registry()).unwrap()
+        expect(empty_plan.nodes[0].facts.cardinality).to_equal(HirPerfCardinality.Exact(0))
+        expect(full_plan.nodes[0].facts.cardinality).to_equal(HirPerfCardinality.Exact(3))
+
+    it "does not infer cardinality from variables calls repeats or fixed array types":
+        step("Retain unknown source evidence outside ordinary array literals")
+        val unknown = HirPerfCardinality.Unknown("source cardinality unavailable")
+        expect(collection_plan_source_facts(cp_source()).cardinality).to_equal(unknown)
+        val call = cp_call(cp_source(), "produce", 99, 2)
+        expect(collection_plan_source_facts(call).cardinality).to_equal(unknown)
+        val item = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val count = HirExpr(kind: HirExprKind.IntLit(4, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val repeat = HirExpr(kind: HirExprKind.ArrayRepeat(item, count, Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        expect(collection_plan_source_facts(repeat).cardinality).to_equal(unknown)
+        var fixed_source = cp_source()
+        fixed_source.type_ = HirType(kind: HirTypeKind.Array(cp_int_type(), Some(4)), span: cp_span(1))
+        expect(collection_plan_source_facts(fixed_source).cardinality).to_equal(unknown)
+
+    it "keeps all rewrite evidence unknown for literals with effectful elements":
+        step("Count slots conditional on successful construction without evaluating elements")
+        val effectful = HirExpr(kind: HirExprKind.Call(cp_source(), [], []), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val literal = HirExpr(kind: HirExprKind.ArrayLit([effectful], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        val facts = collection_plan_source_facts(literal)
+        expect(facts.cardinality).to_equal(HirPerfCardinality.Exact(1))
+        expect(facts.effects.unknown).to_equal(true)
+        expect(facts.cost).to_equal(HirPerfCostClass.Unknown("source cost unavailable"))
+        expect(facts.allocation).to_equal(HirPerfAllocationClass.Unknown)
+        expect(facts.equality_proven).to_equal(false)
+        expect(facts.alias_proven).to_equal(false)
+        expect(facts.callback_pure).to_equal(false)
+        expect(facts.escape_proven).to_equal(false)
+        expect(facts.profitability_proven).to_equal(false)
+        expect(facts.evidence_receipt).to_equal("")
+
+    it "does not grant cardinality to untyped or non-array-typed literals":
+        step("Require typed array HIR before producing even a slot count")
+        var literal = HirExpr(kind: HirExprKind.ArrayLit([], nil), has_type_: false, type_: cp_array_type(), span: cp_span(1))
+        val unknown = HirPerfCardinality.Unknown("source cardinality unavailable")
+        expect(collection_plan_source_facts(literal).cardinality).to_equal(unknown)
+        literal.has_type_ = true
+        literal.type_ = cp_unit_type()
+        expect(collection_plan_source_facts(literal).cardinality).to_equal(unknown)
+
     it "orders a resolved map-filter chain from source to result":
         step("Extract two admitted unary calls without granting rewrite proofs")
         val mapped = cp_call(cp_source(), "map", 40, 3)

@@ -5,6 +5,13 @@ Authored companion to
 The tests build resolved typed HIR and call production logical-plan extraction;
 they do not compile or execute a substituted plan.
 
+Authored source-cardinality cases additionally require Exact(0)/Exact(3) for
+typed empty/nonempty literals through real chain extraction. Variable, call,
+ArrayRepeat, fixed-length variable, untyped and non-array-typed inputs retain
+Unknown. An effectful element still gives one slot conditional on successful
+construction; every independent effect/cost/allocation/rewrite proof stays
+unknown or false. These tests were committed before implementation, unexecuted.
+
 The original extraction cases cover node ordering, unresolved/absent metadata,
 receiver and arity mismatch, chain bounds, and callback-derived distinct key
 types. The module-analysis increment adds six scenarios:
