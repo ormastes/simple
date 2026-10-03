@@ -17,6 +17,9 @@ artifact ran. Actual shared programs are documented in
 | Requested JIT with matching stdout | Reject absent production-owned engine witness. |
 | Engine selection | Reject aliases counted twice, unknown engines or fewer than two engines. |
 | Aggregate verdict | Reject any lane failure, divergence or zero-fixture run. |
+| Interpreter receipt | Require exactly one execution-owner line with requested/actual interpreter and no fallback. |
+| Receipt rejection | Reject missing, duplicate, wrong-mode, fallback and extra-field receipts. |
+| Same-length content changes | Reject a wrong marker or altered mode field even when string length is unchanged. |
 
 The marker file is independent expected data. Strict flags are requests, not
 proof of an execution engine. Successful rule-level tests would verify verdict

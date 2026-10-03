@@ -47,6 +47,6 @@ an executable and starting an AOT subprocess is the native lane, not evidence of
 an in-process JIT route. Existing SMF loading must likewise be identified by its
 actual execution route. Do not relabel either to fill the JIT acceptance column.
 
-No engine implementation is authorized by this note before an admitted test
-runner is available. REQ-002 remains open; no global claim that every possible
-JIT provider is absent is made here.
+This audit introduces no engine implementation. An admitted test runner is
+still required for runtime verification. REQ-002 remains open; no global claim
+that every possible JIT provider is absent is made here.
