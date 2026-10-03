@@ -1,0 +1,88 @@
+use std.spec.*
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_policy_codec.*
+use std.scv.db_reducer.{db_empty_state, db_state_digest}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode}
+use std.scv.distributed_identity_map.{identity_map_empty}
+use std.scv.distributed_identity.*
+use std.scv.db_conflict_catalog.{DbConflictCatalog, db_conflict_catalog_encode}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_apply_fixture.*
+
+fn setup_item2_checkpoint() -> (DbDatabaseCheckpoint, DbCheckpointAuthority):
+    var policy = DbPolicyConfig(revision: "", admission: setup_item2_apply_policy(), merge: setup_item2_apply_merge())
+    policy.revision = db_policy_digest(policy).unwrap()
+    var state = db_empty_state()
+    state.revision = db_state_digest(state).unwrap()
+    val record = db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.revision, 1u64, [], [], sha256_text(db_snapshot_encode(state).unwrap()))).unwrap()
+    val pages = db_pages_build([record], DbPageQuota(max_page_bytes: 16777216, max_page_records: 10000, max_records: 1000000)).unwrap()
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: "repo", namespace: policy.admission.namespace, epoch: 1, schema_revision: "s1", reducer_revision: "r1", policy_revision: policy.revision, predecessor_checkpoint: "", history_horizon: state.revision, current_revision: state.revision, metadata: pages.manifest, storage: DbCheckpointStorage.Reference(db_snapshot_encode(state).unwrap(), db_identity_snapshot_encode(identity_map_empty(policy.admission.namespace, 1)).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap()), signer: "checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    (checkpoint, DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: policy, paged_policy: nil))
+
+fn setup_item2_checkpoint_entity(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+describe "Signed complete checkpoint envelopes and explicit history":
+    it "roundtrips authenticated metadata roots and rejects independent pin or signature changes":
+        val (checkpoint, authority) = setup_item2_checkpoint()
+        val encoded = db_checkpoint_encode(checkpoint).unwrap()
+        expect(db_checkpoint_decode(encoded, authority)).to_equal(Ok(checkpoint))
+        var wrong = authority
+        wrong.expected_checkpoint = sha256_text("different independent pin")
+        expect(db_checkpoint_decode(encoded, wrong)).to_equal(Err("SCVDB_CHECKPOINT_PIN"))
+        var forged = checkpoint
+        forged.signature = [0u8;64]
+        expect(db_checkpoint_decode(db_checkpoint_encode(forged).unwrap(), authority)).to_equal(Err("SCVDB_CHECKPOINT_SIGNATURE"))
+        expect(db_checkpoint_decode(encoded + "trailing", authority)).to_equal(Err("SCVDB_CHECKPOINT_FORMAT"))
+
+    it "binds explicit history and refuses context migration under the same authority":
+        val (checkpoint, authority) = setup_item2_checkpoint()
+        var changed = checkpoint
+        changed.history_horizon = sha256_text("different horizon")
+        expect(db_checkpoint_digest(changed).unwrap() == checkpoint.revision).to_be(false)
+        changed = checkpoint
+        changed.epoch = 2
+        expect(db_checkpoint_authenticate(changed, authority)).to_equal(Err("SCVDB_CHECKPOINT_CONTEXT"))
+
+    it "returns explicit split ambiguity and follows real merge history":
+        val first = setup_item2_checkpoint_entity(1)
+        val second = setup_item2_checkpoint_entity(2)
+        val third = setup_item2_checkpoint_entity(3)
+        val batch = sha256_text("accepted merge batch")
+        val merged = db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(first, DbCheckpointDisposition.MergedInto(second, batch))).unwrap()
+        val split = db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(second, DbCheckpointDisposition.SplitInto([first, third], batch))).unwrap()
+        val live = db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(second, DbCheckpointDisposition.Live)).unwrap()
+        expect(db_checkpoint_resolve(first, [merged, live])).to_equal(Ok(DbCheckpointResolution.Live(second)))
+        match db_checkpoint_resolve(first, [merged, split]).unwrap():
+            Ambiguous(entity, targets, cause):
+                expect(entity).to_equal(second)
+                expect(targets.len()).to_equal(2)
+                expect(cause).to_equal(batch)
+            _: assert(false)
+
+    it "rejects missing link proof, cycles, duplicate split targets and missing causal batches":
+        val first = setup_item2_checkpoint_entity(1)
+        val second = setup_item2_checkpoint_entity(2)
+        val batch = sha256_text("cause")
+        val forward = db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(first, DbCheckpointDisposition.MergedInto(second, batch))).unwrap()
+        val backward = db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(second, DbCheckpointDisposition.MergedInto(first, batch))).unwrap()
+        expect(db_checkpoint_resolve(first, [forward])).to_equal(Err("SCVDB_CHECKPOINT_GRAPH_INCOMPLETE"))
+        expect(db_checkpoint_resolve(first, [forward, backward])).to_equal(Err("SCVDB_CHECKPOINT_GRAPH_CYCLE"))
+        expect(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(first, DbCheckpointDisposition.SplitInto([second, second], batch))).is_err()).to_be(true)
+        expect(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(first, DbCheckpointDisposition.Tombstoned("")))).to_equal(Err("SCVDB_CHECKPOINT_BATCH"))
+
+    it "requires a signed nonzero topological ordinal and rejects history self edges":
+        val revision = sha256_text("revision")
+        expect(db_checkpoint_metadata_encode(DbCheckpointMetadata.History(revision, 0u64, [], [], revision))).to_equal(Err("SCVDB_CHECKPOINT_HISTORY"))
+        expect(db_checkpoint_metadata_encode(DbCheckpointMetadata.History(revision, 1u64, [revision], [], revision))).to_equal(Err("SCVDB_CHECKPOINT_HISTORY"))
+        val record = db_checkpoint_metadata_encode(DbCheckpointMetadata.History(revision, 1u64, [], [], revision)).unwrap()
+        expect(db_checkpoint_metadata_decode(record)).to_equal(Ok(DbCheckpointMetadata.History(revision, 1u64, [], [], revision)))
+
+export setup_item2_checkpoint, setup_item2_checkpoint_entity
