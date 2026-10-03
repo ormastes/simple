@@ -13,6 +13,13 @@ fn collection_plan_algorithm_name(algorithm: CollectionPlanAlgorithm) -> text:
         case CollectionPlanAlgorithm.Hash: "hash"
         case CollectionPlanAlgorithm.Ordered: "ordered"
 
+fn _collection_plan_memory_text(bytes: i64) -> text:
+    if bytes == -1:
+        return "unknown"
+    if bytes < -1:
+        return "invalid"
+    bytes.to_text()
+
 fn collection_plan_explain(
     site_id: text, target_profile_id: text,
     facts: CollectionPlanFacts, decision: CollectionPlanDecision
@@ -32,7 +39,19 @@ fn collection_plan_explain(
     val linear_rejection = if decision.linear_rejection == "": "none" else: decision.linear_rejection
     val hash_rejection = if decision.hash_rejection == "": "none" else: decision.hash_rejection
     val ordered_rejection = if decision.ordered_rejection == "": "none" else: decision.ordered_rejection
-    val extra_memory = if decision.selected == CollectionPlanAlgorithm.Original: "0" else: "unproven"
+    # These are supplied peak-extra-memory upper bounds, not measured RSS.
+    # Original introduces no optimizer-owned allocation; its zero says nothing
+    # about the memory already required by the original program.
+    val selected_memory = match decision.selected:
+        case CollectionPlanAlgorithm.Original: 0
+        case CollectionPlanAlgorithm.Linear: facts.linear_extra_memory_bytes
+        case CollectionPlanAlgorithm.Hash: facts.hash_extra_memory_bytes
+        case CollectionPlanAlgorithm.Ordered: facts.ordered_extra_memory_bytes
+    val extra_memory = _collection_plan_memory_text(selected_memory)
+    val memory_budget = _collection_plan_memory_text(facts.memory_budget_bytes)
+    val linear_memory = _collection_plan_memory_text(facts.linear_extra_memory_bytes)
+    val hash_memory = _collection_plan_memory_text(facts.hash_extra_memory_bytes)
+    val ordered_memory = _collection_plan_memory_text(facts.ordered_extra_memory_bytes)
     val fallback = if decision.selected == CollectionPlanAlgorithm.Original:
         "original-on-rejection"
     else:
@@ -70,8 +89,11 @@ fn collection_plan_explain(
         "rejected.linear={linear_rejection}",
         "rejected.hash={hash_rejection}",
         "rejected.ordered={ordered_rejection}",
+        "candidate.linear.extra_memory_bytes={linear_memory}",
+        "candidate.hash.extra_memory_bytes={hash_memory}",
+        "candidate.ordered.extra_memory_bytes={ordered_memory}",
         "extra_memory_bytes={extra_memory}",
-        "memory_budget=not-modeled",
+        "memory_budget={memory_budget}",
         "fallback={fallback}"
     ]
     lines.join("\n") + "\n"
