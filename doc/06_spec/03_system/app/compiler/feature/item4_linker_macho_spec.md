@@ -17,4 +17,3 @@ SPipe regeneration are **UNRUN**. This is not generated PASS evidence.
 
 These are image-construction assertions. No Darwin execution, signing, dyld,
 TLS or unwind qualification follows from them.
-

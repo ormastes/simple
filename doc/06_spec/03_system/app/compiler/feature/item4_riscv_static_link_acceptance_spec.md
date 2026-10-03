@@ -17,4 +17,3 @@ SPipe regeneration are **UNRUN**. This is not generated PASS evidence.
 
 The admitted image is little-endian RV64 static ET_EXEC. RV32 output, dynamic
 linking/TLS and actual RV64 host execution are not established by this manual.
-

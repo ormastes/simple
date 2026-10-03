@@ -17,4 +17,3 @@ SPipe regeneration are **UNRUN**. This is not generated PASS evidence.
 
 Scratch accounting is logical bytes, not whole-job memory or filesystem
 allocation. Full bounded linker admission remains unsupported.
-
