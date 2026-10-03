@@ -1,0 +1,137 @@
+# Snapshot collection order preserves the in-memory projection exactly.
+# Unlike semantic set/map encoding, projection sets/fields are ordered lists;
+# uniqueness is validated independently. This module performs no I/O.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{EntityRef, EntityUid, SettledAlias, ActorIncarnation, entity_ref_validate, entity_ref_provisional, entity_ref_settled}
+
+fn db_snapshot_text(value: text) -> Result<[u8], text>:
+    val encoded = db_canonical_text(value)?
+    val decoded = db_read_text(db_read_frame(encoded, 0)?)?
+    if decoded != value: return Err("SCVDB_SNAPSHOT_NONCANONICAL_TEXT")
+    Ok(encoded)
+
+fn db_snapshot_ref_encode(ref: EntityRef) -> Result<[u8], text>:
+    if not entity_ref_validate(ref).valid: return Err("SCVDB_REFERENCE")
+    if val uid = ref.provisional:
+        return Ok(db_frame(40u8, db_snapshot_text(uid.database_namespace)? + db_snapshot_text(uid.entity_kind)? + db_snapshot_text(uid.actor.hex)? + db_frame(2u8, db_u64_bytes(uid.counter))))
+    if val alias = ref.settled:
+        return Ok(db_frame(41u8, db_snapshot_text(alias.database_namespace)? + db_frame(2u8, db_u64_bytes(alias.authority_epoch)) + db_snapshot_text(alias.entity_kind)? + db_frame(2u8, db_u64_bytes(alias.sequence))))
+    Err("SCVDB_REFERENCE")
+
+fn db_snapshot_ref_decode(frame: DbDecodedFrame) -> Result<EntityRef, text>:
+    val fields = db_read_children(frame.payload)?
+    if fields.len() != 4: return Err("SCVDB_REFERENCE_FIELDS")
+    var ref = EntityRef(provisional: nil, settled: nil)
+    if frame.tag == 40u8:
+        ref = entity_ref_provisional(EntityUid(database_namespace: db_read_text(fields[0])?, entity_kind: db_read_text(fields[1])?, actor: ActorIncarnation(hex: db_read_text(fields[2])?), counter: db_read_unsigned(fields[3])?))
+    elif frame.tag == 41u8:
+        ref = entity_ref_settled(SettledAlias(database_namespace: db_read_text(fields[0])?, authority_epoch: db_read_unsigned(fields[1])?, entity_kind: db_read_text(fields[2])?, sequence: db_read_unsigned(fields[3])?))
+    else: return Err("SCVDB_REFERENCE_TAG")
+    if not entity_ref_validate(ref).valid: return Err("SCVDB_REFERENCE")
+    Ok(ref)
+
+fn db_snapshot_value_encode(value: DbValue, depth: i64) -> Result<[u8], text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    match value:
+        Absent: Ok(db_frame(0u8, []))
+        Text(content): db_snapshot_text(content)
+        Unsigned(number): Ok(db_frame(2u8, db_u64_bytes(number)))
+        Flag(flag):
+            if flag: return Ok(db_frame(1u8, [1u8]))
+            Ok(db_frame(1u8, [0u8]))
+        Reference(ref): Ok(db_frame(31u8, db_snapshot_ref_encode(ref)?))
+        List(values):
+            var encoded: [[u8]] = []
+            for item in values: encoded.push(db_snapshot_value_encode(item, depth + 1)?)
+            Ok(db_canonical_list(encoded))
+        Set(values):
+            var canonical: [[u8]] = []
+            var payload: [u8] = []
+            for item in values:
+                val bytes = db_snapshot_value_encode(item, depth + 1)?
+                payload = payload + bytes
+                canonical.push(db_value_bytes(item)?)
+            val unique = db_canonical_set(canonical)?
+            Ok(db_frame(7u8, payload))
+        ObservedSet(members):
+            var dots: [[u8]] = []
+            var payload: [u8] = []
+            for member in members:
+                if member.dot == "": return Err("SCVDB_SET_IDENTITY")
+                val dot = db_snapshot_text(member.dot)?
+                dots.push(dot)
+                var removed = 0u8
+                if member.removed: removed = 1u8
+                payload = payload + db_frame(25u8, dot + db_snapshot_value_encode(member.value, depth + 1)? + db_frame(1u8, [removed]))
+            val unique = db_canonical_set(dots)?
+            Ok(db_frame(26u8, payload))
+
+fn db_snapshot_value_decode(frame: DbDecodedFrame, depth: i64) -> Result<DbValue, text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    if frame.tag == 0u8:
+        if frame.payload.len() != 0: return Err("SCVDB_ABSENT_PAYLOAD")
+        return Ok(DbValue.Absent)
+    if frame.tag == 1u8: return Ok(DbValue.Flag(db_read_flag(frame)?))
+    if frame.tag == 2u8: return Ok(DbValue.Unsigned(db_read_unsigned(frame)?))
+    if frame.tag == 3u8: return Ok(DbValue.Text(db_read_text(frame)?))
+    if frame.tag == 31u8:
+        val children = db_read_children(frame.payload)?
+        if children.len() != 1: return Err("SCVDB_REFERENCE_FIELDS")
+        return Ok(DbValue.Reference(db_snapshot_ref_decode(children[0])?))
+    if frame.tag == 6u8 or frame.tag == 7u8:
+        val children = db_read_children(frame.payload)?
+        var values: [DbValue] = []
+        var canonical: [[u8]] = []
+        for child in children:
+            val value = db_snapshot_value_decode(child, depth + 1)?
+            values.push(value)
+            if frame.tag == 7u8: canonical.push(db_value_bytes(value)?)
+        if frame.tag == 6u8: return Ok(DbValue.List(values))
+        val unique = db_canonical_set(canonical)?
+        return Ok(DbValue.Set(values))
+    if frame.tag == 26u8:
+        val children = db_read_children(frame.payload)?
+        var members: [DbSetMember] = []
+        var dots: [[u8]] = []
+        for child in children:
+            if child.tag != 25u8: return Err("SCVDB_SET_MEMBER_TAG")
+            val fields = db_read_children(child.payload)?
+            if fields.len() != 3: return Err("SCVDB_SET_MEMBER_FIELDS")
+            val dot = db_read_text(fields[0])?
+            if dot == "": return Err("SCVDB_SET_IDENTITY")
+            dots.push(db_snapshot_text(dot)?)
+            members.push(DbSetMember(dot: dot, value: db_snapshot_value_decode(fields[1], depth + 1)?, removed: db_read_flag(fields[2])?))
+        val unique = db_canonical_set(dots)?
+        return Ok(DbValue.ObservedSet(members))
+    Err("SCVDB_VALUE_TAG")
+
+fn db_snapshot_fields_encode(fields: [DbField]) -> Result<[u8], text>:
+    var names: [[u8]] = []
+    var encoded: [[u8]] = []
+    for field in fields:
+        if field.name == "": return Err("SCVDB_FIELD_NAME")
+        val name = db_snapshot_text(field.name)?
+        names.push(name)
+        encoded.push(db_frame(32u8, name + db_snapshot_value_encode(field.value, 0)?))
+    val unique = db_canonical_set(names)?
+    Ok(db_canonical_list(encoded))
+
+fn db_snapshot_fields_decode(frame: DbDecodedFrame) -> Result<[DbField], text>:
+    if frame.tag != 6u8: return Err("SCVDB_FIELDS_TAG")
+    val children = db_read_children(frame.payload)?
+    var fields: [DbField] = []
+    var names: [[u8]] = []
+    for child in children:
+        if child.tag != 32u8: return Err("SCVDB_FIELD_TAG")
+        val pair = db_read_children(child.payload)?
+        if pair.len() != 2: return Err("SCVDB_FIELD_ARITY")
+        val name = db_read_text(pair[0])?
+        if name == "": return Err("SCVDB_FIELD_NAME")
+        names.push(db_snapshot_text(name)?)
+        fields.push(DbField(name: name, value: db_snapshot_value_decode(pair[1], 0)?))
+    val unique = db_canonical_set(names)?
+    Ok(fields)
+
+export db_snapshot_text, db_snapshot_value_encode, db_snapshot_value_decode
+export db_snapshot_fields_encode, db_snapshot_fields_decode

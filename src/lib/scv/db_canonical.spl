@@ -6,6 +6,61 @@ struct DbCanonicalEntry:
     key: [u8]
     value: [u8]
 
+struct DbDecodedFrame:
+    tag: u8
+    payload: [u8]
+    next_offset: i64
+
+fn db_read_frame(bytes: [u8], offset: i64) -> Result<DbDecodedFrame, text>:
+    """Read one bounded frame; reject nonminimal lengths before allocation."""
+    if bytes.len() > 16777216: return Err("SCVDB_BYTES_QUOTA")
+    if offset < 0 or offset >= bytes.len(): return Err("SCVDB_FRAME_TRUNCATED")
+    var cursor = offset + 1
+    var length_bytes: [u8] = []
+    var terminated = false
+    while cursor < bytes.len() and length_bytes.len() < 10:
+        val byte = bytes[cursor]
+        length_bytes.push(byte)
+        cursor = cursor + 1
+        if byte < 128u8:
+            terminated = true
+            break
+    if not terminated: return Err("SCVDB_FRAME_LENGTH")
+    val length = db_decode_u64(length_bytes)?
+    if length > 16777216u64: return Err("SCVDB_BYTES_QUOTA")
+    if length > ((bytes.len() - cursor) as u64): return Err("SCVDB_FRAME_TRUNCATED")
+    val finish = cursor + (length as i64)
+    var payload: [u8] = []
+    while cursor < finish:
+        payload.push(bytes[cursor])
+        cursor = cursor + 1
+    Ok(DbDecodedFrame(tag: bytes[offset], payload: payload, next_offset: finish))
+
+fn db_read_children(payload: [u8]) -> Result<[DbDecodedFrame], text>:
+    var children: [DbDecodedFrame] = []
+    var offset = 0
+    while offset < payload.len():
+        if children.len() >= 1000000: return Err("SCVDB_RECORD_QUOTA")
+        val child = db_read_frame(payload, offset)?
+        children.push(child)
+        offset = child.next_offset
+    Ok(children)
+
+fn db_read_text(frame: DbDecodedFrame) -> Result<text, text>:
+    if frame.tag != 3u8: return Err("SCVDB_TEXT_TAG")
+    val value = validated_utf8_bytes_to_text_linear(frame.payload)?
+    if base_encoding_text_to_bytes(unicode_normalize_nfc(value)) != frame.payload: return Err("SCVDB_TEXT_NONCANONICAL")
+    Ok(value)
+
+fn db_read_unsigned(frame: DbDecodedFrame) -> Result<u64, text>:
+    if frame.tag != 2u8: return Err("SCVDB_UNSIGNED_TAG")
+    db_decode_u64(frame.payload)
+
+fn db_read_flag(frame: DbDecodedFrame) -> Result<bool, text>:
+    if frame.tag != 1u8 or frame.payload.len() != 1: return Err("SCVDB_FLAG")
+    if frame.payload[0] > 1u8: return Err("SCVDB_FLAG")
+    Ok(frame.payload[0] == 1u8)
+
 fn db_u64_bytes(value: u64) -> [u8]:
     """Minimal unsigned LEB128, including the full unsigned 64-bit range."""
     var remaining = value
@@ -102,3 +157,4 @@ fn db_canonical_map(entries: [DbCanonicalEntry]) -> Result<[u8], text>:
 
 export DbCanonicalEntry, db_u64_bytes, db_decode_u64, db_frame, db_canonical_text, db_domain_bytes
 export db_bytes_less, db_canonical_list, db_canonical_set, db_canonical_map
+export DbDecodedFrame, db_read_frame, db_read_children, db_read_text, db_read_unsigned, db_read_flag

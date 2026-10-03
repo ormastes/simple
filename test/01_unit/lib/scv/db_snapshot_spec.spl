@@ -1,0 +1,95 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.db_snapshot.*
+use std.scv.db_snapshot_values.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, SettledAlias, EntityRef, entity_ref_provisional, entity_ref_settled, entity_ref_canonical}
+
+fn setup_item2_snapshot_ref(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+fn setup_item2_snapshot_state() -> MaterializedState:
+    val provisional = setup_item2_snapshot_ref(18446744073709551615u64)
+    val settled = entity_ref_settled(SettledAlias(database_namespace: "00112233445566778899aabbccddeeff", authority_epoch: 9, entity_kind: "bug", sequence: 18446744073709551615u64))
+    val values = [DbValue.Absent, DbValue.Text("é\0가"), DbValue.Unsigned(18446744073709551615u64), DbValue.Flag(true), DbValue.Flag(false), DbValue.Reference(provisional), DbValue.Reference(settled), DbValue.Set([DbValue.Text("z"), DbValue.Text("a")]), DbValue.ObservedSet([DbSetMember(dot: "b:1", value: DbValue.Text("retained"), removed: true), DbSetMember(dot: "a:1", value: DbValue.Text("visible"), removed: false)])]
+    val first = DbRow(entity: entity_ref_canonical(setup_item2_snapshot_ref(2)), kind: "bug", fields: [DbField(name: "z", value: DbValue.List(values)), DbField(name: "a", value: DbValue.List([]))], revision: "row-revision-2", tombstoned: true)
+    val second = DbRow(entity: entity_ref_canonical(setup_item2_snapshot_ref(1)), kind: "bug", fields: [DbField(name: "empty", value: DbValue.Text(""))], revision: "row-revision-1", tombstoned: false)
+    var state = MaterializedState(rows: [first, second], accepted: [DbAcceptedBatch(batch_id: "z-batch", canonical_digest: "z-digest"), DbAcceptedBatch(batch_id: "a-batch", canonical_digest: "a-digest")], revision: "")
+    state.revision = db_state_digest(state).unwrap()
+    state
+
+fn check_item2_snapshot_exact(expected: MaterializedState, actual: MaterializedState):
+    expect(actual.rows).to_equal(expected.rows)
+    expect(actual.accepted).to_equal(expected.accepted)
+    expect(actual.revision).to_equal(expected.revision)
+
+describe "REQ-011 REQ-015 complete versioned state snapshot projection":
+    it "matches a literal genesis vector and preserves every stored variant and order":
+        step("Decode the independently specified empty genesis bytes")
+        val genesis = "SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f7631003206030006000600\n"
+        expect(db_snapshot_encode(db_empty_state())).to_equal(Ok(genesis))
+        check_item2_snapshot_exact(db_empty_state(), db_snapshot_decode(genesis).unwrap())
+        step("Recover all fields references tombstones revisions and accepted batches exactly")
+        val state = setup_item2_snapshot_state()
+        val encoded = db_snapshot_encode(state).unwrap()
+        val decoded = db_snapshot_decode(encoded).unwrap()
+        check_item2_snapshot_exact(state, decoded)
+        expect(db_snapshot_encode(decoded)).to_equal(Ok(encoded))
+
+    it "rejects unsupported versions malformed hex and missing terminators":
+        step("Reject malformed projections before reading payloads")
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n00\n")).to_equal(Err("SCVDB_SNAPSHOT_VERSION"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n00")).to_equal(Err("SCVDB_SNAPSHOT_TERMINATOR"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n0\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\nGG\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\nAA\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
+
+    it "rejects truncated roots trailing bytes wrong tags and a forged semantic revision":
+        step("Check literal hostile wire vectors without an encoder roundtrip")
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f76310032060300060006\n")).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f763100320603000600060000\n")).to_equal(Err("SCVDB_SNAPSHOT_TRAILING_BYTES"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f7631003106030006000600\n")).to_equal(Err("SCVDB_SNAPSHOT_TAG"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f763100320703017806000600\n")).to_equal(Err("SCVDB_SNAPSHOT_REVISION"))
+
+    it "rejects nonminimal lengths invalid UTF8 non-NFC text and unknown values":
+        step("Require canonical framing and strict Unicode bytes")
+        expect(db_read_frame([3u8,128u8,0u8], 0)).to_equal(Err("SCVDB_VARINT_NONMINIMAL"))
+        expect(db_read_frame([3u8,2u8,65u8], 0)).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        val invalid = db_read_frame([3u8,2u8,192u8,128u8], 0).unwrap()
+        expect(db_read_text(invalid)).to_equal(Err("utf8: invalid leading byte"))
+        val decomposed = db_read_frame([3u8,3u8,101u8,204u8,129u8], 0).unwrap()
+        expect(db_read_text(decomposed)).to_equal(Err("SCVDB_TEXT_NONCANONICAL"))
+        val unknown = db_read_frame([255u8,0u8], 0).unwrap()
+        expect(db_snapshot_value_decode(unknown, 0)).to_equal(Err("SCVDB_VALUE_TAG"))
+        val invalid_flag = db_read_frame([1u8,1u8,2u8], 0).unwrap()
+        expect(db_snapshot_value_decode(invalid_flag, 0)).to_equal(Err("SCVDB_FLAG"))
+
+    it "rejects duplicate fields set members and retained causal dots":
+        step("Reject duplicates instead of silently choosing a winner")
+        val fields = db_read_frame([6u8,14u8,32u8,5u8,3u8,1u8,97u8,0u8,0u8,32u8,5u8,3u8,1u8,97u8,0u8,0u8], 0).unwrap()
+        expect(db_snapshot_fields_decode(fields)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+        val set = db_read_frame([7u8,4u8,0u8,0u8,0u8,0u8], 0).unwrap()
+        expect(db_snapshot_value_decode(set, 0)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+        val members = DbValue.ObservedSet([DbSetMember(dot: "actor:1", value: DbValue.Absent, removed: false), DbSetMember(dot: "actor:1", value: DbValue.Absent, removed: true)])
+        expect(db_snapshot_value_encode(members, 0)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+        val duplicate_batches = "SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f76310032170301780600061034060301610301623406030161030162\n"
+        expect(db_snapshot_decode(duplicate_batches)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+        var duplicate_rows = setup_item2_snapshot_state()
+        duplicate_rows.rows = [duplicate_rows.rows[0], duplicate_rows.rows[0]]
+        expect(db_snapshot_encode(duplicate_rows)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+
+    it "enforces nesting quotas on encode and decode and rejects stale state digests":
+        step("Bound recursive value work before semantic digest validation")
+        var bytes = [0u8,0u8]
+        var value = DbValue.Absent
+        var depth = 0
+        while depth < 65:
+            bytes = db_frame(6u8, bytes)
+            value = DbValue.List([value])
+            depth = depth + 1
+        expect(db_snapshot_value_encode(value, 0)).to_equal(Err("SCVDB_DEPTH_QUOTA"))
+        expect(db_snapshot_value_decode(db_read_frame(bytes, 0).unwrap(), 0)).to_equal(Err("SCVDB_DEPTH_QUOTA"))
+        var state = setup_item2_snapshot_state()
+        state.revision = "forged"
+        expect(db_snapshot_encode(state)).to_equal(Err("SCVDB_SNAPSHOT_REVISION"))
