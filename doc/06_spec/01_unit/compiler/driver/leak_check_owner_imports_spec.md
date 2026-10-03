@@ -73,7 +73,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("imports the interpreter call and result type from concrete owners")
-val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
+val source = rt_file_read_text("src/compiler/90.tools/leak_check/main.spl") ?? ""
 expect(source).to_contain("use compiler.driver.driver_public_interpret_bridge.\{interpret_file\}")
 expect(source).to_contain("use compiler.common.driver_core_types.\{CompileResult\}")
 expect(source).to_not_contain("use compiler.driver.\{interpret_file, CompileResult\}")
@@ -95,8 +95,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("imports MemLeakEntry directly while retaining adjacent tracker operations")
-val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
-expect(source).to_contain("use std.mem_tracker.types.\{MemLeakEntry\}")
+val source = rt_file_read_text("src/compiler/90.tools/leak_check/main.spl") ?? ""
+expect(source).to_contain("use std.nogc_sync_mut.mem_tracker.types.\{MemLeakEntry\}")
 expect(source).to_contain("mem_enable, mem_disable, mem_snapshot, mem_dump_leaks, parse_leak_dump")
 expect(source).to_not_contain("parse_leak_dump, MemLeakEntry")
 ```
