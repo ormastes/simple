@@ -1095,3 +1095,32 @@ The REQ-002 interchange owner uses SCVDB-ALIAS-v1 followed by namespace, minimal
 ### 19.8 Bounded local settlement coordination
 
 The settlement-work queue persists at most 64 original signed patches (1 MiB each, 16 MiB total encoding). Its local bare-remote coordinator records the exact candidate commit and a canonical structural policy pin before publication, prioritizes uncertain publication recovery, and chooses dependency-ready work deterministically. Credentials are rechecked separately from structural replanning. Real signed index and exact tree/blob readbacks can produce local-index-observed; this is not protected deployment admission or Indexed completion. The existing scv db command owner exposes queue-status and queue-enqueue through independently pinned policy and exact queue-head checks. Network, signing and protected production completion are not implied by a queue acknowledgement. All coordinator and command tests remain execution-unverified.
+
+### 19.9 Paged conflicts and checkpoint codec boundaries
+
+Paged conflict capture stores the original signed patch and canonical conflict
+record under an immutable evidence key. It publishes no partial semantic rows,
+accepted batch or actor-counter claim. A conflict against an intermediate row
+created or changed only by an earlier operation in the rejected batch returns
+`SCVDB_INTERMEDIATE_CONFLICT_UNSUPPORTED` before any metadata CAS.
+
+Resolution accepts a typed reviewer decision and original signed resolution
+patch, checks its exact operation, preconditions and provenance against actual
+captured evidence, and runs the indexed constraint reducer. The resolution
+receipt, semantic rows, accepted registry and derived indexes publish in one
+manifest CAS. The receipt binds the prior root and signed patch; the containing
+manifest supplies the resulting root without a self-referential digest.
+Historical replay still authenticates the reviewer under current policy and
+verifies the original producer signature with its retained public key. Retiring
+that producer key does not invalidate an already accepted reviewer operation.
+New resolution also requires current admission of the preserved original.
+
+The checkpoint codec binds a separate immutable metadata page manifest, explicit
+Live/Tombstoned/MergedInto/SplitInto dispositions, and history records carrying
+signed nonzero topological ordinals. The effect owner must verify every parent,
+strict ordinal decrease, actual ancestry/nonregression and all page/index links;
+ordinals and signed manifests alone are not full import validation. Missing
+records are errors, never implicit history or Live defaults. Signed frame bytes
+plus signature fit the existing 16 MiB canonical reader. Reference inline data
+is bounded; paged data and metadata remain separate immutable pages. Codec and
+conflict tests are authored but unexecuted; complete installation remains open.

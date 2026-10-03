@@ -37,6 +37,8 @@ crash durability, cross-platform qualification, or a measured scale result.
 | Canonical provider follow-up | `github_binding_owner.spl` | Durable acknowledgement plus fresh scoped GET for new signed binding/common-state writes; generic producer entry rejects reserved entity kinds; historical replay reauthorizes accepted bytes |
 | Retention effects | `retention_store.spl`, `retention_codec.spl`, `evidence_delete.spl` | Durable pending deletion, verified rollup/provenance, same-lease current-pin and retained-root dependency closure checks, actual unlink/absence receipts and honest resolution; bounded reference lane, not Operating B qualification |
 | Authoritative paged transactions | `db_paged_*.spl`, `paged_store.spl` | Signature admission before bounded proof IO, captured-manifest indexes, unique swaps/reference counts, one authoritative SJ CAS, structural/key rotation pins and symmetric backend exclusion; execution unverified |
+| Paged conflict lifecycle | `db_paged_conflicts.spl`, `paged_conflict_owner.spl` | Original signed conflict evidence in immutable pages; reviewer operation, resolution receipt and semantic/index updates share one CAS; historical replay verifies retained keys; intermediate-only conflict evidence is rejected |
+| Checkpoint envelopes | `db_checkpoint.spl`, `db_checkpoint_history.spl` | Independently pinned signed Reference/Paged envelope and metadata manifests; explicit dispositions and topological history ordinals; these codecs alone do not establish complete import invariants or installation |
 
 ## Review findings addressed during coding
 
@@ -60,7 +62,7 @@ crash durability, cross-platform qualification, or a measured scale result.
 
 The bounded local settlement coordinator now persists original queued patches, exact candidate commits and structural policy pins; it schedules ready dependencies and reconciles uncertain publication before allocation. Local signed index observation is not protected production completion. Finish protected receipt/index recovery,
 protected-authority deployment admission, cross-replica delivery admission,
-paged adapter/conflict-resolution integration, complete command coverage and resnapshot/epoch
+paged adapter qualification, complete command coverage and resnapshot/epoch
 migration orchestration. The source binding follow-up is implemented; live
 provider qualification remains open. Compressed/archive
 bundle formats are explicitly unsupported by the initial quarantine owner.
