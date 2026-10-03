@@ -47,7 +47,7 @@ describe "cs pane backend reads tmux pane lines":
         literal write can be detected before anything is submitted.
         """
         # @req REQ-APP-LLM-CARET-PANE-001
-        # @capture(protocol_binary): both send-keys argv transcripts
+        # @capture(protocol): both send-keys argv transcripts
         step("Build the literal-write argv")
         expect(pane_send_literal_argv("%3", "say Enter please")).to_equal(
             ["send-keys", "-t", "%3", "-l", "say Enter please"])
@@ -57,7 +57,7 @@ describe "cs pane backend reads tmux pane lines":
 
     it "turns a realistic list-panes line into a fully populated Pane":
         # @req REQ-APP-LLM-CARET-PANE-002
-        # @capture(tui_grid): parsed Pane fields for the active unzoomed line
+        # @capture(tui): parsed Pane fields for the active unzoomed line
         step("parse one active, unzoomed pane line emitted by tmux")
         val panes = pane_parse_line("%3 48211 1 0 claude-worker")
         expect(panes.len()).to_equal(1)  # oracle: one well-formed line parses to exactly one Pane
@@ -68,7 +68,7 @@ describe "cs pane backend reads tmux pane lines":
         assert_false(panes[0].zoomed)
 
     it "keeps a multi-word pane title intact":
-        # @capture(tui_grid): parsed title retaining internal spaces
+        # @capture(tui): parsed title retaining internal spaces
         step("titles carry spaces, so they are the trailing columns")
         val panes = pane_parse_line("%12 991 0 1 caret agent two")
         expect(panes.len()).to_equal(1)  # oracle: one well-formed line parses to exactly one Pane
@@ -77,7 +77,7 @@ describe "cs pane backend reads tmux pane lines":
         assert_true(panes[0].zoomed)
 
     it "accepts a pane whose title tmux left empty":
-        # @capture(tui_grid): parsed Pane for a title-less line
+        # @capture(tui): parsed Pane for a title-less line
         step("an untitled pane is still a real pane")
         val panes = pane_parse_line("%0 7 1 0")
         expect(panes.len()).to_equal(1)  # oracle: a short line without a title still parses to one Pane
@@ -86,7 +86,7 @@ describe "cs pane backend reads tmux pane lines":
 
     it "yields no Pane at all for a malformed line":
         # @req REQ-APP-LLM-CARET-PANE-003
-        # @capture(statistics): six malformed inputs, zero Panes produced
+        # @capture(text): six malformed inputs, zero Panes produced
         step("fail closed: garbage must never become a Pane with garbage fields")
         expect(pane_parse_line("").len()).to_equal(0)  # oracle: an empty line is absence, not a Pane
         expect(pane_parse_line("garbage").len()).to_equal(0)  # oracle: a line without columns is absence, not a Pane
@@ -96,7 +96,7 @@ describe "cs pane backend reads tmux pane lines":
         expect(pane_parse_line("%3 48211 1 maybe title").len()).to_equal(0)  # oracle: a non-numeric zoom flag is absence, not a Pane
 
     it "drops only the bad line when a block mixes good and bad":
-        # @capture(tui_grid): surviving panes around one corrupt line
+        # @capture(tui): surviving panes around one corrupt line
         step("one corrupt line must not lose the healthy panes around it")
         val panes = pane_parse_lines("%1 100 1 0 alpha\nrubbish\n%2 200 0 1 beta\n")
         expect(panes.len()).to_equal(2)  # oracle: only the corrupt middle line is dropped from the block
@@ -107,7 +107,7 @@ describe "cs pane backend reads tmux pane lines":
 describe "cs pane backend builds the right tmux commands":
     it "asks tmux for the pane fields the parser expects":
         # @req REQ-APP-LLM-CARET-PANE-004
-        # @capture(protocol_json): list-panes argv with session and format
+        # @capture(protocol): list-panes argv with session and format
         step("the list argv must carry the session and the documented format")
         val argv = pane_list_argv("caret")
         expect(argv[0]).to_equal("list-panes")
@@ -117,7 +117,7 @@ describe "cs pane backend builds the right tmux commands":
         expect(PANE_FORMAT).to_contain("#{{pane_title}}")
 
     it "switches the active pane with select-pane on the pane id":
-        # @capture(protocol_json): select-pane argv transcript
+        # @capture(protocol): select-pane argv transcript
         step("pane ids are globally unique, so -t takes the id alone")
         val argv = pane_select_argv("%7")
         expect(argv.len()).to_equal(3)  # oracle: select-pane -t <id> is exactly three argv words
@@ -126,7 +126,7 @@ describe "cs pane backend builds the right tmux commands":
         expect(argv[2]).to_equal("%7")
 
     it "maximizes with resize-pane -Z so the zoom toggles":
-        # @capture(protocol_json): resize-pane argv transcript
+        # @capture(protocol): resize-pane argv transcript
         step("-Z is tmux's toggle for pane zoom")
         val argv = pane_zoom_argv("%7")
         expect(argv[0]).to_equal("resize-pane")
@@ -134,7 +134,7 @@ describe "cs pane backend builds the right tmux commands":
         expect(argv[argv.len() - 1]).to_equal("%7")
 
     it "kills a pane with kill-pane on the pane id":
-        # @capture(protocol_json): kill-pane argv transcript
+        # @capture(protocol): kill-pane argv transcript
         step("teardown targets the same pane id")
         val argv = pane_kill_argv("%7")
         expect(argv[0]).to_equal("kill-pane")
@@ -165,7 +165,7 @@ fn _await_pane_text(session: text, pane_id: text, needle: text) -> text:
 describe "cs pane backend is honest about the host":
     it "names tmux only when tmux answers, and smux otherwise":
         # @req REQ-APP-LLM-CARET-PANE-005
-        # @capture(statistics): backend name versus host platform
+        # @capture(text): backend name versus host platform
         step("Read the backend the dashboard will drive on this host")
         val name = pane_backend_name()
         expect(pane_available()).to_equal(true)
@@ -178,7 +178,7 @@ describe "cs pane backend is honest about the host":
 
     it "refuses pane operations that were given no target":
         # @req REQ-APP-LLM-CARET-PANE-005
-        # @capture(statistics): empty-target refusals across five operations
+        # @capture(text): empty-target refusals across five operations
         step("An empty session or pane id is a caller bug, not a no-op success")
         assert_false(pane_select("caret", ""))
         assert_false(pane_zoom("", "%1"))
@@ -188,7 +188,7 @@ describe "cs pane backend is honest about the host":
 
     it "rejects an unknown pane instead of inventing output for it":
         # @req REQ-APP-LLM-CARET-PANE-005
-        # @capture(statistics): unknown-pane capture and send verdicts
+        # @capture(text): unknown-pane capture and send verdicts
         step("Capture a pane id that no session owns")
         expect(pane_capture("cs-pane-backend-nobody", "no-such-pane", 10).len()).to_equal(0)  # oracle: an unknown pane has no lines
         step("Send to it")
@@ -197,7 +197,7 @@ describe "cs pane backend is honest about the host":
 describe "cs pane backend drives a live pane":
     it "spawns a shell, runs a typed command in it, then maximizes and kills it":
         # @req REQ-APP-LLM-CARET-PANE-006
-        # @capture(tui_grid): live pane capture holding the computed product
+        # @capture(tui): live pane capture holding the computed product
         val session = "cs-pane-backend-spec"
         step("Spawn a real shell in a disposable session, never the operator's own")
         val pane = pane_spawn(session, "spec-shell", _live_shell(), [])

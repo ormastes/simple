@@ -1,0 +1,163 @@
+"""
+## Purpose and audience
+As an operator running the `cs` caret-suite dashboard I launch real coding
+agents — Claude Code, Codex, Kimi — each in its own terminal pane, type to the
+selected one from the dashboard's input line, and watch it answer in the
+right-hand half of the same window while the roster stays on the left.
+This spec starts the REAL agent CLIs. It is for the maintainers of the
+dashboard (`src/app/llm_caret/cs_dashboard.spl`), the pane backend
+(`src/app/llm_caret/pane_backend.spl`) and smux (`src/os/apps/smux/`).
+## Operator workflow
+bin/simple test test/03_system/app/llm_caret/cs_live_agents_system_spec.spl
+Each scenario: `/launch <agent>`, answer any first-run dialog with `/key`,
+type a question, read the answer off the agent screen, `/kill` the pane.
+## Compatibility and limitations
+Needs `claude`, `codex` and `kimi` on PATH and signed in; on Windows they are
+found as claude.exe / codex.cmd / kimi.exe. Without tmux (always on Windows)
+the panes are smux panes on a real ConPTY. A missing or signed-out agent is a
+FAILED scenario naming the agent, never a skip. Each scenario costs one short
+model call.
+## Verification guidance and troubleshooting
+The oracle is a product the agent must COMPUTE (4711 x 3 = 14133): the typed
+question holds only 4711, so the answer cannot be an echo of the input. If the
+question sits in the agent's input box unanswered, Enter was not delivered as
+its own keystroke; if the screen shows stale dialog text, the pane screen
+model (`os.apps.smux.vt_screen`) missed an erase sequence.
+"""
+# Lifecycle: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ;
+# doc/02_requirements/feature/cs_caret_suite.md ;
+# doc/02_requirements/feature/windows_conpty_smux.md
+# @manual_section: cs-live-agents
+
+use std.spec
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
+    cs_render, cs_handle_command, cs_apply_action}
+
+val QUESTION = "What is 4711 times 3? Reply with only the number."
+val ANSWER = "14133"
+
+struct LiveRun:
+    launched: text
+    answered: bool
+    screen: text
+    frame: text
+    killed: text
+
+# One dashboard command, applied, then the dashboard re-polled.
+fn _cmd(d: CsDashboard, line: text) -> (CsDashboard, text):
+    val (after, action) = cs_handle_command(d, line)
+    val (applied, outcome) = cs_apply_action(after, action)
+    (cs_refresh(applied), outcome)
+
+# Agents open with first-run dialogs; answer them the way an operator would.
+fn _dialog_key(screen: text) -> text:
+    if screen.contains("MCP servers found"):
+        return "esc"
+    if screen.contains("trust") and (screen.contains("folder") or screen.contains("directory")):
+        return "enter"
+    ""
+
+# Launches `harness` from the dashboard, asks QUESTION through the input line
+# and waits up to `budget_s` seconds for ANSWER on the agent screen.
+fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
+    var d = cs_refresh(cs_dashboard_new(session))
+    val (launched_d, launched) = _cmd(d, "/launch " + harness)
+    d = launched_d
+    var sent = false
+    var answered = false
+    var quiet = 0
+    var last = ""
+    var waited = 0
+    while waited < budget_s and not answered:
+        thread_sleep_ms(1000)
+        waited = waited + 1
+        d = cs_refresh(d)
+        val shown = d.screen.join("\n")
+        if not sent:
+            val key = _dialog_key(shown)
+            if key != "":
+                val (after_key, _k) = _cmd(d, "/key " + key)
+                d = after_key
+                quiet = 0
+            else:
+                # Ready once the agent has drawn something and stopped changing.
+                if shown != "" and shown == last:
+                    quiet = quiet + 1
+                else:
+                    quiet = 0
+                if quiet >= 3:
+                    val (after_send, _s) = _cmd(d, QUESTION)
+                    d = after_send
+                    sent = true
+            last = shown
+        elif shown.contains(ANSWER):
+            answered = true
+    val screen = d.screen.join("\n")
+    val frame = cs_render(d, 140, 34)
+    val (_gone, killed) = _cmd(d, "/kill a1")
+    LiveRun(launched: launched, answered: answered, screen: screen,
+        frame: frame, killed: killed)
+
+# The text right of the dashboard/screen divider on every frame row.
+fn right_half(frame: text) -> text:
+    var out: [text] = []
+    # Row 0 is the full-width status header; its own "  |  " is not the divider.
+    val rows = frame.split("\n")
+    for line in rows[1:]:
+        val bar = line.index_of("|")
+        if bar > 0:
+            out.push(line.substring(bar + 1, line.len()))
+    out.join("\n")
+
+describe "cs dashboard drives live agents in panes":
+
+    it "Claude Code answers a dashboard question in the right-hand pane":
+        # @req REQ-CS-LIVE-001
+        step("Launch claude from the dashboard and type the question")
+        val run = drive_agent("cs-live-claude", "claude", 180)
+        # @capture(tui): split frame with Claude's answer on the right
+        step("The pane was created for the agent")
+        expect(run.launched).to_contain("launched a1 in pane")
+        step("Claude computed the answer, and it shows in the agent half of the frame")
+        expect(run.answered).to_equal(true)
+        expect(right_half(run.frame)).to_contain(ANSWER)
+        step("Killing the agent closes its pane")
+        expect(run.killed).to_contain("killed pane")
+
+    it "Codex answers a dashboard question in the right-hand pane":
+        # @req REQ-CS-LIVE-002
+        step("Launch codex from the dashboard and type the question")
+        val run = drive_agent("cs-live-codex", "codex", 180)
+        # @capture(tui): split frame with Codex's answer on the right
+        step("The pane was created for the agent")
+        expect(run.launched).to_contain("launched a1 in pane")
+        step("Codex computed the answer, and it shows in the agent half of the frame")
+        expect(run.answered).to_equal(true)
+        expect(right_half(run.frame)).to_contain(ANSWER)
+        step("Killing the agent closes its pane")
+        expect(run.killed).to_contain("killed pane")
+
+    it "Kimi answers a dashboard question in the right-hand pane":
+        # @req REQ-CS-LIVE-003
+        step("Launch kimi from the dashboard and type the question")
+        val run = drive_agent("cs-live-kimi", "kimi", 180)
+        # @capture(tui): split frame with Kimi's answer on the right
+        step("The pane was created for the agent")
+        expect(run.launched).to_contain("launched a1 in pane")
+        step("Kimi computed the answer, and it shows in the agent half of the frame")
+        expect(run.answered).to_equal(true)
+        expect(right_half(run.frame)).to_contain(ANSWER)
+        step("Killing the agent closes its pane")
+        expect(run.killed).to_contain("killed pane")
+
+    it "rejects launching an unknown agent instead of opening a dead pane":
+        # @req REQ-CS-LIVE-004
+        step("Launch a harness name the dashboard does not know")
+        val d = cs_refresh(cs_dashboard_new("cs-live-missing"))
+        val (_after, outcome) = _cmd(d, "/launch no-such-agent-cli-9f2")
+        # @capture(text): launch refusal text
+        step("The dashboard names the harnesses it can launch and opens no pane")
+        expect(outcome).to_contain("unknown harness")
+        expect(outcome).to_contain("claude, codex, kimi")
+        expect(outcome.contains("launched")).to_equal(false)
