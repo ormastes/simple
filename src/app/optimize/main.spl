@@ -9,6 +9,7 @@ use app.optimize.apply.{optimize_apply}
 use app.optimize.profile_layout_cli.{profile_layout_write_manifest_file, profile_layout_write_artifact_file}
 use app.optimize.collection_plan_cli.{collection_plan_explain_file}
 use app.optimize.collection_typed_plan_cli.{collection_typed_plan_explain_file}
+use app.cli.collection_planner_options.{collection_planner_options}
 
 fn print_optimize_help():
     print "Usage: simple optimize <file.spl> [options]"
@@ -69,6 +70,7 @@ struct OptimizeArgs:
     collection_memory_budget: text = ""
     native_target: text = ""
     do_typed_collection_plan: bool = false
+    collection_option_error: text = ""
     manifest_path: text
     out_path:      text
     order_out_path: text
@@ -116,6 +118,7 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs:
             file_path = a
         i = i + 1
 
+    val planner = collection_planner_options(args)
     val level_raw = parse_flag_value(args, "--level=")
     val level = if level_raw == "": "O2" else: level_raw
 
@@ -134,8 +137,9 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs:
         collection_workload: parse_flag_value(args, "--collection-workload="),
         collection_target: parse_flag_value(args, "--collection-target="),
         collection_site: parse_flag_value(args, "--site="),
-        collection_policy: parse_flag_value(args, "--collection-policy="),
-        collection_memory_budget: parse_flag_value(args, "--collection-memory-budget="),
+        collection_policy: planner.policy,
+        collection_memory_budget: if planner.memory_budget_bytes < 0: "" else: "{planner.memory_budget_bytes}",
+        collection_option_error: planner.error,
         native_target: parse_flag_value(args, "--target="),
         do_typed_collection_plan: (has_named_option(args, "--collection-policy") or
             has_named_option(args, "--collection-memory-budget") or has_named_option(args, "--target")),
@@ -217,7 +221,10 @@ fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
 
     var exit_code = 0
 
-    val typed_collection = (opt_args.do_typed_collection_plan or opt_args.collection_policy != "" or
+    if opt_args.collection_option_error != "":
+        print "error: {opt_args.collection_option_error}"
+        return 1
+    val typed_collection = (opt_args.do_typed_collection_plan or
         opt_args.collection_memory_budget != "" or opt_args.native_target != "")
     if typed_collection and not opt_args.do_explain_collection_plan:
         print "Error: collection policy, budget, and target require --explain-collection-plan"
