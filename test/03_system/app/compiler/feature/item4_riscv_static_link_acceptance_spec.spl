@@ -74,8 +74,8 @@ fn item4_rv_pair_target(image: [i64], high_place: i64, low_place: i64, store: bo
     val low = if store: ((lower >> 25) << 5) | ((lower >> 7) & 31) else: lower >> 20
     high_place + item4_rv_signed(upper & 0xfffff000, 32) + item4_rv_signed(low, 12)
 
-fn item4_rv_mutate(kind: i64, field: i64, value: i64) -> [i64]:
-    var bytes = item4_rv_load("start.o")
+fn item4_rv_mutate(kind: i64, field: i64, value: i64, name: text = "start.o") -> [i64]:
+    var bytes = item4_rv_load(name)
     val parsed = elf_parse_object(bytes)
     expect(parsed.is_ok()).to_equal(true)
     if parsed.is_err(): return bytes
@@ -287,3 +287,54 @@ describe "RV64 real static ELF link":
         expect(result.is_err()).to_equal(true)
         if result.is_ok(): return
         expect(result.unwrap_err()).to_contain("incompatible floating-point ABI")
+
+    it "resolves paired ULEB128 labels without shrinking padded fields":
+        # @req ITEM4-REQ-004
+        step("Load the real clang object with three-byte and one-byte ULEB pairs")
+        val object = item4_rv_load("uleb.o")
+        expect(elf_parse_object(object).unwrap().relocations.len()).to_equal(5)
+        step("Resolve the two label differences after final section placement")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val data = item4_rv_symbol(image, "uleb_values")
+        step("Require the original three-byte extent and the following field unchanged")
+        expect(item4_rv_symbol(image, "end_marker") - item4_rv_symbol(image, "_start")).to_equal(136)
+        expect(item4_rv_at(image, data, 1)).to_equal(0x88)
+        expect(item4_rv_at(image, data + 1, 1)).to_equal(0x81)
+        expect(item4_rv_at(image, data + 2, 1)).to_equal(0)
+        expect(item4_rv_at(image, data + 3, 1)).to_equal(13)
+
+    it "rejects orphaned ULEB128 assignments before applying any pair":
+        # @req ITEM4-REQ-004
+        step("Replace the first SUB_ULEB128 entry by NONE")
+        val object = item4_rv_mutate(61, 8, 0, "uleb.o")
+        step("Link the malformed relocation sequence")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require a named adjacent-pair error")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 requires adjacent SET/SUB")
+
+    it "rejects a ULEB128 result that cannot fit its allocated field":
+        # @req ITEM4-REQ-004
+        step("Increase the first label difference beyond twenty-one bits")
+        val object = item4_rv_mutate(61, 16, -2097152, "uleb.o")
+        step("Link without allowing ULEB128 field growth")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require a named encoding-size overflow")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 result exceeds allocated field")
+
+    it "rejects negative ULEB128 label differences":
+        # @req ITEM4-REQ-004
+        step("Make the first assigned label smaller than the subtracted label")
+        val object = item4_rv_mutate(60, 16, -1000, "uleb.o")
+        step("Link the negative unsigned result")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require an unsigned-result diagnostic")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 result is negative")
