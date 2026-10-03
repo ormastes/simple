@@ -1,0 +1,52 @@
+#!/bin/sh
+# Source ownership for the six native test products. File discovery is NOT a
+# registered-test count: the produced executable must enumerate its registry.
+set -eu
+[ "$#" -eq 1 ] || { echo 'usage: compiler-subsystem-test-inventory.shs SOURCE_ROOT' >&2; exit 2; }
+source_root=$(CDPATH= cd -- "$1" && pwd -P) || exit 2
+for level in 01_unit 02_integration 03_system; do
+  [ -d "$source_root/test/$level" ] || {
+    echo "compiler-subsystem-test-inventory: missing authoritative test/$level" >&2
+    exit 2
+  }
+done
+# Existing bootstrap tooling already requires Perl. Avoid platform-dependent
+# find/awk argument quoting and inspect only the authoritative test trees.
+exec perl - "$source_root" <<'PERL'
+use strict;
+use warnings;
+use File::Find qw(find);
+use Digest::SHA qw(sha256_hex);
+my $root = shift @ARGV;
+my @rows;
+for my $level (qw(01_unit 02_integration 03_system)) {
+  find({ no_chdir => 1, wanted => sub {
+    my $path = $File::Find::name;
+    if (-d $path && $path =~ m{/(?:vendor|fixtures)(?:/|$)}) {
+      $File::Find::prune = 1;
+      return;
+    }
+    return unless $path =~ /_(?:spec|test)\.spl\z/;
+    return unless -f $path;
+    die "symlinked test owner: $path\n" if -l $path;
+    my $relative = substr($path, length($root) + 1);
+    die "unsafe test inventory path\n" if $relative =~ /[\t\r\n\\]/;
+    my @parts = split m{/}, $relative;
+    pop @parts;
+    my %parts = map { $_ => 1 } @parts;
+    # Core/shared compiler suites also have authoritative sibling roots;
+    # requiring only a literal /compiler/ component silently omits them.
+    my $compiler_root = @parts > 2 && $parts[2] =~ /\A(?:compiler_core|compiler_shared|core)\z/;
+    return unless $compiler_root || $parts{compiler} || $parts{interpreter} || $parts{loader};
+    my $subsystem = $parts{loader} ? 'loader' : $parts{interpreter} ? 'interpreter' : 'compiler';
+    open my $fh, '<:raw', $path or die "unreadable test owner: $path\n";
+    local $/;
+    my $bytes = <$fh>;
+    close $fh or die "test owner close failed: $path\n";
+    push @rows, join("\t", $subsystem, $level, $relative, sha256_hex($bytes));
+  }}, "$root/test/$level");
+}
+die "empty compiler subsystem inventory\n" unless @rows;
+print "subsystem\tlevel\tpath\tsha256\n";
+print "$_\n" for sort @rows;
+PERL
