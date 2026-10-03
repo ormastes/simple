@@ -161,7 +161,9 @@ scenarios, signed Reference and Paged checkpoint-drop scenarios covering both ma
 kinds, three Reference legacy-v1 replay scenarios, and actual-owner REQ-019
 happy, boundary and failure system scenarios. Historical v1 fixture state comes from
 prior-contract authorization and the actual reducer, then a signed checkpoint;
-it is not evidence of execution by an old released binary. Paged legacy replay remains open. Three independent literal v1 vectors now cover
+it is not evidence of execution by an old released binary. Three Paged legacy replay scenarios now derive a bounded prior-contract generation,
+import its signed checkpoint and inspect physical acceptance indexes. This is
+not an old-binary execution receipt. Three independent literal v1 vectors cover
 the original variants in four unit scenarios; they are derived from documented
 framing and separately hashed, not captured historical executions.
 The boundary uses real retention rollup/deletion before observing expired evidence; restricted and missing states also reach both owners. All are unexecuted.

@@ -375,5 +375,6 @@ Compatibility regression sources now cover Reference legacy replay and signed
 checkpoint mapping-drop rejection. The system rejection source covers both
 backends. Paged mapping-drop regression sources and three independently derived
 literal v1 vectors now also exist. Expected vectors are framing-derived, not
-captured historical wire. All Simple cases remain unexecuted; Paged legacy replay
-and complete reproduction qualification remain pending.
+captured historical wire. Paged legacy replay also has source scenarios derived from a bounded prior-contract
+model and actual signed checkpoint import. All Simple cases remain unexecuted;
+complete reproduction qualification remains pending.

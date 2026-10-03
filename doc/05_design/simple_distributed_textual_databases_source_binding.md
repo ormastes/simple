@@ -161,3 +161,20 @@ reject tampered or nonminimal variants. Vectors include multi-byte LEB128,
 u64 maximum and NFC text. Expected bytes were derived from framing rules;
 production encoding did not generate them. This supplies an independent oracle,
 not historical binary provenance or runtime compatibility proof.
+
+### Paged legacy replay fixture authority
+
+The Paged legacy fixture models only an authenticated empty genesis and one
+three-record v1 append batch. It applies production row, constraint, allocation
+and page-update kernels and the accepted-entry derivation pinned to commit
+76899528004. The same derived entry is written to batch and actor-counter indexes;
+the parent history record and all alias/reverse indexes are validated by full
+signed checkpoint installation. Assertions read actual installed indexes and
+canonical rows before attempting replay.
+
+This construction preserves current production admission: fresh v1 custom
+failures still hit the new mapping gate, and current authorization and captured
+HEAD checks still precede accepted replay. The fixture is a bounded prior-contract
+model, not captured output from an old binary or equivalence with an entire old
+planner. Content-loss replay, current trust revocation and stale HEAD have source
+oracles; no runtime compatibility or crash-recovery result is claimed.

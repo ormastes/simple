@@ -359,3 +359,11 @@ proof/reducer/index primitives, not a broad copied planner or a supplied replay
 flag. A signed checkpoint must pass actual full import before replay assertions.
 Research reviews its accepted-entry derivation and completed fixture; root owns
 shared plans/manuals. This is prior-contract modeling, not historical execution.
+
+Integrated core c79169eec9a as b5d7bfd04b7 after independent review. Three Paged
+legacy scenarios now cover fresh/forged refusal, content-loss accepted replay,
+current trust and stale HEAD. The signed checkpoint first passes full import;
+readback asserts paired accepted/counter entries and canonical rows. This closes
+the Paged legacy source-oracle gap, not runtime verification. No production gate
+was relaxed. REQ-017 remains a known defect with an intended-failing regression;
+all system counts and remaining full acceptance obligations are unchanged.
