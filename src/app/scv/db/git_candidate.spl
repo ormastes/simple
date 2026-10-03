@@ -10,7 +10,7 @@ use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.common.text_bytes.{text_to_utf8_bytes}
 use app.scv.db.git_settlement_transport.{db_git_settlement_reconcile_history}
-use app.scv.db.git_policy.{db_git_network_config_safe}
+use app.scv.db.git_policy.{db_git_network_config_safe, db_git_effect_prefix}
 
 struct DbGitCandidateFile:
     path: text
@@ -314,3 +314,37 @@ fn db_git_candidate_cleanup(candidate: DbGitPreparedCandidate) -> Result<bool, t
 
 export DbGitCandidateFile, DbGitCandidateRequest, DbGitPreparedCandidate, DbGitCandidatePublication
 export db_git_candidate_validate, db_git_candidate_prepare, db_git_candidate_publish, db_git_candidate_cleanup
+
+# Preserve exact commit bytes for restart: commit-tree timestamps cannot be
+# regenerated from a message/tree. This output is data, not publication proof.
+fn db_git_candidate_commit_bytes(candidate: DbGitPreparedCandidate) -> Result<text, text>:
+    _db_candidate_verify(candidate)?
+    if not _db_candidate_environment_safe(): return Err("CandidateGitEnvironmentOverride")
+    val (output, _error, code) = process_run_bounded("git", db_git_effect_prefix(candidate.scratch) + ["cat-file", "commit", candidate.candidate_oid], 30000, 65536)
+    if code != 0 or output.len() == 0 or output.len() >= 65536 or output.contains("\0"): return Err("CandidateCommitRead")
+    Ok(output)
+
+fn _db_candidate_restore_commit(candidate: DbGitPreparedCandidate, raw_commit: text, expected_oid: text) -> Result<DbGitPreparedCandidate, text>:
+    if not file_write_bytes(candidate.scratch + "/.scv-commit", text_to_utf8_bytes(raw_commit)): return Err("CandidateCommitWrite")
+    val restored_oid = _db_candidate_run(candidate.scratch, ["hash-object", "-t", "commit", "-w", "--no-filters", "--", candidate.scratch + "/.scv-commit"])?
+    if restored_oid != expected_oid: return Err("CandidateCommitDigest")
+    var restored = candidate
+    restored.candidate_oid = restored_oid
+    _db_candidate_prepared.push(restored)
+    _db_candidate_verify(restored)?
+    if db_git_candidate_commit_bytes(restored)? != raw_commit: return Err("CandidateCommitDigest")
+    Ok(restored)
+
+fn db_git_candidate_restore(request: DbGitCandidateRequest, raw_commit: text, expected_oid: text, lease_held: fn() -> bool) -> Result<DbGitPreparedCandidate, text>:
+    if raw_commit.len() == 0 or raw_commit.len() >= 65536 or raw_commit.contains("\0") or not _db_candidate_oid(expected_oid, request.object_format): return Err("CandidateCommitEncoding")
+    # Preparation reconstructs every blob/tree and safely fetches the exact old
+    # parent. Its incidental new commit is never published; retained raw bytes
+    # must hash to the old OID and pass the existing sole-parent/tree verifier.
+    val candidate = db_git_candidate_prepare(request, lease_held)?
+    match _db_candidate_restore_commit(candidate, raw_commit, expected_oid):
+        Ok(restored): Ok(restored)
+        Err(reason):
+            _db_candidate_cleanup_owned(candidate.scratch)?
+            Err(reason)
+
+export db_git_candidate_commit_bytes, db_git_candidate_restore

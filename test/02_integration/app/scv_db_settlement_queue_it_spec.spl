@@ -1,0 +1,149 @@
+# Actual local bare Git/FS/Ed25519 source scenarios, not deployed authority proof.
+use std.spec.*
+use app.io.mod.{dir_create, dir_remove_all, cwd}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_decode}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use app.scv.db.settlement_queue_codec.*
+use app.scv.db.settlement_queue.*
+use app.scv.db.settlement_resume_local.*
+use app.scv.db.git_candidate.*
+use app.scv.db.receipt_index_git.*
+use test.fixtures.scv.db_settlement_queue_fixture.*
+
+fn check_item2_queue_cleanup(fixture: Item2SettlementQueueFixture):
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(fixture.root.starts_with(path_final_existing(cwd()).unwrap().path + "/scv-queue-spec-")).to_equal(true)
+    expect(dir_remove_all(fixture.root)).to_equal(true)
+
+fn setup_item2_queue_restore(fixture: Item2SettlementQueueFixture, item: DbSettlementWorkItem) -> DbGitPreparedCandidate:
+    val journal = item.journal.unwrap()
+    val request = DbGitCandidateRequest(source_root: fixture.source, remote: fixture.config.authority.remote, scratch_parent: fixture.config.scratch_parent, expected_head: journal.receipt.previous_head, object_format: journal.receipt.object_format, files: journal.files, message: "different wall clock/message cannot change retained commit")
+    db_git_candidate_restore(request, item.candidate_commit, journal.receipt.accepted_head, \: scv_sj_lease_is_held(fixture.source)).unwrap()
+
+describe "durable local settlement queue and exact candidate restart":
+    it "reopens original signed work and restores exact commit bytes across each persisted transition":
+        val fixture = setup_item2_queue_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val original = db_patch_encode(queued.queue.items[0].patch).unwrap()
+        val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(prepared.code).to_equal("prepared")
+        val reopened = db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap()
+        expect(reopened.head).to_equal(prepared.view.head)
+        expect(db_patch_encode(reopened.queue.items[0].patch).unwrap()).to_equal(original)
+        val restored = setup_item2_queue_restore(fixture, reopened.queue.items[0])
+        expect(restored.candidate_oid).to_equal(reopened.queue.items[0].journal.unwrap().receipt.accepted_head)
+        expect(db_git_candidate_commit_bytes(restored).unwrap()).to_equal(reopened.queue.items[0].candidate_commit)
+        db_git_candidate_cleanup(restored).unwrap()
+        val accepted = db_settlement_resume_local(fixture.source, reopened.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(accepted.code).to_equal("awaiting-index")
+        val indexed = db_settlement_resume_local(fixture.source, accepted.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(indexed.code).to_equal("local-index-observed")
+        expect(indexed.view.queue.items[0].attempts).to_equal(1u64)
+        expect(db_settlement_resume_local(fixture.source, indexed.view.head, fixture.config, setup_item2_queue_sign).unwrap().code).to_equal("idle")
+        expect(db_patch_encode(indexed.view.queue.items[0].patch).unwrap()).to_equal(original)
+        # A different replica with no candidate journal must find the actual
+        # indexed batch receipt rather than allocate a second alias.
+        val replica = fixture.root + "/replay-replica"
+        expect(dir_create(replica, true)).to_equal(true)
+        check_item2_queue_git(replica, ["init", "--template=", "."])
+        val pending = db_settlement_enqueue(replica, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val replay = db_settlement_resume_local(replica, pending.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(replay.code).to_equal("local-index-observed")
+        expect(replay.view.queue.items[0].attempts).to_equal(0u64)
+        expect(replay.view.queue.items[0].journal.unwrap().receipt.accepted_head).to_equal(indexed.view.queue.items[0].journal.unwrap().receipt.accepted_head)
+        check_item2_queue_cleanup(fixture)
+
+    it "retains prepared uncertainty when the remote history cannot prove publication or rejection":
+        val fixture = setup_item2_queue_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val remote = fixture.config.authority.remote
+        val tree = check_item2_queue_git(remote, ["log", "-1", "--format=%T", "refs/heads/settled"])
+        # Disposable local authority is deliberately corrupted to an unrelated
+        # root. This is NOT an admitted disaster-recovery or production action.
+        val unrelated = check_item2_queue_git(remote, ["commit-tree", tree, "-m", "unrelated test history"])
+        check_item2_queue_git(remote, ["update-ref", "refs/heads/settled", unrelated, fixture.config.bootstrap_receipt.accepted_head])
+        expect(db_settlement_resume_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign)).to_equal(Err("SCVDB_HISTORY_REQUIRED"))
+        val retained = db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap()
+        expect(retained).to_equal(prepared.view)
+        expect(retained.queue.items[0].attempts).to_equal(1u64)
+        check_item2_queue_cleanup(fixture)
+
+    it "recovers remote acceptance and index acknowledgement loss without allocating again":
+        val fixture = setup_item2_queue_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val item = prepared.view.queue.items[0]
+        val candidate = setup_item2_queue_restore(fixture, item)
+        expect(db_git_candidate_publish(candidate, \: scv_sj_lease_is_held(fixture.source)).unwrap().code).to_equal("published")
+        db_git_candidate_cleanup(candidate).unwrap()
+        # Deliberately leave the queue at Prepared, as after lost acknowledgement.
+        val observed = db_settlement_resume_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(observed.code).to_equal("awaiting-index")
+        val tip = db_receipt_index_git_tip(DbReceiptIndexGitRequest(source_root: fixture.source, remote: fixture.config.authority.remote, scratch_parent: fixture.config.scratch_parent, expected_head: "", receipt: fixture.config.bootstrap_receipt, authority: fixture.config.authority)).unwrap()
+        val receipt = item.journal.unwrap().receipt
+        val proof = db_receipt_index_git_publish_local(DbReceiptIndexGitRequest(source_root: fixture.source, remote: receipt.remote, scratch_parent: fixture.config.scratch_parent, expected_head: tip.index_head, receipt: receipt, authority: fixture.config.authority)).unwrap()
+        val recovered = db_settlement_resume_local(fixture.source, observed.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(recovered.view.queue.items[0].observed_index_head).to_equal(proof.index_head)
+        expect(recovered.view.queue.items[0].journal.unwrap().receipt.accepted_head).to_equal(receipt.accepted_head)
+        expect(recovered.view.queue.items[0].attempts).to_equal(1u64)
+        check_item2_queue_cleanup(fixture)
+
+    it "replans a proven stale sibling from the indexed winner without changing original signed patch":
+        val fixture = setup_item2_queue_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val stale = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val second_root = fixture.root + "/second"
+        expect(dir_create(second_root, true)).to_equal(true)
+        check_item2_queue_git(second_root, ["init", "--template=", "."])
+        val other = db_settlement_enqueue(second_root, "", fixture.patches[1], fixture.config.policy.admission).unwrap()
+        val winner = db_settlement_resume_local(second_root, other.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val sent = db_settlement_resume_local(second_root, winner.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val indexed = db_settlement_resume_local(second_root, sent.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val rejected = db_settlement_resume_local(fixture.source, stale.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(rejected.code).to_equal("stale-replan")
+        val rebased = db_settlement_resume_local(fixture.source, rejected.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(rebased.code).to_equal("prepared")
+        val work = rebased.view.queue.items[0]
+        expect(work.attempts).to_equal(2u64)
+        expect(work.journal.unwrap().receipt.previous_head).to_equal(indexed.view.queue.items[0].journal.unwrap().receipt.accepted_head)
+        expect(db_patch_encode(work.patch).unwrap()).to_equal(db_patch_encode(fixture.patches[0]).unwrap())
+        val identities = db_identity_snapshot_decode(work.journal.unwrap().files[1].content).unwrap()
+        expect(identities.bindings.len()).to_equal(2)
+        expect(identities.high_water[0].sequence).to_equal(2u64)
+        check_item2_queue_cleanup(fixture)
+
+    it "rejects signatures stale queue heads and modified retained commit bytes":
+        val fixture = setup_item2_queue_fixture()
+        var forged = fixture.patches[0]
+        forged.signature = [0u8;64]
+        expect(db_settlement_enqueue(fixture.source, "", forged, fixture.config.policy.admission)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        expect(db_settlement_resume_local(fixture.source, "", fixture.config, setup_item2_queue_sign)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+        val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val work = prepared.view.queue.items[0]
+        val journal = work.journal.unwrap()
+        val request = DbGitCandidateRequest(source_root: fixture.source, remote: fixture.config.authority.remote, scratch_parent: fixture.config.scratch_parent, expected_head: journal.receipt.previous_head, object_format: "sha1", files: journal.files, message: "restore")
+        expect(db_git_candidate_restore(request, work.candidate_commit + "altered", journal.receipt.accepted_head, \: scv_sj_lease_is_held(fixture.source))).to_equal(Err("CandidateCommitDigest"))
+        expect(db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap().head).to_equal(prepared.view.head)
+        check_item2_queue_cleanup(fixture)
+
+    it "backpressures at64 without dropping oldest work and rejects malformed queue framing":
+        val fixture = setup_item2_queue_fixture(65u64)
+        var head = ""
+        for index in 0..64:
+            head = db_settlement_enqueue(fixture.source, head, fixture.patches[index], fixture.config.policy.admission).unwrap().head
+        expect(db_settlement_enqueue(fixture.source, head, fixture.patches[64], fixture.config.policy.admission)).to_equal(Err("SCVDB_QUEUE_BACKPRESSURE"))
+        val view = db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap()
+        expect(view.head).to_equal(head)
+        expect(view.queue.items.len()).to_equal(64)
+        expect(view.queue.items[0].patch).to_equal(fixture.patches[0])
+        val wire = db_settlement_queue_encode(view.queue).unwrap()
+        expect(db_settlement_queue_decode(wire).unwrap()).to_equal(view.queue)
+        expect(db_settlement_queue_decode(wire + "trailing")).to_equal(Err("SCVDB_QUEUE_ENCODING"))
+        var invalid = view.queue
+        invalid.items[0].phase = "production-complete"
+        expect(db_settlement_queue_encode(invalid)).to_equal(Err("SCVDB_QUEUE_PHASE"))
+        check_item2_queue_cleanup(fixture)

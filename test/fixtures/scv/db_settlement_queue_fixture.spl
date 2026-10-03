@@ -1,0 +1,76 @@
+use std.spec.*
+use app.io.mod.{cwd, dir_create, file_write, process_run_bounded}
+use app.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.scv.db_patch.*
+use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_digest}
+use std.scv.db_reducer.{db_empty_state}
+use std.scv.distributed_identity_map.{identity_map_empty}
+use std.scv.db_receipt.*
+use app.scv.db.settlement_resume_local.{DbSettlementLocalConfig}
+use app.scv.db.settlement_remote_snapshot.{db_settlement_snapshot_files}
+use app.scv.db.receipt_index_git.*
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+
+struct Item2SettlementQueueFixture:
+    root: text
+    source: text
+    config: DbSettlementLocalConfig
+    patches: [DbPatch]
+
+fn check_item2_queue_git(root: text, args: [text]) -> text:
+    val (output, _error, code) = process_run_bounded("git", ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", "-c", "user.name=SCV Queue Test", "-c", "user.email=scv-queue@invalid"] + args, 30000, 1048576)
+    expect(code).to_equal(0)
+    output.trim()
+
+fn setup_item2_queue_sign(receipt: DbSettlementReceipt) -> Result<DbSettlementReceipt, text>:
+    var signed = receipt
+    val (seed, key) = pure_ed25519_keypair_from_seed([44u8;32])
+    signed.signature = pure_ed25519_sign(seed, key, db_receipt_signing_bytes(signed)?)
+    Ok(signed)
+
+fn setup_item2_queue_fixture(count: u64 = 2u64) -> Item2SettlementQueueFixture:
+    val allocated = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path, "scv-queue-spec-")
+    expect(allocated.len()).to_be_greater_than(0)
+    val root = path_final_existing(allocated).unwrap().path
+    val source = root + "/source"
+    val remote = root + "/remote.git"
+    val scratch = root + "/scratch"
+    expect(dir_create(source + "/scv", true)).to_equal(true)
+    expect(dir_create(scratch, true)).to_equal(true)
+    check_item2_queue_git(source, ["init", "--template=", "--object-format=sha1", "."])
+    check_item2_queue_git(source, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    var policy = setup_item2_paged_policy().config
+    policy.admission.reducer_revision = "scv-reference-queue-v1"
+    policy.merge.reducer_revision = "scv-reference-queue-v1"
+    var patches: [DbPatch] = []
+    val (patch_seed, patch_key) = pure_ed25519_keypair_from_seed([45u8;32])
+    var counter = 1u64
+    while counter <= count:
+        var patch = setup_item2_paged_patch([setup_item2_paged_create(counter, "queue-{counter}")], "", counter)
+        patch.reducer_revision = "scv-reference-queue-v1"
+        patch = db_patch_seal(patch).unwrap()
+        patch.signature = pure_ed25519_sign(patch_seed, patch_key, db_patch_signing_bytes(patch).unwrap())
+        patches.push(patch)
+        counter = counter + 1u64
+    policy.admission.metadata = setup_item2_reviewed_metadata(patches)
+    policy.admission.revision = db_admission_policy_digest(policy.admission).unwrap()
+    policy.revision = db_policy_digest(policy).unwrap()
+    val identities = identity_map_empty(policy.admission.namespace, policy.admission.epoch)
+    for file in db_settlement_snapshot_files(db_empty_state(), identities).unwrap():
+        expect(file_write(source + "/" + file.path, file.content)).to_equal(true)
+    check_item2_queue_git(source, ["add", "--", "scv"])
+    check_item2_queue_git(source, ["commit", "-m", "actual empty authority snapshot"])
+    val head = check_item2_queue_git(source, ["rev-parse", "HEAD"])
+    val tree = check_item2_queue_git(source, ["log", "-1", "--format=%T"])
+    check_item2_queue_git(source, ["push", "--no-force", remote, "HEAD:refs/heads/settled"])
+    val (receipt_seed, receipt_key) = pure_ed25519_keypair_from_seed([44u8;32])
+    val authority = DbReceiptAuthority(repository: policy.admission.repository, namespace: policy.admission.namespace, epoch: 1u64, remote: remote, settled_ref: "refs/heads/settled", key_id: "local-receipt-key", public_key: receipt_key, schema_revision: policy.admission.schema_revision, reducer_revision: policy.admission.reducer_revision)
+    val bootstrap = setup_item2_queue_sign(DbSettlementReceipt(repository: authority.repository, namespace: authority.namespace, epoch: 1u64, remote: remote, settled_ref: authority.settled_ref, previous_receipt: "", previous_head: "", accepted_head: head, accepted_tree: tree, object_format: "sha1", high_water: [], schema_revision: authority.schema_revision, reducer_revision: authority.reducer_revision, batch_digests: [], signer: authority.key_id, signature: [])).unwrap()
+    db_receipt_index_git_publish_local(DbReceiptIndexGitRequest(source_root: source, remote: remote, scratch_parent: scratch, expected_head: "", receipt: bootstrap, authority: authority)).unwrap()
+    Item2SettlementQueueFixture(root: root, source: source, config: DbSettlementLocalConfig(scratch_parent: scratch, authority: authority, policy: policy, bootstrap_receipt: bootstrap), patches: patches)
+
+export Item2SettlementQueueFixture, setup_item2_queue_fixture, setup_item2_queue_sign, check_item2_queue_git
