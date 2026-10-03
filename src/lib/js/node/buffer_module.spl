@@ -225,20 +225,22 @@ fn _buffer_decode_hex(value: text) -> [u8]:
         i = i + 2
     out
 
+# PERF: accumulate per-byte pieces and join once — `out = out + piece`
+# re-copies the whole result per byte (O(n^2) on multi-KB buffers).
 fn _buffer_encode_hex(bytes: [u8]) -> text:
     val table = "0123456789abcdef"
-    var out = ""
+    var parts: [text] = []
     for b in bytes:
         val n = b as i64
-        out = out + table.substring((n >> 4) & 15, ((n >> 4) & 15) + 1)
-        out = out + table.substring(n & 15, (n & 15) + 1)
-    out
+        parts.push(table.substring((n >> 4) & 15, ((n >> 4) & 15) + 1))
+        parts.push(table.substring(n & 15, (n & 15) + 1))
+    parts.join("")
 
 fn _buffer_bytes_to_text(bytes: [u8]) -> text:
-    var out = ""
+    var parts: [text] = []
     for b in bytes:
-        out = out + (b as i64).chr()
-    out
+        parts.push((b as i64).chr())
+    parts.join("")
 
 fn _buffer_utf8_is_continuation(byte: i64) -> bool:
     byte >= 128 and byte < 192
@@ -258,32 +260,34 @@ fn _buffer_utf8_four_byte_allowed(lead: i64, cont: i64) -> bool:
     true
 
 fn _buffer_decode_utf8_bytes(bytes: [u8]) -> text:
-    var out = ""
+    # PERF: parts-array + single join, not `out = out + ...` per scalar
+    # (O(n^2) text re-copy on multi-KB buffers).
+    var parts: [text] = []
     var i = 0
     while i < bytes.len():
         val b0 = bytes[i] as i64
         if b0 < 128:
-            out = out + b0.chr()
+            parts.push(b0.chr())
             i = i + 1
         else if b0 >= 194 and b0 < 224 and i + 1 < bytes.len() and _buffer_utf8_is_continuation(bytes[i + 1] as i64):
             val b1 = bytes[i + 1] as i64
-            out = out + (((b0 & 31) << 6) | (b1 & 63)).chr()
+            parts.push((((b0 & 31) << 6) | (b1 & 63)).chr())
             i = i + 2
         else if b0 >= 224 and b0 < 240 and i + 2 < bytes.len() and _buffer_utf8_is_continuation(bytes[i + 1] as i64) and _buffer_utf8_is_continuation(bytes[i + 2] as i64) and _buffer_utf8_three_byte_allowed(b0, bytes[i + 1] as i64):
             val b1 = bytes[i + 1] as i64
             val b2 = bytes[i + 2] as i64
-            out = out + (((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63)).chr()
+            parts.push((((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63)).chr())
             i = i + 3
         else if b0 >= 240 and b0 < 245 and i + 3 < bytes.len() and _buffer_utf8_is_continuation(bytes[i + 1] as i64) and _buffer_utf8_is_continuation(bytes[i + 2] as i64) and _buffer_utf8_is_continuation(bytes[i + 3] as i64) and _buffer_utf8_four_byte_allowed(b0, bytes[i + 1] as i64):
             val b1 = bytes[i + 1] as i64
             val b2 = bytes[i + 2] as i64
             val b3 = bytes[i + 3] as i64
-            out = out + (((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63)).chr()
+            parts.push((((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63)).chr())
             i = i + 4
         else:
-            out = out + 65533.chr()
+            parts.push(65533.chr())
             i = i + 1
-    out
+    parts.join("")
 
 fn _buffer_decode(value: text, encoding: text) -> [u8]:
     val enc = _buffer_normalize_encoding(encoding)

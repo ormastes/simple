@@ -218,11 +218,11 @@ fn mi_malloc(size: usize) -> [u8]?:
     # Try to alloc from existing pages for this class
     val pages = _g_heap.pages_by_class[class_idx]
     var page_idx: usize = 0
-    var found_ptr: [u8]? = nil
-    var found: bool = false
 
     for page in pages:
-        if not found and page.free.len() > 0:
+        # local_free holds blocks returned by mi_free; reclaiming them here
+        # keeps the page list bounded under steady-state churn.
+        if page.free.len() > 0 or page.local_free.len() > 0:
             val result = _page_alloc_from_free(page)
             val updated_page = result[0]
             val ptr_opt = result[1]
@@ -234,12 +234,8 @@ fn mi_malloc(size: usize) -> [u8]?:
                 new_pages[class_idx] = class_pages
                 _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages)
                 _record_allocation(actual_size)
-                found_ptr = ptr_opt
-                found = true
+                return ptr_opt
         page_idx = page_idx + 1
-
-    if found:
-        return found_ptr
 
     # No page had free blocks — allocate a new page (base=0 for mock mode)
     val cap = _blocks_per_page(actual_size)
@@ -353,9 +349,8 @@ fn mi_free(ptr: [u8], size: usize):
 
     # Free to the first page with used > 0 (simplified: no address-based lookup)
     var page_idx: usize = 0
-    var freed: bool = false
     for page in pages:
-        if not freed and page.used > 0:
+        if page.used > 0:
             val updated = _page_free_to_local(page, ptr)
             var new_pages = _g_heap.pages_by_class
             var class_pages = new_pages[class_idx]
@@ -364,7 +359,7 @@ fn mi_free(ptr: [u8], size: usize):
             _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages)
             val actual_size = _class_size(class_idx)
             _record_free(actual_size)
-            freed = true
+            return
         page_idx = page_idx + 1
 
 fn mi_free_size(ptr: [u8], size: usize):
