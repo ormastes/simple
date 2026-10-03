@@ -1,6 +1,7 @@
 # Checkpoint validation requires a shared aggregate work budget
 
-Status: OPEN — checkpoint installation is not integration-ready.
+Status: REPAIR SOURCE WRITTEN — independent source review and runtime execution
+remain required; checkpoint installation is not production-qualified.
 
 Date: 2026-10-03. Source checkpoint: `7a90c461297` on
 `work/item2-checkpoint-20261003`. This is a source-review finding; no runtime,
@@ -83,3 +84,63 @@ The next review should cover only the new reader, changed call chains, and these
 regressions. Runtime execution remains a separate unavailable gate. This note
 records an unfinished correctness/resource guard, not a measured performance
 regression or a completed implementation.
+
+## 2026-10-03 repair source and precise accounting scope
+
+`checkpoint_reader.spl` now returns explicit reader values from every load and
+reservation. Prepare, resume, preservation, metadata/history traversal, and
+pending planning retain that returned state. No nested helper resets it.
+Pages enter the 64 MiB LRU cache only after actual no-follow byte reads and
+descriptor/digest verification. Binary cache lookups avoid whole-page hashing;
+record payload/key work is charged on hits too. Eviction and Reference release
+refund retained storage only, never cumulative IO/work reservations.
+
+Reference semantic images decode once into keyed row, accepted, binding, and
+high-water indexes. Independent signed-envelope canonical validation still
+decodes nested wires; it is separately charged before decoding. A previous live
+Reference generation is decoded from its captured store view, without reopening
+a possibly advanced HEAD or using a synthetic authenticated checkpoint key.
+The retained encoded-image bound remains 32 MiB, not a heap/RSS estimate.
+
+The 1 GiB reader IO ceiling applies to validation source-page/artifact reads and
+variable preflight generations. Normal store reads reserve 64 MiB plus the
+65-byte HEAD pointer; compact checkpoint generations reserve 2048+65 bytes.
+Artifact reads reserve their actual 33,554,800-byte IO ceiling first, then charge
+actual returned wire length before canonical decoding. Trusted policy encoding
+has its own pre-encode reservation and each authorization pays its measured
+canonical policy wire size plus the bounded original patch work. The work
+counter represents encoded-byte/codec reservations, not measured instructions,
+CPU time, or memory.
+
+There are deliberately separate effect bounds:
+
+- Immutable staging retains `DbCheckpointPageSource` quotas and the page
+  publisher's bounded readbacks. It is not charged to the subsequent validation
+  reader. Source quota alone was never a validation quota.
+- The paged import owner retains its separate spill quota (64 GiB with bounded
+  chunks/file count). The reader reserves both source-page passes and the
+  importer's conflict-proof cache before invocation, not spill IO. No 1 GiB
+  whole-import or whole-install claim is made.
+- Held prepare/install/replay performs a fixed protocol, not a page/row loop:
+  at most 32 generation/publisher bounded-read operations, conservatively
+  bounded by `32 * (64 MiB + 65)` bytes. This covers at most five explicit held
+  prechecks, three install-primitive checks, two backend-exclusion checks,
+  current/readback for each publication, and staged/destination object/HEAD
+  readbacks. Compact barrier reads are smaller. These protocol reads remain
+  outside the validation counter; shared local-store atomicity is unchanged.
+
+Prepare also reserves recovery-only artifact IO and journal decoding before
+publishing Prepared. Resume uses actual wire decode sizes rather than charging
+two artificial maximum-sized authentication envelopes. Under the same limits
+and immutable admitted inputs, recovery does not acquire a larger fixed-cost
+validation requirement than prepare. Lowered test limits may intentionally
+reject recovery, preserving the source and Prepared marker for a default-limit
+retry.
+
+Pending paged preview reserves only distinct requested existing descriptors per
+round; absent buckets cost no source IO. Retained proof revalidation work still
+counts, and the shared proof loader continues enforcing its cumulative budget.
+The new positive source fixture prepares/resumes an actual empty paged genesis
+with an unchanged signed pending create. Negative sources cover pre-IO failure
+before corrupt bytes, cache hits, eviction, image bounds, a shared pending-work
+failure, and resume failure without publishing a new active generation.

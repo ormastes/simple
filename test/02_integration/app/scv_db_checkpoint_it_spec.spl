@@ -5,6 +5,7 @@ use app.scv.db.checkpoint_store.*
 use app.scv.db.checkpoint_objects.*
 use app.scv.db.checkpoint_journal.*
 use app.scv.db.checkpoint_validation.*
+use app.scv.db.checkpoint_reader.*
 use app.scv.db.page_store.{db_page_store_publish_objects}
 use app.scv.db.local_store.*
 use app.scv.db.bridge_store.{db_bridge_store_encode, db_bridge_store_acquire, db_bridge_store_sent}
@@ -14,6 +15,7 @@ use app.scv.db.settlement_queue_codec.*
 use std.scv.db_checkpoint.*
 use std.scv.db_checkpoint_history.*
 use std.scv.db_pages.*
+use std.scv.db_paged_model.{db_paged_genesis}
 use std.scv.db_snapshot.{db_snapshot_encode}
 use std.scv.db_reducer.{db_empty_state, db_state_digest}
 use std.scv.db_admission.{db_admission_policy_digest}
@@ -28,6 +30,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
 use test.fixtures.scv.db_checkpoint_fixture.*
 use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create}
 use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
 
 fn setup_item2_checkpoint_files() -> (text, DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
@@ -92,7 +95,7 @@ describe "Same-epoch checkpoint installation and immutable pending work":
         val build = db_pages_build(records, checkpoint.metadata.quota).unwrap()
         checkpoint.metadata = build.manifest
         expect(db_page_store_publish_objects(root, build, nil)).to_equal(Ok(true))
-        expect(db_checkpoint_validate_metadata(root, checkpoint)).to_equal(Err("SCVDB_CHECKPOINT_HISTORY_ACCEPTANCE_ANCESTRY"))
+        expect(db_checkpoint_validate_metadata(db_checkpoint_reader_new(root), checkpoint)).to_equal(Err("SCVDB_CHECKPOINT_HISTORY_ACCEPTANCE_ANCESTRY"))
 
     it "rejects an imported undeclared field even when its snapshot digest is internally consistent":
         val (checkpoint, authority) = setup_item2_checkpoint()
@@ -103,7 +106,7 @@ describe "Same-epoch checkpoint installation and immutable pending work":
         var imported = checkpoint
         imported.current_revision = plan.proposed.revision
         imported.storage = DbCheckpointStorage.Reference(db_snapshot_encode(plan.proposed).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap())
-        expect(db_checkpoint_validate_reference(imported, authority)).to_equal(Ok(true))
+        expect(db_checkpoint_validate_reference(db_checkpoint_reader_new(""), imported, authority).is_ok()).to_be(true)
         var changed = plan.proposed
         var row = changed.rows[0]
         row.fields.push(DbField(name: "unreviewed", value: DbValue.Text("injected")))
@@ -111,7 +114,7 @@ describe "Same-epoch checkpoint installation and immutable pending work":
         changed.revision = db_state_digest(changed).unwrap()
         imported.current_revision = changed.revision
         imported.storage = DbCheckpointStorage.Reference(db_snapshot_encode(changed).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap())
-        expect(db_checkpoint_validate_reference(imported, authority)).to_equal(Err("SCVDB_UNKNOWN_FIELD"))
+        expect(db_checkpoint_validate_reference(db_checkpoint_reader_new(""), imported, authority)).to_equal(Err("SCVDB_UNKNOWN_FIELD"))
 
     it "rejects actual pending leased and sent-unconfirmed bridge records before Prepared":
         val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
@@ -199,3 +202,165 @@ describe "Same-epoch checkpoint installation and immutable pending work":
         expect(later.checkpoint_anchor).to_equal(checkpoint.revision)
         expect(db_checkpoint_read_active(root, "semantic", authority)).to_equal(Ok(checkpoint))
         expect(db_checkpoint_resume_install(root, installed.journal_head, authority)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+describe "Checkpoint operation-wide reader budgets":
+    it "prepares and resumes a real tiny paged checkpoint with an unchanged signed create waiting on absent buckets":
+        val (root, original, original_authority, source) = setup_item2_checkpoint_files()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_genesis(policy).unwrap()
+        var checkpoint = original
+        checkpoint.reducer_revision = policy.config.admission.reducer_revision
+        checkpoint.policy_revision = policy.config.revision
+        checkpoint.current_revision = genesis.revision
+        checkpoint.history_horizon = genesis.revision
+        checkpoint.storage = DbCheckpointStorage.Paged(genesis)
+        val history = db_checkpoint_metadata_encode(DbCheckpointMetadata.History(genesis.revision, 1u64, [], [], genesis.revision)).unwrap()
+        val build = db_pages_build([history], policy.quota).unwrap()
+        checkpoint.metadata = build.manifest
+        checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+        val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+        checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+        var authority = original_authority
+        authority.expected_checkpoint = checkpoint.revision
+        authority.policy = policy.config
+        authority.paged_policy = Some(policy)
+        for page in build.pages:
+            expect(file_write_bytes(source.external_parent + "/scv-checkpoint-pages-v1/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_be(true)
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.revision, 1u64)
+        db_settlement_enqueue(root, "", patch, policy.config.admission).unwrap()
+        val pending = db_store_read(root, "settlement-work")
+        val active = db_store_read(root, "paged")
+        val barrier = db_store_read(root, "checkpoint-install")
+        var tiny = db_checkpoint_reader_limits()
+        tiny.io_bytes = 67108929u64
+        expect(db_checkpoint_prepare_install_with_limits(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source, tiny)).to_equal(Err("SCVDB_CHECKPOINT_READ_QUOTA"))
+        expect(db_store_read(root, "paged")).to_equal(active)
+        expect(db_store_read(root, "checkpoint-install")).to_equal(barrier)
+        expect(db_store_read(root, "settlement-work")).to_equal(pending)
+        val prepared = db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap()
+        expect(prepared.pending_results).to_equal(["RebaseReady"])
+        val installed = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+        expect(installed.phase).to_equal("Installed")
+        expect(db_store_read(root, "paged").checkpoint_anchor).to_equal(checkpoint.revision)
+        expect(db_store_read(root, "settlement-work")).to_equal(pending)
+        expect(db_checkpoint_resume_install(root, installed.journal_head, authority)).to_equal(Ok(installed))
+
+    it "reserves the next real page before reading corrupt backing bytes":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val quota = DbPageQuota(max_page_bytes: 4096, max_page_records: 16, max_records: 32)
+        val records = [DbPageRecord(key: "reader-a", kind: DbPageKind.Row, payload: [1u8]), DbPageRecord(key: "reader-b", kind: DbPageKind.Row, payload: [2u8])]
+        expect(db_pages_bucket(records[0].key).unwrap() == db_pages_bucket(records[1].key).unwrap()).to_be(false)
+        val build = db_pages_build(records, quota).unwrap()
+        expect(db_page_store_publish_objects(root, build, nil)).to_equal(Ok(true))
+        var limits = db_checkpoint_reader_limits()
+        limits.io_bytes = 4096u64
+        val first = db_checkpoint_reader_page(db_checkpoint_reader_with_limits(root, limits).unwrap(), build.manifest, build.manifest.entries[0]).unwrap()
+        expect(first.0.io_bytes).to_equal(4096u64)
+        expect(first.0.page_reads).to_equal(1u64)
+        val second = build.manifest.entries[1]
+        expect(file_write_bytes(root + "/.scv/db-pages/pages/" + second.digest + ".scvp", [0u8])).to_be(true)
+        expect(db_checkpoint_reader_page(first.0, build.manifest, second)).to_equal(Err("SCVDB_CHECKPOINT_READ_QUOTA"))
+        expect(db_store_read(root).code).to_equal("empty")
+        expect(db_store_read(root, "checkpoint-install").code).to_equal("empty")
+
+    it "uses verified cache bytes after backing-file corruption but still charges record work":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val quota = DbPageQuota(max_page_bytes: 4096, max_page_records: 16, max_records: 32)
+        val record = DbPageRecord(key: "reader-cache", kind: DbPageKind.Row, payload: [3u8, 4u8])
+        val build = db_pages_build([record], quota).unwrap()
+        expect(db_page_store_publish_objects(root, build, nil)).to_equal(Ok(true))
+        val first = db_checkpoint_reader_record(db_checkpoint_reader_new(root), build.manifest, record.key).unwrap()
+        expect(first.1).to_equal(Some(record))
+        expect(file_write_bytes(root + "/.scv/db-pages/pages/" + build.pages[0].digest + ".scvp", [0u8])).to_be(true)
+        val second = db_checkpoint_reader_record(first.0, build.manifest, record.key).unwrap()
+        expect(second.1).to_equal(Some(record))
+        expect(second.0.io_bytes).to_equal(first.0.io_bytes)
+        expect(second.0.page_reads).to_equal(1u64)
+        expect(second.0.work_bytes).to_be_greater_than(first.0.work_bytes)
+        var exhausted = second.0
+        exhausted.limits.work_bytes = exhausted.work_bytes
+        expect(db_checkpoint_reader_record(exhausted, build.manifest, record.key)).to_equal(Err("SCVDB_CHECKPOINT_WORK_QUOTA"))
+        expect(db_checkpoint_reader_record(db_checkpoint_reader_new(root), build.manifest, record.key).is_err()).to_be(true)
+
+    it "does not refund cumulative reservations when a verified page is evicted":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val quota = DbPageQuota(max_page_bytes: 4096, max_page_records: 16, max_records: 32)
+        val build = db_pages_build([DbPageRecord(key: "evict-a", kind: DbPageKind.Row, payload: [1u8]), DbPageRecord(key: "evict-b", kind: DbPageKind.Row, payload: [2u8])], quota).unwrap()
+        expect(build.pages.len()).to_equal(2)
+        expect(db_page_store_publish_objects(root, build, nil)).to_equal(Ok(true))
+        var limits = db_checkpoint_reader_limits()
+        limits.cache_bytes = 4096u64
+        limits.io_bytes = 8192u64
+        val first = db_checkpoint_reader_page(db_checkpoint_reader_with_limits(root, limits).unwrap(), build.manifest, build.manifest.entries[0]).unwrap()
+        val second = db_checkpoint_reader_page(first.0, build.manifest, build.manifest.entries[1]).unwrap()
+        expect(second.0.cache_bytes).to_equal(4096u64)
+        expect(second.0.io_bytes).to_equal(8192u64)
+        expect(second.0.page_reads).to_equal(2u64)
+        expect(db_checkpoint_reader_page(second.0, build.manifest, build.manifest.entries[0])).to_equal(Err("SCVDB_CHECKPOINT_READ_QUOTA"))
+
+    it "decodes a Reference semantic image once and bounds retained image bytes":
+        val (original, original_authority) = setup_item2_checkpoint()
+        val patch = setup_item2_apply_patch(1, "")
+        val state = db_plan_admitted_patch(db_empty_state(), patch, original_authority.policy.merge, original_authority.policy.admission, 10).unwrap().proposed
+        val entity = setup_item2_checkpoint_entity(1)
+        val identities = identity_map_allocate(identity_map_empty(original.namespace, original.epoch), entity.provisional.unwrap()).state
+        var checkpoint = original
+        checkpoint.current_revision = state.revision
+        checkpoint.storage = DbCheckpointStorage.Reference(db_snapshot_encode(state).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap())
+        checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+        val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+        checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+        var authority = original_authority
+        authority.expected_checkpoint = checkpoint.revision
+        expect(db_checkpoint_authenticate(checkpoint, authority)).to_equal(Ok(true))
+        val first = db_checkpoint_reader_reference(db_checkpoint_reader_new(""), checkpoint).unwrap()
+        var reader = first.0
+        for index in 0..16:
+            val row = db_checkpoint_row(reader, checkpoint, entity).unwrap()
+            reader = row.0
+            expect(row.1).to_equal(Some(state.rows[0]))
+            val accepted = db_checkpoint_batch(reader, checkpoint, patch.batch_id).unwrap()
+            reader = accepted.0
+            expect(accepted.1).to_equal(Some(state.accepted[0]))
+        expect(reader.reference_decodes).to_equal(1u64)
+        expect(reader.reference_bytes).to_equal(first.1.encoded_bytes)
+        expect(reader.io_bytes).to_equal(0u64)
+        var tight = db_checkpoint_reader_limits()
+        tight.reference_bytes = first.1.encoded_bytes
+        val exact = db_checkpoint_reader_reference(db_checkpoint_reader_with_limits("", tight).unwrap(), checkpoint).unwrap()
+        expect(db_checkpoint_reader_reference(exact.0, original)).to_equal(Err("SCVDB_CHECKPOINT_REFERENCE_CACHE_QUOTA"))
+        val forgotten = db_checkpoint_reader_forget_reference(reader, checkpoint.revision)
+        expect(forgotten.reference_bytes).to_equal(0u64)
+        expect(forgotten.work_bytes).to_equal(reader.work_bytes)
+
+    it "shares metadata work with pending classification and publishes no Prepared on quota failure":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val patch = setup_item2_apply_patch(1, "")
+        val queued = db_settlement_enqueue(root, "", patch, authority.policy.admission).unwrap()
+        expect(db_checkpoint_stage_pages(root, [checkpoint.metadata], source)).to_equal(Ok(true))
+        # Four 64MiB preflight generations, the policy encode reservation and
+        # one 64MiB page decode fit; the pending patch exceeds what remains.
+        var limits = db_checkpoint_reader_limits()
+        limits.work_bytes = 407000000u64
+        expect(db_checkpoint_validate_metadata(db_checkpoint_reader_with_limits(root, limits).unwrap(), checkpoint).is_ok()).to_be(true)
+        val active = db_store_read(root)
+        val barrier = db_store_read(root, "checkpoint-install")
+        val pending = db_store_read(root, "settlement-work")
+        expect(db_checkpoint_prepare_install_with_limits(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source, limits)).to_equal(Err("SCVDB_CHECKPOINT_WORK_QUOTA"))
+        expect(db_store_read(root)).to_equal(active)
+        expect(db_store_read(root, "checkpoint-install")).to_equal(barrier)
+        expect(db_store_read(root, "settlement-work")).to_equal(pending)
+
+    it "preserves Prepared and active source on resume quota failure then finishes the same journal":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val prepared = db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap()
+        val active = db_store_read(root)
+        val barrier = db_store_read(root, "checkpoint-install")
+        var limits = db_checkpoint_reader_limits()
+        limits.io_bytes = 33559026u64
+        expect(db_checkpoint_resume_install_with_limits(root, prepared.journal_head, authority, limits)).to_equal(Err("SCVDB_CHECKPOINT_READ_QUOTA"))
+        expect(db_store_read(root)).to_equal(active)
+        expect(db_store_read(root, "checkpoint-install")).to_equal(barrier)
+        val installed = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+        expect(installed.phase).to_equal("Installed")
+        expect(installed.checkpoint_anchor).to_equal(checkpoint.revision)
+        expect(db_checkpoint_resume_install(root, installed.journal_head, authority)).to_equal(Ok(installed))
