@@ -1,7 +1,7 @@
 # Package index reader acquisition transaction
 
 Source: `test/01_unit/compiler/cache/package_module_index_reader_transaction_spec.spl`.
-Requirement: `PSI-REQ-004`. Status: UNEXECUTED; reader implementation pending RED.
+Requirement: `PSI-REQ-004`. Status: UNEXECUTED; reader implementation present.
 This hand-maintained manual is not generated execution evidence.
 
 ## Refuse contended acquisition, then admit after release
@@ -12,7 +12,7 @@ This hand-maintained manual is not generated execution evidence.
    `generation-lock-unavailable`, empty digest and no decoded generation.
 4. Read after release. Expect an admitted digest and exact canonical generation
    bytes. The current unlocked reader is expected to violate step 3; actual
-   baseline execution must prove RED before implementation.
+   baseline execution must still capture the actual pre-fix failure.
 
 ## Preserve an owned generation after file collection
 
