@@ -31,7 +31,9 @@ summary is explicitly not an original log. No prior native diagnostic is rerun.
 
 - Session: `01a0fedc-f802-7af2-ab5b-a5c6abe85984`, merge/review owner `/root`.
 - Integration worktree: `C:/dev/simple-item3-dev-20261003`.
-- Work branch: `work/item3-dev-20261003`; target: `release/1.0`.
+- Original branch: `work/item3-dev-20261003`; target: `release/1.0`.
+- Follow-up branch after the earlier checkpoint merged:
+  `work/item3-runtime-followup-20261003`, draft PR #2304.
 - Refreshed base and expected target: `cb2f783acf0ea22e8da54ff0d8d18b4fb14c816c`.
 - Research, specifications, and planner agents have separate sibling worktrees
   and `work/item3-{research,spec,planner}-20261003` branches. Their commits are
@@ -251,5 +253,13 @@ no safe session, loaded-provider identity, or JIT invocation. Actual imported
 owner calls still require verification; appended-source ABI tests alone do not
 prove that boundary. All added Simple scenarios remain authored, unexecuted.
 
+Live GitHub inspection at 05:56 UTC found PR #2285 had already merged at
+04:37:30 UTC by `ormastes`, with head `71259ba2326` and merge commit
+`6c905c710c6`. An ancestry check confirms that checkpoint is on `release/1.0`.
+This merge occurred outside this continuation and does not establish feature
+acceptance. The reviewed newer fixes are preserved in draft PR #2304 rather
+than attributed to the earlier merge. The refreshed release tip was
+`5742353e641` when creating the follow-up branch.
+
 Full REQ-001–011, native/backend parity, measured NFRs, generated manuals,
-production verification and the release-line merge remain incomplete.
+production verification and landing of the newer fixes remain incomplete.
