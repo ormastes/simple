@@ -1,0 +1,137 @@
+# codex-impl
+# Real filesystem/lease assertions. Execution and crash-injection evidence are
+# separate gates; source presence alone is not a durability acceptance receipt.
+use std.spec.{describe, it, expect, step}
+use app.io.mod (cwd, dir_create, file_read, file_write, file_exists, file_delete, process_run_timeout)
+use app.scv.db.local_store.{db_store_read, db_store_commit}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
+
+fn setup_item2_store() -> text:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val root = "{cwd()}/build/test-artifacts/item2-store-{nonce}"
+    expect(dir_create(root, true)).to_be(true)
+    root
+
+describe "SJ-owned distributed database local generation store":
+    it "isolates local delivery and discovery channels under the same repository lease":
+        val root = setup_item2_store()
+        val semantic = db_store_commit(root, "", sha256_text("semantic"), "rows")
+        val bridge = db_store_commit(root, "", sha256_text("bridge"), "pending", "bridge")
+        val ci = db_store_commit(root, "", sha256_text("ci"), "cursor", "ci")
+        expect(semantic.code).to_equal("ok")
+        expect(bridge.code).to_equal("ok")
+        expect(ci.code).to_equal("ok")
+        expect(db_store_read(root).state).to_equal("rows")
+        expect(db_store_read(root, "bridge").state).to_equal("pending")
+        expect(db_store_read(root, "ci").state).to_equal("cursor")
+        expect(db_store_read(root, "../escape").code).to_equal("SCVDB_STORE_CHANNEL")
+        expect(scv_sj_lease_acquire(root, "other-owner").starts_with("ok:")).to_be(true)
+        expect(db_store_commit(root, bridge.head, sha256_text("lease-attempt"), "sent", "bridge").code).to_equal("SCVDB_STORE_BUSY")
+        expect(scv_sj_lease_release(root, "other-owner").starts_with("ok:")).to_be(true)
+
+    it "reopens one complete multiline generation and keeps its parent image":
+        step("Publish a complete local image through the SJ writer boundary")
+        val root = setup_item2_store()
+        expect(db_store_read(root).code).to_equal("empty")
+        val first = db_store_commit(root, "", sha256_text("transaction-1"), "aliases=1\naccepted=batch-a\ntombstones=\n")
+        expect(first.code).to_equal("ok")
+        expect(first.head.len()).to_equal(64)
+        expect(scv_sj_lease_is_held(root)).to_be(false)
+        val next = db_store_commit(root, first.head, sha256_text("transaction-2"), "aliases=2\naccepted=batch-a,batch-b\ntombstones=1\n")
+        expect(next.code).to_equal("ok")
+        expect(next.parent).to_equal(first.head)
+        expect(db_store_read(root).state).to_equal("aliases=2\naccepted=batch-a,batch-b\ntombstones=1\n")
+        expect(file_exists("{root}/.scv/db/objects/{first.head}.scvg")).to_be(true)
+        expect(file_read("{root}/.scv/db/HEAD")).to_equal("{next.head}\n")
+
+    it "deduplicates an exact immediate retry and rejects changed transaction bytes":
+        step("Retry the original transaction after losing its caller acknowledgement")
+        val root = setup_item2_store()
+        val transaction = sha256_text("same-transaction")
+        val first = db_store_commit(root, "", transaction, "one")
+        expect(first.code).to_equal("ok")
+        val retry = db_store_commit(root, "", transaction, "one")
+        expect(retry.code).to_equal("ok")
+        expect(retry.head).to_equal(first.head)
+        expect(db_store_commit(root, "", transaction, "different").code).to_equal("SCVDB_STORE_TRANSACTION_COLLISION")
+        expect(db_store_read(root).state).to_equal("one")
+
+    it "refuses stale expected heads without changing the accepted image":
+        step("Use an obsolete expected generation in a second writer")
+        val root = setup_item2_store()
+        val first = db_store_commit(root, "", sha256_text("first"), "accepted")
+        expect(first.code).to_equal("ok")
+        val stale = db_store_commit(root, "", sha256_text("stale"), "must not appear")
+        expect(stale.code).to_equal("SCVDB_STORE_HEAD_ADVANCED")
+        expect(stale.head).to_equal(first.head)
+        expect(db_store_read(root).state).to_equal("accepted")
+        expect(scv_sj_lease_is_held(root)).to_be(false)
+
+    it "respects an existing SJ writer lease and never releases another owner":
+        step("Hold the repository lease while a database writer attempts publication")
+        val root = setup_item2_store()
+        expect(scv_sj_lease_acquire(root, "other-writer").starts_with("ok:")).to_be(true)
+        expect(db_store_commit(root, "", sha256_text("blocked"), "state").code).to_equal("SCVDB_STORE_BUSY")
+        expect(scv_sj_lease_is_held(root)).to_be(true)
+        expect(db_store_read(root).code).to_equal("empty")
+        expect(scv_sj_lease_release(root, "other-writer").starts_with("ok:")).to_be(true)
+
+    it "detects immutable-image tampering and malformed pointers on reopen":
+        step("Modify a persisted image without changing its content-addressed name")
+        val root = setup_item2_store()
+        val first = db_store_commit(root, "", sha256_text("initial"), "state")
+        expect(first.code).to_equal("ok")
+        expect(file_write("{root}/.scv/db/objects/{first.head}.scvg", "tampered")).to_be(true)
+        expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")
+        expect(db_store_commit(root, first.head, sha256_text("unsafe"), "replacement").code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")
+        expect(file_write("{root}/.scv/db/HEAD", "../../other\n")).to_be(true)
+        expect(db_store_read(root).code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
+
+    it "rejects invalid transaction identities before taking a lease":
+        step("Attempt a transaction with a path-like identity")
+        val root = setup_item2_store()
+        expect(db_store_commit(root, "", "../invalid", "state").code).to_equal("SCVDB_STORE_IDENTITY")
+        expect(scv_sj_lease_is_held(root)).to_be(false)
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "rejects a preexisting state-directory symlink before writing outside root":
+        val root = setup_item2_store()
+        val victim = setup_item2_store()
+        expect(file_write("{victim}/sentinel", "unchanged")).to_be(true)
+        val (_out, _err, code) = process_run_timeout("ln", ["-s", victim, "{root}/.scv"], 30000)
+        expect(code).to_equal(0)
+        expect(db_store_commit(root, "", sha256_text("alias"), "state").code).to_equal("SCVDB_STORE_SCOPE")
+        expect(file_read("{victim}/sentinel")).to_equal("unchanged")
+        expect(file_exists("{victim}/db/HEAD")).to_be(false)
+        expect(scv_sj_lease_is_held(root)).to_be(false)
+
+    it "rejects pointer and object symlinks even when their bytes are otherwise valid":
+        val root = setup_item2_store()
+        val first = db_store_commit(root, "", sha256_text("symlink-fixture"), "state")
+        expect(first.code).to_equal("ok")
+        val object_path = "{root}/.scv/db/objects/{first.head}.scvg"
+        val victim = setup_item2_store()
+        expect(file_write("{victim}/object", file_read(object_path))).to_be(true)
+        expect(file_delete(object_path)).to_be(true)
+        val (_out, _err, code) = process_run_timeout("ln", ["-s", "{victim}/object", object_path], 30000)
+        expect(code).to_equal(0)
+        expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")
+        expect(file_write("{victim}/HEAD", "{first.head}\n")).to_be(true)
+        expect(file_delete("{root}/.scv/db/HEAD")).to_be(true)
+        val (_head_out, _head_err, head_code) = process_run_timeout("ln", ["-s", "{victim}/HEAD", "{root}/.scv/db/HEAD"], 30000)
+        expect(head_code).to_equal(0)
+        expect(db_store_read(root).code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
+
+    it "bounds pointer and object reads before loading their bytes":
+        val root = setup_item2_store()
+        val first = db_store_commit(root, "", sha256_text("bounds"), "state")
+        expect(first.code).to_equal("ok")
+        expect(file_write("{root}/.scv/db/HEAD", "{first.head}xx")).to_be(true)
+        expect(db_store_read(root).code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
+        expect(file_write("{root}/.scv/db/HEAD", "{first.head}\n")).to_be(true)
+        val (_out, _err, code) = process_run_timeout("truncate", ["-s", "67108865", "{root}/.scv/db/objects/{first.head}.scvg"], 30000)
+        expect(code).to_equal(0)
+        expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")

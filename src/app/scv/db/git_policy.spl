@@ -1,0 +1,21 @@
+# Shared Git effect constraints. Fixed caller-authorized URLs must not be
+# redirected by repository or inherited Git configuration.
+use app.io.mod.{process_run_bounded}
+use app.io.env_ops.{env_get}
+
+fn db_git_environment_safe() -> bool:
+    for key in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH", "GIT_SHALLOW_FILE", "GIT_QUARANTINE_PATH", "GIT_REPLACE_REF_BASE", "GIT_SSL_NO_VERIFY"]:
+        if env_get(key) != "": return false
+    true
+
+fn db_git_effect_prefix(root: text) -> [text]:
+    ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "commit.gpgsign=false", "-c", "push.followTags=false", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.https.allow=always", "-c", "http.sslVerify=true", "-c", "http.followRedirects=false"]
+
+fn db_git_network_config_safe(root: text) -> bool:
+    if not db_git_environment_safe(): return false
+    val forbidden = "^(url\\..*\\.(insteadof|pushinsteadof)|http\\..*\\.(sslverify|followredirects))$"
+    val (_out, _err, code) = process_run_bounded("git", ["--no-replace-objects", "-C", root, "config", "--get-regexp", forbidden], 30000, 65536)
+    # Exit 1 means no matching rewrites. Never return credential-bearing config.
+    code == 1
+
+export db_git_environment_safe, db_git_effect_prefix, db_git_network_config_safe

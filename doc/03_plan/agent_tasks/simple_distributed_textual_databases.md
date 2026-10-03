@@ -319,3 +319,14 @@ All lanes start at release/1.0 commit `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`
 Shared public identity/map and Git transport signatures remain frozen. The additive transport function is `db_git_settlement_reconcile_history(source, remote, expected_old_oid, candidate_oid, scratch_parent) -> DbGitSettlementReadback`; existing reconciliation stays conservative. New test helpers use `setup_item2_*` and `check_item2_*`. Existing full-contract fail-fast checkers are preserved until production-backed durable evidence exists. Pure map prerequisites cannot close REQ-004; transport inclusion cannot close signed settlement/receipt requirements.
 
 The concrete acceptance authority is [the 51-row matrix](../evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md). Root owns runtime discovery; no sidecar launches long bootstrap builds. At this update no admitted self-hosted runtime has executed the new cases, so RED/GREEN receipts and generated-manual execution remain missing. Historical named sidecar roles above are planning roles, not claims that those models have run or approved this revision.
+
+### Code-first resumed ownership
+
+The user explicitly resumed implementation and test-source work despite the
+runner gate. Core, evidence/provider, and storage/confidentiality agents continue
+in separate worktrees; root cherry-picks their scoped commits into the existing
+release-target work branch. Root owns signature/metadata admission, authenticated
+local apply, conflict persistence, shared SJ store channels, signed receipts,
+allocator projection, integration review and the draft PR. Runtime evidence,
+generated manuals, host/performance qualification and merge remain separate
+required gates. See the [implementation ledger](../evidence/seven_plans/item2_code_first_2026-10-03.md).

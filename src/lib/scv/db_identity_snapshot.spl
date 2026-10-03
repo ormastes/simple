@@ -1,0 +1,65 @@
+# Complete identity allocator projection for the same candidate tree as the
+# materialized snapshot and accepted registry. No row-count reconstruction.
+use std.scv.db_canonical.*
+use std.scv.db_patch.{DbValue}
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode, db_snapshot_value_decode}
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+
+fn db_identity_snapshot_encode(state: IdentityMap) -> Result<text, text>:
+    val error = identity_map_validate(state)
+    if error != "": return Err(error)
+    var bindings: [[u8]] = []
+    for binding in state.bindings:
+        var deleted = 0u8
+        if binding.tombstoned: deleted = 1u8
+        val uid = db_snapshot_value_encode(DbValue.Reference(entity_ref_provisional(binding.uid)), 0)?
+        bindings.push(db_frame(81u8, uid + db_canonical_text(binding.identity)? + db_canonical_text(binding.entity_kind)? + db_frame(2u8, db_u64_bytes(binding.sequence)) + db_frame(1u8, [deleted])))
+    var marks: [[u8]] = []
+    for mark in state.high_water:
+        marks.push(db_frame(82u8, db_canonical_text(mark.entity_kind)? + db_frame(2u8, db_u64_bytes(mark.sequence))))
+    val payload = db_canonical_text(state.database_namespace)? + db_frame(2u8, db_u64_bytes(state.authority_epoch)) + db_canonical_list(bindings) + db_canonical_list(marks)
+    val bytes = db_domain_bytes("identity-snapshot", db_frame(80u8, payload))?
+    if bytes.len() > 16777216: return Err("SCVDB_BYTES_QUOTA")
+    Ok("SCVDB-IDENTITIES-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_identity_snapshot_decode(encoded: text) -> Result<IdentityMap, text>:
+    val prefix = "SCVDB-IDENTITIES-v1\n"
+    if encoded.len() > 33554500: return Err("SCVDB_BYTES_QUOTA")
+    if encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_IDENTITY_SNAPSHOT_FORMAT")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val domain = db_domain_bytes("identity-snapshot", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_IDENTITY_SNAPSHOT_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_IDENTITY_SNAPSHOT_DOMAIN")
+    val frame = db_read_frame(bytes, domain.len())?
+    if frame.tag != 80u8 or frame.next_offset != bytes.len(): return Err("SCVDB_IDENTITY_SNAPSHOT_FORMAT")
+    val parts = db_read_children(frame.payload)?
+    if parts.len() != 4 or parts[2].tag != 6u8 or parts[3].tag != 6u8: return Err("SCVDB_IDENTITY_SNAPSHOT_FIELDS")
+    val namespace = db_read_text(parts[0])?
+    val epoch = db_read_unsigned(parts[1])?
+    var bindings: [IdentityMapBinding] = []
+    for entry in db_read_children(parts[2].payload)?:
+        if entry.tag != 81u8: return Err("SCVDB_IDENTITY_SNAPSHOT_BINDING")
+        val values = db_read_children(entry.payload)?
+        if values.len() != 5: return Err("SCVDB_IDENTITY_SNAPSHOT_BINDING")
+        val reference = db_snapshot_value_decode(values[0], 0)?
+        match reference:
+            Reference(ref):
+                if val uid = ref.provisional:
+                    bindings.push(IdentityMapBinding(uid: uid, identity: db_read_text(values[1])?, entity_kind: db_read_text(values[2])?, sequence: db_read_unsigned(values[3])?, tombstoned: db_read_flag(values[4])?))
+                else: return Err("SCVDB_IDENTITY_SNAPSHOT_BINDING")
+            _: return Err("SCVDB_IDENTITY_SNAPSHOT_BINDING")
+    var marks: [IdentityMapHighWater] = []
+    for entry in db_read_children(parts[3].payload)?:
+        if entry.tag != 82u8: return Err("SCVDB_IDENTITY_SNAPSHOT_MARK")
+        val values = db_read_children(entry.payload)?
+        if values.len() != 2: return Err("SCVDB_IDENTITY_SNAPSHOT_MARK")
+        marks.push(IdentityMapHighWater(entity_kind: db_read_text(values[0])?, sequence: db_read_unsigned(values[1])?))
+    val state = IdentityMap(database_namespace: namespace, authority_epoch: epoch, bindings: bindings, high_water: marks)
+    val error = identity_map_validate(state)
+    if error != "": return Err(error)
+    Ok(state)
+
+export db_identity_snapshot_encode, db_identity_snapshot_decode

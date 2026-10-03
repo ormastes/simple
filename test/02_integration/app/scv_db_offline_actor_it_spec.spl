@@ -1,0 +1,79 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod (cwd, dir_create, file_read, file_write, file_delete, file_exists, process_run_timeout)
+use app.scv.db.offline_actor.{db_actor_open, db_actor_reserve}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+
+fn setup_item2_actor_root() -> text:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val root = "{cwd()}/build/test-artifacts/item2-actor-{nonce}"
+    expect(dir_create(root, true)).to_be(true)
+    root
+
+describe "Durable offline database actor reservations":
+    it "reserves increasing counters durably before returning each UID":
+        step("Open a fresh random process-session incarnation and reserve two IDs")
+        val root = setup_item2_actor_root()
+        val session = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+        val first = db_actor_reserve(session, "bug").unwrap()
+        val second = db_actor_reserve(first.session, "bug").unwrap()
+        expect(first.uid.counter).to_equal(1u64)
+        expect(second.uid.counter).to_equal(2u64)
+        expect(second.uid.actor == first.uid.actor).to_be(false)
+        expect(first.uid.actor == session.actor).to_be(false)
+        expect(file_read("{root}/.scv/local/actors/{second.session.actor.hex}.counter").ends_with("\n2\n")).to_be(true)
+        expect(file_read("{root}/.scv/local/actors/{first.session.actor.hex}.counter").starts_with("scv-db/actor-retired/v1\n")).to_be(true)
+
+    it "requires rotation on stale handles and detected disk counter rollback":
+        val root = setup_item2_actor_root()
+        val session = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+        val first = db_actor_reserve(session, "bug").unwrap()
+        expect(db_actor_reserve(session, "bug")).to_equal(Err("SCVDB_ACTOR_ROTATION_REQUIRED"))
+        val path = "{root}/.scv/local/actors/{first.session.actor.hex}.counter"
+        val rolled_back = "scv-db/actor/v1\n{first.session.namespace}\n{first.session.actor.hex}\n0\n"
+        expect(file_write(path, rolled_back)).to_be(true)
+        expect(db_actor_reserve(first.session, "bug")).to_equal(Err("SCVDB_ACTOR_ROTATION_REQUIRED"))
+        val replacement = db_actor_open(root, session.namespace).unwrap()
+        expect(replacement.actor == session.actor).to_be(false)
+        expect(db_actor_reserve(replacement, "bug").unwrap().uid.counter).to_equal(1u64)
+
+    it "cannot reissue a UID when both an old handle and its counter bytes are restored":
+        val root = setup_item2_actor_root()
+        val original = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+        val path = "{root}/.scv/local/actors/{original.actor.hex}.counter"
+        val before = file_read(path)
+        val acknowledged = db_actor_reserve(original, "bug").unwrap()
+        expect(file_write(path, before)).to_be(true)
+        val after_restore = db_actor_reserve(original, "bug").unwrap()
+        expect(after_restore.uid.counter).to_equal(acknowledged.uid.counter)
+        expect(after_restore.uid.actor == acknowledged.uid.actor).to_be(false)
+        expect(file_exists("{root}/.scv/local/actors/{acknowledged.uid.actor.hex}.counter")).to_be(true)
+        expect(file_exists("{root}/.scv/local/actors/{after_restore.uid.actor.hex}.counter")).to_be(true)
+
+    it "rotates incarnation on every reopened session and rejects path-like kinds":
+        val root = setup_item2_actor_root()
+        val first = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+        val reopened = db_actor_open(root, first.namespace).unwrap()
+        expect(first.actor == reopened.actor).to_be(false)
+        expect(db_actor_reserve(reopened, "../bug")).to_equal(Err("SCVDB_ACTOR_IDENTITY"))
+
+    it "rejects state-directory aliases before opening an actor":
+        val root = setup_item2_actor_root()
+        val victim = setup_item2_actor_root()
+        val (_out, _err, code) = process_run_timeout("ln", ["-s", victim, "{root}/.scv"], 30000)
+        expect(code).to_equal(0)
+        expect(db_actor_open(root, "00112233445566778899aabbccddeeff")).to_equal(Err("SCVDB_STORE_SCOPE"))
+        expect(file_exists("{victim}/local/actors")).to_be(false)
+
+    it "rejects a counter symlink without changing its external target":
+        val root = setup_item2_actor_root()
+        val session = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+        val path = "{root}/.scv/local/actors/{session.actor.hex}.counter"
+        val original = file_read(path)
+        val victim = setup_item2_actor_root()
+        expect(file_write("{victim}/counter", original)).to_be(true)
+        expect(file_delete(path)).to_be(true)
+        val (_out, _err, code) = process_run_timeout("ln", ["-s", "{victim}/counter", path], 30000)
+        expect(code).to_equal(0)
+        expect(db_actor_reserve(session, "bug")).to_equal(Err("SCVDB_ACTOR_ROTATION_REQUIRED"))
+        expect(file_read("{victim}/counter")).to_equal(original)

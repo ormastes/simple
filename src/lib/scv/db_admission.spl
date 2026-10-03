@@ -1,0 +1,183 @@
+# codex-impl
+# Signature and scope verification over a trusted, revision-pinned policy.
+# The application owner loads the policy independently of incoming patches.
+# Public receipt records are data, not unforgeable capabilities: effect owners
+# call db_plan_admitted_patch and reverify instead of trusting a caller record.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{MaterializedState, MergePolicy, MergePlan, db_plan_patch, db_plan_patch_with_identity}
+use std.scv.distributed_identity_map.{IdentityMap}
+use std.scv.db_confidentiality.{DbMetadataPolicy, db_metadata_policy_digest, db_metadata_check_patch}
+use std.scv.distributed_identity.{EntityRef, entity_ref_validate}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbPermission:
+    operation: text
+    kind: text
+    field: text
+
+struct DbSignerKey:
+    key_id: text
+    public_key: [u8]
+    role: text
+    valid_from: u64
+    valid_until: u64
+    revoked: bool
+    permissions: [DbPermission]
+
+struct DbAdmissionPolicy:
+    revision: text
+    repository: text
+    namespace: text
+    epoch: u64
+    schema_revision: text
+    reducer_revision: text
+    keys: [DbSignerKey]
+    metadata: DbMetadataPolicy
+
+struct AuthorizedPatch:
+    patch: DbPatch
+    policy_revision: text
+    signer_role: text
+    signing_digest: text
+
+fn db_admission_policy_digest(policy: DbAdmissionPolicy) -> Result<text, text>:
+    if db_metadata_policy_digest(policy.metadata)? != policy.metadata.revision:
+        return Err("SCVDB_METADATA_POLICY_REVISION")
+    if policy.repository == "" or policy.namespace == "" or policy.epoch == 0 or policy.schema_revision == "" or policy.reducer_revision == "":
+        return Err("SCVDB_ADMISSION_POLICY")
+    var keys: [DbCanonicalEntry] = []
+    for key in policy.keys:
+        if key.key_id == "" or key.public_key.len() != 32 or key.valid_until <= key.valid_from:
+            return Err("SCVDB_ADMISSION_KEY")
+        if key.role != "user" and key.role != "reviewer" and key.role != "integrator" and key.role != "ci":
+            return Err("SCVDB_ADMISSION_ROLE")
+        var permissions: [[u8]] = []
+        for permission in key.permissions:
+            if permission.kind == "" or not ["create", "update", "tombstone", "set_add", "set_remove", "append"].contains(permission.operation):
+                return Err("SCVDB_ADMISSION_PERMISSION")
+            permissions.push(db_frame(9u8, db_canonical_text(permission.operation)? + db_canonical_text(permission.kind)? + db_canonical_text(permission.field)?))
+        val flags: [u8] = if key.revoked: [1u8] else: [0u8]
+        val bytes = db_frame(8u8, key.public_key) + db_canonical_text(key.role)? + db_frame(2u8, db_u64_bytes(key.valid_from)) + db_frame(2u8, db_u64_bytes(key.valid_until)) + db_frame(3u8, flags) + db_canonical_set(permissions)?
+        keys.push(DbCanonicalEntry(key: db_canonical_text(key.key_id)?, value: db_frame(9u8, bytes)))
+    val context = db_canonical_text(policy.repository)? + db_canonical_text(policy.namespace)? + db_frame(2u8, db_u64_bytes(policy.epoch)) + db_canonical_text(policy.schema_revision)? + db_canonical_text(policy.reducer_revision)? + db_canonical_text(policy.metadata.revision)?
+    Ok(sha256_u8_hex(db_domain_bytes("admission-policy", db_frame(9u8, context + db_canonical_map(keys)?))?))
+
+fn db_patch_signing_bytes(patch: DbPatch) -> Result<[u8], text>:
+    val digest = db_patch_validate(patch)?
+    if patch.signature_algorithm != "ed25519" or patch.signature_version != 1:
+        return Err("SCVDB_SIGNATURE_ALGORITHM")
+    db_domain_bytes("patch-signature", db_frame(9u8, db_canonical_text(digest)? + db_canonical_text(patch.signer)? + db_canonical_text(patch.signature_algorithm)? + db_frame(2u8, db_u64_bytes(patch.signature_version))))
+
+fn _db_admission_entity(entity: EntityRef, policy: DbAdmissionPolicy) -> Result<text, text>:
+    if not entity_ref_validate(entity).valid:
+        return Err("SCVDB_ENTITY_REF")
+    if val uid = entity.provisional:
+        if uid.database_namespace != policy.namespace:
+            return Err("SCVDB_NAMESPACE_MISMATCH")
+        return Ok(uid.entity_kind)
+    if val alias = entity.settled:
+        if alias.database_namespace != policy.namespace or alias.authority_epoch != policy.epoch:
+            return Err("SCVDB_NAMESPACE_MISMATCH")
+        return Ok(alias.entity_kind)
+    Err("SCVDB_ENTITY_REF")
+
+fn _db_permission(key: DbSignerKey, operation: text, kind: text, field: text) -> Result<bool, text>:
+    for permission in key.permissions:
+        if permission.operation == operation and db_canonical_text(permission.kind)? == db_canonical_text(kind)? and (permission.field == "*" or db_canonical_text(permission.field)? == db_canonical_text(field)?):
+            return Ok(true)
+    Ok(false)
+
+fn _db_require_scope(key: DbSignerKey, operation: text, kind: text, fields: [text]) -> Result<text, text>:
+    # CI is append-only regardless of an accidentally overbroad configured ACL.
+    if key.role == "ci":
+        if operation != "create" and operation != "append":
+            return Err("SCVDB_CI_AUTHORITY")
+        if not ["observation", "run_manifest", "evidence_manifest"].contains(kind):
+            return Err("SCVDB_CI_AUTHORITY")
+    if fields.len() == 0 and not _db_permission(key, operation, kind, "")?:
+        return Err("SCVDB_ACL_DENIED")
+    for field in fields:
+        if not _db_permission(key, operation, kind, field)?:
+            return Err("SCVDB_ACL_DENIED")
+    Ok("allowed")
+
+fn _db_operation_scope(operation: DbOperation, key: DbSignerKey, policy: DbAdmissionPolicy) -> Result<text, text>:
+    match operation:
+        case DbOperation.Create(entity, kind, fields):
+            if _db_admission_entity(entity, policy)? != kind: return Err("SCVDB_ENTITY_KIND")
+            var names: [text] = []
+            for field in fields: names.push(field.name)
+            _db_require_scope(key, "create", kind, names)
+        case DbOperation.UpdateFields(entity, edits, condition):
+            val kind = _db_admission_entity(entity, policy)?
+            var names: [text] = []
+            for edit in edits: names.push(edit.field)
+            _db_require_scope(key, "update", kind, names)
+        case DbOperation.Tombstone(entity, condition):
+            _db_require_scope(key, "tombstone", _db_admission_entity(entity, policy)?, [])
+        case DbOperation.AddSetMember(entity, field, member, dot):
+            _db_require_scope(key, "set_add", _db_admission_entity(entity, policy)?, [field])
+        case DbOperation.RemoveObservedSetMember(entity, field, observed):
+            _db_require_scope(key, "set_remove", _db_admission_entity(entity, policy)?, [field])
+        case DbOperation.AddSetMemberAfterRemoval(entity, field, member, dot, observed):
+            _db_require_scope(key, "set_add", _db_admission_entity(entity, policy)?, [field])
+        case DbOperation.RemoveSetMember(entity, field, member, dot, observed):
+            _db_require_scope(key, "set_remove", _db_admission_entity(entity, policy)?, [field])
+        case DbOperation.AppendObservation(entity, kind, fields):
+            if _db_admission_entity(entity, policy)? != kind: return Err("SCVDB_ENTITY_KIND")
+            var names: [text] = []
+            for field in fields: names.push(field.name)
+            _db_require_scope(key, "append", kind, names)
+
+fn db_authorize_patch(patch: DbPatch, policy: DbAdmissionPolicy, accepted_ids: [text], now: u64) -> Result<AuthorizedPatch, text>:
+    if db_admission_policy_digest(policy)? != policy.revision:
+        return Err("SCVDB_POLICY_REVISION")
+    if db_canonical_text(patch.repository)? != db_canonical_text(policy.repository)? or patch.namespace != policy.namespace or patch.epoch != policy.epoch:
+        return Err("SCVDB_AUTHORITY_CONTEXT")
+    if patch.schema_revision != policy.schema_revision or patch.reducer_revision != policy.reducer_revision:
+        return Err("SCVDB_VERSION")
+    val message = db_patch_signing_bytes(patch)?
+    for dependency in patch.causal_dependencies:
+        if not accepted_ids.contains(dependency):
+            return Err("SCVDB_MISSING_DEPENDENCY")
+    for key in policy.keys:
+        if db_canonical_text(key.key_id)? != db_canonical_text(patch.signer)?:
+            continue
+        if key.revoked: return Err("SCVDB_KEY_REVOKED")
+        if now < key.valid_from or now >= key.valid_until: return Err("SCVDB_KEY_TIME")
+        if patch.signature.len() != 64 or not pure_ed25519_verify(key.public_key, message, patch.signature):
+            return Err("SCVDB_SIGNATURE_INVALID")
+        for operation in patch.operations:
+            val permitted = _db_operation_scope(operation, key, policy)?
+        val admissible_metadata = db_metadata_check_patch(patch, policy.metadata)?
+        return Ok(AuthorizedPatch(patch: patch, policy_revision: policy.revision, signer_role: key.role, signing_digest: sha256_u8_hex(message)))
+    Err("SCVDB_KEY_UNKNOWN")
+
+# Reverification is deliberate: a public AuthorizedPatch-shaped struct cannot
+# bypass the signature/key/ACL boundary by carrying an invented receipt string.
+fn db_plan_admitted_patch(state: MaterializedState, patch: DbPatch, merge: MergePolicy, admission: DbAdmissionPolicy, now: u64) -> Result<MergePlan, text>:
+    var accepted: [text] = []
+    for batch in state.accepted: accepted.push(batch.batch_id)
+    val authorized = db_authorize_patch(patch, admission, accepted, now)?
+    if merge.repository != admission.repository or merge.namespace != admission.namespace or merge.epoch != admission.epoch or merge.schema_revision != admission.schema_revision or merge.reducer_revision != admission.reducer_revision:
+        return Err("SCVDB_POLICY_CONTEXT")
+    var plan = db_plan_patch(state, authorized.patch, merge)?
+    plan.authorization_status = "VERIFIED_SIGNATURE_AND_SCOPE"
+    Ok(plan)
+
+fn db_plan_admitted_settled_patch(state: MaterializedState, patch: DbPatch, merge: MergePolicy, admission: DbAdmissionPolicy, identities: IdentityMap, now: u64) -> Result<MergePlan, text>:
+    var accepted: [text] = []
+    for batch in state.accepted: accepted.push(batch.batch_id)
+    val authorized = db_authorize_patch(patch, admission, accepted, now)?
+    if merge.repository != admission.repository or merge.namespace != admission.namespace or merge.epoch != admission.epoch or merge.schema_revision != admission.schema_revision or merge.reducer_revision != admission.reducer_revision:
+        return Err("SCVDB_POLICY_CONTEXT")
+    if identities.database_namespace != admission.namespace or identities.authority_epoch != admission.epoch:
+        return Err("SCVDB_ALLOCATOR_CONTEXT")
+    var plan = db_plan_patch_with_identity(state, authorized.patch, merge, identities)?
+    plan.authorization_status = "VERIFIED_SIGNATURE_AND_SCOPE"
+    Ok(plan)
+
+export DbPermission, DbSignerKey, DbAdmissionPolicy, AuthorizedPatch
+export db_admission_policy_digest, db_patch_signing_bytes, db_authorize_patch, db_plan_admitted_patch, db_plan_admitted_settled_patch

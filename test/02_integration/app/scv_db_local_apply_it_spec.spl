@@ -1,0 +1,138 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod (cwd, dir_create, file_exists)
+use app.scv.db.local_apply.{db_apply_local, db_read_local, db_read_local_image, db_resolve_local}
+use std.scv.db_conflict_resolution.*
+use app.scv.db.local_store.{db_store_read}
+use std.scv.db_admission.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.db_snapshot.{db_snapshot_decode}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+
+fn setup_item2_apply_root() -> text:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val root = "{cwd()}/build/test-artifacts/item2-apply-{nonce}"
+    expect(dir_create(root, true)).to_be(true)
+    root
+
+fn setup_item2_apply_seed() -> [u8]:
+    [0u8,1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8,10u8,11u8,12u8,13u8,14u8,15u8,16u8,17u8,18u8,19u8,20u8,21u8,22u8,23u8,24u8,25u8,26u8,27u8,28u8,29u8,30u8,31u8]
+
+fn setup_item2_apply_policy(patches: [DbPatch] = [], role: text = "user") -> DbAdmissionPolicy:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_apply_seed())
+    val key = DbSignerKey(key_id: "author", public_key: public_key, role: role, valid_from: 0, valid_until: 100, revoked: false, permissions: [DbPermission(operation: "create", kind: "bug", field: "title"), DbPermission(operation: "update", kind: "bug", field: "title")])
+    var policy = DbAdmissionPolicy(revision: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", keys: [key], metadata: setup_item2_reviewed_metadata([setup_item2_apply_patch(1, "")] + patches))
+    policy.revision = db_admission_policy_digest(policy).unwrap()
+    policy
+
+fn setup_item2_apply_merge() -> MergePolicy:
+    MergePolicy(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", fields: [DbFieldSchema(kind: "bug", field: "title", rule: FieldMergeRule.ScalarConflict)], constraints: [])
+
+fn setup_item2_apply_patch(counter: u64, base: text) -> DbPatch:
+    val entity = entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+    var patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: counter, base_revision: base, causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: [DbOperation.Create(entity, "bug", [DbField(name: "title", value: DbValue.Text("bug-{counter}"))])], payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "author", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "integration fixture")
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_apply_seed())
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+fn setup_item2_apply_resign(patch: DbPatch) -> DbPatch:
+    var sealed = db_patch_seal(patch).unwrap()
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_apply_seed())
+    sealed.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(sealed).unwrap())
+    sealed
+
+fn setup_item2_apply_edit(counter: u64, base: text, value: text) -> DbPatch:
+    var patch = setup_item2_apply_patch(counter, base)
+    val entity = entity_ref_provisional(EntityUid(database_namespace: patch.namespace, entity_kind: "bug", actor: ActorIncarnation(hex: patch.actor), counter: 1))
+    patch.operations = [DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("bug-1"), after: DbValue.Text(value))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+    setup_item2_apply_resign(patch)
+
+describe "Authenticated distributed database local publication":
+    it "persists immutable conflict evidence and atomically records a signed reviewer resolution":
+        step("Create two genuinely concurrent edits from the same accepted base")
+        val root = setup_item2_apply_root()
+        val first = db_apply_local(root, "", setup_item2_apply_patch(1, ""), setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        val left = setup_item2_apply_edit(2, first.revision, "left")
+        val right = setup_item2_apply_edit(3, first.revision, "right")
+        val local = db_apply_local(root, first.head, left, setup_item2_apply_merge(), setup_item2_apply_policy([left]), 10).unwrap()
+        val conflict = db_apply_local(root, local.head, right, setup_item2_apply_merge(), setup_item2_apply_policy([right]), 10).unwrap()
+        expect(conflict.code).to_equal("conflict")
+        val image = db_read_local_image(root, setup_item2_apply_policy()).unwrap()
+        expect(image.state.accepted.len()).to_equal(2)
+        expect(image.catalog.records.len()).to_equal(1)
+        expect(image.catalog.records[0].local).to_equal(DbValue.Text("left"))
+        expect(image.catalog.records[0].incoming).to_equal(DbValue.Text("right"))
+        val record = image.catalog.records[0]
+        val decision = DbConflictDecision(conflict_id: record.conflict_id, reviewer: "author", expected_current: DbValue.Text("left"), chosen: DbValue.Text("merged"))
+        val resolution = db_plan_conflict_resolution(record, decision, image.state).unwrap()
+        var patch = setup_item2_apply_patch(4, image.state.revision)
+        patch.operations = [resolution.operation]
+        patch.provenance = db_conflict_resolution_provenance(record, decision).unwrap()
+        patch = setup_item2_apply_resign(patch)
+        expect(db_resolve_local(root, conflict.head, decision, patch, setup_item2_apply_merge(), setup_item2_apply_policy([patch]), 10)).to_equal(Err("SCVDB_CONFLICT_REVIEWER_ROLE"))
+        val resolved = db_resolve_local(root, conflict.head, decision, patch, setup_item2_apply_merge(), setup_item2_apply_policy([patch], "reviewer"), 10).unwrap()
+        expect(resolved.code).to_equal("ok")
+        val reopened = db_read_local_image(root, setup_item2_apply_policy()).unwrap()
+        expect(reopened.state.accepted.len()).to_equal(3)
+        expect(reopened.catalog.records).to_equal(image.catalog.records)
+        expect(reopened.catalog.resolutions[0].resolution_batch).to_equal(patch.batch_id)
+        expect(reopened.state.rows[0].fields[0].value).to_equal(DbValue.Text("merged"))
+        expect(db_resolve_local(root, conflict.head, decision, patch, setup_item2_apply_merge(), setup_item2_apply_policy([patch], "reviewer"), 10).unwrap().replay).to_be(true)
+
+    it "persists a signed mutation and its accepted registry in one reopened snapshot":
+        step("Verify Ed25519 and scope then publish under the SJ lease")
+        val root = setup_item2_apply_root()
+        val patch = setup_item2_apply_patch(1, "")
+        val applied = db_apply_local(root, "", patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        expect(applied.code).to_equal("ok")
+        expect(applied.replay).to_be(false)
+        val reopened = db_read_local(root, setup_item2_apply_policy()).unwrap()
+        expect(reopened.rows.len()).to_equal(1)
+        expect(reopened.accepted[0].batch_id).to_equal(patch.batch_id)
+        expect(reopened.revision).to_equal(applied.revision)
+
+    it "replays an older accepted batch after another transaction without losing later rows":
+        val root = setup_item2_apply_root()
+        val first_patch = setup_item2_apply_patch(1, "")
+        val first = db_apply_local(root, "", first_patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        val second = db_apply_local(root, first.head, setup_item2_apply_patch(2, first.revision), setup_item2_apply_merge(), setup_item2_apply_policy([setup_item2_apply_patch(2, first.revision)]), 10).unwrap()
+        val replay = db_apply_local(root, "", first_patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        expect(replay.replay).to_be(true)
+        expect(replay.head).to_equal(second.head)
+        expect(db_read_local(root, setup_item2_apply_policy()).unwrap().rows.len()).to_equal(2)
+
+    it "rejects forged signatures before creating the database directory":
+        val root = setup_item2_apply_root()
+        var patch = setup_item2_apply_patch(1, "")
+        patch.signature = [0u8]
+        expect(db_apply_local(root, "", patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+        expect(file_exists("{root}/.scv/db/HEAD")).to_be(false)
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "rejects a stale physical generation without publishing the next accepted batch":
+        val root = setup_item2_apply_root()
+        val first = db_apply_local(root, "", setup_item2_apply_patch(1, ""), setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        expect(db_apply_local(root, "", setup_item2_apply_patch(2, first.revision), setup_item2_apply_merge(), setup_item2_apply_policy([setup_item2_apply_patch(2, first.revision)]), 10)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+        expect(db_store_read(root).head).to_equal(first.head)
+        expect(db_read_local(root, setup_item2_apply_policy()).unwrap().accepted.len()).to_equal(1)
+
+    it "rejects reopening persisted state under another authority epoch":
+        val root = setup_item2_apply_root()
+        val first = db_apply_local(root, "", setup_item2_apply_patch(1, ""), setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        var policy = setup_item2_apply_policy()
+        policy.epoch = 2
+        policy.revision = db_admission_policy_digest(policy).unwrap()
+        expect(db_read_local(root, policy)).to_equal(Err("SCVDB_STORE_CONTEXT"))
+        expect(db_store_read(root).head).to_equal(first.head)
+
+    it "rejects unknown semantic bases and reused actor counters without publication":
+        val root = setup_item2_apply_root()
+        val first = db_apply_local(root, "", setup_item2_apply_patch(1, ""), setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        expect(db_apply_local(root, first.head, setup_item2_apply_patch(2, "missing-base"), setup_item2_apply_merge(), setup_item2_apply_policy([setup_item2_apply_patch(2, "missing-base")]), 10)).to_equal(Err("SCVDB_BASE_REVISION_MISSING"))
+        expect(db_apply_local(root, first.head, setup_item2_apply_patch(1, first.revision), setup_item2_apply_merge(), setup_item2_apply_policy([setup_item2_apply_patch(1, first.revision)]), 10)).to_equal(Err("SCVDB_ACTOR_COUNTER_COLLISION"))
+        expect(db_store_read(root).head).to_equal(first.head)

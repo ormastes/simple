@@ -1,0 +1,106 @@
+# Signed settlement history checks. This pure module authenticates receipt
+# contents, not Git ancestry or branch-protection configuration. The transport
+# owner must independently prove those facts before accepting publication.
+use std.scv.db_canonical.*
+use std.scv.distributed_identity_map.{IdentityMapHighWater}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_uid_validate}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+
+struct DbReceiptAuthority:
+    repository: text
+    namespace: text
+    epoch: u64
+    remote: text
+    settled_ref: text
+    key_id: text
+    public_key: [u8]
+    schema_revision: text
+    reducer_revision: text
+
+struct DbSettlementReceipt:
+    repository: text
+    namespace: text
+    epoch: u64
+    remote: text
+    settled_ref: text
+    previous_receipt: text
+    previous_head: text
+    accepted_head: text
+    accepted_tree: text
+    object_format: text
+    high_water: [IdentityMapHighWater]
+    schema_revision: text
+    reducer_revision: text
+    batch_digests: [text]
+    signer: text
+    signature: [u8]
+
+fn _db_receipt_hex(value: text, length: i64) -> bool:
+    if value.len() != length: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_receipt_signing_bytes(receipt: DbSettlementReceipt) -> Result<[u8], text>:
+    var oid_length = 0
+    if receipt.object_format == "sha1": oid_length = 40
+    elif receipt.object_format == "sha256": oid_length = 64
+    else: return Err("SCVDB_RECEIPT_OBJECT_FORMAT")
+    if not _db_receipt_hex(receipt.accepted_head, oid_length) or not _db_receipt_hex(receipt.accepted_tree, oid_length):
+        return Err("SCVDB_RECEIPT_OID")
+    if receipt.previous_head != "" and not _db_receipt_hex(receipt.previous_head, oid_length): return Err("SCVDB_RECEIPT_OID")
+    if receipt.previous_receipt != "" and not _db_receipt_hex(receipt.previous_receipt, 64): return Err("SCVDB_RECEIPT_CHAIN")
+    if receipt.repository == "" or receipt.remote == "" or receipt.epoch == 0 or receipt.signer == "" or receipt.schema_revision == "" or receipt.reducer_revision == "":
+        return Err("SCVDB_RECEIPT_CONTEXT")
+    if receipt.settled_ref != "refs/heads/settled": return Err("SCVDB_RECEIPT_REF")
+    var marks: [DbCanonicalEntry] = []
+    for mark in receipt.high_water:
+        val probe = EntityUid(database_namespace: receipt.namespace, entity_kind: mark.entity_kind, actor: ActorIncarnation(hex: "00000000000000000000000000000000"), counter: 1)
+        if not entity_uid_validate(probe).valid: return Err("SCVDB_RECEIPT_HIGH_WATER")
+        marks.push(DbCanonicalEntry(key: db_canonical_text(mark.entity_kind)?, value: db_frame(2u8, db_u64_bytes(mark.sequence))))
+    # Validate namespace even for an authority with no allocated kinds yet.
+    if not _db_receipt_hex(receipt.namespace, 32): return Err("SCVDB_RECEIPT_CONTEXT")
+    var batches: [[u8]] = []
+    for digest in receipt.batch_digests:
+        if not _db_receipt_hex(digest, 64): return Err("SCVDB_RECEIPT_BATCH")
+        batches.push(db_canonical_text(digest)?)
+    val context = db_canonical_text(receipt.repository)? + db_canonical_text(receipt.namespace)? + db_frame(2u8, db_u64_bytes(receipt.epoch)) + db_canonical_text(receipt.remote)? + db_canonical_text(receipt.settled_ref)?
+    val chain = db_canonical_text(receipt.previous_receipt)? + db_canonical_text(receipt.previous_head)? + db_canonical_text(receipt.accepted_head)? + db_canonical_text(receipt.accepted_tree)? + db_canonical_text(receipt.object_format)?
+    val policy = db_canonical_text(receipt.schema_revision)? + db_canonical_text(receipt.reducer_revision)? + db_canonical_text(receipt.signer)?
+    db_domain_bytes("settlement-receipt", db_frame(9u8, context + chain + policy + db_canonical_map(marks)? + db_canonical_set(batches)?))
+
+fn db_receipt_digest(receipt: DbSettlementReceipt) -> Result<text, text>:
+    Ok(sha256_u8_hex(db_receipt_signing_bytes(receipt)?))
+
+fn db_receipt_authenticate(receipt: DbSettlementReceipt, authority: DbReceiptAuthority) -> Result<text, text>:
+    if db_canonical_text(receipt.repository)? != db_canonical_text(authority.repository)? or receipt.namespace != authority.namespace or receipt.epoch != authority.epoch or receipt.remote != authority.remote or receipt.settled_ref != authority.settled_ref or receipt.schema_revision != authority.schema_revision or receipt.reducer_revision != authority.reducer_revision or receipt.signer != authority.key_id:
+        return Err("SCVDB_RECEIPT_AUTHORITY")
+    val bytes = db_receipt_signing_bytes(receipt)?
+    if authority.public_key.len() != 32 or receipt.signature.len() != 64 or not pure_ed25519_verify(authority.public_key, bytes, receipt.signature):
+        return Err("SCVDB_RECEIPT_SIGNATURE")
+    Ok(sha256_u8_hex(bytes))
+
+fn db_receipt_genesis(receipt: DbSettlementReceipt, authority: DbReceiptAuthority) -> Result<text, text>:
+    val digest = db_receipt_authenticate(receipt, authority)?
+    if receipt.previous_receipt != "" or receipt.previous_head != "": return Err("SCVDB_RECEIPT_GENESIS")
+    Ok(digest)
+
+fn db_receipt_successor(previous: DbSettlementReceipt, current: DbSettlementReceipt, authority: DbReceiptAuthority) -> Result<text, text>:
+    val before = db_receipt_authenticate(previous, authority)?
+    val after = db_receipt_authenticate(current, authority)?
+    if current.previous_receipt != before or current.previous_head != previous.accepted_head or current.object_format != previous.object_format:
+        return Err("SCVDB_RECEIPT_CHAIN")
+    if current.accepted_head == previous.accepted_head: return Err("SCVDB_RECEIPT_HEAD_REUSE")
+    for old in previous.high_water:
+        var found = false
+        for mark in current.high_water:
+            if mark.entity_kind == old.entity_kind:
+                found = true
+                if mark.sequence < old.sequence: return Err("SCVDB_RECEIPT_HIGH_WATER_REGRESSION")
+        if not found: return Err("SCVDB_RECEIPT_HIGH_WATER_REGRESSION")
+    Ok(after)
+
+export DbReceiptAuthority, DbSettlementReceipt
+export db_receipt_signing_bytes, db_receipt_digest, db_receipt_authenticate, db_receipt_genesis, db_receipt_successor

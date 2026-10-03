@@ -885,3 +885,46 @@ The result `published` means candidate inclusion in inspected Git history, not a
 After the focused identity/transport prerequisites, implement canonical encoding and replay, durable transaction recovery, admission/receipt-index publication, configuration-aware evidence/CI, provider bridge, retention/resnapshot, and Operating B performance/host evidence. Keep all remaining scenarios visibly failing until their production owners and durable oracles exist. Windows/Linux/macOS/FreeBSD support and live GitHub capability proofs are separate evidence cells; one host's local bare-Git fixture does not satisfy them. NFR targets in section 16 are unchanged and unproven by these small fixtures.
 
 Current host blocker: the Windows `path_absolute` implementation cannot prove symlink/final-path identity (`src/app/io/env_access_host.spl:111`). The interim history adapter therefore rejects Windows scratch setup with `SCVDB_SCRATCH_SCOPE`. REQ-036 remains OPEN until the existing host path owner supplies alias-safe final-path resolution and the same containment/history fixtures run on Windows. This is a blocked capability, not an accepted Windows exclusion or a reduction of the one-app-path requirement.
+
+## 19. Code-first implementation refinement (2026-10-03)
+
+The user directed implementation and test coding to proceed before runtime
+execution. The [source-progress record](../03_plan/evidence/seven_plans/item2_code_first_2026-10-03.md)
+describes implemented owners and remaining integration gates; it is not a
+verification receipt or permission to reduce the selected scope.
+
+The materialized snapshot is now `SCVDB-SNAPSHOT-v2`: accepted entries bind the
+original actor/counter, canonical batch digest and prior semantic revision.
+Aliased operations resolve after verification without changing original signed
+patch identity. Explicit causal events implement remove-wins sets; settlement
+order does not create their causal observations.
+
+Local semantic publication uses a `SCVDB-LOCAL-v2` envelope binding authority and
+schema/reducer context, the complete semantic snapshot, and an immutable conflict
+catalog with resolution receipts. A conflicting scalar edit can persist its
+diagnostic record without accepting the batch or changing semantic state. A
+reviewer/integrator resolution binds exact guarded operations and canonical
+decision provenance into a newly signed patch; state and receipt publish
+together. Retries reestablish durability rather than treating readable bytes as
+an acknowledgement.
+
+One SJ repository writer boundary owns separate semantic, bridge, CI, settlement
+and page-manifest channels. Channels do not create independent checkout locks.
+Provider calls run after the short write lease is released. Bridge delivery
+persists sent-unconfirmed before effects, reconstructs reconciliation from
+observed provider data, and retains scoped provider IDs through recovery.
+Shared-field GitHub updates without provider CAS remain unsupported; uncertain
+absent creates are not blindly repeated.
+
+Metadata admission now requires an independently reviewed exact typed-value
+allowlist, including envelope/precondition/provenance content. Policy hashing
+and lookup share NFC equivalence. Restricted evidence uses actual authenticated
+encryption and controlled external key files; a deletion receipt covers removal
+of the owned active key file only, never retained plaintext/key copies, backups,
+or immutable Git history.
+
+The small whole-state codecs are bounded reference owners. They cannot establish
+Operating B: the [tracked capacity issue](../08_tracking/bug/item2_operating_b_sharded_storage_required_2026-10-03.md)
+requires immutable bounded pages, indexed manifests and affected-page updates,
+followed by unchanged million-row resource measurements. No quota increase or
+source-only implementation may be reported as that measurement.

@@ -1,0 +1,224 @@
+# codex-impl
+# SJ-owned local generation store. One immutable image contains the caller's
+# complete semantic state; this layer does not authenticate that state or claim
+# Git settlement. Readers verify the image named by the atomic HEAD pointer.
+
+use app.io.mod (is_dir, dir_create, dir_remove_all, file_exists, file_write, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_atomic_write, file_fsync, directory_fsync, host_os)
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_release, scv_sj_lease_is_held}
+
+struct DbStoreView:
+    code: text
+    head: text
+    parent: text
+    transaction_id: text
+    state: text
+
+fn _db_store_error(code: text) -> DbStoreView:
+    DbStoreView(code: code, head: "", parent: "", transaction_id: "", state: "")
+
+# Root is caller-owned and stable while SJ holds its lease. These path-based
+# facades reject existing aliases; they do not promise dirfd/openat protection
+# against hostile concurrent directory replacement by another OS principal.
+fn db_local_path_scope(root: text, relative_directories: [text]) -> text:
+    if host_os() == "windows":
+        return "SCVDB_STORE_CANONICAL_PATH_UNSUPPORTED"
+    if not root.starts_with("/") or root.starts_with("//") or root.ends_with("/") or path_absolute(root) != root or not dir_is_real_no_follow(root):
+        return "SCVDB_STORE_SCOPE"
+    for relative in relative_directories:
+        if relative == "" or relative.starts_with("/") or relative.contains("\\"):
+            return "SCVDB_STORE_SCOPE"
+        for component in relative.split("/"):
+            if component == "" or component == "." or component == "..": return "SCVDB_STORE_SCOPE"
+        val directory = "{root}/{relative}"
+        if is_dir(directory) or file_exists(directory):
+            if not dir_is_real_no_follow(directory) or path_absolute(directory) != directory:
+                return "SCVDB_STORE_SCOPE"
+    ""
+
+fn _db_store_scope(root: text, channel: text) -> text:
+    if not ["semantic", "bridge", "ci", "settlement", "pages"].contains(channel): return "SCVDB_STORE_CHANNEL"
+    db_local_path_scope(root, [".sj", ".scv", _db_store_relative(channel), "{_db_store_relative(channel)}/objects"])
+
+fn _db_store_relative(channel: text) -> text:
+    if channel == "semantic": return ".scv/db"
+    ".scv/db-{channel}"
+
+fn _db_store_read_bounded(path: text, limit: i64) -> Result<text, text>:
+    if not file_is_regular_no_follow(path) or path_absolute(path) != path:
+        return Err("SCVDB_STORE_FILE_SCOPE")
+    file_read_regular_no_follow_bounded(path, limit)
+
+fn _db_store_stage_publish(stage: text, object_path: text, encoded: text) -> text:
+    val staged = "{stage}/generation"
+    if not file_write(staged, encoded): return "SCVDB_STORE_OBJECT_WRITE"
+    if not file_fsync(staged) or not directory_fsync(stage): return "SCVDB_STORE_OBJECT_SYNC"
+    match _db_store_read_bounded(staged, 67108864):
+        Ok(actual):
+            if actual != encoded: return "SCVDB_STORE_OBJECT_CORRUPT"
+        Err(error): return "SCVDB_STORE_OBJECT_CORRUPT"
+    match file_publish_noreplace(staged, object_path):
+        Ok(inserted): ()
+        Err(error): return "SCVDB_STORE_OBJECT_WRITE"
+    match _db_store_read_bounded(object_path, 67108864):
+        Ok(actual):
+            if actual != encoded: return "SCVDB_STORE_OBJECT_CORRUPT"
+        Err(error): return "SCVDB_STORE_OBJECT_CORRUPT"
+    ""
+
+fn _db_store_publish_object(objects: text, object_path: text, encoded: text) -> text:
+    var stage = ""
+    match secure_temp_dir(objects, "generation-"):
+        Ok(value): stage = value
+        Err(error): return "SCVDB_STORE_OBJECT_WRITE"
+    if not dir_is_real_no_follow(stage) or path_absolute(stage) != stage or not stage.starts_with("{objects}/generation-"):
+        return "SCVDB_STORE_SCOPE"
+    val result = _db_store_stage_publish(stage, object_path, encoded)
+    if path_absolute(stage) != stage or not dir_remove_all(stage):
+        return "SCVDB_STORE_CLEANUP"
+    result
+
+fn _db_store_digest(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn _db_store_directory(root: text, channel: text) -> text:
+    "{root}/{_db_store_relative(channel)}"
+
+fn _db_store_object(root: text, head: text, channel: text) -> text:
+    "{_db_store_directory(root, channel)}/objects/{head}.scvg"
+
+fn _db_store_encode(parent: text, transaction_id: text, state: text) -> text:
+    # This is a storage envelope, not SCVDB-CANON signature encoding. The
+    # semantic owner supplies its canonical projection as an opaque payload.
+    "scv-db/local-generation/v1\n{parent}\n{transaction_id}\n{sha256_text(state)}\n{state}"
+
+# Read immutable state without holding the writer lease. Reopening after a
+# process crash yields the complete old or new generation, never mixed rows.
+fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
+    if not is_dir(root):
+        return _db_store_error("SCVDB_STORE_ROOT")
+    val scope = _db_store_scope(root, channel)
+    if scope != "": return _db_store_error(scope)
+    val pointer = "{_db_store_directory(root, channel)}/HEAD"
+    if not file_exists(pointer):
+        return DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "")
+    var raw_head = ""
+    match _db_store_read_bounded(pointer, 65):
+        Ok(value): raw_head = value
+        Err(error): return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
+    val head = raw_head.trim()
+    if not _db_store_digest(head) or raw_head != "{head}\n":
+        return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
+    val path = _db_store_object(root, head, channel)
+    if not file_exists(path):
+        return _db_store_error("SCVDB_STORE_OBJECT_MISSING")
+    var encoded = ""
+    match _db_store_read_bounded(path, 67108864):
+        Ok(value): encoded = value
+        Err(error): return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
+    if sha256_text(encoded) != head:
+        return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
+    val fields = encoded.split("\n")
+    if fields.len() < 5 or fields[0] != "scv-db/local-generation/v1":
+        return _db_store_error("SCVDB_STORE_ENCODING")
+    if (fields[1] != "" and not _db_store_digest(fields[1])) or not _db_store_digest(fields[2]):
+        return _db_store_error("SCVDB_STORE_ENCODING")
+    val state = fields[4:].join("\n")
+    if not _db_store_digest(fields[3]) or sha256_text(state) != fields[3]:
+        return _db_store_error("SCVDB_STORE_PAYLOAD_CORRUPT")
+    DbStoreView(code: "ok", head: head, parent: fields[1], transaction_id: fields[2], state: state)
+
+fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text, state: text, channel: text) -> DbStoreView:
+    val current = db_store_read(root, channel)
+    if current.code != "ok" and current.code != "empty":
+        return current
+    # Retry is idempotent only for the exact immediate transaction and payload.
+    # Historical replay belongs to the semantic accepted-batch registry.
+    if current.transaction_id == transaction_id:
+        if current.state != state or current.parent != expected_head:
+            return _db_store_error("SCVDB_STORE_TRANSACTION_COLLISION")
+        # A prior call may have published HEAD but failed its final sync. A
+        # retry must establish durability before turning that uncertainty into
+        # an acknowledgement; readable bytes alone are insufficient.
+        val directory = _db_store_directory(root, channel)
+        if not file_fsync(_db_store_object(root, current.head, channel)) or not directory_fsync("{directory}/objects") or not file_fsync("{directory}/HEAD") or not directory_fsync(directory) or not directory_fsync("{root}/.scv") or not directory_fsync(root):
+            return DbStoreView(code: "SCVDB_STORE_DURABILITY_UNCERTAIN", head: current.head, parent: current.parent, transaction_id: current.transaction_id, state: current.state)
+        return current
+    if current.head != expected_head:
+        return DbStoreView(code: "SCVDB_STORE_HEAD_ADVANCED", head: current.head, parent: current.parent, transaction_id: current.transaction_id, state: current.state)
+    val directory = _db_store_directory(root, channel)
+    val objects = "{directory}/objects"
+    # Create one directory at a time and reject aliases before descending.
+    for path in ["{root}/.scv", directory, objects]:
+        if not dir_is_real_no_follow(path) and not dir_create(path, false):
+            return _db_store_error("SCVDB_STORE_CREATE")
+        if not dir_is_real_no_follow(path) or path_absolute(path) != path:
+            return _db_store_error("SCVDB_STORE_SCOPE")
+    val encoded = _db_store_encode(expected_head, transaction_id, state)
+    val head = sha256_text(encoded)
+    val object_path = _db_store_object(root, head, channel)
+    val publication = _db_store_publish_object(objects, object_path, encoded)
+    if publication != "": return _db_store_error(publication)
+    # Persist the complete object and its directory entry before publication.
+    if not file_fsync(object_path) or not directory_fsync(objects):
+        return _db_store_error("SCVDB_STORE_OBJECT_SYNC")
+    # Newly created .scv/db and objects directory entries also need durability.
+    if not directory_fsync(directory) or not directory_fsync("{root}/.scv") or not directory_fsync(root):
+        return _db_store_error("SCVDB_STORE_DIRECTORY_SYNC")
+    val pointer = "{directory}/HEAD"
+    if current.code == "empty":
+        # Atomic no-replace publication also rejects dangling symlinks which
+        # exists() cannot distinguish from absence. Readers see complete bytes.
+        if _db_store_publish_object(directory, pointer, "{head}\n") != "":
+            return _db_store_error("SCVDB_STORE_PUBLICATION_UNCERTAIN")
+    else:
+        if not file_is_regular_no_follow(pointer) or path_absolute(pointer) != pointer:
+            return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
+        if not file_atomic_write(pointer, "{head}\n"):
+            return _db_store_error("SCVDB_STORE_PUBLICATION_UNCERTAIN")
+    if not file_fsync(pointer) or not directory_fsync(directory):
+        return DbStoreView(code: "SCVDB_STORE_DURABILITY_UNCERTAIN", head: head, parent: expected_head, transaction_id: transaction_id, state: state)
+    val observed = db_store_read(root, channel)
+    if observed.code != "ok" or observed.head != head:
+        return _db_store_error("SCVDB_STORE_READBACK")
+    observed
+
+# Compare-and-publish under the existing SJ repository writer boundary. Never
+# invoke providers/network here; callers fetch and validate remote state first.
+fn db_store_commit(root: text, expected_head: text, transaction_id: text, state: text, channel: text = "semantic") -> DbStoreView:
+    # Leave room for the fixed storage header within the bounded image read.
+    if state.len() < 0 or state.len() > 67108608:
+        return _db_store_error("SCVDB_STORE_QUOTA")
+    if not is_dir(root):
+        return _db_store_error("SCVDB_STORE_ROOT")
+    val scope = _db_store_scope(root, channel)
+    if scope != "": return _db_store_error(scope)
+    if (expected_head != "" and not _db_store_digest(expected_head)) or not _db_store_digest(transaction_id):
+        return _db_store_error("SCVDB_STORE_IDENTITY")
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32:
+        return _db_store_error("SCVDB_STORE_ENTROPY")
+    val holder = "scvdb-{nonce}"
+    val acquired = scv_sj_lease_acquire(root, holder)
+    if not acquired.starts_with("ok:"):
+        return _db_store_error("SCVDB_STORE_BUSY")
+    if scv_sj_lease_holder(root) != holder:
+        return _db_store_error("SCVDB_STORE_LEASE_IDENTITY")
+    val result = _db_store_commit_owned(root, expected_head, transaction_id, state, channel)
+    val released = scv_sj_lease_release(root, holder)
+    if not released.starts_with("ok:") or scv_sj_lease_is_held(root):
+        return DbStoreView(code: "SCVDB_STORE_RELEASE_UNCERTAIN", head: result.head, parent: result.parent, transaction_id: result.transaction_id, state: result.state)
+    result
+
+export DbStoreView, db_store_read, db_store_commit
+export db_local_path_scope

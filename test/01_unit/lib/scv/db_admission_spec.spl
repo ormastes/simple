@@ -1,0 +1,72 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_admission.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+
+fn setup_item2_signing_seed() -> [u8]:
+    [0u8,1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8,10u8,11u8,12u8,13u8,14u8,15u8,16u8,17u8,18u8,19u8,20u8,21u8,22u8,23u8,24u8,25u8,26u8,27u8,28u8,29u8,30u8,31u8]
+
+fn setup_item2_admission(role: text) -> DbAdmissionPolicy:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_signing_seed())
+    val key = DbSignerKey(key_id: "author-key", public_key: public_key, role: role, valid_from: 10, valid_until: 100, revoked: false, permissions: [DbPermission(operation: "create", kind: "bug", field: "title"), DbPermission(operation: "append", kind: "observation", field: "actual")])
+    var policy = DbAdmissionPolicy(revision: "", repository: "repo-a", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "schema-1", reducer_revision: "reducer-1", keys: [key], metadata: setup_item2_reviewed_metadata([setup_item2_signed_create("bug", "title")]))
+    policy.revision = db_admission_policy_digest(policy).unwrap()
+    policy
+
+fn setup_item2_signed_create(kind: text, field: text) -> DbPatch:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_signing_seed())
+    val entity = entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: kind, actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1))
+    var patch = DbPatch(batch_id: "", repository: "repo-a", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: 1, base_revision: "", causal_dependencies: [], schema_revision: "schema-1", reducer_revision: "reducer-1", operations: [DbOperation.Create(entity, kind, [DbField(name: field, value: DbValue.Text("title"))])], payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "author-key", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "unit fixture")
+    patch = db_patch_seal(patch).unwrap()
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+describe "Distributed database signature and scope admission":
+    it "verifies actual Ed25519 bytes before constructing an admission receipt":
+        step("Sign the canonical patch digest with a deterministic fixture key")
+        val patch = setup_item2_signed_create("bug", "title")
+        val policy = setup_item2_admission("user")
+        val accepted = db_authorize_patch(patch, policy, [], 20).unwrap()
+        expect(accepted.patch.batch_id).to_equal(patch.batch_id)
+        expect(accepted.policy_revision).to_equal(policy.revision)
+        expect(accepted.signer_role).to_equal("user")
+        expect(accepted.signing_digest.len()).to_equal(64)
+
+    it "rejects a forged detached signature and mutated signed payload":
+        val policy = setup_item2_admission("user")
+        var patch = setup_item2_signed_create("bug", "title")
+        patch.signature = [0u8]
+        expect(db_authorize_patch(patch, policy, [], 20)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+        patch = setup_item2_signed_create("bug", "title")
+        patch.provenance = "changed"
+        expect(db_authorize_patch(patch, policy, [], 20)).to_equal(Err("SCVDB_BATCH_IDENTITY_COLLISION"))
+
+    it "rejects revoked expired and unknown signing keys":
+        val patch = setup_item2_signed_create("bug", "title")
+        var policy = setup_item2_admission("user")
+        expect(db_authorize_patch(patch, policy, [], 9)).to_equal(Err("SCVDB_KEY_TIME"))
+        expect(db_authorize_patch(patch, policy, [], 100)).to_equal(Err("SCVDB_KEY_TIME"))
+        var key = policy.keys[0]
+        key.revoked = true
+        policy.keys = [key]
+        policy.revision = db_admission_policy_digest(policy).unwrap()
+        expect(db_authorize_patch(patch, policy, [], 20)).to_equal(Err("SCVDB_KEY_REVOKED"))
+        policy.keys = []
+        policy.revision = db_admission_policy_digest(policy).unwrap()
+        expect(db_authorize_patch(patch, policy, [], 20)).to_equal(Err("SCVDB_KEY_UNKNOWN"))
+
+    it "rejects field escalation and forbids CI keys from creating bugs":
+        val escalated = setup_item2_signed_create("bug", "state")
+        expect(db_authorize_patch(escalated, setup_item2_admission("user"), [], 20)).to_equal(Err("SCVDB_ACL_DENIED"))
+        val patch = setup_item2_signed_create("bug", "title")
+        expect(db_authorize_patch(patch, setup_item2_admission("ci"), [], 20)).to_equal(Err("SCVDB_CI_AUTHORITY"))
+
+    it "pins authority context and policy content independently of the patch":
+        val patch = setup_item2_signed_create("bug", "title")
+        var policy = setup_item2_admission("user")
+        policy.epoch = 2
+        expect(db_authorize_patch(patch, policy, [], 20)).to_equal(Err("SCVDB_POLICY_REVISION"))
+        policy.revision = db_admission_policy_digest(policy).unwrap()
+        expect(db_authorize_patch(patch, policy, [], 20)).to_equal(Err("SCVDB_AUTHORITY_CONTEXT"))

@@ -1,0 +1,35 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_allocation.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+
+fn setup_item2_allocation_uid(counter: u64) -> EntityUid:
+    EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter)
+
+describe "Contextual settlement reference projection":
+    it "rewrites nested typed references while preserving ordinary text and list order":
+        step("Allocate aliases then project only typed reference values")
+        val uid = setup_item2_allocation_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(uid.database_namespace, 1), uid)
+        val value = DbValue.List([DbValue.Text("bug-1"), DbValue.Reference(entity_ref_provisional(uid))])
+        val expected = DbValue.List([DbValue.Text("bug-1"), DbValue.Reference(entity_ref_settled(SettledAlias(database_namespace: uid.database_namespace, authority_epoch: 1, entity_kind: "bug", sequence: 1)))])
+        expect(db_project_settled_value(value, allocated.state, 0).unwrap()).to_equal(expected)
+
+    it "keeps tombstoned alias identity and never borrows an alias from another epoch":
+        val uid = setup_item2_allocation_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(uid.database_namespace, 1), uid)
+        val removed = identity_map_tombstone(allocated.state, uid)
+        val ref = db_settled_reference(entity_ref_provisional(uid), removed.state).unwrap()
+        expect(ref.settled.unwrap().sequence).to_equal(1u64)
+        val other = entity_ref_settled(SettledAlias(database_namespace: uid.database_namespace, authority_epoch: 2, entity_kind: "bug", sequence: 1))
+        expect(db_settled_reference(other, removed.state)).to_equal(Err("SCVDB_ALIAS_CONTEXT"))
+
+    it "rejects unresolved references and preserves observed-set tombstone knowledge":
+        val uid = setup_item2_allocation_uid(1)
+        val empty = identity_map_empty(uid.database_namespace, 1)
+        expect(db_settled_reference(entity_ref_provisional(uid), empty)).to_equal(Err("SCVDB_IDENTITY_UNKNOWN"))
+        val map = identity_map_allocate(empty, uid).state
+        val value = DbValue.ObservedSet([DbSetMember(dot: "dot-a", value: DbValue.Reference(entity_ref_provisional(uid)), removed: true)])
+        val expected = DbValue.ObservedSet([DbSetMember(dot: "dot-a", value: DbValue.Reference(db_settled_reference(entity_ref_provisional(uid), map).unwrap()), removed: true)])
+        expect(db_project_settled_value(value, map, 0).unwrap()).to_equal(expected)

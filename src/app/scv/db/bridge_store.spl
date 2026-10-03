@@ -1,0 +1,144 @@
+# Replica-local delivery persistence. Canonical intent is a semantic row;
+# delivery leases and retry state live in a separate channel under the same SJ
+# repository writer lock. Network effects occur only after this owner returns.
+use app.scv.db.local_store.{db_store_read, db_store_commit}
+use app.scv.db.local_apply.{db_read_local}
+use std.scv.db_admission.{DbAdmissionPolicy}
+use std.scv.db_patch.{DbValue}
+use std.scv.db_bridge.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_text}
+use std.common.crypto.sha256.{sha256_text}
+
+struct DbStoredDelivery:
+    head: text
+    delivery: DbBridgeDelivery
+
+fn _db_bridge_store_valid(delivery: DbBridgeDelivery) -> bool:
+    if delivery.generation == 0:
+        return delivery.state == "pending" and delivery.owner == "" and delivery.lease_expires == 0 and delivery.attempts == 0 and delivery.next_attempt == 0 and not delivery.must_reconcile and delivery.provider_revision == "" and delivery.last_error == ""
+    if delivery.state == "leased" or delivery.state == "sent_unconfirmed":
+        if delivery.owner == "" or delivery.lease_expires == 0: return false
+        if delivery.state == "sent_unconfirmed": return delivery.must_reconcile and delivery.attempts > 0 and delivery.next_attempt == 0
+        return true
+    if delivery.owner != "" or delivery.lease_expires != 0: return false
+    if delivery.state == "pending": return not delivery.must_reconcile
+    if delivery.state == "quarantined": return delivery.last_error != "" and delivery.next_attempt == 0
+    if delivery.state == "acknowledged" or delivery.state == "conflicted":
+        return not delivery.must_reconcile and delivery.provider_revision != "" and delivery.attempts > 0 and delivery.next_attempt == 0
+    false
+
+fn db_bridge_store_encode(deliveries: [DbBridgeDelivery]) -> Result<text, text>:
+    if deliveries.len() > 10000: return Err("SCVDB_RECORD_QUOTA")
+    var records: [[u8]] = []
+    var identities: [[u8]] = []
+    for delivery in deliveries:
+        val intent = delivery.intent
+        val checked = db_bridge_pending(intent)?
+        if not ["pending", "leased", "sent_unconfirmed", "acknowledged", "conflicted", "quarantined"].contains(delivery.state): return Err("SCVDB_BRIDGE_STATE")
+        if not _db_bridge_store_valid(delivery): return Err("SCVDB_BRIDGE_STORE_INVARIANT")
+        var payload: [u8] = []
+        for value in [intent.revision, intent.provider.instance, intent.provider.project, intent.provider.external_id, intent.operation, intent.payload_digest, intent.correlation_id, intent.causation_id, intent.idempotency_key, delivery.state, delivery.owner, delivery.provider_revision, delivery.last_error]:
+            payload = payload + db_snapshot_text(value)?
+        for value in [delivery.generation, delivery.lease_expires, delivery.attempts, delivery.next_attempt]:
+            payload = payload + db_frame(2u8, db_u64_bytes(value))
+        var reconcile = 0u8
+        if delivery.must_reconcile: reconcile = 1u8
+        payload = payload + db_frame(1u8, [reconcile])
+        records.push(db_frame(91u8, payload))
+        identities.push(db_snapshot_text(intent.revision)?)
+    val unique = db_canonical_set(identities)?
+    val bytes = db_domain_bytes("bridge-store", db_canonical_list(records))?
+    if bytes.len() > 16777216: return Err("SCVDB_BYTES_QUOTA")
+    Ok("SCVDB-BRIDGE-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_bridge_store_decode(encoded: text) -> Result<[DbBridgeDelivery], text>:
+    val header = "SCVDB-BRIDGE-v1\n"
+    if encoded.len() <= header.len() or not encoded.starts_with(header) or not encoded.ends_with("\n"): return Err("SCVDB_BRIDGE_STORE_FORMAT")
+    val bytes = db_snapshot_unhex(encoded[header.len():encoded.len() - 1])?
+    val domain = db_domain_bytes("bridge-store", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_BRIDGE_STORE_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_BRIDGE_STORE_FORMAT")
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != 6u8 or root.next_offset != bytes.len(): return Err("SCVDB_BRIDGE_STORE_FORMAT")
+    var deliveries: [DbBridgeDelivery] = []
+    for record in db_read_children(root.payload)?:
+        if record.tag != 91u8: return Err("SCVDB_BRIDGE_STORE_FORMAT")
+        val fields = db_read_children(record.payload)?
+        if fields.len() != 18: return Err("SCVDB_BRIDGE_STORE_FORMAT")
+        val provider = DbProviderBindingIdentity(instance: db_read_text(fields[1])?, project: db_read_text(fields[2])?, external_id: db_read_text(fields[3])?)
+        val intent = DbBridgeIntent(revision: db_read_text(fields[0])?, provider: provider, operation: db_read_text(fields[4])?, payload_digest: db_read_text(fields[5])?, correlation_id: db_read_text(fields[6])?, causation_id: db_read_text(fields[7])?, idempotency_key: db_read_text(fields[8])?)
+        deliveries.push(DbBridgeDelivery(intent: intent, state: db_read_text(fields[9])?, owner: db_read_text(fields[10])?, provider_revision: db_read_text(fields[11])?, last_error: db_read_text(fields[12])?, generation: db_read_unsigned(fields[13])?, lease_expires: db_read_unsigned(fields[14])?, attempts: db_read_unsigned(fields[15])?, next_attempt: db_read_unsigned(fields[16])?, must_reconcile: db_read_flag(fields[17])?))
+    val verified = db_bridge_store_encode(deliveries)?
+    if verified != encoded: return Err("SCVDB_BRIDGE_STORE_NONCANONICAL")
+    Ok(deliveries)
+
+fn db_bridge_store_load(root: text, revision: text) -> Result<DbStoredDelivery, text>:
+    val stored = db_store_read(root, "bridge")
+    if stored.code == "empty": return Err("SCVDB_BRIDGE_NOT_FOUND")
+    if stored.code != "ok": return Err(stored.code)
+    for delivery in db_bridge_store_decode(stored.state)?:
+        if delivery.intent.revision == revision: return Ok(DbStoredDelivery(head: stored.head, delivery: delivery))
+    Err("SCVDB_BRIDGE_NOT_FOUND")
+
+fn _db_bridge_store_publish(root: text, expected_head: text, next: DbBridgeDelivery) -> Result<DbStoredDelivery, text>:
+    val current = db_store_read(root, "bridge")
+    if current.code != "empty" and current.code != "ok": return Err(current.code)
+    if current.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    var deliveries: [DbBridgeDelivery] = []
+    if current.code == "ok": deliveries = db_bridge_store_decode(current.state)?
+    var updated: [DbBridgeDelivery] = []
+    for existing in deliveries:
+        if existing.intent.revision != next.intent.revision: updated.push(existing)
+    updated.push(next)
+    val encoded = db_bridge_store_encode(updated)?
+    val committed = db_store_commit(root, expected_head, sha256_text(encoded), encoded, "bridge")
+    if committed.code != "ok": return Err(committed.code)
+    Ok(DbStoredDelivery(head: committed.head, delivery: next))
+
+fn db_bridge_store_enqueue(root: text, admission: DbAdmissionPolicy, intent: DbBridgeIntent) -> Result<DbStoredDelivery, text>:
+    val pending = db_bridge_pending(intent)?
+    val semantic = db_read_local(root, admission)?
+    var accepted_intent = false
+    for row in semantic.rows:
+        if row.kind == "bridge_intent" and not row.tombstoned:
+            for field in row.fields:
+                if field.name == "intent_revision" and field.value == DbValue.Text(intent.revision): accepted_intent = true
+    if not accepted_intent: return Err("SCVDB_BRIDGE_INTENT_NOT_COMMITTED")
+    val current = db_store_read(root, "bridge")
+    if current.code != "empty" and current.code != "ok": return Err(current.code)
+    if current.code == "ok":
+        for existing in db_bridge_store_decode(current.state)?:
+            if existing.intent.revision == intent.revision:
+                # Readability alone cannot acknowledge an earlier uncertain sync.
+                val durable = db_store_commit(root, current.parent, current.transaction_id, current.state, "bridge")
+                if durable.code != "ok": return Err(durable.code)
+                return Ok(DbStoredDelivery(head: durable.head, delivery: existing))
+    _db_bridge_store_publish(root, current.head, pending)
+
+fn db_bridge_store_transition(root: text, previous: DbStoredDelivery, transition: DbBridgeTransition) -> Result<DbStoredDelivery, text>:
+    # Internal callers must derive the transition from the actual loaded state.
+    # Exported operations below perform that derivation and fencing validation.
+    if not ["leased", "sent_unconfirmed", "not_applied", "acknowledged", "conflicted", "pending", "quarantined"].contains(transition.code): return Err(transition.code)
+    _db_bridge_store_publish(root, previous.head, transition.delivery)
+
+fn db_bridge_store_acquire(root: text, revision: text, owner: text, now: u64, ttl: u64) -> Result<DbStoredDelivery, text>:
+    val previous = db_bridge_store_load(root, revision)?
+    db_bridge_store_transition(root, previous, db_bridge_acquire(previous.delivery, owner, now, ttl))
+
+fn db_bridge_store_sent(root: text, revision: text, owner: text, generation: u64, now: u64) -> Result<DbStoredDelivery, text>:
+    val previous = db_bridge_store_load(root, revision)?
+    db_bridge_store_transition(root, previous, db_bridge_sent(previous.delivery, owner, generation, now))
+
+fn db_bridge_store_reconcile(root: text, revision: text, owner: text, generation: u64, now: u64, observed: DbBridgeObservation) -> Result<DbStoredDelivery, text>:
+    val previous = db_bridge_store_load(root, revision)?
+    db_bridge_store_transition(root, previous, db_bridge_reconcile(previous.delivery, owner, generation, now, observed))
+
+fn db_bridge_store_retry(root: text, revision: text, owner: text, generation: u64, now: u64, base_delay: u64, cap_delay: u64) -> Result<DbStoredDelivery, text>:
+    val previous = db_bridge_store_load(root, revision)?
+    db_bridge_store_transition(root, previous, db_bridge_retry(previous.delivery, owner, generation, now, base_delay, cap_delay))
+
+export DbStoredDelivery, db_bridge_store_encode, db_bridge_store_decode, db_bridge_store_load
+export db_bridge_store_enqueue, db_bridge_store_acquire, db_bridge_store_sent, db_bridge_store_reconcile, db_bridge_store_retry

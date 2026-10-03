@@ -4,7 +4,8 @@
 # A remote URL contains no credential bytes. Git's configured credential helper
 # may authenticate an HTTPS read without exposing that credential here.
 
-use app.io.mod (is_dir, dir_remove_all, process_run_timeout)
+use app.io.mod (is_dir, dir_remove_all, process_run_bounded)
+use app.scv.db.git_policy.{db_git_environment_safe, db_git_effect_prefix, db_git_network_config_safe}
 use app.io.env_ops.{env_get, host_os}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
@@ -58,13 +59,16 @@ fn _db_git_oid_valid(oid: text, object_format: text) -> bool:
     true
 
 fn _db_git_run(root: text, args: [text]) -> (text, bool):
-    var argv: [text] = ["--no-replace-objects", "-C", root]
+    if not db_git_environment_safe(): return ("", false)
+    if (args.contains("fetch") or args.contains("ls-remote")) and not db_git_network_config_safe(root):
+        return ("", false)
+    var argv = db_git_effect_prefix(root)
     for arg in args:
         argv.push(arg)
-    val (out, _err, code) = process_run_timeout("git", argv, 30000)
+    val (out, _err, code) = process_run_bounded("git", argv, 30000, 65536)
     # Git stderr may contain credential-helper diagnostics or remote URLs.
     # Return only classified status and bounded stdout to the caller.
-    if code != 0 or out.len() > 65536:
+    if code != 0 or out.len() >= 65536:
         return ("", false)
     (out.trim(), true)
 
