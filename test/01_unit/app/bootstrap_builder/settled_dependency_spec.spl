@@ -1,0 +1,72 @@
+# File/codec/transport integration. No OS compiler child is started by this spec.
+use std.spec.{describe, it, expect}
+use app.bootstrap_builder.main.{builder_cli_verify_settled_v1}
+use app.bootstrap_builder.cli_args.{BuilderCliV1}
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildRunV1, BuildResultV1,
+    builder_task_identity_v1}
+use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_encode_v1}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.io.file_ops.{file_atomic_write, file_hash_sha256, path_absolute}
+use app.io.dir_ops.{dir_create_all}
+use app.io.time_ops.{time_now_unix_micros}
+use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1,
+    builder_capacity_settlement_encode_v1}
+
+fn settled_dependency_fixture(mode: text) -> (BuildRunV1, BuilderCliV1):
+    val root = path_absolute(".").replace("\\", "/") + "/build/settled-query-" +
+        mode + "-" + str(time_now_unix_micros())
+    for suffix in ["/source", "/output", "/state/receipts", "/state/attempts/index/1/local/work"]:
+        expect(dir_create_all(root + suffix)).to_equal(true)
+    val program = root + "/source/producer"
+    expect(file_atomic_write(program, "fixture producer bytes")).to_equal(true)
+    val digest = file_hash_sha256(program)
+    val task = BuildTaskV1(id: "index", attempt: 1, phase: "module",
+        producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+        dependencies: [], program: program, args: [], inputs: [], outputs: ["index.sdn"],
+        cache_key: digest, timeout_ms: 0, memory_limit_bytes: 1048576, links: [])
+    val host = BuildHostV1(id: "local", transport: "local", endpoint: "", workspace: root,
+        worker_program: program, worker_digest: digest, slots: 1)
+    val run = BuildRunV1(tasks: [task], hosts: [host], keep_going: true, max_attempts: 1)
+    var state = builder_manager_start(run)
+    state.statuses[0] = if mode == "unresolved": "UNRESOLVED" else: "FAILED"
+    if mode == "running": state.statuses[0] = "RUNNING"
+    if mode == "pending": state.statuses[0] = "PENDING"
+    state.host_ids[0] = "local"
+    expect(file_atomic_write(root + "/state/journal.sdn", builder_manager_encode_v1(state))).to_equal(true)
+    val identity = builder_task_identity_v1(task)
+    val attempt = root + "/state/attempts/index/1/local"
+    var result = BuildResultV1(task_id: "index", attempt: 1, identity_digest: identity,
+        host_id: "local", status: "ERROR", exit_code: 2, outputs: [],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    if mode == "crash":
+        result.status = "CRASHED"
+        result.exit_code = 139
+    if mode == "timeout":
+        result.status = "TIMEOUT"
+        result.exit_code = 124
+    expect(builder_write_result_v1(root + "/state/receipts/index.sdn", result)).to_equal(true)
+    if mode == "mismatched": result.host_id = "other"
+    expect(builder_write_result_v1(attempt + "/result.sdn", result)).to_equal(true)
+    if mode == "malformed": expect(file_atomic_write(attempt + "/result.sdn", "invalid receipt")).to_equal(true)
+    if mode != "no-reap":
+        expect(file_atomic_write(attempt + "/compiler.reaped", identity + "\nlocal")).to_equal(true)
+    if mode != "unsettled":
+        expect(file_atomic_write(attempt + "/capacity.settled", builder_capacity_settlement_encode_v1(
+            BuilderCapacitySettlementV1(identity, "local", "windows-job-settled")))).to_equal(true)
+    if mode == "cancel": expect(file_atomic_write(root + "/state/cancel.request", "cancel\n")).to_equal(true)
+    val config = BuilderCliV1(command: "verify-settled", manifest: "", state: root + "/state",
+        source_root: root + "/source", output_root: root + "/output",
+        request: "", attempt_root: "", host: "", error: "")
+    (run, config)
+
+describe "settled dependency query never admits index content":
+    it "admits reaped ERROR2 and crash ownership without requiring an index artifact":
+        for mode in ["error", "crash"]:
+            val (run, config) = settled_dependency_fixture(mode)
+            expect(builder_cli_verify_settled_v1(run, config, builder_process_portable_v1())).to_equal(0)
+
+    it "rejects unresolved missing malformed mismatched cancelled and timeout evidence":
+        for mode in ["unresolved", "running", "pending", "no-reap", "unsettled", "malformed", "mismatched", "cancel", "timeout"]:
+            val (run, config) = settled_dependency_fixture(mode)
+            expect(builder_cli_verify_settled_v1(run, config, builder_process_portable_v1())).to_equal(2)

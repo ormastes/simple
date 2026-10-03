@@ -1,0 +1,58 @@
+# In-process diagnostic SMF tasks. Each task gets a new compiler context; only
+# immutable admitted source rows survive. No native executable/no-op shortcut.
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.common.driver_core_modes.{CompileMode, OutputFormat}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset,
+    driver_entry_scan_cache_release}
+use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_check_v1,
+    driver_admitted_epoch_task_begin_v1, driver_admitted_epoch_task_finish_v1}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+
+pub fn driver_admitted_epoch_compile_v1(
+    owner: i64, entry_identity: text, options: CompileOptions
+) -> Result<CompileResult, text>:
+    val reason = driver_admitted_epoch_check_v1(owner)
+    if reason != "": return Err(reason)
+    if options.mode != CompileMode.Aot or options.output_format != OutputFormat.Smf or
+            (options.cli_mode_text != "" and options.cli_mode_text != "aot"):
+        return Err("admitted-epoch-requires-diagnostic-smf")
+    if options.backend != "llvm" and options.backend != "cranelift":
+        return Err("admitted-epoch-backend-unsupported")
+    # These selectors precede the SMF format branch or skip parse/HIR work.
+    # Reject them before entering the compiler; no source-read proof can make
+    # a native/bootstrap dispatch masquerade as a per-entry SMF diagnostic.
+    for name in ["SIMPLE_BOOTSTRAP_DIRECT_IR", "SIMPLE_BOOTSTRAP"]:
+        if (sosix_env_get_nullable(name) ?? "") == "1":
+            return Err("admitted-epoch-native-override:{name}")
+    for name in ["SIMPLE_PARSE_SHARD", "SIMPLE_PARSE_SHARD_QUEUE",
+            "SIMPLE_HIR_SHARD", "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_HIR_SHARD_OWNER"]:
+        if (sosix_env_get_nullable(name) ?? "") != "":
+            return Err("admitted-epoch-shard-override:{name}")
+    # Source resolution uses the retained epoch root. The process stays in the
+    # manager-owned working directory, so output confinement is unchanged.
+    if (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1":
+        return Err("admitted-epoch-task-inherits-full-inventory-mode")
+    val begun = driver_admitted_epoch_task_begin_v1(owner, entry_identity)
+    if val Err(error) = begun: return Err(error)
+    val entry = begun.unwrap()
+    driver_entry_scan_cache_reset()
+    var task_options = options
+    task_options.input_files = [entry]
+    task_options.bootstrap_input_count = 1
+    task_options.bootstrap_input_0 = entry
+    task_options.bootstrap_input_1 = ""
+    task_options.bootstrap_input_2 = ""
+    task_options.bootstrap_input_3 = ""
+    task_options.bootstrap_input_4 = ""
+    task_options.bootstrap_input_5 = ""
+    var driver = compiler_driver_create(task_options)
+    driver.ctx.config["compiler_source_entry"] = entry
+    val result = compiler_driver_run_compile(driver)
+    driver_entry_scan_cache_release()
+    val finished = driver_admitted_epoch_task_finish_v1(owner)
+    if val Err(error) = finished: return Err(error)
+    # Compiler diagnostics remain a normal task outcome. Authority violations
+    # above are Err and must terminate the epoch instead of admitting a retry.
+    Ok(result)
