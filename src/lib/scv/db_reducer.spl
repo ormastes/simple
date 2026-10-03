@@ -1,0 +1,280 @@
+# Pure, authorization-independent preview. No preview is an admission receipt.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{entity_ref_canonical}
+use std.scv.db_schema.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+enum FieldMergeRule:
+    ScalarConflict
+    OrderedListConflict
+    Derived
+    ObservedRemoveSet
+
+struct DbFieldSchema:
+    kind: text
+    field: text
+    rule: FieldMergeRule
+
+struct MergePolicy:
+    repository: text
+    namespace: text
+    epoch: u64
+    schema_revision: text
+    reducer_revision: text
+    fields: [DbFieldSchema]
+    constraints: [DbEntityConstraint]
+
+struct DbRow:
+    entity: text
+    kind: text
+    fields: [DbField]
+    revision: text
+    tombstoned: bool
+
+struct DbAcceptedBatch:
+    batch_id: text
+    canonical_digest: text
+
+struct MaterializedState:
+    rows: [DbRow]
+    accepted: [DbAcceptedBatch]
+    revision: text
+
+struct DbConflict:
+    entity: text
+    field: text
+    code: text
+
+struct MergePlan:
+    base_revision: text
+    proposed: MaterializedState
+    conflicts: [DbConflict]
+    replay: bool
+    authorization_status: text
+
+fn db_empty_state() -> MaterializedState:
+    MaterializedState(rows: [], accepted: [], revision: "")
+
+fn db_field_value(fields: [DbField], name: text) -> DbValue:
+    for field in fields:
+        if field.name == name: return field.value
+    DbValue.Absent
+
+fn db_values_equal(left: DbValue, right: DbValue) -> Result<bool, text>:
+    Ok(db_value_bytes(left)? == db_value_bytes(right)?)
+
+fn db_state_digest(state: MaterializedState) -> Result<text, text>:
+    var rows: [DbCanonicalEntry] = []
+    for row in state.rows:
+        var deleted = 0u8
+        if row.tombstoned: deleted = 1u8
+        val payload = db_canonical_text(row.kind)? + db_fields_bytes(row.fields)? + db_canonical_text(row.revision)? + db_frame(1u8, [deleted])
+        rows.push(DbCanonicalEntry(key: db_canonical_text(row.entity)?, value: db_frame(30u8, payload)))
+    var accepted: [DbCanonicalEntry] = []
+    for batch in state.accepted:
+        accepted.push(DbCanonicalEntry(key: db_canonical_text(batch.batch_id)?, value: db_canonical_text(batch.canonical_digest)?))
+    Ok(sha256_u8_hex(db_domain_bytes("state", db_canonical_map(rows)? + db_canonical_map(accepted)?)?))
+
+fn db_schema_rule(policy: MergePolicy, kind: text, field: text) -> Result<FieldMergeRule, text>:
+    for schema in policy.fields:
+        if schema.kind == kind and schema.field == field: return Ok(schema.rule)
+    Err("SCVDB_UNKNOWN_FIELD")
+
+fn db_row_index(rows: [DbRow], entity: text) -> i64:
+    var index = 0
+    while index < rows.len():
+        if rows[index].entity == entity: return index
+        index = index + 1
+    -1
+
+fn db_condition_conflicts(row: DbRow, condition: RowPrecondition) -> Result<[DbConflict], text>:
+    var conflicts: [DbConflict] = []
+    if condition.expected_revision != "" and condition.expected_revision != row.revision:
+        conflicts.push(DbConflict(entity: row.entity, field: "", code: "SCVDB_ROW_PRECONDITION"))
+    for expected in condition.expected_fields:
+        if not db_values_equal(db_field_value(row.fields, expected.name), expected.value)?:
+            conflicts.push(DbConflict(entity: row.entity, field: expected.name, code: "SCVDB_FIELD_PRECONDITION"))
+    Ok(conflicts)
+
+fn db_set_field(fields: [DbField], name: text, value: DbValue) -> [DbField]:
+    var result: [DbField] = []
+    var replaced = false
+    for field in fields:
+        if field.name == name:
+            result.push(DbField(name: name, value: value))
+            replaced = true
+        else: result.push(field)
+    if not replaced: result.push(DbField(name: name, value: value))
+    result
+
+fn db_constraint_conflicts(rows: [DbRow], policy: MergePolicy) -> Result<[DbConflict], text>:
+    var conflicts: [DbConflict] = []
+    for constraint in policy.constraints:
+        var keys: [[u8]] = []
+        for row in rows:
+            if row.kind == constraint.kind and not row.tombstoned:
+                var key_parts: [[u8]] = []
+                for name in constraint.key_fields:
+                    val value = db_field_value(row.fields, name)
+                    match value:
+                        Absent: conflicts.push(DbConflict(entity: row.entity, field: name, code: "SCVDB_KEY_MISSING"))
+                        _: ()
+                    key_parts.push(db_value_bytes(value)?)
+                if key_parts.len() > 0:
+                    val key = db_canonical_list(key_parts)
+                    if keys.contains(key): conflicts.push(DbConflict(entity: row.entity, field: "", code: "SCVDB_NATURAL_KEY_COLLISION"))
+                    keys.push(key)
+                for reference in constraint.references:
+                    val value = db_field_value(row.fields, reference.field)
+                    match value:
+                        Reference(target):
+                            val index = db_row_index(rows, entity_ref_canonical(target))
+                            if index < 0:
+                                conflicts.push(DbConflict(entity: row.entity, field: reference.field, code: "SCVDB_REFERENCE_MISSING"))
+                            elif rows[index].tombstoned or rows[index].kind != reference.target_kind:
+                                conflicts.push(DbConflict(entity: row.entity, field: reference.field, code: "SCVDB_REFERENCE_INVALID"))
+                        Absent: ()
+                        _: conflicts.push(DbConflict(entity: row.entity, field: reference.field, code: "SCVDB_REFERENCE_TYPE"))
+        for name in constraint.unique_fields:
+            var values: [[u8]] = []
+            for row in rows:
+                if row.kind == constraint.kind and not row.tombstoned:
+                    val value = db_field_value(row.fields, name)
+                    match value:
+                        Absent: ()
+                        _:
+                            val bytes = db_value_bytes(value)?
+                            if values.contains(bytes): conflicts.push(DbConflict(entity: row.entity, field: name, code: "SCVDB_UNIQUE_COLLISION"))
+                            values.push(bytes)
+    Ok(conflicts)
+
+fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) -> Result<MergePlan, text>:
+    """Preview only: caller must obtain cryptographic/ACL admission before persistence."""
+    val digest = db_patch_validate(patch)?
+    if patch.repository != policy.repository or patch.namespace != policy.namespace or patch.epoch != policy.epoch:
+        return Err("SCVDB_RESNAPSHOT_REQUIRED")
+    if patch.schema_revision != policy.schema_revision or patch.reducer_revision != policy.reducer_revision:
+        return Err("SCVDB_VERSION_UNSUPPORTED")
+    for accepted in state.accepted:
+        if accepted.batch_id == patch.batch_id:
+            if accepted.canonical_digest != digest: return Err("SCVDB_BATCH_IDENTITY_COLLISION")
+            return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: [], replay: true, authorization_status: "UNVERIFIED_PREVIEW"))
+    var accepted_ids: [text] = []
+    for accepted in state.accepted: accepted_ids.push(accepted.batch_id)
+    for dependency in patch.causal_dependencies:
+        if not accepted_ids.contains(dependency): return Err("SCVDB_MISSING_DEPENDENCY")
+    var rows = state.rows
+    var conflicts: [DbConflict] = []
+    for operation in patch.operations:
+        match operation:
+            Create(ref, kind, fields):
+                val entity = entity_ref_canonical(ref)
+                if db_row_index(rows, entity) >= 0:
+                    conflicts.push(DbConflict(entity: entity, field: "", code: "SCVDB_ENTITY_ALREADY_EXISTS"))
+                else:
+                    for field in fields:
+                        val rule = db_schema_rule(policy, kind, field.name)?
+                        match rule:
+                            Derived: return Err("SCVDB_DERIVED_WRITE")
+                            _: ()
+                    rows.push(DbRow(entity: entity, kind: kind, fields: fields, revision: patch.batch_id, tombstoned: false))
+            UpdateFields(ref, edits, condition):
+                val entity = entity_ref_canonical(ref)
+                val index = db_row_index(rows, entity)
+                if index < 0:
+                    conflicts.push(DbConflict(entity: entity, field: "", code: "SCVDB_ENTITY_MISSING"))
+                elif rows[index].tombstoned:
+                    conflicts.push(DbConflict(entity: entity, field: "", code: "SCVDB_TOMBSTONE_UPDATE"))
+                else:
+                    var row = rows[index]
+                    val row_conflicts = db_condition_conflicts(row, condition)?
+                    conflicts = conflicts + row_conflicts
+                    for edit in edits:
+                        val rule = db_schema_rule(policy, row.kind, edit.field)?
+                        match rule:
+                            Derived: return Err("SCVDB_DERIVED_WRITE")
+                            ObservedRemoveSet: return Err("SCVDB_SET_REQUIRES_DOTS")
+                            _: ()
+                        val current = db_field_value(row.fields, edit.field)
+                        if db_values_equal(current, edit.before)? or db_values_equal(current, edit.after)?:
+                            row.fields = db_set_field(row.fields, edit.field, edit.after)
+                        else:
+                            conflicts.push(DbConflict(entity: entity, field: edit.field, code: "SCVDB_CONCURRENT_FIELD"))
+                    row.revision = patch.batch_id
+                    rows[index] = row
+            Tombstone(ref, condition):
+                val entity = entity_ref_canonical(ref)
+                val index = db_row_index(rows, entity)
+                if index < 0:
+                    conflicts.push(DbConflict(entity: entity, field: "", code: "SCVDB_ENTITY_MISSING"))
+                else:
+                    var row = rows[index]
+                    conflicts = conflicts + db_condition_conflicts(row, condition)?
+                    row.tombstoned = true
+                    row.revision = patch.batch_id
+                    rows[index] = row
+            AddSetMember(ref, field, member, dot):
+                val entity = entity_ref_canonical(ref)
+                val index = db_row_index(rows, entity)
+                if index < 0: return Err("SCVDB_ENTITY_MISSING")
+                var row = rows[index]
+                if row.tombstoned:
+                    conflicts.push(DbConflict(entity: entity, field: field, code: "SCVDB_TOMBSTONE_UPDATE"))
+                else:
+                    match db_schema_rule(policy, row.kind, field)?:
+                        ObservedRemoveSet: ()
+                        _: return Err("SCVDB_SET_POLICY")
+                    val updated = db_set_add(db_field_value(row.fields, field), member, dot)?
+                    row.fields = db_set_field(row.fields, field, updated)
+                    row.revision = patch.batch_id
+                    rows[index] = row
+            RemoveObservedSetMember(ref, field, observed):
+                val entity = entity_ref_canonical(ref)
+                val index = db_row_index(rows, entity)
+                if index < 0: return Err("SCVDB_ENTITY_MISSING")
+                var row = rows[index]
+                if row.tombstoned:
+                    conflicts.push(DbConflict(entity: entity, field: field, code: "SCVDB_TOMBSTONE_UPDATE"))
+                else:
+                    match db_schema_rule(policy, row.kind, field)?:
+                        ObservedRemoveSet: ()
+                        _: return Err("SCVDB_SET_POLICY")
+                    row.fields = db_set_field(row.fields, field, db_set_remove(db_field_value(row.fields, field), observed)?)
+                    row.revision = patch.batch_id
+                    rows[index] = row
+            AppendObservation(ref, kind, fields):
+                val entity = entity_ref_canonical(ref)
+                val index = db_row_index(rows, entity)
+                for field in fields:
+                    val rule = db_schema_rule(policy, kind, field.name)?
+                    match rule:
+                        Derived: return Err("SCVDB_DERIVED_WRITE")
+                        _: ()
+                if index < 0:
+                    rows.push(DbRow(entity: entity, kind: kind, fields: fields, revision: patch.batch_id, tombstoned: false))
+                elif rows[index].tombstoned or rows[index].kind != kind or db_fields_bytes(rows[index].fields)? != db_fields_bytes(fields)?:
+                    conflicts.push(DbConflict(entity: entity, field: "", code: "SCVDB_APPEND_IDENTITY_COLLISION"))
+    conflicts = conflicts + db_constraint_conflicts(rows, policy)?
+    if conflicts.len() > 0:
+        return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: conflicts, replay: false, authorization_status: "UNVERIFIED_PREVIEW"))
+    var accepted = state.accepted
+    accepted.push(DbAcceptedBatch(batch_id: patch.batch_id, canonical_digest: digest))
+    var proposed = MaterializedState(rows: rows, accepted: accepted, revision: "")
+    proposed.revision = db_state_digest(proposed)?
+    Ok(MergePlan(base_revision: state.revision, proposed: proposed, conflicts: [], replay: false, authorization_status: "UNVERIFIED_PREVIEW"))
+
+fn db_preview_materialize(checkpoint: MaterializedState, patches: [DbPatch], policy: MergePolicy) -> Result<MaterializedState, text>:
+    """Deterministic full/incremental simulation; never an authorization bypass."""
+    var accepted: [text] = []
+    for batch in checkpoint.accepted: accepted.push(batch.batch_id)
+    val ordered = db_patch_order(patches, accepted)?
+    var state = checkpoint
+    for patch in ordered:
+        val plan = db_plan_patch(state, patch, policy)?
+        if plan.conflicts.len() > 0: return Err("SCVDB_UNRESOLVED_CONFLICT")
+        state = plan.proposed
+    Ok(state)
+
+export FieldMergeRule, DbFieldSchema, MergePolicy, DbRow, DbAcceptedBatch, MaterializedState, DbConflict, MergePlan
+export db_empty_state, db_field_value, db_state_digest, db_plan_patch, db_preview_materialize

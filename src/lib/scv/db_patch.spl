@@ -1,0 +1,228 @@
+use std.scv.db_canonical.*
+use std.scv.distributed_identity.{EntityRef, entity_ref_validate, entity_ref_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+enum DbValue:
+    Text(value: text)
+    Unsigned(value: u64)
+    Flag(value: bool)
+    List(values: [DbValue])
+    Set(values: [DbValue])
+    ObservedSet(members: [DbSetMember])
+    Reference(entity: EntityRef)
+    Absent
+
+struct DbSetMember:
+    dot: text
+    value: DbValue
+    removed: bool
+
+struct DbField:
+    name: text
+    value: DbValue
+
+struct FieldEdit:
+    field: text
+    before: DbValue
+    after: DbValue
+
+struct RowPrecondition:
+    base_row: text
+    expected_revision: text
+    expected_fields: [DbField]
+
+enum DbOperation:
+    Create(entity: EntityRef, kind: text, fields: [DbField])
+    UpdateFields(entity: EntityRef, edits: [FieldEdit], precondition: RowPrecondition)
+    Tombstone(entity: EntityRef, precondition: RowPrecondition)
+    AddSetMember(entity: EntityRef, field: text, member: DbValue, dot: text)
+    RemoveObservedSetMember(entity: EntityRef, field: text, observed: [text])
+    AppendObservation(entity: EntityRef, kind: text, fields: [DbField])
+
+struct DbPatch:
+    batch_id: text
+    repository: text
+    namespace: text
+    epoch: u64
+    actor: text
+    actor_counter: u64
+    base_revision: text
+    causal_dependencies: [text]
+    schema_revision: text
+    reducer_revision: text
+    operations: [DbOperation]
+    payload_digest: text
+    digest_algorithm: text
+    digest_version: u64
+    signer: text
+    signature_algorithm: text
+    signature_version: u64
+    signature: [u8]
+    provenance: text
+
+fn db_value_bytes(value: DbValue) -> Result<[u8], text>:
+    match value:
+        Text(content): db_canonical_text(content)
+        Unsigned(number): Ok(db_frame(2u8, db_u64_bytes(number)))
+        Flag(flag):
+            if flag: return Ok(db_frame(1u8, [1u8]))
+            Ok(db_frame(1u8, [0u8]))
+        Absent: Ok(db_frame(0u8, []))
+        Reference(entity):
+            if not entity_ref_validate(entity).valid: return Err("SCVDB_REFERENCE")
+            Ok(db_frame(31u8, db_canonical_text(entity_ref_canonical(entity))?))
+        List(values):
+            var encoded: [[u8]] = []
+            for item in values: encoded.push(db_value_bytes(item)?)
+            Ok(db_canonical_list(encoded))
+        Set(values):
+            var encoded: [[u8]] = []
+            for item in values: encoded.push(db_value_bytes(item)?)
+            db_canonical_set(encoded)
+        ObservedSet(members):
+            var entries: [DbCanonicalEntry] = []
+            for member in members:
+                var removed = 0u8
+                if member.removed: removed = 1u8
+                entries.push(DbCanonicalEntry(key: db_canonical_text(member.dot)?, value: db_frame(25u8, db_value_bytes(member.value)? + db_frame(1u8, [removed]))))
+            Ok(db_frame(26u8, db_canonical_map(entries)?))
+
+fn db_fields_bytes(fields: [DbField]) -> Result<[u8], text>:
+    var entries: [DbCanonicalEntry] = []
+    for field in fields:
+        if field.name == "": return Err("SCVDB_FIELD_NAME")
+        entries.push(DbCanonicalEntry(key: db_canonical_text(field.name)?, value: db_value_bytes(field.value)?))
+    db_canonical_map(entries)
+
+fn db_precondition_bytes(condition: RowPrecondition) -> Result<[u8], text>:
+    Ok(db_frame(20u8, db_canonical_text(condition.base_row)? + db_canonical_text(condition.expected_revision)? + db_fields_bytes(condition.expected_fields)?))
+
+fn db_operation_bytes(operation: DbOperation) -> Result<[u8], text>:
+    match operation:
+        Create(entity, kind, fields):
+            if not entity_ref_validate(entity).valid or kind == "": return Err("SCVDB_ENTITY")
+            Ok(db_frame(21u8, db_canonical_text(entity_ref_canonical(entity))? + db_canonical_text(kind)? + db_fields_bytes(fields)?))
+        UpdateFields(entity, edits, condition):
+            if not entity_ref_validate(entity).valid: return Err("SCVDB_ENTITY")
+            var encoded: [[u8]] = []
+            var names: [[u8]] = []
+            for edit in edits:
+                val name = db_canonical_text(edit.field)?
+                names.push(name)
+                encoded.push(db_frame(24u8, name + db_value_bytes(edit.before)? + db_value_bytes(edit.after)?))
+            val unique_names = db_canonical_set(names)?
+            Ok(db_frame(22u8, db_canonical_text(entity_ref_canonical(entity))? + db_canonical_list(encoded) + db_precondition_bytes(condition)?))
+        Tombstone(entity, condition):
+            if not entity_ref_validate(entity).valid: return Err("SCVDB_ENTITY")
+            Ok(db_frame(23u8, db_canonical_text(entity_ref_canonical(entity))? + db_precondition_bytes(condition)?))
+        AddSetMember(entity, field, member, dot):
+            if not entity_ref_validate(entity).valid or field == "" or dot == "": return Err("SCVDB_SET_IDENTITY")
+            Ok(db_frame(27u8, db_canonical_text(entity_ref_canonical(entity))? + db_canonical_text(field)? + db_value_bytes(member)? + db_canonical_text(dot)?))
+        RemoveObservedSetMember(entity, field, observed):
+            if not entity_ref_validate(entity).valid or field == "": return Err("SCVDB_ENTITY")
+            var dots: [[u8]] = []
+            for dot in observed: dots.push(db_canonical_text(dot)?)
+            Ok(db_frame(28u8, db_canonical_text(entity_ref_canonical(entity))? + db_canonical_text(field)? + db_canonical_set(dots)?))
+        AppendObservation(entity, kind, fields):
+            if not entity_ref_validate(entity).valid or kind == "": return Err("SCVDB_ENTITY")
+            Ok(db_frame(29u8, db_canonical_text(entity_ref_canonical(entity))? + db_canonical_text(kind)? + db_fields_bytes(fields)?))
+
+fn db_operation_ref(operation: DbOperation) -> EntityRef:
+    match operation:
+        Create(entity, _, _): entity
+        UpdateFields(entity, _, _): entity
+        Tombstone(entity, _): entity
+        AddSetMember(entity, _, _, _): entity
+        RemoveObservedSetMember(entity, _, _): entity
+        AppendObservation(entity, _, _): entity
+
+fn db_ref_context(ref: EntityRef, namespace: text, epoch: u64) -> bool:
+    if not entity_ref_validate(ref).valid: return false
+    if val uid = ref.provisional: return uid.database_namespace == namespace
+    if val alias = ref.settled: return alias.database_namespace == namespace and alias.authority_epoch == epoch
+    false
+
+fn db_ref_kind(ref: EntityRef) -> text:
+    if val uid = ref.provisional: return uid.entity_kind
+    if val alias = ref.settled: return alias.entity_kind
+    ""
+
+fn db_patch_bytes(patch: DbPatch) -> Result<[u8], text>:
+    """Identity excludes batch ID, payload digest and signature; binds signer metadata."""
+    if patch.repository == "" or patch.namespace == "" or patch.actor == "" or patch.epoch == 0 or patch.actor_counter == 0:
+        return Err("SCVDB_PATCH_CONTEXT")
+    if patch.schema_revision == "" or patch.reducer_revision == "": return Err("SCVDB_VERSION")
+    if patch.digest_algorithm != "sha256" or patch.digest_version != 1: return Err("SCVDB_DIGEST_ALGORITHM")
+    var dependencies: [[u8]] = []
+    for dependency in patch.causal_dependencies:
+        dependencies.push(db_canonical_text(dependency)?)
+    var operations: [[u8]] = []
+    for operation in patch.operations:
+        if not db_ref_context(db_operation_ref(operation), patch.namespace, patch.epoch): return Err("SCVDB_ENTITY_CONTEXT")
+        match operation:
+            Create(entity, kind, _):
+                if db_ref_kind(entity) != kind: return Err("SCVDB_ENTITY_KIND")
+            AppendObservation(entity, kind, _):
+                if db_ref_kind(entity) != kind: return Err("SCVDB_ENTITY_KIND")
+            _: ()
+        operations.push(db_operation_bytes(operation)?)
+    var payload = db_canonical_text(patch.repository)? + db_canonical_text(patch.namespace)?
+    payload = payload + db_frame(2u8, db_u64_bytes(patch.epoch)) + db_canonical_text(patch.actor)?
+    payload = payload + db_frame(2u8, db_u64_bytes(patch.actor_counter)) + db_canonical_text(patch.base_revision)?
+    payload = payload + db_canonical_set(dependencies)? + db_canonical_text(patch.schema_revision)? + db_canonical_text(patch.reducer_revision)?
+    payload = payload + db_canonical_list(operations) + db_canonical_text(patch.digest_algorithm)? + db_frame(2u8, db_u64_bytes(patch.digest_version))
+    payload = payload + db_canonical_text(patch.signer)? + db_canonical_text(patch.signature_algorithm)? + db_frame(2u8, db_u64_bytes(patch.signature_version))
+    payload = payload + db_canonical_text(patch.provenance)?
+    db_domain_bytes("patch", db_frame(9u8, payload))
+
+fn db_patch_digest(patch: DbPatch) -> Result<text, text>:
+    Ok(sha256_u8_hex(db_patch_bytes(patch)?))
+
+fn db_patch_seal(patch: DbPatch) -> Result<DbPatch, text>:
+    """Set content identity only. This does not authenticate or authorize the patch."""
+    var sealed = patch
+    val digest = db_patch_digest(patch)?
+    sealed.batch_id = digest
+    sealed.payload_digest = digest
+    Ok(sealed)
+
+fn db_patch_validate(patch: DbPatch) -> Result<text, text>:
+    val digest = db_patch_digest(patch)?
+    if patch.batch_id != digest or patch.payload_digest != digest: return Err("SCVDB_BATCH_IDENTITY_COLLISION")
+    Ok(digest)
+
+fn db_patch_order(patches: [DbPatch], accepted_ids: [text]) -> Result<[DbPatch], text>:
+    """Kahn ordering; only ready independent patches use canonical-ID tie breaking."""
+    var ids: [text] = []
+    for patch in patches:
+        if ids.contains(patch.batch_id): return Err("SCVDB_DUPLICATE_BATCH")
+        ids.push(patch.batch_id)
+    for patch in patches:
+        for dependency in patch.causal_dependencies:
+            if not ids.contains(dependency) and not accepted_ids.contains(dependency): return Err("SCVDB_MISSING_DEPENDENCY")
+    var done = accepted_ids
+    var emitted: [text] = []
+    var ordered: [DbPatch] = []
+    while ordered.len() < patches.len():
+        var best = -1
+        var index = 0
+        while index < patches.len():
+            val patch = patches[index]
+            var ready = not emitted.contains(patch.batch_id)
+            for dependency in patch.causal_dependencies:
+                if not done.contains(dependency): ready = false
+            if ready:
+                if best < 0:
+                    best = index
+                elif db_bytes_less(db_canonical_text(patch.batch_id)?, db_canonical_text(patches[best].batch_id)?):
+                    best = index
+            index = index + 1
+        if best < 0: return Err("SCVDB_CAUSAL_CYCLE")
+        ordered.push(patches[best])
+        emitted.push(patches[best].batch_id)
+        done.push(patches[best].batch_id)
+    Ok(ordered)
+
+export DbValue, DbSetMember, DbField, FieldEdit, RowPrecondition, DbOperation, DbPatch
+export db_value_bytes, db_fields_bytes, db_operation_bytes, db_patch_bytes, db_patch_digest, db_patch_seal, db_patch_validate, db_patch_order
+export db_operation_ref, db_ref_context, db_ref_kind

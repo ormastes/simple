@@ -1,0 +1,23 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_schema.*
+
+describe "REQ-013 observed-remove set causal dots":
+    it "removes only observed dots and retains concurrent additions":
+        step("removes only observed dots and retains concurrent additions")
+        val first = db_set_add(DbValue.Absent, DbValue.Text("label"), "actor-a:1").unwrap()
+        val concurrent = db_set_add(first, DbValue.Text("label"), "actor-b:1").unwrap()
+        val removed = db_set_remove(concurrent, ["actor-a:1"]).unwrap()
+        expect(db_set_visible(removed)).to_equal(Ok([DbValue.Text("label")]))
+        val complete = db_set_remove(removed, ["actor-b:1"]).unwrap()
+        expect(db_set_visible(complete)).to_equal(Ok([]))
+        val replay = db_set_add(complete, DbValue.Text("label"), "actor-a:1").unwrap()
+        expect(db_set_visible(replay)).to_equal(Ok([]))
+
+    it "rejects dot collisions unknown observations and wrong field types":
+        step("rejects dot collisions unknown observations and wrong field types")
+        val current = db_set_add(DbValue.Absent, DbValue.Text("first"), "actor:1").unwrap()
+        expect(db_set_add(current, DbValue.Text("other"), "actor:1")).to_equal(Err("SCVDB_DOT_COLLISION"))
+        expect(db_set_remove(current, ["actor:2"])).to_equal(Err("SCVDB_UNOBSERVED_DOT"))
+        expect(db_set_add(DbValue.Text("not a set"), DbValue.Absent, "actor:1")).to_equal(Err("SCVDB_SET_TYPE"))
+        expect(db_set_add(DbValue.Absent, DbValue.Absent, "")).to_equal(Err("SCVDB_SET_IDENTITY"))

@@ -1,0 +1,40 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_canonical.*
+
+describe "REQ-011 canonical database bytes":
+    it "frames payloads with an exact tag and minimal byte length":
+        step("frames payloads with an exact tag and minimal byte length")
+        expect(db_frame(3u8, [65u8, 66u8])).to_equal([3u8, 2u8, 65u8, 66u8])
+        expect(db_u64_bytes(128u64)).to_equal([128u8, 1u8])
+        expect(db_u64_bytes(0u64)).to_equal([0u8])
+
+    it "retains all bits at the unsigned boundary":
+        step("retains all bits at the unsigned boundary")
+        val maximum = 18446744073709551615u64
+        val bytes = [255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 1u8]
+        expect(db_u64_bytes(maximum)).to_equal(bytes)
+        expect(db_decode_u64(bytes)).to_equal(Ok(maximum))
+        expect(db_decode_u64([128u8, 0u8])).to_equal(Err("SCVDB_VARINT_NONMINIMAL"))
+        expect(db_decode_u64([128u8])).to_equal(Err("SCVDB_VARINT_TRUNCATED"))
+        expect(db_decode_u64([255u8,255u8,255u8,255u8,255u8,255u8,255u8,255u8,255u8,2u8])).to_equal(Err("SCVDB_VARINT_OVERFLOW"))
+
+    it "normalizes decomposed accents and Hangul to NFC":
+        step("normalizes decomposed accents and Hangul to NFC")
+        expect(db_canonical_text("é")).to_equal(Ok([3u8, 2u8, 195u8, 169u8]))
+        expect(db_canonical_text("é")).to_equal(db_canonical_text("é"))
+        expect(db_canonical_text("가")).to_equal(Ok([3u8, 3u8, 234u8, 176u8, 128u8]))
+        expect(db_canonical_text("")).to_equal(Ok([3u8, 0u8]))
+
+    it "sorts complete canonical keys and rejects duplicate canonical keys":
+        step("sorts complete canonical keys and rejects duplicate canonical keys")
+        val a = DbCanonicalEntry(key: [3u8,1u8,97u8], value: [0u8,0u8])
+        val b = DbCanonicalEntry(key: [3u8,1u8,98u8], value: [0u8,0u8])
+        expect(db_canonical_map([b,a])).to_equal(Ok([8u8,10u8,3u8,1u8,97u8,0u8,0u8,3u8,1u8,98u8,0u8,0u8]))
+        expect(db_canonical_map([a,a])).to_equal(Err("SCVDB_DUPLICATE_KEY"))
+        expect(db_canonical_set([[2u8,1u8,2u8],[2u8,1u8,1u8]])).to_equal(Ok([7u8,6u8,2u8,1u8,1u8,2u8,1u8,2u8]))
+        expect(db_canonical_set([[0u8,0u8],[0u8,0u8]])).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+
+    it "separates object domains and rejects embedded separators":
+        step("separates object domains and rejects embedded separators")
+        expect(db_domain_bytes("a", [])).to_equal(Ok([115u8,99u8,118u8,45u8,100u8,98u8,47u8,97u8,47u8,118u8,49u8,0u8]))
+        expect(db_domain_bytes("a/b", [])).to_equal(Err("SCVDB_DOMAIN"))

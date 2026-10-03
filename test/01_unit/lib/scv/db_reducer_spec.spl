@@ -1,0 +1,110 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, EntityRef, entity_ref_provisional}
+
+fn setup_item2_ref(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+use std.scv.db_reducer.*
+use std.scv.db_schema.*
+
+fn setup_item2_reducer_patch(operations: [DbOperation], counter: u64) -> DbPatch:
+    val patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "producer", actor_counter: counter, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "producer", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
+    db_patch_seal(patch).unwrap()
+
+fn setup_item2_policy() -> MergePolicy:
+    MergePolicy(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", fields: [DbFieldSchema(kind: "bug", field: "title", rule: FieldMergeRule.ScalarConflict), DbFieldSchema(kind: "bug", field: "status", rule: FieldMergeRule.ScalarConflict)], constraints: [])
+
+fn setup_item2_condition() -> RowPrecondition:
+    RowPrecondition(base_row: "", expected_revision: "", expected_fields: [])
+
+fn setup_item2_create() -> DbPatch:
+    setup_item2_reducer_patch([DbOperation.Create(setup_item2_ref(1), "bug", [DbField(name: "title", value: DbValue.Text("first")), DbField(name: "status", value: DbValue.Text("open"))])], 1)
+
+fn setup_item2_update(field: text, before: text, after: text, counter: u64) -> DbPatch:
+    setup_item2_reducer_patch([DbOperation.UpdateFields(setup_item2_ref(1), [FieldEdit(field: field, before: DbValue.Text(before), after: DbValue.Text(after))], setup_item2_condition())], counter)
+
+describe "REQ-012 REQ-013 REQ-015 pure reducer previews":
+    it "keeps admission explicitly unverified and replays identical batches once":
+        step("keeps admission explicitly unverified and replays identical batches once")
+        val patch = setup_item2_create()
+        val plan = db_plan_patch(db_empty_state(), patch, setup_item2_policy()).unwrap()
+        expect(plan.authorization_status).to_equal("UNVERIFIED_PREVIEW")
+        expect(plan.proposed.rows.len()).to_equal(1)
+        val replay = db_plan_patch(plan.proposed, patch, setup_item2_policy()).unwrap()
+        expect(replay.replay).to_be(true)
+        expect(replay.proposed.accepted.len()).to_equal(1)
+        expect(replay.proposed.revision).to_equal(plan.proposed.revision)
+
+    it "merges different fields while retaining incompatible same-field conflicts":
+        step("merges different fields while retaining incompatible same-field conflicts")
+        val initial = db_plan_patch(db_empty_state(), setup_item2_create(), setup_item2_policy()).unwrap().proposed
+        val title = db_plan_patch(initial, setup_item2_update("title", "first", "second", 2), setup_item2_policy()).unwrap().proposed
+        val status = db_plan_patch(title, setup_item2_update("status", "open", "closed", 3), setup_item2_policy()).unwrap()
+        expect(status.conflicts.len()).to_equal(0)
+        expect(db_field_value(status.proposed.rows[0].fields, "title")).to_equal(DbValue.Text("second"))
+        expect(db_field_value(status.proposed.rows[0].fields, "status")).to_equal(DbValue.Text("closed"))
+        val conflict = db_plan_patch(title, setup_item2_update("title", "first", "third", 4), setup_item2_policy()).unwrap()
+        expect(conflict.conflicts[0].code).to_equal("SCVDB_CONCURRENT_FIELD")
+        expect(conflict.proposed.revision).to_equal(title.revision)
+
+    it "retains tombstones and rejects update or create resurrection":
+        step("retains tombstones and rejects update or create resurrection")
+        val initial = db_plan_patch(db_empty_state(), setup_item2_create(), setup_item2_policy()).unwrap().proposed
+        val deletion = setup_item2_reducer_patch([DbOperation.Tombstone(setup_item2_ref(1), setup_item2_condition())], 2)
+        val deleted = db_plan_patch(initial, deletion, setup_item2_policy()).unwrap().proposed
+        expect(deleted.rows[0].tombstoned).to_be(true)
+        val update = db_plan_patch(deleted, setup_item2_update("title", "first", "second", 3), setup_item2_policy()).unwrap()
+        expect(update.conflicts[0].code).to_equal("SCVDB_TOMBSTONE_UPDATE")
+        val recreate = setup_item2_reducer_patch([DbOperation.Create(setup_item2_ref(1), "bug", [])], 4)
+        expect(db_plan_patch(deleted, recreate, setup_item2_policy()).unwrap().conflicts[0].code).to_equal("SCVDB_ENTITY_ALREADY_EXISTS")
+
+    it "produces equal full and incremental state digests with causal input permutation":
+        step("produces equal full and incremental state digests with causal input permutation")
+        val create = setup_item2_create()
+        var update = setup_item2_update("title", "first", "second", 2)
+        update.causal_dependencies = [create.batch_id]
+        update = db_patch_seal(update).unwrap()
+        val full = db_preview_materialize(db_empty_state(), [update,create], setup_item2_policy()).unwrap()
+        val checkpoint = db_preview_materialize(db_empty_state(), [create], setup_item2_policy()).unwrap()
+        val incremental = db_preview_materialize(checkpoint, [update], setup_item2_policy()).unwrap()
+        expect(full.revision).to_equal(incremental.revision)
+        expect(full.rows[0].fields).to_equal(incremental.rows[0].fields)
+
+    it "rejects duplicate natural keys without accepting either row from the batch":
+        step("rejects duplicate natural keys without accepting either row from the batch")
+        var policy = setup_item2_policy()
+        policy.constraints = [DbEntityConstraint(kind: "bug", key_fields: ["title"], unique_fields: [], references: [])]
+        val operations = [DbOperation.Create(setup_item2_ref(1), "bug", [DbField(name: "title", value: DbValue.Text("same"))]), DbOperation.Create(setup_item2_ref(2), "bug", [DbField(name: "title", value: DbValue.Text("same"))])]
+        val plan = db_plan_patch(db_empty_state(), setup_item2_reducer_patch(operations, 1), policy).unwrap()
+        expect(plan.conflicts[0].code).to_equal("SCVDB_NATURAL_KEY_COLLISION")
+        expect(plan.proposed.rows.len()).to_equal(0)
+        expect(plan.proposed.accepted.len()).to_equal(0)
+
+    it "rejects missing typed reference targets and duplicate unique fields":
+        step("rejects missing typed reference targets and duplicate unique fields")
+        var policy = setup_item2_policy()
+        policy.constraints = [DbEntityConstraint(kind: "bug", key_fields: [], unique_fields: ["title"], references: [DbReferenceConstraint(field: "status", target_kind: "bug")])]
+        val fields = [DbField(name: "title", value: DbValue.Text("same")), DbField(name: "status", value: DbValue.Reference(setup_item2_ref(9)))]
+        val operations = [DbOperation.Create(setup_item2_ref(1), "bug", fields), DbOperation.Create(setup_item2_ref(2), "bug", fields)]
+        val plan = db_plan_patch(db_empty_state(), setup_item2_reducer_patch(operations, 1), policy).unwrap()
+        expect(plan.conflicts[0].code).to_equal("SCVDB_REFERENCE_MISSING")
+        expect(plan.conflicts[2].code).to_equal("SCVDB_UNIQUE_COLLISION")
+
+    it "deduplicates immutable append identity and quarantines changed content":
+        step("deduplicates immutable append identity and quarantines changed content")
+        val fields = [DbField(name: "title", value: DbValue.Text("observation"))]
+        val first = setup_item2_reducer_patch([DbOperation.AppendObservation(setup_item2_ref(1), "bug", fields)], 1)
+        val state = db_plan_patch(db_empty_state(), first, setup_item2_policy()).unwrap().proposed
+        val replay = setup_item2_reducer_patch([DbOperation.AppendObservation(setup_item2_ref(1), "bug", fields)], 2)
+        expect(db_plan_patch(state, replay, setup_item2_policy()).unwrap().proposed.rows.len()).to_equal(1)
+        val changed = setup_item2_reducer_patch([DbOperation.AppendObservation(setup_item2_ref(1), "bug", [DbField(name: "title", value: DbValue.Text("changed"))])], 3)
+        expect(db_plan_patch(state, changed, setup_item2_policy()).unwrap().conflicts[0].code).to_equal("SCVDB_APPEND_IDENTITY_COLLISION")
+
+    it "rejects stale row preconditions atomically":
+        step("rejects stale row preconditions atomically")
+        val initial = db_plan_patch(db_empty_state(), setup_item2_create(), setup_item2_policy()).unwrap().proposed
+        val condition = RowPrecondition(base_row: "retrievable-base-object", expected_revision: "wrong-revision", expected_fields: [])
+        val operation = DbOperation.Tombstone(setup_item2_ref(1), condition)
+        val plan = db_plan_patch(initial, setup_item2_reducer_patch([operation], 2), setup_item2_policy()).unwrap()
+        expect(plan.conflicts[0].code).to_equal("SCVDB_ROW_PRECONDITION")
+        expect(plan.proposed.rows[0].tombstoned).to_be(false)

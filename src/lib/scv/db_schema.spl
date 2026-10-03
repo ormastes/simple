@@ -1,0 +1,61 @@
+# Constraint and observed-remove-set values independent of reducer storage.
+use std.scv.db_patch.*
+
+struct DbEntityConstraint:
+    kind: text
+    key_fields: [text]
+    unique_fields: [text]
+    references: [DbReferenceConstraint]
+
+struct DbReferenceConstraint:
+    field: text
+    target_kind: text
+
+fn db_set_add(current: DbValue, member: DbValue, dot: text) -> Result<DbValue, text>:
+    if dot == "": return Err("SCVDB_SET_IDENTITY")
+    var members: [DbSetMember] = []
+    match current:
+        Absent: ()
+        ObservedSet(values): members = values
+        _: return Err("SCVDB_SET_TYPE")
+    for existing in members:
+        if existing.dot == dot:
+            if db_value_bytes(existing.value)? != db_value_bytes(member)?: return Err("SCVDB_DOT_COLLISION")
+            # A removed dot remains removed; replay cannot resurrect it.
+            return Ok(current)
+    members.push(DbSetMember(dot: dot, value: member, removed: false))
+    Ok(DbValue.ObservedSet(members))
+
+fn db_set_remove(current: DbValue, observed: [text]) -> Result<DbValue, text>:
+    var members: [DbSetMember] = []
+    match current:
+        ObservedSet(values): members = values
+        _: return Err("SCVDB_SET_TYPE")
+    for dot in observed:
+        var found = false
+        var index = 0
+        while index < members.len():
+            if members[index].dot == dot:
+                var member = members[index]
+                member.removed = true
+                members[index] = member
+                found = true
+            index = index + 1
+        if not found: return Err("SCVDB_UNOBSERVED_DOT")
+    Ok(DbValue.ObservedSet(members))
+
+fn db_set_visible(current: DbValue) -> Result<[DbValue], text>:
+    var visible: [DbValue] = []
+    var bytes: [[u8]] = []
+    match current:
+        ObservedSet(members):
+            for member in members:
+                if not member.removed:
+                    val encoded = db_value_bytes(member.value)?
+                    if not bytes.contains(encoded):
+                        visible.push(member.value)
+                        bytes.push(encoded)
+        _: return Err("SCVDB_SET_TYPE")
+    Ok(visible)
+
+export DbEntityConstraint, DbReferenceConstraint, db_set_add, db_set_remove, db_set_visible

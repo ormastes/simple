@@ -1,0 +1,104 @@
+# SCVDB-CANON-v1. Pure encoding; Unicode tables are pinned to Unicode 17.
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+
+struct DbCanonicalEntry:
+    key: [u8]
+    value: [u8]
+
+fn db_u64_bytes(value: u64) -> [u8]:
+    """Minimal unsigned LEB128, including the full unsigned 64-bit range."""
+    var remaining = value
+    var output: [u8] = []
+    while remaining >= 128u64:
+        output.push(((remaining & 127u64) | 128u64) as u8)
+        remaining = remaining >> 7
+    output.push(remaining as u8)
+    output
+
+fn db_decode_u64(bytes: [u8]) -> Result<u64, text>:
+    if bytes.len() == 0 or bytes.len() > 10:
+        return Err("SCVDB_VARINT_LENGTH")
+    var value = 0u64
+    var index = 0
+    while index < bytes.len():
+        val byte = bytes[index] as u64
+        if index == 9 and byte > 1u64:
+            return Err("SCVDB_VARINT_OVERFLOW")
+        value = value | ((byte & 127u64) << (index * 7))
+        if byte < 128u64:
+            if index != bytes.len() - 1 or (index > 0 and byte == 0u64):
+                return Err("SCVDB_VARINT_NONMINIMAL")
+            return Ok(value)
+        index = index + 1
+    Err("SCVDB_VARINT_TRUNCATED")
+
+fn db_frame(tag: u8, payload: [u8]) -> [u8]:
+    """One tag byte, minimal byte length, then the payload."""
+    [tag] + db_u64_bytes(payload.len() as u64) + payload
+
+fn db_canonical_text(value: text) -> Result<[u8], text>:
+    """Strict UTF-8 validation precedes NFC normalization and tag 3 framing."""
+    val valid = validated_utf8_bytes_to_text_linear(base_encoding_text_to_bytes(value))?
+    Ok(db_frame(3u8, base_encoding_text_to_bytes(unicode_normalize_nfc(valid))))
+
+fn db_domain_bytes(domain: text, payload: [u8]) -> Result<[u8], text>:
+    """Bind a root to scv-db/<ASCII domain>/v1 followed by NUL."""
+    if domain == "": return Err("SCVDB_DOMAIN")
+    for byte in domain.bytes():
+        if not ((byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 45):
+            return Err("SCVDB_DOMAIN")
+    Ok(base_encoding_text_to_bytes("scv-db/" + domain + "/v1\0") + payload)
+
+fn db_bytes_less(left: [u8], right: [u8]) -> bool:
+    var index = 0
+    while index < left.len() and index < right.len():
+        if left[index] != right[index]: return left[index] < right[index]
+        index = index + 1
+    left.len() < right.len()
+
+fn db_canonical_list(values: [[u8]]) -> [u8]:
+    var payload: [u8] = []
+    for value in values: payload = payload + value
+    db_frame(6u8, payload)
+
+fn db_canonical_set(values: [[u8]]) -> Result<[u8], text>:
+    var ordered = values
+    var index = 1
+    while index < ordered.len():
+        var cursor = index
+        while cursor > 0 and db_bytes_less(ordered[cursor], ordered[cursor - 1]):
+            val previous = ordered[cursor - 1]
+            ordered[cursor - 1] = ordered[cursor]
+            ordered[cursor] = previous
+            cursor = cursor - 1
+        index = index + 1
+    var payload: [u8] = []
+    index = 0
+    while index < ordered.len():
+        if index > 0 and ordered[index] == ordered[index - 1]: return Err("SCVDB_DUPLICATE_MEMBER")
+        payload = payload + ordered[index]
+        index = index + 1
+    Ok(db_frame(7u8, payload))
+
+fn db_canonical_map(entries: [DbCanonicalEntry]) -> Result<[u8], text>:
+    var ordered = entries
+    var index = 1
+    while index < ordered.len():
+        var cursor = index
+        while cursor > 0 and db_bytes_less(ordered[cursor].key, ordered[cursor - 1].key):
+            val previous = ordered[cursor - 1]
+            ordered[cursor - 1] = ordered[cursor]
+            ordered[cursor] = previous
+            cursor = cursor - 1
+        index = index + 1
+    var payload: [u8] = []
+    index = 0
+    while index < ordered.len():
+        if index > 0 and ordered[index].key == ordered[index - 1].key: return Err("SCVDB_DUPLICATE_KEY")
+        payload = payload + ordered[index].key + ordered[index].value
+        index = index + 1
+    Ok(db_frame(8u8, payload))
+
+export DbCanonicalEntry, db_u64_bytes, db_decode_u64, db_frame, db_canonical_text, db_domain_bytes
+export db_bytes_less, db_canonical_list, db_canonical_set, db_canonical_map

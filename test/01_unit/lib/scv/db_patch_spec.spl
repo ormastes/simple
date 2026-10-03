@@ -1,0 +1,54 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, EntityRef, entity_ref_provisional}
+
+fn setup_item2_ref(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+fn setup_item2_patch(operations: [DbOperation]) -> DbPatch:
+    DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: 1, base_revision: "", causal_dependencies: [], schema_revision: "schema-1", reducer_revision: "reducer-1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "producer", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
+
+describe "REQ-010 REQ-011 REQ-014 patch identity and causality":
+    it "binds repository epoch and ordered operations into identity":
+        step("binds repository epoch and ordered operations into identity")
+        val original = setup_item2_patch([])
+        var other = original
+        other.repository = "another-repository"
+        expect(db_patch_digest(original) == db_patch_digest(other)).to_be(false)
+        other = original
+        other.epoch = 2
+        expect(db_patch_digest(original) == db_patch_digest(other)).to_be(false)
+        val first = DbOperation.Create(setup_item2_ref(1), "bug", [])
+        val second = DbOperation.Create(setup_item2_ref(2), "bug", [])
+        expect(db_patch_digest(setup_item2_patch([first,second])) == db_patch_digest(setup_item2_patch([second,first]))).to_be(false)
+
+    it "excludes detached signature bytes but detects changed signed content":
+        step("excludes detached signature bytes but detects changed signed content")
+        var sealed = db_patch_seal(setup_item2_patch([])).unwrap()
+        val digest = sealed.payload_digest
+        sealed.signature = [1u8,2u8]
+        expect(db_patch_validate(sealed)).to_equal(Ok(digest))
+        sealed.provenance = "changed"
+        expect(db_patch_validate(sealed)).to_equal(Err("SCVDB_BATCH_IDENTITY_COLLISION"))
+
+    it "orders dependencies before lexical ties and rejects missing or cyclic graphs":
+        step("orders dependencies before lexical ties and rejects missing or cyclic graphs")
+        var a = setup_item2_patch([])
+        a.batch_id = "a"
+        a.causal_dependencies = ["z"]
+        var z = setup_item2_patch([])
+        z.batch_id = "z"
+        val ordered = db_patch_order([a,z], []).unwrap()
+        expect(ordered[0].batch_id).to_equal("z")
+        expect(ordered[1].batch_id).to_equal("a")
+        expect(db_patch_order([a], [])).to_equal(Err("SCVDB_MISSING_DEPENDENCY"))
+        z.causal_dependencies = ["a"]
+        expect(db_patch_order([a,z], [])).to_equal(Err("SCVDB_CAUSAL_CYCLE"))
+
+    it "rejects duplicate canonical field names and unsupported digest versions":
+        step("rejects duplicate canonical field names and unsupported digest versions")
+        val fields = [DbField(name: "é", value: DbValue.Absent), DbField(name: "é", value: DbValue.Absent)]
+        expect(db_fields_bytes(fields)).to_equal(Err("SCVDB_DUPLICATE_KEY"))
+        var patch = setup_item2_patch([])
+        patch.digest_version = 2
+        expect(db_patch_digest(patch)).to_equal(Err("SCVDB_DIGEST_ALGORITHM"))
