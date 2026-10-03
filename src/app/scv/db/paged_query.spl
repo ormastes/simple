@@ -1,0 +1,74 @@
+# Queries use one captured, policy-validated generation. The low-level lookup
+# checks actual bounded page bytes against its descriptor, without rehashing the
+# entire directory for each key. These data views convey no write authority.
+use app.scv.db.paged_store.{DbPagedView, db_paged_open}
+use app.scv.db.page_store.{DbStoredPages, db_page_store_lookup}
+use std.scv.db_paged_model.{DbPagedPolicy}
+use std.scv.db_paged_indexes.{db_paged_index_key, db_paged_index_value, db_paged_unique_keys}
+use std.scv.db_page_records.*
+use std.scv.db_pages.{DbPageRecord}
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbRow, db_field_value}
+use std.scv.distributed_identity.*
+
+struct DbPagedQuery:
+    root: text
+    view: DbPagedView
+    policy: DbPagedPolicy
+
+fn db_paged_query_open(root: text, policy: DbPagedPolicy) -> Result<DbPagedQuery, text>:
+    Ok(DbPagedQuery(root: root, view: db_paged_open(root, policy)?, policy: policy))
+
+fn db_paged_query_record(query: DbPagedQuery, key: text) -> Result<DbPageRecord?, text>:
+    db_page_store_lookup(query.root, DbStoredPages(head: query.view.head, manifest: query.view.manifest.pages), key)
+
+fn db_paged_resolve_at(query: DbPagedQuery, entity: EntityRef) -> Result<EntityRef, text>:
+    val context = query.view.manifest.context
+    if not db_ref_context(entity, context.namespace, context.epoch): return Err("SCVDB_ALIAS_CONTEXT")
+    if entity.provisional != nil: return Ok(entity)
+    val record = db_paged_query_record(query, db_page_alias_key(entity.settled.unwrap())?)?
+    if record == nil: return Err("SCVDB_IDENTITY_UNKNOWN")
+    match db_typed_page_record_decode(record.unwrap())?:
+        Alias(binding): Ok(entity_ref_provisional(binding.uid))
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+fn db_paged_row_at(query: DbPagedQuery, entity: EntityRef) -> Result<DbRow?, text>:
+    val uid = db_paged_resolve_at(query, entity)?
+    val record = db_paged_query_record(query, db_page_row_key(uid)?)?
+    if record == nil: return Ok(nil)
+    match db_typed_page_record_decode(record.unwrap())?:
+        CurrentRow(_, row): Ok(Some(row))
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+# fields is either one declared unique field, or the exact ordered compound key.
+fn db_paged_unique_at(query: DbPagedQuery, kind: text, fields: [DbField]) -> Result<DbRow?, text>:
+    var names: [text] = []
+    var name_bytes: [[u8]] = []
+    var value_bytes: [[u8]] = []
+    for field in fields:
+        if field.value == DbValue.Absent: return Err("SCVDB_KEY_MISSING")
+        names.push(field.name)
+        name_bytes.push(db_canonical_text(field.name)?)
+        value_bytes.push(db_value_bytes(field.value)?)
+    var key = ""
+    for constraint in query.policy.config.merge.constraints:
+        if constraint.kind != kind: continue
+        if fields.len() == 1 and constraint.unique_fields.contains(names[0]):
+            key = db_paged_index_key("unique", db_canonical_text(kind)? + name_bytes[0] + value_bytes[0])?
+        elif fields.len() > 0 and constraint.key_fields == names:
+            key = db_paged_index_key("natural", db_canonical_text(kind)? + db_canonical_list(name_bytes) + db_canonical_list(value_bytes))?
+    if key == "": return Err("SCVDB_PAGED_UNIQUE_INDEX_REQUIRED")
+    val record = db_paged_query_record(query, key)?
+    if record == nil: return Ok(nil)
+    match db_paged_index_value(record.unwrap(), 170u8)?:
+        Absent: Ok(nil)
+        Reference(entity):
+            val row = db_paged_row_at(query, entity)?
+            if row == nil or row.unwrap().tombstoned or row.unwrap().kind != kind: return Err("SCVDB_PAGED_INDEX_CORRUPT")
+            if not db_paged_unique_keys(row.unwrap(), query.policy.config.merge)?.contains(key): return Err("SCVDB_PAGED_INDEX_CORRUPT")
+            Ok(row)
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+export DbPagedQuery, db_paged_query_open, db_paged_query_record
+export db_paged_resolve_at, db_paged_row_at, db_paged_unique_at

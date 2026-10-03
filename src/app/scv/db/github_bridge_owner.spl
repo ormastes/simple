@@ -1,3 +1,5 @@
+use std.scv.db_paged_model.{DbPagedPolicy}
+use app.scv.db.bridge_store.{db_bridge_store_enqueue_paged}
 # Durable owner for GitHub bridge effects. Canonical intent must already exist
 # in the semantic database; local leases/status use the separate bridge channel.
 # Only the actual store-reopened sent transition permits a provider mutation.
@@ -35,6 +37,9 @@ fn db_github_bridge_owned(root: text, admission: DbAdmissionPolicy, request: DbG
     # The enqueue owner proves the exact intent revision is in an actual,
     # non-tombstoned canonical semantic row; caller delivery state is ignored.
     val enqueued = db_bridge_store_enqueue(root, admission, request.delivery.intent)?
+    _github_bridge_enqueued(root, enqueued, request, owner, ttl, now, execute)
+
+fn _github_bridge_enqueued(root: text, enqueued: DbStoredDelivery, request: DbGithubBridgeRequest, owner: text, ttl: u64, now: fn() -> u64, execute: fn([text], i64, i64) -> DbGithubProcessReply) -> Result<DbGithubOwnedBridgeResult, text>:
     if ["acknowledged", "conflicted", "quarantined"].contains(enqueued.delivery.state):
         var external_id = ""
         if enqueued.delivery.state == "acknowledged" or enqueued.delivery.state == "conflicted":
@@ -76,3 +81,10 @@ fn db_github_bridge_owned_live(root: text, admission: DbAdmissionPolicy, request
     db_github_bridge_owned(root, admission, request, owner, ttl, now, _db_github_owner_execute)
 
 export DbGithubOwnedBridgeResult, db_github_bridge_owned, db_github_bridge_owned_live
+
+fn db_github_bridge_owned_paged(root: text, policy: DbPagedPolicy, request: DbGithubBridgeRequest, owner: text, ttl: u64, now: fn() -> u64, execute: fn([text], i64, i64) -> DbGithubProcessReply) -> Result<DbGithubOwnedBridgeResult, text>:
+    if owner == "": return Err("SCVDB_LEASE_ARGUMENT")
+    val enqueued = db_bridge_store_enqueue_paged(root, policy, request.delivery.intent)?
+    _github_bridge_enqueued(root, enqueued, request, owner, ttl, now, execute)
+
+export db_github_bridge_owned_paged

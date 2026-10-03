@@ -45,7 +45,6 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
     val patch = request.patch
     val policy = request.policy
     val valid = db_paged_manifest_validate(manifest, policy)?
-    val allowed = db_require_unreserved_entity_kinds(patch)?
     if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
     if (patch.operations.len() as u64) > policy.max_operations or (patch.causal_dependencies.len() as u64) > policy.max_read_keys: return Err("SCVDB_PAGED_QUOTA")
     val digest = db_patch_validate(patch)?
@@ -115,9 +114,26 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
     Ok(DbPagedPlanning.Ready(DbPagedCommitPlan(manifest: next, build: build, replay: false)))
 
 fn db_paged_begin(manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedPlanning, text>:
+    db_require_unreserved_entity_kinds(patch)?
     _paged_run(DbPagedRequest(manifest: manifest, patch: patch, policy: policy, now: now, proofs: []))
 
 fn db_paged_advance(planning: DbPagedPlanning, proofs: [DbPagedLookupProof]) -> Result<DbPagedPlanning, text>:
+    match planning:
+        NeedKeys(request, _):
+            db_require_unreserved_entity_kinds(request.patch)?
+            var next = request
+            next.proofs = request.proofs + proofs
+            _paged_run(next)
+        Ready(_): Err("SCVDB_PAGED_ALREADY_READY")
+
+export DbPagedRequest, DbPagedCommitPlan, DbPagedPlanning, db_paged_begin, db_paged_advance
+
+# Pure infrastructure entry; never a publication capability. The specialized
+# effect owner validates its reserved transition before calling this reducer.
+fn db_paged_transition_begin(manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedPlanning, text>:
+    _paged_run(DbPagedRequest(manifest: manifest, patch: patch, policy: policy, now: now, proofs: []))
+
+fn db_paged_transition_advance(planning: DbPagedPlanning, proofs: [DbPagedLookupProof]) -> Result<DbPagedPlanning, text>:
     match planning:
         NeedKeys(request, _):
             var next = request
@@ -125,4 +141,4 @@ fn db_paged_advance(planning: DbPagedPlanning, proofs: [DbPagedLookupProof]) -> 
             _paged_run(next)
         Ready(_): Err("SCVDB_PAGED_ALREADY_READY")
 
-export DbPagedRequest, DbPagedCommitPlan, DbPagedPlanning, db_paged_begin, db_paged_advance
+export db_paged_transition_begin, db_paged_transition_advance
