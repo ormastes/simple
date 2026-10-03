@@ -20,6 +20,8 @@ types. The module-analysis increment adds six scenarios:
 | User-produced collection source | Outer map/filter is extracted; the whole source call remains opaque. |
 | Unresolved typed source call | Only the resolved outer operation is admitted; source effects remain unknown. |
 | Untyped opaque source | Extraction fails instead of inventing a source type. |
+| Opaque call between admitted regions | Exactly two independent regions; neither assigns authority to the user call. |
+| Chain bound with opaque source | 128 admitted operations accepted; 129 rejected. The source is not charged as an admitted operation. |
 
 Analysis uses the existing typed diagnostic scan plus an iterative region scan.
 Successful receiver chains are pruned while their source and call arguments

@@ -143,6 +143,31 @@ describe "typed CollectionPlan extraction":
         expect(missing.contains("key type")).to_equal(false)
 
 describe "collection analysis discovers maximal regions":
+    it "keeps independent admitted regions on both sides of an opaque call":
+        step("Separate inner map from outer filter across a user method")
+        val inner = cp_call(cp_source(), "map", 40, 3)
+        val opaque = cp_call(inner, "user_transform", 900, 4)
+        val result = collect_collection_expr_plans_v1(
+            cp_call(opaque, "filter", 41, 5), 20, cp_registry())
+        expect(result.plans.len()).to_equal(2)
+        expect(result.blockers.len()).to_equal(0)
+        expect(result.plans[0].nodes.len()).to_equal(2)
+        expect(result.plans[1].nodes.len()).to_equal(2)
+        expect(result.plans[0].nodes[1].operation_symbol_id.unwrap()).to_equal(41)
+        expect(result.plans[1].nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+
+    it "counts admitted operations rather than an opaque source against the bound":
+        step("Accept 128 admitted calls above one opaque source and reject 129")
+        var chain = cp_call(cp_source(), "load_rows", 900, 2)
+        for i in 0..128:
+            chain = cp_call(chain, "map", 40, i + 3)
+        val accepted = extract_unary_collection_plan(chain, 20, cp_registry())
+        expect(accepted.is_ok()).to_equal(true)
+        expect(accepted.unwrap().nodes.len()).to_equal(129)
+        val too_long = cp_call(chain, "map", 40, 131)
+        expect(extract_unary_collection_plan(
+            too_long, 20, cp_registry()).is_err()).to_equal(true)
+
     it "retains a user method as the opaque source of an admitted chain":
         step("Extract map-filter above a typed user-produced collection")
         val produced = cp_call(cp_source(), "load_rows", 900, 2)
