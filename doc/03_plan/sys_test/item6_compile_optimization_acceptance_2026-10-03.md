@@ -14,7 +14,7 @@ The canonical system specification contains 44 scenarios with explicit `step()` 
 
 ## Concrete canonical acceptance list
 
-Each row requires the named production scenario, status 0, empty unexpected stderr, and the listed observations from actual compiler state/receipts. All rows are currently **UNVERIFIED: checker absent**. For error scenarios, checker success means the compiler operation was actually refused with the specified reason; it never means compilation succeeded. Instrumented reads, counters, and digests must originate at production owners, not a test-side graph model.
+Each row requires the named production scenario, status 0, empty unexpected stderr, and the listed observations from actual compiler state/receipts. All rows remain **UNVERIFIED**. The original audit found the checker absent; the implementation update below records the subsequently added owner adapters. For error scenarios, checker success means the compiler operation was actually refused with the specified reason; it never means compilation succeeded. Instrumented reads, counters, and digests must originate at production owners, not a test-side graph model.
 
 | Requirement | Scenario | Required production observations |
 |---|---|---|
@@ -86,18 +86,42 @@ sets, archive behavior, crash timing, daemon/remote lifecycle and output parity
 still require their own witnesses. Runtime provenance investigation is recorded
 in `doc/08_tracking/bug/item6_acceptance_runtime_unavailable_2026-10-03.md`.
 
-Reader acquisition remains a separate OPEN case. Actual current consumers own
+Reader acquisition was a separate OPEN case in the original audit. Actual current consumers own
 decoded generation values, so the selected repair is atomic pointer/payload
 capture, followed by hash/decode outside the lock. Test lock contention refusal,
 successful admission after release, and unchanged owned A after publishing B
 and collecting A's file. A process-barrier reader/publisher/GC case still needs
-execution. The current unlocked pointer/payload sequence is unsafe, and a
+execution. The original unlocked pointer/payload sequence was unsafe, and a
 caller-supplied retained list is not a lease for lazy-index/archive consumers.
 The held-publication-lock test does not certify those separate lifetimes.
 
 Use existing `PackageIndexRouteV1`, `PackageModuleIndexReadV1`, `PackageModuleChangeV1`, `package_index_route_current_v1`, and production publish/read/invalidate owners. Preserve the canonical conceptual record names and PSI IDs in the parent plan. A future `run_package_index_scenario(name)` helper is allowed only when it invokes the real compiler and returns admitted evidence; no synthetic receipt adapter is planned.
 
 Retain existing scenario step labels. New focused labels agreed with the integration owner are `Admit the current package index`, `Reject a changed index binding`, and `Preserve the prior admitted generation`. Use setup/teardown hooks for isolated cache and environment cleanup. Never use sleeps as race synchronization; use a held lock or explicit barrier. Assertions must inspect returned production records and persisted bytes. Placeholder bodies must fail explicitly rather than create green coverage.
+
+## Implementation update after PRs #2299 and #2305
+
+The shell launcher now exists and executes only a separately compiled acceptance
+binary. Its Simple entrypoint is `src/app/test/package_index_acceptance.spl`.
+Explicit `--scope owner` checks call production persistence, metadata, parser,
+snapshot, scheduling, daemon and remote-content owners. Default scope continues
+to return incomplete when actual compiler completion, filesystem observations,
+process crash injection or performance evidence is missing. Owner scope is not
+a replacement for any canonical system assertion above.
+
+The reader captures CURRENT and payload while holding the publication lock.
+The production driver now uses admitted previous/current semantic transitions
+to derive per-module changes; incompatible/missing transition evidence retains
+conservative invalidation. The former global environment flag no longer supplies
+semantic authority. These changes supersede the original source-gap descriptions
+in the TDD list; all new executable specs remain UNEXECUTED.
+
+Additional focused specs cover mixed private/public edits, omitted change hints,
+metadata producer/SMF identity, section arithmetic bounds, actual comment and
+whitespace parsing, Git event refresh, frozen-source refusal, snapshot retention,
+remote payload forgery and daemon request-token lifetime. See the implementation
+design at `doc/05_design/compiler/perf/item6_request_and_remote_admission_2026-10-03.md`.
+Full 44-scenario qualification and generated-manual evidence remain outstanding.
 
 Generate manuals from the executable spec with the admitted SPipe docgen after executable tests run. Preserve evidence links, input/runtime digests, scenario status, and requirement traceability; never label this planning appendix as generated execution evidence.
 
