@@ -8,6 +8,7 @@ use std.spec.step
 use std.io_runtime.{file_read_bytes}
 use compiler.backend.linker.macho.macho_static_link.{macho_static_link}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho_parser.{macho_parse_object}
 
 fn item4_macho_fixture(name: text) -> [u8]:
     val bytes = file_read_bytes("test/fixtures/linker/macho/" + name)
@@ -50,6 +51,41 @@ fn item4_macho_check_image(bytes: [u8], arm: bool):
     expect(item4_macho_read(bytes, 260, 4)).to_equal(if arm: 68 else: 42)
     val pc = if arm: 248 + 16 + 256 else: 248 + 16 + 128
     expect(item4_macho_read(bytes, pc, 8)).to_equal(0x100004000)
+
+fn item4_macho_write(bytes: [u8], offset: i64, width: i64, value: i64) -> [u8]:
+    val valid = offset >= 0 and offset <= bytes.len() and width > 0 and width <= 8
+    expect(valid).to_equal(true)
+    if not valid: return []
+    expect(width <= bytes.len() - offset).to_equal(true)
+    if width > bytes.len() - offset: return []
+    var changed = bytes
+    var index: i64 = 0
+    while index < width:
+        changed[offset + index] = ((value >> (index * 8)) & 255) as u8
+        index = index + 1
+    changed
+
+fn item4_macho_text_relocation(bytes: [u8]) -> i64:
+    val parsed = macho_parse_object(bytes).unwrap()
+    for segment in parsed.segments:
+        for section in segment.sections:
+            if section.sectname == "__text":
+                expect(section.nreloc).to_be_greater_than(0)
+                expect(section.reloff).to_be_greater_than(0)
+                return section.reloff
+    fail("missing __text relocation fixture")
+    -1
+
+fn item4_macho_command(bytes: [u8], kind: i64) -> i64:
+    var offset: i64 = 32
+    var index: i64 = 0
+    val count = item4_macho_read(bytes, 16, 4)
+    while index < count:
+        if item4_macho_read(bytes, offset, 4) == kind: return offset
+        offset = offset + item4_macho_read(bytes, offset + 4, 4)
+        index = index + 1
+    fail("missing fixture load command {kind}")
+    -1
 
 describe "Mach-O freestanding executable construction":
     # @req ITEM4-REQ-003 ITEM4-REQ-004 ITEM4-REQ-006 ITEM4-REQ-007
@@ -123,3 +159,96 @@ describe "Mach-O freestanding executable construction":
         step("Truncate a BSD archive inside its first member header")
         val archive = item4_macho_fixture("provider_x64.a")
         expect(macho_static_link([object], [archive[0:35]], "_start", RelocArch.X86_64).unwrap_err()).to_contain("archive")
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-004
+    it "resolves an archive dependency discovered only after the first extraction":
+        step("Link entry against leaf-first BSD archive requiring transitive selection")
+        val entry = item4_macho_fixture("start_x64.o")
+        val image = macho_static_link([entry], [item4_macho_fixture("chain_x64.a")], "_start", RelocArch.X86_64).unwrap()
+        step("Check call to mid and jump from mid to leaf against independent section layout")
+        expect(item4_macho_read(image, 0x4001, 4)).to_equal(3)
+        expect(item4_macho_read(image, 0x4009, 4)).to_equal(3)
+
+    # @req ITEM4-REQ-003
+    it "prefers a strong definition over an earlier weak definition":
+        step("Provide a weak helper returning seven before the strong helper returning forty-two")
+        val image = macho_static_link([item4_macho_fixture("start_x64.o"),
+            item4_macho_fixture("weak_x64.o"), item4_macho_fixture("provider_x64.o")],
+            [], "_start", RelocArch.X86_64).unwrap()
+        step("Follow the relocated call and inspect the chosen helper immediate")
+        val target = 0x4005 + item4_macho_read(image, 0x4001, 4)
+        expect(item4_macho_read(image, target, 1)).to_equal(0xb8)
+        expect(item4_macho_read(image, target + 1, 4)).to_equal(42)
+
+    # @req ITEM4-REQ-003
+    it "coalesces tentative common definitions with maximum size and alignment":
+        step("Link two common declarations and a real relocation to their shared storage")
+        val image = macho_static_link([item4_macho_fixture("start_x64.o"),
+            item4_macho_fixture("provider_x64.o"), item4_macho_fixture("common_x64.o"),
+            item4_macho_fixture("common_large_x64.o")], [], "_start", RelocArch.X86_64).unwrap()
+        step("Require one sixteen-byte aligned and zero-filled common allocation")
+        expect(item4_macho_read(image, 0x8010, 8)).to_equal(0x100008020)
+        expect(image.len()).to_equal(0x8030)
+        expect(item4_macho_read(image, 0x8020, 8)).to_equal(0)
+        expect(item4_macho_read(image, 0x8028, 8)).to_equal(0)
+
+    # @req ITEM4-REQ-004 ITEM4-REQ-007
+    it "rejects invalid relocation symbol indices and patch intervals":
+        step("Locate the real x86_64 call relocation")
+        val original = item4_macho_fixture("start_x64.o")
+        val record = item4_macho_text_relocation(original)
+        if record < 0: return
+        val provider = item4_macho_fixture("provider_x64.o")
+        step("Preserve relocation flags but select an impossible symbol index")
+        val info = item4_macho_read(original, record + 4, 4)
+        val bad_index = item4_macho_write(original, record + 4, 4, (info & 0xff000000) | 0xffffff)
+        expect(macho_static_link([bad_index, provider], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("symbol index")
+        step("Move the four-byte patch past the actual six-byte text section")
+        val bad_patch = item4_macho_write(original, record, 4, 6)
+        expect(macho_static_link([bad_patch, provider], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("patch exceeds section")
+
+    # @req ITEM4-REQ-004 ITEM4-REQ-006
+    it "rejects unimplemented relocation kinds instead of ignoring their semantics":
+        step("Change only the actual x86_64 branch type to TLV")
+        val original = item4_macho_fixture("start_x64.o")
+        val record = item4_macho_text_relocation(original)
+        if record < 0: return
+        val info = item4_macho_read(original, record + 4, 4)
+        val changed = item4_macho_write(original, record + 4, 4, (info & 0x0fffffff) | 0x90000000)
+        expect(macho_static_link([changed, item4_macho_fixture("provider_x64.o")], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("unsupported x86_64 Mach-O relocation")
+
+    # @req ITEM4-REQ-006 ITEM4-REQ-007
+    it "rejects malformed command sizes and oversized output before allocation":
+        step("Give a real segment command an impossible four-byte size")
+        val original = item4_macho_fixture("start_x64.o")
+        val changed = item4_macho_write(original, 36, 4, 4)
+        expect(macho_static_link([changed], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("command size")
+        step("Constrain a valid link to a budget below its payload end")
+        expect(macho_static_link([original, item4_macho_fixture("provider_x64.o")], [], "_start", RelocArch.X86_64, 32768).unwrap_err()).to_contain("byte limit")
+
+    # @req ITEM4-REQ-006 ITEM4-REQ-007
+    it "rejects metadata commands too short for their declared payload":
+        step("Locate a real build-version command and alter its tag without changing its span")
+        val original = item4_macho_fixture("start_x64.o")
+        val command = item4_macho_command(original, 0x32)
+        if command < 0: return
+        val as_dysymtab = item4_macho_write(original, command, 4, 0xb)
+        expect(macho_static_link([as_dysymtab], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("LC_DYSYMTAB size")
+        step("Declare a tool record without extending the command")
+        val bad_tools = item4_macho_write(original, command + 20, 4, 0xffffffff)
+        expect(macho_static_link([bad_tools], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("tools exceed command")
+        step("Give an otherwise bounded symbol command the UUID tag with an invalid size")
+        val symtab = item4_macho_command(original, 2)
+        if symtab < 0: return
+        var bad_uuid = item4_macho_write(original, symtab, 4, 0x1b)
+        bad_uuid = item4_macho_write(bad_uuid, symtab + 4, 4, 8)
+        expect(macho_static_link([bad_uuid], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("LC_UUID size")
+
+    # @req ITEM4-REQ-006 ITEM4-REQ-007
+    it "rejects a section address whose address-plus-size wraps":
+        step("Retain actual section size while moving its address to signed maximum")
+        val original = item4_macho_fixture("start_x64.o")
+        val command = item4_macho_command(original, 0x19)
+        if command < 0: return
+        val changed = item4_macho_write(original, command + 72 + 32, 8, 0x7fffffffffffffff)
+        expect(macho_static_link([changed], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("address range overflows")
