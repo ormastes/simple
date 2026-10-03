@@ -9,6 +9,22 @@ its two tests; inspected linker sources and the research document are unchanged.
 Session metadata records this refreshed base/expected target. No runtime PASS
 evidence exists to transfer across the rebase.
 
+## Test-first continuation
+
+On the user's `codingtest first` instruction, the same isolated worktrees are
+reused with new exclusive ownership: `/root` strengthens the existing image
+acceptance spec and updates plan/design; `/root/linker_acceptance` owns the new
+`item4_linker_relocation_acceptance_spec.spl`; `/root/linker_research` owns the
+new `item4_linker_dynamic_acceptance_spec.spl`; `/root/linker_runtime` reviews
+the image assertions read-only. All three specs live under
+`test/03_system/app/compiler/feature/`. Helper prefixes are `item4_reloc_` and
+`item4_dynamic_` for the new files. Root's image helpers are `item4_read_le`,
+`item4_check_elf_load_segments` and `item4_pe_file_offset`.
+
+This ownership amendment applies to this test-first wave; the original lane
+table below records the completed research/initial-spec allocation. Runtime
+execution and production fixes remain separate pending work.
+
 | Lane / owner | Isolated worktree and work branch | Exclusive edits |
 |---|---|---|
 | Integration / `/root` | `C:/dev/simple-item4-linker-dev-20261003`; `work/item4-linker-dev-20261003` | Plan/design, acceptance plan, lane ledger, subsequent reviewed production fix |

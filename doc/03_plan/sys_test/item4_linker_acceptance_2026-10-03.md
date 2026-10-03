@@ -36,7 +36,7 @@ its requirement ID and explicit setup/action/check steps.
 
 | Scenario | Input/action | Required result | Evidence level |
 |---|---|---|---|
-| ELF x86_64 image | Link checked-in start/provider ET_REL fixtures through `elf_static_link`; parse emitted bytes | ET_EXEC, correct machine, nonzero entry/program-header offset/section count; identical repeat output | Header and byte determinism, not segment validity or execution |
+| ELF x86_64 image | Link checked-in start/provider ET_REL fixtures through `elf_static_link`; parse emitted bytes and independent program-header fields | ET_EXEC, correct machine, bounded/aligned PT_LOAD ranges, no writable-executable load, entry covered by executable file bytes; identical repeat output | Image and segment assertions authored; not executed |
 | ELF aarch64 image | Same using aarch64 fixtures | AArch64 image and deterministic bytes | Portable image construction, not execution |
 | Archive fixpoint control | Start object plus unchanged `libchain_a64.a` | Successful link resolving the transitive member | Production archive algorithm |
 | Selected ET_EXEC member | Change selected `mid_a64.o` e_type at its parsed archive offset to 2 | Error identifies archive member and nonrelocatable e_type | TDD regression; predicted RED until executed |
@@ -53,11 +53,34 @@ executable spec before claiming this slice complete. This table is a plan, not
 a test transcript. Remaining requirement rows need additional executable
 scenarios; they are not implicitly covered by these eleven cases.
 
-An additional ELF acceptance gate must independently validate PT_LOAD file and
-memory bounds, permissions and coverage of the entry by an executable segment.
-Positive header offsets do not prove those properties. Likewise the PE fixture
-directory-size check is metadata evidence only: directory RVA/content validation
-and actual unwind execution remain required under ITEM4-REQ-005/006/008.
+The test-first continuation adds independent ELF64 program-header assertions
+for file bounds, file/memory size ordering, power-of-two alignment, offset/address
+congruence, readable loads, W xor X, writable data and file-backed executable
+entry coverage. They apply to both direct ELF targets and the archive-linked
+image. PE assertions now map the exception directory RVA to bytes, validate its
+runtime-function range against executable code and check the referenced unwind
+header version and complete code-slot storage. These assertions are authored,
+not executed evidence; actual loader/unwind execution remains open.
+
+## Additional test-first implementation lanes
+
+The user's `codingtest first` instruction continues executable specification
+authoring while runtime admission is pending. Production fixes still follow
+observed behavioral RED; authoring further tests does not require inventing a
+runtime PASS or waiting for an unrelated bootstrap to complete.
+
+| New executable spec | Concrete cases | Requirement coverage |
+|---|---|---|
+| `test/03_system/app/compiler/feature/item4_linker_relocation_acceptance_spec.spl` | Full `elf_static_link` calls with ABS8 values 0/255 and overflow -1/256; PC8 values -128/127 and overflow -129/128; patch past section, invalid symbol index and unsupported relocation | ITEM4-REQ-004; byte oracle independent of production formulas |
+| `test/03_system/app/compiler/feature/item4_linker_dynamic_acceptance_spec.spl` | Real shared provider and exact DT_NEEDED/imports; stripped image retains required dynamic symbols; hidden provider rejection; typed binding/runpath/hash metadata and invalid policy; embedded-NUL interpreter rejection | ITEM4-REQ-005/006/007; dynamic image semantics, not native execution |
+
+Each mutation must prove it found the intended original ELF field or symbol
+before changing it. New helpers have distinct `item4_reloc_` and
+`item4_dynamic_` prefixes. The expanded image test uses `item4_read_le`,
+`item4_check_elf_load_segments` and `item4_pe_file_offset`; these read wire fields
+or assert mappings and never return a fabricated successful linker result.
+Integration and independent review must reconcile this planned list with the
+actual scenario names before submission.
 
 ## RED -> GREEN -> verification protocol
 

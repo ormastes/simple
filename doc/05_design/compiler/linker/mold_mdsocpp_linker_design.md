@@ -69,6 +69,17 @@ RED or PASS. Manual generation and release qualification follow observed
 RED/GREEN and the full applicable verification gates. See the acceptance plan
 for the current runtime blocker and the full remaining scope.
 
+The subsequent test-first instruction expands the executable oracle before
+production changes. Image acceptance reads ELF64 program headers independently
+of the writer's layout helpers and checks entry coverage, file bounds,
+permissions and alignment. PE acceptance resolves exception/unwind RVAs to
+file-backed ranges. Separate relocation scenarios exercise the complete ELF
+link path with signed/unsigned boundaries and malformed RELA records; dynamic
+scenarios exercise shared-provider identity, strip retention, visibility and
+typed policy. Fixture mutation is permitted only after asserting the original
+field/symbol. None of these authored assertions establishes native execution
+until it is actually run on an admitted runtime and target.
+
 ## 0. Decisions in one screen
 
 | # | Decision | Why |

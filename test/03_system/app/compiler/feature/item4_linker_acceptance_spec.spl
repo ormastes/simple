@@ -24,7 +24,102 @@ use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
 use compiler.backend.linker.elf_parser.{elf_parse_object}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
-use compiler.backend.linker.pe_inspect.{pe_inspect}
+use compiler.backend.linker.pe_inspect.{PeInspector, pe_inspect}
+
+fn item4_read_le(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = offset >= 0 and offset <= bytes.len() and width > 0 and width <= 8
+    expect(valid).to_equal(true)
+    if not valid:
+        return 0
+    val fits = width <= bytes.len() - offset
+    expect(fits).to_equal(true)
+    if not fits:
+        return 0
+    var value: i64 = 0
+    var index: i64 = 0
+    while index < width:
+        value = value | ((bytes[offset + index] & 0xff) << (8 * index))
+        index = index + 1
+    value
+
+fn item4_check_elf_load_segments(bytes: [i64]):
+    # Independent ELF64 wire checks; do not use the writer's layout helpers.
+    expect(bytes.len()).to_be_greater_than(63)
+    if bytes.len() < 64:
+        return
+    expect(bytes[4]).to_equal(2)
+    expect(bytes[5]).to_equal(1)
+    val entry = item4_read_le(bytes, 24, 8)
+    val table = item4_read_le(bytes, 32, 8)
+    val stride = item4_read_le(bytes, 54, 2)
+    val count = item4_read_le(bytes, 56, 2)
+    expect(stride).to_equal(56)
+    expect(count).to_be_greater_than(0)
+    val valid_table = table >= 64 and table <= bytes.len()
+    expect(valid_table).to_equal(true)
+    if stride != 56 or count == 0 or not valid_table:
+        return
+    val table_fits = count <= (bytes.len() - table) / stride
+    expect(table_fits).to_equal(true)
+    if not table_fits:
+        return
+    var executable_entry = false
+    var writable_load = false
+    var index: i64 = 0
+    while index < count:
+        val header = table + index * stride
+        if item4_read_le(bytes, header, 4) == 1:
+            val flags = item4_read_le(bytes, header + 4, 4)
+            val offset = item4_read_le(bytes, header + 8, 8)
+            val address = item4_read_le(bytes, header + 16, 8)
+            val file_size = item4_read_le(bytes, header + 32, 8)
+            val memory_size = item4_read_le(bytes, header + 40, 8)
+            val alignment = item4_read_le(bytes, header + 48, 8)
+            val valid_offset = offset >= 0 and offset <= bytes.len()
+            expect(valid_offset).to_equal(true)
+            if not valid_offset:
+                return
+            val valid_range = file_size >= 0 and file_size <= bytes.len() - offset and
+                address >= 0 and memory_size >= file_size
+            expect(valid_range).to_equal(true)
+            if not valid_range:
+                return
+            expect(alignment).to_be_greater_than(0)
+            if alignment <= 0:
+                return
+            expect(alignment & (alignment - 1)).to_equal(0)
+            expect(address % alignment).to_equal(offset % alignment)
+            expect(flags & 4).to_equal(4)
+            expect((flags & 3) == 3).to_equal(false)
+            if (flags & 1) != 0 and entry >= address and entry - address < file_size:
+                executable_entry = true
+            if (flags & 2) != 0 and memory_size > 0:
+                writable_load = true
+        index = index + 1
+    expect(executable_entry).to_equal(true)
+    expect(writable_load).to_equal(true)
+
+fn item4_pe_file_offset(image: PeInspector, rva: i64, size: i64, file_size: i64) -> i64:
+    val valid = rva >= 0 and size > 0 and file_size >= 0
+    expect(valid).to_equal(true)
+    if not valid:
+        return -1
+    var offset: i64 = -1
+    for section in image.sections:
+        if rva >= section.virtual_address:
+            val delta = rva - section.virtual_address
+            if delta <= section.raw_size and size <= section.raw_size - delta and
+                    delta <= section.virtual_size and size <= section.virtual_size - delta:
+                expect(offset).to_equal(-1)
+                offset = section.raw_pointer + delta
+    val valid_offset = offset >= 0 and offset <= file_size
+    expect(valid_offset).to_equal(true)
+    if not valid_offset:
+        return -1
+    expect(size <= file_size - offset).to_equal(true)
+    if size > file_size - offset:
+        return -1
+    offset
 
 fn item4_load_elf_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("test/fixtures/linker/elf/" + name)
@@ -46,8 +141,15 @@ fn item4_archive_with_member_type(name: text, elf_type: i64) -> [i64]:
     for member in archive.members:
         if member.name == name:
             expect(member.data_size).to_be_greater_than(18)
+            val valid_member = member.data_size > 18 and member.data_offset >= 0 and
+                member.data_offset <= bytes.len() and bytes.len() - member.data_offset >= 18
+            expect(valid_member).to_equal(true)
+            if not valid_member:
+                return bytes
             expect(bytes[member.data_offset + 16]).to_equal(1)
             expect(bytes[member.data_offset + 17]).to_equal(0)
+            if bytes[member.data_offset + 16] != 1 or bytes[member.data_offset + 17] != 0:
+                return bytes
             bytes[member.data_offset + 16] = elf_type
             bytes[member.data_offset + 17] = 0
             found = true
@@ -70,6 +172,8 @@ describe "Item 4 internal linker acceptance":
         expect(image.header.e_entry).to_be_greater_than(0)
         expect(image.header.e_phoff).to_be_greater_than(0)
         expect(image.header.e_shnum).to_be_greater_than(0)
+        step("Validate load bounds, W xor X permissions and file-backed executable entry")
+        item4_check_elf_load_segments(first)
 
     # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
     it "emits deterministic AArch64 ELF ET_EXEC from direct LLVM objects":
@@ -86,6 +190,8 @@ describe "Item 4 internal linker acceptance":
         expect(image.header.e_entry).to_be_greater_than(0)
         expect(image.header.e_phoff).to_be_greater_than(0)
         expect(image.header.e_shnum).to_be_greater_than(0)
+        step("Validate AArch64 load bounds, alignment and executable entry coverage")
+        item4_check_elf_load_segments(first)
 
     # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
     it "links the AArch64 archive fixpoint into deterministic ET_EXEC":
@@ -101,6 +207,9 @@ describe "Item 4 internal linker acceptance":
         expect(image.header.e_type).to_equal(2)
         expect(image.header.e_machine).to_equal(183)
         expect(image.header.e_entry).to_be_greater_than(0)
+
+        step("Validate the archive-linked image has bounded readable load segments")
+        item4_check_elf_load_segments(first)
 
     # @req ITEM4-REQ-003 ITEM4-REQ-006 ITEM4-REQ-007
     it "rejects a selected ET_EXEC archive member by name and ELF type":
@@ -189,4 +298,40 @@ describe "Item 4 internal linker acceptance":
         expect(image.header.machine).to_equal(0x8664)
         expect(image.header.optional_magic).to_equal(0x20b)
         expect(image.header.entry_point_rva).to_equal(0x1000)
+        expect(image.data_directories.len()).to_be_greater_than(3)
+        if image.data_directories.len() <= 3:
+            return
         expect(image.data_directories[3].size).to_equal(12)
+        step("Resolve the exception directory to complete file-backed runtime-function bytes")
+        var bytes: [i64] = []
+        for byte in first:
+            bytes = bytes.push(byte as i64)
+        val directory = image.data_directories[3]
+        val record = item4_pe_file_offset(image, directory.rva, directory.size, bytes.len())
+        val begin = item4_read_le(bytes, record, 4)
+        val end = item4_read_le(bytes, record + 4, 4)
+        val unwind = item4_read_le(bytes, record + 8, 4)
+        expect(begin).to_equal(image.header.entry_point_rva)
+        expect(end).to_be_greater_than(begin)
+        expect(end - begin).to_equal(0x22)
+        val code_offset = item4_pe_file_offset(image, begin, end - begin, bytes.len())
+        expect(code_offset).to_be_greater_than(0)
+        var executable_range = false
+        for section in image.sections:
+            if section.is_executable() and begin >= section.virtual_address:
+                if end - section.virtual_address <= section.virtual_size:
+                    executable_range = true
+        expect(executable_range).to_equal(true)
+        step("Check the unwind header version and complete unwind-code storage")
+        expect(unwind % 4).to_equal(0)
+        val unwind_offset = item4_pe_file_offset(image, unwind, 4, bytes.len())
+        if unwind_offset < 0:
+            return
+        val version_flags = item4_read_le(bytes, unwind_offset, 1)
+        expect(version_flags & 7).to_equal(1)
+        expect(version_flags >> 3).to_equal(0)
+        expect(item4_read_le(bytes, unwind_offset + 1, 1)).to_equal(4)
+        val slots = item4_read_le(bytes, unwind_offset + 2, 1)
+        expect(slots).to_equal(1)
+        val padded_slots = slots + (slots % 2)
+        expect(item4_pe_file_offset(image, unwind, 4 + padded_slots * 2, bytes.len())).to_equal(unwind_offset)
