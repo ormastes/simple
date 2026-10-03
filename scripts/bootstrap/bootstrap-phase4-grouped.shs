@@ -27,6 +27,7 @@ module_role_policy= module_role_policy_digest=
 shared_parse_cas_root=
 root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
 authority_program= authority_receipt= authority_digest= image_receipt=
+derived_image_verified_sha=
 llvm_index_config= cranelift_index_config= phase3_llvm_index_config= phase3_cranelift_index_config=
 threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
 estimated_group_disk_bytes= minimum_free_disk_bytes=
@@ -206,8 +207,25 @@ verify_image_pin() {
     || die "manager image/template changed: $path_key"
 }
 verify_image_set() {
-  [ "$(bootstrap_stage3_manifest_value format "$image_receipt")" = SIMPLE-PHASE2-MANAGER-IMAGES-1 ] \
-    || die "canonical manager image receipt has wrong schema"
+  image_format=$(bootstrap_stage3_manifest_value format "$image_receipt") || die "manager image format missing"
+  case "$image_format" in
+    SIMPLE-PHASE2-MANAGER-IMAGES-1) ;;
+    SIMPLE-DERIVED-MANAGER-IMAGES-1)
+      current_image_sha=$(hash_file "$image_receipt")
+      if [ "$derived_image_verified_sha" != "$current_image_sha" ]; then
+        . "$repo_root/scripts/bootstrap/lib/derived-manager-provenance.shs"
+        helper_snapshot=$(bootstrap_stage3_manifest_value helper_source_snapshot_path "$image_receipt") \
+          || die "derived manager source snapshot missing"
+        bootstrap_derived_manager_provenance_verify "$image_receipt" "$producer" \
+          "$source_authority" "$runtime_snapshot" "$tool_authority" "$repo_root" \
+          "$scratch/derived-source-observed.$$" "$helper_snapshot" \
+          || die "derived manager producer/source/runtime binding differs"
+        # Source bytes establish image provenance once; every subsequent use
+        # still checks the sealed receipt and every installed image hash.
+        derived_image_verified_sha=$current_image_sha
+      fi ;;
+    *) die "manager image receipt has wrong schema" ;;
+  esac
   verify_image_pin "$template" template template_sha256
   verify_image_pin "$manifest_program" manifest_program manifest_sha256
   verify_image_pin "$builder_program" builder_program builder_sha256
