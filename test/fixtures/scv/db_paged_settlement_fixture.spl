@@ -4,7 +4,8 @@ use app.io.file_ops.{secure_temp_dir_raw}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
 use std.scv.db_patch.*
-use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_admission.{db_patch_signing_bytes, db_authorize_patch}
+use std.scv.db_confidentiality.{db_metadata_check_patch}
 use std.scv.db_paged_model.*
 use std.scv.db_receipt.*
 use std.scv.distributed_identity.*
@@ -14,12 +15,14 @@ use app.scv.db.receipt_index_git.*
 use app.scv.db.settlement_queue.*
 use app.scv.db.settlement_queue_codec.*
 use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
 use test.fixtures.scv.db_settlement_queue_fixture.{setup_item2_queue_sign, check_item2_queue_git}
 
 struct Item2PagedSettlementFixture:
     root: text
     source: text
     config: DbSettlementPagedLocalConfig
+    genesis: DbPagedManifest
     patches: [DbPatch]
 
 fn setup_item2_paged_settlement_fixture() -> Item2PagedSettlementFixture:
@@ -33,7 +36,7 @@ fn setup_item2_paged_settlement_fixture() -> Item2PagedSettlementFixture:
     expect(dir_create(scratch, true)).to_equal(true)
     check_item2_queue_git(source, ["init", "--template=", "--object-format=sha1", "."])
     check_item2_queue_git(source, ["init", "--bare", "--template=", "--object-format=sha1", remote])
-    val policy = setup_item2_paged_policy()
+    var policy = setup_item2_paged_policy()
     val genesis = db_paged_genesis(policy).unwrap()
     expect(file_write(source + "/scv/paged/manifest", db_paged_manifest_encode(genesis).unwrap())).to_equal(true)
     expect(file_write(source + "/scv/paged/high-water", db_paged_git_marks([]).unwrap())).to_equal(true)
@@ -55,7 +58,13 @@ fn setup_item2_paged_settlement_fixture() -> Item2PagedSettlementFixture:
     second = db_patch_seal(second).unwrap()
     val (seed, key) = pure_ed25519_keypair_from_seed([46u8;32])
     second.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(second).unwrap())
-    Item2PagedSettlementFixture(root: root, source: source, config: DbSettlementPagedLocalConfig(scratch_parent: scratch, authority: authority, policy: policy, bootstrap_receipt: bootstrap), patches: [first,second])
+    # Review the completed signed envelopes, including their actual captured base.
+    policy.config.admission.metadata = setup_item2_reviewed_metadata([first,second])
+    policy = setup_item2_paged_repin(policy)
+    for patch in [first,second]:
+        expect(db_metadata_check_patch(patch, policy.config.admission.metadata)).to_equal(Ok("allowed"))
+        expect(db_authorize_patch(patch, policy.config.admission, [], 10u64).is_ok()).to_equal(true)
+    Item2PagedSettlementFixture(root: root, source: source, config: DbSettlementPagedLocalConfig(scratch_parent: scratch, authority: authority, policy: policy, bootstrap_receipt: bootstrap), genesis: genesis, patches: [first,second])
 
 fn check_item2_paged_settlement_complete(fixture: Item2PagedSettlementFixture, queued: DbSettlementQueueView) -> DbSettlementQueueView:
     val prepared = db_settlement_resume_paged_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()

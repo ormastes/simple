@@ -13,7 +13,8 @@ use std.scv.db_checkpoint_history.*
 use std.scv.db_pages.*
 use std.scv.db_paged_model.*
 use std.scv.db_patch.*
-use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_admission.{db_patch_signing_bytes, db_authorize_patch}
+use std.scv.db_confidentiality.{db_metadata_check_patch}
 use std.scv.db_reducer.{FieldMergeRule}
 use std.scv.db_receipt.*
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
@@ -22,6 +23,7 @@ use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
 use std.scv.db_snapshot.{db_snapshot_unhex}
 use test.fixtures.scv.db_paged_settlement_fixture.*
 use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
 use test.fixtures.scv.db_settlement_queue_fixture.{setup_item2_queue_sign, check_item2_queue_git}
 
 fn setup_item2_paged_corrupt_blob(fixture: Item2PagedSettlementFixture, previous: DbSettlementReceipt, path: text, content: text) -> DbSettlementReceipt:
@@ -45,7 +47,8 @@ fn setup_item2_paged_corrupt_blob(fixture: Item2PagedSettlementFixture, previous
 
 fn setup_item2_paged_settlement_checkpoint(fixture: Item2PagedSettlementFixture) -> (DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
     val policy = fixture.config.policy
-    val manifest = db_paged_genesis(policy).unwrap()
+    # Retain the exact signed bootstrap root across credential/metadata repinning.
+    val manifest = fixture.genesis
     val history = db_checkpoint_metadata_encode(DbCheckpointMetadata.History(manifest.revision, 1u64, [], [], manifest.revision)).unwrap()
     val build = db_pages_build([history], policy.quota).unwrap()
     val external = fixture.root + "/checkpoint-source"
@@ -152,12 +155,18 @@ describe "paged settlement checkpoint and authority boundaries":
         check_item2_paged_settlement_cleanup(fixture)
 
     it "selects a reverse-arrival predecessor without rewriting either signed patch":
-        val fixture = setup_item2_paged_settlement_fixture()
+        var fixture = setup_item2_paged_settlement_fixture()
         var dependent = fixture.patches[1]
         dependent.causal_dependencies = [fixture.patches[0].batch_id]
         dependent = db_patch_seal(dependent).unwrap()
         val (seed, key) = pure_ed25519_keypair_from_seed([46u8;32])
         dependent.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(dependent).unwrap())
+        fixture.config.policy.config.admission.metadata = setup_item2_reviewed_metadata([fixture.patches[0],dependent])
+        fixture.config.policy = setup_item2_paged_repin(fixture.config.policy)
+        expect(db_metadata_check_patch(dependent, fixture.config.policy.config.admission.metadata)).to_equal(Ok("allowed"))
+        # This fixture assertion supplies the real predecessor ID; the coordinator
+        # must still prove its durable acceptance before preparing the child.
+        expect(db_authorize_patch(dependent, fixture.config.policy.config.admission, [fixture.patches[0].batch_id], 10u64).is_ok()).to_equal(true)
         val child = db_settlement_enqueue(fixture.source, "", dependent, fixture.config.policy.config.admission).unwrap()
         val both = db_settlement_enqueue(fixture.source, child.head, fixture.patches[0], fixture.config.policy.config.admission).unwrap()
         val first = check_item2_paged_settlement_complete(fixture, both)
