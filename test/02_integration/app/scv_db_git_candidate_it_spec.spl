@@ -1,10 +1,9 @@
 # Real disposable local Git effects. Local bare remotes do not prove protected
 # authority capabilities. No fixture ever addresses a configured external remote.
 use std.spec.*
-use app.io.mod.{dir_create, dir_remove_all, process_run_bounded, file_write, file_read, is_dir}
-use app.io.env_ops.{host_os}
+use app.io.mod.{cwd, dir_create, dir_remove_all, process_run_bounded, file_write, file_read, is_dir}
 use app.io.file_ops.{secure_temp_dir_raw}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
 use app.scv.db.git_candidate.*
 
@@ -22,9 +21,9 @@ fn check_item2_candidate_git(root: text, args: [text]) -> text:
     stdout.trim()
 
 fn setup_item2_candidate_fixture() -> Item2GitCandidateFixture:
-    val allocated = secure_temp_dir_raw("/tmp", "scv-candidate-spec-")
+    val allocated = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path, "scv-candidate-spec-")
     expect(allocated.len()).to_be_greater_than(0)
-    val root = path_absolute(allocated)
+    val root = path_final_existing(allocated).unwrap().path
     val source = root + "/source"
     val remote = root + "/authority.git"
     val scratch = root + "/scratch"
@@ -52,129 +51,133 @@ fn setup_item2_candidate_prepare(request: DbGitCandidateRequest) -> DbGitPrepare
             DbGitPreparedCandidate(source_root: "", scratch_parent: "", scratch: "", remote: "", expected_head: "", candidate_oid: "", tree_oid: "", object_format: "")
 
 fn check_item2_candidate_cleanup_fixture(fixture: Item2GitCandidateFixture):
-    expect(path_absolute(fixture.root)).to_equal(fixture.root)
-    expect(fixture.root.starts_with(path_absolute("/tmp") + "/scv-candidate-spec-")).to_equal(true)
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(fixture.root.starts_with(path_final_existing(cwd()).unwrap().path + "/scv-candidate-spec-")).to_equal(true)
     expect(dir_remove_all(fixture.root)).to_equal(true)
 
-if host_os() != "windows":
-    describe "dedicated settled-tree candidate publication on disposable local Git":
-        it "builds one complete tree with sole fetched parent and leaves source index untouched":
-            val fixture = setup_item2_candidate_fixture()
-            val before_index = check_item2_candidate_git(fixture.source, ["hash-object", "--no-filters", "--", ".git/index"])
-            val request = setup_item2_candidate_request(fixture, "one")
-            val candidate = setup_item2_candidate_prepare(request)
-            expect(check_item2_candidate_git(candidate.scratch, ["rev-parse", "--is-bare-repository"])).to_equal("true")
-            expect(check_item2_candidate_git(candidate.scratch, ["rev-list", "--parents", "-n", "1", candidate.candidate_oid])).to_equal("{candidate.candidate_oid} {fixture.head}")
-            expect(check_item2_candidate_git(candidate.scratch, ["ls-tree", "-r", "--name-only", candidate.candidate_oid])).to_equal("state/accepted.scv\nstate/aliases.scv\nstate/allocators.scv")
-            expect(check_item2_candidate_git(candidate.scratch, ["show", "{candidate.candidate_oid}:state/aliases.scv"])).to_equal("aliases:one")
-            expect(check_item2_candidate_git(fixture.source, ["hash-object", "--no-filters", "--", ".git/index"])).to_equal(before_index)
-            expect(check_item2_candidate_git(fixture.source, ["rev-parse", "HEAD"])).to_equal(fixture.head)
-            expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
-            check_item2_candidate_cleanup_fixture(fixture)
+describe "dedicated settled-tree candidate publication on disposable local Git":
+    it "builds one complete tree with sole fetched parent and leaves source index untouched":
+        val fixture = setup_item2_candidate_fixture()
+        val before_index = check_item2_candidate_git(fixture.source, ["hash-object", "--no-filters", "--", ".git/index"])
+        val request = setup_item2_candidate_request(fixture, "one")
+        val candidate = setup_item2_candidate_prepare(request)
+        expect(check_item2_candidate_git(candidate.scratch, ["rev-parse", "--is-bare-repository"])).to_equal("true")
+        expect(check_item2_candidate_git(candidate.scratch, ["rev-list", "--parents", "-n", "1", candidate.candidate_oid])).to_equal("{candidate.candidate_oid} {fixture.head}")
+        expect(check_item2_candidate_git(candidate.scratch, ["ls-tree", "-r", "--name-only", candidate.candidate_oid])).to_equal("state/accepted.scv\nstate/aliases.scv\nstate/allocators.scv")
+        expect(check_item2_candidate_git(candidate.scratch, ["show", "{candidate.candidate_oid}:state/aliases.scv"])).to_equal("aliases:one")
+        expect(check_item2_candidate_git(fixture.source, ["hash-object", "--no-filters", "--", ".git/index"])).to_equal(before_index)
+        expect(check_item2_candidate_git(fixture.source, ["rev-parse", "HEAD"])).to_equal(fixture.head)
+        expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
+        check_item2_candidate_cleanup_fixture(fixture)
 
-        it "publishes by nonforce push and reconciles an acknowledgement-loss retry idempotently":
-            val fixture = setup_item2_candidate_fixture()
-            val candidate = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "one"))
-            val lease = \: scv_sj_lease_is_held(fixture.source)
-            match db_git_candidate_publish(candidate, lease):
-                Ok(result):
-                    expect(result.code).to_equal("published")
-                    expect(result.observed_head).to_equal(candidate.candidate_oid)
-                Err(reason): fail(reason)
-            match db_git_candidate_publish(candidate, lease):
-                Ok(result):
-                    expect(result.code).to_equal("already_published")
-                    expect(result.candidate_oid).to_equal(candidate.candidate_oid)
-                Err(reason): fail(reason)
-            expect(check_item2_candidate_git(fixture.remote, ["rev-parse", "refs/heads/settled"])).to_equal(candidate.candidate_oid)
-            expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
-            check_item2_candidate_cleanup_fixture(fixture)
+    it "publishes by nonforce push and reconciles an acknowledgement-loss retry idempotently":
+        val fixture = setup_item2_candidate_fixture()
+        val candidate = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "one"))
+        val lease = \: scv_sj_lease_is_held(fixture.source)
+        match db_git_candidate_publish(candidate, lease):
+            Ok(result):
+                expect(result.code).to_equal("published")
+                expect(result.observed_head).to_equal(candidate.candidate_oid)
+            Err(reason): fail(reason)
+        match db_git_candidate_publish(candidate, lease):
+            Ok(result):
+                expect(result.code).to_equal("already_published")
+                expect(result.candidate_oid).to_equal(candidate.candidate_oid)
+            Err(reason): fail(reason)
+        expect(check_item2_candidate_git(fixture.remote, ["rev-parse", "refs/heads/settled"])).to_equal(candidate.candidate_oid)
+        expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
+        check_item2_candidate_cleanup_fixture(fixture)
 
-        it "rejects a stale sibling push and preserves the winning complete tree":
-            val fixture = setup_item2_candidate_fixture()
-            val winner = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "winner"))
-            val stale = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "stale"))
-            val lease = \: scv_sj_lease_is_held(fixture.source)
-            match db_git_candidate_publish(winner, lease):
-                Ok(result): expect(result.code).to_equal("published")
-                Err(reason): fail(reason)
-            # Exercise actual Git rejection independently of the preflight guard.
-            val (_out, _err, code) = process_run_bounded("git", ["-C", stale.scratch, "push", "--no-force", fixture.remote, "{stale.candidate_oid}:refs/heads/settled"], 30000, 65536)
-            expect(code == 0).to_equal(false)
-            match db_git_candidate_publish(stale, lease):
-                Ok(result):
-                    expect(result.code).to_equal("stale_head")
-                    expect(result.observed_head).to_equal(winner.candidate_oid)
-                Err(reason): fail(reason)
-            expect(check_item2_candidate_git(fixture.remote, ["show", "refs/heads/settled:state/accepted.scv"])).to_equal("accepted:winner")
-            expect(db_git_candidate_cleanup(winner)).to_equal(Ok(true))
-            expect(db_git_candidate_cleanup(stale)).to_equal(Ok(true))
-            check_item2_candidate_cleanup_fixture(fixture)
+    it "rejects a stale sibling push and preserves the winning complete tree":
+        val fixture = setup_item2_candidate_fixture()
+        val winner = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "winner"))
+        val stale = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "stale"))
+        val lease = \: scv_sj_lease_is_held(fixture.source)
+        match db_git_candidate_publish(winner, lease):
+            Ok(result): expect(result.code).to_equal("published")
+            Err(reason): fail(reason)
+        # Exercise actual Git rejection independently of the preflight guard.
+        val (_out, _err, code) = process_run_bounded("git", ["-C", stale.scratch, "push", "--no-force", fixture.remote, "{stale.candidate_oid}:refs/heads/settled"], 30000, 65536)
+        expect(code == 0).to_equal(false)
+        match db_git_candidate_publish(stale, lease):
+            Ok(result):
+                expect(result.code).to_equal("stale_head")
+                expect(result.observed_head).to_equal(winner.candidate_oid)
+            Err(reason): fail(reason)
+        expect(check_item2_candidate_git(fixture.remote, ["show", "refs/heads/settled:state/accepted.scv"])).to_equal("accepted:winner")
+        expect(db_git_candidate_cleanup(winner)).to_equal(Ok(true))
+        expect(db_git_candidate_cleanup(stale)).to_equal(Ok(true))
+        check_item2_candidate_cleanup_fixture(fixture)
 
-        it "recognizes an accepted candidate after a later settlement advanced the remote":
-            val fixture = setup_item2_candidate_fixture()
-            val first = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "first"))
-            val lease = \: scv_sj_lease_is_held(fixture.source)
-            match db_git_candidate_publish(first, lease):
-                Ok(result): expect(result.code).to_equal("published")
-                Err(reason): fail(reason)
-            var request = setup_item2_candidate_request(fixture, "second")
-            request.expected_head = first.candidate_oid
-            val second = setup_item2_candidate_prepare(request)
-            match db_git_candidate_publish(second, lease):
-                Ok(result): expect(result.code).to_equal("published")
-                Err(reason): fail(reason)
-            match db_git_candidate_publish(first, lease):
-                Ok(result):
-                    expect(result.code).to_equal("already_published")
-                    expect(result.observed_head).to_equal(second.candidate_oid)
-                Err(reason): fail(reason)
-            expect(db_git_candidate_cleanup(first)).to_equal(Ok(true))
-            expect(db_git_candidate_cleanup(second)).to_equal(Ok(true))
-            check_item2_candidate_cleanup_fixture(fixture)
+    it "recognizes an accepted candidate after a later settlement advanced the remote":
+        val fixture = setup_item2_candidate_fixture()
+        val first = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "first"))
+        val lease = \: scv_sj_lease_is_held(fixture.source)
+        match db_git_candidate_publish(first, lease):
+            Ok(result): expect(result.code).to_equal("published")
+            Err(reason): fail(reason)
+        var request = setup_item2_candidate_request(fixture, "second")
+        request.expected_head = first.candidate_oid
+        val second = setup_item2_candidate_prepare(request)
+        match db_git_candidate_publish(second, lease):
+            Ok(result): expect(result.code).to_equal("published")
+            Err(reason): fail(reason)
+        match db_git_candidate_publish(first, lease):
+            Ok(result):
+                expect(result.code).to_equal("already_published")
+                expect(result.observed_head).to_equal(second.candidate_oid)
+            Err(reason): fail(reason)
+        expect(db_git_candidate_cleanup(first)).to_equal(Ok(true))
+        expect(db_git_candidate_cleanup(second)).to_equal(Ok(true))
+        check_item2_candidate_cleanup_fixture(fixture)
 
-        it "refuses held SJ leases and unauthorized public prepared-struct changes":
-            val fixture = setup_item2_candidate_fixture()
-            val request = setup_item2_candidate_request(fixture, "one")
-            val candidate = setup_item2_candidate_prepare(request)
-            val lease = \: scv_sj_lease_is_held(fixture.source)
-            expect(scv_sj_lease_acquire(fixture.source, "candidate-test").starts_with("ok:")).to_equal(true)
-            expect(db_git_candidate_prepare(request, lease)).to_equal(Err("CandidateNetworkForbiddenUnderLease"))
-            expect(db_git_candidate_publish(candidate, lease)).to_equal(Err("CandidateNetworkForbiddenUnderLease"))
-            expect(scv_sj_lease_release(fixture.source, "candidate-test").starts_with("ok:")).to_equal(true)
-            var forged = candidate
-            forged.scratch = fixture.source
-            expect(db_git_candidate_cleanup(forged)).to_equal(Err("CandidateNotOwned"))
-            expect(db_git_candidate_publish(forged, lease)).to_equal(Err("CandidateNotOwned"))
-            expect(is_dir(fixture.source)).to_equal(true)
-            expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
-            expect(db_git_candidate_cleanup(candidate)).to_equal(Err("CandidateNotOwned"))
-            check_item2_candidate_cleanup_fixture(fixture)
+    it "refuses held SJ leases and unauthorized public prepared-struct changes":
+        val fixture = setup_item2_candidate_fixture()
+        val request = setup_item2_candidate_request(fixture, "one")
+        val candidate = setup_item2_candidate_prepare(request)
+        val lease = \: scv_sj_lease_is_held(fixture.source)
+        expect(scv_sj_lease_acquire(fixture.source, "candidate-test").starts_with("ok:")).to_equal(true)
+        expect(db_git_candidate_prepare(request, lease)).to_equal(Err("CandidateNetworkForbiddenUnderLease"))
+        expect(db_git_candidate_publish(candidate, lease)).to_equal(Err("CandidateNetworkForbiddenUnderLease"))
+        expect(scv_sj_lease_release(fixture.source, "candidate-test").starts_with("ok:")).to_equal(true)
+        var forged = candidate
+        forged.scratch = fixture.source
+        expect(db_git_candidate_cleanup(forged)).to_equal(Err("CandidateNotOwned"))
+        expect(db_git_candidate_publish(forged, lease)).to_equal(Err("CandidateNotOwned"))
+        expect(is_dir(fixture.source)).to_equal(true)
+        expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
+        expect(db_git_candidate_cleanup(candidate)).to_equal(Err("CandidateNotOwned"))
+        check_item2_candidate_cleanup_fixture(fixture)
 
-        it "rejects path collisions NUL and scratch containment before publication":
-            val fixture = setup_item2_candidate_fixture()
-            val lease = \: scv_sj_lease_is_held(fixture.source)
-            var request = setup_item2_candidate_request(fixture, "one")
-            request.files = [DbGitCandidateFile(path: "../outside", content: "data")]
-            expect(db_git_candidate_validate(request)).to_equal(Err("CandidateInvalidPathOrText"))
-            request.files = [DbGitCandidateFile(path: "state/A", content: "one"), DbGitCandidateFile(path: "state/a", content: "two")]
-            expect(db_git_candidate_validate(request)).to_equal(Err("CandidatePathCollision"))
-            request.files = [DbGitCandidateFile(path: "state/a", content: "one"), DbGitCandidateFile(path: "state/a/b", content: "two")]
-            expect(db_git_candidate_validate(request)).to_equal(Err("CandidatePathCollision"))
-            request = setup_item2_candidate_request(fixture, "one")
-            request.message = "before\0after"
-            expect(db_git_candidate_validate(request)).to_equal(Err("CandidateInvalidManifest"))
-            request = setup_item2_candidate_request(fixture, "one")
-            request.scratch_parent = fixture.source
-            expect(db_git_candidate_prepare(request, lease)).to_equal(Err("CandidateScratchInsideSource"))
-            check_item2_candidate_cleanup_fixture(fixture)
+    it "rejects path collisions NUL and scratch containment before publication":
+        val fixture = setup_item2_candidate_fixture()
+        val lease = \: scv_sj_lease_is_held(fixture.source)
+        var request = setup_item2_candidate_request(fixture, "one")
+        request.files = [DbGitCandidateFile(path: "../outside", content: "data")]
+        expect(db_git_candidate_validate(request)).to_equal(Err("CandidateInvalidPathOrText"))
+        request.files = [DbGitCandidateFile(path: "state/A", content: "one"), DbGitCandidateFile(path: "state/a", content: "two")]
+        expect(db_git_candidate_validate(request)).to_equal(Err("CandidatePathCollision"))
+        request.files = [DbGitCandidateFile(path: "state/a", content: "one"), DbGitCandidateFile(path: "state/a/b", content: "two")]
+        expect(db_git_candidate_validate(request)).to_equal(Err("CandidatePathCollision"))
+        request = setup_item2_candidate_request(fixture, "one")
+        request.message = "before\0after"
+        expect(db_git_candidate_validate(request)).to_equal(Err("CandidateInvalidManifest"))
+        request = setup_item2_candidate_request(fixture, "one")
+        request.scratch_parent = fixture.source
+        expect(db_git_candidate_prepare(request, lease)).to_equal(Err("CandidateScratchInsideSource"))
+        request.scratch_parent = fixture.scratch_parent + "/../source"
+        expect(db_git_candidate_prepare(request, lease)).to_equal(Err("CandidateScratchInsideSource"))
+        request.scratch_parent = fixture.scratch_parent + "/missing"
+        expect(db_git_candidate_prepare(request, lease)).to_equal(Err("CandidateInvalidScope"))
+        expect(is_dir(request.scratch_parent)).to_equal(false)
+        check_item2_candidate_cleanup_fixture(fixture)
 
-        it "refuses cleanup when the private scratch ownership marker changes":
-            val fixture = setup_item2_candidate_fixture()
-            val candidate = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "one"))
-            expect(file_write(candidate.scratch + "/.scv-candidate-owner", "tampered")).to_equal(true)
-            expect(db_git_candidate_cleanup(candidate)).to_equal(Err("CandidateScratchIdentityChanged"))
-            expect(is_dir(candidate.scratch)).to_equal(true)
-            expect(file_write(candidate.scratch + "/.scv-candidate-owner", candidate.scratch)).to_equal(true)
-            expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
-            check_item2_candidate_cleanup_fixture(fixture)
+    it "refuses cleanup when the private scratch ownership marker changes":
+        val fixture = setup_item2_candidate_fixture()
+        val candidate = setup_item2_candidate_prepare(setup_item2_candidate_request(fixture, "one"))
+        expect(file_write(candidate.scratch + "/.scv-candidate-owner", "tampered")).to_equal(true)
+        expect(db_git_candidate_cleanup(candidate)).to_equal(Err("CandidateScratchIdentityChanged"))
+        expect(is_dir(candidate.scratch)).to_equal(true)
+        expect(file_write(candidate.scratch + "/.scv-candidate-owner", candidate.scratch)).to_equal(true)
+        expect(db_git_candidate_cleanup(candidate)).to_equal(Ok(true))
+        check_item2_candidate_cleanup_fixture(fixture)

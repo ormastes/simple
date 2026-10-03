@@ -4,7 +4,8 @@
 use app.io.mod.{is_dir, dir_create, file_create_exclusive, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_delete, file_exists, file_fsync, directory_fsync}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
 use std.scv.db_confidentiality.*
 use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
@@ -68,22 +69,26 @@ fn _restricted_key_owner(checkout: text, context: DbRestrictedContext) -> Result
 
 fn _restricted_key_scope(checkout: text, external_parent: text, handle: DbRestrictedKeyHandle) -> Result<text, text>:
     val root = db_evidence_external_scope(checkout, external_parent, "scv-restricted-keys-v1")?
-    if not is_dir(root) or path_absolute(root) != root or not handle.directory.starts_with("{root}/key-") or not is_dir(handle.directory) or path_absolute(handle.directory) != handle.directory:
+    if not dir_is_real_no_follow(root) or path_final_existing(root)?.path != root or not handle.directory.starts_with("{root}/key-") or not dir_is_real_no_follow(handle.directory) or path_final_existing(handle.directory)?.path != handle.directory:
         return Err("SCVDB_RESTRICTED_KEY_SCOPE")
+    if not path_identity_contains(path_final_existing(root)?, path_final_existing(handle.directory)?): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
     val leaf = handle.directory[root.len() + 1:]
     if leaf.contains("/") or leaf.contains("\\"): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
     val marker = "{handle.directory}/owner"
-    if not file_is_regular_no_follow(marker) or path_absolute(marker) != marker: return Err("SCVDB_RESTRICTED_KEY_OWNER")
+    if not file_is_regular_no_follow(marker) or path_final_existing(marker)?.path != marker: return Err("SCVDB_RESTRICTED_KEY_OWNER")
     if file_read_regular_no_follow_bounded(marker, 256)? != _restricted_key_owner(checkout, handle.context)?: return Err("SCVDB_RESTRICTED_KEY_OWNER")
     Ok(root)
 
 fn _restricted_key_create_owned(checkout: text, external_parent: text, root: text, context: DbRestrictedContext, hex: text) -> Result<DbRestrictedKeyHandle, text>:
+    val external_identity = path_final_existing(external_parent)?
+    if not dir_is_real_no_follow(external_parent): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
     if not is_dir(root) and not dir_create(root, false): return Err("SCVDB_RESTRICTED_KEY_STORE")
-    if path_absolute(root) != root: return Err("SCVDB_RESTRICTED_KEY_SCOPE")
+    if not dir_is_real_no_follow(root) or path_final_existing(root)?.path != root or not path_identity_contains(external_identity, path_final_existing(root)?): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
     # Secure host temp directories are private (0700 on POSIX), and persist as
     # owned key directories. They are not automatically cleaned or archived.
+    val parent_identity = path_final_existing(root)?
     val directory = secure_temp_dir(root, "key-")?
-    if path_absolute(directory) != directory or not directory.starts_with("{root}/key-"): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
+    if not dir_is_real_no_follow(directory) or path_final_existing(directory)?.path != directory or not path_identity_contains(parent_identity, path_final_existing(directory)?) or not directory.starts_with("{root}/key-"): return Err("SCVDB_RESTRICTED_KEY_SCOPE")
     val owner = _restricted_key_owner(checkout, context)?
     if not file_create_exclusive("{directory}/owner", owner): return Err("SCVDB_RESTRICTED_KEY_OWNER")
     if not file_create_exclusive("{directory}/active.key", hex): return Err("SCVDB_RESTRICTED_KEY_CREATE")
@@ -109,14 +114,14 @@ fn db_restricted_key_create(checkout: text, external_parent: text, context: DbRe
 fn db_restricted_key_load(checkout: text, external_parent: text, handle: DbRestrictedKeyHandle) -> Result<[u8], text>:
     val root = _restricted_key_scope(checkout, external_parent, handle)?
     val path = "{handle.directory}/active.key"
-    if not file_is_regular_no_follow(path) or path_absolute(path) != path: return Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE")
+    if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path: return Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE")
     val hex = file_read_regular_no_follow_bounded(path, 64)?
     _restricted_hex_bytes(hex, 32)
 
 fn _restricted_key_delete_owned(checkout: text, external_parent: text, handle: DbRestrictedKeyHandle) -> Result<DbDeletionReport, text>:
     val root = _restricted_key_scope(checkout, external_parent, handle)?
     val path = "{handle.directory}/active.key"
-    if not file_is_regular_no_follow(path) or path_absolute(path) != path: return Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE")
+    if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path: return Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE")
     if not file_delete(path): return Err("SCVDB_RESTRICTED_KEY_DELETE")
     if not directory_fsync(handle.directory) or not directory_fsync(root) or not directory_fsync(external_parent): return Err("SCVDB_RESTRICTED_KEY_DURABILITY_UNCERTAIN")
     if file_exists(path) or file_is_regular_no_follow(path): return Err("SCVDB_RESTRICTED_KEY_DELETE_READBACK")

@@ -3,14 +3,15 @@
 use std.spec.{describe, it, expect, fail, step}
 use app.io.mod.{cwd, dir_create, dir_list, file_exists, file_delete, file_write_bytes, file_read_regular_no_follow_bounded_bytes, process_run_timeout}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use app.io.env_ops.{host_os}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
 use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
 use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_put, db_evidence_store_get}
 
 fn setup_item2_store_paths() -> (text, text):
     var root = ""
-    match secure_temp_dir(path_absolute(cwd()), "item2-cas-fixture-"):
+    match secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-cas-fixture-"):
         Ok(value): root = value
         Err(error): fail(error)
     expect(root.len() > 0).to_be(true)
@@ -136,10 +137,22 @@ describe "SCV external evidence CAS real file publication":
         expect(file_exists("{external}/scv-evidence-v1")).to_be(false)
         expect(scv_sj_lease_release(source, "other-owner")).to_equal("ok: released")
 
-    it "rejects a symlink alias for the configured CAS directory":
+    it "requires a disjoint existing parent before deriving a new CAS leaf":
         val (source, external) = setup_item2_store_paths()
-        val node = setup_item2_store_node([1], [])
-        val (_out, _err, code) = process_run_timeout("ln", ["-s", source, "{external}/scv-evidence-v1"], 30000)
-        expect(code).to_equal(0)
-        check_item2_store_put_error(source, external, node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
-        expect(file_exists("{source}/{node.digest}.scve")).to_be(false)
+        val node = setup_item2_store_node([11], [])
+        val ancestor = path_final_existing(source + "/..").unwrap().path
+        check_item2_store_put_error(source, ancestor, node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
+        check_item2_store_put_error(source, external + "/missing-parent", node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
+        expect(file_exists(ancestor + "/scv-evidence-v1")).to_be(false)
+        expect(file_exists(external + "/missing-parent")).to_be(false)
+        expect(file_exists(source + "/.sj/lease/holder")).to_be(false)
+
+if host_os() != "windows":
+    describe "POSIX external evidence alias fixture":
+        it "rejects a symlink alias for the configured CAS directory":
+            val (source, external) = setup_item2_store_paths()
+            val node = setup_item2_store_node([1], [])
+            val (_out, _err, code) = process_run_timeout("ln", ["-s", source, "{external}/scv-evidence-v1"], 30000)
+            expect(code).to_equal(0)
+            check_item2_store_put_error(source, external, node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
+            expect(file_exists("{source}/{node.digest}.scve")).to_be(false)

@@ -1,8 +1,9 @@
 # External immutable evidence CAS. Input is bytes, never an archive extraction
 # or executable reproduction. Authorization/encryption are separate owners.
-use app.io.mod.{is_dir, dir_create, dir_remove_all, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_exists, file_fsync, directory_fsync, process_run_timeout, env_get, host_os}
+use app.io.mod.{is_dir, dir_create, dir_remove_all, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_exists, file_fsync, directory_fsync, process_run_timeout, env_get}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
 use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
 
@@ -23,53 +24,39 @@ fn _evidence_digest_valid(digest: text) -> bool:
             return false
     true
 
-fn _evidence_contains(parent: text, child: text) -> bool:
-    parent == "/" or parent == child or child.starts_with("{parent}/")
-
-fn _evidence_path_valid(path: text) -> bool:
-    if not path.starts_with("/") or path.starts_with("//") or path.contains("\\") or path.contains("\n") or path.contains("\r") or path.ends_with("/"):
-        return false
-    for index in 0..path.len():
-        if path.char_code_at(index) == 0:
-            return false
-    for component in path.split("/"):
-        if component == "." or component == "..":
-            return false
-    true
-
-# Only local bounded Git discovery; no network wait occurs under the lease.
+# Existing parents are resolved before deriving a new leaf. Unsupported SMB/UNC
+# volume identity propagates an error; there is no lexical authority fallback.
+# Parents must remain trusted against concurrent same-name object replacement.
 fn db_evidence_external_scope(checkout: text, external_parent: text, leaf: text) -> Result<text, text>:
     if leaf != "scv-evidence-v1" and leaf != "scv-restricted-keys-v1":
         return Err("SCVDB_STORE_SCOPE")
-    if host_os() == "windows":
-        return Err("SCVDB_STORE_CANONICAL_PATH_UNSUPPORTED")
-    if not _evidence_path_valid(checkout) or not _evidence_path_valid(external_parent) or not is_dir(checkout) or not is_dir(external_parent):
+    if not dir_is_real_no_follow(checkout) or not dir_is_real_no_follow(external_parent):
         return Err("SCVDB_STORE_SCOPE")
-    if path_absolute(checkout) != checkout or path_absolute(external_parent) != external_parent:
-        return Err("SCVDB_STORE_SCOPE")
+    val source = path_final_existing(checkout)?
+    val parent = path_final_existing(external_parent)?
+    if source.path != checkout or parent.path != external_parent: return Err("SCVDB_STORE_SCOPE")
     for key in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH"]:
-        if env_get(key).len() > 0:
-            return Err("SCVDB_STORE_GIT_ENV")
-    val (top, _top_error, top_code) = process_run_timeout("git", ["--no-replace-objects", "-C", checkout, "rev-parse", "--show-toplevel"], 30000)
-    val (common, _common_error, common_code) = process_run_timeout("git", ["--no-replace-objects", "-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"], 30000)
-    if top_code != 0 or common_code != 0 or top.len() > 4096 or common.len() > 4096 or path_absolute(top.trim()) != checkout:
+        if env_get(key).len() > 0: return Err("SCVDB_STORE_GIT_ENV")
+    val (top, _top_error, top_code) = process_run_timeout("git", ["--no-replace-objects", "-C", source.path, "rev-parse", "--show-toplevel"], 30000)
+    val (common, _common_error, common_code) = process_run_timeout("git", ["--no-replace-objects", "-C", source.path, "rev-parse", "--path-format=absolute", "--git-common-dir"], 30000)
+    if top_code != 0 or common_code != 0 or top.len() > 4096 or common.len() > 4096:
         return Err("SCVDB_STORE_REPOSITORY")
-    val common_path = path_absolute(common.trim())
-    if common_path.len() <= 0:
-        return Err("SCVDB_STORE_REPOSITORY")
-    val root = "{external_parent}/{leaf}"
-    if _evidence_contains(checkout, root) or _evidence_contains(root, checkout) or _evidence_contains(common_path, root) or _evidence_contains(root, common_path):
+    if not path_identity_same(path_final_existing(top.trim())?, source): return Err("SCVDB_STORE_REPOSITORY")
+    val common_identity = path_final_existing(common.trim())?
+    # Require a dedicated disjoint parent, so a not-yet-created leaf never needs
+    # an invented canonical identity and cannot contain the source checkout.
+    if path_identity_contains(source, parent) or path_identity_contains(parent, source) or path_identity_contains(common_identity, parent) or path_identity_contains(parent, common_identity):
         return Err("SCVDB_STORE_SCOPE")
+    val root = parent.path + "/" + leaf
     if is_dir(root) or file_exists(root):
-        if not is_dir(root) or path_absolute(root) != root:
-            return Err("SCVDB_STORE_SCOPE")
-    # Reject a preexisting alias for SJ's lock directory, too.
-    val sj = "{checkout}/.sj"
+        if not dir_is_real_no_follow(root): return Err("SCVDB_STORE_SCOPE")
+        val existing = path_final_existing(root)?
+        if existing.path != root or not path_identity_contains(parent, existing): return Err("SCVDB_STORE_SCOPE")
+    val sj = source.path + "/.sj"
     if is_dir(sj) or file_exists(sj):
-        if not is_dir(sj) or path_absolute(sj) != sj:
-            return Err("SCVDB_STORE_SCOPE")
+        if not dir_is_real_no_follow(sj): return Err("SCVDB_STORE_SCOPE")
+        if not path_identity_contains(source, path_final_existing(sj)?): return Err("SCVDB_STORE_SCOPE")
     Ok(root)
-
 fn _evidence_scope(checkout: text, external_parent: text) -> Result<text, text>:
     db_evidence_external_scope(checkout, external_parent, "scv-evidence-v1")
 
@@ -161,10 +148,10 @@ fn _evidence_decode(bytes: [u8], digest: text, created_day: u64, quota: DbEviden
     Ok(DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: created_day, dependencies: dependencies))
 
 fn _evidence_read(root: text, digest: text, created_day: u64, quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
-    if not is_dir(root) or path_absolute(root) != root:
+    if not dir_is_real_no_follow(root) or path_final_existing(root)?.path != root:
         return Err("SCVDB_STORE_UNAVAILABLE")
     val destination = "{root}/{digest}.scve"
-    if not file_is_regular_no_follow(destination) or path_absolute(destination) != destination:
+    if not file_is_regular_no_follow(destination) or path_final_existing(destination)?.path != destination:
         return Err("SCVDB_EVIDENCE_UNAVAILABLE")
     val bytes = file_read_regular_no_follow_bounded_bytes(destination, quota.max_envelope_bytes)?
     _evidence_decode(bytes, digest, created_day, quota)
@@ -178,7 +165,7 @@ fn db_evidence_store_get(checkout: text, external_parent: text, digest: text, cr
     _evidence_read(root, digest, created_day, quota)
 
 fn _evidence_publish(root: text, stage: text, node: DbEvidenceNode, bytes: [u8], quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
-    if path_absolute(root) != root or path_absolute(stage) != stage or not stage.starts_with("{root}/quarantine-"):
+    if not dir_is_real_no_follow(root) or not dir_is_real_no_follow(stage) or not path_identity_contains(path_final_existing(root)?, path_final_existing(stage)?) or path_final_existing(root)?.path != root or path_final_existing(stage)?.path != stage or not stage.starts_with("{root}/quarantine-"):
         return Err("SCVDB_STORE_SCOPE")
     val staged_file = "{stage}/envelope"
     if not file_write_bytes(staged_file, bytes):
@@ -190,10 +177,10 @@ fn _evidence_publish(root: text, stage: text, node: DbEvidenceNode, bytes: [u8],
         return Err("SCVDB_EVIDENCE_STAGE_CHANGED")
     # Publication never replaces an existing entry, including a hostile link.
     val destination = "{root}/{node.digest}.scve"
-    if path_absolute(root) != root or path_absolute(stage) != stage:
+    if not dir_is_real_no_follow(root) or not dir_is_real_no_follow(stage) or path_final_existing(root)?.path != root or path_final_existing(stage)?.path != stage:
         return Err("SCVDB_STORE_SCOPE")
     val _inserted = file_publish_noreplace(staged_file, destination)?
-    if not file_is_regular_no_follow(destination) or path_absolute(destination) != destination:
+    if not file_is_regular_no_follow(destination) or path_final_existing(destination)?.path != destination:
         return Err("SCVDB_EVIDENCE_COLLISION")
     val actual = file_read_regular_no_follow_bounded_bytes(destination, quota.max_envelope_bytes)?
     if actual != bytes:
@@ -204,16 +191,20 @@ fn _evidence_publish(root: text, stage: text, node: DbEvidenceNode, bytes: [u8],
         return Err("SCVDB_EVIDENCE_DURABILITY_UNCERTAIN")
     _evidence_decode(actual, node.digest, node.created_day, quota)
 
-fn _evidence_put_locked(root: text, node: DbEvidenceNode, bytes: [u8], quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+fn _evidence_put_locked(root: text, external_parent: text, node: DbEvidenceNode, bytes: [u8], quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+    val external_identity = path_final_existing(external_parent)?
+    if not dir_is_real_no_follow(external_parent): return Err("SCVDB_STORE_SCOPE")
     if not is_dir(root) and not dir_create(root, false):
         return Err("SCVDB_STORE_CREATE")
-    if path_absolute(root) != root:
+    if not dir_is_real_no_follow(root) or path_final_existing(root)?.path != root or not path_identity_contains(external_identity, path_final_existing(root)?):
         return Err("SCVDB_STORE_SCOPE")
+    val parent_identity = path_final_existing(root)?
     val stage = secure_temp_dir(root, "quarantine-")?
-    if path_absolute(stage) != stage or not stage.starts_with("{root}/quarantine-"):
+    val created = path_final_existing(stage)?
+    if not dir_is_real_no_follow(stage) or created.path != stage or not path_identity_contains(parent_identity, created) or not stage.starts_with("{root}/quarantine-"):
         return Err("SCVDB_STORE_SCOPE")
     val result = _evidence_publish(root, stage, node, bytes, quota)
-    if path_absolute(stage) != stage or not dir_remove_all(stage):
+    if not dir_is_real_no_follow(stage) or not path_identity_same(created, path_final_existing(stage)?) or not path_identity_same(parent_identity, path_final_existing(root)?) or not dir_remove_all(stage):
         return Err("SCVDB_EVIDENCE_CLEANUP")
     result
 
@@ -226,7 +217,7 @@ fn db_evidence_store_put(checkout: text, external_parent: text, node: DbEvidence
     val acquired = scv_sj_lease_acquire(checkout, holder)
     if not acquired.starts_with("ok:"):
         return Err("SCVDB_STORE_BUSY")
-    val result = _evidence_put_locked(root, node, bytes, quota)
+    val result = _evidence_put_locked(root, external_parent, node, bytes, quota)
     val released = scv_sj_lease_release(checkout, holder)
     if not released.starts_with("ok:"):
         return Err("SCVDB_STORE_LEASE_RELEASE")

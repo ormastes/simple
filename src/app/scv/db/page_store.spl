@@ -5,7 +5,7 @@ use app.io.mod.{dir_create, dir_remove_all, file_write_bytes, file_read_regular_
 use app.io.file_ops.{secure_temp_dir, file_publish_noreplace}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_release, scv_sj_lease_is_held}
 use app.scv.db.local_store.{db_store_read, db_store_commit, db_local_path_scope}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -43,7 +43,7 @@ fn _db_page_path(root: text, digest: text) -> Result<text, text>:
 
 fn _db_page_read_bytes(path: text, limit: i64 = 16777216) -> Result<[u8], text>:
     if limit <= 0 or limit > 16777216: return Err("SCVDB_PAGE_BYTES_QUOTA")
-    if not file_is_regular_no_follow(path) or path_absolute(path) != path:
+    if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path:
         return Err("SCVDB_PAGE_FILE_SCOPE")
     file_read_regular_no_follow_bounded_bytes(path, limit)
 
@@ -63,11 +63,16 @@ fn _db_page_stage_publish(stage: text, destination: text, bytes: [u8]) -> Result
 fn _db_page_publish_bytes(root: text, digest: text, bytes: [u8]) -> Result<bool, text>:
     val destination = _db_page_path(root, digest)?
     val pages = root + "/.scv/db-pages/pages"
+    val parent_identity = path_final_existing(pages)?
+    if not dir_is_real_no_follow(pages): return Err("SCVDB_PAGE_STAGE_SCOPE")
     val stage = secure_temp_dir(pages, "page-")?
-    if path_absolute(stage) != stage or not dir_is_real_no_follow(stage) or not stage.starts_with(pages + "/page-"):
+    val created = path_final_existing(stage)?
+    if created.path != stage or not path_identity_contains(parent_identity, created) or not dir_is_real_no_follow(stage) or not stage.starts_with(pages + "/page-"):
         return Err("SCVDB_PAGE_STAGE_SCOPE")
     val result = _db_page_stage_publish(stage, destination, bytes)
-    if path_absolute(stage) != stage or not dir_remove_all(stage):
+    # The owner requires a stable trusted parent: path identity is not an inode
+    # token and cannot distinguish same-name replacement by a hostile writer.
+    if not dir_is_real_no_follow(stage) or not path_identity_same(created, path_final_existing(stage)?) or not path_identity_same(parent_identity, path_final_existing(pages)?) or not dir_remove_all(stage):
         return Err("SCVDB_PAGE_CLEANUP")
     result
 
@@ -181,11 +186,14 @@ fn _db_page_prepare_changed(build: DbPageBuild, previous: DbPageManifest?) -> Re
 
 fn _db_page_write_owned(root: text, pages: [_DbEncodedPage]) -> Result<bool, text>:
     _db_page_scope(root)?
+    var parent_identity = path_final_existing(root)?
     for directory in [root + "/.scv", root + "/.scv/db-pages", root + "/.scv/db-pages/pages"]:
         if not dir_is_real_no_follow(directory) and not dir_create(directory, false):
             return Err("SCVDB_PAGE_DIRECTORY_CREATE")
-        if not dir_is_real_no_follow(directory) or path_absolute(directory) != directory:
+        val created = path_final_existing(directory)?
+        if not dir_is_real_no_follow(directory) or created.path != directory or not path_identity_contains(parent_identity, created) or path_identity_same(parent_identity, created):
             return Err("SCVDB_PAGE_DIRECTORY_SCOPE")
+        parent_identity = created
     for page in pages:
         _db_page_publish_bytes(root, page.digest, page.bytes)?
     for directory in [root + "/.scv/db-pages/pages", root + "/.scv/db-pages", root + "/.scv", root]:

@@ -4,9 +4,10 @@
 # Network calls require the caller's SJ lease query; the owner must exclude
 # concurrent lease acquisition until the synchronous call has returned.
 use app.io.mod.{is_dir, dir_remove_all, process_run_bounded}
-use app.io.env_ops.{env_get, host_os}
+use app.io.env_ops.{env_get}
 use app.io.file_ops.{secure_temp_dir_raw, file_write_bytes, file_read, file_is_regular_no_follow}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path_identity_same, path_identity_contains}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.common.text_bytes.{text_to_utf8_bytes}
 use app.scv.db.git_settlement_transport.{db_git_settlement_reconcile_history}
 use app.scv.db.git_policy.{db_git_network_config_safe}
@@ -41,7 +42,7 @@ struct DbGitCandidatePublication:
 
 # Private in-process ownership. Public struct fields never authorize cleanup or
 # publication. Durable recovery imports require a separate authenticated owner.
-var _db_candidate_owned_scratch: [text] = []
+var _db_candidate_owned_scratch: [HostFinalPath] = []
 var _db_candidate_prepared: [DbGitPreparedCandidate] = []
 
 fn _db_candidate_oid(oid: text, format: text) -> bool:
@@ -77,12 +78,15 @@ fn _db_candidate_network_config_safe(root: text) -> Result<bool, text>:
     Ok(true)
 
 fn _db_candidate_remote_allowed(remote: text) -> bool:
-    if remote.starts_with("/") and not remote.starts_with("//"):
+    if not remote.starts_with("https://"):
         for i in 0..remote.len():
             val code = remote.char_code_at(i)
             if code < 32 or code == 127:
                 return false
-        return is_dir(remote)
+        if not dir_is_real_no_follow(remote): return false
+        match path_final_existing(remote):
+            Ok(resolved): return resolved.path == remote
+            Err(_): return false
     if not remote.starts_with("https://github.com/"):
         return false
     val parts = remote[19:].split("/")
@@ -116,9 +120,6 @@ fn _db_candidate_path(path: text) -> bool:
     true
 
 fn db_git_candidate_validate(request: DbGitCandidateRequest) -> Result<bool, text>:
-    # Existing path facade cannot prove Windows junction identity; fail closed.
-    if host_os() == "windows":
-        return Err("CandidatePathIdentityUnsupported")
     if not _db_candidate_environment_safe():
         return Err("CandidateGitEnvironmentOverride")
     for path in [request.source_root, request.scratch_parent]:
@@ -126,8 +127,10 @@ fn db_git_candidate_validate(request: DbGitCandidateRequest) -> Result<bool, tex
             val code = path.char_code_at(i)
             if code < 32 or code == 127:
                 return Err("CandidateInvalidScope")
-    if not request.source_root.starts_with("/") or not request.scratch_parent.starts_with("/") or not is_dir(request.source_root) or not is_dir(request.scratch_parent) or not _db_candidate_remote_allowed(request.remote):
+    if not dir_is_real_no_follow(request.source_root) or not dir_is_real_no_follow(request.scratch_parent) or not _db_candidate_remote_allowed(request.remote):
         return Err("CandidateInvalidScope")
+    path_final_existing(request.source_root)?
+    path_final_existing(request.scratch_parent)?
     if not _db_candidate_oid(request.expected_head, request.object_format):
         return Err("CandidateInvalidHead")
     if request.files.len() == 0 or request.files.len() > 10000 or request.message == "" or request.message.len() > 4096 or request.message.contains("\0"):
@@ -148,29 +151,40 @@ fn db_git_candidate_validate(request: DbGitCandidateRequest) -> Result<bool, tex
         total = total + bytes
     Ok(true)
 
-fn _db_candidate_scratch_parent(request: DbGitCandidateRequest) -> Result<text, text>:
-    var source = path_absolute(request.source_root)
-    val parent = path_absolute(request.scratch_parent)
-    val common = path_absolute(_db_candidate_run(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"])?)
-    if _db_candidate_run(source, ["rev-parse", "--is-bare-repository"])? == "false":
-        source = path_absolute(_db_candidate_run(source, ["rev-parse", "--show-toplevel"])?)
-    if parent == "" or parent == "/" or source == "" or common == "" or _db_candidate_inside(source, parent) or _db_candidate_inside(common, parent):
+fn _db_candidate_scratch_parent(request: DbGitCandidateRequest) -> Result<HostFinalPath, text>:
+    var source = path_final_existing(request.source_root)?
+    val parent = path_final_existing(request.scratch_parent)?
+    val common = path_final_existing(_db_candidate_run(source.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?
+    if _db_candidate_run(source.path, ["rev-parse", "--is-bare-repository"])? == "false":
+        source = path_final_existing(_db_candidate_run(source.path, ["rev-parse", "--show-toplevel"])?)?
+    if parent.path.ends_with("/") or path_identity_contains(source, parent) or path_identity_contains(common, parent):
         return Err("CandidateScratchInsideSource")
-    val format = _db_candidate_run(source, ["rev-parse", "--show-object-format"])?
+    val format = _db_candidate_run(source.path, ["rev-parse", "--show-object-format"])?
     if format != request.object_format:
         return Err("CandidateObjectFormatMismatch")
     Ok(parent)
 
+fn _db_candidate_owned(scratch: text) -> bool:
+    if not dir_is_real_no_follow(scratch): return false
+    match path_final_existing(scratch):
+        Ok(current):
+            for owned in _db_candidate_owned_scratch:
+                if owned.path == scratch and path_identity_same(owned, current): return true
+        Err(_): return false
+    false
+
+# Registry tokens detect aliases, not hostile same-name object replacement.
+# The securely allocated child's parent must remain trusted through cleanup.
 fn _db_candidate_cleanup_owned(scratch: text) -> Result<bool, text>:
-    if not _db_candidate_owned_scratch.contains(scratch):
+    if not _db_candidate_owned(scratch):
         return Err("CandidateScratchNotOwned")
-    if path_absolute(scratch) != scratch or not file_is_regular_no_follow(scratch + "/.scv-candidate-owner") or file_read(scratch + "/.scv-candidate-owner") != scratch:
+    if not file_is_regular_no_follow(scratch + "/.scv-candidate-owner") or file_read(scratch + "/.scv-candidate-owner") != scratch:
         return Err("CandidateScratchIdentityChanged")
     if not dir_remove_all(scratch):
         return Err("CandidateScratchCleanupFailed")
-    var retained: [text] = []
+    var retained: [HostFinalPath] = []
     for owned in _db_candidate_owned_scratch:
-        if owned != scratch:
+        if owned.path != scratch:
             retained.push(owned)
     _db_candidate_owned_scratch = retained
     var candidates: [DbGitPreparedCandidate] = []
@@ -202,23 +216,25 @@ fn _db_candidate_build(request: DbGitCandidateRequest, scratch: text, parent: te
     val oid = _db_candidate_run(scratch, ["-c", "user.name=SCV Settlement", "-c", "user.email=scv-settlement@invalid", "commit-tree", tree, "-p", request.expected_head, "-m", request.message])?
     if not _db_candidate_oid(oid, request.object_format):
         return Err("CandidateInvalidCommit")
-    Ok(DbGitPreparedCandidate(source_root: path_absolute(request.source_root), scratch_parent: parent, scratch: scratch, remote: request.remote, expected_head: request.expected_head, candidate_oid: oid, tree_oid: tree, object_format: request.object_format))
+    Ok(DbGitPreparedCandidate(source_root: path_final_existing(request.source_root)?.path, scratch_parent: parent, scratch: scratch, remote: request.remote, expected_head: request.expected_head, candidate_oid: oid, tree_oid: tree, object_format: request.object_format))
 
 fn db_git_candidate_prepare(request: DbGitCandidateRequest, lease_held: fn() -> bool) -> Result<DbGitPreparedCandidate, text>:
     db_git_candidate_validate(request)?
     if lease_held():
         return Err("CandidateNetworkForbiddenUnderLease")
     val parent = _db_candidate_scratch_parent(request)?
-    val scratch = secure_temp_dir_raw(parent, "scv-candidate-")
-    if scratch == "" or path_absolute(scratch) != scratch or not scratch.starts_with(parent + "/scv-candidate-"):
+    val scratch = secure_temp_dir_raw(parent.path, "scv-candidate-")
+    if scratch == "": return Err("CandidateScratchCreationFailed")
+    val created = path_final_existing(scratch)?
+    if created.path != scratch or not dir_is_real_no_follow(scratch) or not path_identity_contains(parent, created) or not scratch.starts_with(parent.path + "/scv-candidate-"):
         return Err("CandidateScratchCreationFailed")
     if not file_write_bytes(scratch + "/.scv-candidate-owner", text_to_utf8_bytes(scratch)):
         # Fresh, securely allocated, canonical path; no external effects yet.
-        if path_absolute(scratch) == scratch:
+        if dir_is_real_no_follow(scratch) and path_identity_same(created, path_final_existing(scratch)?):
             val removed = dir_remove_all(scratch)
         return Err("CandidateOwnershipMarkerFailed")
-    _db_candidate_owned_scratch.push(scratch)
-    match _db_candidate_build(request, scratch, parent, lease_held):
+    _db_candidate_owned_scratch.push(created)
+    match _db_candidate_build(request, scratch, parent.path, lease_held):
         Ok(candidate):
             _db_candidate_prepared.push(candidate)
             match _db_candidate_verify(candidate):
@@ -237,9 +253,9 @@ fn _db_candidate_registered(candidate: DbGitPreparedCandidate) -> bool:
     false
 
 fn _db_candidate_verify(candidate: DbGitPreparedCandidate) -> Result<bool, text>:
-    if not _db_candidate_registered(candidate) or not _db_candidate_owned_scratch.contains(candidate.scratch):
+    if not _db_candidate_registered(candidate) or not _db_candidate_owned(candidate.scratch):
         return Err("CandidateNotOwned")
-    if path_absolute(candidate.scratch) != candidate.scratch or not file_is_regular_no_follow(candidate.scratch + "/.scv-candidate-owner") or file_read(candidate.scratch + "/.scv-candidate-owner") != candidate.scratch:
+    if not file_is_regular_no_follow(candidate.scratch + "/.scv-candidate-owner") or file_read(candidate.scratch + "/.scv-candidate-owner") != candidate.scratch:
         return Err("CandidateScratchIdentityChanged")
     if _db_candidate_run(candidate.scratch, ["rev-parse", "--show-object-format"])? != candidate.object_format:
         return Err("CandidateObjectFormatMismatch")
