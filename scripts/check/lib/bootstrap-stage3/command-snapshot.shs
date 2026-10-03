@@ -289,6 +289,28 @@ bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_tmpdir=$5
     bootstrap_stage3_run_path=$6
     shift 6
+    # The same finite cap feeds the watchdog and the child's shard admission.
+    # Carry it as explicit-env before freezing the transcript; do not widen the
+    # fixed host-env schema or allow a caller to substitute a different budget.
+    bootstrap_stage3_run_rss_cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}
+    case "$bootstrap_stage3_run_rss_cap" in
+        ''|*[!0-9]*) echo 'bootstrap-transcript-error: invalid RSS cap' >&2; return 1 ;;
+    esac
+    [ "$bootstrap_stage3_run_rss_cap" -gt 0 ] &&
+        [ "$bootstrap_stage3_run_rss_cap" -le 6835937 ] || return 1
+    for bootstrap_stage3_run_env in "$@"; do
+        [ "$bootstrap_stage3_run_env" != -- ] || break
+        case "$bootstrap_stage3_run_env" in
+            [Ss][Ii][Mm][Pp][Ll][Ee]_[Ss][Hh][Aa][Rr][Dd]_[Tt][Rr][Ee][Ee]_[Mm][Ee][Mm][Oo][Rr][Yy]_[Bb][Uu][Dd][Gg][Ee][Tt]_[Kk][Ii][Bb]=*)
+                echo 'bootstrap-transcript-error: reserved shard budget' >&2
+                return 1 ;;
+        esac
+    done
+    bootstrap_stage3_run_shard_budget=0
+    if [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ]; then
+        bootstrap_stage3_run_shard_budget=$bootstrap_stage3_run_rss_cap
+    fi
+    set -- "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$bootstrap_stage3_run_shard_budget" "$@"
     for bootstrap_stage3_run_directory in "$bootstrap_stage3_run_home" \
         "$bootstrap_stage3_run_tmpdir"; do
         if [ ! -d "$bootstrap_stage3_run_directory" ] ||
@@ -348,7 +370,7 @@ ${ProgramData:-${PROGRAMDATA:-}}
                 PATH="$bootstrap_stage3_run_path" perl "$bootstrap_stage3_rss_runner" \
                     --session-mode="$bootstrap_stage3_rss_session_mode" \
                     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-                    --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+                    --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
                     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
                     --receipt="$bootstrap_stage3_run_log.rss.env" -- \
                 env -i "HOME=$bootstrap_stage3_run_home" \
@@ -388,7 +410,7 @@ ${ProgramData:-${PROGRAMDATA:-}}
         perl "$bootstrap_stage3_rss_runner" \
             --session-mode="$bootstrap_stage3_rss_session_mode" \
             --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
-            --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+            --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
             --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
             --receipt="$bootstrap_stage3_run_log.rss.env" -- \
         /bin/sh -c '
