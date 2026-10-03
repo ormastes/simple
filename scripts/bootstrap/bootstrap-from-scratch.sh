@@ -2477,13 +2477,20 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
         export HOMEBREW_PREFIX="${brew_prefix}"
         export LIBRARY_PATH="${LIBRARY_PATH:+${LIBRARY_PATH}:}${brew_prefix}/lib"
       fi
-      export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
     echo "error: admitted LLVM 23.1.1 (native Linux/FreeBSD: 23.1.2) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
+fi
+
+# Stage 2 native-build admits a Darwin action only with an explicit SDK and
+# deployment target (compile_targets.spl, darwin-deployment-or-sdk-missing).
+# Default both to the host macOS SDK; an explicit caller value wins.
+if [ "${host_os}" = "Darwin" ]; then
+  export SDKROOT="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)}"
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)}"
 fi
 
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
