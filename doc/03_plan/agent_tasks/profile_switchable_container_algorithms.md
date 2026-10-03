@@ -35,8 +35,9 @@ Tests were written before the root profile fix and typed factory implementation,
 but neither execution RED nor GREEN has been established. Both inspected Windows
 executables report a Rust-seed banner; `bin/release` and a configured qualified
 runtime are absent. WSL/bootstrap discovery continues. All source-only review
-results remain distinct from executable acceptance. Numeric resource targets
-await user selection; NFR-PSC-005 and full release qualification remain open.
+results remain distinct from executable acceptance. The user selected best-effort
+resource measurements on 2026-10-03; numeric latency/memory thresholds are not
+mandatory. Full correctness and execution qualification remain open.
 
 Root source review found that prepared-profile selection discarded measured
 collision evidence and preparation converted malformed pairs into absent data.

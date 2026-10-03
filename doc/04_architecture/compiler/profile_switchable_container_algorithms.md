@@ -17,7 +17,7 @@ The compiler owns four ordered stages: typed recognition, semantic eligibility, 
 | PSC-AC-005 | REQ-PSC-005 | Typed tests and executed programs prove illegal/effectful/order-sensitive/mutated candidates retain Original; critical policy rejects unbounded choices; memory limits reject candidates independently of profile preference. |
 | PSC-AC-006 | REQ-PSC-006 | CLI explanation matches the executed site's selected representation and includes evidence, all rejected alternatives, guards, memory and fallback. |
 | PSC-AC-007 | REQ-PSC-007 | Supported generic set/map key/value matrix executes; resolved typed operations reach actual lowering; nested/hash/merge join fixtures preserve duplicate multiplicity and order after P0 proof. |
-| PSC-AC-008 | REQ-PSC-008 | Admitted interpreter/native and required differential engines execute the same acceptance corpus; geometric workloads record operation counts, latency, allocation and maximum RSS against NFR targets. |
+| PSC-AC-008 | REQ-PSC-008 | Admitted interpreter/native and required differential engines execute the same acceptance corpus; geometric workloads check required operation bounds. Latency, allocation and maximum RSS measurement is best effort per the user's 2026-10-03 selection; no mandatory numeric resource thresholds apply. |
 
 Each row requires test result and artifact provenance tied to the tested source revision and runner. A partially covered row remains incomplete. Existing requirements and NFRs remain authoritative; this matrix is not a reduction of the selected scope.
 
