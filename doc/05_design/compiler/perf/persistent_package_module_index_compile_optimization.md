@@ -45,8 +45,10 @@ releases it and requires admission. A second case acquires decoded A, publishes
 B, collects A's file, and proves the owned A value remains byte-identical while
 the current reader admits B. A process-barrier stress case must still cover
 reader/publisher/collector interleavings. Capture-before-unlock is the selected
-algorithm; no test-only barrier belongs in the production API. Implementation
-waits for executable RED evidence. Long-lived archive or future lazy-index
+algorithm; no test-only barrier belongs in the production API. The reader repair
+and error-path tests are now implemented in source. The user authorized coding
+and pushing despite the unavailable runner; executed RED/GREEN remains pending.
+Long-lived archive or future lazy-index
 consumers require separate leases; a retained-digest list cannot prove those.
 
 ### Mixed-change routing acceptance

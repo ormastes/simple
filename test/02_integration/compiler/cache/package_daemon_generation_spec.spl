@@ -1,0 +1,149 @@
+# @req PSI-REQ-007
+# @evidence-display: links
+use std.spec.*
+use compiler.driver.cache.daemon.package_daemon_session.{PackageDaemonSessionV1}
+use compiler.driver.cache.daemon.cache_daemon_main.{CacheDaemonHost}
+use std.service.daemon_base.{daemon_config_new}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_publish_v1,
+    package_module_index_digest_v1, package_module_index_gc_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_write}
+
+extern fn rt_getpid() -> i64
+
+fn daemon_generation_root() -> text:
+    "build/test-artifacts/package-daemon-generation-{rt_getpid()}"
+
+fn daemon_generation(revision: text) -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        1, sha256_text("daemon-producer"), "root", revision, "commit", "tree",
+        sha256_text(revision), [])
+
+describe "daemon request generation ownership":
+    before_each:
+        dir_remove(daemon_generation_root(), true)
+    after_each:
+        dir_remove(daemon_generation_root(), true)
+
+    it "keeps an active request on one generation and refreshes between requests":
+        step("Acquire one complete generation for the daemon request")
+        val root = daemon_generation_root()
+        val first = daemon_generation("first")
+        val second = daemon_generation("second")
+        expect(package_module_index_publish_v1(root, first)).to_equal(true)
+        var session = PackageDaemonSessionV1.create("workspace-a", root)
+        val request = session.begin_request("workspace-a")
+        expect(request.valid).to_equal(true)
+        expect(request.index_digest).to_equal(package_module_index_digest_v1(first))
+        step("Publish another generation without refreshing the active request")
+        expect(package_module_index_publish_v1(root, second)).to_equal(true)
+        expect(session.refresh()).to_equal(false)
+        expect(session.begin_request("workspace-a").valid).to_equal(false)
+        expect(package_module_index_gc_v1(root, [], 1)).to_equal(1)
+        expect(request.generation!.scv_revision_id).to_equal("first")
+        expect(session.index_digest).to_equal(request.index_digest)
+        expect(session.end_request(request.sequence + 1)).to_equal(false)
+        expect(session.active).to_equal(true)
+        expect(session.close()).to_equal(false)
+        expect(session.end_request(request.sequence)).to_equal(true)
+        step("Refresh only when the next request starts")
+        val next = session.begin_request("workspace-a")
+        expect(next.valid).to_equal(true)
+        expect(next.index_digest).to_equal(package_module_index_digest_v1(second))
+        expect(next.sequence).to_equal(request.sequence + 1)
+        expect(session.reload_count).to_equal(2)
+        expect(session.end_request(next.sequence)).to_equal(true)
+
+    it "reuses an unchanged generation and clears all owned state on close":
+        val root = daemon_generation_root()
+        expect(package_module_index_publish_v1(root, daemon_generation("same"))).to_equal(true)
+        var session = PackageDaemonSessionV1.create("workspace-a", root)
+        val first = session.begin_request("workspace-a")
+        expect(first.valid).to_equal(true)
+        expect(session.end_request(first.sequence)).to_equal(true)
+        val next = session.begin_request("workspace-a")
+        expect(next.index_digest).to_equal(first.index_digest)
+        expect(session.reload_count).to_equal(1)
+        expect(session.end_request(next.sequence)).to_equal(true)
+        step("Close the workspace and release its generation")
+        expect(session.close()).to_equal(true)
+        expect(session.generation).to_be_nil()
+        expect(session.index_digest).to_equal("")
+        expect(session.cache_root).to_equal("")
+        expect(session.begin_request("workspace-a").valid).to_equal(false)
+
+    it "rejects another workspace and corrupt refresh without serving stale data":
+        val root = daemon_generation_root()
+        expect(package_module_index_publish_v1(root, daemon_generation("first"))).to_equal(true)
+        var session = PackageDaemonSessionV1.create("workspace-a", root)
+        step("Reject another workspace before acquiring a generation")
+        expect(session.begin_request("workspace-b").reason).to_equal("workspace-mismatch")
+        expect(session.reload_count).to_equal(0)
+        val first = session.begin_request("workspace-a")
+        expect(first.valid).to_equal(true)
+        expect(session.end_request(first.sequence)).to_equal(true)
+        expect(file_write("{root}/package-module-index-v1/CURRENT", "bad")).to_equal(true)
+        step("Refuse a corrupted next generation instead of serving cached data")
+        val rejected = session.begin_request("workspace-a")
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.generation).to_be_nil()
+        expect(rejected.index_digest).to_equal("")
+        expect(session.active).to_equal(false)
+        expect(session.request_sequence).to_equal(1)
+
+    it "does not share generations across independent workspace roots":
+        val root_a = daemon_generation_root() + "/a"
+        val root_b = daemon_generation_root() + "/b"
+        expect(package_module_index_publish_v1(root_a, daemon_generation("a"))).to_equal(true)
+        expect(package_module_index_publish_v1(root_b, daemon_generation("b"))).to_equal(true)
+        var a = PackageDaemonSessionV1.create("a", root_a)
+        var b = PackageDaemonSessionV1.create("b", root_b)
+        val request_a = a.begin_request("a")
+        val request_b = b.begin_request("b")
+        expect(request_a.generation!.scv_revision_id).to_equal("a")
+        expect(request_b.generation!.scv_revision_id).to_equal("b")
+        expect(a.end_request(request_a.sequence)).to_equal(true)
+        expect(a.close()).to_equal(true)
+        expect(b.active).to_equal(true)
+        expect(b.end_request(request_b.sequence)).to_equal(true)
+
+    it "balances host activity and rejects stale tokens after workspace reopening":
+        val root = daemon_generation_root()
+        expect(package_module_index_publish_v1(root, daemon_generation("host"))).to_equal(true)
+        var host = CacheDaemonHost.create(daemon_config_new("{root}/host.pid", "{root}/host.sock", 1000), 0)
+        expect(host.begin_package_request("a", root, 1).reason).to_equal("daemon-not-admitted")
+        # This fixture starts after host admission; it exercises request state,
+        # not OS peer authentication (which has its own opaque-receipt tests).
+        host.package_admission_open = true
+        val first = host.begin_package_request("a", root, 2)
+        expect(first.valid).to_equal(true)
+        expect(host.lifecycle.request_count).to_equal(1)
+        expect(host.begin_package_request("a", root, 3).valid).to_equal(false)
+        expect(host.lifecycle.request_count).to_equal(1)
+        expect(host.close_package_workspace("a")).to_equal(false)
+        expect(host.end_package_request("a", first.sequence, 4)).to_equal(true)
+        expect(host.lifecycle.request_count).to_equal(0)
+        expect(host.close_package_workspace("a")).to_equal(true)
+        step("Reject a stale request token after reopening the workspace")
+        val second = host.begin_package_request("a", root, 5)
+        expect(second.valid).to_equal(true)
+        expect(second.sequence).to_be_greater_than(first.sequence)
+        expect(host.end_package_request("a", first.sequence, 6)).to_equal(false)
+        expect(host.lifecycle.request_count).to_equal(1)
+        expect(host.end_package_request("a", second.sequence, 7)).to_equal(true)
+        expect(host.end_package_request("a", second.sequence, 8)).to_equal(false)
+        expect(host.lifecycle.request_count).to_equal(0)
+
+    it "rejects root substitution without releasing another workspace request":
+        val root = daemon_generation_root()
+        expect(package_module_index_publish_v1(root, daemon_generation("host"))).to_equal(true)
+        var host = CacheDaemonHost.create(daemon_config_new("{root}/host.pid", "{root}/host.sock", 1000), 0)
+        host.package_admission_open = true
+        val first = host.begin_package_request("a", root, 1)
+        expect(first.valid).to_equal(true)
+        expect(host.begin_package_request("a", root + "/other", 2).reason).to_equal("workspace-root-mismatch")
+        expect(host.end_package_request("b", first.sequence, 3)).to_equal(false)
+        expect(host.lifecycle.request_count).to_equal(1)
+        expect(host.end_package_request("a", first.sequence, 4)).to_equal(true)

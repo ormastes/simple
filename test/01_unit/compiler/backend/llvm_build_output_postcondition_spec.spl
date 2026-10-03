@@ -1,0 +1,36 @@
+"""Production result adapter fault injection; no compilation is performed."""
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.backend.build_native_types.{BuildConfig, BuildResult}
+use compiler.backend.build_native_pipeline.{build_native_llvm_finish}
+
+val existing_output = "test/01_unit/compiler/backend/llvm_build_output_postcondition_spec.spl"
+
+describe "LLVM build output postcondition":
+    it "rejects a reported success when its requested output does not exist":
+        expect(file_exists(existing_output)).to_equal(true)
+        val missing_output = "{existing_output}/missing.exe"
+        expect(file_exists(missing_output)).to_equal(false)
+        val config = BuildConfig.default("unused.spl", missing_output)
+        val result = build_native_llvm_finish(config, CompileResult.Success(nil), 17)
+        match result:
+            case BuildResult.Error(message):
+                expect(message).to_equal("compile reported success but did not create output: {missing_output}")
+            case _: expect(false).to_equal(true)
+
+    it "preserves the requested existing path and elapsed time":
+        expect(file_exists(existing_output)).to_equal(true)
+        val config = BuildConfig.default("unused.spl", existing_output)
+        match build_native_llvm_finish(config, CompileResult.Success(nil), 23):
+            case BuildResult.Success(output, stats):
+                expect(output).to_equal(existing_output)
+                expect(stats.compile_time_ms).to_equal(23)
+            case _: expect(false).to_equal(true)
+
+    it "does not turn a compilation error into success for an existing path":
+        expect(file_exists(existing_output)).to_equal(true)
+        val config = BuildConfig.default("unused.spl", existing_output)
+        match build_native_llvm_finish(config, CompileResult.CodegenError("injected failure"), 31):
+            case BuildResult.Error(message): expect(message).to_equal("injected failure")
+            case _: expect(false).to_equal(true)

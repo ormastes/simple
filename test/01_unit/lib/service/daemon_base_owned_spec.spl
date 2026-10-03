@@ -1,0 +1,70 @@
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.service.daemon_base.{
+    daemon_config_new, daemon_base_new, daemon_base_start_owned, daemon_base_stop_owned
+}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_exists, file_read, file_write}
+
+extern fn rt_getpid() -> i64
+
+fn daemon_owned_root() -> text:
+    "build/test-artifacts/daemon-base-owned-{rt_getpid()}"
+
+describe "daemon base explicit value ownership":
+    before_each:
+        dir_remove(daemon_owned_root(), true)
+    after_each:
+        dir_remove(daemon_owned_root(), true)
+
+    it "returns acquired state and removes its actual PID file on stop":
+        step("Write back explicit daemon start and stop state")
+        val root = daemon_owned_root()
+        val pid_path = "{root}/daemon.pid"
+        val initial = daemon_base_new(daemon_config_new(pid_path, "{root}/socket", 1000))
+        val result = daemon_base_start_owned(initial)
+        expect(result.started).to_equal(true)
+        expect(result.base.running).to_equal(true)
+        expect(result.base.pid_state.acquired).to_equal(true)
+        expect(result.base.pid_state.pid).to_equal(rt_getpid())
+        expect(file_exists(pid_path)).to_equal(true)
+        expect(initial.running).to_equal(false)
+        expect(initial.pid_state.acquired).to_equal(false)
+        val stopped = daemon_base_stop_owned(result.base)
+        expect(stopped.running).to_equal(false)
+        expect(stopped.pid_state.acquired).to_equal(false)
+        expect(stopped.pid_state.pid).to_equal(-1)
+        expect(file_exists(pid_path)).to_equal(false)
+        expect(daemon_base_stop_owned(stopped).running).to_equal(false)
+
+    it "preserves the first receipt when another acquisition fails":
+        val root = daemon_owned_root()
+        val pid_path = "{root}/daemon.pid"
+        val initial = daemon_base_new(daemon_config_new(pid_path, "{root}/socket", 1000))
+        val first = daemon_base_start_owned(initial)
+        expect(first.started).to_equal(true)
+        val before = file_read(pid_path)
+        val second = daemon_base_start_owned(initial)
+        expect(second.started).to_equal(false)
+        expect(second.base.running).to_equal(false)
+        expect(second.base.pid_state.acquired).to_equal(false)
+        expect(file_read(pid_path)).to_equal(before)
+        val repeated = daemon_base_start_owned(first.base)
+        expect(repeated.started).to_equal(false)
+        expect(repeated.base.running).to_equal(true)
+        expect(repeated.base.pid_state.acquired).to_equal(true)
+        expect(repeated.base.pid_state.pid).to_equal(first.base.pid_state.pid)
+        val stopped = daemon_base_stop_owned(first.base)
+        expect(stopped.running).to_equal(false)
+        expect(file_exists(pid_path)).to_equal(false)
+
+    it "does not remove a replacement owner's PID file":
+        val root = daemon_owned_root()
+        val pid_path = "{root}/daemon.pid"
+        val initial = daemon_base_new(daemon_config_new(pid_path, "{root}/socket", 1000))
+        val first = daemon_base_start_owned(initial)
+        expect(first.started).to_equal(true)
+        val replacement = "{rt_getpid() + 1}\nreplacement-owner"
+        expect(file_write(pid_path, replacement)).to_equal(true)
+        val stopped = daemon_base_stop_owned(first.base)
+        expect(stopped.running).to_equal(false)
+        expect(stopped.pid_state.acquired).to_equal(false)
+        expect(file_read(pid_path)).to_equal(replacement)

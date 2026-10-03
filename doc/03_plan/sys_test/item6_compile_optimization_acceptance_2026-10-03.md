@@ -77,7 +77,7 @@ Each row requires the named production scenario, status 0, empty unexpected stde
 | Executable source | Cases | Execution status |
 |---|---|---|
 | `test/01_unit/compiler/cache/package_module_index_gc_publication_spec.spl` | Publication-lock exclusion, retained generation, post-unlock collection | UNEXECUTED; GC repair exists |
-| `test/01_unit/compiler/cache/package_module_index_reader_transaction_spec.spl` | Reader contention, owned snapshot after collection, absent-root compatibility | UNEXECUTED; reader repair awaits RED |
+| `test/01_unit/compiler/cache/package_module_index_reader_transaction_spec.spl` | Reader contention, owned snapshot after collection, absent-root compatibility, error-path unlock | UNEXECUTED; reader repair implemented |
 | `test/02_integration/compiler/cache/package_index_persistence_admission_spec.spl` | Tampered payload, invalid pointer, empty pointer, absent generation and restoration | UNEXECUTED; uses actual persistence owners |
 
 These eight scenarios do not replace the 44 compiler system scenarios. Owner
