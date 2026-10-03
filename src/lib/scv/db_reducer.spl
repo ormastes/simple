@@ -37,6 +37,9 @@ struct DbRow:
 struct DbAcceptedBatch:
     batch_id: text
     canonical_digest: text
+    actor: text
+    actor_counter: u64
+    prior_revision: text
 
 struct MaterializedState:
     rows: [DbRow]
@@ -75,7 +78,8 @@ fn db_state_digest(state: MaterializedState) -> Result<text, text>:
         rows.push(DbCanonicalEntry(key: db_canonical_text(row.entity)?, value: db_frame(30u8, payload)))
     var accepted: [DbCanonicalEntry] = []
     for batch in state.accepted:
-        accepted.push(DbCanonicalEntry(key: db_canonical_text(batch.batch_id)?, value: db_canonical_text(batch.canonical_digest)?))
+        val record = db_canonical_text(batch.canonical_digest)? + db_canonical_text(batch.actor)? + db_frame(2u8, db_u64_bytes(batch.actor_counter)) + db_canonical_text(batch.prior_revision)?
+        accepted.push(DbCanonicalEntry(key: db_canonical_text(batch.batch_id)?, value: db_frame(33u8, record)))
     Ok(sha256_u8_hex(db_domain_bytes("state", db_canonical_map(rows)? + db_canonical_map(accepted)?)?))
 
 fn db_schema_rule(policy: MergePolicy, kind: text, field: text) -> Result<FieldMergeRule, text>:
@@ -166,6 +170,13 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
         if accepted.batch_id == patch.batch_id:
             if accepted.canonical_digest != digest: return Err("SCVDB_BATCH_IDENTITY_COLLISION")
             return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: [], replay: true, authorization_status: "UNVERIFIED_PREVIEW"))
+    var base_known = patch.base_revision != "" and patch.base_revision == state.revision
+    if patch.base_revision == "" and state.rows.len() == 0 and state.accepted.len() == 0: base_known = true
+    for accepted in state.accepted:
+        if accepted.actor == patch.actor and accepted.actor_counter == patch.actor_counter:
+            return Err("SCVDB_ACTOR_COUNTER_COLLISION")
+        if patch.base_revision == accepted.prior_revision: base_known = true
+    if not base_known: return Err("SCVDB_BASE_REVISION_MISSING")
     var accepted_ids: [text] = []
     for accepted in state.accepted: accepted_ids.push(accepted.batch_id)
     for dependency in patch.causal_dependencies:
@@ -266,7 +277,7 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
     if conflicts.len() > 0:
         return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: conflicts, replay: false, authorization_status: "UNVERIFIED_PREVIEW"))
     var accepted = state.accepted
-    accepted.push(DbAcceptedBatch(batch_id: patch.batch_id, canonical_digest: digest))
+    accepted.push(DbAcceptedBatch(batch_id: patch.batch_id, canonical_digest: digest, actor: patch.actor, actor_counter: patch.actor_counter, prior_revision: state.revision))
     var proposed = MaterializedState(rows: rows, accepted: accepted, revision: "")
     proposed.revision = db_state_digest(proposed)?
     Ok(MergePlan(base_revision: state.revision, proposed: proposed, conflicts: [], replay: false, authorization_status: "UNVERIFIED_PREVIEW"))

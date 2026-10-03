@@ -8,7 +8,7 @@ use std.scv.db_reducer.*
 use std.scv.db_schema.*
 
 fn setup_item2_reducer_patch(operations: [DbOperation], counter: u64) -> DbPatch:
-    val patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "producer", actor_counter: counter, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "producer", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
+    val patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: counter, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "producer", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
     db_patch_seal(patch).unwrap()
 
 fn setup_item2_policy() -> MergePolicy:
@@ -108,3 +108,32 @@ describe "REQ-012 REQ-013 REQ-015 pure reducer previews":
         val plan = db_plan_patch(initial, setup_item2_reducer_patch([operation], 2), setup_item2_policy()).unwrap()
         expect(plan.conflicts[0].code).to_equal("SCVDB_ROW_PRECONDITION")
         expect(plan.proposed.rows[0].tombstoned).to_be(false)
+
+    it "rejects reuse of an actor counter with different signed content":
+        step("Retain the actor counter identity after accepting its first patch")
+        val create = setup_item2_create()
+        val initial = db_plan_patch(db_empty_state(), create, setup_item2_policy()).unwrap().proposed
+        val collision = setup_item2_update("title", "first", "changed", 1)
+        expect(db_plan_patch(initial, collision, setup_item2_policy())).to_equal(Err("SCVDB_ACTOR_COUNTER_COLLISION"))
+        expect(initial.accepted[0].actor).to_equal(create.actor)
+        expect(initial.accepted[0].actor_counter).to_equal(1u64)
+        expect(db_plan_patch(initial, create, setup_item2_policy()).unwrap().replay).to_be(true)
+
+    it "requires a retained semantic base while preserving historical bases and genesis":
+        step("Reject invented base revisions before planning a new patch")
+        val initial = db_plan_patch(db_empty_state(), setup_item2_create(), setup_item2_policy()).unwrap().proposed
+        var missing = setup_item2_update("title", "first", "changed", 2)
+        missing.base_revision = "not-in-retained-history"
+        missing = db_patch_seal(missing).unwrap()
+        expect(db_plan_patch(initial, missing, setup_item2_policy())).to_equal(Err("SCVDB_BASE_REVISION_MISSING"))
+        var update = setup_item2_update("title", "first", "changed", 2)
+        update.base_revision = initial.revision
+        update = db_patch_seal(update).unwrap()
+        val next = db_plan_patch(initial, update, setup_item2_policy()).unwrap().proposed
+        expect(next.accepted[1].prior_revision).to_equal(initial.revision)
+        var historical = setup_item2_update("status", "open", "closed", 3)
+        historical.base_revision = initial.revision
+        historical = db_patch_seal(historical).unwrap()
+        expect(db_plan_patch(next, historical, setup_item2_policy()).unwrap().conflicts.len()).to_equal(0)
+        val genesis = setup_item2_update("status", "open", "closed", 4)
+        expect(db_plan_patch(next, genesis, setup_item2_policy()).unwrap().conflicts.len()).to_equal(0)

@@ -15,7 +15,7 @@ fn setup_item2_snapshot_state() -> MaterializedState:
     val values = [DbValue.Absent, DbValue.Text("é\0가"), DbValue.Unsigned(18446744073709551615u64), DbValue.Flag(true), DbValue.Flag(false), DbValue.Reference(provisional), DbValue.Reference(settled), DbValue.Set([DbValue.Text("z"), DbValue.Text("a")]), DbValue.ObservedSet([DbSetMember(dot: "b:1", value: DbValue.Text("retained"), removed: true), DbSetMember(dot: "a:1", value: DbValue.Text("visible"), removed: false)])]
     val first = DbRow(entity: entity_ref_canonical(setup_item2_snapshot_ref(2)), kind: "bug", fields: [DbField(name: "z", value: DbValue.List(values)), DbField(name: "a", value: DbValue.List([]))], revision: "row-revision-2", tombstoned: true)
     val second = DbRow(entity: entity_ref_canonical(setup_item2_snapshot_ref(1)), kind: "bug", fields: [DbField(name: "empty", value: DbValue.Text(""))], revision: "row-revision-1", tombstoned: false)
-    var state = MaterializedState(rows: [first, second], accepted: [DbAcceptedBatch(batch_id: "z-batch", canonical_digest: "z-digest"), DbAcceptedBatch(batch_id: "a-batch", canonical_digest: "a-digest")], revision: "")
+    var state = MaterializedState(rows: [first, second], accepted: [DbAcceptedBatch(batch_id: "z-batch", canonical_digest: "z-digest", actor: "ffeeddccbbaa99887766554433221100", actor_counter: 2, prior_revision: "prior-z"), DbAcceptedBatch(batch_id: "a-batch", canonical_digest: "a-digest", actor: "ffeeddccbbaa99887766554433221100", actor_counter: 1, prior_revision: "")], revision: "")
     state.revision = db_state_digest(state).unwrap()
     state
 
@@ -27,7 +27,7 @@ fn check_item2_snapshot_exact(expected: MaterializedState, actual: MaterializedS
 describe "REQ-011 REQ-015 complete versioned state snapshot projection":
     it "matches a literal genesis vector and preserves every stored variant and order":
         step("Decode the independently specified empty genesis bytes")
-        val genesis = "SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f7631003206030006000600\n"
+        val genesis = "SCVDB-SNAPSHOT-v2\n7363762d64622f736e617073686f742d76322f7631003206030006000600\n"
         expect(db_snapshot_encode(db_empty_state())).to_equal(Ok(genesis))
         check_item2_snapshot_exact(db_empty_state(), db_snapshot_decode(genesis).unwrap())
         step("Recover all fields references tombstones revisions and accepted batches exactly")
@@ -39,18 +39,18 @@ describe "REQ-011 REQ-015 complete versioned state snapshot projection":
 
     it "rejects unsupported versions malformed hex and missing terminators":
         step("Reject malformed projections before reading payloads")
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n00\n")).to_equal(Err("SCVDB_SNAPSHOT_VERSION"))
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n00")).to_equal(Err("SCVDB_SNAPSHOT_TERMINATOR"))
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n0\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\nGG\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\nAA\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v3\n00\n")).to_equal(Err("SCVDB_SNAPSHOT_VERSION"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n00")).to_equal(Err("SCVDB_SNAPSHOT_TERMINATOR"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n0\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\nGG\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\nAA\n")).to_equal(Err("SCVDB_SNAPSHOT_HEX"))
 
     it "rejects truncated roots trailing bytes wrong tags and a forged semantic revision":
         step("Check literal hostile wire vectors without an encoder roundtrip")
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f76310032060300060006\n")).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f763100320603000600060000\n")).to_equal(Err("SCVDB_SNAPSHOT_TRAILING_BYTES"))
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f7631003106030006000600\n")).to_equal(Err("SCVDB_SNAPSHOT_TAG"))
-        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f763100320703017806000600\n")).to_equal(Err("SCVDB_SNAPSHOT_REVISION"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n7363762d64622f736e617073686f742d76322f76310032060300060006\n")).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n7363762d64622f736e617073686f742d76322f763100320603000600060000\n")).to_equal(Err("SCVDB_SNAPSHOT_TRAILING_BYTES"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n7363762d64622f736e617073686f742d76322f7631003106030006000600\n")).to_equal(Err("SCVDB_SNAPSHOT_TAG"))
+        expect(db_snapshot_decode("SCVDB-SNAPSHOT-v2\n7363762d64622f736e617073686f742d76322f763100320703017806000600\n")).to_equal(Err("SCVDB_SNAPSHOT_REVISION"))
 
     it "rejects nonminimal lengths invalid UTF8 non-NFC text and unknown values":
         step("Require canonical framing and strict Unicode bytes")
@@ -73,7 +73,7 @@ describe "REQ-011 REQ-015 complete versioned state snapshot projection":
         expect(db_snapshot_value_decode(set, 0)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
         val members = DbValue.ObservedSet([DbSetMember(dot: "actor:1", value: DbValue.Absent, removed: false), DbSetMember(dot: "actor:1", value: DbValue.Absent, removed: true)])
         expect(db_snapshot_value_encode(members, 0)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
-        val duplicate_batches = "SCVDB-SNAPSHOT-v1\n7363762d64622f736e617073686f742f76310032170301780600061034060301610301623406030161030162\n"
+        val duplicate_batches = "SCVDB-SNAPSHOT-v2\n7363762d64622f736e617073686f742d76322f76310032650301780600065e342d030161030162032030303030303030303030303030303030303030303030303030303030303030300201010300342d030161030162032030303030303030303030303030303030303030303030303030303030303030300201010300\n"
         expect(db_snapshot_decode(duplicate_batches)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
         var duplicate_rows = setup_item2_snapshot_state()
         duplicate_rows.rows = [duplicate_rows.rows[0], duplicate_rows.rows[0]]

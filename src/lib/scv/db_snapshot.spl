@@ -1,5 +1,5 @@
-# SCVDB-SNAPSHOT-v1 is a deterministic textual projection, not signing bytes.
-# One exact ASCII header, lowercase hex of scv-db/snapshot/v1 NUL + root frame,
+# SCVDB-SNAPSHOT-v2 is a deterministic textual projection, not signing bytes.
+# One exact ASCII header, lowercase hex of scv-db/snapshot-v2/v1 NUL + root frame,
 # and one LF. Collection order is retained for exact materialized-state recovery.
 # db_state_digest remains the canonical semantic identity (map/set order free).
 # Every non-genesis snapshot verifies that semantic digest before acceptance.
@@ -7,6 +7,7 @@ use std.scv.db_canonical.*
 use std.scv.db_patch.*
 use std.scv.db_reducer.{DbRow, DbAcceptedBatch, MaterializedState, db_state_digest}
 use std.scv.db_snapshot_values.*
+use std.scv.distributed_identity.{ActorIncarnation, actor_incarnation_validate}
 
 fn db_snapshot_hex(bytes: [u8]) -> text:
     val digits = ["0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"]
@@ -54,28 +55,33 @@ fn db_snapshot_encode(state: MaterializedState) -> Result<text, text>:
     val unique_rows = db_canonical_set(row_ids)?
     var accepted: [[u8]] = []
     var batch_ids: [[u8]] = []
+    var actor_counters: [[u8]] = []
     for batch in state.accepted:
         if batch.batch_id == "" or batch.canonical_digest == "": return Err("SCVDB_SNAPSHOT_BATCH")
+        if not actor_incarnation_validate(ActorIncarnation(hex: batch.actor)).valid or batch.actor_counter == 0: return Err("SCVDB_SNAPSHOT_ACTOR")
         val id = db_snapshot_text(batch.batch_id)?
         batch_ids.push(id)
-        accepted.push(db_frame(52u8, id + db_snapshot_text(batch.canonical_digest)?))
+        val actor_counter = db_snapshot_text(batch.actor)? + db_frame(2u8, db_u64_bytes(batch.actor_counter))
+        actor_counters.push(actor_counter)
+        accepted.push(db_frame(52u8, id + db_snapshot_text(batch.canonical_digest)? + actor_counter + db_snapshot_text(batch.prior_revision)?))
     val unique_batches = db_canonical_set(batch_ids)?
+    val unique_counters = db_canonical_set(actor_counters)?
     val payload = db_snapshot_text(state.revision)? + db_canonical_list(rows) + db_canonical_list(accepted)
-    val bytes = db_domain_bytes("snapshot", db_frame(50u8, payload))?
+    val bytes = db_domain_bytes("snapshot-v2", db_frame(50u8, payload))?
     if bytes.len() > 16777216: return Err("SCVDB_BYTES_QUOTA")
     val verified = db_snapshot_verify_revision(state)?
-    Ok("SCVDB-SNAPSHOT-v1\n" + db_snapshot_hex(bytes) + "\n")
+    Ok("SCVDB-SNAPSHOT-v2\n" + db_snapshot_hex(bytes) + "\n")
 
 fn db_snapshot_decode(encoded: text) -> Result<MaterializedState, text>:
     """Strict complete decode: no recovery, normalization or ignored extensions."""
-    val header = "SCVDB-SNAPSHOT-v1\n"
+    val header = "SCVDB-SNAPSHOT-v2\n"
     if encoded.len() > 33554464: return Err("SCVDB_BYTES_QUOTA")
     if not encoded.starts_with(header): return Err("SCVDB_SNAPSHOT_VERSION")
     if not encoded.ends_with("\n"): return Err("SCVDB_SNAPSHOT_TERMINATOR")
     if encoded.len() <= header.len(): return Err("SCVDB_SNAPSHOT_TRUNCATED")
     val hex = encoded[header.len():encoded.len() - 1]
     val bytes = db_snapshot_unhex(hex)?
-    val domain = db_domain_bytes("snapshot", [])?
+    val domain = db_domain_bytes("snapshot-v2", [])?
     if bytes.len() <= domain.len(): return Err("SCVDB_SNAPSHOT_TRUNCATED")
     var index = 0
     while index < domain.len():
@@ -103,17 +109,23 @@ fn db_snapshot_decode(encoded: text) -> Result<MaterializedState, text>:
     val unique_rows = db_canonical_set(row_ids)?
     var accepted: [DbAcceptedBatch] = []
     var batch_ids: [[u8]] = []
+    var actor_counters: [[u8]] = []
     val batch_frames = db_read_children(sections[2].payload)?
     for batch_frame in batch_frames:
         if batch_frame.tag != 52u8: return Err("SCVDB_SNAPSHOT_BATCH_TAG")
         val fields = db_read_children(batch_frame.payload)?
-        if fields.len() != 2: return Err("SCVDB_SNAPSHOT_BATCH_FIELDS")
+        if fields.len() != 5: return Err("SCVDB_SNAPSHOT_BATCH_FIELDS")
         val id = db_read_text(fields[0])?
         val digest = db_read_text(fields[1])?
         if id == "" or digest == "": return Err("SCVDB_SNAPSHOT_BATCH")
+        val incarnation = db_read_text(fields[2])?
+        val counter = db_read_unsigned(fields[3])?
+        if not actor_incarnation_validate(ActorIncarnation(hex: incarnation)).valid or counter == 0: return Err("SCVDB_SNAPSHOT_ACTOR")
         batch_ids.push(db_snapshot_text(id)?)
-        accepted.push(DbAcceptedBatch(batch_id: id, canonical_digest: digest))
+        actor_counters.push(db_snapshot_text(incarnation)? + db_frame(2u8, db_u64_bytes(counter)))
+        accepted.push(DbAcceptedBatch(batch_id: id, canonical_digest: digest, actor: incarnation, actor_counter: counter, prior_revision: db_read_text(fields[4])?))
     val unique_batches = db_canonical_set(batch_ids)?
+    val unique_counters = db_canonical_set(actor_counters)?
     val state = MaterializedState(rows: rows, accepted: accepted, revision: revision)
     val verified = db_snapshot_verify_revision(state)?
     Ok(state)
