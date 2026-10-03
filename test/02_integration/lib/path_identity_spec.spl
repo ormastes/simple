@@ -1,0 +1,73 @@
+# Real host fixtures. Windows symlink creation requires developer mode or its
+# native privilege; inability to create the fixture is a failed qualification,
+# never a positive test of an unsupported platform. No recursive cleanup.
+use std.spec.{describe, it, expect}
+use app.io.mod.{cwd, dir_create, file_write, process_run_bounded}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.nogc_sync_mut.io.path_identity.*
+
+fn setup_item2_path_identity_root() -> text:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val root = "{cwd()}/build/test-artifacts/item2-path-identity-{nonce}"
+    expect(dir_create(root, true)).to_be(true)
+    root
+
+describe "Existing path identity host owner":
+    it "resolves real directories and Unicode children with separator-safe containment":
+        val root = setup_item2_path_identity_root()
+        val child = "{root}/CaseProof-한글-😀"
+        expect(dir_create(child, false)).to_be(true)
+        val parent = path_final_existing(root).unwrap()
+        val final = path_final_existing(child).unwrap()
+        expect(path_identity_contains(parent, final)).to_be(true)
+        expect(path_identity_same(final, path_final_existing(final.path).unwrap())).to_be(true)
+        expect(path_identity_same(parent, final)).to_be(false)
+
+    it "fails on missing paths and actual OS buffer truncation without a lexical fallback":
+        val root = setup_item2_path_identity_root()
+        expect(path_final_existing("{root}/does-not-exist")).to_equal(Err("PATH_IDENTITY_OPEN"))
+        expect(path_final_existing_with_capacity(root, 1)).to_equal(Err("PATH_IDENTITY_TRUNCATED"))
+        val first = path_final_existing(root).unwrap()
+        expect(path_identity_same(first, path_final_existing(root).unwrap())).to_be(true)
+
+@when(os="windows"):
+fn setup_item2_windows_path_alias(root: text, name: text, kind: text, target: text) -> text:
+    val script = "{root}/make-link.ps1"
+    val source = "param([string]$LinkPath,[string]$TargetPath,[string]$LinkKind)\n$ErrorActionPreference = 'Stop'\nNew-Item -ItemType $LinkKind -Path $LinkPath -Target $TargetPath | Out-Null\n"
+    expect(file_write(script, source)).to_be(true)
+    val alias = "{root}/{name}"
+    val (_out, _err, code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-LinkPath", alias, "-TargetPath", target, "-LinkKind", kind], 30000, 4096)
+    expect(code).to_equal(0)
+    alias
+
+describe "Windows handle-derived final identity":
+    it "normalizes existing case variants through the kernel rather than lowercasing":
+        val root = setup_item2_path_identity_root()
+        expect(dir_create("{root}/CaseProof", false)).to_be(true)
+        val original = path_final_existing("{root}/CaseProof").unwrap()
+        val alias = path_final_existing("{root}/caseproof").unwrap()
+        expect(path_identity_same(original, alias)).to_be(true)
+        expect(original.identity.starts_with("//?/Volume{")).to_be(true)
+
+    it "resolves real junctions and symlinks to the same local-volume identity":
+        val root = setup_item2_path_identity_root()
+        expect(dir_create("{root}/target", false)).to_be(true)
+        val target = path_final_existing("{root}/target").unwrap()
+        val junction = setup_item2_windows_path_alias(root, "junction", "Junction", target.path)
+        val symlink = setup_item2_windows_path_alias(root, "symlink", "SymbolicLink", target.path)
+        expect(path_identity_same(target, path_final_existing(junction).unwrap())).to_be(true)
+        expect(path_identity_same(target, path_final_existing(symlink).unwrap())).to_be(true)
+        expect(dir_create("{root}/target/child", false)).to_be(true)
+        expect(path_identity_contains(target, path_final_existing("{junction}/child").unwrap())).to_be(true)
+@else:
+describe "POSIX existing-path realpath owner":
+    it "resolves actual symlink targets and preserves literal backslashes":
+        val root = setup_item2_path_identity_root()
+        expect(dir_create("{root}/target\\literal", false)).to_be(true)
+        val target = path_final_existing("{root}/target\\literal").unwrap()
+        val (_out, _err, code) = process_run_bounded("ln", ["-s", target.path, "{root}/alias"], 30000, 4096)
+        expect(code).to_equal(0)
+        expect(path_identity_same(target, path_final_existing("{root}/alias").unwrap())).to_be(true)
+        expect(target.path.ends_with("/target\\literal")).to_be(true)
+@end

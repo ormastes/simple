@@ -1,0 +1,140 @@
+# Authoritative existing-path resolution, additive to legacy path_absolute.
+# Identity is observed at one instant, not a retained handle or protection from
+# hostile concurrent directory replacement. Callers still need trusted roots
+# and no-follow opens. Windows local volumes require a volume-GUID identity;
+# UNC/SMB without that capability fail closed rather than invent equivalence.
+# This is resolved path identity, not inode identity for distinct hard links.
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+
+struct HostFinalPath:
+    path: text
+    identity: text
+
+fn path_identity_same(left: HostFinalPath, right: HostFinalPath) -> bool:
+    left.identity != "" and left.identity == right.identity
+
+fn path_identity_contains(parent: HostFinalPath, child: HostFinalPath) -> bool:
+    if parent.identity == "" or child.identity == "": return false
+    if path_identity_same(parent, child): return true
+    val prefix = if parent.identity.ends_with("/"): parent.identity else: parent.identity + "/"
+    child.identity.starts_with(prefix)
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.path_identity_abi.{GetFinalPathNameByHandleW}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW, CloseHandle}
+use std.nogc_sync_mut.io.windows_image_owner.{windows_image_decode}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_read_u16}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+
+@unsafe(reason: "writes checked Unicode scalars into privately owned UTF16 input allocation", capabilities: [ffi, raw_ptr])
+fn _path_identity_wide(heap: i64, path: text) -> i64:
+    val buffer = HeapAlloc(heap, 8u32, ((path.len() + 1) * 2) as u64)
+    if buffer == 0: return 0
+    var ordinal = 0
+    var consumed = 0
+    var offset = 0
+    while consumed < path.len():
+        val scalar = path.char_code_at(ordinal)
+        if scalar <= 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+            val released = HeapFree(heap, 0u32, buffer)
+            return 0
+        if scalar < 65536:
+            volatile_write_u16(buffer + offset * 2, scalar)
+            offset = offset + 1
+        else:
+            val supplementary = scalar - 65536
+            volatile_write_u16(buffer + offset * 2, 55296 + (supplementary >> 10))
+            volatile_write_u16(buffer + (offset + 1) * 2, 56320 + (supplementary & 1023))
+            offset = offset + 2
+        if scalar < 128: consumed = consumed + 1
+        elif scalar < 2048: consumed = consumed + 2
+        elif scalar < 65536: consumed = consumed + 3
+        else: consumed = consumed + 4
+        ordinal = ordinal + 1
+    buffer
+
+@unsafe(reason: "bounded kernel final path copied before checked buffer release", capabilities: [ffi, raw_ptr])
+fn _path_identity_query(heap: i64, handle: i64, capacity: i64, flags: u32) -> Result<text, text>:
+    val buffer = HeapAlloc(heap, 8u32, (capacity * 2) as u64)
+    if buffer == 0: return Err("PATH_IDENTITY_ALLOCATION")
+    val length = GetFinalPathNameByHandleW(handle, buffer, capacity as u32, flags) as i64
+    var units: [i64] = []
+    if length > 0 and length < capacity:
+        for index in 0..(length + 1): units.push(volatile_read_u16(buffer + index * 2))
+    val released = HeapFree(heap, 0u32, buffer)
+    if released == 0: return Err("PATH_IDENTITY_RELEASE")
+    if length == 0: return Err("PATH_IDENTITY_QUERY")
+    if length >= capacity: return Err("PATH_IDENTITY_TRUNCATED")
+    val decoded = windows_image_decode(units, length, capacity)?
+    Ok(decoded.replace("\\", "/"))
+
+@unsafe(reason: "opens existing file/directory and queries normalized DOS and volume-GUID identities on one owned handle", capabilities: [ffi, raw_ptr])
+fn _path_final_existing(path: text, capacity: i64) -> Result<HostFinalPath, text>:
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("PATH_IDENTITY_ALLOCATION")
+    val wide = _path_identity_wide(heap, host_path_native(path))
+    if wide == 0: return Err("PATH_IDENTITY_INPUT")
+    # READ_ATTRIBUTES, share read/write/delete, OPEN_EXISTING, BACKUP_SEMANTICS.
+    # Follow reparse points deliberately: this owner identifies their target.
+    val handle = CreateFileW(wide, 128u32, 7u32, 0, 3u32, 33554432u32, 0)
+    val released = HeapFree(heap, 0u32, wide)
+    if handle == 0 or handle == -1: return Err("PATH_IDENTITY_OPEN")
+    if released == 0:
+        val closed = CloseHandle(handle)
+        return Err("PATH_IDENTITY_RELEASE")
+    val dos = _path_identity_query(heap, handle, capacity, 0u32)
+    val guid = _path_identity_query(heap, handle, capacity, 1u32)
+    val closed = CloseHandle(handle)
+    if closed == 0: return Err("PATH_IDENTITY_CLOSE")
+    var final_path = dos?
+    val identity = guid?
+    if not identity.starts_with("//?/Volume{"): return Err("PATH_IDENTITY_VOLUME_UNAVAILABLE")
+    if final_path.starts_with("//?/UNC/"):
+        final_path = "//" + final_path[8:final_path.len()]
+    elif final_path.starts_with("//?/"):
+        final_path = final_path[4:final_path.len()]
+    Ok(HostFinalPath(path: final_path, identity: identity))
+@else:
+use std.nogc_sync_mut.io.path_identity_abi.{malloc, free, realpath}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_read_u8}
+
+@unsafe(reason: "POSIX realpath with allocated output, bounded copy and complete input/output release", capabilities: [ffi, raw_ptr])
+fn _path_final_existing(path: text, capacity: i64) -> Result<HostFinalPath, text>:
+    val bytes = base_encoding_text_to_bytes(path)
+    val input = malloc((bytes.len() + 1) as u64)
+    if input == 0: return Err("PATH_IDENTITY_ALLOCATION")
+    for index in 0..bytes.len(): volatile_write_u8(input + index, bytes[index] as i64)
+    volatile_write_u8(input + bytes.len(), 0)
+    val resolved = realpath(input, 0)
+    free(input)
+    if resolved == 0: return Err("PATH_IDENTITY_OPEN")
+    var output: [u8] = []
+    var terminated = false
+    var index = 0
+    while index < capacity:
+        val byte = volatile_read_u8(resolved + index)
+        if byte == 0:
+            terminated = true
+            break
+        output.push(byte as u8)
+        index = index + 1
+    free(resolved)
+    if not terminated: return Err("PATH_IDENTITY_TRUNCATED")
+    val final_path = validated_utf8_bytes_to_text_linear(output)?
+    if not final_path.starts_with("/"): return Err("PATH_IDENTITY_QUERY")
+    Ok(HostFinalPath(path: final_path, identity: final_path))
+@end
+
+# Capacity seam exercises real OS truncation without a mock provider. It is not
+# an authorization flag. Fixed production maximum is 32768 UTF16 units/bytes.
+fn path_final_existing_with_capacity(path: text, capacity: i64) -> Result<HostFinalPath, text>:
+    if path == "" or path.contains("\0") or path.len() > 131072: return Err("PATH_IDENTITY_INPUT")
+    if capacity <= 0 or capacity > 32768: return Err("PATH_IDENTITY_CAPACITY")
+    unsafe(capabilities: [ffi, raw_ptr]):
+        _path_final_existing(path, capacity)
+
+fn path_final_existing(path: text) -> Result<HostFinalPath, text>:
+    path_final_existing_with_capacity(path, 32768)
+
+export HostFinalPath, path_final_existing, path_final_existing_with_capacity
+export path_identity_same, path_identity_contains
