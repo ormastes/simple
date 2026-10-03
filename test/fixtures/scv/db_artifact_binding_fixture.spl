@@ -1,0 +1,142 @@
+use std.spec.*
+use app.io.mod.{file_delete, dir_create, file_write_bytes}
+use app.scv.db.checkpoint_objects.{DbCheckpointPageSource}
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_reducer.{db_state_digest}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode}
+use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate}
+use std.scv.db_conflict_catalog.{db_conflict_catalog_encode}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use app.scv.db.evidence_store.*
+use app.scv.db.restricted_evidence.*
+use app.scv.db.observation_owner.*
+use app.scv.db.observation_content.*
+use app.scv.db.local_transition.{db_read_local_view}
+use app.scv.db.paged_store.{db_paged_open, db_paged_current_row}
+use std.scv.db_confidentiality.{DbRestrictedContext}
+use std.scv.db_evidence.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.*
+use test.fixtures.scv.db_observation_fixture.*
+
+fn setup_item2_artifact_digest(record: DbReproductionRecord) -> text:
+    match record:
+        SourceSnapshot(value): value.snapshot_digest
+        TestDefinition(value): value.definition_digest
+        _: fail("expected immutable artifact mapping")
+
+fn setup_item2_artifact_patch(fixture: Item2ObservationFixture, records: [DbReproductionRecord]) -> Item2ObservationFixture:
+    var next = fixture
+    next.records = records
+    next.patch.operations = []
+    for record in records: next.patch.operations.push(db_reproduction_operation(record).unwrap())
+    next.patch = setup_item2_observation_sign(next.patch)
+    next.policy = setup_item2_observation_review(next.policy, [next.patch])
+    next
+
+fn setup_item2_artifact_fixture(paged: bool = false, availability: text = "available") -> Item2ObservationFixture:
+    var fixture = setup_item2_observation_fixture(paged)
+    if availability == "available": return fixture
+    var snapshot = match fixture.records[3]:
+        SourceSnapshot(value): value
+        _: fail("source mapping")
+    val original = snapshot.snapshot_digest
+    if availability == "restricted":
+        val context = DbRestrictedContext(repository: "repo", namespace: fixture.patch.namespace, epoch: 1, key_id: "source-artifact", purpose: "source-snapshot")
+        val handle = db_restricted_key_create(fixture.source, fixture.sources.evidence_parent, context).unwrap()
+        val key = db_restricted_key_load(fixture.source, fixture.sources.evidence_parent, handle).unwrap()
+        val receipt = db_restricted_store_put(fixture.source, fixture.sources.evidence_parent, context, key, [3u8,4u8], [], 0, DbEvidenceStoreQuota(max_content_bytes: 8388608, max_envelope_bytes: 8409088, max_dependencies: 256)).unwrap()
+        expect(db_restricted_store_get(fixture.source, fixture.sources.evidence_parent, receipt, key, DbEvidenceStoreQuota(max_content_bytes: 8388608, max_envelope_bytes: 8409088, max_dependencies: 256)).unwrap()).to_equal([3u8,4u8])
+        snapshot.snapshot_digest = "sha256:v1:" + receipt.digest
+    else:
+        expect(availability).to_equal("missing")
+        expect(file_delete(fixture.sources.evidence_parent + "/scv-evidence-v1/" + original[10:] + ".scve")).to_equal(true)
+    fixture.records[3] = db_reproduction_record_seal(DbReproductionRecord.SourceSnapshot(snapshot)).unwrap()
+    var reproduction = match fixture.records[1]:
+        BoundReproduction(value, _): value
+        _: fail("bound reproduction")
+    reproduction.source_revision = db_reproduction_reference(fixture.records[3]).revision
+    var dependencies: [DbEvidenceDependency] = []
+    for dependency in reproduction.dependencies:
+        if dependency.digest == original: dependencies.push(DbEvidenceDependency(digest: snapshot.snapshot_digest, availability: availability))
+        else: dependencies.push(dependency)
+    reproduction.dependencies = setup_item2_observation_dependencies(dependencies)
+    fixture.records[1] = db_reproduction_record_seal(DbReproductionRecord.BoundReproduction(reproduction, db_reproduction_reference(fixture.records[3]))).unwrap()
+    var observation = match fixture.records[2]:
+        Observation(value): value
+        _: fail("observation")
+    observation.source_revision = reproduction.source_revision
+    observation.reproduction = Some(db_reproduction_reference(fixture.records[1]))
+    fixture.records[2] = db_reproduction_record_seal(DbReproductionRecord.Observation(observation)).unwrap()
+    setup_item2_artifact_patch(fixture, fixture.records)
+
+fn check_item2_artifact_apply(fixture: Item2ObservationFixture, expected: text) -> Result<text, text>:
+    if fixture.policy.config.admission.reducer_revision == "scv-merkle-reducer-v1":
+        return Ok(db_observation_apply_paged(fixture.source, expected, fixture.patch, fixture.policy, fixture.sources, db_observation_limits())?.head)
+    val applied = db_observation_apply_reference(fixture.source, expected, fixture.patch, fixture.policy.config, fixture.sources, db_observation_limits())?
+    if applied.code != "ok": return Err("SCVDB_ARTIFACT_FIXTURE_APPLY_" + applied.code)
+    Ok(applied.head)
+
+fn setup_item2_artifact_followup(fixture: Item2ObservationFixture, records: [DbReproductionRecord]) -> Item2ObservationFixture:
+    var next = fixture
+    next.patch.actor_counter = 2
+    next.patch.base_revision = if fixture.policy.config.admission.reducer_revision == "scv-merkle-reducer-v1": db_paged_open(fixture.source, fixture.policy).unwrap().manifest.revision else: db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image.state.revision
+    setup_item2_artifact_patch(next, records)
+
+export setup_item2_artifact_digest, setup_item2_artifact_patch, setup_item2_artifact_fixture
+export check_item2_artifact_apply, setup_item2_artifact_followup
+
+# Independent checkpoint authority signs a real captured image; altered cases
+# rehash every affected layer, so refusal must come from monotonic row policy.
+fn setup_item2_artifact_checkpoint(fixture: Item2ObservationFixture, changed: i64 = -1) -> (DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
+    val captured = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap()
+    val original = captured.image.state
+    var state = original
+    if changed >= 0:
+        val mapping = fixture.records[changed]
+        val rewritten = match mapping:
+            SourceSnapshot(value):
+                var next = value
+                next.snapshot_digest = setup_item2_artifact_digest(fixture.records[4])
+                db_reproduction_record_seal(DbReproductionRecord.SourceSnapshot(next)).unwrap()
+            TestDefinition(value):
+                var next = value
+                next.definition_digest = setup_item2_artifact_digest(fixture.records[3])
+                db_reproduction_record_seal(DbReproductionRecord.TestDefinition(next)).unwrap()
+            _: fail("mapping rewrite")
+        val identity = entity_ref_canonical(db_reproduction_reference(mapping).entity)
+        for index in 0..state.rows.len():
+            if state.rows[index].entity == identity: state.rows[index].fields = db_reproduction_fields(rewritten).unwrap()
+        state.revision = db_state_digest(state).unwrap()
+    var metadata = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(original.revision, 1u64, [], [fixture.patch.batch_id], sha256_text(db_snapshot_encode(original).unwrap()))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(fixture.patch.batch_id, original.revision)).unwrap()]
+    if state.revision != original.revision:
+        metadata.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.revision, 2u64, [original.revision], [], sha256_text(db_snapshot_encode(state).unwrap()))).unwrap())
+    var identities = identity_map_empty(fixture.patch.namespace, 1)
+    for record in fixture.records:
+        val entity = db_reproduction_reference(record).entity
+        identities = identity_map_allocate(identities, entity.provisional.unwrap()).state
+        metadata.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(entity, DbCheckpointDisposition.Live)).unwrap())
+    val pages = db_pages_build(metadata, DbPageQuota(max_page_bytes: 1048576, max_page_records: 10000, max_records: 1000000)).unwrap()
+    val parent = fixture.root + "/checkpoint-source"
+    expect(dir_create(parent + "/scv-checkpoint-pages-v1", true)).to_equal(true)
+    for page in pages.pages: expect(file_write_bytes(parent + "/scv-checkpoint-pages-v1/" + page.digest + ".page", db_page_encode(page, pages.manifest.quota).unwrap())).to_equal(true)
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: "repo", namespace: fixture.patch.namespace, epoch: 1, schema_revision: "s1", reducer_revision: "r1", policy_revision: fixture.policy.config.revision, predecessor_checkpoint: "", history_horizon: original.revision, current_revision: state.revision, metadata: pages.manifest, storage: DbCheckpointStorage.Reference(db_snapshot_encode(state).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(captured.image.catalog).unwrap()), signer: "checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    (checkpoint, DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: fixture.policy.config, paged_policy: nil), DbCheckpointPageSource(external_parent: parent, maximum_pages: 65536, maximum_bytes: 67108864))
+
+export setup_item2_artifact_checkpoint
+
+fn check_item2_artifact_mapping(fixture: Item2ObservationFixture, expected: DbReproductionRecord):
+    val entity = db_reproduction_reference(expected).entity
+    val row = if fixture.policy.config.admission.reducer_revision == "scv-merkle-reducer-v1": db_paged_current_row(fixture.source, fixture.policy, entity).unwrap().unwrap() else: db_reproduction_state_row(db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image.state.rows, entity).unwrap().unwrap()
+    expect(db_reproduction_row(row).unwrap()).to_equal(expected)
+
+export check_item2_artifact_mapping

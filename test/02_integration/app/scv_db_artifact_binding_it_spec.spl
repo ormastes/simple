@@ -1,0 +1,171 @@
+use std.spec.*
+use app.io.mod.{file_delete, file_write}
+use app.scv.db.evidence_store.*
+use app.scv.db.observation_content.*
+use app.scv.db.observation_owner.*
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.retention_store.{db_retention_open}
+use app.scv.db.checkpoint_store.*
+use std.scv.db_checkpoint.{db_checkpoint_encode}
+use std.scv.db_evidence.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_canonical.{db_canonical_text}
+use std.scv.distributed_identity.*
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_artifact_binding_fixture.*
+
+fn check_item2_artifact_unchanged(fixture: Item2ObservationFixture):
+    val channel = if fixture.policy.config.admission.reducer_revision == "scv-merkle-reducer-v1": "paged" else: "semantic"
+    val before = db_store_read(fixture.source, channel)
+    val retained = db_retention_open(fixture.source).unwrap()
+    expect(check_item2_artifact_apply(fixture, fixture.initial_head).is_err()).to_equal(true)
+    expect(db_store_read(fixture.source, channel)).to_equal(before)
+    expect(db_retention_open(fixture.source).unwrap()).to_equal(retained)
+
+describe "REQ019 immutable source and test artifact bindings":
+    it "reads real canonical source and test CAS bytes separately from semantic revision identity":
+        for paged in [false, true]:
+            val fixture = setup_item2_artifact_fixture(paged)
+            val wire = db_patch_encode(fixture.patch).unwrap()
+            val expected = [db_canonical_text("fixture-source-v1\nfn main():\n    7\n").unwrap(), db_canonical_text("fixture-test-v1\nexpect(main()).to_equal(7)\n").unwrap()]
+            for index in [3, 4]:
+                val record = fixture.records[index]
+                val digest = setup_item2_artifact_digest(record)
+                expect(db_reproduction_reference(record).revision == digest).to_equal(false)
+                val node = db_evidence_store_get(fixture.source, fixture.sources.evidence_parent, digest[10:], 0, DbEvidenceStoreQuota(max_content_bytes: 8388608, max_envelope_bytes: 8409088, max_dependencies: 256)).unwrap()
+                expect(node.content).to_equal(expected[index - 3])
+                expect(db_reproduction_record_decode(db_reproduction_record_encode(record).unwrap()).unwrap()).to_equal(record)
+            check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+            val retained = db_retention_open(fixture.source).unwrap()
+            for index in [3, 4]:
+                var pinned = false
+                for pin in retained.catalog.pins:
+                    if pin.root == setup_item2_artifact_digest(fixture.records[index])[10:] and pin.reason == "reproduction" and pin.expires_day == 0: pinned = true
+                expect(pinned).to_equal(true)
+            expect(db_patch_encode(fixture.patch).unwrap()).to_equal(wire)
+            check_item2_observation_cleanup(fixture)
+
+    it "rejects signed wrong source revision and test definition identity without accepting or pinning":
+        for paged in [false, true]:
+            for wrong_source in [false, true]:
+                var fixture = setup_item2_artifact_fixture(paged)
+                var observation = match fixture.records[2]:
+                    Observation(value): value
+                    _: fail("observation")
+                if wrong_source: observation.source_revision = setup_item2_artifact_digest(fixture.records[3])
+                else: observation.test_definition = setup_item2_observation_ref("test_definition", 77)
+                fixture.records[2] = db_reproduction_record_seal(DbReproductionRecord.Observation(observation)).unwrap()
+                fixture = setup_item2_artifact_patch(fixture, fixture.records)
+                check_item2_artifact_unchanged(fixture)
+                check_item2_observation_cleanup(fixture)
+
+    it "requires actual captured mapping rows rather than signed digest shaped references alone":
+        for paged in [false, true]:
+            for absent_index in [3, 4]:
+                var fixture = setup_item2_artifact_fixture(paged)
+                var records: [DbReproductionRecord] = []
+                for index in 0..fixture.records.len():
+                    if index != absent_index: records.push(fixture.records[index])
+                fixture = setup_item2_artifact_patch(fixture, records)
+                check_item2_artifact_unchanged(fixture)
+                check_item2_observation_cleanup(fixture)
+
+    it "retains honest missing and genuine encrypted source declarations without claiming all available":
+        for paged in [false, true]:
+            for status in ["missing", "restricted"]:
+                val fixture = setup_item2_artifact_fixture(paged, status)
+                check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+                val proof = db_observation_verify_and_pin(fixture.source, fixture.sources, fixture.records, fixture.patch.batch_id, db_observation_limits(), db_observation_now().unwrap() / 86400u64).unwrap()
+                expect(proof.all_declared_available).to_equal(false)
+                var found = false
+                for item in proof.availability:
+                    if item.digest == setup_item2_artifact_digest(fixture.records[3]):
+                        expect(item.observed).to_equal(status)
+                        found = true
+                expect(found).to_equal(true)
+                check_item2_observation_cleanup(fixture)
+
+    it "rejects missing or corrupt mapped source and test bytes declared available":
+        for paged in [false, true]:
+            for index in [3, 4]:
+                for corrupt in [false, true]:
+                    val fixture = setup_item2_artifact_fixture(paged)
+                    val path = fixture.sources.evidence_parent + "/scv-evidence-v1/" + setup_item2_artifact_digest(fixture.records[index])[10:] + ".scve"
+                    if corrupt: expect(file_write(path, "truncated envelope")).to_equal(true)
+                    else: expect(file_delete(path)).to_equal(true)
+                    check_item2_artifact_unchanged(fixture)
+                    check_item2_observation_cleanup(fixture)
+
+    it "preserves mapping identities when a later signed reproduction declares actual source loss":
+        for paged in [false, true]:
+            val fixture = setup_item2_artifact_fixture(paged)
+            val initial_wire = db_patch_encode(fixture.patch).unwrap()
+            val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+            val source_digest = setup_item2_artifact_digest(fixture.records[3])
+            expect(file_delete(fixture.sources.evidence_parent + "/scv-evidence-v1/" + source_digest[10:] + ".scve")).to_equal(true)
+            var reproduction = match fixture.records[1]:
+                BoundReproduction(value, _): value
+                _: fail("bound reproduction")
+            reproduction.reference = setup_item2_observation_ref("reproduction", 2)
+            var dependencies: [DbEvidenceDependency] = []
+            for item in reproduction.dependencies:
+                dependencies.push(DbEvidenceDependency(digest: item.digest, availability: if item.digest == source_digest: "missing" else: item.availability))
+            reproduction.dependencies = dependencies
+            val bound = db_reproduction_record_seal(DbReproductionRecord.BoundReproduction(reproduction, db_reproduction_reference(fixture.records[3]))).unwrap()
+            val next = setup_item2_artifact_followup(fixture, [bound])
+            check_item2_artifact_apply(next, head).unwrap()
+            check_item2_artifact_mapping(next, fixture.records[3])
+            check_item2_artifact_mapping(next, fixture.records[4])
+            expect(db_reproduction_reference(bound).revision == db_reproduction_reference(fixture.records[1]).revision).to_equal(false)
+            expect(db_patch_encode(fixture.patch).unwrap()).to_equal(initial_wire)
+            # Same captured immutable mapping, not a replacement row or inferred available default.
+            val closure = [fixture.records[0], bound, fixture.records[3], fixture.records[4]]
+            val proof = db_observation_verify_and_pin(fixture.source, fixture.sources, closure, next.patch.batch_id, db_observation_limits(), db_observation_now().unwrap() / 86400u64).unwrap()
+            expect(proof.all_declared_available).to_equal(false)
+            check_item2_observation_cleanup(fixture)
+
+    it "reauthorizes accepted replay while making no fresh source availability claim":
+        for paged in [false, true]:
+            var fixture = setup_item2_artifact_fixture(paged)
+            val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+            expect(file_delete(fixture.sources.evidence_parent + "/scv-evidence-v1/" + setup_item2_artifact_digest(fixture.records[3])[10:] + ".scve")).to_equal(true)
+            expect(check_item2_artifact_apply(fixture, head).unwrap()).to_equal(head)
+            fixture.policy.config.admission.keys = []
+            fixture.policy = setup_item2_observation_repin(fixture.policy)
+            expect(check_item2_artifact_apply(fixture, head).is_err()).to_equal(true)
+            check_item2_observation_cleanup(fixture)
+
+    it "does not let a missing bound mapping lend its availability to a different standalone mapping":
+        val fixture = setup_item2_artifact_fixture(false, "missing")
+        var source = match fixture.records[3]:
+            SourceSnapshot(value): value
+            _: fail("source mapping")
+        source.reference = setup_item2_observation_ref("source_snapshot", 2)
+        val standalone = db_reproduction_record_seal(DbReproductionRecord.SourceSnapshot(source)).unwrap()
+        var records = fixture.records
+        records.push(standalone)
+        expect(db_observation_artifacts(records, 256).unwrap_err()).to_equal("SCVDB_OBSERVATION_CLAIM_COLLISION")
+        check_item2_artifact_unchanged(setup_item2_artifact_patch(fixture, records))
+        check_item2_observation_cleanup(fixture)
+
+    it "installs preserved mappings but refuses independently signed checkpoint source or test rewrites":
+        for changed in [-1, 3, 4]:
+            val fixture = setup_item2_artifact_fixture()
+            val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+            val (checkpoint, authority, pages) = setup_item2_artifact_checkpoint(fixture, changed)
+            val before = db_store_read(fixture.source)
+            val barrier = db_store_read(fixture.source, "checkpoint-install")
+            val prepared = db_checkpoint_prepare_install(fixture.source, head, db_checkpoint_encode(checkpoint).unwrap(), authority, pages)
+            if changed < 0:
+                val installed = db_checkpoint_resume_install(fixture.source, prepared.unwrap().journal_head, authority).unwrap()
+                expect(installed.phase).to_equal("Installed")
+                expect(db_store_read(fixture.source).checkpoint_anchor).to_equal(checkpoint.revision)
+                check_item2_artifact_mapping(fixture, fixture.records[3])
+                check_item2_artifact_mapping(fixture, fixture.records[4])
+            else:
+                expect(prepared.unwrap_err()).to_equal("SCVDB_CHECKPOINT_ROW_REGRESSION")
+                expect(db_store_read(fixture.source)).to_equal(before)
+                expect(db_store_read(fixture.source, "checkpoint-install")).to_equal(barrier)
+            check_item2_observation_cleanup(fixture)

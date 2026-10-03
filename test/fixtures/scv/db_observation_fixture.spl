@@ -21,7 +21,7 @@ use app.scv.db.paged_transition.{db_paged_initialize}
 use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_repin}
 use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
 use test.fixtures.scv.db_settlement_queue_fixture.{check_item2_queue_git}
-use std.common.crypto.sha256.{sha256_text}
+use std.scv.db_canonical.{db_canonical_text}
 
 struct Item2ObservationFixture:
     root: text
@@ -74,16 +74,27 @@ fn setup_item2_observation_fixture(paged: bool = false, declared: text = "availa
         digest = db_evidence_digest(content, [dependency]).unwrap()
         db_evidence_store_put(source, parent, DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: 0, dependencies: [dependency]), quota).unwrap()
     val config = db_reproduction_record_seal(DbReproductionRecord.Config(DbConfigRevision(reference: setup_item2_observation_ref("config", 1), effective_values_digest: "sha256:v1:" + digest, dependencies: [DbEvidenceDependency(digest: "sha256:v1:" + dependency, availability: declared)]))).unwrap()
-    val definition = setup_item2_observation_ref("test", 1)
-    val source_revision = "sha256:v1:" + sha256_text("exact fixture source snapshot")
-    val reproduction = db_reproduction_record_seal(DbReproductionRecord.Reproduction(DbReproductionRevision(reference: setup_item2_observation_ref("reproduction", 1), source_revision: source_revision, test_definition: definition, config: db_reproduction_reference(config), invocation_digest: "sha256:v1:" + digest, dependencies: [DbEvidenceDependency(digest: "sha256:v1:" + dependency, availability: declared)]))).unwrap()
+    val source_bytes = db_canonical_text("fixture-source-v1\nfn main():\n    7\n").unwrap()
+    val test_bytes = db_canonical_text("fixture-test-v1\nexpect(main()).to_equal(7)\n").unwrap()
+    val source_digest = db_evidence_digest(source_bytes, []).unwrap()
+    val test_digest = db_evidence_digest(test_bytes, []).unwrap()
+    db_evidence_store_put(source, parent, DbEvidenceNode(digest: source_digest, content: source_bytes, availability: "available", created_day: 0, dependencies: []), quota).unwrap()
+    db_evidence_store_put(source, parent, DbEvidenceNode(digest: test_digest, content: test_bytes, availability: "available", created_day: 0, dependencies: []), quota).unwrap()
+    val snapshot = db_reproduction_record_seal(DbReproductionRecord.SourceSnapshot(DbSourceSnapshotRevision(reference: setup_item2_observation_ref("source_snapshot", 1), snapshot_digest: "sha256:v1:" + source_digest))).unwrap()
+    val test_record = db_reproduction_record_seal(DbReproductionRecord.TestDefinition(DbTestDefinitionRevision(reference: setup_item2_observation_ref("test_definition", 1), definition_digest: "sha256:v1:" + test_digest))).unwrap()
+    val definition = db_reproduction_reference(test_record)
+    val source_ref = db_reproduction_reference(snapshot)
+    val source_revision = source_ref.revision
+    val dependencies = setup_item2_observation_dependencies([DbEvidenceDependency(digest: "sha256:v1:" + dependency, availability: declared), DbEvidenceDependency(digest: "sha256:v1:" + source_digest, availability: "available"), DbEvidenceDependency(digest: "sha256:v1:" + test_digest, availability: "available")])
+    val reproduction = db_reproduction_record_seal(DbReproductionRecord.BoundReproduction(DbReproductionRevision(reference: setup_item2_observation_ref("reproduction", 1), source_revision: source_revision, test_definition: definition, config: db_reproduction_reference(config), invocation_digest: "sha256:v1:" + digest, dependencies: dependencies), source_ref)).unwrap()
     val observation = db_reproduction_record_seal(DbReproductionRecord.Observation(DbObservation(reference: setup_item2_observation_ref("observation", 1), provider: DbProviderIdentity(instance: "fixture.invalid", project: "repo", run: "run-1", job: "job-1", attempt: 1, dimensions: []), source_revision: source_revision, test_definition: definition, config: db_reproduction_reference(config), case_revision: setup_item2_observation_ref("case", 1), run: setup_item2_observation_ref("run", 1), actual: "FAIL", measurements: [], failure_signature: "fixture-failure", custom_config: true, reproduction: Some(db_reproduction_reference(reproduction)), payload_digest: "sha256:v1:" + digest))).unwrap()
-    val records = [config, reproduction, observation]
+    # Keep original first-three positions for existing alias/replay scenarios.
+    val records = [config, reproduction, observation, snapshot, test_record]
     var policy = setup_item2_paged_policy()
     policy.config.merge.fields = []
     policy.config.merge.constraints = []
     var permissions: [DbPermission] = []
-    for kind in ["config", "reproduction", "observation"]:
+    for kind in ["config", "reproduction", "observation", "source_snapshot", "test_definition"]:
         for name in ["version", "revision", "canonical_record"]: policy.config.merge.fields.push(DbFieldSchema(kind: kind, field: name, rule: FieldMergeRule.ScalarConflict))
         permissions.push(DbPermission(operation: "append", kind: kind, field: "*"))
     policy.config.admission.keys[0].permissions = permissions
@@ -120,3 +131,19 @@ fn setup_item2_observation_repin(policy: DbPagedPolicy) -> DbPagedPolicy:
     next
 
 export setup_item2_observation_repin
+
+fn setup_item2_observation_dependencies(values: [DbEvidenceDependency]) -> [DbEvidenceDependency]:
+    var sorted: [DbEvidenceDependency] = []
+    for item in values:
+        var inserted = false
+        var next: [DbEvidenceDependency] = []
+        for previous in sorted:
+            if not inserted and item.digest < previous.digest:
+                next.push(item)
+                inserted = true
+            next.push(previous)
+        if not inserted: next.push(item)
+        sorted = next
+    sorted
+
+export setup_item2_observation_dependencies

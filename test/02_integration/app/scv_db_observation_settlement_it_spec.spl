@@ -15,6 +15,9 @@ use std.scv.db_receipt.*
 use std.scv.distributed_identity_map.{identity_map_empty}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed}
 use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_artifact_binding_fixture.*
+use std.scv.db_patch_codec.{db_patch_encode}
+use app.scv.db.retention_store.{db_retention_open}
 use test.fixtures.scv.db_settlement_queue_fixture.{check_item2_queue_git, setup_item2_queue_sign}
 
 fn setup_item2_observation_settlement(fixture: Item2ObservationFixture, paged: bool) -> DbSettlementLocalConfig:
@@ -55,6 +58,7 @@ describe "REQ019 shared signed queue publication closure":
         for paged in [false, true]:
             val fixture = setup_item2_observation_fixture(paged)
             val config = setup_item2_observation_settlement(fixture, paged)
+            val original_wire = db_patch_encode(fixture.patch).unwrap()
             val queued = db_settlement_enqueue(fixture.source, "", fixture.patch, config.policy.admission).unwrap()
             expect(check_item2_observation_resume(fixture, config, queued.head, nil).unwrap_err()).to_equal("SCVDB_OBSERVATION_SOURCES_REQUIRED")
             expect(db_settlement_queue_open(fixture.source, config.policy.admission).unwrap()).to_equal(queued)
@@ -67,6 +71,13 @@ describe "REQ019 shared signed queue publication closure":
             val indexed = check_item2_observation_resume(fixture, config, published.view.head, Some(fixture.sources)).unwrap()
             expect(indexed.code).to_equal("local-index-observed")
             expect(indexed.view.queue.items[0].patch).to_equal(fixture.patch)
+            expect(db_patch_encode(indexed.view.queue.items[0].patch).unwrap()).to_equal(original_wire)
+            val retained = db_retention_open(fixture.source).unwrap()
+            for mapping in [fixture.records[3], fixture.records[4]]:
+                var pinned = false
+                for pin in retained.catalog.pins:
+                    if pin.root == setup_item2_artifact_digest(mapping)[10:] and pin.reason == "reproduction" and pin.expires_day == 0: pinned = true
+                expect(pinned).to_equal(true)
             check_item2_observation_cleanup(fixture)
 
     it "rechecks actual bytes after unpublished reconciliation and prevents publication on loss":
