@@ -82,4 +82,11 @@ Status: NOT_IMPLEMENTED. Criteria precede intentional failing SSpec skeletons; n
 - Requirements: REQ-003 REQ-012 REQ-015
 - Setup: Prepare an OPTIONAL provider with missing-policy=SILENT_SKIP and absent compiled artifact plus malformed-digest and capability-denial controls.
 - Action: Demand the absent optional capability and both invalid control capabilities through the packaged CLI.
-- Observable: Require exit 0 only for typed optional absence with zero source fallback; malformed digest and capability denial remain typed errors with nonzero exit.
+- Observable: Require the loader to retain its typed ArtifactMissing refusal; only the explicit CLI SILENT_SKIP policy maps that refusal to exit 0 with zero source fallback. Malformed digest and capability denial remain typed errors with nonzero exit.
+
+This criterion uses the existing `CLI_AVAILABILITY_OPTIONAL` and
+`CLI_MISSING_SILENT_SKIP` contract in
+`src/lib/nogc_sync_mut/composition/cli_option_route.spl`. It does not replace the
+REQ-012 loader error contract: the scenario must observe both the typed loader
+refusal and the separate CLI policy decision. AC06 covers the explicit error
+policy for the same missing artifact.
