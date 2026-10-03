@@ -27,3 +27,8 @@ This design adds a local-first SCV semantic database over Git/jj without adding 
 - [Implementation plan](../03_plan/agent_tasks/simple_distributed_textual_databases.md)
 - [System-test plan](../03_plan/sys_test/simple_distributed_textual_databases.md)
 - [Executable acceptance design](../../test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl)
+
+Observation identity source now has a pure pinned-policy kernel and strict
+compact-claim codecs. Quarantine has a direct-wire CAS preparation operation;
+prepared bytes are not a canonical conflict decision. Atomic provider indexes,
+mixed-batch equivalence, migration and quarantine recovery remain unimplemented.

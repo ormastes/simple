@@ -220,3 +220,14 @@ still needs exact original signed-wire readback, before/after-CAS crash cases,
 changed-HEAD recomputation and whole-mixed-batch nonacceptance. A duplicate mixed
 batch needs verified equivalence links and atomic resolution of all dependent
 operations; a skipped append and dangling proposed UID are not a passing oracle.
+
+### Direct-wire quarantine storage acceptance
+
+Exercise db_quarantine_store_bundle through actual controlled CAS and real SJ
+leases. Reopen exact prefixed canonical wire and signed patches; compare direct
+submission with guarded file import; require idempotent repeated storage.
+Store a shape-valid forged signature, then prove current admission still refuses
+it. Malformed/over-quota input, checkout-internal scope and held leases must not
+produce candidate storage or accepted/retention mutations. Retry only after
+releasing the explicitly owned test lease. This gate prepares bytes; it is not
+the still-missing canonical identity-quarantine decision or its recovery proof.

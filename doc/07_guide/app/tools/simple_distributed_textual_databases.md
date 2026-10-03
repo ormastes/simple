@@ -393,3 +393,11 @@ an independently pinned policy, expected key and actual original observation.
 Missing originals fail closed. Backend index registration/migration and atomic
 duplicate/quarantine publication remain unimplemented; canonical quarantine
 decisions may legitimately advance HEAD without accepting the rejected input.
+
+Call db_quarantine_store_bundle for an already available canonical signed-bundle
+wire; file-based db_quarantine_import preserves its input guards and delegates.
+Both prepare inert controlled-CAS bytes. Reopen the handle to inspect exact
+patches, then perform current admission separately. Do not call preparation
+while holding the final decision's SJ lease. The handle is neither accepted
+state nor a completed provider-identity quarantine decision; per-bundle bounds
+do not establish global spool limits or orphan cleanup.

@@ -426,3 +426,13 @@ Root owns the accepted-projection regression correction and shared design/plan
 updates. APIs: policy_encode/decode, entry_encode/decode and entry_verify under
 the db_observation_identity prefix. Missing originals are typed lookup errors.
 No page tag or backend schema is registered by this pure persistence work.
+
+### Direct-wire quarantine storage lanes
+
+All isolated branches start at a531ceac8b1. Core owns only quarantine_store.spl's
+db_quarantine_store_bundle extraction and guarded-import delegation. Evidence
+owns a new actual-filesystem spec using existing observation fixtures. Research
+reviews exact-wire identity, quotas, lease scope and test prerequisites. Root
+owns architecture/design/guide consistency and integration. Storage preparation
+is complete only at source level here; canonical decision and recovery gates
+remain separately required. No system placeholder is replaced by a CAS handle.

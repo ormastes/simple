@@ -428,3 +428,31 @@ The REQ-017 system contract still fails explicitly; its wording now requires
 exact rejected signed bytes and unchanged accepted projections rather than
 unchanged HEAD. The manually maintained source fold matches exactly. No runtime
 RED/GREEN, core/MCP qualification, migration or durable owner completion is claimed.
+
+### Direct canonical-wire quarantine preparation
+
+Core extracted db_quarantine_store_bundle in the existing quarantine effect
+module. Guarded file import retains format, path/no-follow, bounded read and
+UTF-8 checks before delegating. The shared owner validates canonical bundle and
+signed shape before the existing CAS writer's single short SJ lease. It stores
+exact original canonical wire and does not add a second input-staging surface.
+
+Five independently authored filesystem sources cover exact stored bytes and
+file/direct equivalence, forged signature separation from current admission,
+malformed/over-quota refusal before candidate storage, actual held-SJ refusal
+then retry, and checkout-internal destination rejection. Independent source
+review found the owner and test preconditions coherent. Full semantic/Paged/
+retention equality is appropriate for this inert preparation operation, unlike
+the eventual canonical decision that may advance HEAD.
+
+Prepared handles remain inert storage evidence. Canonical conflict decisions,
+provider index/equivalence atomicity, migration, recovery, total spool limits and
+orphan lifecycle remain open. All Simple tests are UNEXECUTED; no runtime
+RED/GREEN, coverage, core/MCP qualification or release PASS exists. System source
+inventory remains 23 owner scenarios and 130 explicit fail-fast contracts.
+
+Integrated reviewed test-first 9c62caf315b as 8152555de69, followed by production
+3222f7cd3e1. The production diff extracts the shared validated-wire storage path
+and preserves guarded file input. No admission or semantic decision owner was
+added. Final malformed-signature/trailing-data cases were independently reviewed
+without expanding the five-case scope. Static checks are source evidence only.

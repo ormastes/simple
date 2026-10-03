@@ -104,3 +104,17 @@ Compact identity entries should retain only claim/reference data, then verify
 against actual original records. Repeating full observations in every index
 entry would add unnecessary persistent bytes against Operating B growth targets.
 Canonical codec success alone is not authenticated membership or absence.
+
+### Direct-wire quarantine preparation
+
+The existing quarantine file owner already parses canonical bundles before
+calling db_evidence_store_put. Extraction of that final validated-wire operation
+allows a future identity owner to preserve original rejected bytes without an
+extra temporary input file. Guarded file import remains a separate input adapter.
+The lower evidence store owns one short SJ lease, private publication staging,
+readback and directory durability; a caller must prepare outside its final
+decision lease to avoid nesting. The stored envelope excludes accounting day
+from content identity, so a handle's day is caller provenance, not signed time.
+No new signature authority, accepted state or decision journal is supplied by
+this extraction. Canonical ASCII wire makes the delegated UTF-8 wire hash equal
+to the original guarded file-byte hash.

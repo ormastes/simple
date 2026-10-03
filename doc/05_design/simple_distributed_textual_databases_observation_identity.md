@@ -157,9 +157,14 @@ whole duplicate mixed batch; silently skipping its duplicate operation is unsafe
 Such interim rejection is not completion of the idempotence requirement.
 
 For quarantine, prepare and reopen the exact original signed bundle in controlled
-external CAS before attempting decision publication. Existing quarantine import
-requires bounded private input staging; do not nest its writer lease inside an
-already held root lease. Under the final root SJ/CAS, recheck semantic HEAD,
+external CAS before attempting decision publication. The direct-wire
+`db_quarantine_store_bundle` operation accepts a canonical signed-bundle wire,
+avoiding an extra temporary input file. File import retains its format, no-follow,
+bounded read and UTF-8 checks, then delegates to the same operation. Canonical
+bundle and signature-shape validation precede CAS mutation; signature shape is
+not current authorization. The existing evidence CAS owner retains private
+publication staging and its short SJ lease. Do not invoke this operation inside
+an already held root lease. Under the final decision SJ/CAS, recheck semantic HEAD,
 policy pin, identity index and original record. Publish a versioned decision
 record binding batch/payload, rejected-object address and conflicting operations,
 without accepting the batch/counter or applying any other operation. The decision
@@ -175,3 +180,20 @@ while accepted observations, counters, aliases and retention remain unchanged.
 The current collision regression checks these accepted projections rather than
 requiring a frozen HEAD; durable rejected-wire and recovery oracles are still
 required before replacing its system placeholder.
+
+### Prepared bytes are not a completed decision
+
+The direct-wire storage handle contains CAS digest, exact wire digest, patch
+count and caller-supplied accounting day. It proves no provider identity conflict,
+policy admission or canonical acceptance. The day is not a signed creation time.
+The owner stores `SCVDB-QUARANTINE-v1` plus the exact validated canonical bundle;
+reopening checks object integrity and bundle identity. Repeating the same wire
+and accounting inputs is idempotent under the existing content store.
+
+Filesystem oracles must compare actual stored bytes and original patch signatures,
+show direct/file import equivalence, distinguish signed shape from signature
+authorization, reject malformed/over-quota wire before candidate storage, reject
+checkout-internal destinations, and observe busy SJ refusal followed by retry.
+Use populated accepted state when asserting no acceptance or retention mutation.
+These tests establish storage preparation only; crash recovery of a canonical
+quarantine decision, index fencing and mixed-batch atomicity remain separate gates.

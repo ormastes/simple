@@ -613,3 +613,29 @@ The history operation inspects at most 32 cursors in a raw single-parent walk, u
 These are implementation dependencies, not reduced scope. REQ-001–036 and NFR-001–015 remain the release acceptance boundary. Each parallel lane has one isolated worktree/branch; a single integrating reviewer reconciles interfaces and evidence before protected release-branch integration. Tags/publication remain a separate authorized release action.
 
 Startup opens generation/version/index roots once. Pure identity/status/dedup hot paths perform no subprocess or network I/O. The existing array IdentityMap's pairwise validation is a known scaling gap: million-row acceptance requires an indexed implementation and recorded warm latency/RSS results, not extrapolation from small unit fixtures.
+
+### Observation identity and quarantine preparation boundaries
+
+The source implementation now separates three responsibilities. The pure
+`db_observation_identity` kernel validates independently pinned capabilities and
+compares identity/content without treating its decisions as write authority.
+`db_observation_identity_codec` persists canonical policy and compact index
+claims, but requires an actual sealed original for consistency verification;
+a codec-valid claim is not authenticated generation membership.
+
+The effect module `quarantine_store` prepares canonical signed-bundle bytes in
+controlled external CAS. Its direct-wire entry point avoids temporary input
+staging; guarded file import retains path/no-follow/read limits and delegates.
+Both reach the existing evidence store's single short SJ lease and publication
+staging. Signature shape is accepted for quarantine inspection; current signature
+and metadata authority remain admission responsibilities. Prepared handles do
+not publish accepted observations, counters, provider indexes or decision receipts.
+
+A future identity admission coordinator must bind verified policy/index/original
+lookups to one captured generation and atomically publish either accepted data
+plus equivalence/index records or a durable quarantine decision. Separate channel
+writes are not one atomic transaction. Mixed-batch duplicate references require
+versioned equivalence links; the existing bijective UID/alias map cannot silently
+supply them. Policy migration, checkpoint preservation, settlement integration
+and crash recovery remain open. Full requirements and Operating B targets are
+unchanged; source review and unexecuted filesystem tests do not qualify deployment.
