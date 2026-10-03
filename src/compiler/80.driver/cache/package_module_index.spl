@@ -616,7 +616,7 @@ fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexR
         return PackageModuleIndexReadV1(false, "generation-pointer-mismatch", "", nil)
     decoded
 
-fn package_module_index_gc_v1(
+fn _package_module_index_gc_locked_v1(
     cache_root: text, retained_digests: [text], max_remove: i64
 ) -> i64:
     if max_remove <= 0:
@@ -643,6 +643,25 @@ fn package_module_index_gc_v1(
                 package_module_index_decode_v1(content!).valid and
                 rt_file_delete(path)):
             removed = removed + 1
+    removed
+
+fn package_module_index_gc_v1(
+    cache_root: text, retained_digests: [text], max_remove: i64
+) -> i64:
+    if max_remove <= 0:
+        return 0
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    # Publication can reuse an existing immutable generation before replacing
+    # CURRENT. Hold its lock across pointer admission, enumeration and deletion
+    # so GC cannot remove the publisher's candidate or newly current generation.
+    # GC is optional maintenance: bounded contention returns the existing zero
+    # removal result rather than delaying compilation for the publisher timeout.
+    val lock = file_lock("{dir}/CURRENT.lock", 1)
+    if lock < 0:
+        return 0
+    val removed = _package_module_index_gc_locked_v1(
+        cache_root, retained_digests, max_remove)
+    file_unlock(lock)
     removed
 
 fn package_module_index_dirty_packages_v1(
