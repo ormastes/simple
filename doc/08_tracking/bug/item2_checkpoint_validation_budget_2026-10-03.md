@@ -121,13 +121,11 @@ There are deliberately separate effect bounds:
   chunks/file count). The reader reserves both source-page passes and the
   importer's conflict-proof cache before invocation, not spill IO. No 1 GiB
   whole-import or whole-install claim is made.
-- Held prepare/install/replay performs a fixed protocol, not a page/row loop:
-  at most 32 generation/publisher bounded-read operations, conservatively
-  bounded by `32 * (64 MiB + 65)` bytes. This covers at most five explicit held
-  prechecks, three install-primitive checks, two backend-exclusion checks,
-  current/readback for each publication, and staged/destination object/HEAD
-  readbacks. Compact barrier reads are smaller. These protocol reads remain
-  outside the validation counter; shared local-store atomicity is unchanged.
+- Held prepare/install/replay performs fixed protocol checks rather than a
+  page/row traversal and retains existing per-object read limits. Its aggregate
+  byte/read count has not been independently audited or qualified. These
+  publication and readback operations remain outside the validation counter;
+  no whole-install IO bound is claimed. Shared local-store atomicity is unchanged.
 
 Prepare also reserves recovery-only artifact IO and journal decoding before
 publishing Prepared. Resume uses actual wire decode sizes rather than charging
