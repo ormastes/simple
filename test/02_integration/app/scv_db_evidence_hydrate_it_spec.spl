@@ -1,0 +1,111 @@
+# Source regression fixtures; no runtime/performance qualification is claimed.
+use std.spec.{describe, it, expect}
+use app.io.mod.{cwd, dir_create, file_write_bytes, file_delete, process_run_bounded, file_read_regular_no_follow_bounded_bytes}
+use app.io.retained_file_ops.*
+use app.scv.db.evidence_store.*
+use app.scv.db.evidence_hydrate.*
+use app.scv.db.evidence_closure.*
+use std.scv.db_retention.*
+use std.scv.db_evidence_stream.*
+use std.common.crypto.sha256.{sha256_stream_v1_update}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+
+fn setup_item2_hydration_paths() -> (text,text,text):
+    val base = secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-hydration-").unwrap()
+    val source = "{base}/source"
+    val parent = "{base}/external"
+    val target = "{base}/target"
+    for path in [source,parent,target]: expect(dir_create(path,false)).to_be(true)
+    val (_out,_err,code) = process_run_bounded("git", ["init","--quiet",source],30000,4096)
+    expect(code).to_equal(0)
+    (source,parent,target)
+
+fn setup_item2_hydration_quota() -> DbEvidenceStoreQuota:
+    DbEvidenceStoreQuota(max_content_bytes: 134217728,max_envelope_bytes: 134238208,max_dependencies: 256)
+
+fn setup_item2_hydration_node(root: text,parent: text,content: [u8],dependencies: [text] = []) -> DbEvidenceNode:
+    val node = DbEvidenceNode(digest: db_evidence_digest(content,dependencies).unwrap(),content: content,availability: "available",created_day: 0,dependencies: dependencies)
+    db_evidence_store_put(root,parent,node,setup_item2_hydration_quota()).unwrap()
+
+fn setup_item2_hydration_big(parent: text) -> text:
+    val store = "{parent}/scv-evidence-v1"
+    expect(dir_create(store,false)).to_be(true)
+    val file = retained_file_open("{store}/fixture",134217728u64,true).unwrap()
+    # SCVE1, zero dependencies, 104857600 (100MiB) content bytes.
+    retained_file_write(file,[83u8,67u8,86u8,69u8,1u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,6u8,64u8,0u8,0u8]).unwrap()
+    val stream = db_evidence_stream_start(104857600u64).unwrap()
+    val chunk = [37u8;1048576]
+    for ordinal in 0..100:
+        retained_file_write(file,chunk).unwrap()
+        expect(sha256_stream_v1_update(stream,chunk)).to_be(true)
+    expect(retained_file_sync(file)).to_be(true)
+    expect(retained_file_close(file)).to_be(true)
+    val digest = db_evidence_stream_finish(stream,[]).unwrap()
+    expect(file_publish_noreplace("{store}/fixture","{store}/{digest}.scve").unwrap()).to_be(true)
+    digest
+
+fn check_item2_hydration_big(path: text):
+    val file = retained_file_open(path,104857600u64).unwrap()
+    expect(file.size).to_equal(104857600u64)
+    var count = 0
+    while true:
+        val chunk = retained_file_read(file,1048576).unwrap()
+        if chunk.len() == 0: break
+        expect(chunk).to_equal([37u8;1048576])
+        count = count + 1
+    expect(count).to_equal(100)
+    expect(retained_file_unchanged(file).unwrap()).to_be(true)
+    expect(retained_file_close(file)).to_be(true)
+
+describe "Verified bounded evidence hydration":
+    it "hydrates a real 100MiB envelope with one MiB reads and rejects oversized chunk requests":
+        val (root,parent,target) = setup_item2_hydration_paths()
+        val digest = setup_item2_hydration_big(parent)
+        val info = db_evidence_inspect_file(root,parent,digest,setup_item2_hydration_quota()).unwrap()
+        expect(info.content_bytes).to_equal(104857600u64)
+        val hydrated = db_evidence_hydrate_file(root,parent,digest,target,setup_item2_hydration_quota()).unwrap()
+        check_item2_hydration_big(hydrated.content_path)
+        val file = retained_file_open(hydrated.content_path,104857600u64).unwrap()
+        expect(retained_file_read(file,1048577).is_err()).to_be(true)
+        expect(retained_file_close(file)).to_be(true)
+
+    it "rejects changed content, truncated envelopes and link objects instead of publishing output":
+        val (root,parent,target) = setup_item2_hydration_paths()
+        val node = setup_item2_hydration_node(root,parent,[1u8,2u8,3u8])
+        val path = "{parent}/scv-evidence-v1/{node.digest}.scve"
+        var bytes = file_read_regular_no_follow_bounded_bytes(path,1024).unwrap()
+        bytes[bytes.len() - 1] = 99u8
+        expect(file_write_bytes(path,bytes)).to_be(true)
+        expect(db_evidence_hydrate_file(root,parent,node.digest,target,setup_item2_hydration_quota()).is_err()).to_be(true)
+        expect(file_write_bytes(path,bytes[0:22])).to_be(true)
+        expect(db_evidence_inspect_file(root,parent,node.digest,setup_item2_hydration_quota()).is_err()).to_be(true)
+        expect(file_delete(path)).to_be(true)
+        val other = "{parent}/other"
+        expect(file_write_bytes(other,bytes)).to_be(true)
+        expect(setup_item2_filesystem_link(root,other,path,false)).to_equal(0)
+        expect(db_evidence_inspect_file(root,parent,node.digest,setup_item2_hydration_quota()).is_err()).to_be(true)
+
+    it "verifies opaque restricted closure without hydrating plaintext or loading a key":
+        val (root,parent,target) = setup_item2_hydration_paths()
+        val leaf = setup_item2_hydration_node(root,parent,[83u8,67u8,82u8,69u8,1u8,0u8,255u8])
+        val first = setup_item2_hydration_node(root,parent,[11u8],[leaf.digest])
+        val second = setup_item2_hydration_node(root,parent,[12u8],[leaf.digest])
+        var children = [first.digest,second.digest]
+        if first.digest > second.digest: children = [second.digest,first.digest]
+        val root_node = setup_item2_hydration_node(root,parent,[13u8],children)
+        val quota = DbEvidenceClosureQuota(object_quota: setup_item2_hydration_quota(),max_objects: 4,max_content_bytes: 10,max_depth: 3)
+        val receipt = db_evidence_verify_closure(root,parent,[root_node.digest],quota).unwrap()
+        expect(receipt.object_count).to_equal(4u64)
+        expect(receipt.content_bytes).to_equal(10u64)
+        expect(db_evidence_inspect_file(root,parent,leaf.digest,setup_item2_hydration_quota()).unwrap().restricted).to_be(true)
+        expect(db_evidence_hydrate_file(root,parent,leaf.digest,target,setup_item2_hydration_quota()).unwrap_err()).to_equal("SCVDB_EVIDENCE_RESTRICTED")
+        var small = quota
+        small.max_objects = 3
+        expect(db_evidence_verify_closure(root,parent,[root_node.digest],small).is_err()).to_be(true)
+        small = quota
+        small.max_content_bytes = 9
+        expect(db_evidence_verify_closure(root,parent,[root_node.digest],small).is_err()).to_be(true)
+        expect(file_delete("{parent}/scv-evidence-v1/{leaf.digest}.scve")).to_be(true)
+        expect(db_evidence_verify_closure(root,parent,[root_node.digest],quota).is_err()).to_be(true)

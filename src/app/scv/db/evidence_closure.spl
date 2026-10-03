@@ -1,0 +1,89 @@
+# Disk-backed breadth-first closure. Queue and visited markers live in one
+# exclusively created private scratch directory; no corpus-sized in-memory set.
+# Receipt describes bytes observed during this scan, not durable pin authority.
+use app.scv.db.evidence_hydrate.{db_evidence_inspect_at}
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_external_scope}
+use app.io.mod.{file_create_exclusive, file_read_regular_no_follow_bounded, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains, path_entry_present}
+use std.scv.db_canonical.{db_domain_bytes, db_canonical_text, db_u64_bytes, db_frame}
+use std.common.crypto.sha256.{sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+
+struct DbEvidenceClosureQuota:
+    object_quota: DbEvidenceStoreQuota
+    max_objects: u64
+    max_content_bytes: u64
+    max_depth: u64
+
+struct DbEvidenceClosureReceipt:
+    roots: [text]
+    object_count: u64
+    content_bytes: u64
+    closure_digest: text
+
+fn _closure_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    for byte in value.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+fn _closure_enqueue(stage: text, digest: text, depth: u64, count: u64, quota: DbEvidenceClosureQuota) -> Result<u64, text>:
+    if not _closure_digest(digest): return Err("SCVDB_EVIDENCE_DIGEST")
+    val seen = "{stage}/seen-{digest}"
+    if path_entry_present(seen)?: return Ok(count)
+    if count >= quota.max_objects or depth > quota.max_depth: return Err("SCVDB_EVIDENCE_CLOSURE_QUOTA")
+    if not file_create_exclusive(seen, digest) or not file_create_exclusive("{stage}/queue-{count}", "{digest}\n{depth}\n"):
+        return Err("SCVDB_EVIDENCE_CLOSURE_IO")
+    Ok(count + 1u64)
+
+fn _closure_run(store: text, stage: text, roots: [text], quota: DbEvidenceClosureQuota) -> Result<DbEvidenceClosureReceipt, text>:
+    var count = 0u64
+    for digest in roots: count = _closure_enqueue(stage, digest, 0, count, quota)?
+    val stream = sha256_stream_v1_new()
+    if not sha256_stream_v1_update(stream, db_domain_bytes("evidence-closure", [])?): return Err("SCVDB_EVIDENCE_HASH")
+    for root in roots:
+        if not sha256_stream_v1_update(stream, db_frame(1u8, db_canonical_text(root)?)): return Err("SCVDB_EVIDENCE_HASH")
+    var cursor = 0u64
+    var total = 0u64
+    while cursor < count:
+        val wire = file_read_regular_no_follow_bounded("{stage}/queue-{cursor}", 96)?
+        val fields = wire.split("\n")
+        if fields.len() != 3 or fields[2] != "" or not _closure_digest(fields[0]): return Err("SCVDB_EVIDENCE_CLOSURE_IO")
+        var depth = 0u64
+        for byte in fields[1].bytes():
+            if byte < 48 or byte > 57 or depth > quota.max_depth: return Err("SCVDB_EVIDENCE_CLOSURE_IO")
+            depth = depth * 10u64 + ((byte - 48) as u64)
+        if fields[1] != "{depth}" or depth > quota.max_depth: return Err("SCVDB_EVIDENCE_CLOSURE_IO")
+        # Clamp remaining before reading, rather than rejecting after retaining
+        # or hashing an object that exceeds the whole-scan budget.
+        var object_quota = quota.object_quota
+        val remaining = quota.max_content_bytes - total
+        if remaining < (object_quota.max_content_bytes as u64): object_quota.max_content_bytes = remaining as i64
+        val info = db_evidence_inspect_at(store, fields[0], object_quota)?
+        total = total + info.content_bytes
+        if not sha256_stream_v1_update(stream, db_frame(2u8, db_canonical_text(info.digest)? + db_frame(3u8, db_u64_bytes(info.content_bytes)))): return Err("SCVDB_EVIDENCE_HASH")
+        for dependency in info.dependencies:
+            count = _closure_enqueue(stage, dependency, depth + 1u64, count, quota)?
+        cursor = cursor + 1u64
+    val digest = sha256_stream_v1_finish_hex(stream) ?? ""
+    if digest == "": return Err("SCVDB_EVIDENCE_HASH")
+    Ok(DbEvidenceClosureReceipt(roots: roots, object_count: count, content_bytes: total, closure_digest: digest))
+
+fn db_evidence_verify_closure(checkout: text, parent: text, roots: [text], quota: DbEvidenceClosureQuota) -> Result<DbEvidenceClosureReceipt, text>:
+    if roots.len() == 0 or roots.len() > 1024 or quota.max_objects < 1u64 or quota.max_objects > 1000000u64 or quota.max_content_bytes > 1099511627776u64 or quota.max_depth > 4096u64: return Err("SCVDB_EVIDENCE_CLOSURE_QUOTA")
+    # Roots must already be canonically sorted; prevents caller-order receipts.
+    var previous = ""
+    for digest in roots:
+        if not _closure_digest(digest) or digest <= previous: return Err("SCVDB_EVIDENCE_DEPENDENCY")
+        previous = digest
+    val scope = db_evidence_external_scope(checkout, parent, "scv-evidence-v1")?
+    val owner = path_final_existing(parent)?
+    val stage = secure_temp_dir(parent, "scv-closure-")?
+    val identity = path_final_existing(stage)?
+    if identity.path != stage or not dir_is_real_no_follow(stage) or not path_identity_contains(owner, identity): return Err("SCVDB_STORE_SCOPE")
+    val result = _closure_run(scope, stage, roots, quota)
+    if not dir_is_real_no_follow(stage) or not path_identity_same(owner, path_final_existing(parent)?) or not path_identity_same(identity, path_final_existing(stage)?) or not dir_remove_all(stage): return Err("SCVDB_EVIDENCE_CLEANUP")
+    result
+
+export DbEvidenceClosureQuota, DbEvidenceClosureReceipt, db_evidence_verify_closure

@@ -1,0 +1,220 @@
+# Bounded binary IO with a retained native regular-file handle. Callers close
+# every handle, including failed reads. Parents must be trusted against rename.
+# Windows denies write/delete sharing; Linux checks inode/size/mtime/ctime at
+# finish. Unsupported host owners fail closed, never fall back to path reads.
+use std.nogc_sync_mut.io.retained_file_abi.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u8, volatile_write_u16}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+
+class RetainedFile:
+    handle: i64
+    size: u64
+    identity: [u8]
+    writable: bool
+    closed: bool
+    position: u64
+    maximum: u64
+
+@unsafe(reason: "allocates zeroed temporary native IO storage", capabilities: [ffi, raw_ptr])
+fn _retained_alloc(size: u64) -> i64:
+    @when(os="windows"):
+    HeapAlloc(GetProcessHeap(), 8u32, size)
+    @else:
+    val ptr = malloc(size)
+    if ptr != 0:
+        for index in 0..(size as i64): volatile_write_u8(ptr + index, 0)
+    ptr
+    @end
+
+@unsafe(reason: "releases exactly one owned native allocation", capabilities: [ffi, raw_ptr])
+fn _retained_free(ptr: i64):
+    if ptr == 0: return
+    @when(os="windows"):
+    val released = HeapFree(GetProcessHeap(), 0u32, ptr)
+    @else:
+    free(ptr)
+    @end
+
+@unsafe(reason: "encodes bounded native path without embedded NUL", capabilities: [ffi, raw_ptr])
+fn _retained_path(path: text) -> i64:
+    if path.len() == 0 or path.len() > 32760: return 0
+    val ptr = _retained_alloc(65536u64)
+    if ptr == 0: return 0
+    @when(os="windows"):
+    var consumed = 0
+    var ordinal = 0
+    var offset = 0
+    while consumed < path.len():
+        val scalar = path.char_code_at(ordinal)
+        if scalar <= 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+            _retained_free(ptr)
+            return 0
+        if scalar < 65536:
+            volatile_write_u16(ptr + offset * 2, scalar)
+            offset = offset + 1
+        else:
+            val value = scalar - 65536
+            volatile_write_u16(ptr + offset * 2, 55296 + (value >> 10))
+            volatile_write_u16(ptr + (offset + 1) * 2, 56320 + (value & 1023))
+            offset = offset + 2
+        ordinal = ordinal + 1
+        if scalar < 128: consumed = consumed + 1
+        elif scalar < 2048: consumed = consumed + 2
+        elif scalar < 65536: consumed = consumed + 3
+        else: consumed = consumed + 4
+    @else:
+    val bytes = base_encoding_text_to_bytes(path)
+    for index in 0..bytes.len():
+        if bytes[index] == 0u8:
+            _retained_free(ptr)
+            return 0
+        volatile_write_u8(ptr + index, bytes[index] as i64)
+    @end
+    ptr
+
+@unsafe(reason: "observes size and identity on exact retained regular-file handle", capabilities: [ffi, raw_ptr])
+fn _retained_metadata(handle: i64) -> Result<(u64, [u8]), text>:
+    val ptr = _retained_alloc(256u64)
+    if ptr == 0: return Err("SCVDB_FILE_MEMORY")
+    var size = 0u64
+    var identity: [u8] = []
+    var valid = false
+    @when(os="windows"):
+    # FileAttributeTagInfo rejects directory/reparse; FileStandardInfo size;
+    # FileIdInfo binds volume+128bit identifier; FileBasicInfo excludes atime.
+    if GetFileType(handle) == 1u32 and GetFileInformationByHandleEx(handle, 9, ptr, 8u32) != 0 and (volatile_read_u32(ptr) & 1040) == 0:
+        if GetFileInformationByHandleEx(handle, 1, ptr, 24u32) != 0:
+            size = volatile_read_u64(ptr + 8) as u64
+            if GetFileInformationByHandleEx(handle, 18, ptr, 24u32) != 0:
+                for index in 0..24: identity.push(volatile_read_u8(ptr + index) as u8)
+                if GetFileInformationByHandleEx(handle, 0, ptr, 40u32) != 0:
+                    for index in 16..32: identity.push(volatile_read_u8(ptr + index) as u8)
+                    valid = true
+    @else:
+    @when(os="linux"):
+    # AT_EMPTY_PATH, STATX_BASIC_STATS; fixed UAPI layout independent of libc stat.
+    val empty = _retained_alloc(1u64)
+    if empty != 0:
+        if statx(handle as i32, empty, 4096, 2047u32, ptr) == 0 and (volatile_read_u32(ptr) & 967) == 967 and (volatile_read_u16(ptr + 28) & 61440) == 32768:
+            size = volatile_read_u64(ptr + 40) as u64
+            for index in 32..48: identity.push(volatile_read_u8(ptr + index) as u8)
+            for index in 96..128: identity.push(volatile_read_u8(ptr + index) as u8)
+            for index in 136..144: identity.push(volatile_read_u8(ptr + index) as u8)
+            valid = true
+        _retained_free(empty)
+    @end
+    @end
+    _retained_free(ptr)
+    if not valid: return Err("SCVDB_FILE_METADATA_UNSUPPORTED")
+    Ok((size, identity))
+
+@unsafe(reason: "opens nofollow regular file or exclusively creates private output", capabilities: [ffi, raw_ptr])
+fn retained_file_open(path: text, maximum: u64, create: bool = false) -> Result<RetainedFile, text>:
+    if maximum > 1099511627776u64: return Err("SCVDB_FILE_QUOTA")
+    @when(os="windows"):
+    val supported = true
+    @else:
+    @when(os="linux"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    @end
+    if not supported: return Err("SCVDB_FILE_HOST_UNSUPPORTED")
+    val ptr = _retained_path(path)
+    if ptr == 0: return Err("SCVDB_FILE_PATH")
+    var handle = -1i64
+    @when(os="windows"):
+    val access = if create: 1073741824u32 else: 2147483648u32
+    val disposition = if create: 1u32 else: 3u32
+    handle = CreateFileW(ptr, access, 1u32, 0, disposition, 2097280u32, 0)
+    @else:
+    @when(os="linux"):
+    # O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK prevents FIFO open from blocking before stat.
+    val flags = if create: 657601 else: 657408
+    handle = open(ptr, flags, 384u32) as i64
+    @end
+    @end
+    _retained_free(ptr)
+    if handle == -1: return Err("SCVDB_FILE_OPEN")
+    val file = RetainedFile(handle: handle, size: 0, identity: [], writable: create, closed: false, position: 0, maximum: maximum)
+    match _retained_metadata(handle):
+        Err(error):
+            val closed = retained_file_close(file)
+            return Err(error)
+        Ok((size, identity)):
+            if size > maximum:
+                val closed = retained_file_close(file)
+                return Err("SCVDB_FILE_QUOTA")
+            file.size = size
+            file.identity = identity
+    Ok(file)
+
+@unsafe(reason: "reads at most one MiB through retained native handle", capabilities: [ffi, raw_ptr])
+fn retained_file_read(file: RetainedFile, maximum: i64) -> Result<[u8], text>:
+    if file.closed or file.writable or maximum < 1 or maximum > 1048576: return Err("SCVDB_FILE_READ_QUOTA")
+    val ptr = _retained_alloc((maximum + 8) as u64)
+    if ptr == 0: return Err("SCVDB_FILE_MEMORY")
+    var count = -1i64
+    @when(os="windows"):
+    if ReadFile(file.handle, ptr, maximum as u32, ptr + maximum, 0) != 0: count = volatile_read_u32(ptr + maximum)
+    @else:
+    count = read(file.handle as i32, ptr, maximum as u64)
+    @end
+    var bytes: [u8] = []
+    if count >= 0 and count <= maximum:
+        for index in 0..count: bytes.push(volatile_read_u8(ptr + index) as u8)
+    _retained_free(ptr)
+    if count < 0 or count > maximum: return Err("SCVDB_FILE_READ")
+    file.position = file.position + (count as u64)
+    Ok(bytes)
+
+@unsafe(reason: "writes bounded chunk completely or fails on retained exclusive output", capabilities: [ffi, raw_ptr])
+fn retained_file_write(file: RetainedFile, bytes: [u8]) -> Result<bool, text>:
+    if file.closed or not file.writable or bytes.len() > 1048576 or (bytes.len() as u64) > file.maximum - file.position: return Err("SCVDB_FILE_WRITE_QUOTA")
+    val ptr = _retained_alloc((bytes.len() + 8) as u64)
+    if ptr == 0: return Err("SCVDB_FILE_MEMORY")
+    for index in 0..bytes.len(): volatile_write_u8(ptr + index, bytes[index] as i64)
+    var offset = 0
+    while offset < bytes.len():
+        var count = -1i64
+        @when(os="windows"):
+        if WriteFile(file.handle, ptr + offset, (bytes.len() - offset) as u32, ptr + bytes.len(), 0) != 0: count = volatile_read_u32(ptr + bytes.len())
+        @else:
+        count = write(file.handle as i32, ptr + offset, (bytes.len() - offset) as u64)
+        @end
+        if count <= 0 or count > bytes.len() - offset:
+            _retained_free(ptr)
+            return Err("SCVDB_FILE_WRITE")
+        offset = offset + count
+    _retained_free(ptr)
+    file.position = file.position + (bytes.len() as u64)
+    Ok(true)
+
+fn retained_file_unchanged(file: RetainedFile) -> Result<bool, text>:
+    if file.closed or file.writable: return Err("SCVDB_FILE_STATE")
+    val (size, identity) = _retained_metadata(file.handle)?
+    if size != file.size or identity != file.identity or file.position != size: return Err("SCVDB_FILE_CHANGED")
+    Ok(true)
+
+@unsafe(reason: "flushes exact owned output descriptor before close", capabilities: [ffi])
+fn retained_file_sync(file: RetainedFile) -> bool:
+    if file.closed or not file.writable: return false
+    @when(os="windows"):
+    FlushFileBuffers(file.handle) != 0
+    @else:
+    fsync(file.handle as i32) == 0
+    @end
+
+@unsafe(reason: "invalidates owner object before closing native handle exactly once", capabilities: [ffi])
+fn retained_file_close(file: RetainedFile) -> bool:
+    if file.closed: return false
+    file.closed = true
+    @when(os="windows"):
+    CloseHandle(file.handle) != 0
+    @else:
+    close(file.handle as i32) == 0
+    @end
+
+export RetainedFile, retained_file_open, retained_file_read, retained_file_write
+export retained_file_unchanged, retained_file_sync, retained_file_close
