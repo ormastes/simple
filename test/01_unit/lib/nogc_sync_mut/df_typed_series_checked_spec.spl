@@ -23,6 +23,8 @@ fn checked_column_dynamic(kind: text) -> Series:
         backing.strides = Stride.new([Index.new(2)])
     elif kind == "negative-stride-outside":
         backing.strides = Stride.new([Index.new(-1)])
+    elif kind == "minimum-stride":
+        backing.strides = Stride.new([Index.new(-9223372036854775807 - 1)])
     elif kind == "zero-rank":
         backing.shape = Shape.new([])
         backing.strides = Stride.new([])
@@ -65,7 +67,7 @@ describe "checked typed column diagnostics and storage":
             case _: fail("forged outer dtype hid backing dtype")
 
     it "rejects malformed dynamic metadata and unreachable backing before flat reads":
-        for kind in ["negative-dimension", "rank-mismatch", "count-overflow", "backing-short", "negative-offset", "stride-outside", "negative-stride-outside", "zero-rank"]:
+        for kind in ["negative-dimension", "rank-mismatch", "count-overflow", "backing-short", "negative-offset", "stride-outside", "negative-stride-outside", "minimum-stride", "zero-rank"]:
             val malformed = checked_column_dynamic(kind)
             match i64_typed_series_from_dynamic_checked(malformed):
                 case Err(error):
@@ -114,6 +116,32 @@ describe "checked typed column diagnostics and storage":
             case _: fail("malformed output converted")
         expect(i64_typed_series_into_dynamic(malformed).is_err()).to_equal(true)
         expect(malformed.map_values(checked_column_poison).is_err()).to_equal(true)
+
+    it "allows an empty view at backing end but rejects an offset beyond it":
+        var empty = checked_column_dynamic("valid")
+        var backing = empty.values
+        backing.shape = Shape.new([Index.new(0)])
+        backing.offset = Index.new(3)
+        backing.strides = Stride.new([Index.new(-9223372036854775807 - 1)])
+        empty.values = backing
+        empty.missing = []
+        expect(i64_typed_series_from_dynamic_checked(empty).unwrap().len().value).to_equal(0)
+        backing.offset = Index.new(4)
+        empty.values = backing
+        match i64_typed_series_from_dynamic_checked(empty):
+            case Err(error): expect(error).to_equal(TypedColumnError.InvalidStorage("offset-outside-backing"))
+            case _: fail("empty view admitted an offset beyond its backing")
+
+    it "validates f64 backing extent independently of matching dtype and mask":
+        var column = Series.from_f64_values(Symbol.from("short_f64"),
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        var backing = column.values
+        backing.data_f64 = [Float64.new(1.0)]
+        column.values = backing
+        match f64_typed_series_from_dynamic_checked(column):
+            case Err(error): expect(error).to_equal(TypedColumnError.InvalidStorage("stride-outside-backing"))
+            case _: fail("f64 adapter read beyond backing")
+        expect(f64_typed_series_from_dynamic(column).is_err()).to_equal(true)
 
     it "roundtrips f64 through checked adapters without changing present or missing rows":
         val column = TypedSeries<Float64>.from_masked_checked(Symbol.from("f64"),
