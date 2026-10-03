@@ -1,6 +1,6 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
-**Status:** Source-only, execution unverified. REQ-001, REQ-002, REQ-010 and REQ-035 now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
+**Status:** Source-only, execution unverified. REQ-001, REQ-002, REQ-010 and REQ-035, plus the REQ-030 hydration boundary, now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`
 
@@ -12,7 +12,7 @@ REQ-001 now creates two independent filesystem roots, reserves actual durable
 offline IDs, restores a saved counter and old handle to exercise rollback, and
 checks a separately signed actor-counter collision against persisted accepted
 state. REQ-002 writes and rereads a versioned compact alias header/cell, resolves its actual paged row, and rejects missing or mismatched context without changing the generation. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
-annotation is not a generated test-run receipt; docgen/execution remains pending. REQ-035 now publishes reviewed metadata to a local Git fixture, rejects unreviewed synthetic secret/PII values and forbidden classifications before queue mutation, and erases an owned key while proving loaded copies and ciphertext remain. Exact reviewed-value admission is not a general secret or PII detector.
+annotation is not a generated test-run receipt; docgen/execution remains pending. REQ-035 now publishes reviewed metadata to a local Git fixture, rejects unreviewed synthetic secret/PII values and forbidden classifications before queue mutation, and erases an owned key while proving loaded copies and ciphertext remain. Exact reviewed-value admission is not a general secret or PII detector. The REQ-030 boundary hydrates and rereads an actual 100 MiB external envelope and rejects an insufficient content allowance without semantic mutation. Its Git-placement cases and NFR measurements remain open.
 
 The five feature flows use these steps (typed-patch scenarios add transport and publication-specific steps):
 
@@ -55,7 +55,7 @@ The five feature flows use these steps (typed-patch scenarios add transport and 
 | REQ-027 — Bridge delivery | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it moves committed intent from pending through acknowledged with read-back | Should prove that it recovers sent-unconfirmed delivery without duplicating remote effects | Should prove that it quarantines mismatched replay and preserves uncertain effects |
 | REQ-028 — Provider conflict semantics | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it three-way merges one-sided provider changes from last-common state | Should prove that it distinguishes inaccessible remote state from confirmed deletion | Should prove that it surfaces concurrent scalar conflict and prevents causation loops |
 | REQ-029 — Writer ownership | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it commits every mutation through the SJ lease capsule | Should prove that it persists intent and releases the lease during provider waits | Should prove that it rejects independent Git jj or adapter mutation of one checkout |
-| REQ-030 — Semantic and evidence placement | `setup_retention_fixture` / `check_retention_contract` | Should prove that it stores durable semantics in Git and raw evidence in controlled CAS | Should prove that it hydrates raw bytes through a digest-verified manifest | Should prove that it rejects high-volume raw evidence from canonical Git ancestry |
+| REQ-030 — Semantic and evidence placement | Hydration boundary: `setup_item2_hydration_big` / actual streaming owner; other cases remain fail-fast | Should prove that it stores durable semantics in Git and raw evidence in controlled CAS | Should prove that it hydrates raw bytes through a digest-verified manifest | Should prove that it rejects high-volume raw evidence from canonical Git ancestry |
 | REQ-031 — Retention classes | `setup_retention_fixture` / `check_retention_contract` | Should prove that it keeps 28-day exact telemetry and versioned daily rollups afterward | Should prove that it pins complete unresolved release pending and reproduction closure | Should prove that it refuses age-based pruning of unsynchronized work |
 | REQ-032 — Honest resolution | `setup_retention_fixture` / `check_retention_contract` | Should prove that it returns exact aggregated restricted or unavailable explicitly | Should prove that it reports a day-end aggregate without claiming an exact revision | Should prove that it rejects a manifest-only claim that missing bytes remain available |
 | REQ-033 — Rollup correctness | `setup_retention_fixture` / `check_retention_contract` | Should prove that it deduplicates counts and merges declared timing sketches | Should prove that it revises provenance when late input changes a daily rollup | Should prove that it rejects averaging daily percentiles as a global percentile |
@@ -90,11 +90,13 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010 and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, REQ-030 boundary and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
 use std.spec.*
+use app.scv.db.evidence_hydrate.{db_evidence_inspect_file, db_evidence_hydrate_file}
+use test.fixtures.scv.db_hydration_fixture.*
 use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional, entity_ref_canonical}
 use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse}
 use app.io.mod (file_read, file_write, file_exists)
@@ -803,8 +805,26 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
         it "should prove that it hydrates raw bytes through a digest-verified manifest":
             step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-030", "drive boundary semantic and evidence placement state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val (root, parent, target) = setup_item2_hydration_paths()
+            val digest = setup_item2_hydration_big(parent)
+            val before = db_store_read(root, "semantic")
+            step("Read the actual external envelope and verify a 100 MiB hydration")
+            val quota = setup_item2_hydration_quota()
+            val manifest = db_evidence_inspect_file(root, parent, digest, quota).unwrap()
+            expect(manifest.digest).to_equal(digest)
+            expect(manifest.content_bytes).to_equal(104857600u64)
+            expect(manifest.dependencies).to_equal([])
+            val hydrated = db_evidence_hydrate_file(root, parent, digest, target, quota).unwrap()
+            expect(hydrated.digest).to_equal(digest)
+            expect(hydrated.content_path.starts_with(target + "/")).to_be(true)
+            check_item2_hydration_big(hydrated.content_path)
+            step("Reject an insufficient byte allowance without semantic mutation")
+            var small = quota
+            small.max_content_bytes = 104857599
+            expect(db_evidence_hydrate_file(root, parent, digest, target, small).unwrap_err()).to_equal("SCVDB_EVIDENCE_QUOTA")
+            expect(db_store_read(root, "semantic").head).to_equal(before.head)
+            expect(db_store_read(root, "semantic").state).to_equal(before.state)
+            # This proves actual hydration, not canonical Git placement or NFR timing.
 
         it "should prove that it rejects high-volume raw evidence from canonical Git ancestry":
             step("Retain exact or aggregated history")

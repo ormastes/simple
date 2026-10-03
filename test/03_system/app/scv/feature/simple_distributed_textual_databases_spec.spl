@@ -1,10 +1,12 @@
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010 and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, REQ-030 boundary and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
 use std.spec.*
+use app.scv.db.evidence_hydrate.{db_evidence_inspect_file, db_evidence_hydrate_file}
+use test.fixtures.scv.db_hydration_fixture.*
 use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional, entity_ref_canonical}
 use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse}
 use app.io.mod (file_read, file_write, file_exists)
@@ -713,8 +715,26 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
         it "should prove that it hydrates raw bytes through a digest-verified manifest":
             step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-030", "drive boundary semantic and evidence placement state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val (root, parent, target) = setup_item2_hydration_paths()
+            val digest = setup_item2_hydration_big(parent)
+            val before = db_store_read(root, "semantic")
+            step("Read the actual external envelope and verify a 100 MiB hydration")
+            val quota = setup_item2_hydration_quota()
+            val manifest = db_evidence_inspect_file(root, parent, digest, quota).unwrap()
+            expect(manifest.digest).to_equal(digest)
+            expect(manifest.content_bytes).to_equal(104857600u64)
+            expect(manifest.dependencies).to_equal([])
+            val hydrated = db_evidence_hydrate_file(root, parent, digest, target, quota).unwrap()
+            expect(hydrated.digest).to_equal(digest)
+            expect(hydrated.content_path.starts_with(target + "/")).to_be(true)
+            check_item2_hydration_big(hydrated.content_path)
+            step("Reject an insufficient byte allowance without semantic mutation")
+            var small = quota
+            small.max_content_bytes = 104857599
+            expect(db_evidence_hydrate_file(root, parent, digest, target, small).unwrap_err()).to_equal("SCVDB_EVIDENCE_QUOTA")
+            expect(db_store_read(root, "semantic").head).to_equal(before.head)
+            expect(db_store_read(root, "semantic").state).to_equal(before.state)
+            # This proves actual hydration, not canonical Git placement or NFR timing.
 
         it "should prove that it rejects high-volume raw evidence from canonical Git ancestry":
             step("Retain exact or aggregated history")
