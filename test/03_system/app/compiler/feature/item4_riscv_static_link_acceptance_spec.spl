@@ -401,6 +401,7 @@ describe "RV64 real static ELF link":
         expect(item4_rv_at(image, refs, 8)).to_equal(first)
         expect(item4_rv_at(image, refs + 8, 8)).to_equal(second)
         expect(item4_rv_at(image, refs + 16, 8)).to_equal(entry + 24)
+        expect(item4_rv_at(image, refs + 24, 8)).to_equal(entry + 24)
         val parsed = elf_parse_object(image).unwrap()
         for symbol in parsed.symbols:
             if symbol.name == "_start": expect(symbol.st_size).to_equal(34)
@@ -432,3 +433,54 @@ describe "RV64 real static ELF link":
             expect(linked.is_err()).to_equal(true)
             if linked.is_ok(): return
             expect(linked.unwrap_err()).to_contain("RISC-V ALIGN")
+
+    it "rejects non-NOP ALIGN contents and insufficient section alignment":
+        # @req ITEM4-REQ-004
+        step("Locate the real fixture's text padding and raw section header")
+        val original = item4_rv_load("align.o")
+        val parsed = elf_parse_object(original)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val object = parsed.unwrap()
+        var text_index: i64 = -1
+        var index: i64 = 0
+        while index < object.sections.len():
+            if elf_section_name(object, index) == ".text": text_index = index
+            index = index + 1
+        expect(text_index).to_be_greater_than(0)
+        if text_index <= 0: return
+        val section = object.sections[text_index]
+        val padding = section.sh_addr + 10
+        val alignment = object.header.e_shoff + text_index * 64 + 48
+        val valid = padding >= 0 and padding < original.len() and alignment >= 0 and alignment <= original.len() and 8 <= original.len() - alignment
+        expect(valid).to_equal(true)
+        if not valid: return
+        expect(item4_rv_read(original, alignment, 8)).to_equal(32)
+        if item4_rv_read(original, alignment, 8) != 32: return
+        for malformed_opcode in [true, false]:
+            var bytes = original
+            if malformed_opcode:
+                bytes[padding] = 0xff
+            else:
+                index = 0
+                while index < 8:
+                    bytes[alignment + index] = if index == 0: 8 else: 0
+                    index = index + 1
+            step("Link the invalid alignment region without publishing an image")
+            val linked = elf_static_link([bytes], [], "_start", RelocArch.Riscv64)
+            step("Require the concrete padding or section-alignment diagnostic")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            val message = if malformed_opcode: "non-NOP" else: "exceeds input section alignment"
+            expect(linked.unwrap_err()).to_contain(message)
+
+    it "rejects duplicate ALIGN offsets rather than applying a deletion twice":
+        # @req ITEM4-REQ-004
+        step("Move the first ALIGN marker onto the second marker's offset")
+        val object = item4_rv_mutate(43, 0, 28, "align.o")
+        step("Link the ambiguous padding map")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require a named duplicate-offset rejection")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("duplicate padding offset")

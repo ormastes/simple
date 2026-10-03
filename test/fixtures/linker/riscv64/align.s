@@ -19,3 +19,4 @@ align_references:
   .quad aligned_target
   .quad second_target
   .quad _start + 24
+  .quad .text + 24
