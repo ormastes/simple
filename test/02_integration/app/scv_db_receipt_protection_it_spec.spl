@@ -5,6 +5,7 @@ use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign
 use std.common.crypto.sha256.{sha256_text}
 use std.common.json.types.*
 use std.common.json.serializer.{json_stringify}
+use std.common.json.parser.{json_parse_strict_with_error, json_parse_with_error}
 use app.scv.db.receipt_protection.*
 use app.scv.db.receipt_index_git.{db_receipt_index_ref}
 
@@ -88,3 +89,31 @@ describe "versioned signed receipt protection evidence does not issue deployment
         val duplicated = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "non_fast_forward"])
         expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), writer, duplicated)).to_equal(Err("SCVDB_PROTECTION_RULES"))
         expect(db_receipt_protection_examine(profile, key, 150, "[]", writer, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+
+    it "rejects contradictory and escaped duplicate protection members before examination":
+        val profile = setup_item2_protection_profile()
+        val (seed, key) = pure_ed25519_keypair_from_seed([55u8;32])
+        val writer = setup_item2_protection_rules(profile, true, [setup_item2_protection_app()], ["creation", "update"])
+        val safety = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"])
+        # Prefixing the raw member makes the serializer's existing safe value
+        # the last occurrence. A permissive parser would silently accept it.
+        val contradictory = "{" + "\"enforcement\":\"disabled\"," + writer[1:]
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), contradictory, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+        val escaped = "{" + "\"enforc\\u0065ment\":\"disabled\"," + writer[1:]
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), escaped, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+        val exception = writer.replace("false", "true,\"update_allows_fetch_and_merge\":false")
+        expect(exception == writer).to_be(false)
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), exception, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+        val escaped_exception = writer.replace("false", "true,\"update_allows_fetch_and_merg\\u0065\":false")
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), escaped_exception, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+
+    it "keeps permissive callers unchanged and checks nested decoded names in strict parsing":
+        val duplicated = "{\"outer\":[{\"name\":1,\"na\\u006de\":2}]}"
+        val (permissive, permissive_error) = json_parse_with_error(duplicated)
+        expect(permissive_error).to_equal("")
+        val (strict, strict_error) = json_parse_strict_with_error(duplicated)
+        expect(strict_error).to_equal("Duplicate object key")
+        val (separate, separate_error) = json_parse_strict_with_error("[{\"name\":1},{\"name\":2}]")
+        expect(separate_error).to_equal("")
+        val (trailing, trailing_error) = json_parse_strict_with_error("{\"name\":1} false")
+        expect(trailing_error).to_equal("Unexpected trailing tokens")
