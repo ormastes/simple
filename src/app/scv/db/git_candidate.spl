@@ -3,7 +3,7 @@
 # A successful local bare-remote push proves neither protection nor authorization.
 # Network calls require the caller's SJ lease query; the owner must exclude
 # concurrent lease acquisition until the synchronous call has returned.
-use app.io.mod.{is_dir, dir_remove_all, process_run_bounded}
+use app.io.mod.{is_dir, dir_remove_all, process_run_bounded, file_read_regular_no_follow_bounded_bytes}
 use app.io.env_ops.{env_get}
 use app.io.file_ops.{secure_temp_dir_raw, file_write_bytes, file_read, file_is_regular_no_follow}
 use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path_identity_same, path_identity_contains}
@@ -177,8 +177,12 @@ fn _db_candidate_owned(scratch: text) -> bool:
 # cannot register ownership; acquisition below is the only registry writer.
 fn db_git_candidate_require_owned_scratch(scratch: text) -> Result<bool, text>:
     if not _db_candidate_owned(scratch): return Err("CandidateScratchNotOwned")
-    if not file_is_regular_no_follow(scratch + "/.scv-candidate-owner") or file_read(scratch + "/.scv-candidate-owner") != scratch:
-        return Err("CandidateScratchIdentityChanged")
+    # The marker contains only the path. Never allocate an attacker-sized marker.
+    if text_to_utf8_bytes(scratch).len() > 4096: return Err("CandidateScratchIdentityChanged")
+    match file_read_regular_no_follow_bounded_bytes(scratch + "/.scv-candidate-owner", 4096):
+        Ok(bytes):
+            if bytes != text_to_utf8_bytes(scratch): return Err("CandidateScratchIdentityChanged")
+        Err(_): return Err("CandidateScratchIdentityChanged")
     Ok(true)
 
 export db_git_candidate_require_owned_scratch
