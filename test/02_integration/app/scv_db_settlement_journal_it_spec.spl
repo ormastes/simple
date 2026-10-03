@@ -109,10 +109,10 @@ describe "REQ-009 durable settlement recovery before canonical acknowledgement":
     it "strictly decodes journal phases and preserves exact nonnormalized blob content":
         step("Roundtrip a complete recovery record without rewriting signed Git blob bytes")
         val fixture = setup_item2_journal_fixture()
-        val journal = DbSettlementJournal(receipt: fixture.receipt, files: fixture.files, projection_digest: db_settlement_projection_digest(fixture.files).unwrap(), phase: DbSettlementPhase.Prepared)
+        val journal = DbSettlementJournal(receipt: fixture.receipt, files: fixture.files, projection_digest: db_settlement_projection_digest(fixture.files).unwrap(), phase: DbSettlementPhase.Prepared, index_ref: "", index_head: "", index_receipt_digest: "")
         val encoded = db_settlement_journal_encode(journal).unwrap()
         expect(db_settlement_journal_decode(encoded).unwrap()).to_equal(journal)
-        expect(db_settlement_journal_decode("SCVDB-SETTLEMENT-JOURNAL-v2\n00\n")).to_equal(Err("SCVDB_JOURNAL_VERSION"))
+        expect(db_settlement_journal_decode("SCVDB-SETTLEMENT-JOURNAL-v3\n00\n")).to_equal(Err("SCVDB_JOURNAL_VERSION"))
         var changed = journal
         changed.projection_digest = sha256_text("wrong")
         expect(db_settlement_journal_encode(changed)).to_equal(Err("SCVDB_JOURNAL_PROJECTION_DIGEST"))
@@ -128,3 +128,38 @@ describe "REQ-009 durable settlement recovery before canonical acknowledgement":
         payload = payload + db_frame(2u8, [2u8])
         val invalid_phase = prefix + db_snapshot_hex(domain + db_frame(98u8, payload)) + "\n"
         expect(db_settlement_journal_decode(invalid_phase)).to_equal(Err("SCVDB_JOURNAL_PHASE"))
+
+    it "migrates v1 pending records without inventing a protected index proof":
+        val fixture = setup_item2_journal_fixture()
+        val journal = DbSettlementJournal(receipt: fixture.receipt, files: fixture.files, projection_digest: db_settlement_projection_digest(fixture.files).unwrap(), phase: DbSettlementPhase.Prepared, index_ref: "", index_head: "", index_receipt_digest: "")
+        val encoded = db_settlement_journal_encode(journal).unwrap()
+        expect(encoded.starts_with("SCVDB-SETTLEMENT-JOURNAL-v2\n")).to_equal(true)
+        val prefix = "SCVDB-SETTLEMENT-JOURNAL-v2\n"
+        val domain = db_domain_bytes("settlement-journal", []).unwrap()
+        val root = db_read_frame(db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1]).unwrap(), domain.len()).unwrap()
+        val fields = db_read_children(root.payload).unwrap()
+        var legacy_payload: [u8] = []
+        for index in 0..4: legacy_payload = legacy_payload + db_frame(fields[index].tag, fields[index].payload)
+        val legacy = "SCVDB-SETTLEMENT-JOURNAL-v1\n" + db_snapshot_hex(domain + db_frame(98u8, legacy_payload)) + "\n"
+        val decoded = db_settlement_journal_decode(legacy).unwrap()
+        expect(decoded).to_equal(journal)
+        expect(decoded.index_ref).to_equal("")
+        expect(decoded.index_head).to_equal("")
+        expect(decoded.index_receipt_digest).to_equal("")
+        expect(db_settlement_journal_encode(decoded).unwrap()).to_equal(encoded)
+
+    it "requires complete indexed data but does not promote decoded data into authority":
+        val fixture = setup_item2_journal_fixture()
+        var indexed = DbSettlementJournal(receipt: fixture.receipt, files: fixture.files, projection_digest: db_settlement_projection_digest(fixture.files).unwrap(), phase: DbSettlementPhase.Indexed, index_ref: "", index_head: "", index_receipt_digest: "")
+        expect(db_settlement_journal_encode(indexed)).to_equal(Err("SCVDB_JOURNAL_INDEX_PROOF"))
+        indexed.index_ref = "refs/heads/scv-receipts/v1/00112233445566778899aabbccddeeff/1"
+        indexed.index_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        indexed.index_receipt_digest = db_receipt_digest(fixture.receipt).unwrap()
+        val encoded = db_settlement_journal_encode(indexed).unwrap()
+        expect(db_settlement_journal_decode(encoded).unwrap()).to_equal(indexed)
+        expect(db_settlement_journal_decode(encoded + "trailing")).to_equal(Err("SCVDB_JOURNAL_VERSION"))
+        indexed.index_receipt_digest = sha256_text("other")
+        expect(db_settlement_journal_encode(indexed)).to_equal(Err("SCVDB_JOURNAL_INDEX_PROOF"))
+        indexed.index_receipt_digest = db_receipt_digest(fixture.receipt).unwrap()
+        indexed.phase = DbSettlementPhase.PublishedAwaitingIndex
+        expect(db_settlement_journal_encode(indexed)).to_equal(Err("SCVDB_JOURNAL_INDEX_PROOF"))

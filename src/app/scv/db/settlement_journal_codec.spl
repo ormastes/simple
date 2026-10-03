@@ -1,6 +1,7 @@
 # Exact candidate projection; file contents are UTF-8 bytes, never NFC rewritten.
 use app.scv.db.git_candidate.{DbGitCandidateFile}
-use std.scv.db_receipt.{DbSettlementReceipt}
+use std.scv.db_receipt.{DbSettlementReceipt, db_receipt_digest}
+use app.scv.db.receipt_index_git.{db_receipt_index_ref}
 use std.scv.db_receipt_codec.{db_receipt_encode, db_receipt_decode}
 use std.scv.db_canonical.*
 use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
@@ -10,12 +11,16 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 enum DbSettlementPhase:
     Prepared
     PublishedAwaitingIndex
+    Indexed
 
 struct DbSettlementJournal:
     receipt: DbSettlementReceipt
     files: [DbGitCandidateFile]
     projection_digest: text
     phase: DbSettlementPhase
+    index_ref: text
+    index_head: text
+    index_receipt_digest: text
 
 fn db_settlement_files_bytes(files: [DbGitCandidateFile]) -> Result<[u8], text>:
     if files.len() == 0 or files.len() > 1024: return Err("SCVDB_JOURNAL_FILES_QUOTA")
@@ -42,18 +47,40 @@ fn db_settlement_files_bytes(files: [DbGitCandidateFile]) -> Result<[u8], text>:
 fn db_settlement_projection_digest(files: [DbGitCandidateFile]) -> Result<text, text>:
     Ok(sha256_u8_hex(db_domain_bytes("settlement-projection", db_settlement_files_bytes(files)?)?))
 
-fn db_settlement_journal_encode(journal: DbSettlementJournal) -> Result<text, text>:
+fn _journal_encode_version(journal: DbSettlementJournal, legacy: bool) -> Result<text, text>:
     if db_settlement_projection_digest(journal.files)? != journal.projection_digest: return Err("SCVDB_JOURNAL_PROJECTION_DIGEST")
     val phase = match journal.phase:
         Prepared: 0u64
         PublishedAwaitingIndex: 1u64
-    val payload = db_canonical_text(db_receipt_encode(journal.receipt)?)? + db_settlement_files_bytes(journal.files)? + db_canonical_text(journal.projection_digest)? + db_frame(2u8, db_u64_bytes(phase))
-    val encoded = "SCVDB-SETTLEMENT-JOURNAL-v1\n" + db_snapshot_hex(db_domain_bytes("settlement-journal", db_frame(98u8, payload))?) + "\n"
+        Indexed: 2u64
+    if phase == 2u64:
+        if legacy: return Err("SCVDB_JOURNAL_PHASE")
+        if journal.index_ref != db_receipt_index_ref(journal.receipt.namespace, journal.receipt.epoch)? or journal.index_receipt_digest != db_receipt_digest(journal.receipt)?: return Err("SCVDB_JOURNAL_INDEX_PROOF")
+        if journal.index_head.len() != journal.receipt.accepted_head.len(): return Err("SCVDB_JOURNAL_INDEX_PROOF")
+        for index in 0..journal.index_head.len():
+            val code = journal.index_head.char_code_at(index)
+            if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return Err("SCVDB_JOURNAL_INDEX_PROOF")
+    elif journal.index_ref != "" or journal.index_head != "" or journal.index_receipt_digest != "": return Err("SCVDB_JOURNAL_INDEX_PROOF")
+    var payload = db_canonical_text(db_receipt_encode(journal.receipt)?)? + db_settlement_files_bytes(journal.files)? + db_canonical_text(journal.projection_digest)? + db_frame(2u8, db_u64_bytes(phase))
+    var prefix = "SCVDB-SETTLEMENT-JOURNAL-v1\n"
+    if not legacy:
+        prefix = "SCVDB-SETTLEMENT-JOURNAL-v2\n"
+        payload = payload + db_canonical_text(journal.index_ref)? + db_canonical_text(journal.index_head)? + db_canonical_text(journal.index_receipt_digest)?
+    val encoded = prefix + db_snapshot_hex(db_domain_bytes("settlement-journal", db_frame(98u8, payload))?) + "\n"
     if encoded.len() > 12582912: return Err("SCVDB_JOURNAL_BYTES_QUOTA")
     Ok(encoded)
 
+# Indexed is a data shape, not an authorization token. No unprotected local
+# Git owner may advance this phase. A future protected-completion owner must
+# independently verify deployment, current rulesets, actual index three-path
+# readback and settled ancestry before SJ CAS; no such capability exists yet.
+fn db_settlement_journal_encode(journal: DbSettlementJournal) -> Result<text, text>:
+    _journal_encode_version(journal, false)
+
 fn db_settlement_journal_decode(encoded: text) -> Result<DbSettlementJournal, text>:
-    val prefix = "SCVDB-SETTLEMENT-JOURNAL-v1\n"
+    var prefix = "SCVDB-SETTLEMENT-JOURNAL-v2\n"
+    val legacy = encoded.starts_with("SCVDB-SETTLEMENT-JOURNAL-v1\n")
+    if legacy: prefix = "SCVDB-SETTLEMENT-JOURNAL-v1\n"
     if encoded.len() > 12582912: return Err("SCVDB_JOURNAL_BYTES_QUOTA")
     if not encoded.starts_with(prefix) or not encoded.ends_with("\n") or encoded.len() <= prefix.len(): return Err("SCVDB_JOURNAL_VERSION")
     val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
@@ -64,7 +91,8 @@ fn db_settlement_journal_decode(encoded: text) -> Result<DbSettlementJournal, te
     val root = db_read_frame(bytes, domain.len())?
     if root.tag != 98u8 or root.next_offset != bytes.len(): return Err("SCVDB_JOURNAL_ENCODING")
     val fields = db_read_children(root.payload)?
-    if fields.len() != 4 or fields[1].tag != 8u8: return Err("SCVDB_JOURNAL_ENCODING")
+    val field_count = if legacy: 4 else: 7
+    if fields.len() != field_count or fields[1].tag != 8u8: return Err("SCVDB_JOURNAL_ENCODING")
     val entries = db_read_children(fields[1].payload)?
     if entries.len() % 2 != 0 or entries.len() > 2048: return Err("SCVDB_JOURNAL_FILES_QUOTA")
     var files: [DbGitCandidateFile] = []
@@ -74,10 +102,14 @@ fn db_settlement_journal_decode(encoded: text) -> Result<DbSettlementJournal, te
         files.push(DbGitCandidateFile(path: db_read_text(entries[index])?, content: validated_utf8_bytes_to_text_linear(entries[index + 1].payload)?))
         index = index + 2
     val phase_number = db_read_unsigned(fields[3])?
-    if phase_number > 1: return Err("SCVDB_JOURNAL_PHASE")
-    val phase = if phase_number == 0: DbSettlementPhase.Prepared else: DbSettlementPhase.PublishedAwaitingIndex
-    val journal = DbSettlementJournal(receipt: db_receipt_decode(db_read_text(fields[0])?)?, files: files, projection_digest: db_read_text(fields[2])?, phase: phase)
-    if db_settlement_journal_encode(journal)? != encoded: return Err("SCVDB_JOURNAL_NONCANONICAL")
+    if phase_number > 2 or (legacy and phase_number > 1): return Err("SCVDB_JOURNAL_PHASE")
+    val phase = if phase_number == 0: DbSettlementPhase.Prepared else: if phase_number == 1: DbSettlementPhase.PublishedAwaitingIndex else: DbSettlementPhase.Indexed
+    var journal = DbSettlementJournal(receipt: db_receipt_decode(db_read_text(fields[0])?)?, files: files, projection_digest: db_read_text(fields[2])?, phase: phase, index_ref: "", index_head: "", index_receipt_digest: "")
+    if not legacy:
+        journal.index_ref = db_read_text(fields[4])?
+        journal.index_head = db_read_text(fields[5])?
+        journal.index_receipt_digest = db_read_text(fields[6])?
+    if _journal_encode_version(journal, legacy)? != encoded: return Err("SCVDB_JOURNAL_NONCANONICAL")
     Ok(journal)
 
 export DbSettlementPhase, DbSettlementJournal, db_settlement_files_bytes, db_settlement_projection_digest
