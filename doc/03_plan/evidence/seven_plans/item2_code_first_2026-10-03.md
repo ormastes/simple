@@ -340,3 +340,22 @@ review rehashed literal preimages using host .NET SHA256 and checked their
 framing/lengths. This host calculation is not Simple runtime test evidence and
 the vectors are independently derived, not captured from historical binaries.
 Paged legacy replay remains absent. No new PR, merge or release claim is made.
+
+### Provider-identity gap and Paged legacy continuation
+
+Commit a578c07a4a4 adds a concrete intended-failing REQ-017 regression for
+same-provider changed bytes under a fresh row UID on both backends. Independent
+review verifies current-base authorization, signed metadata and unchanged-store
+oracles. The tracked defect separates this rejection safety check from missing
+durable quarantine and independently pinned capability dimensions. The existing
+DbCiCapabilities model is reusable validation input, not admission authority.
+All REQ-017 system placeholders remain; inventory stays 23 owner sources and
+130 fail-fast contracts. No RED/GREEN execution has occurred.
+
+Paged replay ordering review found current authorization and dependency proofs
+before accepted batch/counter replay, with the v2 fresh gate after replay. Core
+owns a bounded prior-contract empty-genesis construction using production
+proof/reducer/index primitives, not a broad copied planner or a supplied replay
+flag. A signed checkpoint must pass actual full import before replay assertions.
+Research reviews its accepted-entry derivation and completed fixture; root owns
+shared plans/manuals. This is prior-contract modeling, not historical execution.

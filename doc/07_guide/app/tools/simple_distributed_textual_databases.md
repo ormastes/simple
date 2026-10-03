@@ -33,7 +33,9 @@ dependency availability must agree with observed content or retained evidence;
 missing and restricted dependencies are explicit and do not establish
 reproducibility. An accepted replay acknowledges the original immutable fact,
 not current artifact availability. Reproduction commands are never executed by
-admission. Responses identify the committed local HEAD, revision and replay
+admission. Provider-identity deduplication across distinct observation row UIDs
+and automatic durable quarantine remain unimplemented; accepted batch replay
+does not establish those guarantees. Responses identify the committed local HEAD, revision and replay
 status; they are not protected remote settlement receipts.
 
 Explicit v2 source-snapshot and test-definition mapping records bind immutable

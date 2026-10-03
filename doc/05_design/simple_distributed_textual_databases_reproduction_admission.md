@@ -154,3 +154,10 @@ existing observations and quarantine recovery remain implementation work.
 The fresh-UID collision integration source is an intended failing safety oracle;
 it is not a durable-quarantine oracle and has not run. See the tracked
 item2_provider_identity_owner_gap_2026-10-03 defect before accepting REQ-017.
+
+Reuse the existing DbCiCapabilities identity_dimensions and uniqueness_tuple
+model in src/lib/scv/db_ci_ingest.spl. Its current validator requires instance,
+project, run, job and attempt, and checks uniqueness-tuple membership. This is
+useful canonical input validation, but its unversioned caller-supplied value is
+not an admitted capability revision. Add authoritative version binding at the
+owner boundary rather than creating a second unrelated capability model.

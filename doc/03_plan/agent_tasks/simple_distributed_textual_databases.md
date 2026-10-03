@@ -395,3 +395,13 @@ candidates. Research reviews all three isolated scopes. Shared helper names:
 setup_item2_expired_observation, setup_item2_v1_golden_vectors and
 setup_item2_paged_artifact_drop. Root remains merge owner; final runtime
 verification is pending. All branches derive from the same release-based lane.
+
+### Paged legacy and provider-identity continuation
+
+Core owns new Paged legacy transition/checkpoint fixtures and spec on an isolated
+release-derived branch. Research approves the historical construction and
+reviews the complete source. Root owns the provider collision regression, defect
+record and shared documentation; evidence independently reviewed that regression.
+Shared APIs: setup_item2_paged_legacy_transition, setup_item2_paged_legacy_replay
+and check_item2_paged_legacy_import. No production bypass is authorized. Root
+integrates reviewed commits; final runtime review and merge remain pending.
