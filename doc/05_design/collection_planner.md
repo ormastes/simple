@@ -174,3 +174,23 @@ matrices, profile bridges, explanation output and CP-GUARD-07–10. They remain
 unexecuted. Cost construction, production lowering, allocation evidence and
 NFR-004 RSS verification remain necessary; this admission logic does not close
 REQ-009 or the full feature.
+
+### Existing MIR query reuse legality
+
+Query reuse needs both proven callee ownership and stable operand/result
+definitions. Generic method names and runtime-looking string callees do not
+establish ownership. The collection pass defaults to no admitted runtime reads;
+its explicit admission seam accepts only known runtime-read names after a caller
+has established their authority. Production wiring remains fail-closed until
+MIR origin/resolution evidence exists.
+
+Within an admitted region, keys frame typed scalar/string identities and local
+definition versions. Cached results are usable only while their destination
+version remains current. Consuming moves, unknown effects and unclassified
+instructions fence reuse. Aggregate and floating constant keys fail closed
+rather than equating coarse category labels or lossy text representations.
+Length and other read reuse share these legality rules. The system fixtures
+exercise the block API; they do not establish production admission.
+
+The lost reuse opportunity and required performance follow-up are tracked in
+`doc/08_tracking/bug/collection_query_cse_authority_performance_2026-10-03.md`.

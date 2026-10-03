@@ -204,3 +204,13 @@ memory evidence for old callers. Test-first commits precede the selector and
 renderer implementation; execution remains unavailable and no RED/GREEN result
 is claimed. CP-009-C and NFR-004 remain partial until actual cost production,
 lowering, allocation evidence and RSS measurements are available.
+
+### MIR query reuse legality
+
+`collection_planner_mir_spec.spl` adds CP-MIR-01–05 at the production block-pass
+boundary: default denial for ambiguous runtime names, denial for generic method
+names, admitted stable-read reuse, index redefinition and cached-result overwrite.
+The unit collection optimizer spec adds typed/framed-key, aggregate/float
+fallback, ownership, move and invalidation regressions. Tests are authored first
+and remain unexecuted. These cover part of REQ-008; the full CP-008 acceptance
+matrix still requires driver integration and compiled-program evidence.

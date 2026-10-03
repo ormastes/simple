@@ -95,6 +95,20 @@ and release verification remain incomplete.
 
 ## Remaining work and stop conditions
 
+The user next requested continued coding. Query-CSE work uses isolated planner
+and spec lanes `work/item3-query-cse-20261003` and
+`work/item3-query-tests-20261003`, both based on `c92920d6806`.
+Tests-first commits `a3861fefd52`, `aa45407a49a`, and parent `45fda607c84`
+cover query ownership, framed constant identities, local/result redefinition,
+consuming moves and effect barriers. The parent system slice is CP-MIR-01–05.
+All remain unexecuted. Independent source review is required before integration.
+
+Runtime-looking names alone are not ownership evidence. The implementation
+seam defaults to an empty admitted-read set; production admission is deferred
+until authoritative MIR call origin/resolution exists. Its lost reuse opportunity
+is recorded in `doc/08_tracking/bug/collection_query_cse_authority_performance_2026-10-03.md`.
+This bounded repair does not implement the full loop/chain lowering pipeline.
+
 1. Obtain an admitted self-hosted CLI and execute the test-first regressions;
    preserve actual RED and GREEN logs. A compiler failure is not a RED test.
 2. Connect typed registry resolution, HIR extraction, proof construction,
