@@ -1,0 +1,161 @@
+use std.spec.*
+use std.scv.db_policy_codec.*
+use std.scv.db_admission.*
+use std.scv.db_confidentiality.*
+use std.scv.db_reducer.{MergePolicy, DbFieldSchema, FieldMergeRule}
+use std.scv.db_schema.{DbEntityConstraint, DbReferenceConstraint}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+
+fn setup_item2_policy_config() -> DbPolicyConfig:
+    var public_key: [u8] = []
+    for index in 0..32: public_key.push(index as u8)
+    val permission = DbPermission(operation: "create", kind: "bug", field: "*")
+    val key = DbSignerKey(key_id: "reviewer-a", public_key: public_key, role: "reviewer", valid_from: 1u64, valid_until: 18446744073709551615u64, revoked: false, permissions: [permission])
+    val reviewed = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    var metadata = DbMetadataPolicy(revision: "", rules: [DbMetadataRule(kind: "bug", field: "title", classification: "internal", allowed_value_digests: [reviewed])])
+    metadata.revision = db_metadata_policy_digest(metadata).unwrap()
+    var admission = DbAdmissionPolicy(revision: "", repository: "fixture-repo", namespace: "00112233445566778899aabbccddeeff", epoch: 3u64, schema_revision: "schema-v1", reducer_revision: "reducer-v1", keys: [key], metadata: metadata)
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    val rules = [FieldMergeRule.ScalarConflict, FieldMergeRule.OrderedListConflict, FieldMergeRule.Derived, FieldMergeRule.ObservedRemoveSet, FieldMergeRule.AddWinsSet, FieldMergeRule.RemoveWinsSet, FieldMergeRule.AuthorityWins("reviewer-a")]
+    var fields: [DbFieldSchema] = []
+    for index in 0..rules.len(): fields.push(DbFieldSchema(kind: "bug", field: "field-{index}", rule: rules[index]))
+    val constraint = DbEntityConstraint(kind: "bug", key_fields: ["field-0"], unique_fields: ["field-1"], references: [DbReferenceConstraint(field: "field-6", target_kind: "bug")])
+    val merge = MergePolicy(repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision, fields: fields, constraints: [constraint])
+    var config = DbPolicyConfig(revision: "", admission: admission, merge: merge)
+    config.revision = db_policy_digest(config).unwrap()
+    config
+
+fn check_item2_policy_rejected(result: Result<text, text>):
+    match result:
+        Ok(_): fail("Invalid trusted configuration encoded")
+        Err(reason): expect(reason.len()).to_be_greater_than(0)
+
+fn setup_item2_policy_root(config: DbPolicyConfig) -> DbDecodedFrame:
+    val encoded = db_policy_encode(config).unwrap()
+    val header = "SCVDB-POLICY-v1\n"
+    db_read_frame(db_snapshot_unhex(encoded[header.len():encoded.len() - 1]).unwrap(), 0).unwrap()
+
+fn setup_item2_policy_wire(bytes: [u8]) -> text:
+    "SCVDB-POLICY-v1\n" + db_snapshot_hex(bytes) + "\n"
+
+fn setup_item2_policy_duplicate_field_wire(config: DbPolicyConfig) -> text:
+    val envelope = db_read_children(setup_item2_policy_root(config).payload).unwrap()
+    val body = db_read_children(envelope[1].payload).unwrap()
+    val merge = db_read_children(body[1].payload).unwrap()
+    val fields = db_read_children(merge[5].payload).unwrap()
+    var changed: [u8] = []
+    for index in 0..merge.len():
+        val field = merge[index]
+        if index == 5:
+            changed = changed + db_frame(6u8, field.payload + db_frame(fields[0].tag, fields[0].payload))
+        else:
+            changed = changed + db_frame(field.tag, field.payload)
+    val payload = db_frame(122u8, body[0].payload) + db_frame(123u8, changed)
+    setup_item2_policy_wire(db_frame(120u8, db_canonical_text(config.revision).unwrap() + db_frame(121u8, payload)))
+
+describe "Strict independently pinned admission and merge configuration":
+    it "round trips all rules constraints keys permissions and reviewed values":
+        val config = setup_item2_policy_config()
+        val encoded = db_policy_encode(config).unwrap()
+        val decoded = db_policy_decode(encoded, config.revision).unwrap()
+        expect(db_policy_encode(decoded)).to_equal(Ok(encoded))
+        expect(decoded.admission.keys[0].public_key).to_equal(config.admission.keys[0].public_key)
+        expect(decoded.admission.keys[0].valid_until).to_equal(18446744073709551615u64)
+        expect(decoded.admission.keys[0].permissions[0].field).to_equal("*")
+        expect(decoded.admission.metadata.rules[0].allowed_value_digests).to_equal(config.admission.metadata.rules[0].allowed_value_digests)
+        expect(decoded.merge.fields[6].rule).to_equal(FieldMergeRule.AuthorityWins("reviewer-a"))
+        expect(decoded.merge.constraints[0].references[0].target_kind).to_equal("bug")
+        expect(decoded.merge.fields.len()).to_equal(7)
+
+    it "requires an independent pin and rejects another well-formed digest":
+        val config = setup_item2_policy_config()
+        val encoded = db_policy_encode(config).unwrap()
+        expect(db_policy_decode(encoded, "")).to_equal(Err("SCVDB_POLICY_PIN_REQUIRED"))
+        expect(db_policy_decode(encoded, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).to_equal(Err("SCVDB_POLICY_PIN_MISMATCH"))
+
+    it "rejects stale admission metadata and full configuration revisions":
+        var config = setup_item2_policy_config()
+        config.admission.keys[0].revoked = true
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_POLICY_REVISION"))
+        config.admission.revision = db_admission_policy_digest(config.admission).unwrap()
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_POLICY_CONFIG_REVISION"))
+        config.revision = db_policy_digest(config).unwrap()
+        expect(db_policy_decode(db_policy_encode(config).unwrap(), config.revision).unwrap().admission.keys[0].revoked).to_equal(true)
+        config.admission.metadata.rules[0].classification = "public"
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_METADATA_POLICY_REVISION"))
+
+    it "binds merge field authority and schema constraints into the config digest":
+        val original = setup_item2_policy_config()
+        var config = original
+        config.merge.fields[0].rule = FieldMergeRule.Derived
+        expect(db_policy_digest(config).unwrap() == original.revision).to_equal(false)
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_POLICY_CONFIG_REVISION"))
+        config = original
+        config.merge.constraints[0].unique_fields = ["field-0"]
+        expect(db_policy_digest(config).unwrap() == original.revision).to_equal(false)
+
+    it "rejects context mismatch unknown authority and invalid constraint fields":
+        var config = setup_item2_policy_config()
+        config.merge.epoch = 4u64
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_POLICY_CONTEXT"))
+        config = setup_item2_policy_config()
+        config.merge.fields[6].rule = FieldMergeRule.AuthorityWins("unconfigured")
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_POLICY_AUTHORITY"))
+        config = setup_item2_policy_config()
+        config.merge.constraints[0].key_fields = ["not-declared"]
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_POLICY_CONSTRAINT_FIELD"))
+
+    it "rejects duplicate keys permissions metadata values merge fields and constraints":
+        var config = setup_item2_policy_config()
+        config.admission.keys.push(config.admission.keys[0])
+        check_item2_policy_rejected(db_policy_encode(config))
+        config = setup_item2_policy_config()
+        config.admission.keys[0].permissions.push(config.admission.keys[0].permissions[0])
+        check_item2_policy_rejected(db_policy_encode(config))
+        config = setup_item2_policy_config()
+        config.admission.metadata.rules[0].allowed_value_digests.push(config.admission.metadata.rules[0].allowed_value_digests[0])
+        check_item2_policy_rejected(db_policy_encode(config))
+        config = setup_item2_policy_config()
+        config.merge.fields.push(config.merge.fields[0])
+        check_item2_policy_rejected(db_policy_encode(config))
+        config = setup_item2_policy_config()
+        config.merge.constraints.push(config.merge.constraints[0])
+        check_item2_policy_rejected(db_policy_encode(config))
+
+    it "rejects unknown version trailing bytes and excess envelope fields":
+        val config = setup_item2_policy_config()
+        val encoded = db_policy_encode(config).unwrap()
+        expect(db_policy_decode("SCVDB-POLICY-v2\n00\n", config.revision)).to_equal(Err("SCVDB_POLICY_VERSION"))
+        val root = setup_item2_policy_root(config)
+        expect(db_policy_decode(setup_item2_policy_wire(db_frame(root.tag, root.payload) + [0u8]), config.revision)).to_equal(Err("SCVDB_POLICY_TRAILING"))
+        expect(db_policy_decode(setup_item2_policy_wire(db_frame(root.tag, root.payload + db_canonical_text("extra").unwrap())), config.revision)).to_equal(Err("SCVDB_POLICY_FIELDS"))
+
+    it "bounds aggregate records and rejects nested container bombs before decoding":
+        var config = setup_item2_policy_config()
+        for index in 0..10001: config.merge.fields.push(DbFieldSchema(kind: "bug", field: "extra-{index}", rule: FieldMergeRule.ScalarConflict))
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_POLICY_RECORD_QUOTA"))
+        config = setup_item2_policy_config()
+        var nested = db_canonical_text("leaf").unwrap()
+        for depth in 0..10: nested = db_frame(6u8, nested)
+        expect(db_policy_decode(setup_item2_policy_wire(db_frame(120u8, nested)), config.revision)).to_equal(Err("SCVDB_POLICY_DEPTH_QUOTA"))
+
+    it "rejects duplicate field records supplied by an encoded input":
+        val config = setup_item2_policy_config()
+        expect(db_policy_decode(setup_item2_policy_duplicate_field_wire(config), config.revision)).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+
+    it "rejects invalid key width and noncanonical scalar spelling":
+        var config = setup_item2_policy_config()
+        config.admission.keys[0].public_key = [1u8]
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_ADMISSION_KEY"))
+        config = setup_item2_policy_config()
+        config.merge.fields[0].field = "é"
+        check_item2_policy_rejected(db_policy_encode(config))
+
+    it "rejects empty validity windows and invalid permission operations":
+        var config = setup_item2_policy_config()
+        config.admission.keys[0].valid_until = 1u64
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_ADMISSION_KEY"))
+        config = setup_item2_policy_config()
+        config.admission.keys[0].permissions[0].operation = "grant-authority"
+        expect(db_policy_encode(config)).to_equal(Err("SCVDB_ADMISSION_PERMISSION"))

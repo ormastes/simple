@@ -1,0 +1,230 @@
+# Trusted configuration projection, independent of incoming patch contents.
+# A digest pins configuration bytes; it does not establish who approved them.
+# The effect owner obtains expected_revision through its trusted configuration.
+# Lists retain reviewed configuration order. Reordering changes the outer pin,
+# even when an inner admission-policy semantic set digest remains equivalent.
+use std.scv.db_admission.{DbAdmissionPolicy, DbSignerKey, DbPermission, db_admission_policy_digest}
+use std.scv.db_confidentiality.{DbMetadataPolicy, DbMetadataRule, db_metadata_policy_digest}
+use std.scv.db_reducer.{MergePolicy, DbFieldSchema, FieldMergeRule}
+use std.scv.db_schema.{DbEntityConstraint, DbReferenceConstraint}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_text}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbPolicyConfig:
+    revision: text
+    admission: DbAdmissionPolicy
+    merge: MergePolicy
+
+fn _policy_hex(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _policy_text(value: text) -> Result<[u8], text>:
+    if value.len() > 4096: return Err("SCVDB_POLICY_TEXT_QUOTA")
+    db_snapshot_text(value)
+
+fn _policy_name(value: text) -> Result<[u8], text>:
+    if value == "": return Err("SCVDB_POLICY_NAME")
+    _policy_text(value)
+
+fn _policy_names(values: [text]) -> Result<[u8], text>:
+    if values.len() > 10000: return Err("SCVDB_POLICY_RECORD_QUOTA")
+    var encoded: [[u8]] = []
+    for value in values: encoded.push(_policy_name(value)?)
+    db_canonical_set(encoded)?
+    Ok(db_canonical_list(encoded))
+
+fn _policy_rule(rule: FieldMergeRule) -> (text, text):
+    match rule:
+        ScalarConflict: ("scalar", "")
+        OrderedListConflict: ("ordered-list", "")
+        Derived: ("derived", "")
+        ObservedRemoveSet: ("observed-remove", "")
+        AddWinsSet: ("add-wins", "")
+        RemoveWinsSet: ("remove-wins", "")
+        AuthorityWins(signer): ("authority", signer)
+
+# Check aggregate cardinality before building any canonical byte collections.
+fn _policy_count(config: DbPolicyConfig) -> Result<bool, text>:
+    var count = config.admission.keys.len() + config.admission.metadata.rules.len() + config.merge.fields.len() + config.merge.constraints.len()
+    if count > 10000: return Err("SCVDB_POLICY_RECORD_QUOTA")
+    for key in config.admission.keys:
+        if key.permissions.len() > 10000 - count: return Err("SCVDB_POLICY_RECORD_QUOTA")
+        count = count + key.permissions.len()
+    for rule in config.admission.metadata.rules:
+        if rule.allowed_value_digests.len() > 10000 - count: return Err("SCVDB_POLICY_RECORD_QUOTA")
+        count = count + rule.allowed_value_digests.len()
+    for constraint in config.merge.constraints:
+        val extra = constraint.key_fields.len() + constraint.unique_fields.len() + constraint.references.len()
+        if extra > 10000 - count: return Err("SCVDB_POLICY_RECORD_QUOTA")
+        count = count + extra
+    Ok(true)
+
+fn _policy_body(config: DbPolicyConfig) -> Result<[u8], text>:
+    _policy_count(config)?
+    val admission = config.admission
+    val merge = config.merge
+    if admission.repository != merge.repository or admission.namespace != merge.namespace or admission.epoch != merge.epoch or admission.schema_revision != merge.schema_revision or admission.reducer_revision != merge.reducer_revision:
+        return Err("SCVDB_POLICY_CONTEXT")
+    if not _policy_hex(admission.revision) or not _policy_hex(admission.metadata.revision): return Err("SCVDB_POLICY_REVISION")
+    var context = _policy_name(admission.repository)? + _policy_name(admission.namespace)? + db_frame(2u8, db_u64_bytes(admission.epoch)) + _policy_name(admission.schema_revision)? + _policy_name(admission.reducer_revision)?
+    var keys: [[u8]] = []
+    var key_ids: [[u8]] = []
+    for key in admission.keys:
+        if key.public_key.len() != 32: return Err("SCVDB_ADMISSION_KEY")
+        val id = _policy_name(key.key_id)?
+        key_ids.push(id)
+        var permissions: [[u8]] = []
+        for permission in key.permissions:
+            permissions.push(db_frame(125u8, _policy_name(permission.operation)? + _policy_name(permission.kind)? + _policy_text(permission.field)?))
+        db_canonical_set(permissions)?
+        val revoked: [u8] = if key.revoked: [1u8] else: [0u8]
+        keys.push(db_frame(124u8, id + db_frame(4u8, key.public_key) + _policy_name(key.role)? + db_frame(2u8, db_u64_bytes(key.valid_from)) + db_frame(2u8, db_u64_bytes(key.valid_until)) + db_frame(1u8, revoked) + db_canonical_list(permissions)))
+    db_canonical_set(key_ids)?
+    var metadata: [[u8]] = []
+    var metadata_ids: [[u8]] = []
+    for rule in admission.metadata.rules:
+        val identity = _policy_name(rule.kind)? + _policy_name(rule.field)?
+        metadata_ids.push(identity)
+        metadata.push(db_frame(126u8, identity + _policy_name(rule.classification)? + _policy_names(rule.allowed_value_digests)?))
+    db_canonical_set(metadata_ids)?
+    var fields: [[u8]] = []
+    var field_ids: [[u8]] = []
+    for field in merge.fields:
+        val identity = _policy_name(field.kind)? + _policy_name(field.field)?
+        field_ids.push(identity)
+        val (rule, signer) = _policy_rule(field.rule)
+        if rule == "authority" and (signer == "" or not key_ids.contains(_policy_name(signer)?)): return Err("SCVDB_POLICY_AUTHORITY")
+        fields.push(db_frame(127u8, identity + _policy_name(rule)? + _policy_text(signer)?))
+    db_canonical_set(field_ids)?
+    var constraints: [[u8]] = []
+    var kinds: [[u8]] = []
+    for constraint in merge.constraints:
+        val kind = _policy_name(constraint.kind)?
+        kinds.push(kind)
+        for field in constraint.key_fields + constraint.unique_fields:
+            if not field_ids.contains(kind + _policy_name(field)?): return Err("SCVDB_POLICY_CONSTRAINT_FIELD")
+        var references: [[u8]] = []
+        var reference_fields: [[u8]] = []
+        for reference in constraint.references:
+            val field = _policy_name(reference.field)?
+            if not field_ids.contains(kind + field): return Err("SCVDB_POLICY_CONSTRAINT_FIELD")
+            reference_fields.push(field)
+            references.push(db_frame(129u8, field + _policy_name(reference.target_kind)?))
+        db_canonical_set(reference_fields)?
+        constraints.push(db_frame(128u8, kind + _policy_names(constraint.key_fields)? + _policy_names(constraint.unique_fields)? + db_canonical_list(references)))
+    db_canonical_set(kinds)?
+    # Semantic digests include role/ACL/time/revocation and exact reviewed values.
+    if db_metadata_policy_digest(admission.metadata)? != admission.metadata.revision: return Err("SCVDB_METADATA_POLICY_REVISION")
+    if db_admission_policy_digest(admission)? != admission.revision: return Err("SCVDB_POLICY_REVISION")
+    val auth = db_frame(122u8, context + _policy_text(admission.revision)? + _policy_text(admission.metadata.revision)? + db_canonical_list(keys) + db_canonical_list(metadata))
+    val reduction = db_frame(123u8, context + db_canonical_list(fields) + db_canonical_list(constraints))
+    val body = db_frame(121u8, auth + reduction)
+    if body.len() > 16777000: return Err("SCVDB_POLICY_BYTES_QUOTA")
+    Ok(body)
+
+fn db_policy_digest(config: DbPolicyConfig) -> Result<text, text>:
+    """Compute the complete configuration pin without trusting config.revision."""
+    Ok(sha256_u8_hex(db_domain_bytes("policy-config-v1", _policy_body(config)?)?))
+
+fn db_policy_encode(config: DbPolicyConfig) -> Result<text, text>:
+    """Encode a reviewed, already revision-pinned v1 configuration."""
+    val body = _policy_body(config)?
+    val digest = sha256_u8_hex(db_domain_bytes("policy-config-v1", body)?)
+    if not _policy_hex(config.revision) or config.revision != digest: return Err("SCVDB_POLICY_CONFIG_REVISION")
+    Ok("SCVDB-POLICY-v1\n" + db_snapshot_hex(db_frame(120u8, _policy_text(config.revision)? + body)) + "\n")
+
+# Fixed grammar, no recursive value language. This bounded preflight examines
+# container tags only and limits depth before recursively entering a child.
+fn _policy_scan(frame: DbDecodedFrame, depth: i64, remaining: i64) -> Result<i64, text>:
+    if depth > 8: return Err("SCVDB_POLICY_DEPTH_QUOTA")
+    if remaining <= 0: return Err("SCVDB_POLICY_FRAME_QUOTA")
+    var count = 1
+    if frame.tag == 6u8 or (frame.tag >= 120u8 and frame.tag <= 129u8):
+        var offset = 0
+        while offset < frame.payload.len():
+            val child = db_read_frame(frame.payload, offset)?
+            count = count + _policy_scan(child, depth + 1, remaining - count)?
+            offset = child.next_offset
+    Ok(count)
+
+fn _policy_children(frame: DbDecodedFrame, tag: u8, count: i64) -> Result<[DbDecodedFrame], text>:
+    if frame.tag != tag: return Err("SCVDB_POLICY_TAG")
+    val fields = db_read_children(frame.payload)?
+    if (count >= 0 and fields.len() != count) or fields.len() > 10000: return Err("SCVDB_POLICY_FIELDS")
+    Ok(fields)
+
+fn _policy_read_names(frame: DbDecodedFrame) -> Result<[text], text>:
+    var values: [text] = []
+    for child in _policy_children(frame, 6u8, -1)?: values.push(db_read_text(child)?)
+    Ok(values)
+
+fn _policy_read_rule(rule: text, signer: text) -> Result<FieldMergeRule, text>:
+    if rule == "authority":
+        if signer == "": return Err("SCVDB_POLICY_AUTHORITY")
+        return Ok(FieldMergeRule.AuthorityWins(signer))
+    if signer != "": return Err("SCVDB_POLICY_AUTHORITY")
+    match rule:
+        "scalar": Ok(FieldMergeRule.ScalarConflict)
+        "ordered-list": Ok(FieldMergeRule.OrderedListConflict)
+        "derived": Ok(FieldMergeRule.Derived)
+        "observed-remove": Ok(FieldMergeRule.ObservedRemoveSet)
+        "add-wins": Ok(FieldMergeRule.AddWinsSet)
+        "remove-wins": Ok(FieldMergeRule.RemoveWinsSet)
+        _: Err("SCVDB_POLICY_RULE")
+
+fn db_policy_decode(encoded: text, expected_revision: text) -> Result<DbPolicyConfig, text>:
+    """Verify bounded v1 bytes against an independently supplied trusted pin."""
+    if not _policy_hex(expected_revision): return Err("SCVDB_POLICY_PIN_REQUIRED")
+    val header = "SCVDB-POLICY-v1\n"
+    if encoded.len() > 33554500: return Err("SCVDB_POLICY_BYTES_QUOTA")
+    if not encoded.starts_with(header) or not encoded.ends_with("\n") or encoded.len() <= header.len(): return Err("SCVDB_POLICY_VERSION")
+    val bytes = db_snapshot_unhex(encoded[header.len():encoded.len() - 1])?
+    if bytes.len() > 16777216: return Err("SCVDB_POLICY_BYTES_QUOTA")
+    val root = db_read_frame(bytes, 0)?
+    if root.next_offset != bytes.len(): return Err("SCVDB_POLICY_TRAILING")
+    _policy_scan(root, 0, 100000)?
+    val envelope = _policy_children(root, 120u8, 2)?
+    val revision = db_read_text(envelope[0])?
+    if revision != expected_revision: return Err("SCVDB_POLICY_PIN_MISMATCH")
+    val pair = _policy_children(envelope[1], 121u8, 2)?
+    val auth = _policy_children(pair[0], 122u8, 9)?
+    val reduction = _policy_children(pair[1], 123u8, 7)?
+    var keys: [DbSignerKey] = []
+    for child in _policy_children(auth[7], 6u8, -1)?:
+        val fields = _policy_children(child, 124u8, 7)?
+        if fields[1].tag != 4u8: return Err("SCVDB_POLICY_KEY_ENCODING")
+        var permissions: [DbPermission] = []
+        for entry in _policy_children(fields[6], 6u8, -1)?:
+            val values = _policy_children(entry, 125u8, 3)?
+            permissions.push(DbPermission(operation: db_read_text(values[0])?, kind: db_read_text(values[1])?, field: db_read_text(values[2])?))
+        keys.push(DbSignerKey(key_id: db_read_text(fields[0])?, public_key: fields[1].payload, role: db_read_text(fields[2])?, valid_from: db_read_unsigned(fields[3])?, valid_until: db_read_unsigned(fields[4])?, revoked: db_read_flag(fields[5])?, permissions: permissions))
+    var rules: [DbMetadataRule] = []
+    for child in _policy_children(auth[8], 6u8, -1)?:
+        val fields = _policy_children(child, 126u8, 4)?
+        rules.push(DbMetadataRule(kind: db_read_text(fields[0])?, field: db_read_text(fields[1])?, classification: db_read_text(fields[2])?, allowed_value_digests: _policy_read_names(fields[3])?))
+    val metadata = DbMetadataPolicy(revision: db_read_text(auth[6])?, rules: rules)
+    val admission = DbAdmissionPolicy(revision: db_read_text(auth[5])?, repository: db_read_text(auth[0])?, namespace: db_read_text(auth[1])?, epoch: db_read_unsigned(auth[2])?, schema_revision: db_read_text(auth[3])?, reducer_revision: db_read_text(auth[4])?, keys: keys, metadata: metadata)
+    var schemas: [DbFieldSchema] = []
+    for child in _policy_children(reduction[5], 6u8, -1)?:
+        val fields = _policy_children(child, 127u8, 4)?
+        schemas.push(DbFieldSchema(kind: db_read_text(fields[0])?, field: db_read_text(fields[1])?, rule: _policy_read_rule(db_read_text(fields[2])?, db_read_text(fields[3])?)?))
+    var constraints: [DbEntityConstraint] = []
+    for child in _policy_children(reduction[6], 6u8, -1)?:
+        val fields = _policy_children(child, 128u8, 4)?
+        var references: [DbReferenceConstraint] = []
+        for entry in _policy_children(fields[3], 6u8, -1)?:
+            val values = _policy_children(entry, 129u8, 2)?
+            references.push(DbReferenceConstraint(field: db_read_text(values[0])?, target_kind: db_read_text(values[1])?))
+        constraints.push(DbEntityConstraint(kind: db_read_text(fields[0])?, key_fields: _policy_read_names(fields[1])?, unique_fields: _policy_read_names(fields[2])?, references: references))
+    val merge = MergePolicy(repository: db_read_text(reduction[0])?, namespace: db_read_text(reduction[1])?, epoch: db_read_unsigned(reduction[2])?, schema_revision: db_read_text(reduction[3])?, reducer_revision: db_read_text(reduction[4])?, fields: schemas, constraints: constraints)
+    val config = DbPolicyConfig(revision: revision, admission: admission, merge: merge)
+    if db_policy_encode(config)? != encoded: return Err("SCVDB_POLICY_NONCANONICAL")
+    Ok(config)
+
+export DbPolicyConfig, db_policy_digest, db_policy_encode, db_policy_decode
