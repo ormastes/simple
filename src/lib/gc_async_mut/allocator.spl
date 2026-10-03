@@ -323,10 +323,10 @@ class PoolAllocator:
         pool.deallocate(obj1, 64, 8)     // Return to free list
         val obj3 = pool.allocate(64, 8)  // Reuses obj1's slot
     """
-    buffer: [u8]       # Pre-allocated memory block
     object_size: usize # Size of each object (fixed)
     capacity: usize    # Max number of objects
-    free_indices: [usize]  # Mock free list: stack of available slot indices
+    free_objects: [[u8]]  # Actual fixed-size objects, reused after deallocate
+    free_count: usize     # Active prefix of the fixed-capacity free stack
     allocated_count: usize  # Number of objects currently allocated
 
     static fn new(object_size: usize, capacity: usize) -> PoolAllocator:
@@ -339,24 +339,20 @@ class PoolAllocator:
         Returns:
             Pool allocator
         """
-        val total_size = object_size * capacity
-        val buffer = sys_malloc(total_size, 8)
-
-        # Initialize the mock free list with every slot index. The compiled
-        # build links objects through their first pointer word; the
-        # interpreter cannot store references in a [u8] backing block, so an
-        # explicit index stack stands in for that linked free list.
-        var free_indices: [usize] = []
-        var idx: usize = capacity
-        while idx > 0:
-            idx = idx - 1
-            free_indices = free_indices.push(idx)
+        # [u8] slicing makes a copy in both runtimes. Keep the objects
+        # themselves in the free stack so returning one never copies a tail
+        # of a shared backing buffer or needs a length-derived slot index.
+        var free_objects: [[u8]] = [[]; capacity]
+        var idx: usize = 0
+        while idx < capacity:
+            free_objects[idx] = sys_malloc(object_size, 8)
+            idx = idx + 1
 
         PoolAllocator(
-            buffer: buffer,
             object_size: object_size,
             capacity: capacity,
-            free_indices: free_indices,
+            free_objects: free_objects,
+            free_count: capacity,
             allocated_count: 0
         )
 
@@ -390,15 +386,16 @@ impl Allocator for PoolAllocator:
         if size != self.object_size:
             return nil  # Wrong size
 
-        # Pop a slot index from the free list
-        val indices = self.free_indices
-        if indices.len() == 0:
+        # Pop the actual slot object, releasing this stack reference while
+        # the caller owns it. No copied slice or reverse identity lookup.
+        if self.free_count == 0:
             return nil  # Pool exhausted
-        val last = indices.len() - 1
-        val idx = indices[last]
-        self.free_indices = indices[0 : last]
+        val last = self.free_count - 1
+        val object = self.free_objects[last]
+        self.free_objects[last] = []
+        self.free_count = last
         self.allocated_count = self.allocated_count + 1
-        Some(buffer_offset(self.buffer, idx * self.object_size))
+        Some(object)
 
     me deallocate(ptr: [u8], size: usize, align: usize):
         """Return object to free list.
@@ -412,22 +409,12 @@ impl Allocator for PoolAllocator:
         if size != self.object_size:
             return  # Invalid size, skip
 
-        # Recover the slot index from the mock slice: buffer_offset returns
-        # buffer[idx * object_size:], so the remaining length identifies the
-        # slot. Reject slices that do not align to a slot boundary.
-        val buffer_len = self.buffer.len()
-        val ptr_len = ptr.len()
-        if ptr_len > buffer_len:
-            return  # Not a slice of this pool's backing block
-        val offset = buffer_len - ptr_len
-        if offset % self.object_size != 0:
-            return  # Not a slot boundary
-        val idx = offset / self.object_size
-        if idx >= self.capacity:
-            return  # Out of range
-
-        # Push the slot index back onto the free list
-        self.free_indices = self.free_indices.push(idx)
+        # Allocator's contract requires ptr to be an allocation from this
+        # pool, with no double free. Return that same object to the stack.
+        if self.free_count >= self.capacity or self.allocated_count == 0:
+            return
+        self.free_objects[self.free_count] = ptr
+        self.free_count = self.free_count + 1
         self.allocated_count = self.allocated_count - 1
 
     fn reallocate(ptr: [u8], old_size: usize, new_size: usize, align: usize) -> [u8]?:

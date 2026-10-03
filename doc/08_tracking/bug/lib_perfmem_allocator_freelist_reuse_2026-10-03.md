@@ -29,7 +29,7 @@ Runtime: Rust seed (`bin/simple`), `--mode=interpreter` (seed-run/diagnostic)
   alloc/free stats under churn, and per-class page lists stay at one page under
   interleaved two-class churn. PASS (3/3, seed interpreter).
 
-### 2. PoolAllocator mock free list never advanced (status: fixed)
+### 2. PoolAllocator mock free list copied each backing-buffer tail (status: follow-up pending native verification)
 
 - `src/lib/gc_async_mut/allocator.spl` — the interpreter mocks `ptr_write` (no-op)
   and `ptr_read` (returns `Some(ptr)` itself), but `PoolAllocator` built its free
@@ -39,18 +39,21 @@ Runtime: Rust seed (`bin/simple`), `--mode=interpreter` (seed-run/diagnostic)
   `allocated_count` grew without bound — the pool never reported exhaustion,
   `available()` = `capacity - allocated_count` underflowed (usize wrap), and every
   allocation returned the same slot.
-- Fix: the pool now tracks free slots as an explicit index stack
-  (`free_indices: [usize]`). `deallocate` recovers the slot index from the mock
-  slice length (`buffer_offset` returns `buffer[idx*object_size:]`) and rejects
-  slices that do not align to a slot boundary or are out of range. No public API or
-  synchronization change; the compiled-mode extern pointer ABI is unchanged
-  (externs remain commented out, mocks always used today).
-- Regression evidence: `test/01_unit/lib/alloc/allocator_pool_spec.spl` asserts
-  exhaustion after `capacity` allocations, slot reuse after deallocate, bounded
-  counts under 30 alloc/free cycles, and wrong-size rejection. PASS (4/4, seed
-  interpreter).
-- Not fixed (pre-existing, low severity): `object_size * capacity` in `new()` has
-  no overflow guard; `deallocate` does not detect double-free.
+- The first fix used an index stack and made the exhaustion/count checks pass
+  (4/4 in the seed interpreter). It also returned `buffer[idx*object_size:]`.
+  In both Simple runtimes that slice allocates and copies the entire tail, so
+  allocating every slot retains `object_size * capacity * (capacity + 1) / 2`
+  bytes of slot data rather than `object_size * capacity`. Popping the index
+  stack with `[0:last]` copied its prefix on every allocation.
+- Follow-up: the pool now preallocates distinct exact-size byte arrays and
+  stores the actual returned arrays in a fixed-capacity free stack. Allocation
+  removes a stack reference; deallocation returns that same array under the
+  `Allocator` contract's valid-pointer/no-double-free preconditions. This
+  removes the tail and prefix copies without changing the public API. Focused
+  byte-preservation, independence, exhaustion and count tests are added, but
+  the follow-up has no native PASS yet.
+- The existing mock allocator remains an array abstraction; alignment and
+  unchecked invalid-pointer/double-free behavior are unchanged.
 
 ## Open (filed, out of this lane or needs owner decision)
 

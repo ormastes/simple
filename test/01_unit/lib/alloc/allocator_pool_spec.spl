@@ -9,11 +9,9 @@
 #
 # ## Overview
 #
-# Regression evidence for the gc_async_mut PoolAllocator interpreter free list.
-# The mock ptr_write/ptr_read helpers were no-ops, so the linked free list
-# never advanced: every allocate() returned the same slot, allocated_count
-# grew without bound, and available() underflowed. The pool now tracks free
-# slots as an explicit index stack.
+# Regression evidence for the gc_async_mut PoolAllocator free list. It returns
+# exact-size, independent byte arrays and reuses each returned array without
+# copying a tail of a larger backing buffer.
 
 use std.spec.{describe, it, expect}
 use std.spec.step
@@ -58,6 +56,34 @@ describe "gc_async_mut PoolAllocator free list":
         expect(pool.available()).to_equal(0)
         val d = pool.allocate(16, 8)
         expect(d.?).to_equal(false)
+
+    it "returns exact independent objects and recycles their bytes":
+        step("Preallocate two eight-byte objects")
+        val pool = PoolAllocator.new(object_size: 8, capacity: 2)
+        var a = pool.allocate(8, 8).unwrap()
+        var b = pool.allocate(8, 8).unwrap()
+        expect(a.len()).to_equal(8)
+        expect(b.len()).to_equal(8)
+
+        step("Writes to one live object must not change the other")
+        a[0] = 11u8
+        b[0] = 23u8
+        expect(a[0]).to_equal(11u8)
+        expect(b[0]).to_equal(23u8)
+
+        step("Returning a reuses that object's stored bytes")
+        pool.deallocate(a, 8, 8)
+        val recycled = pool.allocate(8, 8).unwrap()
+        expect(recycled.len()).to_equal(8)
+        expect(recycled[0]).to_equal(11u8)
+        expect(b[0]).to_equal(23u8)
+        expect(pool.available()).to_equal(0)
+
+    it "a zero-capacity pool returns no object":
+        val pool = PoolAllocator.new(object_size: 16, capacity: 0)
+        expect(pool.allocate(16, 8).?).to_equal(false)
+        expect(pool.available()).to_equal(0)
+        expect(pool.total_allocated()).to_equal(0)
 
     it "allocated count never exceeds capacity under churn":
         step("Create a pool of 3 objects")
