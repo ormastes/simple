@@ -24,7 +24,7 @@ the oracle. Fixture source and binary digests must accompany eventual results.
 
 Use the existing `DIFF_FILTER=collection_req002_` discovery selector. Interpreter
 and JIT use existing `DIFF_LANES=interpret,jit`; LLVM is the actual `native` build
-lane, never an invented execution-mode environment value. Self-hosted and
+lane with explicit `--backend=llvm`, never an invented execution-mode environment value. Self-hosted and
 bootstrap-produced compilers are binary provenance, not additional mode strings.
 Keep the exact same four sources and markers for both generations. Bootstrap
 does not authorize Rust-seed tests: only admitted pure-Simple artifacts may run
