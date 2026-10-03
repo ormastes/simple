@@ -1,0 +1,128 @@
+# Source regressions using actual retained generations and signed checkpoints.
+# No execution, deployment, or historical producer-signature proof is implied.
+use std.spec.*
+use app.io.mod.{file_delete, file_write}
+use app.scv.db.historical_model.*
+use app.scv.db.historical_query.{db_history_query}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.local_apply.{db_apply_local}
+use app.scv.db.retention_store.{db_retention_store_quota}
+use std.scv.db_admission.{db_admission_policy_digest}
+use std.scv.db_policy_codec.{db_policy_digest}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed}
+use test.fixtures.scv.db_history_fixture.*
+use test.fixtures.scv.db_history_chain_fixture.*
+
+fn check_item2_history_chain_heads(fixture: Item2HistoryFixture, active: text, retention: text, checkpoint: text):
+    expect(db_store_read(fixture.root).head).to_equal(active)
+    expect(db_store_read(fixture.root, "retention").head).to_equal(retention)
+    expect(db_store_read(fixture.root, "checkpoint-install").head).to_equal(checkpoint)
+
+describe "REQ032 historical multi-generation rollup provenance":
+    it "replays three actual CAS rollups while preserving the requested historical acceptance":
+        val chain = setup_item2_history_chain()
+        val fixture = chain.fixture
+        val active = db_store_read(fixture.root).head
+        val marker = db_store_read(fixture.root, "checkpoint-install").head
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        var limits = db_history_limits()
+        limits.max_rollup_hops = 3u64
+        val result = db_history_query(fixture.root, request, fixture.authority, fixture.sources, limits).unwrap()
+        match result.resolution:
+            Aggregated(retained, raw):
+                expect(raw).to_equal(DbHistoricalUnavailableReason.EvidenceMissing)
+                expect(retained.rollup.generation).to_equal(3u64)
+                expect(retained.rollup.count).to_equal(3u64)
+                expect(retained.rollup.passed).to_equal(1u64)
+                expect(retained.rollup.failed).to_equal(2u64)
+                expect(retained.inputs.len()).to_equal(3)
+                expect(retained.rollup.prior_revision).to_equal(setup_item2_history_rollup(fixture.root, fixture.sources.evidence_parent, chain.rollups[1]).rollup.revision)
+            _: expect("expected replayed three-generation aggregate").to_equal("Aggregated")
+        expect(result.provenance.requested_revision).to_equal(fixture.first.revision)
+        expect(result.provenance.accepted_batch_digest).to_equal(Some(fixture.patches[0].batch_id))
+        expect(result.provenance.rollup_digest).to_equal(Some(chain.rollups[2]))
+        expect(result.provenance.retention_head).to_equal(Some(chain.retained.head))
+        expect(result.provenance.evidence_digest).to_equal(Some(fixture.digests[0]))
+        check_item2_history_chain_heads(fixture, active, chain.retained.head, marker)
+
+    it "distinguishes a missing prior object from hop and aggregate-byte quota before opening it":
+        val chain = setup_item2_history_chain()
+        val fixture = chain.fixture
+        val active = db_store_read(fixture.root).head
+        val marker = db_store_read(fixture.root, "checkpoint-install").head
+        expect(file_delete(fixture.sources.evidence_parent + "/scv-evidence-v1/" + chain.rollups[0] + ".scve")).to_be(true)
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        var hops = db_history_limits()
+        hops.max_rollup_hops = 2u64
+        expect(db_history_query(fixture.root, request, fixture.authority, fixture.sources, hops).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.Quota))
+        var bytes = db_history_limits()
+        # All prior reads plus exactly two rollup envelope reservations; the
+        # third reservation must fail before its now-missing path is opened.
+        bytes.max_total_read_bytes = 67108929u64 + 33554800u64 + 1073741824u64 + 1024u64 + bytes.max_semantic_bytes + 21u64 + 67108929u64 + 2u64 * db_retention_store_quota().max_envelope_bytes as u64
+        expect(db_history_query(fixture.root, request, fixture.authority, fixture.sources, bytes).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.Quota))
+        val missing = db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        expect(missing.resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.Io("SCVDB_EVIDENCE_UNAVAILABLE")))
+        expect(missing.provenance.rollup_digest).to_be_nil()
+        check_item2_history_chain_heads(fixture, active, chain.retained.head, marker)
+
+    it "rejects tampered middle-generation bytes despite a valid newest rollup and catalog":
+        val chain = setup_item2_history_chain()
+        val fixture = chain.fixture
+        val active = db_store_read(fixture.root).head
+        val marker = db_store_read(fixture.root, "checkpoint-install").head
+        expect(file_write(fixture.sources.evidence_parent + "/scv-evidence-v1/" + chain.rollups[1] + ".scve", "tampered retained envelope")).to_be(true)
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        val result = db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        expect(result.resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.RollupProvenance))
+        expect(result.provenance.rollup_digest).to_be_nil()
+        check_item2_history_chain_heads(fixture, active, chain.retained.head, marker)
+
+describe "Historical checkpoint attestation differs from original producer authentication":
+    it "retains checkpoint-attested acceptance without the producer key but rejects original patch replay":
+        val original = setup_item2_history()
+        val fixture = setup_item2_history_without_producer_key(original)
+        expect(fixture.authority.checkpoint.policy.admission.keys.len()).to_equal(0)
+        val active = db_store_read(fixture.root).head
+        val marker = db_store_read(fixture.root, "checkpoint-install").head
+        val request = DbHistoricalRequest(revision: fixture.current.revision, manifest: fixture.entities[0])
+        val result = db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        match result.resolution:
+            Exact(info): expect(info.digest).to_equal(original.digests[0])
+            _: expect("expected checkpoint-attested exact bytes").to_equal("Exact")
+        expect(result.provenance.checkpoint_digest).to_equal(fixture.checkpoint.revision)
+        expect(result.provenance.accepted_batch_digest).to_equal(Some(original.patches[0].batch_id))
+        expect(result.provenance.resolved_manifest).to_equal(Some(original.entities[0]))
+        expect(result.provenance.checkpoint_digest == original.checkpoint.revision).to_be(false)
+        val policy = fixture.authority.checkpoint.policy
+        expect(db_apply_local(fixture.root, active, original.patches[0], policy.merge, policy.admission, 12).unwrap_err()).to_equal("SCVDB_KEY_UNKNOWN")
+        check_item2_history_chain_heads(fixture, active, "", marker)
+
+    it "rejects an absent or substituted independent checkpoint verification key":
+        val fixture = setup_item2_history()
+        val active = db_store_read(fixture.root).head
+        val marker = db_store_read(fixture.root, "checkpoint-install").head
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        val (unused_seed, wrong_key) = pure_ed25519_keypair_from_seed([62u8;32])
+        var absent = fixture.authority
+        absent.checkpoint.public_key = []
+        var substituted = fixture.authority
+        substituted.checkpoint.public_key = wrong_key
+        for authority in [absent, substituted]:
+            expect(db_history_query(fixture.root, request, authority, fixture.sources, db_history_limits()).unwrap_err()).to_equal("SCVDB_CHECKPOINT_SIGNATURE")
+        check_item2_history_chain_heads(fixture, active, "", marker)
+
+    it "does not silently treat a changed producer policy as the policy pinned by the old checkpoint":
+        val fixture = setup_item2_history()
+        val active = db_store_read(fixture.root).head
+        val marker = db_store_read(fixture.root, "checkpoint-install").head
+        var authority = fixture.authority
+        var policy = authority.checkpoint.policy
+        var admission = policy.admission
+        admission.keys = []
+        admission.revision = db_admission_policy_digest(admission).unwrap()
+        policy.admission = admission
+        policy.revision = db_policy_digest(policy).unwrap()
+        authority.checkpoint.policy = policy
+        val request = DbHistoricalRequest(revision: fixture.current.revision, manifest: fixture.entities[0])
+        expect(db_history_query(fixture.root, request, authority, fixture.sources, db_history_limits()).unwrap_err()).to_equal("SCVDB_CHECKPOINT_POLICY")
+        check_item2_history_chain_heads(fixture, active, "", marker)

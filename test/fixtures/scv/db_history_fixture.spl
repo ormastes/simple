@@ -10,6 +10,8 @@ use app.scv.db.local_store.*
 use app.scv.db.checkpoint_store.*
 use app.scv.db.checkpoint_objects.{DbCheckpointPageSource}
 use app.scv.db.retention_codec.{db_retention_observation_encode}
+use app.scv.db.restricted_evidence.{db_restricted_key_create, db_restricted_key_load, db_restricted_store_put, db_restricted_store_get}
+use test.fixtures.scv.db_restricted_fixture.{setup_item2_restricted_store_context, setup_item2_restricted_quota}
 use std.scv.db_checkpoint.*
 use std.scv.db_checkpoint_history.*
 use std.scv.db_pages.*
@@ -75,10 +77,16 @@ fn setup_item2_history(big: bool = false, restricted: bool = false, observation:
     if big:
         digest = setup_item2_hydration_big(external)
     elif restricted:
-        # Actual SCRE header bytes: query recognizes restriction, never decrypts.
-        digest = setup_item2_hydration_node(root, external, [83u8,67u8,82u8,69u8,1u8,0u8,255u8]).digest
+        var context = setup_item2_restricted_store_context()
+        context.repository = "repo"
+        val owner = db_restricted_key_create(root, external, context).unwrap()
+        val key = db_restricted_key_load(root, external, owner).unwrap()
+        val plaintext = [112u8,114u8,105u8,118u8,97u8,116u8,101u8]
+        val encrypted = db_restricted_store_put(root, external, context, key, plaintext, [], 0u64, setup_item2_restricted_quota()).unwrap()
+        expect(db_restricted_store_get(root, external, encrypted, key, setup_item2_restricted_quota())).to_equal(Ok(plaintext))
+        digest = encrypted.digest
     elif observation:
-        digest = setup_item2_hydration_node(root, external, db_retention_observation_encode("observation-1", 0u64, "history-cohort", "pass", 12u64, [1u8,2u8]).unwrap()).digest
+        digest = setup_item2_hydration_node(root, external, db_retention_observation_encode("observation-1", 0u64, "history-cohort", "PASS", 12u64, [1u8,2u8]).unwrap()).digest
     else:
         digest = setup_item2_hydration_node(root, external, [11u8,22u8,33u8]).digest
     val second_digest = setup_item2_hydration_node(root, external, [44u8,55u8]).digest

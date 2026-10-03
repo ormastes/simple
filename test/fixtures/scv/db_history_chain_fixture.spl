@@ -1,0 +1,89 @@
+use std.spec.{expect}
+use app.io.mod.{dir_create, file_write_bytes}
+use app.scv.db.historical_model.*
+use app.scv.db.retention_store.*
+use app.scv.db.retention_codec.*
+use app.scv.db.evidence_store.{db_evidence_store_get}
+use app.scv.db.checkpoint_store.*
+use app.scv.db.checkpoint_objects.{DbCheckpointPageSource, db_checkpoint_page_read}
+use app.scv.db.local_store.{db_store_read}
+use std.scv.db_retention.{DbEvidencePin}
+use std.scv.db_checkpoint.*
+use std.scv.db_pages.{db_page_encode}
+use std.scv.db_admission.{db_admission_policy_digest}
+use std.scv.db_policy_codec.{db_policy_digest}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_history_fixture.*
+use test.fixtures.scv.db_hydration_fixture.*
+
+struct Item2HistoryChain:
+    fixture: Item2HistoryFixture
+    rollups: [text]
+    retained: DbStoredRetention
+
+fn setup_item2_history_rollup(root: text, parent: text, digest: text) -> DbRetainedRollup:
+    val node = db_evidence_store_get(root, parent, digest, 0u64, db_retention_store_quota()).unwrap()
+    db_retained_rollup_decode(node.content).unwrap()
+
+fn setup_item2_history_chain() -> Item2HistoryChain:
+    var fixture = setup_item2_history(observation: true)
+    val root = fixture.root
+    val parent = fixture.sources.evidence_parent
+    var retained = db_retention_register(root, parent, "", fixture.digests[0], 0u64, "internal").unwrap()
+    retained = db_retention_set_pins(root, parent, retained.head, [DbEvidencePin(root: fixture.digests[0], reason: "policy", expires_day: 0u64)], 28u64).unwrap()
+    retained = db_retention_run(root, parent, retained.head, 28u64, 0u64, "history-cohort").unwrap()
+    var rollups = [retained.catalog.rollups[0].digest]
+    expect(setup_item2_history_rollup(root, parent, rollups[0]).rollup.generation).to_equal(1u64)
+    for ordinal in 2..4:
+        val content = db_retention_observation_encode("observation-{ordinal}", 0u64, "history-cohort", "FAIL", ordinal as u64, [ordinal as u8]).unwrap()
+        val node = setup_item2_hydration_node(root, parent, content)
+        retained = db_retention_register(root, parent, retained.head, node.digest, 0u64, "internal").unwrap()
+        retained = db_retention_run(root, parent, retained.head, 28u64 + ordinal as u64, 0u64, "history-cohort").unwrap()
+        rollups.push(retained.catalog.rollups[0].digest)
+        val actual = db_evidence_store_get(root, parent, rollups[ordinal - 1], 0u64, db_retention_store_quota()).unwrap()
+        expect(actual.dependencies).to_equal([rollups[ordinal - 2]])
+        expect(db_retained_rollup_decode(actual.content).unwrap().rollup.generation).to_equal(ordinal as u64)
+    retained = db_retention_set_pins(root, parent, retained.head, [], 32u64).unwrap()
+    retained = db_retention_run(root, parent, retained.head, 32u64, 0u64, "history-cohort").unwrap()
+    expect(retained.catalog.rollups[0].digest).to_equal(rollups[2])
+    var selected = false
+    for entry in retained.catalog.entries:
+        if entry.digest == fixture.digests[0]:
+            expect(entry.state).to_equal("deleted")
+            expect(entry.rollup_digest).to_equal(rollups[2])
+            selected = true
+    expect(selected).to_be(true)
+    fixture.authority.expected_retention_head = retained.head
+    Item2HistoryChain(fixture: fixture, rollups: rollups, retained: retained)
+
+fn setup_item2_history_without_producer_key(original: Item2HistoryFixture) -> Item2HistoryFixture:
+    var fixture = original
+    val (root, unused_external, pages_parent) = setup_item2_hydration_paths()
+    var checkpoint = original.checkpoint
+    var authority = original.authority.checkpoint
+    var policy = authority.policy
+    var admission = policy.admission
+    admission.keys = []
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    policy.admission = admission
+    policy.revision = db_policy_digest(policy).unwrap()
+    checkpoint.policy_revision = policy.revision
+    checkpoint.predecessor_checkpoint = ""
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    authority.policy = policy
+    authority.expected_checkpoint = checkpoint.revision
+    expect(dir_create(pages_parent + "/scv-checkpoint-pages-v1", false)).to_be(true)
+    for entry in checkpoint.metadata.entries:
+        val page = db_checkpoint_page_read(original.root, checkpoint.metadata, entry).unwrap()
+        expect(file_write_bytes(pages_parent + "/scv-checkpoint-pages-v1/" + entry.digest + ".page", db_page_encode(page, checkpoint.metadata.quota).unwrap())).to_be(true)
+    val prepared = db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, DbCheckpointPageSource(external_parent: pages_parent, maximum_pages: 65536, maximum_bytes: 67108864)).unwrap()
+    val installed = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+    expect(installed.phase).to_equal("Installed")
+    fixture.root = root
+    fixture.checkpoint = checkpoint
+    fixture.authority = DbHistoricalAuthority(checkpoint: authority, expected_active_head: installed.active_head, expected_retention_head: "")
+    fixture
+
+export Item2HistoryChain, setup_item2_history_chain, setup_item2_history_rollup, setup_item2_history_without_producer_key
