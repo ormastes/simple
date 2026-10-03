@@ -9,6 +9,7 @@ clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c start.s -
 clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c provider.s -o provider.o
 clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c relax.s -o relax.o
 clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c arithmetic.s -o arithmetic.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c uleb.s -o uleb.o
 llvm-ar rcs libprovider.a provider.o
 llvm-readelf -r -h start.o provider.o relax.o
 ld.lld --no-relax -static -e _start start.o provider.o -o oracle.elf
@@ -29,8 +30,13 @@ RVC_JUMP and JAL. `relax.o` isolates CALL_PLT plus RELAX without ALIGN padding.
 data section; ADD/SUB pairs cover 8/16/32/64-bit fields; SET6/SUB6 preserve the
 upper two bits; SET8/16/32, PCREL32, PLT32 and GOT32_PCREL cover data fields.
 
+`uleb.o` contains an absolute retention pointer and two adjacent SET/SUB pairs.
+The three-byte padded label difference is 136, encoded as `88 81 00`, followed
+by a one-byte value13. LLD independently emitted `88 81 00 0d` during fixture
+authoring. Tests also corrupt adjacency, range and unsigned ordering.
+
 Current static-driver boundary: no ALIGN padding deletion, instruction-size
-relaxation, ULEB128 relocation pairs, or .riscv.attributes merge. RV32 ELF,
+relaxation, or .riscv.attributes merge. RV32 ELF,
 dynamic/PIE and TLS output remain unsupported. Native execution and the Simple
 acceptance run are pending. Arithmetic/branch encodings follow the
 [RISC-V psABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc)

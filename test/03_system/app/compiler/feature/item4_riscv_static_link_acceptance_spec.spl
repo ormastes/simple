@@ -80,7 +80,7 @@ fn item4_rv_mutate(kind: i64, field: i64, value: i64, name: text = "start.o") ->
     expect(parsed.is_ok()).to_equal(true)
     if parsed.is_err(): return bytes
     val object = parsed.unwrap()
-    val valid_field = field == 8 or field == 16
+    val valid_field = field == 0 or field == 8 or field == 16
     expect(valid_field).to_equal(true)
     if not valid_field: return bytes
     var changed = false
@@ -338,3 +338,44 @@ describe "RV64 real static ELF link":
         expect(linked.is_err()).to_equal(true)
         if linked.is_ok(): return
         expect(linked.unwrap_err()).to_contain("ULEB128 result is negative")
+
+    it "rejects ULEB128 subtraction at a different offset or without assignment":
+        # @req ITEM4-REQ-004
+        step("Prepare a mismatched offset and an orphaned subtraction")
+        val wrong_offset = item4_rv_mutate(61, 0, 1, "uleb.o")
+        val orphan_sub = item4_rv_mutate(60, 8, 0, "uleb.o")
+        for object in [wrong_offset, orphan_sub]:
+            step("Link the malformed ULEB128 pair")
+            val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+            step("Require explicit adjacency rejection")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain("ULEB128 requires adjacent SET/SUB")
+
+    it "rejects a ULEB128 continuation beyond its original input section":
+        # @req ITEM4-REQ-004
+        step("Remove the final one-byte field terminator in the real object")
+        var bytes = item4_rv_load("uleb.o")
+        val parsed = elf_parse_object(bytes)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val object = parsed.unwrap()
+        var index: i64 = 0
+        var changed = false
+        while index < object.sections.len():
+            if elf_section_name(object, index) == ".data":
+                val section = object.sections[index]
+                val valid = section.sh_size == 4 and section.sh_addr >= 0 and section.sh_addr <= bytes.len() and 4 <= bytes.len() - section.sh_addr
+                expect(valid).to_equal(true)
+                if not valid: return
+                bytes[section.sh_addr + 3] = 0x80
+                changed = true
+            index = index + 1
+        expect(changed).to_equal(true)
+        if not changed: return
+        step("Link without permitting the decoder to consume another section")
+        val linked = elf_static_link([bytes], [], "_start", RelocArch.Riscv64)
+        step("Require a named unterminated-field failure")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 field is unterminated")
