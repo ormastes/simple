@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Emulate native Perl's missing POSIX parent probe while retaining the host's
+# filesystem modules. This checks admission routing, not Windows execution.
+cat >"$tmp/native-windows.pl" <<'PERL'
+use strict;
+use warnings;
+use POSIX;
+use Time::HiRes;
+use Cwd;
+use File::Basename;
+use File::Temp;
+use File::Path;
+use Config;
+use Fcntl;
+use Digest::SHA;
+use IPC::Open2;
+BEGIN { *CORE::GLOBAL::getppid = sub { die "unexpected POSIX parent probe\n" }; }
+local $^O = 'MSWin32';
+my $guard = shift @ARGV;
+do $guard;
+die $@ if $@;
+die "watchdog did not exit\n";
+PERL
+code=0
+perl "$tmp/native-windows.pl" "$guard" "--receipt=$tmp/receipt" -- \
+    sh -c 'touch "$1"' sh "$tmp/workload-started" >"$tmp/output" 2>&1 || code=$?
+[ "$code" -eq 89 ] || fail "native Windows admission exited $code, expected 89"
+grep -q 'native MSWin32 perl is unsupported' "$tmp/output" || fail 'missing admission diagnostic'
+if grep -q 'unexpected POSIX parent probe' "$tmp/output"; then
+    fail 'Windows admission called getppid'
+fi
+grep -q '^status=session-helper-install-failed$' "$tmp/receipt" || fail 'missing failure receipt'
+[ ! -e "$tmp/workload-started" ] || fail 'unsupported host started workload'
+echo 'PASS: emulated native Windows rejects admission without a POSIX parent probe'
