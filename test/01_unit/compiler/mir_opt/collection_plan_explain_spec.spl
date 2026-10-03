@@ -5,6 +5,27 @@ use compiler.mir_opt.mir_opt.collection_plan_selection.{
 }
 use compiler.mir_opt.mir_opt.collection_plan_explain.collection_plan_explain
 
+fn collection_explain_memory_facts() -> CollectionPlanFacts:
+    var facts = collection_plan_unproven_facts()
+    facts.collection_kind = "set"
+    facts.equality_pure = true
+    facts.duplicate_semantics_preserved = true
+    facts.order_insensitive = true
+    facts.mutation_epoch_stable = true
+    facts.key_hashable = true
+    facts.key_orderable = true
+    facts.target_has_hash = true
+    facts.target_has_ordered = true
+    facts.ordered_update_bound_proven = true
+    facts.p0_correctness_ready = true
+    facts.static_size = 100
+    facts.static_lookups = 1000
+    facts.memory_budget_bytes = 64
+    facts.linear_extra_memory_bytes = 0
+    facts.hash_extra_memory_bytes = 64
+    facts.ordered_extra_memory_bytes = 48
+    facts
+
 describe "collection plan explanation uses the guarded selector result":
     it "reports admitted workload and the selected physical algorithm":
         var facts = collection_plan_unproven_facts()
@@ -19,6 +40,8 @@ describe "collection plan explanation uses the guarded selector result":
         facts.profile_admitted = true
         facts.profile_size_p95 = 100
         facts.profile_lookups_p95 = 1000
+        facts.memory_budget_bytes = 64
+        facts.hash_extra_memory_bytes = 64
         val decision = collection_plan_select(facts)
         expect(decision.selected).to_equal(CollectionPlanAlgorithm.Hash)
         val explanation = collection_plan_explain("ast://module/collection#1", "x86_64-v3", facts, decision)
@@ -26,7 +49,8 @@ describe "collection plan explanation uses the guarded selector result":
         expect(explanation).to_contain("profile.status=admitted")
         expect(explanation).to_contain("profile.size_p95=100")
         expect(explanation).to_contain("rejected.linear=size-exceeds-linear-limit")
-        expect(explanation).to_contain("extra_memory_bytes=unproven")
+        expect(explanation).to_contain("\nextra_memory_bytes=64\n")
+        expect(explanation).to_contain("\nmemory_budget=64\n")
 
     it "reports a failed correctness gate without claiming profile evidence":
         var facts = collection_plan_unproven_facts()
@@ -40,3 +64,46 @@ describe "collection plan explanation uses the guarded selector result":
         expect(explanation).to_contain("rejected.linear=p0-correctness-gate")
         expect(explanation).to_contain("rejected.ordered=p0-correctness-gate")
         expect(explanation).to_contain("fallback=original-on-rejection")
+
+    it "reports candidate memory bounds and selects the fitting alternative":
+        var facts = collection_explain_memory_facts()
+        facts.memory_budget_bytes = 48
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        val report = collection_plan_explain("memory/alternative", "generic", facts, decision)
+        expect(report).to_contain("\nrejected.hash=memory-budget-exceeded\n")
+        expect(report).to_contain("\nextra_memory_bytes=48\n")
+        expect(report).to_contain("\nmemory_budget=48\n")
+        expect(report).to_contain("\ncandidate.hash.extra_memory_bytes=64\n")
+        expect(report).to_contain("\ncandidate.ordered.extra_memory_bytes=48\n")
+
+    it "keeps unknown candidate estimates distinct from zero-byte bounds":
+        var facts = collection_explain_memory_facts()
+        facts.hash_extra_memory_bytes = -1
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        val report = collection_plan_explain("memory/unknown", "generic", facts, decision)
+        expect(report).to_contain("\nrejected.hash=memory-estimate-unproven\n")
+        expect(report).to_contain("\ncandidate.hash.extra_memory_bytes=unknown\n")
+        expect(report).to_contain("\ncandidate.linear.extra_memory_bytes=0\n")
+        expect(report).to_contain("\nextra_memory_bytes=48\n")
+
+    it "reports zero extra allocation for original fallback without claiming a budget":
+        var facts = collection_explain_memory_facts()
+        facts.memory_budget_bytes = -1
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        val report = collection_plan_explain("memory/no-budget", "generic", facts, decision)
+        expect(report).to_contain("\nreason=memory-budget-unproven\n")
+        expect(report).to_contain("\nmemory_budget=unknown\n")
+        expect(report).to_contain("\nextra_memory_bytes=0\n")
+        expect(report).to_contain("\nfallback=original-on-rejection\n")
+
+    it "labels malformed negative bounds as invalid rather than unknown":
+        var facts = collection_explain_memory_facts()
+        facts.hash_extra_memory_bytes = -2
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        val report = collection_plan_explain("memory/invalid", "generic", facts, decision)
+        expect(report).to_contain("\nreason=invalid-memory-facts\n")
+        expect(report).to_contain("\ncandidate.hash.extra_memory_bytes=invalid\n")

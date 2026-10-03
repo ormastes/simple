@@ -32,6 +32,10 @@ fn collection_guard_fixture() -> CollectionPlanFacts:
     facts.static_lookups = 3
     facts.hard_size_bound = 2
     facts.policy = "critical"
+    facts.memory_budget_bytes = 64
+    facts.linear_extra_memory_bytes = 0
+    facts.hash_extra_memory_bytes = 64
+    facts.ordered_extra_memory_bytes = 48
     facts
 
 describe "collection planner guarded selection and explanation":
@@ -121,5 +125,60 @@ describe "collection planner guarded selection and explanation":
         val report = collection_plan_explain("guard/collisions", "generic", facts, decision)
         expect(report).to_contain("selected=ordered\n")
         expect(report).to_contain("rejected.hash=profile-hash-collisions\n")
-        expect(report).to_contain("extra_memory_bytes=unproven\n")
-        expect(report).to_contain("memory_budget=not-modeled\n")
+        expect(report).to_contain("\nextra_memory_bytes=48\n")
+        expect(report).to_contain("\nmemory_budget=64\n")
+
+    it "CP-GUARD-07 rejects an over-budget hash candidate and explains its fitting alternative":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.policy = "moderate"
+        facts.static_size = 100
+        facts.hard_size_bound = -1
+        facts.memory_budget_bytes = 48
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+        val report = collection_plan_explain("guard/memory-alternative", "generic", facts, decision)
+        expect(report).to_contain("rejected.hash=memory-budget-exceeded\n")
+        expect(report).to_contain("\nextra_memory_bytes=48\n")
+        expect(report).to_contain("\nmemory_budget=48\n")
+
+    it "CP-GUARD-08 an explicit attribute cannot admit an unknown memory estimate":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.policy = "moderate"
+        facts.attribute = "hash"
+        facts.hash_extra_memory_bytes = -1
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        val report = collection_plan_explain("guard/memory-unknown", "generic", facts, decision)
+        expect(report).to_contain("rejected.hash=memory-estimate-unproven\n")
+        expect(report).to_contain("candidate.hash.extra_memory_bytes=unknown\n")
+        expect(report).to_contain("fallback=original-on-rejection\n")
+
+    it "CP-GUARD-09 admitted profile pressure cannot replace an absent memory budget":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.hard_size_bound = -1
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 100
+        facts.profile_lookups_p95 = 1000
+        facts.memory_budget_bytes = -1
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        val report = collection_plan_explain("guard/memory-profile", "generic", facts, decision)
+        expect(report).to_contain("reason=memory-budget-unproven\n")
+        expect(report).to_contain("\nmemory_budget=unknown\n")
+
+    it "CP-GUARD-10 admits a proved zero-extra-memory candidate under a zero budget":
+        step("prepare typed collection fixtures")
+        var facts = collection_guard_fixture()
+        facts.memory_budget_bytes = 0
+        step("inspect the selected collection plan")
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Linear)
+        val report = collection_plan_explain("guard/memory-zero", "generic", facts, decision)
+        expect(report).to_contain("\nextra_memory_bytes=0\n")
+        expect(report).to_contain("\nmemory_budget=0\n")
