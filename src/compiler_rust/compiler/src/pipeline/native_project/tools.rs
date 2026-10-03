@@ -4102,6 +4102,7 @@ fn is_known_system_name(name: &str) -> bool {
             | "__cxa_finalize"
             | "__cxa_thread_atexit_impl"
             | "__errno_location"
+            | "__riscv_flush_icache" // glibc on riscv64 Linux (libgcc __clear_cache calls it)
             | "__stack_chk_fail"
             | "__stack_chk_guard"
             | "posix_spawn"
