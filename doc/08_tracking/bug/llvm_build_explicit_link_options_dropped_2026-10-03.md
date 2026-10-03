@@ -22,7 +22,8 @@ Source review found that the old default `libraries: ["c"]` would become
 The default constructor now supplies no explicit libraries. Target linkers
 already own CRT defaults: native_linking.spl uses native_link_std_lib_args for
 Unix, and msvc.spl supplies msvcrt.lib in its default Windows library set.
-Explicit caller `c` is retained verbatim; the separate Unix-specific
-for_simple_cli constructor is unchanged. Regression coverage distinguishes these
+Explicit caller `c` is retained verbatim. Review of build_simple_cli found no
+Unix target restriction, so for_simple_cli also delegates its former c/m/pthread
+defaults to the target linker. Regression coverage distinguishes these
 cases, including Windows driver options. This is source evidence, not executed
 cross-platform link validation.

@@ -1,12 +1,13 @@
 # Explicit LLVM link options
 
-Authored manual, 2026-10-03. Four unexecuted scenarios in
+Authored manual, 2026-10-03. Five unexecuted scenarios in
 `test/01_unit/compiler/backend/llvm_explicit_link_options_spec.spl` exercise
 production option projection and hashing functions.
 
 | Case | Assertion |
 |---|---|
 | Constructor defaults | Default libraries are empty; explicit `c` and provider names retain order even when driver target is Windows MSVC. |
+| CLI constructor defaults | CLI convenience configuration also delegates standard libraries; an explicit caller override retains c/m/pthread unchanged. |
 | BuildConfig projection | Ordered libraries, search paths and linker flags reach CompileOptions; LLVM backend stays llvm-lib. |
 | Final-link projection | Requested libraries/paths survive; explicit flags follow existing flags; existing fallback policy is retained. |
 | Cache identity | Changes in every link-input family affect identity; reordered flags and concatenated values cannot share the original identity. |
@@ -28,5 +29,6 @@ ORC use. No LLVM provider was linked or invoked here.
 The default constructor leaves CRT selection to the linker: GNU/Unix linking
 uses `native_link_std_lib_args` (Linux/FreeBSD libc, Darwin libSystem), and MSVC
 uses `default_windows_libs_with_suffix` including msvcrt.lib. This avoids turning
-an implicit Unix `c` into c.lib on Windows. The historical Unix-specific
-`for_simple_cli` constructor remains unchanged; explicit names are never filtered.
+an implicit Unix `c` into c.lib on Windows. The `for_simple_cli` constructor also
+delegates standard libraries, because its public caller has no Unix target
+restriction. Explicit names are never filtered.
