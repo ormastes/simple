@@ -323,10 +323,10 @@ class PoolAllocator:
         pool.deallocate(obj1, 64, 8)     // Return to free list
         val obj3 = pool.allocate(64, 8)  // Reuses obj1's slot
     """
-    buffer: [u8]       # Pre-allocated memory block
     object_size: usize # Size of each object (fixed)
     capacity: usize    # Max number of objects
-    free_list: [u8]?   # Head of free list (linked via first ptr in object)
+    free_objects: [[u8]]  # Actual fixed-size objects, reused after deallocate
+    free_count: usize     # Active prefix of the fixed-capacity free stack
     allocated_count: usize  # Number of objects currently allocated
 
     static fn new(object_size: usize, capacity: usize) -> PoolAllocator:
@@ -339,22 +339,20 @@ class PoolAllocator:
         Returns:
             Pool allocator
         """
-        val total_size = object_size * capacity
-        val buffer = sys_malloc(total_size, 8)
-
-        # Initialize free list (link all objects)
-        var free_list: [u8]? = nil
-        for i in 0..capacity:
-            val obj_ptr = buffer_offset(buffer, i * object_size)
-            # Link to previous head
-            ptr_write(obj_ptr, free_list)
-            free_list = Some(obj_ptr)
+        # [u8] slicing makes a copy in both runtimes. Keep the objects
+        # themselves in the free stack so returning one never copies a tail
+        # of a shared backing buffer or needs a length-derived slot index.
+        var free_objects: [[u8]] = [[]; capacity]
+        var idx: usize = 0
+        while idx < capacity:
+            free_objects[idx] = sys_malloc(object_size, 8)
+            idx = idx + 1
 
         PoolAllocator(
-            buffer: buffer,
             object_size: object_size,
             capacity: capacity,
-            free_list: free_list,
+            free_objects: free_objects,
+            free_count: capacity,
             allocated_count: 0
         )
 
@@ -388,16 +386,16 @@ impl Allocator for PoolAllocator:
         if size != self.object_size:
             return nil  # Wrong size
 
-        # Pop from free list
-        match self.free_list:
-            case nil:
-                nil  # Pool exhausted
-            case Some(ptr):
-                # Read next pointer from object
-                val next = ptr_read(ptr)
-                self.free_list = next
-                self.allocated_count = self.allocated_count + 1
-                Some(ptr)
+        # Pop the actual slot object, releasing this stack reference while
+        # the caller owns it. No copied slice or reverse identity lookup.
+        if self.free_count == 0:
+            return nil  # Pool exhausted
+        val last = self.free_count - 1
+        val object = self.free_objects[last]
+        self.free_objects[last] = []
+        self.free_count = last
+        self.allocated_count = self.allocated_count + 1
+        Some(object)
 
     me deallocate(ptr: [u8], size: usize, align: usize):
         """Return object to free list.
@@ -411,9 +409,12 @@ impl Allocator for PoolAllocator:
         if size != self.object_size:
             return  # Invalid size, skip
 
-        # Push to free list
-        ptr_write(ptr, self.free_list)
-        self.free_list = Some(ptr)
+        # Allocator's contract requires ptr to be an allocation from this
+        # pool, with no double free. Return that same object to the stack.
+        if self.free_count >= self.capacity or self.allocated_count == 0:
+            return
+        self.free_objects[self.free_count] = ptr
+        self.free_count = self.free_count + 1
         self.allocated_count = self.allocated_count - 1
 
     fn reallocate(ptr: [u8], old_size: usize, new_size: usize, align: usize) -> [u8]?:

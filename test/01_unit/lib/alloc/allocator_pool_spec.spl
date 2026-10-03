@@ -1,0 +1,118 @@
+# @cover src/lib/gc_async_mut/allocator.spl
+# # gc_async_mut PoolAllocator free-list specification
+#
+# **Feature IDs:** #alloc-004
+# **Category:** Infrastructure | Stdlib
+# **Difficulty:** 2/5
+# **Status:** Draft
+# **Requirements:** N/A
+#
+# ## Overview
+#
+# Regression evidence for the gc_async_mut PoolAllocator free list. It returns
+# exact-size, independent byte arrays and reuses each returned array without
+# copying a tail of a larger backing buffer.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.gc_async_mut.allocator.{PoolAllocator, Allocator}
+
+describe "gc_async_mut PoolAllocator free list":
+    it "exhausts after capacity allocations":
+        step("Create a pool of 4 objects, 16 bytes each")
+        val pool = PoolAllocator.new(object_size: 16, capacity: 4)
+
+        step("Allocate all four slots successfully")
+        var n = 0
+        while n < 4:
+            val p = pool.allocate(16, 8)
+            expect(p.?).to_equal(true)
+            n = n + 1
+
+        step("A fifth allocation must report the pool as full")
+        val extra = pool.allocate(16, 8)
+        expect(extra.?).to_equal(false)
+        expect(pool.is_full()).to_equal(true)
+        expect(pool.available()).to_equal(0)
+        expect(pool.total_allocated()).to_equal(64)
+
+    it "reuses a slot after deallocate":
+        step("Create a pool of 2 objects and allocate both")
+        val pool = PoolAllocator.new(object_size: 16, capacity: 2)
+        val a = pool.allocate(16, 8)
+        val b = pool.allocate(16, 8)
+        expect(a.?).to_equal(true)
+        expect(b.?).to_equal(true)
+        expect(pool.is_full()).to_equal(true)
+
+        step("Deallocate returns the slot to the pool")
+        pool.deallocate(a.unwrap(), 16, 8)
+        expect(pool.available()).to_equal(1)
+        expect(pool.is_full()).to_equal(false)
+
+        step("The next allocation succeeds again")
+        val c = pool.allocate(16, 8)
+        expect(c.?).to_equal(true)
+        expect(pool.available()).to_equal(0)
+        val d = pool.allocate(16, 8)
+        expect(d.?).to_equal(false)
+
+    it "returns exact independent objects and recycles their bytes":
+        step("Preallocate two eight-byte objects")
+        val pool = PoolAllocator.new(object_size: 8, capacity: 2)
+        var a = pool.allocate(8, 8).unwrap()
+        var b = pool.allocate(8, 8).unwrap()
+        expect(a.len()).to_equal(8)
+        expect(b.len()).to_equal(8)
+
+        step("Writes to one live object must not change the other")
+        a[0] = 11u8
+        b[0] = 23u8
+        expect(a[0]).to_equal(11u8)
+        expect(b[0]).to_equal(23u8)
+
+        step("Returning a reuses that object's stored bytes")
+        pool.deallocate(a, 8, 8)
+        val recycled = pool.allocate(8, 8).unwrap()
+        expect(recycled.len()).to_equal(8)
+        expect(recycled[0]).to_equal(11u8)
+        expect(b[0]).to_equal(23u8)
+        expect(pool.available()).to_equal(0)
+
+    it "a zero-capacity pool returns no object":
+        val pool = PoolAllocator.new(object_size: 16, capacity: 0)
+        expect(pool.allocate(16, 8).?).to_equal(false)
+        expect(pool.available()).to_equal(0)
+        expect(pool.total_allocated()).to_equal(0)
+
+    it "allocated count never exceeds capacity under churn":
+        step("Create a pool of 3 objects")
+        val pool = PoolAllocator.new(object_size: 8, capacity: 3)
+
+        step("Run 30 alloc/free cycles")
+        var i = 0
+        while i < 30:
+            val p = pool.allocate(8, 8)
+            expect(p.?).to_equal(true)
+            pool.deallocate(p.unwrap(), 8, 8)
+            i = i + 1
+
+        step("Counts remain consistent and bounded")
+        expect(pool.available()).to_equal(3)
+        expect(pool.total_allocated()).to_equal(0)
+
+    it "rejects wrong-size allocation and deallocation":
+        step("Create a pool of 16-byte objects")
+        val pool = PoolAllocator.new(object_size: 16, capacity: 2)
+
+        step("Wrong-size allocation returns nil")
+        val wrong = pool.allocate(32, 8)
+        expect(wrong.?).to_equal(false)
+        expect(pool.available()).to_equal(2)
+
+        step("Wrong-size deallocate is a no-op")
+        val a = pool.allocate(16, 8)
+        expect(a.?).to_equal(true)
+        pool.deallocate(a.unwrap(), 32, 8)
+        expect(pool.available()).to_equal(1)
+        expect(pool.total_allocated()).to_equal(16)
