@@ -153,35 +153,65 @@ expect(panes.len()).to_equal(2)
 
 ### REQ-005 input and output routing
 
-#### should route sent text and commands to the selected pane
+The positive fixture spawns a real shell child, sends distinct text and command nonces, and requires both child-generated GOT prefixes. It polls at most 60 times with 50 ms sleeps and closes the owned pane before final output assertions. A separate empty-pane scenario requires typed no-child errors; no fabricated send counters are used.
 
-1. smux reset for test
-   - Expected: smux_focus_pane(session.id, window.id, pane.id) is true
-   - Expected: smux_send_text(session.id, window.id, pane.id, "echo hi") is true
-   - Expected: smux_send_command(session.id, window.id, pane.id, "pwd") is true
-   - Expected: metrics.send_text_count equals `1`
-   - Expected: metrics.send_command_count equals `1`
-
+Validation status: source contract updated during branch synchronization; runtime execution of these revised scenarios is **UNRUN**. The positive fixture requires the same `/bin/sh` provider as `smux_terminal_service_spec.spl` (Git Bash on Windows).
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Source: `test/03_system/app/simpleos/feature/tmux_simpleos_spec.spl`. Run the owning spec with its existing imports.
 
 ```simple
-smux_reset_for_test()
-val session = smux_create_session("io")
-val window = smux_list_windows(session.id)[0]
-val pane = smux_list_panes(session.id, window.id)[0]
+fn _await_routed_output(sid: text, wid: text, pid: text) -> text:
+    var attempts = 0
+    var seen = ""
+    while attempts < 60 and not (seen.contains("GOT:text7f3a") and seen.contains("GOT:command9b2c")):
+        thread_sleep_ms(50)
+        val captured = smux_capture(sid, wid, pid, 20)
+        if captured.is_ok():
+            seen = captured.unwrap().content
+        attempts = attempts + 1
+    return seen
 
-expect(smux_focus_pane(session.id, window.id, pane.id)).to_equal(true)
-expect(smux_send_text(session.id, window.id, pane.id, "echo hi")).to_equal(true)
-expect(smux_send_command(session.id, window.id, pane.id, "pwd")).to_equal(true)
+describe "REQ-005 input and output routing":
+    it "route sent text and commands to the selected pane":
+        # @req REQ-005
+        step("route sent text and commands to the selected pane")
+        smux_reset_for_test()
+        val session = smux_create_session("routed-io")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        expect(smux_focus_pane(session.id, window.id, pane.id)).to_equal(true)
+        val spawned = smux_pane_spawn(session.id, window.id, pane.id, "/bin/sh",
+            ["-c", "while read l; do echo \"GOT:$l\"; done"])
+        expect(spawned.is_ok()).to_equal(true)
 
-val metrics = smux_metrics()
-expect(metrics.send_text_count).to_equal(1)
-expect(metrics.send_command_count).to_equal(1)
+        val sent_text = smux_send_text(session.id, window.id, pane.id, "text7f3a\n")
+        val sent_command = smux_send_command(session.id, window.id, pane.id, "command9b2c")
+        val seen = _await_routed_output(session.id, window.id, pane.id)
+        val closed = smux_close_pane(session.id, window.id, pane.id)
+        expect(sent_text.is_ok()).to_equal(true)
+        expect(sent_command.is_ok()).to_equal(true)
+        expect(closed).to_equal(true)
+        expect(seen).to_equal("GOT:text7f3a\nGOT:command9b2c")
+
+    it "reject input for a selected pane without a child":
+        # @req REQ-SSPEC-SYSTEM
+        step("reject input for a selected pane without a child")
+        # evidence(protocol_json): asserted result fields below are the complete typed oracle
+        smux_reset_for_test()
+        val session = smux_create_session("io")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+
+        expect(smux_focus_pane(session.id, window.id, pane.id)).to_equal(true)
+        val text_result = smux_send_text(session.id, window.id, pane.id, "echo hi")
+        expect(text_result.is_err()).to_equal(true)
+        expect(text_result.err().unwrap()).to_equal("pane has no child: " + pane.id)
+        val command_result = smux_send_command(session.id, window.id, pane.id, "pwd")
+        expect(command_result.is_err()).to_equal(true)
+        expect(command_result.err().unwrap()).to_equal("pane has no child: " + pane.id)
 ```
 
 </details>
@@ -219,27 +249,36 @@ expect(panes[0].window_id).to_equal(windows[0].id)
 
 ### REQ-007 capture api
 
-#### should capture pane output and preserve pane identity
+Capture must return Ok for an existing empty pane, preserve its identity, and report empty content and zero rows. An unknown pane must return the exact typed error.
 
-1. smux reset for test
-   - Expected: capture.pane_id equals `pane.id`
-
+Validation status: source contract updated during branch synchronization; runtime execution of these revised scenarios is **UNRUN**. The positive fixture requires the same `/bin/sh` provider as `smux_terminal_service_spec.spl` (Git Bash on Windows).
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Source: `test/03_system/app/simpleos/feature/tmux_simpleos_spec.spl`. Run the owning spec with its existing imports.
 
 ```simple
-smux_reset_for_test()
-val session = smux_create_session("capture")
-val window = smux_list_windows(session.id)[0]
-val pane = smux_list_panes(session.id, window.id)[0]
+describe "REQ-007 capture api":
+    it "capture pane output and preserve pane identity":
+        # @req REQ-SSPEC-SYSTEM
+        step("capture pane output and preserve pane identity")
+        # evidence(protocol_json): asserted result fields below are the complete typed oracle
+        smux_reset_for_test()
+        val session = smux_create_session("capture")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
 
-val capture = smux_capture(session.id, window.id, pane.id, 50)
-expect(capture.pane_id).to_equal(pane.id)
-expect(capture.rows).to_be_greater_than(0)
+        val result = smux_capture(session.id, window.id, pane.id, 50)
+        expect(result.is_ok()).to_equal(true)
+        val capture = result.unwrap()
+        expect(capture.pane_id).to_equal(pane.id)
+        expect(capture.content).to_equal("")
+        expect(capture.rows).to_equal(0)
+
+        val missing = smux_capture(session.id, window.id, "missing-pane", 50)
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.err().unwrap()).to_equal("unknown pane: missing-pane")
 ```
 
 </details>
