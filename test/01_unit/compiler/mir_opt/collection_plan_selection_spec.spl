@@ -25,10 +25,177 @@ fn safe_collection_facts() -> CollectionPlanFacts:
         profile_size_p95: -1,
         profile_lookups_p95: -1,
         linear_size_limit: 8,
-        lookup_promotion_count: 32
+        lookup_promotion_count: 32,
+        memory_budget_bytes: 1024,
+        linear_extra_memory_bytes: 0,
+        hash_extra_memory_bytes: 256,
+        ordered_extra_memory_bytes: 128
     )
 
 describe "guarded collection physical plan selection":
+    it "requires a memory budget for every policy and attribute":
+        for policy in ["moderate", "strict", "robust", "critical"]:
+            for attribute in ["auto", "linear", "hash", "ordered"]:
+                var facts = safe_collection_facts()
+                facts.policy = policy
+                facts.attribute = attribute
+                facts.memory_budget_bytes = -1
+                facts.static_size = 2
+                facts.static_lookups = 3
+                facts.hard_size_bound = 2
+                val decision = collection_plan_select(facts)
+                expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+                expect(decision.reason).to_equal("memory-budget-unproven")
+
+    it "does not let a profile supply a missing memory budget":
+        var facts = safe_collection_facts()
+        facts.memory_budget_bytes = -1
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 1000
+        facts.profile_lookups_p95 = 10000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("memory-budget-unproven")
+
+    it "retains semantic and correctness blockers before an unknown memory budget":
+        var facts = safe_collection_facts()
+        facts.memory_budget_bytes = -1
+        facts.equality_pure = false
+        expect(collection_plan_select(facts).reason).to_equal("semantic-proof-missing")
+        facts.p0_correctness_ready = false
+        expect(collection_plan_select(facts).reason).to_equal("p0-correctness-gate")
+
+    it "rejects every malformed negative memory fact":
+        var facts = safe_collection_facts()
+        facts.attribute = "hash"
+        facts.memory_budget_bytes = -2
+        expect(collection_plan_select(facts).reason).to_equal("invalid-memory-facts")
+        facts.memory_budget_bytes = 1024
+        facts.linear_extra_memory_bytes = -2
+        expect(collection_plan_select(facts).reason).to_equal("invalid-memory-facts")
+        facts.linear_extra_memory_bytes = 0
+        facts.hash_extra_memory_bytes = -2
+        expect(collection_plan_select(facts).reason).to_equal("invalid-memory-facts")
+        facts.hash_extra_memory_bytes = 256
+        facts.ordered_extra_memory_bytes = -2
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("invalid-memory-facts")
+
+    it "rejects explicit algorithms whose memory estimate is unknown":
+        var facts = safe_collection_facts()
+        facts.attribute = "linear"
+        facts.linear_extra_memory_bytes = -1
+        val linear = collection_plan_select(facts)
+        expect(linear.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(linear.reason).to_equal("explicit-linear-rejected")
+        expect(linear.linear_rejection).to_equal("memory-estimate-unproven")
+        facts.attribute = "hash"
+        facts.hash_extra_memory_bytes = -1
+        val hashed = collection_plan_select(facts)
+        expect(hashed.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(hashed.hash_rejection).to_equal("memory-estimate-unproven")
+        facts.attribute = "ordered"
+        facts.ordered_extra_memory_bytes = -1
+        val ordered = collection_plan_select(facts)
+        expect(ordered.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(ordered.ordered_rejection).to_equal("memory-estimate-unproven")
+
+    it "accepts zero and exact memory bounds but rejects one byte over for explicit algorithms":
+        for budget in [0, 256]:
+            var facts = safe_collection_facts()
+            facts.memory_budget_bytes = budget
+            facts.linear_extra_memory_bytes = budget
+            facts.hash_extra_memory_bytes = budget
+            facts.ordered_extra_memory_bytes = budget
+            facts.attribute = "linear"
+            expect(collection_plan_select(facts).selected).to_equal(CollectionPlanAlgorithm.Linear)
+            facts.attribute = "hash"
+            expect(collection_plan_select(facts).selected).to_equal(CollectionPlanAlgorithm.Hash)
+            facts.attribute = "ordered"
+            expect(collection_plan_select(facts).selected).to_equal(CollectionPlanAlgorithm.Ordered)
+            facts.linear_extra_memory_bytes = budget + 1
+            facts.hash_extra_memory_bytes = budget + 1
+            facts.ordered_extra_memory_bytes = budget + 1
+            for attribute in ["linear", "hash", "ordered"]:
+                facts.attribute = attribute
+                val decision = collection_plan_select(facts)
+                expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+                expect(decision.hash_rejection).to_equal("memory-budget-exceeded")
+                expect(decision.ordered_rejection).to_equal("memory-budget-exceeded")
+            facts.attribute = "linear"
+            expect(collection_plan_select(facts).linear_rejection).to_equal("memory-budget-exceeded")
+
+    it "falls back to a fitting ordered candidate when hash exceeds the memory cap":
+        for policy in ["moderate", "strict"]:
+            var facts = safe_collection_facts()
+            facts.policy = policy
+            facts.static_size = 100
+            facts.static_lookups = 1000
+            facts.memory_budget_bytes = 128
+            val decision = collection_plan_select(facts)
+            expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
+            expect(decision.hash_rejection).to_equal("memory-budget-exceeded")
+            expect(decision.ordered_rejection).to_equal("")
+
+    it "keeps original when every pressured candidate exceeds the memory cap":
+        var facts = safe_collection_facts()
+        facts.static_size = 100
+        facts.static_lookups = 1000
+        facts.memory_budget_bytes = 0
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("no-proven-candidate")
+        expect(decision.hash_rejection).to_equal("memory-budget-exceeded")
+        expect(decision.ordered_rejection).to_equal("memory-budget-exceeded")
+
+    it "does not invent alternative cost pressure when small quiet linear memory is unknown":
+        var facts = safe_collection_facts()
+        facts.static_size = 2
+        facts.static_lookups = 3
+        facts.linear_extra_memory_bytes = -1
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.reason).to_equal("insufficient-cost-evidence")
+        expect(decision.linear_rejection).to_equal("memory-estimate-unproven")
+
+    it "enforces ordered memory caps under bounded policies even with admitted profiles":
+        for policy in ["robust", "critical"]:
+            var facts = safe_collection_facts()
+            facts.policy = policy
+            facts.profile_admitted = true
+            facts.profile_size_p95 = 1000
+            facts.profile_lookups_p95 = 10000
+            facts.memory_budget_bytes = 0
+            val decision = collection_plan_select(facts)
+            expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+            expect(decision.reason).to_equal("bounded-algorithm-unavailable")
+            expect(decision.ordered_rejection).to_equal("memory-budget-exceeded")
+
+    it "does not select a collision-driven ordered alternative above the memory cap":
+        var facts = safe_collection_facts()
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 100
+        facts.profile_lookups_p95 = 1000
+        facts.profile_hash_probes_p95 = 100
+        facts.profile_hash_collisions_p95 = 40
+        facts.memory_budget_bytes = 256
+        facts.ordered_extra_memory_bytes = 257
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(decision.ordered_rejection).to_equal("memory-budget-exceeded")
+
+    it "compares maximum i64 byte counts without overflow":
+        var facts = safe_collection_facts()
+        facts.attribute = "hash"
+        facts.memory_budget_bytes = 9223372036854775807
+        facts.hash_extra_memory_bytes = 9223372036854775807
+        expect(collection_plan_select(facts).selected).to_equal(CollectionPlanAlgorithm.Hash)
+        facts.memory_budget_bytes = 9223372036854775806
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(decision.hash_rejection).to_equal("memory-budget-exceeded")
+
     it "rejects a static-only contradiction without an admitted profile":
         var facts = safe_collection_facts()
         facts.policy = "critical"
