@@ -1,0 +1,118 @@
+# Actual producer admission, retained generations, CAS and signed checkpoint.
+# Reviewed metadata below is fixture policy, never inferred by production code.
+use std.spec.{expect}
+use app.io.mod.{dir_create, file_write_bytes}
+use app.scv.db.ci_projection.*
+use app.scv.db.historical_model.*
+use app.scv.db.historical_archive.*
+use app.scv.db.local_apply.*
+use app.scv.db.local_store.*
+use app.scv.db.checkpoint_store.*
+use app.scv.db.checkpoint_objects.{DbCheckpointPageSource}
+use app.scv.db.retention_codec.{db_retention_observation_encode}
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_evidence.{DbEvidenceRevision}
+use std.scv.db_admission.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode}
+use std.scv.db_policy_codec.*
+use std.scv.db_conflict_catalog.{DbConflictCatalog, db_conflict_catalog_encode}
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+use test.fixtures.scv.db_hydration_fixture.*
+
+struct Item2HistoryFixture:
+    root: text
+    sources: DbHistoricalSources
+    authority: DbHistoricalAuthority
+    checkpoint: DbDatabaseCheckpoint
+    first: MaterializedState
+    current: MaterializedState
+    patches: [DbPatch]
+    entities: [EntityRef]
+    digests: [text]
+    archive: DbArchivedSemantic
+
+fn setup_item2_history_entity(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "run_manifest", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+fn setup_item2_history_patch(counter: u64, base: text, digest: text) -> DbPatch:
+    var patch = setup_item2_apply_patch(counter, base)
+    val draft = DbCiManifestDraft(provider_instance: "github.com", project: "123", run_id: "run-{counter}", manifest: DbEvidenceRevision(entity: setup_item2_history_entity(counter), revision: "sha256:v1:" + sha256_text("discovery-{counter}")), bundle_digest: "sha256:v1:" + digest)
+    patch.operations = db_ci_manifest_operations(draft).unwrap()
+    setup_item2_apply_resign(patch)
+
+fn setup_item2_history_policy(patches: [DbPatch]) -> DbPolicyConfig:
+    var admission = setup_item2_apply_policy(patches)
+    var key = admission.keys[0]
+    key.valid_until = 18446744073709551615u64
+    key.permissions = []
+    # Intentionally overbroad non-CI permissions exercise the global guard.
+    for operation in ["append", "create", "update", "tombstone"]:
+        key.permissions.push(DbPermission(operation: operation, kind: "run_manifest", field: "*"))
+    admission.keys = [key]
+    admission.metadata = setup_item2_reviewed_metadata(patches)
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    var merge = setup_item2_apply_merge()
+    merge.fields = []
+    for name in ["version", "provider_instance", "project", "run_id", "manifest_revision", "bundle_digest"]:
+        merge.fields.push(DbFieldSchema(kind: "run_manifest", field: name, rule: FieldMergeRule.ScalarConflict))
+    var config = DbPolicyConfig(revision: "", admission: admission, merge: merge)
+    config.revision = db_policy_digest(config).unwrap()
+    config
+
+fn setup_item2_history(big: bool = false, restricted: bool = false, observation: bool = false) -> Item2HistoryFixture:
+    val (root, external, pages_parent) = setup_item2_hydration_paths()
+    var digest = ""
+    if big:
+        digest = setup_item2_hydration_big(external)
+    elif restricted:
+        # Actual SCRE header bytes: query recognizes restriction, never decrypts.
+        digest = setup_item2_hydration_node(root, external, [83u8,67u8,82u8,69u8,1u8,0u8,255u8]).digest
+    elif observation:
+        digest = setup_item2_hydration_node(root, external, db_retention_observation_encode("observation-1", 0u64, "history-cohort", "pass", 12u64, [1u8,2u8]).unwrap()).digest
+    else:
+        digest = setup_item2_hydration_node(root, external, [11u8,22u8,33u8]).digest
+    val second_digest = setup_item2_hydration_node(root, external, [44u8,55u8]).digest
+    val first_patch = setup_item2_history_patch(1, "", digest)
+    var config = setup_item2_history_policy([first_patch])
+    val first_apply = db_apply_local(root, "", first_patch, config.merge, config.admission, 10).unwrap()
+    expect(first_apply.code).to_equal("ok")
+    val first = db_read_local(root, config.admission).unwrap()
+    val sources = DbHistoricalSources(evidence_parent: external)
+    val archived = db_history_archive_current(root, "semantic", first_apply.head, config, nil, sources, db_history_limits()).unwrap()
+    val second_patch = setup_item2_history_patch(2, first.revision, second_digest)
+    config = setup_item2_history_policy([first_patch, second_patch])
+    val second_apply = db_apply_local(root, first_apply.head, second_patch, config.merge, config.admission, 11).unwrap()
+    expect(second_apply.code).to_equal("ok")
+    val current = db_read_local(root, config.admission).unwrap()
+    var empty = db_empty_state()
+    empty.revision = db_state_digest(empty).unwrap()
+    val entities = [setup_item2_history_entity(1), setup_item2_history_entity(2)]
+    var identities = identity_map_empty(config.admission.namespace, 1)
+    for entity in entities: identities = identity_map_allocate(identities, entity.provisional.unwrap()).state
+    var records = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(empty.revision, 1u64, [], [], sha256_text(db_snapshot_encode(empty).unwrap()))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(first.revision, 2u64, [empty.revision], [first_patch.batch_id], archived.object_digest)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(current.revision, 3u64, [first.revision], [second_patch.batch_id], sha256_text(db_snapshot_encode(current).unwrap()))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(first_patch.batch_id, first.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(second_patch.batch_id, current.revision)).unwrap()]
+    for entity in entities: records.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(entity, DbCheckpointDisposition.Live)).unwrap())
+    val build = db_pages_build(records, DbPageQuota(max_page_bytes: 1048576, max_page_records: 10000, max_records: 1000000)).unwrap()
+    expect(dir_create(pages_parent + "/scv-checkpoint-pages-v1", false)).to_be(true)
+    for page in build.pages:
+        expect(file_write_bytes(pages_parent + "/scv-checkpoint-pages-v1/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_be(true)
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: "repo", namespace: config.admission.namespace, epoch: 1, schema_revision: "s1", reducer_revision: "r1", policy_revision: config.revision, predecessor_checkpoint: "", history_horizon: empty.revision, current_revision: current.revision, metadata: build.manifest, storage: DbCheckpointStorage.Reference(db_snapshot_encode(current).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap()), signer: "checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    val authority = DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: config, paged_policy: nil)
+    val prepared = db_checkpoint_prepare_install(root, second_apply.head, db_checkpoint_encode(checkpoint).unwrap(), authority, DbCheckpointPageSource(external_parent: pages_parent, maximum_pages: 65536, maximum_bytes: 67108864)).unwrap()
+    val installed = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+    expect(installed.phase).to_equal("Installed")
+    Item2HistoryFixture(root: root, sources: sources, authority: DbHistoricalAuthority(checkpoint: authority, expected_active_head: installed.active_head, expected_retention_head: ""), checkpoint: checkpoint, first: first, current: current, patches: [first_patch, second_patch], entities: entities, digests: [digest, second_digest], archive: archived)
+
+export Item2HistoryFixture, setup_item2_history_entity, setup_item2_history_patch, setup_item2_history_policy, setup_item2_history

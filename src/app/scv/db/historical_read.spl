@@ -1,0 +1,120 @@
+use app.scv.db.historical_model.*
+use app.scv.db.historical_archive.*
+use app.scv.db.local_store.*
+use app.scv.db.paged_query.*
+use app.scv.db.paged_store.{DbPagedView}
+use app.scv.db.ci_projection.{db_ci_manifest_from_row}
+use app.scv.db.ci_state_codec.{DbCiDurableManifest}
+use std.scv.db_checkpoint.*
+use std.scv.db_snapshot.{db_snapshot_decode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_decode}
+use std.scv.db_paged_model.*
+use std.scv.db_page_records.*
+use std.scv.db_patch.{db_ref_context}
+use std.scv.db_reducer.{DbRow, DbAcceptedBatch}
+use std.scv.distributed_identity.*
+
+fn db_history_find_image(root: text, request: DbHistoricalRequest, object_digest: text, checkpoint: DbDatabaseCheckpoint, current: DbStoreView, authority: DbHistoricalAuthority, sources: DbHistoricalSources, initial: DbHistoricalBudget) -> Result<(DbHistoricalBudget, DbHistoricalImage), text>:
+    var budget = db_history_reserve(initial, 1024u64)?
+    val backend = match checkpoint.storage:
+        Reference(snapshot, identities, conflicts): "semantic"
+        Paged(manifest): "paged"
+    var hint_error = "SCVDB_HISTORY_IMAGE_MISSING"
+    match db_history_locator_read(root, object_digest):
+        Ok(locator):
+            if val hint = locator:
+                if hint.0 == backend and hint.1 == request.revision:
+                    # Keep the attempt reservation even when the loader fails,
+                    # so a bad hint cannot reset the fallback's remaining quota.
+                    val before = budget
+                    budget = db_history_reserve(budget, budget.limits.max_semantic_bytes + 21u64)?
+                    match db_history_load_cas(root, sources, before, hint.2, backend, authority.checkpoint.policy, authority.checkpoint.paged_policy):
+                        Ok(loaded):
+                            if loaded.1.revision == request.revision and loaded.1.object_digest == object_digest: return Ok((budget, loaded.1))
+                            hint_error = "SCVDB_HISTORY_IMAGE_CORRUPT"
+                        Err(error): hint_error = error
+                else: hint_error = "SCVDB_HISTORY_LOCATOR"
+        Err(error):
+            if error == "SCVDB_HISTORY_SCOPE": return Err(error)
+            hint_error = error
+    # A bad hint never overrides a valid independently verified retained image.
+    # Addresses are walked only through actual hash-checked parent generations.
+    var stored = current
+    var seen: [text] = []
+    for hop in 0..budget.limits.max_generation_hops:
+        if stored.code != "ok": return Err(if stored.code == "SCVDB_STORE_OBJECT_MISSING": hint_error else: stored.code)
+        if seen.contains(stored.head): return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+        seen.push(stored.head)
+        match db_history_generation_image(stored, backend, authority.checkpoint.policy, authority.checkpoint.paged_policy, budget.limits.max_semantic_bytes):
+            Ok(image):
+                if image.wire.len() as u64 > budget.limits.max_semantic_bytes: return Err("SCVDB_HISTORY_QUOTA")
+                if image.revision == request.revision:
+                    if image.object_digest != object_digest: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+                    return Ok((budget, image))
+            Err(error): return Err(error)
+        if stored.parent == "": return Err(hint_error)
+        budget = db_history_reserve(budget, 67108864u64)?
+        stored = db_store_read_generation(root, backend, stored.parent)
+    Err("SCVDB_HISTORY_QUOTA")
+
+fn db_history_manifest_at(root: text, request: DbHistoricalRequest, image: DbHistoricalImage, checkpoint: DbDatabaseCheckpoint, authority: DbHistoricalAuthority, initial: DbHistoricalBudget) -> Result<(DbHistoricalBudget, DbCiDurableManifest), text>:
+    if not entity_ref_validate(request.manifest).valid or not db_ref_context(request.manifest, checkpoint.namespace, checkpoint.epoch): return Err("SCVDB_HISTORY_CONTEXT")
+    var budget = initial
+    var entity = request.manifest
+    if image.backend == "semantic":
+        if entity.settled != nil:
+            if request.revision != checkpoint.current_revision: return Err("SCVDB_HISTORY_IDENTITY_UNAVAILABLE")
+            match checkpoint.storage:
+                Reference(snapshot, identities, conflicts):
+                    val alias = entity.settled.unwrap()
+                    val map = db_identity_snapshot_decode(identities)?
+                    if map.database_namespace != checkpoint.namespace or map.authority_epoch != checkpoint.epoch: return Err("SCVDB_HISTORY_CONTEXT")
+                    var found: EntityRef? = nil
+                    for binding in map.bindings:
+                        if binding.entity_kind == alias.entity_kind and binding.sequence == alias.sequence: found = Some(entity_ref_provisional(binding.uid))
+                    if found == nil: return Err("SCVDB_HISTORY_IDENTITY_UNAVAILABLE")
+                    entity = found.unwrap()
+                _: return Err("SCVDB_HISTORY_IDENTITY_UNAVAILABLE")
+        val state = db_snapshot_decode(image.wire)?
+        if state.rows.len() > 10000 or state.accepted.len() > 10000: return Err("SCVDB_HISTORY_QUOTA")
+        var selected: DbRow? = nil
+        for row in state.rows:
+            if row.entity == entity_ref_canonical(entity): selected = Some(row)
+        if selected == nil: return Err("SCVDB_HISTORY_MANIFEST_MISSING")
+        val row = selected.unwrap()
+        if row.tombstoned: return Err("SCVDB_HISTORY_MANIFEST_TOMBSTONED")
+        for accepted in state.accepted:
+            if accepted.batch_id == row.revision: return Ok((budget, db_ci_manifest_from_row(row, entity, accepted)?))
+        return Err("SCVDB_HISTORY_ACCEPTANCE")
+    val policy = authority.checkpoint.paged_policy.unwrap()
+    val manifest = db_paged_manifest_decode(image.wire, policy)?
+    # This is one captured historical query, never an active-HEAD query. Its
+    # cumulative page cache/proof budget is reserved once, not once per key.
+    budget = db_history_reserve(budget, policy.max_read_bytes)?
+    var query = DbPagedQuery(root: root, view: DbPagedView(head: image.generation ?? "", manifest: manifest), policy: policy, buckets: {}, records: {}, requested: {}, bytes_read: 0u64, keys_read: 0u64)
+    query = db_paged_query_rows(query, [entity])?
+    entity = db_paged_resolve_at(query, entity)?
+    val selected = db_paged_row_at(query, entity)?
+    if selected == nil: return Err("SCVDB_HISTORY_MANIFEST_MISSING")
+    val row = selected.unwrap()
+    if row.tombstoned: return Err("SCVDB_HISTORY_MANIFEST_TOMBSTONED")
+    val key = db_page_batch_key(row.revision)?
+    query = db_paged_query_require(query, [key])?
+    val record = db_paged_query_record(query, key)?
+    if record == nil: return Err("SCVDB_HISTORY_ACCEPTANCE")
+    var accepted: DbAcceptedBatch? = nil
+    match db_typed_page_record_decode(record.unwrap())?:
+        Accepted(batch): accepted = Some(batch)
+        _: return Err("SCVDB_HISTORY_ACCEPTANCE")
+    val batch = accepted.unwrap()
+    val counter = db_page_actor_counter_key(batch.actor, batch.actor_counter)?
+    query = db_paged_query_require(query, [counter])?
+    val counter_record = db_paged_query_record(query, counter)?
+    if counter_record == nil: return Err("SCVDB_HISTORY_ACCEPTANCE")
+    match db_typed_page_record_decode(counter_record.unwrap())?:
+        ActorCounter(found):
+            if found != batch: return Err("SCVDB_HISTORY_ACCEPTANCE")
+        _: return Err("SCVDB_HISTORY_ACCEPTANCE")
+    Ok((budget, db_ci_manifest_from_row(row, entity, batch)?))
+
+export db_history_find_image, db_history_manifest_at

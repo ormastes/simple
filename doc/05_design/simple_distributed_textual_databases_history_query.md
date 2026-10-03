@@ -145,3 +145,41 @@ separate gaps. This slice does not implement epoch/backend migration.
 7. Cover unsigned/wrong checkpoint pin, projection/default-deny admission,
    entity/namespace mismatch, accepted/counter mismatch, linked paths, loops,
    malformed locators, and exact reservation boundaries.
+
+## Source checkpoint, 2026-10-03
+
+The implemented producer is `db_ci_manifest_operations(DbCiManifestDraft)`;
+it emits only AppendObservation and never signs. Central admission rejects
+every other operation against run_manifest for all roles. Reference and Paged
+checkpoint preservation compare already existing manifest rows exactly.
+Legacy rows lacking the six-field versioned projection remain unavailable;
+their presence does not imply CI provenance or an accepted manifest receipt.
+
+`historical_archive.spl` publishes verified semantic CAS bytes and a captured
+HEAD locator under SJ. `historical_read.spl` resolves the requested signed
+history object through that hint or bounded retained generations.
+`historical_query.spl` returns structured proof fields and streaming exact,
+restricted, verified aggregate, or typed unavailable results. The selected
+object receipt does not prove transitive dependency hydration. Reference
+snapshot membership is checkpoint-attested; no unavailable original producer
+signature or past CI role is claimed as independently reverified.
+
+Eleven integration scenarios are authored in
+`test/02_integration/app/scv_db_history_query_it_spec.spl`, using the real
+two-revision fixture in `test/fixtures/scv/db_history_fixture.spl`. Cases cover
+different bundles and a not-yet-created historical row, malformed locator
+fallback, alias namespace/epoch/dual-form rejection, older Reference alias
+unavailability, 100 MiB streaming/quota, corrupted/missing CAS, cumulative
+quota before retention IO, actual restricted bytes, actual retention aggregate
+and zero-hop pre-IO rejection, byte framing, generic mutation rejection and
+replay, and Reference checkpoint manifest preservation. The existing three
+generation-reader scenarios cover actual old generation, missing/corrupt
+objects, and invalid addresses. None has been executed in this lane.
+
+Remaining source coverage includes Paged historical alias/missing-page query,
+Paged checkpoint manifest rewrite rejection, multi-generation rollup chains,
+historical signature/key loss, and wider reproduction/configuration closure.
+The older Reference identity/archive gaps above remain explicit. There is no
+runtime, throughput, RSS, global imported-index, or protected remote authority
+qualification. Budget counters reserve source/artifact read bounds; fixed
+path/lease/fsync metadata operations and codec CPU are not measured by them.

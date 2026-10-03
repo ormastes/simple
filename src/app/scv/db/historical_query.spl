@@ -1,0 +1,199 @@
+# Read-only historical evidence resolution. Accepted membership is attested by
+# the authenticated checkpoint/image, not a replay of unavailable old signatures.
+use app.scv.db.historical_model.*
+use app.scv.db.historical_read.*
+use app.scv.db.local_store.*
+use app.scv.db.checkpoint_objects.{db_checkpoint_object_read}
+use app.scv.db.checkpoint_reader.{DbCheckpointReader, db_checkpoint_reader_new}
+use app.scv.db.checkpoint_validation.{db_checkpoint_metadata}
+use app.scv.db.evidence_store.*
+use app.scv.db.evidence_hydrate.{db_evidence_inspect_at}
+use app.scv.db.retention_codec.*
+use app.scv.db.retention_store.{db_retention_open, db_retention_store_quota}
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_patch.{db_ref_kind, db_ref_context}
+use std.scv.db_retention.{db_rollup}
+use std.scv.distributed_identity.*
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+
+fn _history_reason(error: text, semantic: bool) -> DbHistoricalUnavailableReason:
+    if error.contains("QUOTA") or error.contains("LIMIT") or error.contains("BOUND"): return DbHistoricalUnavailableReason.Quota
+    if error == "SCVDB_HISTORY_IDENTITY_UNAVAILABLE" or error == "SCVDB_IDENTITY_UNKNOWN": return DbHistoricalUnavailableReason.HistoricalIdentityUnavailable
+    if error == "SCVDB_CI_PROJECTION_UNAVAILABLE": return DbHistoricalUnavailableReason.HistoricalProjectionUnavailable
+    if error == "SCVDB_HISTORY_MANIFEST_MISSING": return DbHistoricalUnavailableReason.ManifestMissing
+    if error == "SCVDB_HISTORY_MANIFEST_TOMBSTONED": return DbHistoricalUnavailableReason.ManifestTombstoned
+    if error == "SCVDB_HISTORY_IMAGE_MISSING" or error == "SCVDB_STORE_OBJECT_MISSING" or error == "SCVDB_EVIDENCE_UNAVAILABLE":
+        return if semantic: DbHistoricalUnavailableReason.SemanticMissing else: DbHistoricalUnavailableReason.EvidenceMissing
+    if error.contains("CORRUPT") or error.contains("DIGEST") or error.contains("FORMAT") or error.contains("TRUNCATED") or error.contains("TRAILING") or error.contains("DEPENDENCY") or error.contains("ENCODING") or error.contains("LOCATOR") or error.contains("ACCEPTANCE") or error.contains("PROJECTION") or error.contains("INDEX"):
+        return if semantic: DbHistoricalUnavailableReason.SemanticCorrupt else: DbHistoricalUnavailableReason.EvidenceCorrupt
+    DbHistoricalUnavailableReason.Io(error)
+
+fn _history_unavailable(provenance: DbHistoricalProvenance, reason: DbHistoricalUnavailableReason) -> DbHistoricalResult:
+    DbHistoricalResult(provenance: provenance, resolution: DbHistoricalResolution.Unavailable(reason))
+
+fn _history_scope_error(error: text) -> bool:
+    error.contains("SCOPE") or error.contains("CONTEXT") or error.contains("GIT_ENV") or error.contains("REPOSITORY") or error.contains("FILE_TYPE")
+
+fn _history_reaches(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, wanted: text, maximum: u64) -> Result<(DbCheckpointReader, bool), text>:
+    var reader = initial
+    var pending = [checkpoint.current_revision]
+    var seen: {text: bool} = {}
+    var count = 0u64
+    while pending.len() > 0:
+        val revision = pending[pending.len() - 1]
+        pending = pending[0:pending.len() - 1]
+        if seen.contains_key(revision): continue
+        if count >= maximum: return Err("SCVDB_HISTORY_QUOTA")
+        count = count + 1u64
+        seen[revision] = true
+        val loaded = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_history_key(revision)?)?
+        reader = loaded.0
+        match loaded.1:
+            History(found, ordinal, parents, batches, digest):
+                if found != revision: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+                if found == wanted: return Ok((reader, true))
+                for parent in parents:
+                    if not seen.contains_key(parent) and not pending.contains(parent): pending.push(parent)
+                if pending.len() as u64 > maximum: return Err("SCVDB_HISTORY_QUOTA")
+            _: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+    Ok((reader, false))
+
+fn _history_rollup(root: text, sources: DbHistoricalSources, initial: DbHistoricalBudget, digest: text, raw: text) -> Result<(DbHistoricalBudget, DbRetainedRollup), text>:
+    var budget = initial
+    if budget.limits.max_rollup_hops == 0u64: return Err("SCVDB_HISTORY_QUOTA")
+    val quota = db_retention_store_quota()
+    budget = db_history_reserve(budget, quota.max_envelope_bytes as u64)?
+    var node = db_evidence_store_get(root, sources.evidence_parent, digest, 0, quota)?
+    val original = db_retained_rollup_decode(node.content)?
+    var covered = false
+    for input in original.inputs:
+        if input.payload_digest == raw: covered = true
+    if not covered: return Err("SCVDB_HISTORY_ROLLUP_PROVENANCE")
+    var current = original
+    var visited = [node.digest]
+    var count = 1u64
+    while current.rollup.generation > 1u64:
+        if count >= budget.limits.max_rollup_hops: return Err("SCVDB_HISTORY_QUOTA")
+        if node.dependencies.len() != 1 or visited.contains(node.dependencies[0]): return Err("SCVDB_HISTORY_ROLLUP_PROVENANCE")
+        budget = db_history_reserve(budget, quota.max_envelope_bytes as u64)?
+        node = db_evidence_store_get(root, sources.evidence_parent, node.dependencies[0], 0, quota)?
+        visited.push(node.digest)
+        count = count + 1u64
+        val previous = db_retained_rollup_decode(node.content)?
+        if db_rollup(previous.rollup, current.inputs)? != current.rollup: return Err("SCVDB_HISTORY_ROLLUP_PROVENANCE")
+        current = previous
+    if current.rollup.generation != 1u64 or current.rollup.prior_revision != "" or node.dependencies.len() != 0: return Err("SCVDB_HISTORY_ROLLUP_PROVENANCE")
+    Ok((budget, original))
+
+fn _history_evidence(root: text, sources: DbHistoricalSources, initial: DbHistoricalBudget, provenance: DbHistoricalProvenance, expected_retention: text) -> Result<DbHistoricalResult, text>:
+    var budget = match db_history_reserve(initial, 67108929u64):
+        Ok(next): next
+        Err(error): return Ok(_history_unavailable(provenance, DbHistoricalUnavailableReason.Quota))
+    var proof = provenance
+    val retained = match db_retention_open(root):
+        Ok(found): found
+        Err(error):
+            if _history_scope_error(error): return Err(error)
+            return Ok(_history_unavailable(proof, _history_reason(error, false)))
+    if retained.head != expected_retention: return Err("SCVDB_HISTORY_RETENTION_ADVANCED")
+    proof.retention_head = Some(retained.head)
+    val digest = proof.evidence_digest.unwrap()
+    var classification = ""
+    var rollup = ""
+    for entry in retained.catalog.entries:
+        if entry.digest == digest:
+            classification = entry.classification
+            rollup = entry.rollup_digest
+    val cas = db_evidence_external_scope(root, sources.evidence_parent, "scv-evidence-v1")?
+    var unavailable = DbHistoricalUnavailableReason.EvidenceMissing
+    match path_entry_present(cas + "/" + digest + ".scve"):
+        Err(error): unavailable = DbHistoricalUnavailableReason.Io(error)
+        Ok(present):
+            if present:
+                # Existing retained-handle owner reads fixed chunks, verifies
+                # digest/EOF/file identity, and recognizes actual SCRE bytes.
+                val maximum = budget.limits.max_evidence_bytes
+                val envelope = maximum + 4194325u64
+                budget = match db_history_reserve(budget, envelope):
+                    Ok(next): next
+                    Err(error): return Ok(_history_unavailable(proof, DbHistoricalUnavailableReason.Quota))
+                val quota = DbEvidenceStoreQuota(max_content_bytes: maximum as i64, max_envelope_bytes: envelope as i64, max_dependencies: 65536)
+                match db_evidence_inspect_at(cas, digest, quota):
+                    Ok(info):
+                        proof.observed_content_bytes = info.content_bytes
+                        if info.restricted or classification == "restricted": return Ok(DbHistoricalResult(provenance: proof, resolution: DbHistoricalResolution.Restricted(info)))
+                        return Ok(DbHistoricalResult(provenance: proof, resolution: DbHistoricalResolution.Exact(info)))
+                    Err(error):
+                        if _history_scope_error(error): return Err(error)
+                        unavailable = _history_reason(error, false)
+    if classification == "restricted" or rollup == "": return Ok(_history_unavailable(proof, unavailable))
+    match _history_rollup(root, sources, budget, rollup, digest):
+        Ok(verified):
+            proof.rollup_digest = Some(rollup)
+            return Ok(DbHistoricalResult(provenance: proof, resolution: DbHistoricalResolution.Aggregated(verified.1, unavailable)))
+        Err(error):
+            if _history_scope_error(error): return Err(error)
+            if error.contains("QUOTA"): return Ok(_history_unavailable(proof, DbHistoricalUnavailableReason.Quota))
+            if error.contains("PROVENANCE") or error.contains("DIGEST") or error.contains("FORMAT"): return Ok(_history_unavailable(proof, DbHistoricalUnavailableReason.RollupProvenance))
+            return Ok(_history_unavailable(proof, DbHistoricalUnavailableReason.Io(error)))
+
+fn db_history_query(root: text, request: DbHistoricalRequest, authority: DbHistoricalAuthority, sources: DbHistoricalSources, limits: DbHistoricalLimits) -> Result<DbHistoricalResult, text>:
+    var budget = db_history_budget(limits)?
+    var proof = db_history_provenance(request, authority)
+    if not db_checkpoint_hex(request.revision) or not db_checkpoint_hex(authority.expected_active_head): return Err("SCVDB_HISTORY_REQUEST")
+    if not entity_ref_validate(request.manifest).valid or db_ref_kind(request.manifest) != "run_manifest" or not db_ref_context(request.manifest, authority.checkpoint.policy.admission.namespace, authority.checkpoint.policy.admission.epoch): return Err("SCVDB_HISTORY_CONTEXT")
+    val backend = if authority.checkpoint.paged_policy == nil: "semantic" else: "paged"
+    budget = match db_history_reserve(budget, 67108929u64 + 33554800u64):
+        Ok(next): next
+        Err(error): return Ok(_history_unavailable(proof, DbHistoricalUnavailableReason.Quota))
+    val active = db_store_read(root, backend)
+    if active.code != "ok": return Err(active.code)
+    if active.head != authority.expected_active_head or active.checkpoint_anchor != authority.checkpoint.expected_checkpoint: return Err("SCVDB_HISTORY_AUTHORITY_ADVANCED")
+    val checkpoint = db_checkpoint_decode(db_checkpoint_object_read(root, active.checkpoint_anchor, false)?, authority.checkpoint)?
+    # Reserve the existing reader's entire hard IO ceiling before catalog IO.
+    # It retains its own bounded verified cache/work accounting across traversal.
+    budget = match db_history_reserve(budget, 1073741824u64):
+        Ok(next): next
+        Err(error): return Ok(_history_unavailable(proof, DbHistoricalUnavailableReason.Quota))
+    var reader = db_checkpoint_reader_new(root)
+    val history = match db_checkpoint_metadata(reader, checkpoint, db_checkpoint_history_key(request.revision)?):
+        Ok(found): found
+        Err(error):
+            if _history_scope_error(error): return Err(error)
+            return Ok(_history_unavailable(proof, if error == "SCVDB_CHECKPOINT_METADATA_MISSING": DbHistoricalUnavailableReason.UnknownRevision else: _history_reason(error, true)))
+    reader = history.0
+    var object_digest = ""
+    match history.1:
+        History(revision, ordinal, parents, batches, digest):
+            if revision != request.revision: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+            object_digest = digest
+        _: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+    proof.history_object_digest = Some(object_digest)
+    val reached = match _history_reaches(reader, checkpoint, request.revision, limits.max_history_nodes):
+        Ok(found): found
+        Err(error):
+            if _history_scope_error(error): return Err(error)
+            return Ok(_history_unavailable(proof, _history_reason(error, true)))
+    if not reached.1: return Ok(_history_unavailable(proof, DbHistoricalUnavailableReason.OutsideHistory))
+    val loaded = match db_history_find_image(root, request, object_digest, checkpoint, active, authority, sources, budget):
+        Ok(found): found
+        Err(error):
+            if _history_scope_error(error): return Err(error)
+            return Ok(_history_unavailable(proof, _history_reason(error, true)))
+    budget = loaded.0
+    proof.semantic_cas_digest = loaded.1.cas_digest
+    proof.retained_generation = loaded.1.generation
+    val manifest = match db_history_manifest_at(root, request, loaded.1, checkpoint, authority, budget):
+        Ok(found): found
+        Err(error):
+            if _history_scope_error(error): return Err(error)
+            return Ok(_history_unavailable(proof, _history_reason(error, true)))
+    budget = manifest.0
+    proof.resolved_manifest = Some(manifest.1.manifest.entity)
+    proof.manifest_revision = Some(manifest.1.manifest.revision)
+    proof.accepted_batch_digest = Some(manifest.1.accepted_batch_digest)
+    proof.evidence_digest = Some(manifest.1.bundle_digest[10:])
+    _history_evidence(root, sources, budget, proof, authority.expected_retention_head)
+
+export db_history_query

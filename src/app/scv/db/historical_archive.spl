@@ -1,0 +1,142 @@
+# Archival bytes and locator hints do not grant historical authority. Query
+# independently checks the signed history digest and requested revision.
+use app.scv.db.historical_model.*
+use app.scv.db.local_store.*
+use app.scv.db.evidence_store.*
+use app.io.mod.{dir_create, dir_remove_all, file_write, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_publish_noreplace}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains, path_entry_present}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.scv.db_canonical.{db_canonical_text, db_frame, db_u64_bytes, db_domain_bytes}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use std.scv.db_policy_codec.{DbPolicyConfig}
+use std.scv.db_paged_model.*
+use std.scv.db_snapshot.{db_snapshot_decode, db_snapshot_encode}
+use std.scv.db_checkpoint_history.{db_checkpoint_hex}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held, scv_sj_lease_holder}
+
+fn db_history_decode_image(wire: text, backend: text, config: DbPolicyConfig, paged_policy: DbPagedPolicy?, maximum: u64 = 16777216u64) -> Result<DbHistoricalImage, text>:
+    if maximum > 16777216u64 or wire.len() as u64 > maximum: return Err("SCVDB_HISTORY_QUOTA")
+    # Both canonical image codecs emit ASCII headers/hex. Reject non-ASCII
+    # before byte conversion; character count is then the exact byte count.
+    for index in 0..wire.len():
+        if wire.char_code_at(index) > 127: return Err("SCVDB_HISTORY_IMAGE_ENCODING")
+    if backend == "semantic":
+        val state = db_snapshot_decode(wire)?
+        if db_snapshot_encode(state)? != wire: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+        return Ok(DbHistoricalImage(backend: backend, revision: state.revision, object_digest: sha256_text(wire), wire: wire, cas_digest: nil, generation: nil))
+    if backend == "paged" and paged_policy != nil:
+        if paged_policy.unwrap().config != config: return Err("SCVDB_HISTORY_CONTEXT")
+        val manifest = db_paged_manifest_decode(wire, paged_policy.unwrap())?
+        if db_paged_manifest_encode(manifest)? != wire: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+        return Ok(DbHistoricalImage(backend: backend, revision: manifest.revision, object_digest: manifest.revision, wire: wire, cas_digest: nil, generation: nil))
+    Err("SCVDB_HISTORY_BACKEND")
+
+fn db_history_generation_image(stored: DbStoreView, backend: text, config: DbPolicyConfig, paged_policy: DbPagedPolicy?, maximum: u64 = 16777216u64) -> Result<DbHistoricalImage, text>:
+    if stored.code != "ok": return Err(stored.code)
+    var wire = stored.state
+    if backend == "semantic":
+        # Validate the captured envelope context without decoding unrelated
+        # conflict catalog data or exceeding the selected image byte ceiling.
+        val admission = config.admission
+        val context = db_canonical_text(admission.repository)? + db_canonical_text(admission.namespace)? + db_frame(2u8, db_u64_bytes(admission.epoch)) + db_canonical_text(admission.schema_revision)? + db_canonical_text(admission.reducer_revision)?
+        val digest = sha256_u8_hex(db_domain_bytes("local-authority", context)?)
+        if not stored.state.starts_with("SCVDB-LOCAL-v2\n{digest}\n"): return Err("SCVDB_HISTORY_CONTEXT")
+        val fields = stored.state.split("\n")
+        if fields.len() != 7 or fields[6] != "": return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+        wire = "{fields[2]}\n{fields[3]}\n"
+    var image = db_history_decode_image(wire, backend, config, paged_policy, maximum)?
+    image.generation = Some(stored.head)
+    Ok(image)
+
+fn _history_locator_wire(image: DbHistoricalImage, digest: text) -> Result<text, text>:
+    if not ["semantic", "paged"].contains(image.backend) or not db_checkpoint_hex(image.revision) or not db_checkpoint_hex(image.object_digest) or not db_checkpoint_hex(digest): return Err("SCVDB_HISTORY_LOCATOR")
+    Ok("SCVDB-HISTORY-LOCATOR-v1\n{image.backend}\n{image.revision}\n{image.object_digest}\n{digest}\n")
+
+fn db_history_locator_read(root: text, object_digest: text) -> Result<(text, text, text)?, text>:
+    if not db_checkpoint_hex(object_digest): return Err("SCVDB_HISTORY_DIGEST")
+    if db_local_path_scope(root, [".scv", ".scv/history", ".scv/history/locators"]) != "": return Err("SCVDB_HISTORY_SCOPE")
+    val path = root + "/.scv/history/locators/" + object_digest + ".scvl"
+    if not path_entry_present(path)?: return Ok(nil)
+    if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path: return Err("SCVDB_HISTORY_SCOPE")
+    val encoded = file_read_regular_no_follow_bounded(path, 1024)?
+    val fields = encoded.split("\n")
+    if fields.len() != 6 or fields[0] != "SCVDB-HISTORY-LOCATOR-v1" or not ["semantic", "paged"].contains(fields[1]) or fields[3] != object_digest or not db_checkpoint_hex(fields[2]) or not db_checkpoint_hex(fields[4]) or fields[5] != "": return Err("SCVDB_HISTORY_LOCATOR")
+    Ok(Some((fields[1], fields[2], fields[4])))
+
+fn db_history_load_cas(root: text, sources: DbHistoricalSources, initial: DbHistoricalBudget, digest: text, backend: text, config: DbPolicyConfig, paged_policy: DbPagedPolicy?) -> Result<(DbHistoricalBudget, DbHistoricalImage), text>:
+    val limit = initial.limits.max_semantic_bytes
+    val budget = db_history_reserve(initial, limit + 21u64)?
+    val quota = DbEvidenceStoreQuota(max_content_bytes: limit as i64, max_envelope_bytes: (limit + 21u64) as i64, max_dependencies: 0)
+    val node = db_evidence_store_get(root, sources.evidence_parent, digest, 0, quota)?
+    if node.dependencies.len() != 0: return Err("SCVDB_HISTORY_LOCATOR")
+    var image = db_history_decode_image(validated_utf8_bytes_to_text_linear(node.content)?, backend, config, paged_policy, limit)?
+    image.cas_digest = Some(node.digest)
+    Ok((budget, image))
+
+fn _history_publish_hint(root: text, holder: text, expected_head: text, image: DbHistoricalImage, digest: text) -> Result<bool, text>:
+    if not scv_sj_lease_is_held(root) or scv_sj_lease_holder(root) != holder: return Err("SCVDB_STORE_LEASE_IDENTITY")
+    if db_store_checkpoint_barrier(root)?: return Err("SCVDB_CHECKPOINT_INSTALL_PENDING")
+    val current = db_store_read(root, image.backend)
+    if current.code != "ok" or current.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    if db_local_path_scope(root, [".scv", ".scv/history", ".scv/history/locators"]) != "": return Err("SCVDB_HISTORY_SCOPE")
+    var parent = path_final_existing(root)?
+    for relative in [".scv", ".scv/history", ".scv/history/locators"]:
+        val directory = root + "/" + relative
+        if not path_entry_present(directory)? and not dir_create(directory, false): return Err("SCVDB_HISTORY_IO")
+        if not dir_is_real_no_follow(directory): return Err("SCVDB_HISTORY_SCOPE")
+        val actual = path_final_existing(directory)?
+        if actual.path != directory or not path_identity_contains(parent, actual): return Err("SCVDB_HISTORY_SCOPE")
+        if not directory_fsync(parent.path): return Err("SCVDB_HISTORY_IO")
+        parent = actual
+    val directory = parent.path
+    val stage = secure_temp_dir_raw(directory, "hint-")
+    if stage == "" or not stage.starts_with(directory + "/hint-") or not dir_is_real_no_follow(stage): return Err("SCVDB_HISTORY_SCOPE")
+    val identity = path_final_existing(stage)?
+    if identity.path != stage or not path_identity_contains(parent, identity): return Err("SCVDB_HISTORY_SCOPE")
+    val result = _history_publish_owned(stage, directory, image, digest)
+    if not dir_is_real_no_follow(stage) or path_final_existing(stage)? != identity: return Err("SCVDB_HISTORY_SCOPE")
+    if not dir_remove_all(stage): return Err("SCVDB_HISTORY_IO")
+    result
+
+fn _history_publish_owned(stage: text, directory: text, image: DbHistoricalImage, digest: text) -> Result<bool, text>:
+    val encoded = _history_locator_wire(image, digest)?
+    val path = directory + "/" + image.object_digest + ".scvl"
+    if not file_write(stage + "/locator", encoded) or not file_fsync(stage + "/locator") or not directory_fsync(stage): return Err("SCVDB_HISTORY_IO")
+    val published = file_publish_noreplace(stage + "/locator", path)
+    if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path: return Err("SCVDB_HISTORY_SCOPE")
+    if file_read_regular_no_follow_bounded(path, 1024)? != encoded: return Err("SCVDB_HISTORY_LOCATOR_COLLISION")
+    if not file_fsync(path) or not directory_fsync(directory): return Err("SCVDB_HISTORY_IO")
+    Ok(true)
+
+fn db_history_archive_current(root: text, channel: text, expected_head: text, config: DbPolicyConfig, paged_policy: DbPagedPolicy?, sources: DbHistoricalSources, limits: DbHistoricalLimits) -> Result<DbArchivedSemantic, text>:
+    if not ["semantic", "paged"].contains(channel): return Err("SCVDB_HISTORY_BACKEND")
+    var budget = db_history_reserve(db_history_budget(limits)?, 67108929u64)?
+    val current = db_store_read(root, channel)
+    if current.code != "ok" or current.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val image = db_history_generation_image(current, channel, config, paged_policy, limits.max_semantic_bytes)?
+    if image.wire.len() as u64 > limits.max_semantic_bytes: return Err("SCVDB_HISTORY_QUOTA")
+    val content = base_encoding_text_to_bytes(image.wire)
+    if content.len() as u64 > limits.max_semantic_bytes: return Err("SCVDB_HISTORY_QUOTA")
+    val digest = db_evidence_digest(content, [])?
+    val quota = DbEvidenceStoreQuota(max_content_bytes: limits.max_semantic_bytes as i64, max_envelope_bytes: (limits.max_semantic_bytes + 21u64) as i64, max_dependencies: 0)
+    budget = db_history_reserve(budget, (limits.max_semantic_bytes + 21u64) * 3u64)?
+    val node = db_evidence_store_put(root, sources.evidence_parent, DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: 0, dependencies: []), quota)?
+    val reopened = db_history_load_cas(root, sources, budget, node.digest, channel, config, paged_policy)?
+    budget = reopened.0
+    if reopened.1.object_digest != image.object_digest or reopened.1.revision != image.revision: return Err("SCVDB_HISTORY_IMAGE_CORRUPT")
+    budget = db_history_reserve(budget, 67110977u64)?
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_STORE_ENTROPY")
+    val holder = "history-archive-{nonce}"
+    if not scv_sj_lease_acquire(root, holder).starts_with("ok:"): return Err("SCVDB_STORE_BUSY")
+    val result = _history_publish_hint(root, holder, expected_head, image, digest)
+    if not scv_sj_lease_release(root, holder).starts_with("ok:") or scv_sj_lease_is_held(root): return Err("SCVDB_STORE_RELEASE_UNCERTAIN")
+    result?
+    Ok(DbArchivedSemantic(backend: channel, revision: image.revision, object_digest: image.object_digest, cas_digest: digest, captured_head: current.head, content_bytes: content.len() as u64))
+
+export db_history_decode_image, db_history_generation_image, db_history_locator_read, db_history_load_cas
+export db_history_archive_current

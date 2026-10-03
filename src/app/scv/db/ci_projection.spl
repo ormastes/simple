@@ -1,0 +1,51 @@
+# Immutable semantic projection of the existing CI manifest identity. This
+# helper creates operations only; callers supply independently authenticated
+# patches and reviewed policy to the normal apply owner. It never signs.
+use app.scv.db.ci_state_codec.{DbCiDurableManifest, db_ci_manifest_encode}
+use std.scv.db_evidence.{DbEvidenceRevision, db_evidence_check_ref, db_evidence_digest_valid}
+use std.scv.db_patch.{DbOperation, DbField, DbValue, db_ref_kind}
+use std.scv.db_reducer.{DbRow, DbAcceptedBatch}
+use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
+
+struct DbCiManifestDraft:
+    provider_instance: text
+    project: text
+    run_id: text
+    manifest: DbEvidenceRevision
+    bundle_digest: text
+
+fn _ci_projection_fields(draft: DbCiManifestDraft) -> Result<[DbField], text>:
+    db_evidence_check_ref(draft.manifest)?
+    if db_ref_kind(draft.manifest.entity) != "run_manifest" or not db_evidence_digest_valid(draft.bundle_digest): return Err("SCVDB_CI_PROJECTION")
+    for value in [draft.provider_instance, draft.project, draft.run_id]:
+        if value == "" or value.len() > 4096: return Err("SCVDB_CI_PROJECTION")
+    Ok([DbField(name: "version", value: DbValue.Text("scv-ci-manifest-v1")), DbField(name: "provider_instance", value: DbValue.Text(draft.provider_instance)), DbField(name: "project", value: DbValue.Text(draft.project)), DbField(name: "run_id", value: DbValue.Text(draft.run_id)), DbField(name: "manifest_revision", value: DbValue.Text(draft.manifest.revision)), DbField(name: "bundle_digest", value: DbValue.Text(draft.bundle_digest))])
+
+fn db_ci_manifest_operations(draft: DbCiManifestDraft) -> Result<[DbOperation], text>:
+    if draft.manifest.entity.provisional == nil or draft.manifest.entity.settled != nil: return Err("SCVDB_CI_PROJECTION_UID")
+    Ok([DbOperation.AppendObservation(draft.manifest.entity, "run_manifest", _ci_projection_fields(draft)?)])
+
+fn _ci_projection_text(row: DbRow, name: text) -> Result<text, text>:
+    var result: text? = nil
+    for field in row.fields:
+        if field.name != name: continue
+        if result != nil: return Err("SCVDB_CI_PROJECTION_DUPLICATE")
+        match field.value:
+            Text(value): result = Some(value)
+            _: return Err("SCVDB_CI_PROJECTION")
+    if result == nil: return Err("SCVDB_CI_PROJECTION_UNAVAILABLE")
+    Ok(result.unwrap())
+
+fn db_ci_manifest_from_row(row: DbRow, entity: EntityRef, accepted: DbAcceptedBatch) -> Result<DbCiDurableManifest, text>:
+    # accepted must come from the actual requested-revision registry; this pure
+    # projection function is not an admission or historical authority boundary.
+    if row.tombstoned or row.kind != "run_manifest" or db_ref_kind(entity) != "run_manifest" or row.entity != entity_ref_canonical(entity): return Err("SCVDB_CI_PROJECTION_UNAVAILABLE")
+    if row.fields.len() != 6 or _ci_projection_text(row, "version")? != "scv-ci-manifest-v1": return Err("SCVDB_CI_PROJECTION_UNAVAILABLE")
+    if accepted.batch_id != row.revision or accepted.canonical_digest != accepted.batch_id: return Err("SCVDB_CI_PROJECTION_ACCEPTANCE")
+    val draft = DbCiManifestDraft(provider_instance: _ci_projection_text(row, "provider_instance")?, project: _ci_projection_text(row, "project")?, run_id: _ci_projection_text(row, "run_id")?, manifest: DbEvidenceRevision(entity: entity, revision: _ci_projection_text(row, "manifest_revision")?), bundle_digest: _ci_projection_text(row, "bundle_digest")?)
+    _ci_projection_fields(draft)?
+    val manifest = DbCiDurableManifest(provider_instance: draft.provider_instance, project: draft.project, run_id: draft.run_id, manifest: draft.manifest, bundle_digest: draft.bundle_digest, accepted_batch_digest: accepted.batch_id)
+    db_ci_manifest_encode(manifest)?
+    Ok(manifest)
+
+export DbCiManifestDraft, db_ci_manifest_operations, db_ci_manifest_from_row

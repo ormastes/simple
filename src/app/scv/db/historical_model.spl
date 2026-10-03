@@ -1,0 +1,105 @@
+use app.scv.db.evidence_hydrate.{DbEvidenceFileInfo}
+use app.scv.db.retention_codec.{DbRetainedRollup}
+use std.scv.db_checkpoint.{DbCheckpointAuthority}
+use std.scv.distributed_identity.{EntityRef}
+
+struct DbHistoricalRequest:
+    revision: text
+    manifest: EntityRef
+
+struct DbHistoricalAuthority:
+    checkpoint: DbCheckpointAuthority
+    expected_active_head: text
+    expected_retention_head: text
+
+struct DbHistoricalSources:
+    evidence_parent: text
+
+struct DbHistoricalLimits:
+    max_history_nodes: u64
+    max_generation_hops: u64
+    max_semantic_bytes: u64
+    max_evidence_bytes: u64
+    max_total_read_bytes: u64
+    max_rollup_hops: u64
+
+struct DbHistoricalBudget:
+    limits: DbHistoricalLimits
+    reserved_bytes: u64
+
+enum DbHistoricalUnavailableReason:
+    UnknownRevision
+    OutsideHistory
+    SemanticMissing
+    SemanticCorrupt
+    HistoricalProjectionUnavailable
+    HistoricalIdentityUnavailable
+    ManifestMissing
+    ManifestTombstoned
+    EvidenceMissing
+    EvidenceCorrupt
+    RollupProvenance
+    Io(code: text)
+    Quota
+
+enum DbHistoricalResolution:
+    Exact(info: DbEvidenceFileInfo)
+    Aggregated(rollup: DbRetainedRollup, raw_unavailability: DbHistoricalUnavailableReason)
+    Restricted(info: DbEvidenceFileInfo)
+    Unavailable(reason: DbHistoricalUnavailableReason)
+
+struct DbHistoricalProvenance:
+    requested_revision: text
+    requested_manifest: EntityRef
+    active_head: text
+    checkpoint_digest: text
+    history_object_digest: text?
+    semantic_cas_digest: text?
+    retained_generation: text?
+    resolved_manifest: EntityRef?
+    manifest_revision: text?
+    accepted_batch_digest: text?
+    evidence_digest: text?
+    retention_head: text?
+    rollup_digest: text?
+    observed_content_bytes: u64
+
+struct DbHistoricalResult:
+    provenance: DbHistoricalProvenance
+    resolution: DbHistoricalResolution
+
+struct DbArchivedSemantic:
+    backend: text
+    revision: text
+    object_digest: text
+    cas_digest: text
+    captured_head: text
+    content_bytes: u64
+
+struct DbHistoricalImage:
+    backend: text
+    revision: text
+    object_digest: text
+    wire: text
+    cas_digest: text?
+    generation: text?
+
+fn db_history_limits() -> DbHistoricalLimits:
+    DbHistoricalLimits(max_history_nodes: 4096u64, max_generation_hops: 64u64, max_semantic_bytes: 16777216u64, max_evidence_bytes: 1073741824u64, max_total_read_bytes: 4294967296u64, max_rollup_hops: 64u64)
+
+fn db_history_budget(limits: DbHistoricalLimits) -> Result<DbHistoricalBudget, text>:
+    if limits.max_history_nodes == 0u64 or limits.max_history_nodes > 4096u64 or limits.max_generation_hops > 64u64 or limits.max_semantic_bytes == 0u64 or limits.max_semantic_bytes > 16777216u64 or limits.max_evidence_bytes > 1073741824u64 or limits.max_total_read_bytes == 0u64 or limits.max_total_read_bytes > 8589934592u64 or limits.max_rollup_hops > 64u64: return Err("SCVDB_HISTORY_LIMITS")
+    Ok(DbHistoricalBudget(limits: limits, reserved_bytes: 0u64))
+
+fn db_history_reserve(initial: DbHistoricalBudget, bytes: u64) -> Result<DbHistoricalBudget, text>:
+    var budget = initial
+    if budget.reserved_bytes > budget.limits.max_total_read_bytes or bytes > budget.limits.max_total_read_bytes - budget.reserved_bytes: return Err("SCVDB_HISTORY_QUOTA")
+    budget.reserved_bytes = budget.reserved_bytes + bytes
+    Ok(budget)
+
+fn db_history_provenance(request: DbHistoricalRequest, authority: DbHistoricalAuthority) -> DbHistoricalProvenance:
+    DbHistoricalProvenance(requested_revision: request.revision, requested_manifest: request.manifest, active_head: authority.expected_active_head, checkpoint_digest: authority.checkpoint.expected_checkpoint, history_object_digest: nil, semantic_cas_digest: nil, retained_generation: nil, resolved_manifest: nil, manifest_revision: nil, accepted_batch_digest: nil, evidence_digest: nil, retention_head: nil, rollup_digest: nil, observed_content_bytes: 0u64)
+
+export DbHistoricalRequest, DbHistoricalAuthority, DbHistoricalSources, DbHistoricalLimits, DbHistoricalBudget
+export DbHistoricalUnavailableReason, DbHistoricalResolution, DbHistoricalProvenance, DbHistoricalResult
+export DbArchivedSemantic, DbHistoricalImage, db_history_limits, db_history_budget, db_history_reserve, db_history_provenance

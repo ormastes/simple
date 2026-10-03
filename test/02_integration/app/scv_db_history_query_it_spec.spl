@@ -1,0 +1,181 @@
+# Actual disposable Git/CAS/generation fixtures. Source only until admitted runtime.
+use std.spec.*
+use app.io.mod.{file_write, file_delete}
+use app.scv.db.historical_model.*
+use app.scv.db.historical_query.*
+use app.scv.db.historical_read.*
+use app.scv.db.historical_archive.*
+use app.scv.db.local_store.*
+use app.scv.db.local_apply.*
+use app.scv.db.ci_projection.*
+use app.scv.db.retention_store.{db_retention_register, db_retention_run}
+use app.scv.db.checkpoint_reader.{db_checkpoint_reader_new}
+use app.scv.db.checkpoint_validation.{db_checkpoint_preserve_reference}
+use std.scv.db_checkpoint.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{db_state_digest}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.distributed_identity.*
+use test.fixtures.scv.db_history_fixture.*
+use test.fixtures.scv.db_apply_fixture.{setup_item2_apply_resign}
+
+fn check_item2_history_exact(result: DbHistoricalResult, digest: text, size: u64):
+    match result.resolution:
+        Exact(info):
+            expect(info.digest).to_equal(digest)
+            expect(info.content_bytes).to_equal(size)
+            expect(info.restricted).to_be(false)
+        _: expect("expected actual verified Exact receipt").to_equal("Exact")
+
+describe "REQ032 requested revision binds actual historical evidence":
+    it "returns different verified bundles from two real admitted revisions without relabelling current state":
+        val fixture = setup_item2_history()
+        val before = db_store_read(fixture.root)
+        val old = db_history_query(fixture.root, DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0]), fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        val current = db_history_query(fixture.root, DbHistoricalRequest(revision: fixture.current.revision, manifest: fixture.entities[1]), fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        check_item2_history_exact(old, fixture.digests[0], 3u64)
+        check_item2_history_exact(current, fixture.digests[1], 2u64)
+        expect(old.provenance.semantic_cas_digest).to_equal(Some(fixture.archive.cas_digest))
+        expect(old.provenance.history_object_digest).to_equal(Some(fixture.archive.object_digest))
+        expect(old.provenance.accepted_batch_digest).to_equal(Some(fixture.patches[0].batch_id))
+        expect(current.provenance.accepted_batch_digest).to_equal(Some(fixture.patches[1].batch_id))
+        expect(old.provenance.requested_revision == current.provenance.requested_revision).to_be(false)
+        val not_yet_created = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[1])
+        expect(db_history_query(fixture.root, not_yet_created, fixture.authority, fixture.sources, db_history_limits()).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.ManifestMissing))
+        expect(db_store_read(fixture.root)).to_equal(before)
+
+    it "ignores a mismatched locator and proves the older image through retained generations":
+        val fixture = setup_item2_history()
+        val hint = fixture.root + "/.scv/history/locators/" + fixture.archive.object_digest + ".scvl"
+        expect(file_write(hint, "SCVDB-HISTORY-LOCATOR-v1\nsemantic\n{fixture.current.revision}\n{fixture.archive.object_digest}\n{fixture.digests[1]}\n")).to_be(true)
+        val result = db_history_query(fixture.root, DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0]), fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        check_item2_history_exact(result, fixture.digests[0], 3u64)
+        expect(result.provenance.semantic_cas_digest).to_be_nil()
+        expect(result.provenance.retained_generation).to_equal(Some(fixture.archive.captured_head))
+
+    it "resolves current signed aliases and rejects foreign namespace and epoch at both public boundaries":
+        val fixture = setup_item2_history()
+        val checkpoint = fixture.checkpoint
+        val good = SettledAlias(database_namespace: checkpoint.namespace, authority_epoch: checkpoint.epoch, entity_kind: "run_manifest", sequence: 1)
+        val request = DbHistoricalRequest(revision: checkpoint.current_revision, manifest: entity_ref_settled(good))
+        check_item2_history_exact(db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap(), fixture.digests[0], 3u64)
+        val image = db_history_generation_image(db_store_read(fixture.root), "semantic", fixture.authority.checkpoint.policy, nil).unwrap()
+        var other_namespace = good
+        other_namespace.database_namespace = "11112233445566778899aabbccddeeff"
+        var other_epoch = good
+        other_epoch.authority_epoch = 2
+        for alias in [other_namespace, other_epoch]:
+            val invalid = DbHistoricalRequest(revision: checkpoint.current_revision, manifest: entity_ref_settled(alias))
+            expect(db_history_manifest_at(fixture.root, invalid, image, checkpoint, fixture.authority, db_history_budget(db_history_limits()).unwrap()).unwrap_err()).to_equal("SCVDB_HISTORY_CONTEXT")
+            expect(db_history_query(fixture.root, invalid, fixture.authority, fixture.sources, db_history_limits()).unwrap_err()).to_equal("SCVDB_HISTORY_CONTEXT")
+        val malformed = DbHistoricalRequest(revision: checkpoint.current_revision, manifest: EntityRef(provisional: fixture.entities[0].provisional, settled: Some(good)))
+        expect(db_history_manifest_at(fixture.root, malformed, image, checkpoint, fixture.authority, db_history_budget(db_history_limits()).unwrap()).unwrap_err()).to_equal("SCVDB_HISTORY_CONTEXT")
+        expect(db_history_query(fixture.root, malformed, fixture.authority, fixture.sources, db_history_limits()).unwrap_err()).to_equal("SCVDB_HISTORY_CONTEXT")
+        val old_alias = DbHistoricalRequest(revision: fixture.first.revision, manifest: entity_ref_settled(good))
+        expect(db_history_query(fixture.root, old_alias, fixture.authority, fixture.sources, db_history_limits()).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.HistoricalIdentityUnavailable))
+
+    it "streams a real 100MiB historical object and reports quota without materializing a raw node":
+        val fixture = setup_item2_history(big: true)
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        val result = db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        check_item2_history_exact(result, fixture.digests[0], 104857600u64)
+        expect(result.provenance.observed_content_bytes).to_equal(104857600u64)
+        var limits = db_history_limits()
+        limits.max_evidence_bytes = 104857599u64
+        expect(db_history_query(fixture.root, request, fixture.authority, fixture.sources, limits).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.Quota))
+
+    it "keeps missing and corrupted actual CAS bytes distinct from catalog presence":
+        val fixture = setup_item2_history()
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        val path = fixture.sources.evidence_parent + "/scv-evidence-v1/" + fixture.digests[0] + ".scve"
+        expect(file_write(path, "SCVE")).to_be(true)
+        expect(db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.EvidenceCorrupt))
+        expect(file_write(path, "not an evidence envelope")).to_be(true)
+        expect(db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.EvidenceCorrupt))
+        expect(file_delete(path)).to_be(true)
+        expect(db_history_query(fixture.root, request, fixture.authority, fixture.sources, db_history_limits()).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.EvidenceMissing))
+
+    it "returns typed quota when the shared budget ends exactly before retention IO":
+        val fixture = setup_item2_history()
+        val before = db_store_read(fixture.root)
+        var limits = db_history_limits()
+        # Active+checkpoint, catalog reader, hint, and archived semantic object.
+        # Nothing remains for the subsequent actual retention-store read.
+        limits.max_total_read_bytes = 67108929u64 + 33554800u64 + 1073741824u64 + 1024u64 + limits.max_semantic_bytes + 21u64
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        val result = db_history_query(fixture.root, request, fixture.authority, fixture.sources, limits).unwrap()
+        expect(result.provenance.evidence_digest).to_equal(Some(fixture.digests[0]))
+        expect(result.resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.Quota))
+        expect(db_store_read(fixture.root)).to_equal(before)
+
+    it "reports Restricted only after inspecting actual restricted-envelope bytes":
+        val fixture = setup_item2_history(restricted: true)
+        val result = db_history_query(fixture.root, DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0]), fixture.authority, fixture.sources, db_history_limits()).unwrap()
+        match result.resolution:
+            Restricted(info):
+                expect(info.restricted).to_be(true)
+                expect(info.digest).to_equal(fixture.digests[0])
+            _: expect("expected actual Restricted receipt").to_equal("Restricted")
+
+    it "uses verified aggregate provenance after actual retention and enforces zero hops before reading a missing rollup":
+        val fixture = setup_item2_history(observation: true)
+        val registered = db_retention_register(fixture.root, fixture.sources.evidence_parent, "", fixture.digests[0], 0u64, "internal").unwrap()
+        val retained = db_retention_run(fixture.root, fixture.sources.evidence_parent, registered.head, 28u64, 0u64, "history-cohort").unwrap()
+        var authority = fixture.authority
+        authority.expected_retention_head = retained.head
+        val request = DbHistoricalRequest(revision: fixture.first.revision, manifest: fixture.entities[0])
+        val result = db_history_query(fixture.root, request, authority, fixture.sources, db_history_limits()).unwrap()
+        match result.resolution:
+            Aggregated(rollup, unavailable):
+                expect(unavailable).to_equal(DbHistoricalUnavailableReason.EvidenceMissing)
+                expect(rollup.inputs.len()).to_equal(1)
+                expect(rollup.inputs[0].payload_digest).to_equal(fixture.digests[0])
+            _: expect("expected actual retained aggregate").to_equal("Aggregated")
+        val rollup_digest = result.provenance.rollup_digest.unwrap()
+        expect(file_delete(fixture.sources.evidence_parent + "/scv-evidence-v1/" + rollup_digest + ".scve")).to_be(true)
+        var limits = db_history_limits()
+        limits.max_rollup_hops = 0u64
+        expect(db_history_query(fixture.root, request, authority, fixture.sources, limits).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.Quota))
+
+    it "rejects oversized or non-ASCII semantic wire before decoding":
+        val fixture = setup_item2_history()
+        val wire = db_snapshot_encode(fixture.first).unwrap()
+        expect(db_history_decode_image(wire, "semantic", fixture.authority.checkpoint.policy, nil, (wire.len() - 1) as u64).unwrap_err()).to_equal("SCVDB_HISTORY_QUOTA")
+        expect(db_history_decode_image("é", "semantic", fixture.authority.checkpoint.policy, nil).unwrap_err()).to_equal("SCVDB_HISTORY_IMAGE_ENCODING")
+
+describe "Immutable manifest admission and checkpoint preservation":
+    it "rejects generic create update and tombstone even with explicitly broad non-CI ACLs":
+        val fixture = setup_item2_history()
+        val before = db_store_read(fixture.root)
+        val entity = fixture.entities[0]
+        val row = fixture.first.rows[0]
+        val condition = RowPrecondition(base_row: "", expected_revision: "", expected_fields: [])
+        val operations = [DbOperation.Create(entity, "run_manifest", row.fields), DbOperation.UpdateFields(entity, [FieldEdit(field: "run_id", before: DbValue.Text("run-1"), after: DbValue.Text("forged"))], condition), DbOperation.Tombstone(entity, condition)]
+        for operation in operations:
+            var changed = fixture.patches[1]
+            changed.actor_counter = 3
+            changed.base_revision = fixture.current.revision
+            changed.operations = [operation]
+            changed = setup_item2_apply_resign(changed)
+            val policy = setup_item2_history_policy(fixture.patches + [changed])
+            expect(db_apply_local(fixture.root, before.head, changed, policy.merge, policy.admission, 12).unwrap_err()).to_equal("SCVDB_MANIFEST_IMMUTABLE")
+            expect(db_store_read(fixture.root)).to_equal(before)
+        val policy = fixture.authority.checkpoint.policy
+        val replay = db_apply_local(fixture.root, before.head, fixture.patches[0], policy.merge, policy.admission, 12).unwrap()
+        expect(replay.replay).to_be(true)
+        expect(db_store_read(fixture.root)).to_equal(before)
+
+    it "rejects a checkpoint rewrite of an existing run manifest row":
+        val fixture = setup_item2_history()
+        var next = fixture.checkpoint
+        var state = fixture.current
+        var row = state.rows[0]
+        row.fields = [DbField(name: "version", value: DbValue.Text("forged"))]
+        state.rows[0] = row
+        state.revision = db_state_digest(state).unwrap()
+        next.current_revision = state.revision
+        match next.storage:
+            Reference(snapshot, identities, conflicts): next.storage = DbCheckpointStorage.Reference(db_snapshot_encode(state).unwrap(), identities, conflicts)
+            _: expect("Reference fixture").to_equal("Reference")
+        next.revision = db_checkpoint_digest(next).unwrap()
+        expect(db_checkpoint_preserve_reference(db_checkpoint_reader_new(fixture.root), fixture.checkpoint, next).unwrap_err()).to_equal("SCVDB_CHECKPOINT_ROW_REGRESSION")
