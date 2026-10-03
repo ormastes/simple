@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-subsystem-inventory.XXXXXX")
+case "$fixture" in "${TMPDIR:-/tmp}"/simple-subsystem-inventory.*) ;; *) exit 2 ;; esac
+# Preserve this tiny fixture on failure for inspection. No source builds run.
+mkdir -p "$fixture/test/01_unit/compiler/core" \
+  "$fixture/test/01_unit/compiler/interpreter" \
+  "$fixture/test/02_integration/compiler/loader" \
+  "$fixture/test/03_system/compiler/hir" \
+  "$fixture/test/01_unit/compiler_core" \
+  "$fixture/test/02_integration/compiler_shared" \
+  "$fixture/test/03_system/core" \
+  "$fixture/test/01_unit/compiler/fixtures" \
+  "$fixture/test/01_unit/compiler/vendor" \
+  "$fixture/test/unit/compiler"
+for path in test/01_unit/compiler/core/one_spec.spl \
+  test/01_unit/compiler/interpreter/two_test.spl \
+  test/02_integration/compiler/loader/three_spec.spl \
+  test/03_system/compiler/hir/four_spec.spl \
+  test/01_unit/compiler_core/five_spec.spl \
+  test/02_integration/compiler_shared/six_spec.spl \
+  test/03_system/core/seven_spec.spl \
+  test/01_unit/excluded_spec.spl \
+  test/01_unit/compiler/fixtures/excluded_spec.spl \
+  test/01_unit/compiler/vendor/excluded_spec.spl \
+  test/unit/compiler/excluded_spec.spl; do
+  printf '# fixture %s\n' "$path" >"$fixture/$path"
+done
+sh "$script_root/compiler-subsystem-test-inventory.shs" "$fixture" >"$fixture/inventory.tsv" 2>"$fixture/inventory.log"
+[ ! -s "$fixture/inventory.log" ]
+perl - "$fixture" <<'PERL'
+use strict; use warnings; use Digest::SHA qw(sha256_hex);
+my $root=shift @ARGV;
+open my $fh, '<', "$root/inventory.tsv" or die $!;
+my @rows=<$fh>; chomp @rows;
+die "wrong header\n" unless shift(@rows) eq "subsystem\tlevel\tpath\tsha256";
+die "wrong physical owner count\n" unless @rows == 7;
+my %counts;
+for my $row (@rows) {
+  my ($role,$level,$path,$sha)=split /\t/,$row;
+  die "excluded owner admitted\n" if $path =~ /excluded/;
+  open my $source,'<:raw',"$root/$path" or die $!;
+  local $/; my $bytes=<$source>;
+  die "wrong source hash\n" unless sha256_hex($bytes) eq $sha;
+  $counts{$role}++;
+}
+die "wrong role ownership\n" unless $counts{compiler}==5 && $counts{interpreter}==1 && $counts{loader}==1;
+die "unstable ordering\n" unless join("\n",@rows) eq join("\n",sort @rows);
+PERL
+# Missing authoritative tree cannot silently reduce coverage.
+mv "$fixture/test/03_system" "$fixture/test/missing-system"
+if sh "$script_root/compiler-subsystem-test-inventory.shs" "$fixture" >"$fixture/missing.tsv" 2>"$fixture/missing.log"; then
+  echo 'FAIL: missing authoritative tree accepted' >&2
+  exit 1
+fi
+[ ! -s "$fixture/missing.tsv" ]
+printf 'PASS: source ownership, exclusions, hashes, ordering and missing-tree rejection; fixture=%s\n' "$fixture"
