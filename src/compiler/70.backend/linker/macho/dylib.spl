@@ -1,0 +1,213 @@
+# Hosted-link prerequisite only: read provider metadata, never claim loadability.
+use compiler.backend.linker.macho.input.{macho_range, macho_read}
+use compiler.backend.linker.macho.export_trie.{MachODylibExport, macho_exports_trie, macho_bounded_string}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+struct MachODylibDependency:
+    install_name: text
+    command: i64
+    current_version: i64
+    compatibility_version: i64
+
+struct MachODylib:
+    install_name: text
+    current_version: i64
+    compatibility_version: i64
+    platform: i64
+    minimum_os: i64
+    sdk: i64
+    preferred_load_address: i64
+    dependencies: [MachODylibDependency]
+    exports: [MachODylibExport]
+
+struct MachODylibSegment:
+    address: i64
+    size: i64
+
+struct MachODylibSection:
+    address: i64
+    size: i64
+    kind: i64
+
+fn macho_dylib_mapped(segments: [MachODylibSegment], address: i64) -> bool:
+    for segment in segments:
+        if address >= segment.address and address - segment.address < segment.size: return true
+    false
+
+fn macho_read_dylib(bytes: [u8], target: RelocArch) -> Result<MachODylib, text>:
+    """Read a thin dylib's provider contracts without executing or trusting it."""
+    if bytes.len() < 32 or macho_read(bytes, 0, 4) != 0xfeedfacf:
+        return Err("require thin little-endian 64-bit Mach-O dylib")
+    var cpu: i64 = 0
+    var subtype: i64 = 0
+    match target:
+        case RelocArch.X86_64:
+            cpu = 0x01000007
+            subtype = 3
+        case RelocArch.AArch64: cpu = 0x0100000c
+        case _: return Err("unsupported Mach-O dylib target")
+    if macho_read(bytes, 4, 4) != cpu or macho_read(bytes, 8, 4) != subtype:
+        return Err("Mach-O dylib CPU/subtype mismatch")
+    if macho_read(bytes, 12, 4) != 6: return Err("Mach-O dependency is not MH_DYLIB")
+    val count = macho_read(bytes, 16, 4)
+    val size = macho_read(bytes, 20, 4)
+    if not macho_range(bytes, 32, size) or count > size / 8: return Err("invalid dylib command envelope")
+    var install_name = ""
+    var current_version: i64 = 0
+    var compatibility_version: i64 = 0
+    var platform: i64 = 0
+    var minimum_os: i64 = 0
+    var sdk: i64 = 0
+    var version_seen = false
+    var base: i64 = -1
+    var segments: [MachODylibSegment] = []
+    var sections_table: [MachODylibSection] = []
+    var dependencies: [MachODylibDependency] = []
+    var trie_offset: i64 = 0
+    var trie_size: i64 = 0
+    var symtab: i64 = -1
+    var at: i64 = 32
+    for index in 0..count:
+        if at > 32 + size - 8: return Err("truncated dylib command")
+        val kind = macho_read(bytes, at, 4)
+        val length = macho_read(bytes, at + 4, 4)
+        if length < 8 or length % 8 != 0 or length > 32 + size - at: return Err("invalid dylib command length")
+        if kind == 13 or kind == 12 or kind == 0x20 or kind == 0x80000018 or kind == 0x8000001f or kind == 0x80000023:
+            if length < 24: return Err("truncated dylib identity/dependency")
+            val offset = macho_read(bytes, at + 8, 4)
+            if offset < 24 or offset >= length: return Err("dylib name outside command")
+            val name = macho_bounded_string(bytes, at + offset, at + length)?
+            if name == "": return Err("empty dylib install name")
+            val current = macho_read(bytes, at + 16, 4)
+            val compatible = macho_read(bytes, at + 20, 4)
+            if compatible > current: return Err("dylib compatibility version exceeds current version")
+            if kind == 13:
+                if install_name != "": return Err("duplicate dylib identity")
+                install_name = name
+                current_version = current
+                compatibility_version = compatible
+            else:
+                dependencies = dependencies.push(MachODylibDependency(install_name: name, command: kind,
+                    current_version: current, compatibility_version: compatible))
+        elif kind == 0x19:
+            if length < 72: return Err("truncated dylib segment")
+            val sections = macho_read(bytes, at + 64, 4)
+            if sections > (length - 72) / 80 or length != 72 + sections * 80: return Err("invalid dylib section envelope")
+            val address = macho_read(bytes, at + 24, 8)
+            val memory_size = macho_read(bytes, at + 32, 8)
+            val file_offset = macho_read(bytes, at + 40, 8)
+            val file_size = macho_read(bytes, at + 48, 8)
+            if address < 0 or memory_size < 0 or memory_size > 0x7fffffffffffffff - address:
+                return Err("overflowing dylib segment address")
+            if not macho_range(bytes, file_offset, file_size) or file_size > memory_size:
+                return Err("dylib segment outside file")
+            for previous in segments:
+                if memory_size > 0 and previous.size > 0 and address < previous.address + previous.size and previous.address < address + memory_size:
+                    return Err("overlapping dylib virtual segments")
+            segments = segments.push(MachODylibSegment(address: address, size: memory_size))
+            for section_index in 0..sections:
+                val section_at = at + 72 + section_index * 80
+                val section_address = macho_read(bytes, section_at + 32, 8)
+                val section_size = macho_read(bytes, section_at + 40, 8)
+                if section_address < address or section_size < 0 or section_address - address > memory_size or section_size > memory_size - (section_address - address):
+                    return Err("dylib section outside virtual segment")
+                val section_kind = macho_read(bytes, section_at + 64, 4) & 255
+                if section_kind != 1 and section_kind != 12 and section_kind != 18:
+                    val section_file = macho_read(bytes, section_at + 48, 4)
+                    if section_file < file_offset or section_file - file_offset > file_size or section_size > file_size - (section_file - file_offset):
+                        return Err("dylib section outside file segment")
+                sections_table = sections_table.push(MachODylibSection(address: section_address, size: section_size, kind: section_kind))
+            if file_offset == 0 and file_size > 0:
+                if base >= 0: return Err("ambiguous dylib preferred address")
+                base = address
+        elif kind == 0x80000022 or kind == 0x22 or kind == 0x80000033:
+            val expected = if kind == 0x80000033: 16 else: 48
+            if length != expected: return Err("invalid dylib export command size")
+            val field = if kind == 0x80000033: 8 else: 40
+            val offset = macho_read(bytes, at + field, 4)
+            val extent = macho_read(bytes, at + field + 4, 4)
+            if not macho_range(bytes, offset, extent): return Err("dylib exports outside file")
+            if extent > 0:
+                if trie_size > 0: return Err("duplicate dylib export declarations")
+                trie_offset = offset
+                trie_size = extent
+        elif kind == 2:
+            if length != 24 or symtab >= 0: return Err("invalid or duplicate dylib symbol table")
+            symtab = at
+        elif kind == 0x32 or kind == 0x24 or kind == 0x25 or kind == 0x2f or kind == 0x30:
+            if version_seen: return Err("duplicate dylib platform version")
+            version_seen = true
+            if kind == 0x32:
+                if length < 24: return Err("truncated dylib build version")
+                val tools = macho_read(bytes, at + 20, 4)
+                if tools > (length - 24) / 8 or length != 24 + tools * 8: return Err("invalid dylib build tools")
+                platform = macho_read(bytes, at + 8, 4)
+                minimum_os = macho_read(bytes, at + 12, 4)
+                sdk = macho_read(bytes, at + 16, 4)
+            else:
+                if length != 16: return Err("invalid dylib minimum version")
+                platform = if kind == 0x24: 1 else: (if kind == 0x25: 2 else: (if kind == 0x2f: 3 else: 4))
+                minimum_os = macho_read(bytes, at + 8, 4)
+                sdk = macho_read(bytes, at + 12, 4)
+        # Other command payloads are opaque metadata. This reader neither
+        # executes them nor claims they satisfy a hosted output contract.
+        at = at + length
+    if at != 32 + size or install_name == "" or base < 0: return Err("incomplete dylib identity/layout")
+    var exports: [MachODylibExport] = []
+    if trie_size > 0:
+        val decoded = macho_exports_trie(bytes, trie_offset, trie_size, dependencies.len())?
+        for symbol in decoded:
+            var address = symbol.address
+            var resolver = symbol.resolver
+            if (symbol.flags & 8) == 0 and (symbol.flags & 3) != 2:
+                if address > 0x7fffffffffffffff - base: return Err("overflowing dylib export address")
+                address = address + base
+                if not macho_dylib_mapped(segments, address): return Err("unmapped dylib export address")
+                if (symbol.flags & 16) != 0:
+                    if resolver > 0x7fffffffffffffff - base: return Err("overflowing dylib resolver address")
+                    resolver = resolver + base
+                    if not macho_dylib_mapped(segments, resolver): return Err("unmapped dylib resolver address")
+            exports = exports.push(MachODylibExport(name: symbol.name, flags: symbol.flags, address: address,
+                resolver: resolver, library_ordinal: symbol.library_ordinal, import_name: symbol.import_name))
+    if symtab >= 0:
+        val symbols = macho_read(bytes, symtab + 8, 4)
+        val symbol_count = macho_read(bytes, symtab + 12, 4)
+        val strings = macho_read(bytes, symtab + 16, 4)
+        val string_size = macho_read(bytes, symtab + 20, 4)
+        if not macho_range(bytes, symbols, symbol_count * 16) or not macho_range(bytes, strings, string_size):
+            return Err("dylib symbol/string table outside file")
+        var names: {text: bool} = {}
+        for index in 0..symbol_count:
+            val offset = symbols + index * 16
+            val string_index = macho_read(bytes, offset, 4)
+            if string_index >= string_size: return Err("dylib symbol string index outside table")
+            val name = macho_bounded_string(bytes, strings + string_index, strings + string_size)?
+            val kind = bytes[offset + 4] as i64
+            if trie_size == 0 and (kind & 0xe0) == 0 and (kind & 1) != 0 and (kind & 0x10) == 0:
+                val symbol_kind = kind & 0x0e
+                if symbol_kind == 0: continue
+                if symbol_kind != 2 and symbol_kind != 14: return Err("unsupported dylib indirect export")
+                if name == "" or names.has(name): return Err("empty or duplicate dylib symbol export")
+                val address = macho_read(bytes, offset + 8, 8)
+                if address < 0 or (symbol_kind == 14 and not macho_dylib_mapped(segments, address)):
+                    return Err("invalid dylib symbol export address")
+                val description = macho_read(bytes, offset + 6, 2)
+                var export_kind: i64 = if symbol_kind == 2: 2 else: 0
+                if symbol_kind == 14:
+                    val ordinal = bytes[offset + 5] as i64
+                    if ordinal < 1 or ordinal > sections_table.len(): return Err("dylib symbol section outside table")
+                    val section = sections_table[ordinal - 1]
+                    if address < section.address or address - section.address > section.size: return Err("dylib symbol outside declared section")
+                    if section.kind >= 17 and section.kind <= 21: export_kind = 1
+                val flags = export_kind | (if (description & 0x80) != 0: 4 else: 0)
+                if exports.len() >= 1000000: return Err("Mach-O export count limit exceeded")
+                names[name] = true
+                exports = exports.push(MachODylibExport(name: name, flags: flags, address: address,
+                    resolver: 0, library_ordinal: 0, import_name: ""))
+    elif trie_size == 0:
+        return Err("dylib has neither exports trie nor symbol table")
+    Ok(MachODylib(install_name: install_name, current_version: current_version,
+        compatibility_version: compatibility_version, platform: platform, minimum_os: minimum_os,
+        sdk: sdk, preferred_load_address: base, dependencies: dependencies, exports: exports))
+
+export MachODylib, MachODylibDependency, macho_read_dylib

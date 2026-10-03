@@ -1,0 +1,201 @@
+"""Normalize R_RISCV_ALIGN without shortening any ordinary instruction.
+
+Section placement honours sh_addralign, so a section-relative normalization
+is valid when it covers every requested alignment. Raw ELF tables are updated
+and reparsed together; callers never receive inconsistent raw/parsed objects.
+"""
+use compiler.backend.linker.elf_parser.{ElfObject, ElfRelocation, elf_parse_object,
+    elf_reloc_type, elf_reloc_sym, elf_section_addralign, elf_section_entsize}
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_patch_width}
+
+struct RiscvAlignCut:
+    start: i64
+    end: i64
+    kept: i64
+    removed_before: i64
+
+struct RiscvAlignSection:
+    cuts: [RiscvAlignCut]
+    bytes: [u8]
+
+fn riscv_align_offset(cuts: [RiscvAlignCut], offset: i64) -> Result<i64, text>:
+    var lo: i64 = 0
+    var hi = cuts.len()
+    while lo < hi:
+        val mid = lo + (hi - lo) / 2
+        if cuts[mid].start <= offset: lo = mid + 1
+        else: hi = mid
+    if lo == 0: return Ok(offset)
+    val cut = cuts[lo - 1]
+    if offset > cut.start and offset < cut.end:
+        return Err("RISC-V ALIGN reference points inside rewritten padding")
+    if offset == cut.start: return Ok(offset - cut.removed_before)
+    Ok(offset - cut.removed_before - (cut.end - cut.start - cut.kept))
+
+fn riscv_align_put(raw: [u8], offset: i64, value: i64) -> Result<[u8], text>:
+    if offset < 0 or offset > raw.len() or 8 > raw.len() - offset:
+        return Err("RISC-V ALIGN ELF table field is truncated")
+    var result = raw
+    var i: i64 = 0
+    while i < 8:
+        result[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+    Ok(result)
+
+fn riscv_align_section(object: ElfObject, si: i64, hints: [ElfRelocation]) -> Result<RiscvAlignSection, text>:
+    if hints.len() == 0: return Ok(RiscvAlignSection(cuts: [], bytes: []))
+    val section = object.sections[si]
+    if section.sh_type != 1 or (section.sh_flags & 6) != 6:
+        return Err("RISC-V ALIGN requires an allocated executable PROGBITS section")
+    if section.sh_addr < 0 or section.sh_addr > object.raw.len() or section.sh_size < 0 or section.sh_size > object.raw.len() - section.sh_addr:
+        return Err("RISC-V ALIGN input section is truncated")
+    val minimum = if (object.raw[48] & 1) != 0: 2 else: 4
+    val section_alignment = elf_section_addralign(object, si)
+    var by_offset: {i64: i64} = {}
+    for hint in hints:
+        if hint.r_offset < 0 or hint.r_offset >= section.sh_size or by_offset.has(hint.r_offset):
+            return Err("RISC-V ALIGN has an invalid or duplicate padding offset")
+        if hint.r_addend <= 0 or hint.r_addend % minimum != 0 or hint.r_addend > section.sh_size - hint.r_offset:
+            return Err("RISC-V ALIGN has an invalid padding size")
+        by_offset[hint.r_offset] = hint.r_addend
+    var bytes: [u8] = []
+    var cuts: [RiscvAlignCut] = []
+    var cursor: i64 = 0
+    var removed: i64 = 0
+    while cursor < section.sh_size:
+        if not by_offset.has(cursor):
+            bytes.push(object.raw[section.sh_addr + cursor])
+            cursor = cursor + 1
+            continue
+        val padding = by_offset[cursor]
+        var alignment: i64 = 1
+        while alignment <= padding:
+            if alignment > 4611686018427387903:
+                return Err("RISC-V ALIGN requested alignment overflows")
+            alignment = alignment * 2
+        if section_alignment < alignment or section_alignment % alignment != 0:
+            return Err("RISC-V ALIGN exceeds input section alignment")
+        val kept = (alignment - (bytes.len() % alignment)) % alignment
+        if kept > padding or kept % minimum != 0:
+            return Err("RISC-V ALIGN cannot be satisfied by deleting complete NOPs")
+        var checked: i64 = 0
+        while checked < padding:
+            val base = section.sh_addr + cursor + checked
+            if minimum == 2 and object.raw[base] == 1 and object.raw[base + 1] == 0:
+                checked = checked + 2
+            elif padding - checked >= 4 and object.raw[base] == 0x13 and object.raw[base + 1] == 0 and object.raw[base + 2] == 0 and object.raw[base + 3] == 0:
+                checked = checked + 4
+            else:
+                return Err("RISC-V ALIGN padding contains a non-NOP instruction")
+        var emitted: i64 = 0
+        while emitted < kept:
+            if minimum == 2:
+                bytes.push(1)
+                bytes.push(0)
+            else:
+                bytes.push(0x13)
+                bytes.push(0)
+                bytes.push(0)
+                bytes.push(0)
+            emitted = emitted + minimum
+        cuts.push(RiscvAlignCut(start: cursor, end: cursor + padding,
+            kept: kept, removed_before: removed))
+        removed = removed + padding - kept
+        cursor = cursor + padding
+    if cuts.len() != hints.len(): return Err("RISC-V ALIGN padding regions overlap")
+    Ok(RiscvAlignSection(cuts: cuts, bytes: bytes))
+
+fn elf_riscv_align_object(object: ElfObject) -> Result<ElfObject, text>:
+    if object.raw.len() < 64 or object.raw[4] != 2 or object.raw[5] != 1 or object.header.e_machine != 243:
+        return Err("RISC-V ALIGN requires a little-endian RV64 ELF object")
+    var hints: [[ElfRelocation]] = []
+    for section in object.sections: hints.push([])
+    var found = false
+    for relocation in object.relocations:
+        if elf_reloc_type(relocation) == 43:
+            val si = relocation.target_section_idx
+            if si < 0 or si >= hints.len(): return Err("RISC-V ALIGN target section is invalid")
+            hints[si] = hints[si].push(relocation)
+            found = true
+    if not found: return Ok(object)
+    var plans: [RiscvAlignSection] = []
+    var si: i64 = 0
+    var raw = object.raw
+    var symtab: i64 = -1
+    while si < object.sections.len():
+        val section = object.sections[si]
+        val plan = riscv_align_section(object, si, hints[si])?
+        plans.push(plan)
+        if plan.cuts.len() > 0:
+            var i: i64 = 0
+            while i < section.sh_size:
+                raw[section.sh_addr + i] = if i < plan.bytes.len(): plan.bytes[i] else: 0
+                i = i + 1
+            raw = riscv_align_put(raw, object.header.e_shoff + si * 64 + 32, plan.bytes.len())?
+        if section.sh_type == 2:
+            if symtab != -1 or elf_section_entsize(object, si) != 24:
+                return Err("RISC-V ALIGN requires one canonical ELF64 symbol table")
+            symtab = si
+        si = si + 1
+    if symtab < 0: return Err("RISC-V ALIGN requires a symbol table")
+    var symbol_index: i64 = 0
+    for symbol in object.symbols:
+        val section_index = symbol.st_shndx
+        if section_index > 0 and section_index < plans.len() and plans[section_index].cuts.len() > 0:
+            val size = object.sections[section_index].sh_size
+            if symbol.st_value < 0 or symbol.st_value > size or symbol.st_size < 0 or symbol.st_size > size - symbol.st_value:
+                return Err("RISC-V ALIGN symbol extent is outside its section")
+            val cuts = plans[section_index].cuts
+            val start = riscv_align_offset(cuts, symbol.st_value)?
+            val end = riscv_align_offset(cuts, symbol.st_value + symbol.st_size)?
+            val offset = object.sections[symtab].sh_addr + symbol_index * 24
+            raw = riscv_align_put(raw, offset + 8, start)?
+            raw = riscv_align_put(raw, offset + 16, end - start)?
+        symbol_index = symbol_index + 1
+    var entries: {i64: i64} = {}
+    for relocation in object.relocations:
+        val table_index = relocation.section_idx
+        if table_index < 0 or table_index >= object.sections.len():
+            return Err("RISC-V ALIGN relocation table is invalid")
+        val table = object.sections[table_index]
+        if table.sh_type != 4 or elf_section_entsize(object, table_index) != 24:
+            return Err("RISC-V ALIGN requires canonical ELF64 RELA tables")
+        val entry = if entries.has(table_index): entries[table_index] else: 0
+        entries[table_index] = entry + 1
+        val offset = table.sh_addr + entry * 24
+        val target = relocation.target_section_idx
+        if target < 0 or target >= plans.len(): return Err("RISC-V ALIGN relocation target section is invalid")
+        val kind = elf_reloc_type(relocation)
+        val cuts = plans[target].cuts
+        val place = riscv_align_offset(cuts, relocation.r_offset)?
+        if cuts.len() > 0 and kind != 43:
+            val width = reloc_patch_width(RelocArch.Riscv64, kind)
+            val size = object.sections[target].sh_size
+            if relocation.r_offset < 0 or relocation.r_offset > size or width > size - relocation.r_offset:
+                return Err("RISC-V ALIGN relocation field exceeds its input section")
+            val end = riscv_align_offset(cuts, relocation.r_offset + width)?
+            if end - place != width: return Err("RISC-V ALIGN relocation overlaps deleted padding")
+        raw = riscv_align_put(raw, offset, place)?
+        if kind == 43:
+            raw = riscv_align_put(raw, offset + 8, 0)?
+            raw = riscv_align_put(raw, offset + 16, 0)?
+            continue
+        val symbol_id = elf_reloc_sym(relocation)
+        if symbol_id < 0 or symbol_id >= object.symbols.len():
+            return Err("RISC-V ALIGN relocation symbol is invalid")
+        # Keep explicit addends unchanged for both named and section symbols.
+        # LLD --no-relax preserves `_start + 24` and `.text + 24` even when
+        # the actual label originally at offset24 moves to offset16.
+    elf_parse_object(raw)
+
+fn elf_riscv_align_objects(objects: [ElfObject]) -> Result<[ElfObject], text>:
+    var normalized: [ElfObject] = []
+    var index: i64 = 0
+    for object in objects:
+        val result = elf_riscv_align_object(object)
+        if result.is_err(): return Err("object {index}: {result.unwrap_err()}")
+        normalized.push(result.unwrap())
+        index = index + 1
+    Ok(normalized)
+
+export elf_riscv_align_objects

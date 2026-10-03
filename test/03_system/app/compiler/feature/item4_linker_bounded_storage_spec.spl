@@ -1,0 +1,267 @@
+"""
+# ITEM4-REQ-009 file-backed linker spill execution
+NOT RUN until an admitted SSpec runtime is available. This tests bounded IO and
+logical scratch-byte admission, not an enforced whole-job memory limit or a
+complete bounded ELF engine. No native execution or performance PASS is claimed.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, file_exists, dir_create_all, dir_exists, host_os, cwd, process_run}
+use std.path.{resolve}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.retained_file.{retained_directory_is_real_no_follow}
+use std.nogc_async_mut.link_working_set.file_store.{
+    link_spill_required_scratch_v1, link_stage_file_v1, link_publish_staged_v1,
+    link_discard_staged_v1
+}
+
+fn item4_spill_never_cancel() -> bool: false
+
+fn item4_spill_prevent_cleanup(path: text) -> bool:
+    expect(file_write_bytes(path, [99u8])).to_equal(true)
+    false
+
+fn item4_spill_parent() -> Result<text, text>:
+    if not dir_create_all("build"): return Err("test build directory unavailable")
+    secure_temp_dir("build", "item4-bounded-spec-")
+
+fn item4_spill_source(parent: text) -> text:
+    val path = parent + "/input.bin"
+    expect(file_write_bytes(path, [0u8, 255u8, 128u8, 1u8, 2u8, 0u8, 4u8, 5u8])).to_equal(true)
+    path
+
+fn item4_spill_cleanup(parent: text, source: text, output: text):
+    if file_exists(source): expect(file_remove(source)).to_equal(true)
+    if file_exists(output): expect(file_remove(output)).to_equal(true)
+    expect(dir_remove(parent, false)).to_equal(true)
+
+describe "ITEM4-REQ-009 linker spill storage execution":
+    it "admits real scratch directories and rejects file missing and NUL parents without runtime-only probes":
+        step("Create a real private directory and binary source through existing filesystem owners")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        expect(retained_directory_is_real_no_follow(parent)).to_equal(true)
+        expect(retained_directory_is_real_no_follow(parent + "/")).to_equal(true)
+        expect(retained_directory_is_real_no_follow(source)).to_equal(false)
+        expect(retained_directory_is_real_no_follow(parent + "/absent")).to_equal(false)
+        expect(retained_directory_is_real_no_follow(parent + "\0suffix")).to_equal(false)
+        step("Reject a regular file as the scratch parent before staging")
+        val rejected = link_stage_file_v1(source, source, 4, 80u64, item4_spill_never_cancel)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("not a regular directory")
+        item4_spill_cleanup(parent, source, parent + "/unused")
+
+    it "rejects a real scratch-directory symlink or junction including a trailing separator":
+        step("Require a supported retained-file host and create a real directory alias")
+        val platform = host_os()
+        expect(platform == "windows" or platform == "linux").to_equal(true)
+        if platform != "windows" and platform != "linux": return
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val alias = parent + "/alias"
+        val normalized_parent = parent.replace("\\", "/")
+        val drive_absolute = normalized_parent.len() >= 3 and normalized_parent.byte_at(1) == 58 and normalized_parent.byte_at(2) == 47
+        val target = if drive_absolute or normalized_parent.starts_with("/"): normalized_parent else: resolve(normalized_parent, cwd().replace("\\", "/"))
+        var code: i64 = -1
+        if platform == "windows":
+            val (_out, _err, status) = process_run("cmd.exe", ["/d", "/c", "mklink", "/J", alias.replace("/", "\\"), target.replace("/", "\\")])
+            code = status
+        else:
+            val (_out, _err, status) = process_run("ln", ["-s", target, alias])
+            code = status
+        expect(code).to_equal(0)
+        expect(dir_exists(alias)).to_equal(true)
+        if code != 0 or not dir_exists(alias): return
+        step("Distinguish the real target from its final symlink or reparse-point entry")
+        expect(retained_directory_is_real_no_follow(alias)).to_equal(false)
+        expect(retained_directory_is_real_no_follow(alias + "/")).to_equal(false)
+        val rejected = link_stage_file_v1(source, alias, 4, 80u64, item4_spill_never_cancel)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("not a regular directory")
+        step("Remove only the alias and prove its real target survives cleanup")
+        if platform == "windows":
+            expect(dir_remove(alias, false)).to_equal(true)
+        else:
+            expect(file_remove(alias)).to_equal(true)
+        expect(retained_directory_is_real_no_follow(parent)).to_equal(true)
+        expect(file_exists(source)).to_equal(true)
+        item4_spill_cleanup(parent, source, parent + "/unused")
+
+    it "streams binary windows into checksummed frames and transactionally reconstructs the exact bytes":
+        step("Create an isolated binary fixture including zero and high-bit bytes")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val output = parent + "/linked.bin"
+        step("Stage two four-byte windows under the exact 80-byte logical scratch reservation")
+        val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
+        expect(staged.is_ok()).to_equal(true)
+        if staged.is_err(): return
+        expect(staged.unwrap().content_bytes).to_equal(8u64)
+        expect(staged.unwrap().spill_bytes).to_equal(72u64)
+        expect(staged.unwrap().scratch_reserved_bytes).to_equal(80u64)
+        expect(file_exists(output)).to_equal(false)
+        step("Replay checked frames into a private output and publish without replacement")
+        val published = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        expect(published.is_ok()).to_equal(true)
+        if published.is_ok():
+            expect(published.unwrap().published_bytes).to_equal(8u64)
+            expect(published.unwrap().cleanup_pending).to_equal(false)
+        expect(file_read_bytes(output)).to_equal([0u8, 255u8, 128u8, 1u8, 2u8, 0u8, 4u8, 5u8])
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        item4_spill_cleanup(parent, source, output)
+
+    it "reports committed publication separately from pending cleanup and allows only cleanup retry":
+        step("Stage a real binary and make nonrecursive cleanup fail on an unrelated marker")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val output = parent + "/linked.bin"
+        val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
+        expect(staged.is_ok()).to_equal(true)
+        if staged.is_err(): return
+        val blocker = staged.unwrap().directory + "/unrelated.marker"
+        val published = link_publish_staged_v1(staged.unwrap(), output, \: item4_spill_prevent_cleanup(blocker))
+        step("Observe successful publication even though owned-directory cleanup remains pending")
+        expect(published.is_ok()).to_equal(true)
+        if published.is_ok():
+            expect(published.unwrap().published_bytes).to_equal(8u64)
+            expect(published.unwrap().cleanup_pending).to_equal(true)
+        expect(file_read_bytes(output)).to_equal([0u8, 255u8, 128u8, 1u8, 2u8, 0u8, 4u8, 5u8])
+        expect(staged.unwrap().published).to_equal(true)
+        expect(staged.unwrap().consumed).to_equal(false)
+        val duplicate = link_publish_staged_v1(staged.unwrap(), parent + "/duplicate.bin", item4_spill_never_cancel)
+        expect(duplicate.is_err()).to_equal(true)
+        if duplicate.is_err(): expect(duplicate.unwrap_err()).to_contain("already published")
+        expect(file_exists(parent + "/duplicate.bin")).to_equal(false)
+        step("Remove only the independently created marker and retry cleanup without another publication")
+        expect(file_remove(blocker)).to_equal(true)
+        expect(link_discard_staged_v1(staged.unwrap()).is_ok()).to_equal(true)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        item4_spill_cleanup(parent, source, output)
+
+    it "rejects scratch and window boundaries before creating a staged transaction":
+        step("Derive the independent two-frame byte budget and reject undersized or overflowing plans")
+        val exact = link_spill_required_scratch_v1(8u64, 4)
+        expect(exact.is_ok()).to_equal(true)
+        if exact.is_err(): return
+        expect(exact.unwrap()).to_equal(80u64)
+        expect(link_spill_required_scratch_v1(8u64, 0).is_err()).to_equal(true)
+        expect(link_spill_required_scratch_v1(8u64, 1048577).is_err()).to_equal(true)
+        expect(link_spill_required_scratch_v1(0xffffffffffffffffu64, 1).is_err()).to_equal(true)
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        step("One byte below the real scratch requirement must fail")
+        val refused = link_stage_file_v1(source, parent, 4, 79u64, item4_spill_never_cancel)
+        expect(refused.is_err()).to_equal(true)
+        if refused.is_err(): expect(refused.unwrap_err()).to_contain("scratch budget")
+        step("The exact admitted boundary succeeds and can be explicitly discarded")
+        val accepted = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
+        expect(accepted.is_ok()).to_equal(true)
+        if accepted.is_ok(): expect(link_discard_staged_v1(accepted.unwrap()).is_ok()).to_equal(true)
+        item4_spill_cleanup(parent, source, parent + "/unused")
+
+    it "rejects a corrupt spill payload and leaves an existing destination untouched":
+        step("Stage a real fixture and preserve a pre-existing destination sentinel")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val output = parent + "/linked.bin"
+        expect(file_write_bytes(output, [9u8, 8u8, 7u8])).to_equal(true)
+        val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
+        expect(staged.is_ok()).to_equal(true)
+        if staged.is_err(): return
+        step("Change one payload byte after the 16-byte file header and 24-byte frame header")
+        var corrupt = file_read_bytes(staged.unwrap().directory + "/frames.bin")
+        expect(corrupt.len()).to_equal(72)
+        if corrupt.len() != 72: return
+        corrupt[40] = corrupt[40] ^ 1u8
+        expect(file_write_bytes(staged.unwrap().directory + "/frames.bin", corrupt)).to_equal(true)
+        step("Replay fails its checksum before publication and removes only owned stage files")
+        val rejected = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("checksum mismatch")
+        expect(file_read_bytes(output)).to_equal([9u8, 8u8, 7u8])
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        item4_spill_cleanup(parent, source, output)
+
+    it "closes retained handles and cleans private output when cancellation arrives after output creation":
+        step("Create valid staged frames before requesting cancellation")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val output = parent + "/cancelled.bin"
+        val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
+        expect(staged.is_ok()).to_equal(true)
+        if staged.is_err(): return
+        val private_output = staged.unwrap().directory + "/payload.tmp"
+        step("Use actual private-output existence as the cancellation signal while handles are open")
+        val rejected = link_publish_staged_v1(staged.unwrap(), output, \: file_exists(private_output))
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("cancelled")
+        expect(file_exists(output)).to_equal(false)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        item4_spill_cleanup(parent, source, output)
+
+    it "rejects a truncated spill before publication":
+        step("Stage two frames and remove only the final payload byte")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val output = parent + "/truncated.bin"
+        val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
+        expect(staged.is_ok()).to_equal(true)
+        if staged.is_err(): return
+        val complete = file_read_bytes(staged.unwrap().directory + "/frames.bin")
+        expect(complete.len()).to_equal(72)
+        if complete.len() != 72: return
+        var short: [u8] = []
+        for index in 0..(complete.len() - 1): short.push(complete[index])
+        expect(file_write_bytes(staged.unwrap().directory + "/frames.bin", short)).to_equal(true)
+        step("Reject the length mismatch, preserve destination absence, and clean the transaction")
+        val rejected = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("spill size mismatch")
+        expect(file_exists(output)).to_equal(false)
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        item4_spill_cleanup(parent, source, output)
+
+    it "never replaces an existing destination even after every spill frame validates":
+        step("Prepare valid frames and a destination that must remain intact")
+        val directory = item4_spill_parent()
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val source = item4_spill_source(parent)
+        val output = parent + "/existing.bin"
+        expect(file_write_bytes(output, [6u8, 5u8])).to_equal(true)
+        val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
+        expect(staged.is_ok()).to_equal(true)
+        if staged.is_err(): return
+        step("Require the atomic no-replace collision, not a destructive overwrite")
+        val rejected = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("destination exists")
+        expect(file_read_bytes(output)).to_equal([6u8, 5u8])
+        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        item4_spill_cleanup(parent, source, output)

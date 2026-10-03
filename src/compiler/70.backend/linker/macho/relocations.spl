@@ -1,0 +1,148 @@
+# Mach-O implicit-addend decoding; shared ELF engine owns checked ISA formulas.
+use compiler.backend.linker.macho.input.{MachOInput, macho_read, macho_put, macho_sign}
+use compiler.backend.linker.macho.layout.{MachOLayout}
+use compiler.backend.linker.macho.symbols.{MachOBinding, macho_resolve_symbol}
+use compiler.backend.linker.macho_parser.{MachORelocationEntry, macho_parse_relocations}
+use compiler.backend.linker.reloc_engine.{reloc_apply_x86_64, reloc_apply_aarch64}
+
+struct MachORelocTarget:
+    address: i64
+    original: i64
+
+fn macho_reloc_target(inputs: [MachOInput], definitions: {text: MachOBinding},
+        owner: i64, relocation: MachORelocationEntry, layout: MachOLayout) -> Result<MachORelocTarget, text>:
+    if relocation.r_extern:
+        val value = macho_resolve_symbol(inputs, definitions, owner, relocation.r_symbolnum, layout)?
+        return Ok(MachORelocTarget(address: value, original: 0))
+    if relocation.r_symbolnum == 0: return Ok(MachORelocTarget(address: 0, original: 0))
+    val key = "{owner}:{relocation.r_symbolnum}"
+    if not layout.addresses.has(key): return Err("Mach-O local relocation section out of range")
+    var ordinal: i64 = 1
+    for segment in inputs[owner].object.segments:
+        for section in segment.sections:
+            if ordinal == relocation.r_symbolnum:
+                return Ok(MachORelocTarget(address: layout.addresses[key], original: section.addr))
+            ordinal = ordinal + 1
+    Err("Mach-O local relocation section out of range")
+
+fn macho_relocate(bytes: [u8], inputs: [MachOInput], definitions: {text: MachOBinding},
+        layout: MachOLayout, arm: bool) -> Result<[u8], text>:
+    var out = bytes
+    var owner: i64 = 0
+    for input in inputs:
+        var ordinal: i64 = 1
+        for segment in input.object.segments:
+            for section in segment.sections:
+                val key = "{owner}:{ordinal}"
+                if layout.offsets.has(key):
+                    val relocations = macho_parse_relocations(input.object.raw, section, input.object.byte_order)
+                    var index: i64 = 0
+                    while index < relocations.len():
+                        var relocation = relocations[index]
+                        var explicit_addend: i64 = 0
+                        if arm and relocation.r_type == 10:
+                            if relocation.r_extern or relocation.r_pcrel or relocation.r_length != 2 or index + 1 >= relocations.len():
+                                return Err("{input.name}: malformed ARM64_RELOC_ADDEND pair")
+                            explicit_addend = macho_sign(relocation.r_symbolnum, 24)
+                            val following = relocations[index + 1]
+                            if following.r_address != relocation.r_address or (following.r_type != 2 and following.r_type != 3 and following.r_type != 4):
+                                return Err("{input.name}: invalid ARM64_RELOC_ADDEND follower")
+                            index = index + 1
+                            relocation = following
+                        val width = 1 << relocation.r_length
+                        if relocation.r_address < 0 or relocation.r_address > section.size or width > section.size - relocation.r_address:
+                            return Err("{input.name}: Mach-O relocation patch exceeds section")
+                        val offset = layout.offsets[key] + relocation.r_address
+                        val place = layout.addresses[key] + relocation.r_address
+                        val target = macho_reloc_target(inputs, definitions, owner, relocation, layout)?
+                        val encoded = macho_read(out, offset, width)
+                        var value: i64 = 0
+                        val subtractor = if arm: 1 else: 5
+                        if relocation.r_type == subtractor:
+                            if relocation.r_pcrel or index + 1 >= relocations.len():
+                                return Err("{input.name}: malformed Mach-O subtractor pair")
+                            val next = relocations[index + 1]
+                            if next.r_type != 0 or next.r_pcrel or next.r_length != relocation.r_length or next.r_address != relocation.r_address:
+                                return Err("{input.name}: malformed Mach-O subtractor follower")
+                            val positive = macho_reloc_target(inputs, definitions, owner, next, layout)?
+                            value = positive.address - target.address + macho_sign(encoded, width * 8)
+                            if not next.r_extern: value = value - positive.original
+                            if not relocation.r_extern: value = value + target.original
+                            if width != 8 and (value < -2147483648 or value > 2147483647):
+                                return Err("Mach-O subtractor overflow")
+                            if width != 4 and width != 8: return Err("unsupported Mach-O subtractor width")
+                            index = index + 1
+                        elif relocation.r_type == 0:
+                            if relocation.r_pcrel or (width != 4 and width != 8):
+                                return Err("unsupported Mach-O unsigned relocation encoding")
+                            value = target.address + macho_sign(encoded, width * 8)
+                            if not relocation.r_extern: value = value - target.original
+                            if value < 0 or (width == 4 and value > 4294967295):
+                                return Err("Mach-O unsigned relocation overflow")
+                        elif not arm:
+                            val kind = relocation.r_type
+                            if kind != 1 and kind != 2 and kind != 6 and kind != 7 and kind != 8:
+                                return Err("unsupported x86_64 Mach-O relocation {kind} (GOT/TLV needs dyld support)")
+                            if not relocation.r_pcrel or width != 4:
+                                return Err("invalid x86_64 Mach-O PC-relative relocation")
+                            val bias = if kind == 6: 1 elif kind == 7: 2 elif kind == 8: 4 else: 0
+                            var addend = macho_sign(encoded, 32)
+                            if not relocation.r_extern:
+                                addend = addend + section.addr + relocation.r_address + 4 + bias - target.original
+                            val applied = reloc_apply_x86_64([], 0, 2, target.address, addend, place + 4 + bias)
+                            if not applied.success: return Err("{input.name}: {applied.error}")
+                            value = applied.value
+                        else:
+                            if width != 4 or relocation.r_address % 4 != 0:
+                                return Err("invalid ARM64 Mach-O instruction relocation width/alignment")
+                            val kind = relocation.r_type
+                            if kind == 2:
+                                if not relocation.r_pcrel or (encoded & 0x7c000000) != 0x14000000:
+                                    return Err("ARM64_RELOC_BRANCH26 requires B or BL")
+                                var addend = macho_sign(encoded & 0x3ffffff, 26) * 4 + explicit_addend
+                                if not relocation.r_extern: addend = addend + section.addr + relocation.r_address - target.original
+                                val applied = reloc_apply_aarch64([], 0, 282, target.address, addend, place)
+                                if not applied.success: return Err("{input.name}: {applied.error}")
+                                value = (encoded & 0xfc000000) | applied.value
+                            elif kind == 3:
+                                if not relocation.r_pcrel or not relocation.r_extern or (encoded & 0x9f000000) != 0x90000000:
+                                    return Err("unsupported ARM64_RELOC_PAGE21 encoding; require external ADRP")
+                                val immediate = ((encoded >> 29) & 3) | (((encoded >> 5) & 0x7ffff) << 2)
+                                val addend = macho_sign(immediate, 21) * 4096 + explicit_addend
+                                val applied = reloc_apply_aarch64([], 0, 275, target.address, addend, place)
+                                if not applied.success: return Err("{input.name}: {applied.error}")
+                                value = (encoded & 0x9f00001f) | ((applied.value & 3) << 29) | (((applied.value >> 2) & 0x7ffff) << 5)
+                            elif kind == 4:
+                                if relocation.r_pcrel or not relocation.r_extern:
+                                    return Err("unsupported ARM64_RELOC_PAGEOFF12 local/pcrel encoding")
+                                var scale: i64 = 0
+                                if (encoded & 0x7f800000) == 0x11000000:
+                                    if (encoded & 0x00400000) != 0: return Err("ARM64 PAGEOFF12 ADD cannot shift by 12")
+                                elif (encoded & 0x3b000000) == 0x39000000:
+                                    scale = (encoded >> 30) & 3
+                                    val vector = (encoded & 0x04000000) != 0
+                                    val opcode = (encoded >> 22) & 3
+                                    if vector:
+                                        if opcode >= 2:
+                                            if scale != 0: return Err("reserved ARM64 vector load/store encoding")
+                                            scale = 4
+                                    elif opcode >= 2:
+                                        # Signed loads: opc=2 accepts byte/half/word;
+                                        # opc=3 accepts byte/half. Exclude PRFM.
+                                        if scale == 3 or (opcode == 3 and scale >= 2):
+                                            return Err("unsupported ARM64 load/store opcode")
+                                else:
+                                    return Err("ARM64 PAGEOFF12 requires ADD or unsigned-offset load/store")
+                                val addend = (((encoded >> 10) & 0xfff) << scale) + explicit_addend
+                                val low = (target.address + addend) & 0xfff
+                                if low % (1 << scale) != 0: return Err("ARM64 PAGEOFF12 target alignment mismatch")
+                                value = (encoded & 0xffc003ff) | ((low >> scale) << 10)
+                            else:
+                                return Err("unsupported ARM64 Mach-O relocation {kind} (GOT/TLV/auth requires loader support)")
+                        out = macho_put(out, offset, width, value)
+                        index = index + 1
+                ordinal = ordinal + 1
+        owner = owner + 1
+    Ok(out)
+
+export macho_relocate
