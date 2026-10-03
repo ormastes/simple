@@ -6,9 +6,8 @@
 # It costs one durable child record and retirement update per reservation;
 # no throughput/scale claim is made. Old files are retained, never deleted.
 use app.io.mod (is_dir, dir_create, file_create_exclusive, file_atomic_write, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_fsync, directory_fsync)
-use app.scv.db.local_store.{db_local_path_scope}
+use app.scv.db.local_store.{db_local_path_scope, db_local_existing_canonical}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_release}
 use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_uid_validate}
@@ -37,9 +36,9 @@ fn _db_actor_open_owned(session: DbActorSession) -> Result<DbActorSession, text>
     if scope != "": return Err(scope)
     for directory in ["{session.root}/.scv", "{session.root}/.scv/local", "{session.root}/.scv/local/actors"]:
         if not dir_is_real_no_follow(directory) and not dir_create(directory, false): return Err("SCVDB_ACTOR_DIRECTORY")
-        if not dir_is_real_no_follow(directory) or path_absolute(directory) != directory: return Err("SCVDB_STORE_SCOPE")
+        if not dir_is_real_no_follow(directory) or not db_local_existing_canonical(directory): return Err("SCVDB_STORE_SCOPE")
     if not file_create_exclusive(_db_actor_path(session), _db_actor_record(session)): return Err("SCVDB_ACTOR_CREATE")
-    if not file_is_regular_no_follow(_db_actor_path(session)) or path_absolute(_db_actor_path(session)) != _db_actor_path(session): return Err("SCVDB_STORE_SCOPE")
+    if not file_is_regular_no_follow(_db_actor_path(session)) or not db_local_existing_canonical(_db_actor_path(session)): return Err("SCVDB_STORE_SCOPE")
     if not _db_actor_sync(session): return Err("SCVDB_ACTOR_DURABILITY_UNCERTAIN")
     Ok(session)
 
@@ -62,7 +61,7 @@ fn db_actor_open(root: text, namespace: text) -> Result<DbActorSession, text>:
 fn _db_actor_reserve_owned(session: DbActorSession, kind: text) -> Result<DbActorReservation, text>:
     val scope = db_local_path_scope(session.root, [".sj", ".scv", ".scv/local", ".scv/local/actors"])
     if scope != "": return Err(scope)
-    if not file_is_regular_no_follow(_db_actor_path(session)) or path_absolute(_db_actor_path(session)) != _db_actor_path(session): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
+    if not file_is_regular_no_follow(_db_actor_path(session)) or not db_local_existing_canonical(_db_actor_path(session)): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
     val recorded = file_read_regular_no_follow_bounded(_db_actor_path(session), 256)?
     if recorded != _db_actor_record(session): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
     val incarnation = random_hex(16) ?? ""
@@ -71,17 +70,17 @@ fn _db_actor_reserve_owned(session: DbActorSession, kind: text) -> Result<DbActo
     var next = session
     next.actor = ActorIncarnation(hex: incarnation)
     next.counter = session.counter + 1
-    if path_absolute("{session.root}/.scv/local/actors") != "{session.root}/.scv/local/actors": return Err("SCVDB_STORE_SCOPE")
+    if not db_local_existing_canonical("{session.root}/.scv/local/actors"): return Err("SCVDB_STORE_SCOPE")
     # A random collision or preexisting entry is rejection, never replacement.
     if not file_create_exclusive(_db_actor_path(next), _db_actor_record(next)):
         return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
-    if not file_is_regular_no_follow(_db_actor_path(next)) or path_absolute(_db_actor_path(next)) != _db_actor_path(next): return Err("SCVDB_STORE_SCOPE")
+    if not file_is_regular_no_follow(_db_actor_path(next)) or not db_local_existing_canonical(_db_actor_path(next)): return Err("SCVDB_STORE_SCOPE")
     if not _db_actor_sync(next): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
     # Retire the old handle only after the child is durable. Crashes before
     # acknowledgement can strand records but cannot reissue an acknowledged
     # UID. Even if an old record is restored, another reservation rotates anew.
     val retired = "scv-db/actor-retired/v1\n{session.namespace}\n{session.actor.hex}\n{session.counter}\n{next.actor.hex}\n{next.counter}\n"
-    if not file_is_regular_no_follow(_db_actor_path(session)) or path_absolute(_db_actor_path(session)) != _db_actor_path(session): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
+    if not file_is_regular_no_follow(_db_actor_path(session)) or not db_local_existing_canonical(_db_actor_path(session)): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
     if not file_atomic_write(_db_actor_path(session), retired): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
     if not _db_actor_sync(session): return Err("SCVDB_ACTOR_ROTATION_REQUIRED")
     Ok(DbActorReservation(session: next, uid: EntityUid(database_namespace: next.namespace, entity_kind: kind, actor: next.actor, counter: next.counter)))

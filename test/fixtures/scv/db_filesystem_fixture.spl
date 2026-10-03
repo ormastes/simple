@@ -1,0 +1,23 @@
+# Real link fixtures. Missing host privileges fail setup; they never count as
+# successful rejection of an alias which was not actually created.
+use std.spec.{expect}
+use app.io.mod (file_write, process_run_bounded)
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+
+@when(os="windows"):
+fn setup_item2_filesystem_link(root: text, target: text, link: text, directory: bool) -> i64:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val script = "{root}/link-{nonce}.ps1"
+    val source = "param([string]$LinkPath,[string]$TargetPath,[string]$LinkKind)\n$ErrorActionPreference = 'Stop'\nNew-Item -ItemType $LinkKind -Path $LinkPath -Target $TargetPath | Out-Null\n"
+    expect(file_write(script, source)).to_be(true)
+    val kind = if directory: "Junction" else: "SymbolicLink"
+    val (_out, _err, code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-LinkPath", link, "-TargetPath", target, "-LinkKind", kind], 30000, 4096)
+    code
+@else:
+fn setup_item2_filesystem_link(root: text, target: text, link: text, directory: bool) -> i64:
+    val (_out, _err, code) = process_run_bounded("ln", ["-s", target, link], 30000, 4096)
+    code
+@end
+
+export setup_item2_filesystem_link

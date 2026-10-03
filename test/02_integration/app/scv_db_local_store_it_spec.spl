@@ -1,9 +1,11 @@
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 # codex-impl
 # Real filesystem/lease assertions. Execution and crash-injection evidence are
 # separate gates; source presence alone is not a durability acceptance receipt.
 use std.spec.{describe, it, expect, step}
-use app.io.mod (cwd, dir_create, file_read, file_write, file_exists, file_delete, process_run_timeout)
-use app.scv.db.local_store.{db_store_read, db_store_commit}
+use app.io.mod (cwd, dir_create, file_read, file_write, file_exists, file_delete)
+use app.scv.db.local_store.{db_store_read, db_store_commit, db_local_path_scope}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
@@ -16,6 +18,14 @@ fn setup_item2_store() -> text:
     root
 
 describe "SJ-owned distributed database local generation store":
+    it "admits an OS-resolved root and rejects missing, traversal and noncanonical scopes":
+        val root = setup_item2_store()
+        expect(db_local_path_scope(root, [".sj", ".scv"])).to_equal("")
+        expect(db_local_path_scope("{root}/missing", [])).to_equal("SCVDB_STORE_SCOPE")
+        expect(db_local_path_scope("{root}/.", [])).to_equal("SCVDB_STORE_SCOPE")
+        expect(db_local_path_scope(root, ["../outside"])).to_equal("SCVDB_STORE_SCOPE")
+        expect(db_local_path_scope(root, [".scv//db"])).to_equal("SCVDB_STORE_SCOPE")
+
     it "isolates local delivery and discovery channels under the same repository lease":
         val root = setup_item2_store()
         val semantic = db_store_commit(root, "", sha256_text("semantic"), "rows")
@@ -101,7 +111,7 @@ describe "SJ-owned distributed database local generation store":
         val root = setup_item2_store()
         val victim = setup_item2_store()
         expect(file_write("{victim}/sentinel", "unchanged")).to_be(true)
-        val (_out, _err, code) = process_run_timeout("ln", ["-s", victim, "{root}/.scv"], 30000)
+        val code = setup_item2_filesystem_link(root, victim, "{root}/.scv", true)
         expect(code).to_equal(0)
         expect(db_store_commit(root, "", sha256_text("alias"), "state").code).to_equal("SCVDB_STORE_SCOPE")
         expect(file_read("{victim}/sentinel")).to_equal("unchanged")
@@ -116,12 +126,12 @@ describe "SJ-owned distributed database local generation store":
         val victim = setup_item2_store()
         expect(file_write("{victim}/object", file_read(object_path))).to_be(true)
         expect(file_delete(object_path)).to_be(true)
-        val (_out, _err, code) = process_run_timeout("ln", ["-s", "{victim}/object", object_path], 30000)
+        val code = setup_item2_filesystem_link(root, "{victim}/object", object_path, false)
         expect(code).to_equal(0)
         expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")
         expect(file_write("{victim}/HEAD", "{first.head}\n")).to_be(true)
         expect(file_delete("{root}/.scv/db/HEAD")).to_be(true)
-        val (_head_out, _head_err, head_code) = process_run_timeout("ln", ["-s", "{victim}/HEAD", "{root}/.scv/db/HEAD"], 30000)
+        val head_code = setup_item2_filesystem_link(root, "{victim}/HEAD", "{root}/.scv/db/HEAD", false)
         expect(head_code).to_equal(0)
         expect(db_store_read(root).code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
 

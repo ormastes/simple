@@ -3,10 +3,10 @@
 # complete semantic state; this layer does not authenticate that state or claim
 # Git settlement. Readers verify the image named by the atomic HEAD pointer.
 
-use app.io.mod (is_dir, dir_create, dir_remove_all, file_exists, file_write, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_atomic_write, file_fsync, directory_fsync, host_os)
+use app.io.mod (is_dir, dir_create, dir_remove_all, file_exists, file_write, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_atomic_write, file_fsync, directory_fsync)
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
-use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_release, scv_sj_lease_is_held}
@@ -24,10 +24,15 @@ fn _db_store_error(code: text) -> DbStoreView:
 # Root is caller-owned and stable while SJ holds its lease. These path-based
 # facades reject existing aliases; they do not promise dirfd/openat protection
 # against hostile concurrent directory replacement by another OS principal.
+fn db_local_existing_canonical(path: text) -> bool:
+    # Require the OS-resolved spelling. No lexical fallback and no lowercasing
+    # of potentially case-sensitive names. Callers use forward-slash paths.
+    match path_final_existing(path):
+        Ok(observed): observed.path == path
+        Err(error): false
+
 fn db_local_path_scope(root: text, relative_directories: [text]) -> text:
-    if host_os() == "windows":
-        return "SCVDB_STORE_CANONICAL_PATH_UNSUPPORTED"
-    if not root.starts_with("/") or root.starts_with("//") or root.ends_with("/") or path_absolute(root) != root or not dir_is_real_no_follow(root):
+    if root.ends_with("/") or not db_local_existing_canonical(root) or not dir_is_real_no_follow(root):
         return "SCVDB_STORE_SCOPE"
     for relative in relative_directories:
         if relative == "" or relative.starts_with("/") or relative.contains("\\"):
@@ -36,7 +41,7 @@ fn db_local_path_scope(root: text, relative_directories: [text]) -> text:
             if component == "" or component == "." or component == "..": return "SCVDB_STORE_SCOPE"
         val directory = "{root}/{relative}"
         if is_dir(directory) or file_exists(directory):
-            if not dir_is_real_no_follow(directory) or path_absolute(directory) != directory:
+            if not dir_is_real_no_follow(directory) or not db_local_existing_canonical(directory):
                 return "SCVDB_STORE_SCOPE"
     ""
 
@@ -49,7 +54,7 @@ fn _db_store_relative(channel: text) -> text:
     ".scv/db-{channel}"
 
 fn _db_store_read_bounded(path: text, limit: i64) -> Result<text, text>:
-    if not file_is_regular_no_follow(path) or path_absolute(path) != path:
+    if not file_is_regular_no_follow(path) or not db_local_existing_canonical(path):
         return Err("SCVDB_STORE_FILE_SCOPE")
     file_read_regular_no_follow_bounded(path, limit)
 
@@ -75,10 +80,20 @@ fn _db_store_publish_object(objects: text, object_path: text, encoded: text) -> 
     match secure_temp_dir(objects, "generation-"):
         Ok(value): stage = value
         Err(error): return "SCVDB_STORE_OBJECT_WRITE"
-    if not dir_is_real_no_follow(stage) or path_absolute(stage) != stage or not stage.starts_with("{objects}/generation-"):
+    if not dir_is_real_no_follow(stage) or not db_local_existing_canonical(stage) or not stage.starts_with("{objects}/generation-"):
         return "SCVDB_STORE_SCOPE"
+    val parent_identity = match path_final_existing(objects):
+        Ok(value): value
+        Err(error): return "SCVDB_STORE_SCOPE"
+    val stage_identity = match path_final_existing(stage):
+        Ok(value): value
+        Err(error): return "SCVDB_STORE_SCOPE"
+    if not path_identity_contains(parent_identity, stage_identity): return "SCVDB_STORE_SCOPE"
     val result = _db_store_stage_publish(stage, object_path, encoded)
-    if path_absolute(stage) != stage or not dir_remove_all(stage):
+    val cleanup_identity = match path_final_existing(stage):
+        Ok(value): value
+        Err(error): return "SCVDB_STORE_CLEANUP"
+    if not dir_is_real_no_follow(stage) or not path_identity_same(stage_identity, cleanup_identity) or not dir_remove_all(stage):
         return "SCVDB_STORE_CLEANUP"
     result
 
@@ -162,7 +177,7 @@ fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text,
     for path in ["{root}/.scv", directory, objects]:
         if not dir_is_real_no_follow(path) and not dir_create(path, false):
             return _db_store_error("SCVDB_STORE_CREATE")
-        if not dir_is_real_no_follow(path) or path_absolute(path) != path:
+        if not dir_is_real_no_follow(path) or not db_local_existing_canonical(path):
             return _db_store_error("SCVDB_STORE_SCOPE")
     val encoded = _db_store_encode(expected_head, transaction_id, state)
     val head = sha256_text(encoded)
@@ -182,7 +197,7 @@ fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text,
         if _db_store_publish_object(directory, pointer, "{head}\n") != "":
             return _db_store_error("SCVDB_STORE_PUBLICATION_UNCERTAIN")
     else:
-        if not file_is_regular_no_follow(pointer) or path_absolute(pointer) != pointer:
+        if not file_is_regular_no_follow(pointer) or not db_local_existing_canonical(pointer):
             return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
         if not file_atomic_write(pointer, "{head}\n"):
             return _db_store_error("SCVDB_STORE_PUBLICATION_UNCERTAIN")
@@ -221,4 +236,4 @@ fn db_store_commit(root: text, expected_head: text, transaction_id: text, state:
     result
 
 export DbStoreView, db_store_read, db_store_commit
-export db_local_path_scope
+export db_local_path_scope, db_local_existing_canonical
