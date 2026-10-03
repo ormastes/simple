@@ -4,6 +4,7 @@ use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
@@ -50,6 +51,52 @@ fn exact_extern_check(source: text, external_name: text, params: [MirType], resu
     expect(emitted_calls).to_equal(1)
 
 describe "fixed direct LLVM-C ABI prerequisites":
+    it "rejects malformed HIR arity without emitting the extern call":
+        val source = "extern fn raw_probe(value: i32) -> i32\nfn probe(value: i32) -> i32:\n    raw_probe(value)\n"
+        val ast = parse_full_frontend(source, "bad_arity.spl", "bad_arity", Logger(level: 0))
+        var lowering = HirLowering.with_filename("bad_arity.spl")
+        var hir = lowering.lower_module(ast)
+        expect(lowering.errors.len()).to_equal(0)
+        var functions = hir.functions
+        var changed = 0
+        for key in functions.keys():
+            var function = functions[key]
+            if function.name == "probe":
+                var body = function.body
+                var value = body.value
+                match value.kind:
+                    case HirExprKind.Call(callee, _, type_args):
+                        value.kind = HirExprKind.Call(callee, [], type_args)
+                        body.value = value
+                        function.body = body
+                        functions[key] = function
+                        changed = changed + 1
+                    case _: fail("expected actual frontend direct call")
+        expect(changed).to_equal(1)
+        hir.functions = functions
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        var fatal = 0
+        for error in mir_lowering.errors:
+            if error.fatal and error.message.contains("fixed extern call argument count"):
+                fatal = fatal + 1
+        expect(fatal).to_equal(1)
+        var calls = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str("raw_probe"), _): calls = calls + 1
+                                case _: pass
+                        case _: pass
+        expect(calls).to_equal(0)
+
+    it "retains declaration authority inside an actual captured lambda":
+        val source = "extern fn raw_probe(value: i64) -> i64\nfn consume(callback: fn(i64) -> i64, value: i64) -> i64:\n    callback(value)\nfn probe(base: i64) -> i64:\n    consume(\\value: raw_probe(value + base), 7)\n"
+        exact_extern_check(source, "raw_probe", [MirType.i64()], MirType.i64(), "declare i64 @raw_probe(i64)", "call i64 @raw_probe(i64 ")
+
     it "preserves a declared zero-argument pointer result as a fixed prototype":
         val pointer = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
         exact_extern_check("extern fn LLVMContextCreate() -> *mut u8\nfn probe() -> *mut u8:\n    LLVMContextCreate()\n", "LLVMContextCreate", [], pointer, "declare ptr @LLVMContextCreate()", "call ptr @LLVMContextCreate()")
