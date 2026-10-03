@@ -2,17 +2,43 @@
 #
 # Provides tmux-shaped operations over the native session/window/pane service.
 # Uses module-level mutable state to persist sessions across detach.
+#
+# A pane is a slot; a CHILD is attached to it explicitly, either over pipes
+# (`smux_pane_spawn`) or over a real pseudo-terminal (`smux_pane_spawn_pty`,
+# POSIX openpty or Windows ConPTY through `std.sys.pty`). Input goes to the
+# child, and every capture first drains whatever the child printed, so a
+# capture shows what the child actually produced — never an echo of the input.
+#
+# Every pane-addressed verb validates the whole (session, window, pane) triple
+# and fails typed on a mismatch; capacity refusals create nothing.
+#
+# Each pub fn writes `_svc` exactly once, at the end: a helper that writes
+# `_svc` and is then followed by a read of `_svc` in the same frame loses the
+# helper's write on older bootstrap interpreters whose call frame cached the
+# module binding. Helpers below are therefore pure (state in, value out).
 
 use os.apps.smux.contract.{
     MuxSession, MuxWindow, MuxPane, MuxCapture, MuxClientAttachment,
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
-use os.apps.smux.buffer.{ScrollbackBuffer}
+use std.sys.pty.{
+    open as pty_open,
+    spawn as pty_spawn,
+    write as pty_write,
+    read as pty_read,
+    close as pty_close,
+    is_running as pty_is_running
+}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_piped, process_write_stdin,
+    process_read_stdout, process_is_piped_alive, process_close_piped}
+use std.io_runtime.{time_now_unix_micros}
 
 # =========================================================================
 # Global service state
 # =========================================================================
+
+const SMUX_CAPACITY: int = 8
 
 var _svc: ServiceState = ServiceState.empty()
 
@@ -21,48 +47,173 @@ var _svc: ServiceState = ServiceState.empty()
 # =========================================================================
 
 pub fn smux_reset_for_test():
+    # Reap every attached child first: a reset must not leak processes.
+    var i = 0
+    while i < _svc.pane_count:
+        _release_child(_svc.get_pane(i))
+        i = i + 1
     _svc = ServiceState.empty()
 
 # =========================================================================
-# ID generation
+# Pure helpers
 # =========================================================================
 
 fn id_text(n: int) -> text:
     return "id" + n.to_text()
 
+fn _now_ns() -> u64:
+    return (time_now_unix_micros() * 1000) as u64
+
+fn _with_startup(st: ServiceState) -> ServiceState:
+    val m = st.metrics
+    return st.with_metrics(SmuxMetrics(
+        startup_count: m.startup_count + 1,
+        last_startup_ns: _now_ns(),
+        resize_count: m.resize_count,
+        capture_count: m.capture_count
+    ))
+
+# Index of the pane only when it belongs to exactly this session AND window.
+fn _pane_idx(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> int:
+    val idx = st.find_pane_idx(pane_id)
+    if idx < 0:
+        return -1
+    val p = st.get_pane(idx).pane
+    if p.session_id != session_id or p.window_id != window_id:
+        return -1
+    return idx
+
+fn _window_idx(st: ServiceState, session_id: text, window_id: text) -> int:
+    val idx = st.find_window_idx(window_id)
+    if idx < 0:
+        return -1
+    if st.get_window(idx).session_id != session_id:
+        return -1
+    return idx
+
+fn _has_child(pr: PaneRecord) -> bool:
+    return pr.child_pid > 0
+
+fn _is_pty(pr: PaneRecord) -> bool:
+    return pr.pty_fd >= 0
+
+fn _release_child(pr: PaneRecord):
+    if _is_pty(pr):
+        val _c = pty_close(pr.pty_fd as i32)
+    elif _has_child(pr):
+        val _p = process_close_piped(pr.child_pid)
+
+fn _child_alive(pr: PaneRecord) -> bool:
+    if _is_pty(pr):
+        return pty_is_running(pr.pty_fd as i32)
+    if _has_child(pr):
+        return process_is_piped_alive(pr.child_pid)
+    return false
+
+# Terminal output -> plain lines. CSI sequences are dropped, except a cursor
+# position (`ESC[row;colH`) which a ConPTY uses instead of a newline, so it
+# becomes one, and a cursor-forward (`ESC[nC`) which full-screen TUIs use
+# instead of spaces, so it becomes n spaces. OSC titles (`ESC]...BEL`) are
+# dropped. `\r` is dropped.
+fn _clean_output(raw: text) -> text:
+    val esc = "\x1b"
+    val bel = "\x07"
+    var out = ""
+    var params = ""
+    var mode = 0  # 0 text, 1 after ESC, 2 CSI, 3 OSC
+    for ch in raw.chars():
+        if mode == 0:
+            if ch == esc:
+                mode = 1
+            elif ch != "\r":
+                out = out + ch
+        elif mode == 1:
+            if ch == "[":
+                mode = 2
+                params = ""
+            elif ch == "]":
+                mode = 3
+            else:
+                mode = 0
+        elif mode == 2:
+            if ch >= "@" and ch <= "~":
+                if ch == "H" and out != "" and not out.ends_with("\n"):
+                    out = out + "\n"
+                if ch == "C":
+                    var n = params.to_int() ?? 1
+                    if n < 1:
+                        n = 1
+                    while n > 0:
+                        out = out + " "
+                        n = n - 1
+                mode = 0
+            else:
+                params = params + ch
+        else:
+            if ch == bel:
+                mode = 0
+            elif ch == esc:
+                mode = 1
+    return out
+
+# Pulls whatever the child printed since the last drain into the pane tail.
+# Reads are chunked (a PTY read returns at most one buffer), so keep reading
+# until the child has nothing pending. Bounded so a child that prints forever
+# cannot stall the caller.
+fn _drain(pr: PaneRecord) -> PaneRecord:
+    var raw = ""
+    var reads = 0
+    var more = _has_child(pr)
+    while more and reads < 256:
+        var chunk = ""
+        if _is_pty(pr):
+            chunk = pty_read(pr.pty_fd as i32, 0)
+        else:
+            chunk = process_read_stdout(pr.child_pid)
+        raw = raw + chunk
+        more = chunk != ""
+        reads = reads + 1
+    if raw == "":
+        return pr
+    if _is_pty(pr):
+        return pr.feed_screen(raw)
+    return pr.feed(_clean_output(raw))
+
+fn _closed_record() -> PaneRecord:
+    return PaneRecord.create(MuxPane(
+        id: "",
+        window_id: "",
+        session_id: "",
+        backend_kind: MuxBackendKind.NativeShell,
+        state: "closed",
+        cols: 0,
+        rows: 0
+    ))
+
 # =========================================================================
 # Session management
 # =========================================================================
 
+pub fn smux_admission_available() -> bool:
+    return (_svc.session_count < SMUX_CAPACITY and
+        _svc.window_count < SMUX_CAPACITY and
+        _svc.pane_count < SMUX_CAPACITY)
+
 pub fn smux_create_session(name: text) -> MuxSession:
-    # Commit the compound operation once.  Calling a helper that writes `_svc`
-    # and then reading `_svc` again in this frame loses the helper's write on
-    # older bootstrap interpreters whose call frame cached the module binding.
+    # All-or-nothing: a session needs one session, window and pane slot.
+    if not smux_admission_available():
+        return MuxSession.create("", name)
     val n = _svc.next_id
     val sid = id_text(n)
-    val session = MuxSession.create(sid, name)
+    val session = MuxSession(id: sid, name: name, created_at: _now_ns(), generation: 0)
     var st = _svc.add_session(session)
 
-    # auto-create initial window and pane
+    # auto-create initial window and (focused) pane
     val wid = id_text(n + 1)
-    val window = MuxWindow(id: wid, session_id: sid, name: "main", is_active: true)
-    st = st.add_window(window)
+    st = st.add_window(MuxWindow(id: wid, session_id: sid, name: "main", is_active: true))
+    st = st.add_pane(PaneRecord.create(MuxPane.create(id_text(n + 2), wid, sid)).with_focus(true))
 
-    val pid = id_text(n + 2)
-    val pane = MuxPane.create(pid, wid, sid)
-    val pr = PaneRecord.create(pane)
-    st = st.add_pane(pr)
-
-    # bump startup counter
-    val m = st.metrics
-    val new_m = SmuxMetrics(
-        startup_count: m.startup_count + 1,
-        last_startup_ns: 1u64,
-        resize_count: m.resize_count,
-        capture_count: m.capture_count
-    )
-    _svc = st.with_metrics(new_m).with_next_id(n + 3)
-
+    _svc = _with_startup(st).with_next_id(n + 3)
     return session
 
 pub fn smux_list_sessions() -> [MuxSession]:
@@ -93,17 +244,15 @@ pub fn smux_detach(client_id: text) -> bool:
 # =========================================================================
 
 pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
+    if (_svc.find_session_idx(session_id) < 0 or
+            _svc.window_count >= SMUX_CAPACITY or _svc.pane_count >= SMUX_CAPACITY):
+        return MuxWindow(id: "", session_id: session_id, name: name, is_active: false)
     val n = _svc.next_id
     val wid = id_text(n)
     val window = MuxWindow(id: wid, session_id: session_id, name: name, is_active: false)
     var st = _svc.add_window(window)
-
-    # auto-create initial pane for new window
-    val pid = id_text(n + 1)
-    val pane = MuxPane.create(pid, wid, session_id)
-    st = st.add_pane(PaneRecord.create(pane))
+    st = st.add_pane(PaneRecord.create(MuxPane.create(id_text(n + 1), wid, session_id)).with_focus(true))
     _svc = st.with_next_id(n + 2)
-
     return window
 
 pub fn smux_list_windows(session_id: text) -> [MuxWindow]:
@@ -117,10 +266,24 @@ pub fn smux_list_windows(session_id: text) -> [MuxWindow]:
     return result
 
 pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
-    val idx = _svc.find_window_idx(window_id)
-    if idx < 0:
+    if _window_idx(_svc, session_id, window_id) < 0:
         return false
+    var st = _svc
+    var i = 0
+    while i < st.window_count:
+        val w = st.get_window(i)
+        if w.session_id == session_id:
+            st = st.replace_window(i, MuxWindow(id: w.id, session_id: w.session_id,
+                name: w.name, is_active: w.id == window_id))
+        i = i + 1
+    _svc = st
     return true
+
+pub fn smux_active_window(session_id: text) -> Result<MuxWindow, text>:
+    for w in smux_list_windows(session_id):
+        if w.is_active:
+            return Ok(w)
+    return Err("no active window in session: " + session_id)
 
 # =========================================================================
 # Pane management
@@ -138,97 +301,170 @@ pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
     return result
 
 pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
-    val src_idx = _svc.find_pane_idx(pane_id)
-    if src_idx < 0:
-        return Err("pane not found: " + pane_id)
-    val win_idx = _svc.find_window_idx(window_id)
-    if win_idx < 0:
-        return Err("window not found: " + window_id)
-
+    if _pane_idx(_svc, session_id, window_id, pane_id) < 0:
+        return Err("unknown pane: " + pane_id)
+    if _svc.pane_count >= SMUX_CAPACITY:
+        return Err("pane capacity reached")
     val n = _svc.next_id
-    val new_pid = id_text(n)
-    val new_pane = MuxPane.create(new_pid, window_id, session_id)
+    val new_pane = MuxPane.create(id_text(n), window_id, session_id)
     _svc = _svc.add_pane(PaneRecord.create(new_pane)).with_next_id(n + 1)
     return Ok(new_pane)
 
+# Closes the pane and reaps its child (pipe close or PTY close both reap).
 pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool:
-    val idx = _svc.find_pane_idx(pane_id)
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return false
-    val closed = MuxPane(
-        id: "",
-        window_id: "",
-        session_id: "",
-        backend_kind: MuxBackendKind.NativeShell,
-        state: "closed",
-        cols: 0,
-        rows: 0
-    )
-    val closed_pr = PaneRecord(pane: closed, buf: ScrollbackBuffer.create(), focus: false)
-    _svc = _svc.replace_pane(idx, closed_pr).with_pane_count(_svc.pane_count - 1)
+    _release_child(_svc.get_pane(idx))
+    _svc = _svc.remove_pane(idx)
     return true
 
 pub fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
-    val idx = _svc.find_pane_idx(pane_id)
-    if idx < 0:
+    if _pane_idx(_svc, session_id, window_id, pane_id) < 0:
         return false
+    var st = _svc
+    var i = 0
+    while i < st.pane_count:
+        val pr = st.get_pane(i)
+        if pr.pane.session_id == session_id and pr.pane.window_id == window_id:
+            st = st.replace_pane(i, pr.with_focus(pr.pane.id == pane_id))
+        i = i + 1
+    _svc = st
     return true
 
-pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<MuxPane, text>:
-    val idx = _svc.find_pane_idx(pane_id)
-    if idx < 0:
-        return Err("pane not found: " + pane_id)
-    val pr = _svc.get_pane(idx)
-    val updated = pr.resize(cols, rows)
-    _svc = _svc.replace_pane(idx, updated)
+pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, text>:
+    var i = 0
+    while i < _svc.pane_count:
+        val pr = _svc.get_pane(i)
+        if pr.pane.session_id == session_id and pr.pane.window_id == window_id and pr.focus:
+            return Ok(pr.pane)
+        i = i + 1
+    return Err("no focused pane in window: " + window_id)
 
+pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<MuxPane, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val updated = _svc.get_pane(idx).resize(cols, rows)
     val m = _svc.metrics
-    val new_m = SmuxMetrics(
+    _svc = _svc.replace_pane(idx, updated).with_metrics(SmuxMetrics(
         startup_count: m.startup_count,
         last_startup_ns: m.last_startup_ns,
         resize_count: m.resize_count + 1,
         capture_count: m.capture_count
-    )
-    _svc = _svc.with_metrics(new_m)
-
+    ))
     return Ok(updated.pane)
+
+# =========================================================================
+# Child processes
+# =========================================================================
+
+# Attaches a piped child (no controlling terminal). Returns its pid.
+pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: text, args: [text]) -> Result<i64, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val pr = _svc.get_pane(idx)
+    if _has_child(pr):
+        return Err("pane already has a child: " + pane_id)
+    if cmd == "":
+        return Err("empty command")
+    val pid = process_spawn_piped(cmd, args)
+    if pid <= 0:
+        return Err("spawn failed: " + cmd)
+    _svc = _svc.replace_pane(idx, pr.with_child(pid))
+    return Ok(pid)
+
+# Attaches a child on a real pseudo-terminal sized to the pane geometry.
+# `command_line` is handed to the platform launcher as one line (a shell path
+# on POSIX, a CreateProcess command line on Windows). Returns its pid.
+pub fn smux_pane_spawn_pty(session_id: text, window_id: text, pane_id: text, command_line: text) -> Result<i64, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val pr = _svc.get_pane(idx)
+    if _has_child(pr):
+        return Err("pane already has a child: " + pane_id)
+    if command_line == "":
+        return Err("empty command")
+    val handle = pty_open(pr.pane.rows as i32, pr.pane.cols as i32)
+    if handle < 0:
+        return Err("pty open failed")
+    val pid = pty_spawn(handle, command_line)
+    if pid <= 0:
+        val _c = pty_close(handle)
+        return Err("pty spawn failed: " + command_line)
+    _svc = _svc.replace_pane(idx, pr.with_pty(pid, handle as i64))
+    return Ok(pid)
+
+pub fn smux_pane_is_pty(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    return Ok(_is_pty(_svc.get_pane(idx)))
+
+pub fn smux_pane_alive(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    return Ok(_child_alive(_svc.get_pane(idx)))
+
+# Ends the PTY child but keeps the pane (and its captured output).
+pub fn smux_pane_close_pty(session_id: text, window_id: text, pane_id: text) -> bool:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return false
+    val pr = _svc.get_pane(idx)
+    if not _is_pty(pr):
+        return false
+    _release_child(pr)
+    _svc = _svc.replace_pane(idx, pr.with_pty(-1, -1))
+    return true
 
 # =========================================================================
 # Input / Output
 # =========================================================================
 
+# Writes raw input to the pane's child. A pane with no child refuses input
+# rather than pretending to accept it.
 pub fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_input: text) -> Result<text, text>:
-    val idx = _svc.find_pane_idx(pane_id)
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
-        return Err("pane not found: " + pane_id)
+        return Err("unknown pane: " + pane_id)
     val pr = _svc.get_pane(idx)
-    val updated = pr.feed(text_input)
-    _svc = _svc.replace_pane(idx, updated)
+    if not _has_child(pr):
+        return Err("pane has no child: " + pane_id)
+    var ok = false
+    if _is_pty(pr):
+        ok = pty_write(pr.pty_fd as i32, text_input)
+    else:
+        ok = process_write_stdin(pr.child_pid, text_input)
+    if not ok:
+        return Err("write failed: " + pane_id)
     return Ok("sent")
 
+# Types `command` and submits it: Enter is `\r` on a terminal (what a key
+# press sends) and `\n` on a pipe.
 pub fn smux_send_command(session_id: text, window_id: text, pane_id: text, command: text) -> Result<text, text>:
-    smux_send_text(session_id, window_id, pane_id, command)
-
-pub fn smux_capture(session_id: text, window_id: text, pane_id: text, history_lines: int) -> MuxCapture:
-    val idx = _svc.find_pane_idx(pane_id)
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
-        # return a minimal capture with 1 row so assertions on rows > 0 pass
-        return MuxCapture.create(pane_id, "", 1)
-    val pr = _svc.get_pane(idx)
-    val cap = pr.capture(history_lines)
+        return Err("unknown pane: " + pane_id)
+    val enter = if _is_pty(_svc.get_pane(idx)): "\r" else: "\n"
+    return smux_send_text(session_id, window_id, pane_id, command + enter)
 
+pub fn smux_capture(session_id: text, window_id: text, pane_id: text, history_lines: int) -> Result<MuxCapture, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val drained = _drain(_svc.get_pane(idx))
     val m = _svc.metrics
-    val new_m = SmuxMetrics(
+    _svc = _svc.replace_pane(idx, drained).with_metrics(SmuxMetrics(
         startup_count: m.startup_count,
         last_startup_ns: m.last_startup_ns,
         resize_count: m.resize_count,
         capture_count: m.capture_count + 1
-    )
-    _svc = _svc.with_metrics(new_m)
-
-    # capture.rows must be > 0 for the initial pane even when empty
-    val effective_rows = if cap.rows == 0: 1 else: cap.rows
-    return MuxCapture.create(pane_id, cap.content, effective_rows)
+    ))
+    return Ok(drained.capture(history_lines))
 
 # =========================================================================
 # Backend contract

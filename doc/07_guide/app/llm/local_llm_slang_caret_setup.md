@@ -41,6 +41,45 @@ no `build/sffi/` at all — without the shim you get "GGUF recognised but no
 ggml backend library is configured". `SLANG_GGML_LIB=<path>` overrides the
 default location.
 
+### Windows (clang-cl + lld-link; verified 2026-10-03, Windows 11, CPU only)
+
+```bash
+# llama.cpp outside the repo, shared libs, clang-cl (never cl). VS's bundled
+# cmake/ninja; LLVM 21 first on PATH.
+. scripts/setup/windows-msvc-bootstrap-env.shs
+export PATH="/c/dev/install/clang+llvm-21.1.3-x86_64-pc-windows-msvc/bin:$PATH"
+git clone --depth 1 --branch b11371 https://github.com/ggml-org/llama.cpp D:/tools/llama.cpp
+cmake -S D:/tools/llama.cpp -B D:/tools/llama.cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_LINKER=lld-link \
+  -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON -DGGML_OPENMP=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF \
+  -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF
+cmake --build D:/tools/llama.cpp/build -j 8   # llama.dll + ggml*.dll; a few tool
+                                              # exes fail to link, not needed
+
+LLAMA_ROOT=D:/tools/llama.cpp sh scripts/check/build-slang-ggml-shim.shs
+# -> PASS -- 50 symbol(s) exported, .../build/sffi/slang_ggml.dll
+```
+
+- The shim is `build/sffi/slang_ggml.dll` (exports from a `.def` generated off
+  the compiled object). The script copies `llama.dll` and `ggml*.dll` next to
+  it, and `backend.spl` preloads those siblings before opening the shim, so no
+  PATH edit is needed (Windows does not search a DLL's own directory for its
+  imports).
+- `llm_engine.spl` resolves the backend as: `engine_set_lib_path` >
+  `SLANG_GGML_LIB` > per-OS default (`slang_ggml.dll` on Windows, else
+  `libslang_ggml.so`).
+- The memory gate reads `Win32_OperatingSystem` via PowerShell
+  (`FreePhysicalMemory`, `TotalVisibleMemorySize`): ~1.2 s per probe, two
+  probes per model load.
+- Run Simple with a phase-1 seed that matches the tree's stdlib, e.g.
+  `SIMPLE_BINARY=build/p1-target/x86_64-pc-windows-msvc/bootstrap/simple.exe`.
+  An older seed dies before reaching slang (`rt_process_run_bounded:
+  max_output_bytes must be a non-negative integer`).
+- Model choice: caret flattens the transcript into a raw `user:/assistant:
+  <think>` completion with the tool-use system prompt rather than the GGUF's
+  chat template. Qwen2.5-0.5B-Instruct generates but does not follow it (it
+  answered a code fence); Qwen2.5-1.5B-Instruct Q4_K_M does.
+
 ## 3. Sanity gates
 
 ```bash

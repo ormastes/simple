@@ -3,33 +3,28 @@
 # Provides the app ID marker used by the OS package registry and
 # the remote-launch entry point for the smux native service.
 #
-# The typed std.sys.pty capability selects POSIX PTY or Windows ConPTY.
-# smux_remote_main routes send/capture verbs through that capability.
+# smux_remote_main is a line protocol over stdin/stdout on top of the smux
+# service API: every session it creates gets a real shell on a pseudo-terminal
+# (POSIX PTY or Windows ConPTY via std.sys.pty), and send/capture go to that
+# shell through the same API every other smux client uses.
 
 use os.apps.smux.api.{
     smux_create_session,
     smux_list_sessions,
+    smux_list_windows,
+    smux_list_panes,
+    smux_pane_spawn_pty,
     smux_send_command,
-    smux_capture
+    smux_capture,
+    smux_reset_for_test
 }
-use std.sys.pty.{
-    open as pty_open,
-    spawn as pty_spawn,
-    write as pty_write,
-    read as pty_read,
-    close as pty_close,
-    platform_default_shell
-}
+use std.sys.pty.{platform_default_shell}
 
 # Use the tagged-text ABI.  The legacy optional-pointer rt_stdin_read_line ABI
 # is not safe through an interpreter call: its boxed text result can be
 # mistaken for a raw integer while unwrapping text?.  EOF is represented by an
 # empty tagged string, which already matches the service loop's stop rule.
 extern fn rt_read_stdin_line() -> text
-
-# Module-level fd for the single default PTY session.
-# -1 means no PTY has been opened yet.
-var default_master_fd: i32 = -1
 
 pub val SMUX_APP_ID: text = "smux"
 
@@ -46,97 +41,74 @@ pub fn smux_remote_launch_once(version: int) -> bool:
     print("smux " + marker + " ready")
     return true
 
+# Session id of the session NAMED `name`, or "".
+fn _session_id(name: text) -> text:
+    for s in smux_list_sessions():
+        if s.name == name:
+            return s.id
+    return ""
+
+# Creates session `name` with a shell on a PTY in its first pane.
+fn _open_shell_session(name: text) -> text:
+    val s = smux_create_session(name)
+    if s.id == "":
+        return "smux: session capacity reached"
+    val w = smux_list_windows(s.id)[0]
+    val p = smux_list_panes(s.id, w.id)[0]
+    val spawned = smux_pane_spawn_pty(s.id, w.id, p.id, platform_default_shell())
+    if spawned.is_err():
+        return "smux: created session " + name + " (no shell: " + spawned.unwrap_err() + ")"
+    return "smux: created session " + name + " shell pid=" + spawned.unwrap().to_text()
+
 # smux_remote_main — entry point for the hosted smux client binary
 # (src/app/hosted_apps/smux_client.spl -> fn main calls this).
 #
-# Runs the service event loop: reads one-line commands from stdin and
-# dispatches them through the typed PTY capability. Each
-# command is "VERB session_id [extra]" terminated by newline.
+# Reads one-line commands from stdin: "VERB session [extra]".
 # Exits on empty input, "quit", or "exit".
 pub fn smux_remote_main():
-    val _s = smux_create_session("default")
-    # Open the default PTY (24 rows × 80 cols) and spawn a shell on it.
-    val fd = pty_open(24, 80)
-    if fd >= 0:
-        val shell = platform_default_shell()
-        print("smux_remote_main: starting PTY fd=" + fd.to_text() + " shell=" + shell)
-        val pid = pty_spawn(fd, shell)
-        if pid > 0:
-            default_master_fd = fd
-            print("smux_remote_main: PTY opened fd=" + fd.to_text() + " shell pid=" + pid.to_text())
-        else:
-            # Shell failed to fork — an open PTY with no shell would swallow
-            # every send, so stay on the scrollback fallback instead.
-            val _closed = pty_close(fd)
-            print("smux_remote_main: PTY spawn failed (" + pid.to_text() + "), no PTY available")
-    else:
-        print("smux_remote_main: PTY open failed (" + fd.to_text() + "), no PTY available")
+    print(_open_shell_session("default"))
     print("smux_remote_main: service started, session=default")
     var done = false
     while done == false:
         val line = rt_read_stdin_line()
-        if line == "":
+        if line == "" or line == "quit" or line == "exit":
             done = true
         else:
-            if line == "quit" or line == "exit":
-                done = true
-            else:
-                _smux_dispatch(line)
-    if default_master_fd >= 0:
-        val _closed = pty_close(default_master_fd)
-        default_master_fd = -1
+            print(smux_remote_dispatch(line))
+    smux_reset_for_test()
     print("smux_remote_main: service stopped")
 
-fn _smux_dispatch(line: text):
-    # Parse "VERB session_id [extra]" — up to 3 space-separated tokens.
+# Handles one protocol line and returns the reply line. Exposed so a spec can
+# drive the protocol without a stdin.
+pub fn smux_remote_dispatch(line: text) -> text:
     val parts = line.split(" ")
-    val n = parts.len()
-    if n < 2:
-        print("smux: usage: VERB session_id [extra]")
-        return
+    if parts.len() < 2:
+        return "smux: usage: VERB session_id [extra]"
     val verb = parts[0]
-    val sid  = parts[1]
+    val name = parts[1]
     if verb == "new":
-        val _s = smux_create_session(sid)
-        print("smux: created session " + sid)
-        return
+        return _open_shell_session(name)
     if verb == "list":
-        val sessions = smux_list_sessions()
-        print("smux: sessions=" + sessions.len().to_text())
-        return
+        return "smux: sessions=" + smux_list_sessions().len().to_text()
+    val sid = _session_id(name)
+    if sid == "":
+        return "smux: unknown session " + name
+    val w = smux_list_windows(sid)[0]
+    val p = smux_list_panes(sid, w.id)[0]
     if verb == "send":
-        if n < 3:
-            print("smux: send requires extra arg")
-            return
+        if parts.len() < 3:
+            return "smux: send requires extra arg"
         # Rejoin everything after "send <sid>" — multi-word commands must not
         # be truncated to their first token.
-        var cmd = parts[2]
-        var i = 3
-        while i < n:
-            cmd = cmd + " " + parts[i]
-            i = i + 1
-        if default_master_fd >= 0 and sid == "default":
-            # Route the command through the real PTY master fd.
-            val written = pty_write(default_master_fd, cmd + "\r\n")
-            if written:
-                print("smux: sent to " + sid + " via PTY")
-            else:
-                print("smux: PTY write failed")
-        else:
-            # PTY unavailable — fall back to scrollback API.
-            val res = smux_send_command(sid, "0", "0", cmd)
-            if res.is_ok():
-                print("smux: sent to " + sid + " (scrollback fallback)")
-            else:
-                print("smux: send failed for " + sid)
-        return
+        val sent = smux_send_command(sid, w.id, p.id, parts[2:].join(" "))
+        if sent.is_err():
+            return "smux: send failed: " + sent.unwrap_err()
+        return "smux: sent to " + name
     if verb == "capture":
-        if default_master_fd >= 0 and sid == "default":
-            # Wait briefly for output without blocking the service loop.
-            val output = pty_read(default_master_fd, 100)
-            print("smux: capture[" + sid + "]: " + output)
-        else:
-            val cap = smux_capture(sid, "0", "0", 20)
-            print("smux: capture[" + sid + "]: " + cap.content)
-        return
-    print("smux: unknown verb: " + verb)
+        val cap = smux_capture(sid, w.id, p.id, 20)
+        if cap.is_err():
+            return "smux: capture failed: " + cap.unwrap_err()
+        return "smux: capture[" + name + "]:\n" + cap.unwrap().content
+    return "smux: unknown verb: " + verb
+
+export smux_remote_dispatch

@@ -8,15 +8,19 @@ use os.apps.smux.contract.{
     MuxSession, MuxWindow, MuxPane, MuxCapture, MuxClientAttachment,
     SmuxMetrics, MuxBackendKind
 }
-use os.apps.smux.buffer.{ScrollbackBuffer}
+use os.apps.smux.vt_screen.{VtScreen, vt_new, vt_feed, vt_text}
+
+# Lines of child output a pane keeps. Large enough for a full agent screen
+# (the caret workbench's right-hand region), small enough to stay cheap to
+# re-split on every capture.
+const PANE_TAIL_LINES: i64 = 200
 
 # =========================================================================
-# Pane record — pane state + its scrollback buffer
+# Pane record — pane state + its output tail
 # =========================================================================
 
 class PaneRecord:
     pane: MuxPane
-    buf: ScrollbackBuffer
     focus: bool
     # child_pid — pid of the piped child process backing this pane, or -1 when
     # the pane has no process attached. Panes are NEVER auto-spawned: creating a
@@ -28,9 +32,22 @@ class PaneRecord:
     # backed by plain pipes. A pane with pty_fd > 0 has a CONTROLLING TERMINAL:
     # its child sees isatty(0) true and `stty size` reports the pane geometry.
     pty_fd: i64
+    # tail — the child's output, ANSI-stripped and newline-normalized, bounded
+    # to the last PANE_TAIL_LINES lines.
+    tail: text
+    # screen — what a PTY child currently shows (a full-screen program redraws
+    # in place, so its output is applied to a grid, not appended to `tail`).
+    screen: VtScreen
 
-    me feed(line: text) -> PaneRecord:
-        return PaneRecord(pane: me.pane, buf: me.buf.append(line), focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd)
+    me feed_screen(raw: text) -> PaneRecord:
+        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_feed(me.screen, raw))
+
+    me feed(output: text) -> PaneRecord:
+        var joined = me.tail + output
+        val lines = joined.split("\n")
+        if lines.len() > PANE_TAIL_LINES:
+            joined = lines[lines.len() - PANE_TAIL_LINES:].join("\n")
+        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: joined, screen: me.screen)
 
     me resize(c: int, r: int) -> PaneRecord:
         val p = me.pane
@@ -43,22 +60,31 @@ class PaneRecord:
             cols: c,
             rows: r
         )
-        return PaneRecord(pane: np, buf: me.buf, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd)
+        return PaneRecord(pane: np, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
 
     me with_focus(f: bool) -> PaneRecord:
-        return PaneRecord(pane: me.pane, buf: me.buf, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd)
+        return PaneRecord(pane: me.pane, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
 
     me with_child(pid: i64) -> PaneRecord:
-        return PaneRecord(pane: me.pane, buf: me.buf, focus: me.focus, child_pid: pid, pty_fd: me.pty_fd)
+        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
 
     me with_pty(pid: i64, fd: i64) -> PaneRecord:
-        return PaneRecord(pane: me.pane, buf: me.buf, focus: me.focus, child_pid: pid, pty_fd: fd)
+        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: fd, tail: me.tail, screen: if fd >= 0: vt_new(me.pane.rows, me.pane.cols) else: me.screen)
 
     me capture(max_lines: int) -> MuxCapture:
-        return MuxCapture.create(me.pane.id, me.buf.capture(max_lines), me.buf.line_count())
+        # A PTY child's output lives on its screen (only a PTY feeds it); a
+        # piped child's in the tail. Trailing blank lines (the newline that
+        # ended the last output line, an idle prompt's padding) are not content.
+        val shown = vt_text(me.screen)
+        var lines = if shown != "": shown.split("\n") else: me.tail.split("\n")
+        while lines.len() > 0 and lines[lines.len() - 1].trim() == "":
+            lines = lines[0:lines.len() - 1]
+        if max_lines > 0 and lines.len() > max_lines:
+            lines = lines[lines.len() - max_lines:]
+        return MuxCapture.create(me.pane.id, lines.join("\n"), lines.len())
 
     static fn create(p: MuxPane) -> PaneRecord:
-        return PaneRecord(pane: p, buf: ScrollbackBuffer.create(), focus: false, child_pid: -1, pty_fd: -1)
+        return PaneRecord(pane: p, focus: false, child_pid: -1, pty_fd: -1, tail: "", screen: vt_new(p.rows, p.cols))
 
 
 # =========================================================================

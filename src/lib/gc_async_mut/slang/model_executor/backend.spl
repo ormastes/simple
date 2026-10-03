@@ -28,6 +28,7 @@
 
 use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
 use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
+use std.io_runtime.{file_exists}
 
 enum BackendError:
     LibraryNotFound
@@ -248,10 +249,30 @@ fn physical_page_group_status_from_probe(reported_capabilities: i64,
         return PhysicalPageProviderStatus.RejectedVersion
     PhysicalPageProviderStatus.Ready
 
+# Windows' loader does not search a DLL's own directory for its imports, so a
+# shim at build/sffi/slang_ggml.dll cannot find llama.dll/ggml*.dll sitting next
+# to it unless that directory is on PATH. Loading the siblings first (in
+# dependency order) satisfies the imports by module name. No-op off Windows and
+# for any sibling build-slang-ggml-shim.shs did not copy.
+fn _preload_windows_dll_siblings(lib_path: text):
+    if lib_path.ends_with(".dll"):
+        var cut = -1
+        var i = 0
+        while i < lib_path.len():
+            val ch = lib_path[i:i + 1]
+            if ch == "/" or ch == "\\":
+                cut = i
+            i = i + 1
+        val dir = if cut >= 0: lib_path[0:cut + 1] else: ""
+        for dep in ["ggml-base.dll", "ggml-cpu.dll", "ggml.dll", "llama.dll"]:
+            if file_exists(dir + dep):
+                spl_dlopen(dir + dep)
+
 # Opens the shim and resolves every entry up front. Resolving eagerly means a
 # missing symbol is reported here, by name, instead of surfacing as a zero
 # function pointer in the middle of a generation.
 fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
+    _preload_windows_dll_siblings(lib_path)
     val lib = spl_dlopen(lib_path)
     if lib == 0:
         return Err(BackendError.LibraryNotFound)
@@ -315,10 +336,16 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_page_table_abort", "slang_ggml_page_allocated_bytes",
         "slang_ggml_page_bytes"
     ]
+    # Probe the page group only when the shim advertises it. spl_dlsym is
+    # fail-closed in the interpreter (a miss is a runtime error, not 0), so
+    # asking a shim built without llama-slang-paged.h for page symbols killed
+    # every load against stock llama.cpp. Without the bit the zeros below make
+    # physical_page_group_status_from_probe answer Unavailable.
+    val shim_has_pages = (reported_capabilities & SLANG_CAP_PHYSICAL_PAGED_KV) != 0
     var physical_page_addrs: [i64] = []
-    var physical_group_complete = true
+    var physical_group_complete = shim_has_pages
     for n in physical_page_names:
-        val address = spl_dlsym(lib, n)
+        val address = if shim_has_pages: spl_dlsym(lib, n) else: 0
         physical_page_addrs.push(address)
         if address == 0:
             physical_group_complete = false
@@ -331,7 +358,8 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         physical_page_abi_version)
     if physical_page_status != PhysicalPageProviderStatus.Ready:
         physical_page_addrs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    var f_page_request_create = spl_dlsym(lib, "slang_ggml_page_request_create")
+    val shim_has_light_requests = (reported_capabilities & SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS) != 0
+    var f_page_request_create = if shim_has_light_requests: spl_dlsym(lib, "slang_ggml_page_request_create") else: 0
     val physical_lightweight_requests = (
         physical_page_status == PhysicalPageProviderStatus.Ready and
         (reported_capabilities & SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS) != 0 and
