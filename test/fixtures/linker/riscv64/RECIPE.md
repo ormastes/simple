@@ -10,6 +10,8 @@ clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c provider.
 clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c relax.s -o relax.o
 clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c arithmetic.s -o arithmetic.o
 clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c uleb.s -o uleb.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c align.s -o align.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64ima -mabi=lp64 -c align_norvc.s -o align_norvc.o
 llvm-ar rcs libprovider.a provider.o
 llvm-readelf -r -h start.o provider.o relax.o
 ld.lld --no-relax -static -e _start start.o provider.o -o oracle.elf
@@ -35,8 +37,19 @@ The three-byte padded label difference is 136, encoded as `88 81 00`, followed
 by a one-byte value13. LLD independently emitted `88 81 00 0d` during fixture
 authoring. Tests also corrupt adjacency, range and unsigned ordering.
 
-Current static-driver boundary: no ALIGN padding deletion, instruction-size
-relaxation, or .riscv.attributes merge. RV32 ELF,
+`align.o` has two padding cuts; LLD `--no-relax` moves its targets to entry+16
+and entry+32 and changes the function size from60 to34. Named `_start+24` and
+section-symbol `.text+24` references both remain entry+24 in the oracle.
+`align_norvc.o` retains a four-byte NOP and moves its target to entry+16.
+These LLD fixture checks ran; internal Simple tests remain unexecuted.
+
+ALIGN normalization admits canonical ELF64 RELA, executable PROGBITS, and
+validated 2/4-byte NOP padding whose requested alignment is covered by the
+input section alignment. It rejects overlapping/duplicate padding, malformed
+sizes, references into rewritten padding, and non-NOP contents.
+
+Current static-driver boundary: no instruction-size call relaxation or
+.riscv.attributes merge. RV32 ELF,
 dynamic/PIE and TLS output remain unsupported. Native execution and the Simple
 acceptance run are pending. Arithmetic/branch encodings follow the
 [RISC-V psABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc)
