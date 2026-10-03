@@ -110,7 +110,18 @@ fn db_quarantine_import(checkout: text, external_parent: text, input: text, form
     # Read and decode before taking the CAS owner's short SJ mutation lease.
     val bytes = file_read_regular_no_follow_bounded_bytes(input, quota.max_bundle_bytes)?
     val wire = validated_utf8_bytes_to_text_linear(bytes)?
+    db_quarantine_store_bundle(checkout, external_parent, wire, created_day, quota)
+
+fn db_quarantine_store_bundle(checkout: text, external_parent: text, wire: text, created_day: u64, quota: DbQuarantineQuota) -> Result<DbQuarantineHandle, text>:
+    """Store exact canonical bundle bytes as inert external CAS evidence.
+
+    Validate bounded canonical encoding and signature shape before the CAS
+    owner's short SJ lease. This does not authenticate signatures, accept a
+    patch, pin retention, or publish Git state; no temporary input is created.
+    """
     val patches = db_quarantine_bundle_decode(wire, quota)?
+    val bytes = base_encoding_text_to_bytes(wire)
+    if bytes.len() > quota.max_bundle_bytes: return Err("SCVDB_QUARANTINE_BYTES_QUOTA")
     val content = base_encoding_text_to_bytes("SCVDB-QUARANTINE-v1\n" + wire)
     val digest = db_evidence_digest(content, [])?
     val node = DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: created_day, dependencies: [])
@@ -155,4 +166,4 @@ fn db_quarantine_admit_patch(checkout: text, external_parent: text, handle: DbQu
 export DbQuarantineQuota, DbQuarantineHandle
 export db_quarantine_bundle_encode, db_quarantine_bundle_decode
 export db_quarantine_import, db_quarantine_open, db_quarantine_admit_patch
-export db_quarantine_read
+export db_quarantine_read, db_quarantine_store_bundle
