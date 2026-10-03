@@ -3,10 +3,10 @@
 use std.spec.*
 use std.spec.step
 use std.io_runtime.{file_read_bytes, dir_create_all}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_atomic_write, file_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_atomic_write, file_remove, file_exists, file_size}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
-use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read, retained_file_read_at, retained_file_identity_unchanged, retained_file_close}
-use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1, elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read, retained_file_read_at, retained_file_identity_unchanged, retained_file_close, retained_file_sync}
+use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1, elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1, elf_file_copy_section_v1}
 
 val ITEM4_FILE_FIXTURE = "test/fixtures/linker/elf/common_x64.o"
 
@@ -27,9 +27,84 @@ fn item4_file_mutant(bytes: [u8]) -> Result<text, text>:
 
 fn item4_file_clean(directory: text):
     expect(file_remove(directory + "/object.o")).to_equal(true)
+    if file_exists(directory + "/slice.bin"):
+        expect(file_remove(directory + "/slice.bin")).to_equal(true)
     expect(dir_remove(directory, false)).to_equal(true)
 
+fn item4_file_not_cancelled() -> bool: false
+
 describe "ITEM4-REQ-009 retained ELF file windows":
+    it "streams a real section into an exact-capacity retained output using several windows":
+        step("Create a private transaction source and exact 17-byte output handle")
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 8)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val output = retained_file_open(directory.unwrap() + "/slice.bin", 17u64, true)
+        expect(output.is_ok()).to_equal(true)
+        if output.is_err():
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            item4_file_clean(directory.unwrap())
+            return
+        step("Emit three bounded windows through the production retained reader and writer")
+        val copied = elf_file_copy_section_v1(opened.unwrap(), 2, output.unwrap(), item4_file_not_cancelled)
+        expect(copied.is_ok()).to_equal(true)
+        if copied.is_ok(): expect(copied.unwrap()).to_equal(17u64)
+        expect(output.unwrap().position).to_equal(17u64)
+        expect(retained_file_sync(output.unwrap())).to_equal(true)
+        expect(retained_file_close(output.unwrap())).to_equal(true)
+        expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        var expected: [u8] = []
+        for index in 64..81: expected.push(bytes[index])
+        expect(file_read_bytes(directory.unwrap() + "/slice.bin")).to_equal(expected)
+        item4_file_clean(directory.unwrap())
+
+    it "rejects output quota before any write and reports mid-stream cancellation as incomplete":
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 8)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val path = directory.unwrap() + "/slice.bin"
+        val small = retained_file_open(path, 16u64, true)
+        expect(small.is_ok()).to_equal(true)
+        if small.is_err():
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            item4_file_clean(directory.unwrap())
+            return
+        step("A one-byte-short output budget fails before emitting any part of the section")
+        val refused = elf_file_copy_section_v1(opened.unwrap(), 2, small.unwrap(), item4_file_not_cancelled)
+        expect(refused.is_err()).to_equal(true)
+        if refused.is_err(): expect(refused.unwrap_err()).to_contain("output capacity")
+        expect(small.unwrap().position).to_equal(0u64)
+        expect(retained_file_close(small.unwrap())).to_equal(true)
+        expect(file_size(path)).to_equal(0)
+        expect(file_remove(path)).to_equal(true)
+        val output = retained_file_open(path, 17u64, true)
+        expect(output.is_ok()).to_equal(true)
+        if output.is_ok():
+            step("Cancel using the actual first emitted window as the signal and discard the partial transaction")
+            val cancelled = elf_file_copy_section_v1(opened.unwrap(), 2, output.unwrap(), \: file_size(path) >= 8)
+            expect(cancelled.is_err()).to_equal(true)
+            if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled; discard output")
+            expect(output.unwrap().position).to_equal(8u64)
+            expect(retained_file_close(output.unwrap())).to_equal(true)
+        expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
     it "decodes real names symbols and RELA records individually without a resident symbol table":
         step("Read the real _start symbol and its cross-section relocation from independently known fixture fields")
         val opened = elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 32)
