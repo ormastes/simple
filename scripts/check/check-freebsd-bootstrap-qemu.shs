@@ -27,6 +27,8 @@ set -eu
 #                        'apt download qemu-efi-aarch64' + dpkg -x into
 #                        ~/.simple/qemu/firmware)
 #   QEMU_MEM             RAM (default: 32G)
+#   QEMU_DISK_SIZE       Sparse overlay virtual capacity in GiB (default: 48G;
+#                        accepted range: 40G..2048G)
 #   QEMU_CPUS            CPUs (default: 10)
 #   Per-host config (untracked, gitignored): .simple/qemu-host.conf at the
 #   repo root or ~/.simple/qemu-host.conf is sourced at startup; use
@@ -50,7 +52,7 @@ EXPECTED_BOOTSTRAP_VERSION=$(bootstrap_stage3_canonical_version "$ROOT_DIR") || 
 
 # Per-host, untracked config (gitignored): repo-local wins over ~/.simple.
 # Use ': "${VAR:=value}"' inside the file to keep explicit env exports
-# taking precedence. Knobs: QEMU_ARCH, QEMU_MEM, QEMU_CPUS, QEMU_EFI_FD.
+# taking precedence. Knobs: QEMU_ARCH, QEMU_MEM, QEMU_DISK_SIZE, QEMU_CPUS, QEMU_EFI_FD.
 [ -f "${HOME}/.simple/qemu-host.conf" ] && . "${HOME}/.simple/qemu-host.conf"
 [ -f "${ROOT_DIR}/.simple/qemu-host.conf" ] && . "${ROOT_DIR}/.simple/qemu-host.conf"
 
@@ -73,6 +75,7 @@ VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-32G}"
+QEMU_DISK_SIZE="${QEMU_DISK_SIZE:-48G}"
 QEMU_CPUS="${QEMU_CPUS:-10}"
 QEMU_PHASE2_BACKEND="${QEMU_PHASE2_BACKEND:-both}"
 QEMU_PHASE2_JOBS="${QEMU_PHASE2_JOBS:-${QEMU_CPUS}}"
@@ -177,6 +180,18 @@ is_valid_memory() {
     esac
 }
 
+is_valid_disk_size() {
+    case "$1" in
+        *G) _disk_gib=${1%G} ;;
+        *) return 1 ;;
+    esac
+    case "$_disk_gib" in
+        ''|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "$_disk_gib" -ge 40 ] 2>/dev/null &&
+        [ "$_disk_gib" -le 2048 ] 2>/dev/null
+}
+
 is_valid_port() {
     is_positive_integer "$1" || return 1
     [ "$1" -le 65535 ] 2>/dev/null
@@ -194,7 +209,7 @@ if [ -z "$TIMEOUT_BIN" ]; then
     TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 fi
 
-PREFLIGHT_ORDER="mode,port,user,memory,cpus,phase2_backend,phase2_jobs,phase2_build_threads,phase2_test_workers,phase2_isolation,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
+PREFLIGHT_ORDER="mode,port,user,memory,disk_size,cpus,phase2_backend,phase2_jobs,phase2_build_threads,phase2_test_workers,phase2_isolation,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
 PREFLIGHT_REASON="none"
 
 preflight_try() {
@@ -214,6 +229,7 @@ preflight_mode() {
 preflight_port() { is_valid_port "$QEMU_PORT"; }
 preflight_user() { is_valid_user "$QEMU_USER"; }
 preflight_memory() { is_valid_memory "$QEMU_MEM"; }
+preflight_disk_size() { is_valid_disk_size "$QEMU_DISK_SIZE"; }
 preflight_cpus() { is_positive_integer "$QEMU_CPUS"; }
 preflight_phase2_backend() {
     case "$QEMU_PHASE2_BACKEND" in both|llvm|cranelift) return 0 ;; *) return 1 ;; esac
@@ -320,6 +336,7 @@ run_preflight() {
     preflight_try port preflight_port
     preflight_try user preflight_user
     preflight_try memory preflight_memory
+    preflight_try disk_size preflight_disk_size
     preflight_try cpus preflight_cpus
     preflight_try phase2_backend preflight_phase2_backend
     preflight_try phase2_jobs preflight_phase2_jobs
@@ -346,7 +363,7 @@ run_preflight() {
         PREFLIGHT_STATUS="fail"
     fi
     printf 'freebsd_qemu_preflight_status=%s\n' "$PREFLIGHT_STATUS"
-    printf 'freebsd_qemu_preflight_checks=24\n'
+    printf 'freebsd_qemu_preflight_checks=25\n'
     printf 'freebsd_qemu_preflight_order=%s\n' "$PREFLIGHT_ORDER"
     printf 'freebsd_qemu_preflight_reason=%s\n' "$PREFLIGHT_REASON"
     [ "$PREFLIGHT_STATUS" = "pass" ]
@@ -371,6 +388,10 @@ if ! is_valid_user "$QEMU_USER"; then
 fi
 if ! is_valid_memory "$QEMU_MEM"; then
     printf 'Invalid QEMU_MEM: %s\n' "$QEMU_MEM" >&2
+    exit 1
+fi
+if ! is_valid_disk_size "$QEMU_DISK_SIZE"; then
+    printf 'Invalid QEMU_DISK_SIZE: %s (expected 40G..2048G)\n' "$QEMU_DISK_SIZE" >&2
     exit 1
 fi
 if ! is_positive_integer "$QEMU_CPUS"; then
@@ -701,29 +722,45 @@ printf '[5/7] QEMU overlay + start\n'
 
 rm -f "$OVERLAY_IMAGE"
 run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
-run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img resize "$OVERLAY_IMAGE" 30G >/dev/null 2>&1
-pass "Overlay created (30G): $OVERLAY_IMAGE"
+run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img resize "$OVERLAY_IMAGE" "$QEMU_DISK_SIZE" >/dev/null 2>&1
+pass "Overlay created (${QEMU_DISK_SIZE} virtual): $OVERLAY_IMAGE"
 
-# Detect KVM
-ACCEL="tcg"
-CPU_MODEL="qemu64"
+# Probe the selected system emulator only for a native-architecture guest.
+# Arm's host CPU model is usable with KVM; TCG keeps the existing max model.
+select_qemu_boot_machine_args() {
+    _boot_guest_arch=$1
+    _boot_host_arch=$2
+    _boot_qemu_system=$3
+    _boot_kvm_device=$4
+    _boot_efi_fd=$5
+    ACCEL="tcg"
+    CPU_MODEL="qemu64"
+    [ "$_boot_guest_arch" = arm64 ] && CPU_MODEL="max"
+
+    _boot_native_arch=false
+    case "$_boot_guest_arch:$_boot_host_arch" in
+        arm64:aarch64|arm64:arm64|amd64:x86_64|amd64:amd64)
+            _boot_native_arch=true ;;
+    esac
+    if [ "$_boot_native_arch" = true ] && [ -w "$_boot_kvm_device" ] &&
+        "$_boot_qemu_system" -accel help 2>/dev/null |
+            grep -Eq '^[[:space:]]*kvm([[:space:]]|$)'; then
+        if [ "$_boot_guest_arch" != arm64 ] ||
+            "$_boot_qemu_system" -cpu help 2>/dev/null |
+                grep -Eq '^[[:space:]]*host([[:space:]]|$)'; then
+            ACCEL="kvm"
+            CPU_MODEL="host"
+        fi
+    fi
+
+    case "$_boot_guest_arch" in
+        arm64) MACHINE_ARGS="-machine virt,accel=${ACCEL} -cpu ${CPU_MODEL} -bios ${_boot_efi_fd}" ;;
+        *) MACHINE_ARGS="-machine accel=${ACCEL} -cpu ${CPU_MODEL}" ;;
+    esac
+}
+
 HOST_ARCH="$(uname -m 2>/dev/null || true)"
-if { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; } &&
-    [ -w /dev/kvm ] 2>/dev/null &&
-    qemu-system-x86_64 -accel help 2>/dev/null | grep -Eq '^[[:space:]]*kvm([[:space:]]|$)'; then
-    ACCEL="kvm"
-    CPU_MODEL="host"
-fi
-
-# Arch-specific machine tuple: aarch64 guests use the virt machine with UEFI.
-case "$QEMU_ARCH" in
-    arm64)
-        MACHINE_ARGS="-machine virt,accel=${ACCEL} -cpu max -bios ${QEMU_EFI_FD_RESOLVED}"
-        ;;
-    *)
-        MACHINE_ARGS="-machine accel=${ACCEL} -cpu ${CPU_MODEL}"
-        ;;
-esac
+select_qemu_boot_machine_args "$QEMU_ARCH" "$HOST_ARCH" "$QEMU_SYSTEM" /dev/kvm "${QEMU_EFI_FD_RESOLVED:-}"
 
 rm -f "$PID_FILE" "$QEMU_START_LOG"
 if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" "$QEMU_SYSTEM" \

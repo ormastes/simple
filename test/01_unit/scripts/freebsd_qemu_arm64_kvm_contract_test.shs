@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="$root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/freebsd-kvm-select.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+sed -n '/^select_qemu_boot_machine_args() {/,/^}/p' "$script" > "$fixture/select.sh"
+[ -s "$fixture/select.sh" ] || fail 'QEMU acceleration selector is missing'
+. "$fixture/select.sh"
+
+cat > "$fixture/qemu-system-aarch64" <<'MOCK'
+#!/bin/sh
+printf '%s %s\n' "${0##*/}" "$*" >> "$MOCK_QEMU_LOG"
+case "$1:$2" in
+    -accel:help) [ "$MOCK_KVM" = yes ] && printf 'kvm\n'; printf 'tcg\n' ;;
+    -cpu:help) [ "$MOCK_HOST_CPU" = yes ] && printf '  host\n'; printf '  max\n' ;;
+    *) exit 1 ;;
+esac
+MOCK
+cp "$fixture/qemu-system-aarch64" "$fixture/qemu-system-x86_64"
+chmod +x "$fixture/qemu-system-aarch64" "$fixture/qemu-system-x86_64"
+: > "$fixture/kvm"
+MOCK_QEMU_LOG="$fixture/probes.log"
+MOCK_KVM=yes
+MOCK_HOST_CPU=yes
+export MOCK_QEMU_LOG MOCK_KVM MOCK_HOST_CPU
+
+: > "$MOCK_QEMU_LOG"
+select_qemu_boot_machine_args arm64 aarch64 "$fixture/qemu-system-aarch64" "$fixture/kvm" "$fixture/EFI.fd"
+[ "$ACCEL:$CPU_MODEL" = kvm:host ] || fail 'native arm64 KVM did not select host CPU'
+[ "$MACHINE_ARGS" = "-machine virt,accel=kvm -cpu host -bios $fixture/EFI.fd" ] || fail 'arm64 KVM command arguments differ'
+grep -Fxq 'qemu-system-aarch64 -accel help' "$MOCK_QEMU_LOG" || fail 'selected arm64 QEMU KVM support was not probed'
+grep -Fxq 'qemu-system-aarch64 -cpu help' "$MOCK_QEMU_LOG" || fail 'selected arm64 QEMU host CPU was not probed'
+
+: > "$MOCK_QEMU_LOG"
+select_qemu_boot_machine_args arm64 aarch64 "$fixture/qemu-system-aarch64" "$fixture/missing-kvm" "$fixture/EFI.fd"
+[ "$ACCEL:$CPU_MODEL" = tcg:max ] || fail 'arm64 without writable KVM did not retain TCG max'
+[ ! -s "$MOCK_QEMU_LOG" ] || fail 'QEMU was probed without a writable KVM device'
+
+: > "$MOCK_QEMU_LOG"
+MOCK_KVM=no
+select_qemu_boot_machine_args arm64 aarch64 "$fixture/qemu-system-aarch64" "$fixture/kvm" "$fixture/EFI.fd"
+[ "$ACCEL:$CPU_MODEL" = tcg:max ] || fail 'arm64 without QEMU KVM support did not retain TCG max'
+! grep -Fq -- '-cpu help' "$MOCK_QEMU_LOG" || fail 'CPU probed after KVM was rejected'
+
+: > "$MOCK_QEMU_LOG"
+MOCK_KVM=yes
+MOCK_HOST_CPU=no
+select_qemu_boot_machine_args arm64 aarch64 "$fixture/qemu-system-aarch64" "$fixture/kvm" "$fixture/EFI.fd"
+[ "$ACCEL:$CPU_MODEL" = tcg:max ] || fail 'arm64 without host CPU support did not retain TCG max'
+grep -Fxq 'qemu-system-aarch64 -cpu help' "$MOCK_QEMU_LOG" || fail 'arm64 host CPU absence was not checked'
+
+: > "$MOCK_QEMU_LOG"
+select_qemu_boot_machine_args amd64 x86_64 "$fixture/qemu-system-x86_64" "$fixture/kvm" ''
+[ "$ACCEL:$CPU_MODEL" = kvm:host ] || fail 'native x86 KVM selection changed'
+[ "$MACHINE_ARGS" = '-machine accel=kvm -cpu host' ] || fail 'x86 KVM command arguments changed'
+grep -Fxq 'qemu-system-x86_64 -accel help' "$MOCK_QEMU_LOG" || fail 'selected x86 QEMU was not probed'
+! grep -Fq -- '-cpu help' "$MOCK_QEMU_LOG" || fail 'x86 CPU probe changed existing behavior'
+
+# The production call site must work with set -u when x86 never resolved EFI.
+grep -F 'select_qemu_boot_machine_args "$QEMU_ARCH" "$HOST_ARCH" "$QEMU_SYSTEM" /dev/kvm' "$script" > "$fixture/call.sh"
+[ "$(wc -l < "$fixture/call.sh")" -eq 1 ] || fail 'production acceleration call site is missing or ambiguous'
+(
+    unset QEMU_EFI_FD_RESOLVED
+    QEMU_ARCH=amd64
+    HOST_ARCH=x86_64
+    QEMU_SYSTEM="$fixture/qemu-system-x86_64"
+    . "$fixture/call.sh"
+) || fail 'x86 production call requires arm64-only EFI firmware variable'
+
+: > "$MOCK_QEMU_LOG"
+select_qemu_boot_machine_args arm64 x86_64 "$fixture/qemu-system-aarch64" "$fixture/kvm" "$fixture/EFI.fd"
+[ "$ACCEL:$CPU_MODEL" = tcg:max ] || fail 'cross-architecture arm64 selection used KVM'
+[ ! -s "$MOCK_QEMU_LOG" ] || fail 'cross-architecture QEMU probed KVM'
+
+printf 'freebsd_qemu_arm64_kvm_contract=true\n'
