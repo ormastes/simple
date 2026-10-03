@@ -172,7 +172,7 @@ fallback, alias namespace/epoch/dual-form rejection, older Reference alias
 unavailability, 100 MiB streaming/quota, corrupted/missing CAS, cumulative
 quota before retention IO, actual restricted bytes, actual retention aggregate
 and zero-hop pre-IO rejection, byte framing, generic mutation rejection and
-replay, and Reference checkpoint manifest preservation. The existing three
+replay, and Reference checkpoint manifest preservation. The existing two
 generation-reader scenarios cover actual old generation, missing/corrupt
 objects, and invalid addresses. None has been executed in this lane.
 
