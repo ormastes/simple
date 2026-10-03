@@ -1,0 +1,62 @@
+"""Typed signature identity for collection metadata admission, not runtime proof."""
+# @req REQ-003
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.abi_interface.hir_abi_function_digest_v1
+
+fn collection_identity_module(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "testdata/collection_identity.spl", "collection_identity", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/collection_identity.spl")
+    lowering.lower_module(parsed)
+
+fn collection_identity_digest(source: text) -> text:
+    val module = collection_identity_module(source)
+    for function in module.functions.values():
+        if function.name == "sample":
+            return hir_abi_function_digest_v1(module, function).unwrap()
+    fail("fixture function was not lowered")
+    ""
+
+describe "collection function typed signature identity":
+    it "retains identity across body-only changes":
+        step("Compare actual lowered signatures with different bodies")
+        val before = collection_identity_digest("fn sample(x: i64) -> i64:\n    x + 1\n")
+        val after = collection_identity_digest("fn sample(x: i64) -> i64:\n    x + 2\n")
+        expect(before).to_equal(after)
+        expect(before.len()).to_equal(64)
+
+    it "changes identity when the actual parameter type changes":
+        step("Reject a stale signature after a typed declaration changes")
+        val integer = collection_identity_digest("fn sample(x: i64) -> bool:\n    true\n")
+        val text_arg = collection_identity_digest("fn sample(x: text) -> bool:\n    true\n")
+        expect(integer == text_arg).to_equal(false)
+
+    it "includes async declaration semantics":
+        step("Compare the same signature with distinct suspension contracts")
+        val module = collection_identity_module("fn sample(x: i64) -> i64:\n    x\n")
+        var compared = false
+        for function in module.functions.values():
+            if function.name == "sample":
+                val before = hir_abi_function_digest_v1(module, function).unwrap()
+                var changed = function
+                changed.is_async = true
+                val after = hir_abi_function_digest_v1(module, changed).unwrap()
+                expect(before == after).to_equal(false)
+                compared = true
+        expect(compared).to_equal(true)
+
+    it "rejects an unresolved named return type":
+        step("Keep unknown symbol identities out of metadata admission")
+        val module = collection_identity_module("fn sample(x: i64) -> i64:\n    x\n")
+        var checked = false
+        for function in module.functions.values():
+            if function.name == "sample":
+                var changed = function
+                changed.return_type = HirType(kind: HirTypeKind.Named(SymbolId(id: 999999), []), span: function.span)
+                expect(hir_abi_function_digest_v1(module, changed).is_err()).to_equal(true)
+                checked = true
+        expect(checked).to_equal(true)
