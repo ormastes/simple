@@ -1,0 +1,74 @@
+#!/bin/sh
+# Bounded real Git authority plus canonical content snapshots for a projected VM tree.
+set -eu
+die() { printf 'freebsd-source-authority: %s\n' "$*" >&2; exit 1; }
+[ "$#" -ge 1 ] || die 'action required'
+action=$1
+shift
+case "$action" in
+    prepare)
+        [ "$#" -eq 3 ] || die 'prepare requires source, capsule directory, and HEAD'
+        source_root=$1
+        capsule=$2
+        expected_head=$3
+        [ -d "$capsule" ] && [ ! -L "$capsule" ] && [ ! -e "$capsule/repo" ] ||
+            die 'capsule must be a fresh owned directory'
+        [ "$(git -C "$source_root" rev-parse --verify HEAD)" = "$expected_head" ] ||
+            die 'source HEAD changed before projection'
+        # No local hardlinks, alternate object store, checkout, or ancestry.
+        # Limit server pack parallelism; the caller supplies the wall-clock cap.
+        git clone --quiet --depth 1 --no-local --no-checkout \
+            --upload-pack='git -c pack.threads=1 -c pack.windowMemory=64m upload-pack' \
+            "$source_root" "$capsule/repo" || die 'depth-one clone failed'
+        [ "$(git -C "$capsule/repo" rev-parse --verify HEAD)" = "$expected_head" ] ||
+            die 'cloned HEAD differs from source'
+        [ "$(git -C "$capsule/repo" rev-list --count HEAD)" = 1 ] ||
+            die 'capsule contains ancestry'
+        [ ! -e "$capsule/repo/.git/objects/info/alternates" ] || die 'alternate object store rejected'
+        git -C "$capsule/repo" remote remove origin
+        git -C "$source_root" diff --no-renames --name-only -z --diff-filter=D HEAD -- \
+            >"$capsule/repo/.git/simple-host-deleted.z" || die 'cannot capture genuine deletions'
+        [ "$(git -C "$source_root" rev-parse --verify HEAD)" = "$expected_head" ] ||
+            die 'source HEAD changed during projection'
+        printf '%s\n' "$expected_head" >"$capsule/repo/.git/simple-source-head"
+        du -sk "$capsule/repo/.git" | awk '{print "git_authority_kib=" $1}'
+        ;;
+    activate)
+        [ "$#" -eq 2 ] || die 'activate requires projected root and expected HEAD'
+        source_root=$1
+        expected_head=$2
+        [ -d "$source_root/.git" ] && [ ! -L "$source_root/.git" ] || die 'real Git directory required'
+        [ ! -e "$source_root/.git/objects/info/alternates" ] || die 'alternate object store rejected'
+        projected_git() { git -c "safe.directory=$source_root" -C "$source_root" "$@"; }
+        [ "$(projected_git rev-parse --verify HEAD)" = "$expected_head" ] || die 'guest HEAD mismatch'
+        [ "$(projected_git cat-file -t "$expected_head")" = commit ] || die 'real commit object missing'
+        [ "$(cat "$source_root/.git/simple-source-head")" = "$expected_head" ] || die 'capsule HEAD receipt mismatch'
+        [ -f "$source_root/.git/simple-host-deleted.z" ] || die 'host deletion receipt missing'
+        # --mixed changes only the index. Never overwrite the transferred sources.
+        projected_git reset --mixed --quiet HEAD
+        projected_git ls-files --deleted -z >"$source_root/.git/simple-projected-absent.z"
+        projected_git update-index --skip-worktree -z --stdin <"$source_root/.git/simple-projected-absent.z"
+        projected_git update-index --no-skip-worktree -z --stdin <"$source_root/.git/simple-host-deleted.z"
+        ;;
+    snapshot|compare)
+        if [ "$action" = snapshot ]; then
+            [ "$#" -eq 2 ] || die 'snapshot requires root and output'
+            source_root=$1
+            snapshot_output=$2
+        else
+            [ "$#" -eq 3 ] || die 'compare requires root, expected snapshot, and output'
+            source_root=$1
+            expected_snapshot=$2
+            snapshot_output=$3
+        fi
+        BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+        export BOOTSTRAP_STAGE3_FACADE_PATH
+        . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+        bootstrap_stage3_source_snapshot "$snapshot_output" "$source_root" || die 'canonical source snapshot failed'
+        if [ "$action" = compare ]; then
+            cmp -s "$expected_snapshot" "$snapshot_output" || die 'projected source content differs from host authority'
+        fi
+        bootstrap_stage3_hash_file "$snapshot_output"
+        ;;
+    *) die "unknown action: $action" ;;
+esac
