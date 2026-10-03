@@ -1,0 +1,41 @@
+# Result predicates inspect the canonical Ok=0 / Err=1 discriminant.
+# A method leaf alone is not evidence that a receiver has Result storage.
+use compiler.mir.mir_data.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+impl MirLowering:
+    me try_lower_result_predicate(
+        receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution
+    ) -> LocalId?:
+        if args.len() != 0 or (method != "is_ok" and method != "is_err"):
+            return nil
+        # An explicitly selected trait, extension, or nominal method owns
+        # dispatch even if its receiver happens to have Result storage.
+        match resolution:
+            case MethodResolution.Unresolved: ()
+            case _: return nil
+        val receiver_type = self.enum_match_expr_type(receiver)
+        if receiver_type == nil:
+            return nil
+        val declared = receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+        match declared.kind:
+            case HirTypeKind.Result(_, _): ()
+            case _: return nil
+        val receiver_local = self.lower_expr(receiver)
+        val discriminant = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_discriminant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val tag = self.emit_resolved_direct_call(discriminant,
+            [mir_operand_copy(receiver_local)], MirType.i64())
+        var builder = self.builder
+        val expected = builder.emit_const_int(if method == "is_ok": 0 else: 1)
+        val result = builder.emit_binop(MirBinOp.Eq,
+            mir_operand_copy(tag), mir_operand_copy(expected), MirType.bool())
+        self.builder = builder
+        result
