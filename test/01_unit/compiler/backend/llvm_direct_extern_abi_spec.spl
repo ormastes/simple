@@ -48,6 +48,48 @@ fn exact_extern_check(source: text, external_name: text, params: [MirType], resu
     expect(emitted_calls).to_equal(1)
 
 describe "fixed direct LLVM-C ABI prerequisites":
+    it "does not treat an ordinary function as an extern declaration":
+        val source = "fn identity(x: i32) -> i32:\n    x\nfn probe(x: i32) -> i32:\n    identity(x)\n"
+        val ast = parse_full_frontend(source, "ordinary.spl", "ordinary", Logger(level: 0))
+        var lowering = HirLowering.with_filename("ordinary.spl")
+        val hir = lowering.lower_module(ast)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        var found = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str("identity"), type_):
+                                    found = found + 1
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature): expect(signature.params).to_equal([])
+                                        case _: fail("ordinary direct call representation changed")
+                                case _: pass
+                        case _: pass
+        expect(found).to_equal(1)
+
+    it "retains the existing word ABI for an actual captured lambda producer":
+        val source = "fn consume(callback: fn(i64) -> i64, value: i64) -> i64:\n    callback(value)\nfn probe(base: i64) -> i64:\n    consume(\\value: value + base, 7)\n"
+        val ast = parse_full_frontend(source, "captured.spl", "captured", Logger(level: 0))
+        var lowering = HirLowering.with_filename("captured.spl")
+        val hir = lowering.lower_module(ast)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        var found = 0
+        for function in mir.functions.values():
+            if function.name.starts_with("__lambda_lift_"):
+                found = found + 1
+                expect(function.signature.params).to_equal([MirType.i64(), MirType.i64()])
+                expect(function.signature.return_type).to_equal(MirType.i64())
+        expect(found).to_equal(1)
+
     it "preserves pointer handles and pointer-to-pointer outputs with C i32 status":
         val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
         val pp = MirType.ptr(p, true)
