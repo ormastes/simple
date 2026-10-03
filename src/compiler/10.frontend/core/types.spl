@@ -756,6 +756,7 @@ fn type_tag_to_c(tag: i64) -> text:
 
 var named_type_names: [text] = []
 var named_type_arguments: [[i64]] = []
+var named_type_layout_owners: [i64] = []
 var named_type_field_names: [[text]] = []
 var named_type_field_types: [[i64]] = []
 
@@ -775,16 +776,16 @@ fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i
     val idx = named_type_names.len()
     named_type_names.push(name)
     named_type_arguments.push([])
+    named_type_layout_owners.push(idx)
     named_type_field_names.push(field_names)
     named_type_field_types.push(field_types)
     idx
 
 fn named_type_update(type_id: i64, field_names: [text], field_types: [i64]):
-    # Applications share their declared owner's runtime field layout.
-    for i in 0..named_type_names.len():
-        if named_type_names[i] == named_type_names[type_id]:
-            named_type_field_names[i] = field_names
-            named_type_field_types[i] = field_types
+    # Canonical owner indirection keeps layout updates and reads O(1).
+    val owner = named_type_layout_owners[type_id]
+    named_type_field_names[owner] = field_names
+    named_type_field_types[owner] = field_types
 
 fn named_type_apply(name: text, arguments: [i64]) -> i64:
     val owner = named_type_register(name, [], [])
@@ -797,8 +798,9 @@ fn named_type_apply(name: text, arguments: [i64]) -> i64:
     val index = named_type_names.len()
     named_type_names.push(name)
     named_type_arguments.push(arguments)
-    named_type_field_names.push(named_type_field_names[owner])
-    named_type_field_types.push(named_type_field_types[owner])
+    named_type_layout_owners.push(owner)
+    named_type_field_names.push([])
+    named_type_field_types.push([])
     TYPE_NAMED_BASE + index
 
 fn named_type_arguments_for_tag(tag: i64) -> [i64]:
@@ -819,10 +821,10 @@ fn named_type_name(type_id: i64) -> text:
     named_type_names[type_id]
 
 fn named_type_fields(type_id: i64) -> [text]:
-    named_type_field_names[type_id]
+    named_type_field_names[named_type_layout_owners[type_id]]
 
 fn named_type_field_type_tags(type_id: i64) -> [i64]:
-    named_type_field_types[type_id]
+    named_type_field_types[named_type_layout_owners[type_id]]
 
 fn primitive_bit_width_from_name(type_name: text) -> i64:
     if type_name == "bool":
@@ -1605,6 +1607,7 @@ pub fn type_pools_promote_hir_owners() -> bool:
     promoted = _type_pool_promote_root<[i64]>([dict_type_values]) and promoted
     promoted = _type_pool_promote_root<[text]>([named_type_names]) and promoted
     promoted = _type_pool_promote_root<[[i64]]>([named_type_arguments]) and promoted
+    promoted = _type_pool_promote_root<[i64]>([named_type_layout_owners]) and promoted
     promoted = _type_pool_promote_root<[[i64]]>([union_type_members]) and promoted
     promoted = _type_pool_promote_root<[i64]>([result_type_ok]) and promoted
     promoted = _type_pool_promote_root<[i64]>([result_type_err]) and promoted
@@ -1634,6 +1637,7 @@ fn reset_all_pools():
     current_scope_depth = 0
     named_type_names = []
     named_type_arguments = []
+    named_type_layout_owners = []
     named_type_field_names = []
     named_type_field_types = []
     # All three newunit pools are per-file scratch. Leaving their old owners
@@ -1763,6 +1767,7 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64_list(named_type_field_types))
     parts = parts.push(flat_pool_enc_text(named_type_names))
     parts = parts.push(flat_pool_enc_i64_list(named_type_arguments))
+    parts = parts.push(flat_pool_enc_i64(named_type_layout_owners))
     parts = parts.push(flat_pool_enc_text(newunit_names))
     parts = parts.push(flat_pool_enc_text(newunit_suffixes))
     parts = parts.push(flat_pool_enc_i64(newunit_underlying_type_tags))
@@ -1824,6 +1829,7 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
     named_type_field_types = flat_pool_dec_i64_list(r)
     named_type_names = flat_pool_dec_text(r)
     named_type_arguments = flat_pool_dec_i64_list(r)
+    named_type_layout_owners = flat_pool_dec_i64(r)
     newunit_names = flat_pool_dec_text(r)
     newunit_suffixes = flat_pool_dec_text(r)
     newunit_underlying_type_tags = flat_pool_dec_i64(r)
@@ -1859,11 +1865,16 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
         return false
     if function_param_tags.len() != function_ret_tags.len():
         return false
-    if not r.ok or named_type_arguments.len() != named_type_names.len():
+    if not r.ok or named_type_arguments.len() != named_type_names.len() or
+            named_type_layout_owners.len() != named_type_names.len():
         return false
     # Parsed type applications reference previously allocated owners/arguments.
     # Reject corrupt forward/self references before recursive AST conversion.
     for i in 0..named_type_arguments.len():
+        val owner = named_type_layout_owners[i]
+        if owner < 0 or owner > i or named_type_layout_owners[owner] != owner or
+                named_type_names[owner] != named_type_names[i]:
+            return false
         for argument in named_type_arguments[i]:
             if argument >= TYPE_NAMED_BASE + i:
                 return false

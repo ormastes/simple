@@ -1,7 +1,7 @@
 # @tag: unit, compiler, hir, collection
 # @req REQ-PSC-002 REQ-PSC-005
 use std.spec.{describe, it, expect, step}
-use compiler.core.parser.{parser_init, parser_has_errors}
+use compiler.core.parser.{parser_init, parser_has_errors, parser_initialization_generation_v1}
 use compiler.core.parser_stmts.{parse_statement}
 use compiler.frontend.flat_ast_bridge.{convert_flat_stmt, flat_pools_dump_all, flat_pools_restore_all}
 use compiler.frontend.parser_types_expr.{TypeKind, StmtKind}
@@ -11,6 +11,9 @@ use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind}
 use compiler.hir.hir_definitions.{HirStmtKind, HirExprKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.statements.*
+use compiler.core.types.{named_type_register, named_type_apply, named_type_update,
+    named_type_fields, named_type_field_type_tags, TYPE_NAMED_BASE, TYPE_I64, TYPE_TEXT}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 
 fn expect_map_annotation(source: text):
     parser_init(source)
@@ -18,7 +21,9 @@ fn expect_map_annotation(source: text):
     expect(parser_has_errors()).to_equal(false)
     val snapshot = flat_pools_dump_all()
     parser_init("val unrelated = 1")
+    val generation = parser_initialization_generation_v1()
     expect(flat_pools_restore_all(snapshot)).to_equal(true)
+    expect(parser_initialization_generation_v1()).to_equal(generation)
     val statement = convert_flat_stmt(parsed)
     match statement.kind:
         case StmtKind.Val(_, type_, _) | StmtKind.Var(_, type_, _):
@@ -37,6 +42,47 @@ fn expect_map_annotation(source: text):
         case _: expect("declaration lost").to_equal("val or var")
 
 describe "attributed collection parsed type transport":
+    it "shares canonical layout updates without modifying unrelated types":
+        step("Instantiate two key types and update their canonical owner once")
+        parser_init("")
+        val owner = named_type_register("AdaptiveSet", ["old"], [TYPE_I64])
+        val unrelated = named_type_register("Unrelated", ["untouched"], [TYPE_TEXT])
+        val integers = named_type_apply("AdaptiveSet", [TYPE_I64]) - TYPE_NAMED_BASE
+        val strings = named_type_apply("AdaptiveSet", [TYPE_TEXT]) - TYPE_NAMED_BASE
+        named_type_update(owner, ["current"], [TYPE_TEXT])
+        expect(named_type_fields(integers)).to_equal(["current"])
+        expect(named_type_fields(strings)).to_equal(["current"])
+        expect(named_type_field_type_tags(integers)).to_equal([TYPE_TEXT])
+        expect(named_type_fields(unrelated)).to_equal(["untouched"])
+
+    it "retains nested adaptive type applications and rejects stale codec snapshots":
+        step("Roundtrip a nested type while rejecting the previous schema before restoration")
+        parser_init("@collection_algorithm(\"auto\")\nval nested: AdaptiveMap<i64, AdaptiveSet<text>> = make_map()")
+        val parsed = parse_statement()
+        expect(parser_has_errors()).to_equal(false)
+        val snapshot = flat_pools_dump_all()
+        val stale = snapshot.replace(FLAT_POOL_CODEC_VERSION, "spl-flatpool-v2")
+        expect(flat_pools_restore_all(stale)).to_equal(false)
+        parser_init("val unrelated = 1")
+        expect(flat_pools_restore_all(snapshot)).to_equal(true)
+        val statement = convert_flat_stmt(parsed)
+        match statement.kind:
+            case StmtKind.Val(_, type_, _):
+                match type_.kind:
+                    case TypeKind.Named(name, args):
+                        expect(name).to_equal("AdaptiveMap")
+                        expect(args.len()).to_equal(2)
+                        match args[1].kind:
+                            case TypeKind.Named(inner_name, inner_args):
+                                expect(inner_name).to_equal("AdaptiveSet")
+                                expect(inner_args.len()).to_equal(1)
+                                match inner_args[0].kind:
+                                    case TypeKind.Named(key, _): expect(key).to_equal("text")
+                                    case _: expect("nested key lost").to_equal("text")
+                            case _: expect("nested type lost").to_equal("AdaptiveSet")
+                    case _: expect("outer type lost").to_equal("AdaptiveMap")
+            case _: expect("declaration lost").to_equal("val")
+
     it "retains a generic immutable declaration through parser cache restoration":
         step("Parse the real attribute syntax and roundtrip the complete flat arena")
         expect_map_annotation("@collection_algorithm(\"hash\")\nval selected: AdaptiveMap<i64, text> = make_map()")
