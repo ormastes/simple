@@ -1,0 +1,294 @@
+# GitHub issue effects. Provider permission is not semantic authorization.
+# Trusted owner validates reviewed policy and persists/reopens sent_unconfirmed
+# BEFORE this adapter may mutate GitHub; returned reconciliation also needs save.
+# API: https://docs.github.com/en/rest/issues/issues
+#      https://docs.github.com/en/rest/issues/comments
+use app.io.mod.{process_run_bounded}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.types.{json_get_type}
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+use std.scv.db_canonical.{db_frame, db_canonical_text, db_domain_bytes}
+use std.scv.db_bridge.{DbBridgeDelivery, DbBridgeTransition, DbBridgeObservation, db_bridge_pending, db_bridge_sent, db_bridge_reconcile, db_provider_field_plan}
+use app.scv.db.github_provider.{DbGithubSource, DbGithubTransport, DbGithubProcessReply, db_github_source_validate, db_github_response}
+
+struct DbGithubIssuePolicy:
+    revision: text
+    reviewed_by: text
+    title_authority: text
+    body_authority: text
+    state_authority: text
+
+struct DbGithubBridgeRequest:
+    source: DbGithubSource
+    delivery: DbBridgeDelivery
+    kind: text
+    issue_number: text
+    title: text
+    body: text
+    state: text
+    base_title: text
+    base_body: text
+    base_state: text
+    policy: DbGithubIssuePolicy
+
+struct DbGithubBridgePorts:
+    transport: DbGithubTransport
+    now: fn() -> u64
+    # Must atomically persist and reopen this exact fenced delivery. This is an
+    # owner capability, never an implementation that merely returns its argument.
+    persist_sent: fn(DbBridgeDelivery) -> Result<DbBridgeDelivery, text>
+
+struct DbGithubBridgeResult:
+    transition: DbBridgeTransition
+    external_id: text
+
+struct DbGithubBridgeScan:
+    found: bool
+    payload_digest: text
+    revision: text
+    external_id: text
+
+fn _db_issue_hex(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for i in 0..value.len():
+        val c = value.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)):
+            return false
+    true
+
+fn _db_issue_number(value: text) -> bool:
+    if value == "" or value.starts_with("0") or value.len() > 16:
+        return false
+    for i in 0..value.len():
+        val c = value.char_code_at(i)
+        if c < 48 or c > 57:
+            return false
+    true
+
+fn db_github_bridge_payload(request: DbGithubBridgeRequest, title: text, body: text, state: text) -> Result<text, text>:
+    var bytes: [u8] = []
+    for field in [request.kind, request.issue_number, title, body, state, request.base_title, request.base_body, request.base_state, request.policy.revision, request.policy.reviewed_by, request.policy.title_authority, request.policy.body_authority, request.policy.state_authority]:
+        bytes = bytes + db_frame(1u8, db_canonical_text(field)?)
+    Ok(sha256_u8_hex(db_domain_bytes("github-issue-payload.v1", bytes)?))
+
+fn _db_issue_marker(request: DbGithubBridgeRequest) -> text:
+    "<!-- scv-bridge:v1:{request.delivery.intent.revision} -->"
+
+fn _db_issue_validate(request: DbGithubBridgeRequest) -> Result<bool, text>:
+    db_github_source_validate(request.source)?
+    db_bridge_pending(request.delivery.intent)?
+    if request.delivery.intent.provider.instance != request.source.host or request.delivery.intent.provider.project != request.source.repository_id:
+        return Err("GithubBridgeScopeMismatch")
+    if not _db_issue_hex(request.delivery.intent.revision) or not _db_issue_hex(request.policy.revision) or request.policy.reviewed_by == "":
+        return Err("GithubBridgeUnreviewedPolicy")
+    for authority in [request.policy.title_authority, request.policy.body_authority, request.policy.state_authority]:
+        if not ["local", "remote", "shared"].contains(authority):
+            return Err("GithubBridgeInvalidAuthority")
+    # Conservative argv quota also fits native Windows argument encoding.
+    if request.body.len() > 12000 or request.title.len() > 256 or request.body.contains("\0") or request.title.contains("\0") or request.body.contains("<!-- scv-bridge:"):
+        return Err("GithubBridgeInvalidPayload")
+    if request.kind == "create-issue":
+        if request.delivery.intent.operation != "create" or request.title == "" or request.state != "open" or request.issue_number != "":
+            return Err("GithubBridgeOperationMismatch")
+    elif request.kind == "update-issue":
+        if request.delivery.intent.operation != "update" or not _db_issue_number(request.issue_number) or request.delivery.intent.provider.external_id != request.issue_number or request.title == "" or not ["open", "closed"].contains(request.state):
+            return Err("GithubBridgeOperationMismatch")
+    elif request.kind == "create-comment":
+        if request.delivery.intent.operation != "create" or not _db_issue_number(request.issue_number) or request.title != "" or request.state != "" or request.body == "":
+            return Err("GithubBridgeOperationMismatch")
+    else:
+        return Err("GithubBridgeOperationUnsupported")
+    if request.delivery.intent.payload_digest != db_github_bridge_payload(request, request.title, request.body, request.state)?:
+        return Err("GithubBridgePayloadDigestMismatch")
+    Ok(true)
+
+fn _db_issue_http(source: DbGithubSource, ports: DbGithubBridgePorts, method: text, endpoint: text, fields: [text]) -> Result<any, text>:
+    if ports.transport.lease_held():
+        return Err("GithubNetworkForbiddenUnderLease")
+    val args = ["api", "--hostname", source.host, "--method", method, "--include", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint] + fields
+    var reply = ports.transport.execute(args, source.timeout_ms, source.maximum_response_bytes)
+    # Existing strict response decoder accepts 200. Normalize ONLY the status
+    # line for a successful create; never replace text inside the returned body.
+    var lines = reply.stdout.replace("\r\n", "\n").split("\n")
+    if method == "POST" and lines.len() > 0 and ["HTTP/2.0 201 Created", "HTTP/1.1 201 Created", "HTTP/2 201 Created"].contains(lines[0]):
+        lines[0] = "HTTP/2.0 200 OK"
+        reply.stdout = lines.join("\n")
+    val body = db_github_response(reply, source.maximum_response_bytes)?
+    val (parsed, error) = json_parse_with_error(body)
+    if error != "":
+        return Err("GithubMalformedJson")
+    Ok(parsed)
+
+fn _db_issue_field(value: any, key: text) -> Result<any, text>:
+    if json_get_type(value) != "object":
+        return Err("GithubSchemaMismatch")
+    val fields: Dict<text, any> = value.1
+    if not fields.has(key):
+        return Err("GithubSchemaMismatch")
+    Ok(fields[key])
+
+fn _db_issue_text(value: any, key: text, nullable: bool) -> Result<text, text>:
+    val field = _db_issue_field(value, key)?
+    if nullable and json_get_type(field) == "null":
+        return Ok("")
+    if json_get_type(field) != "string":
+        return Err("GithubSchemaMismatch")
+    val result: text = field.1
+    Ok(result)
+
+fn _db_issue_id(value: any, key: text) -> Result<text, text>:
+    val field = _db_issue_field(value, key)?
+    if json_get_type(field) != "number":
+        return Err("GithubSchemaMismatch")
+    val number: f64 = field.1
+    if number < 1 or number > 9007199254740991:
+        return Err("GithubUnsafeNumericIdentity")
+    val integer = number as u64
+    if integer as f64 != number:
+        return Err("GithubUnsafeNumericIdentity")
+    Ok(integer.to_text())
+
+fn _db_issue_scan_value(request: DbGithubBridgeRequest, value: any) -> Result<DbGithubBridgeScan, text>:
+    val body = _db_issue_text(value, "body", true)?
+    val marker = _db_issue_marker(request)
+    val absent = DbGithubBridgeScan(found: false, payload_digest: "", revision: "", external_id: "")
+    if not body.contains(marker):
+        return Ok(absent)
+    if not body.ends_with("\n\n" + marker):
+        return Err("GithubBridgeMarkerMalformed")
+    val content = body[0:body.len() - marker.len() - 2]
+    if content.contains(marker):
+        return Err("GithubBridgeMarkerCollision")
+    var title = ""
+    var state = ""
+    var external_id = ""
+    if request.kind == "create-comment":
+        external_id = _db_issue_id(value, "id")?
+    else:
+        val fields: Dict<text, any> = value.1
+        if fields.has("pull_request"):
+            return Ok(absent)
+        title = _db_issue_text(value, "title", false)?
+        state = _db_issue_text(value, "state", false)?
+        external_id = _db_issue_id(value, "number")?
+    val updated = _db_issue_text(value, "updated_at", false)?
+    if updated == "":
+        return Err("GithubBridgeMissingRevision")
+    val payload = db_github_bridge_payload(request, title, content, state)?
+    Ok(DbGithubBridgeScan(found: true, payload_digest: payload, revision: sha256_text(external_id + "\n" + updated + "\n" + payload), external_id: external_id))
+
+# Full bounded scans use stable creation ordering and exact markers. An exhausted
+# page budget is unknown, never proof that no previous create exists.
+fn _db_issue_scan(request: DbGithubBridgeRequest, ports: DbGithubBridgePorts) -> Result<DbGithubBridgeScan, text>:
+    val base = "repos/{request.source.owner}/{request.source.repository}/issues"
+    if request.kind == "update-issue":
+        val value = _db_issue_http(request.source, ports, "GET", "{base}/{request.issue_number}", [])?
+        if _db_issue_id(value, "number")? != request.issue_number:
+            return Err("GithubBridgeScopeMismatch")
+        return _db_issue_scan_value(request, value)
+    var result = DbGithubBridgeScan(found: false, payload_digest: "", revision: "", external_id: "")
+    var page = 1u64
+    while page <= request.source.maximum_pages:
+        val endpoint = if request.kind == "create-comment": "{base}/{request.issue_number}/comments?per_page={request.source.per_page}&page={page}" else: "{base}?state=all&sort=created&direction=asc&per_page={request.source.per_page}&page={page}"
+        val value = _db_issue_http(request.source, ports, "GET", endpoint, [])?
+        if json_get_type(value) != "array":
+            return Err("GithubSchemaMismatch")
+        val rows: [any] = value.1
+        if rows.len() as u64 > request.source.per_page:
+            return Err("GithubPageBoundExceeded")
+        for row in rows:
+            val found = _db_issue_scan_value(request, row)?
+            if found.found:
+                if result.found and result.external_id != found.external_id:
+                    return Err("GithubBridgeMarkerCollision")
+                result = found
+        if rows.len() as u64 < request.source.per_page:
+            return Ok(result)
+        page = page + 1u64
+    Err("GithubBridgeReadbackIncomplete")
+
+fn _db_issue_plan_update(request: DbGithubBridgeRequest, value: any) -> Result<bool, text>:
+    val remote_title = _db_issue_text(value, "title", false)?
+    val remote_body = _db_issue_text(value, "body", true)?
+    val remote_state = _db_issue_text(value, "state", false)?
+    val title = db_provider_field_plan(request.base_title, request.title, remote_title, request.policy.title_authority, "found")
+    val body = db_provider_field_plan(request.base_body, request.body, remote_body, request.policy.body_authority, "found")
+    val state = db_provider_field_plan(request.base_state, request.state, remote_state, request.policy.state_authority, "found")
+    for action in [title.action, body.action, state.action]:
+        if action == "conflict":
+            return Err("GithubBridgeFieldConflict")
+        if action == "pull_remote" or action == "pull_remote_authoritative":
+            return Err("GithubBridgePullRequired")
+    # GitHub Issues PATCH is not an admitted compare-and-swap. Only a reviewed
+    # local field authority permits overwrite after a racing provider edit.
+    if (remote_title != request.title and request.policy.title_authority != "local") or request.policy.body_authority != "local" or (remote_state != request.state and request.policy.state_authority != "local"):
+        return Err("GithubBridgeConditionalWriteUnsupported")
+    Ok(true)
+
+fn _db_issue_persist_sent(delivery: DbBridgeDelivery, ports: DbGithubBridgePorts) -> Result<DbBridgeDelivery, text>:
+    val proposed = db_bridge_sent(delivery, delivery.owner, delivery.generation, ports.now())
+    if proposed.code != "sent_unconfirmed":
+        return Err(proposed.code)
+    val reopened = ports.persist_sent(proposed.delivery)?
+    if reopened.intent.revision != proposed.delivery.intent.revision or reopened.intent.payload_digest != proposed.delivery.intent.payload_digest or reopened.owner != proposed.delivery.owner or reopened.generation != proposed.delivery.generation or reopened.state != "sent_unconfirmed" or not reopened.must_reconcile or reopened.attempts != proposed.delivery.attempts or reopened.lease_expires != proposed.delivery.lease_expires or reopened.lease_expires <= ports.now() or reopened.provider_revision != proposed.delivery.provider_revision or reopened.next_attempt != proposed.delivery.next_attempt or reopened.last_error != proposed.delivery.last_error:
+        return Err("GithubBridgeDurableFenceMismatch")
+    # Validate the entire immutable intent rather than only its supplied digest.
+    db_bridge_pending(reopened.intent)?
+    Ok(reopened)
+
+fn _db_issue_reconcile(delivery: DbBridgeDelivery, scan: DbGithubBridgeScan, ports: DbGithubBridgePorts) -> DbGithubBridgeResult:
+    # An absent marker after an uncertain effect cannot prove a POST was not
+    # applied (eventual visibility/deletion). Never enable a blind retry.
+    val observation = DbBridgeObservation(provider: delivery.intent.provider, correlation_id: delivery.intent.correlation_id, payload_digest: scan.payload_digest, revision: scan.revision, status: if scan.found: "found" else: "unknown")
+    DbGithubBridgeResult(transition: db_bridge_reconcile(delivery, delivery.owner, delivery.generation, ports.now(), observation), external_id: scan.external_id)
+
+fn db_github_bridge_deliver(request: DbGithubBridgeRequest, ports: DbGithubBridgePorts) -> Result<DbGithubBridgeResult, text>:
+    _db_issue_validate(request)?
+    val delivery = request.delivery
+    if not ["leased", "sent_unconfirmed"].contains(delivery.state) or delivery.owner == "" or delivery.lease_expires <= ports.now():
+        return Err("GithubBridgeDeliveryFence")
+    # Bound total work: repository probe + two full scans + preflight + effect.
+    if request.source.maximum_pages * 2u64 + 3u64 > request.source.maximum_requests:
+        return Err("GithubBridgeRequestBudgetExceeded")
+    val repository = _db_issue_http(request.source, ports, "GET", "repos/{request.source.owner}/{request.source.repository}", [])?
+    if _db_issue_id(repository, "id")? != request.source.repository_id:
+        return Err("GithubBridgeScopeMismatch")
+    val observed = _db_issue_scan(request, ports)?
+    if delivery.must_reconcile or delivery.state == "sent_unconfirmed":
+        return Ok(_db_issue_reconcile(delivery, observed, ports))
+    if observed.found:
+        val persisted = _db_issue_persist_sent(delivery, ports)?
+        return Ok(_db_issue_reconcile(persisted, observed, ports))
+    val base = "repos/{request.source.owner}/{request.source.repository}/issues"
+    if request.kind == "update-issue":
+        val current = _db_issue_http(request.source, ports, "GET", "{base}/{request.issue_number}", [])?
+        if _db_issue_id(current, "number")? != request.issue_number:
+            return Err("GithubBridgeScopeMismatch")
+        _db_issue_plan_update(request, current)?
+    val persisted = _db_issue_persist_sent(delivery, ports)?
+    val body = request.body + "\n\n" + _db_issue_marker(request)
+    val endpoint = if request.kind == "create-comment": "{base}/{request.issue_number}/comments" else: if request.kind == "update-issue": "{base}/{request.issue_number}" else: base
+    val method = if request.kind == "update-issue": "PATCH" else: "POST"
+    var fields = ["-f", "body=" + body]
+    if request.kind == "create-issue" or (request.kind == "update-issue" and request.policy.title_authority == "local"):
+        fields = fields + ["-f", "title=" + request.title]
+    if request.kind == "update-issue" and request.policy.state_authority == "local":
+        fields = fields + ["-f", "state=" + request.state]
+    # Regardless of status, a provider might have applied the effect. Always
+    # read back; never convert a timeout/permission loss into "not applied".
+    val effect = _db_issue_http(request.source, ports, method, endpoint, fields)
+    match _db_issue_scan(request, ports):
+        Ok(scan): Ok(_db_issue_reconcile(persisted, scan, ports))
+        Err(reason):
+            Ok(DbGithubBridgeResult(transition: DbBridgeTransition(code: reason, delivery: persisted), external_id: ""))
+
+fn _db_issue_live_execute(args: [text], timeout: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    val (stdout, stderr, code) = process_run_bounded("gh", args, timeout, maximum_bytes)
+    DbGithubProcessReply(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn db_github_bridge_live_ports(lease_held: fn() -> bool, now: fn() -> u64, persist_sent: fn(DbBridgeDelivery) -> Result<DbBridgeDelivery, text>) -> DbGithubBridgePorts:
+    DbGithubBridgePorts(transport: DbGithubTransport(execute: _db_issue_live_execute, lease_held: lease_held), now: now, persist_sent: persist_sent)
+
+export DbGithubIssuePolicy, DbGithubBridgeRequest, DbGithubBridgePorts, DbGithubBridgeResult
+export db_github_bridge_payload, db_github_bridge_deliver, db_github_bridge_live_ports

@@ -1,0 +1,223 @@
+# Injected transport and persistence-port ordering tests, not durability evidence.
+# Production uses the real SJ outbox owner. No test here contacts GitHub.
+use std.spec.*
+use std.common.json.types.{json_object, json_array, json_number, json_string}
+use std.common.json.serializer.{json_stringify}
+use std.scv.db_bridge.*
+use app.scv.db.github_provider.{DbGithubSource, DbGithubTransport, DbGithubProcessReply}
+use app.scv.db.github_issue_bridge.*
+
+var _item2_issue_request: DbGithubBridgeRequest? = nil
+var _item2_issue_persisted: DbBridgeDelivery? = nil
+var _item2_issue_mode = "normal"
+var _item2_issue_remote_body = ""
+var _item2_issue_effects = 0
+var _item2_issue_persist_calls = 0
+
+fn setup_item2_issue_now() -> u64: 10u64
+fn setup_item2_issue_no_lease() -> bool: false
+fn setup_item2_issue_held_lease() -> bool: true
+
+fn check_item2_issue_text(result: Result<text, text>) -> text:
+    match result:
+        Ok(value): value
+        Err(reason):
+            fail(reason)
+            ""
+
+fn setup_item2_issue_request(kind: text) -> DbGithubBridgeRequest:
+    _item2_issue_persisted = nil
+    _item2_issue_mode = "normal"
+    _item2_issue_remote_body = ""
+    _item2_issue_effects = 0
+    _item2_issue_persist_calls = 0
+    val source = DbGithubSource(host: "github.com", owner: "owner", repository: "repo", repository_id: "42", created_since: "2026-10-01", tracked_run_ids: [], per_page: 100u64, maximum_pages: 2u64, maximum_requests: 10u64, timeout_ms: 1000, maximum_response_bytes: 16384)
+    val number = if kind == "create-issue": "" else: "7"
+    val external = if kind == "update-issue": "7" else: "new:intent-1"
+    var intent = DbBridgeIntent(revision: "", provider: DbProviderBindingIdentity(instance: "github.com", project: "42", external_id: external), operation: if kind == "update-issue": "update" else: "create", payload_digest: "", correlation_id: "corr-1", causation_id: "prior-1", idempotency_key: "intent-1")
+    val blank = DbBridgeDelivery(intent: intent, state: "pending", owner: "", generation: 0u64, lease_expires: 0u64, attempts: 0u64, next_attempt: 0u64, must_reconcile: false, provider_revision: "", last_error: "")
+    val policy = DbGithubIssuePolicy(revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", reviewed_by: "reviewer-key", title_authority: "local", body_authority: "local", state_authority: "local")
+    var request = DbGithubBridgeRequest(source: source, delivery: blank, kind: kind, issue_number: number, title: if kind == "create-comment": "" else: "new title", body: "new body", state: if kind == "create-comment": "" else: "open", base_title: "old title", base_body: "old body", base_state: "open", policy: policy)
+    intent.payload_digest = check_item2_issue_text(db_github_bridge_payload(request, request.title, request.body, request.state))
+    intent.revision = check_item2_issue_text(db_bridge_intent_digest(intent))
+    match db_bridge_pending(intent):
+        Ok(pending): request.delivery = db_bridge_acquire(pending, "worker", 10u64, 100u64).delivery
+        Err(reason): fail(reason)
+    _item2_issue_request = Some(request)
+    request
+
+fn setup_item2_issue_resign(request: DbGithubBridgeRequest) -> DbGithubBridgeRequest:
+    var result = request
+    var delivery = request.delivery
+    var intent = delivery.intent
+    intent.payload_digest = check_item2_issue_text(db_github_bridge_payload(request, request.title, request.body, request.state))
+    intent.revision = check_item2_issue_text(db_bridge_intent_digest(intent))
+    delivery.intent = intent
+    result.delivery = delivery
+    _item2_issue_request = Some(result)
+    result
+
+# This recorder tests callback ordering/fencing only. It does not claim fsync.
+fn setup_item2_issue_persist(delivery: DbBridgeDelivery) -> Result<DbBridgeDelivery, text>:
+    _item2_issue_persist_calls = _item2_issue_persist_calls + 1
+    if _item2_issue_mode == "persist-fails":
+        return Err("FixtureStorageUnavailable")
+    _item2_issue_persisted = Some(delivery)
+    if val reopened = _item2_issue_persisted:
+        var result = reopened
+        if _item2_issue_mode == "wrong-fence":
+            result.generation = result.generation + 1u64
+        return Ok(result)
+    Err("FixtureMissingReopenedDelivery")
+
+fn setup_item2_issue_reply(value: any) -> DbGithubProcessReply:
+    DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(value), stderr: "", exit_code: 0)
+
+fn setup_item2_issue_object(request: DbGithubBridgeRequest, body: text, identity: f64) -> any:
+    if request.kind == "create-comment":
+        return json_object({"id": json_number(identity), "body": json_string(body), "updated_at": json_string("2026-10-03T00:00:00Z")})
+    val title = if body == "old body" or body == "other edit": "old title" else: request.title
+    json_object({"number": json_number(identity), "title": json_string(title), "body": json_string(body), "state": json_string("open"), "updated_at": json_string("2026-10-03T00:00:00Z")})
+
+fn setup_item2_issue_execute(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    expect(timeout_ms).to_equal(1000)
+    expect(maximum_bytes).to_equal(16384)
+    expect(args[2]).to_equal("github.com")
+    val method = args[4]
+    val endpoint = args[10]
+    if _item2_issue_mode == "permission":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 403 Forbidden\n\nsecret", stderr: "private-token", exit_code: 1)
+    if val request = _item2_issue_request:
+        if method == "GET":
+            if endpoint == "repos/owner/repo":
+                return setup_item2_issue_reply(json_object({"id": json_number(42)}))
+            var body = _item2_issue_remote_body
+            if request.kind == "update-issue" and body == "":
+                body = if _item2_issue_mode == "conflict": "other edit" else: "old body"
+            if request.kind == "update-issue":
+                expect(endpoint).to_equal("repos/owner/repo/issues/7")
+                return setup_item2_issue_reply(setup_item2_issue_object(request, body, 7))
+            if request.kind == "create-comment":
+                expect(endpoint).to_equal("repos/owner/repo/issues/7/comments?per_page=100&page=1")
+            else:
+                expect(endpoint).to_equal("repos/owner/repo/issues?state=all&sort=created&direction=asc&per_page=100&page=1")
+            if body == "":
+                return setup_item2_issue_reply(json_array([]))
+            if _item2_issue_mode == "collision":
+                return setup_item2_issue_reply(json_array([setup_item2_issue_object(request, body, 7), setup_item2_issue_object(request, body, 8)]))
+            return setup_item2_issue_reply(json_array([setup_item2_issue_object(request, body, 7)]))
+        expect(["POST", "PATCH"].contains(method)).to_equal(true)
+        if _item2_issue_mode == "omit-shared":
+            expect(args.contains("title=old title")).to_equal(false)
+            expect(args.contains("state=open")).to_equal(false)
+        if val persisted = _item2_issue_persisted:
+            expect(persisted.state).to_equal("sent_unconfirmed")
+            expect(persisted.must_reconcile).to_equal(true)
+            expect(persisted.intent.revision).to_equal(request.delivery.intent.revision)
+        else:
+            fail("Provider effect preceded persistence callback")
+        _item2_issue_effects = _item2_issue_effects + 1
+        for arg in args:
+            if arg.starts_with("body=") and _item2_issue_mode != "timeout-absent":
+                _item2_issue_remote_body = arg[5:]
+        if _item2_issue_mode == "timeout-applied" or _item2_issue_mode == "timeout-absent":
+            return DbGithubProcessReply(stdout: "", stderr: "\nTIMEOUT\n", exit_code: -1)
+        return setup_item2_issue_reply(setup_item2_issue_object(request, _item2_issue_remote_body, 7))
+    fail("Missing provider fixture request")
+    DbGithubProcessReply(stdout: "", stderr: "", exit_code: 99)
+
+fn setup_item2_issue_ports() -> DbGithubBridgePorts:
+    DbGithubBridgePorts(transport: DbGithubTransport(execute: setup_item2_issue_execute, lease_held: setup_item2_issue_no_lease), now: setup_item2_issue_now, persist_sent: setup_item2_issue_persist)
+
+describe "GitHub issue bridge effect ordering and uncertain readback":
+    it "persists sent-unconfirmed before POST and acknowledges exact causal-marker readback":
+        val request = setup_item2_issue_request("create-issue")
+        match db_github_bridge_deliver(request, setup_item2_issue_ports()):
+            Ok(result):
+                expect(result.transition.code).to_equal("acknowledged")
+                expect(result.external_id).to_equal("7")
+                expect(_item2_issue_effects).to_equal(1)
+                expect(_item2_issue_persist_calls).to_equal(1)
+            Err(reason): fail(reason)
+
+    it "reconciles timeout-after-POST without a second mutation":
+        val request = setup_item2_issue_request("create-comment")
+        _item2_issue_mode = "timeout-applied"
+        match db_github_bridge_deliver(request, setup_item2_issue_ports()):
+            Ok(result):
+                expect(result.transition.code).to_equal("acknowledged")
+                expect(_item2_issue_effects).to_equal(1)
+            Err(reason): fail(reason)
+
+    it "never retries an absent marker after an uncertain create":
+        var request = setup_item2_issue_request("create-issue")
+        _item2_issue_mode = "timeout-absent"
+        match db_github_bridge_deliver(request, setup_item2_issue_ports()):
+            Ok(result):
+                expect(result.transition.code).to_equal("SCVDB_PROVIDER_EFFECT_UNCERTAIN")
+                expect(result.transition.delivery.state).to_equal("sent_unconfirmed")
+                request.delivery = result.transition.delivery
+            Err(reason): fail(reason)
+        match db_github_bridge_deliver(request, setup_item2_issue_ports()):
+            Ok(result): expect(result.transition.code).to_equal("SCVDB_PROVIDER_EFFECT_UNCERTAIN")
+            Err(reason): fail(reason)
+        expect(_item2_issue_effects).to_equal(1)
+
+    it "blocks effects when persistence fails or reopens a different fencing generation":
+        val request = setup_item2_issue_request("create-issue")
+        _item2_issue_mode = "persist-fails"
+        expect(db_github_bridge_deliver(request, setup_item2_issue_ports())).to_equal(Err("FixtureStorageUnavailable"))
+        expect(_item2_issue_effects).to_equal(0)
+        _item2_issue_mode = "wrong-fence"
+        expect(db_github_bridge_deliver(request, setup_item2_issue_ports())).to_equal(Err("GithubBridgeDurableFenceMismatch"))
+        expect(_item2_issue_effects).to_equal(0)
+
+    it "rejects shared-field concurrency without pretending GitHub PATCH has CAS":
+        var request = setup_item2_issue_request("update-issue")
+        var policy = request.policy
+        policy.body_authority = "shared"
+        request.policy = policy
+        request = setup_item2_issue_resign(request)
+        expect(db_github_bridge_deliver(request, setup_item2_issue_ports())).to_equal(Err("GithubBridgeConditionalWriteUnsupported"))
+        _item2_issue_mode = "conflict"
+        expect(db_github_bridge_deliver(request, setup_item2_issue_ports())).to_equal(Err("GithubBridgeFieldConflict"))
+        expect(_item2_issue_effects).to_equal(0)
+
+    it "performs reviewed local-authority PATCH with exact readback":
+        val request = setup_item2_issue_request("update-issue")
+        match db_github_bridge_deliver(request, setup_item2_issue_ports()):
+            Ok(result):
+                expect(result.transition.code).to_equal("acknowledged")
+                expect(_item2_issue_effects).to_equal(1)
+            Err(reason): fail(reason)
+
+    it "blocks ambiguous duplicate markers and changed immutable payloads":
+        var request = setup_item2_issue_request("create-issue")
+        _item2_issue_mode = "collision"
+        _item2_issue_remote_body = request.body + "\n\n<!-- scv-bridge:v1:{request.delivery.intent.revision} -->"
+        expect(db_github_bridge_deliver(request, setup_item2_issue_ports())).to_equal(Err("GithubBridgeMarkerCollision"))
+        request.body = "changed without new intent"
+        expect(db_github_bridge_deliver(request, setup_item2_issue_ports())).to_equal(Err("GithubBridgePayloadDigestMismatch"))
+        expect(_item2_issue_effects).to_equal(0)
+
+    it "omits unchanged shared fields from PATCH instead of overwriting a racing remote edit":
+        var request = setup_item2_issue_request("update-issue")
+        request.title = "old title"
+        var policy = request.policy
+        policy.title_authority = "shared"
+        policy.state_authority = "shared"
+        request.policy = policy
+        request = setup_item2_issue_resign(request)
+        _item2_issue_mode = "omit-shared"
+        match db_github_bridge_deliver(request, setup_item2_issue_ports()):
+            Ok(result): expect(result.transition.code).to_equal("acknowledged")
+            Err(reason): fail(reason)
+
+    it "distinguishes provider permission loss and blocks a held SJ lease":
+        val request = setup_item2_issue_request("create-issue")
+        _item2_issue_mode = "permission"
+        expect(db_github_bridge_deliver(request, setup_item2_issue_ports())).to_equal(Err("GithubPermissionDenied"))
+        var ports = setup_item2_issue_ports()
+        ports.transport = DbGithubTransport(execute: setup_item2_issue_execute, lease_held: setup_item2_issue_held_lease)
+        expect(db_github_bridge_deliver(request, ports)).to_equal(Err("GithubNetworkForbiddenUnderLease"))
+        expect(_item2_issue_effects).to_equal(0)
