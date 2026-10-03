@@ -4,7 +4,7 @@
 use app.scv.db.retention_codec.*
 use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get, db_evidence_store_put}
 use app.scv.db.evidence_delete.{db_evidence_delete_held}
-use app.scv.db.local_store.{db_store_read, db_store_commit_held}
+use app.scv.db.local_store.{db_store_read, db_store_commit_held, db_local_path_scope}
 use std.scv.db_retention.*
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_holder, scv_sj_lease_is_held}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
@@ -20,6 +20,10 @@ fn db_retention_open(root: text) -> Result<DbStoredRetention, text>:
     Ok(DbStoredRetention(head: current.head, catalog: db_retention_catalog_decode(current.state)?))
 
 fn _retention_lock(root: text) -> Result<text, text>:
+    # Scope must be checked before lease creation, not merely before catalog
+    # publication: a preexisting .sj alias must never redirect even lock writes.
+    val scope = db_local_path_scope(root, [".sj", ".scv", ".scv/db-retention", ".scv/db-retention/objects"])
+    if scope != "": return Err(scope)
     val nonce = random_hex(16) ?? ""
     if nonce.len() != 32: return Err("SCVDB_STORE_ENTROPY")
     val holder = "retention-{nonce}"

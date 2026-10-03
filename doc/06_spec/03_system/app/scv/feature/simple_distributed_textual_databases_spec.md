@@ -1,12 +1,18 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
-**Status:** Design-only and intentionally fail-fast. No scenario is PASS evidence until its subsystem checker invokes the production owner and validates a durable receipt.
+**Status:** Source-only, execution unverified. REQ-001 now invokes real offline-actor and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`
 
 ## Operator model
 
-Each `@inline` checker owns its named setup contract: `setup_replica_fixture`, `setup_settlement_fixture`, `setup_test_evidence_fixture`, `setup_bridge_fixture`, or `setup_retention_fixture`. Its future production implementation must create an isolated fixture, drive the real owner, inject the stated boundary/fault, and inspect canonical state plus a durable receipt. Today the checker names that sequence and calls `fail(...)`; setup is not a silent test double.
+Each remaining `@inline` checker owns its named setup contract: `setup_replica_fixture`, `setup_settlement_fixture`, `setup_test_evidence_fixture`, `setup_bridge_fixture`, or `setup_retention_fixture`. Its production implementation must create an isolated fixture, drive the real owner, inject the stated boundary/fault, and inspect canonical state plus a durable receipt. These remaining checkers name that sequence and call `fail(...)`; setup is not a silent test double.
+
+REQ-001 now creates two independent filesystem roots, reserves actual durable
+offline IDs, restores a saved counter and old handle to exercise rollback, and
+checks a separately signed actor-counter collision against persisted accepted
+state. Those three authored oracles retain the existing step names. This manual
+annotation is not a generated test-run receipt; docgen/execution remains pending.
 
 The five visible flows are:
 
@@ -20,7 +26,7 @@ The five visible flows are:
 
 | Contract | Fixture/checker | Happy-path scenario | Boundary scenario | Failure scenario |
 |---|---|---|---|---|
-| REQ-001 — Offline identity | `setup_replica_fixture` / `check_replica_contract` | Should prove that it creates distinct durable IDs on disconnected replicas | Should prove that it rotates incarnation after cloned counter rollback | Should prove that it rejects reused actor-counter identity with different bytes |
+| REQ-001 — Offline identity | Real filesystem roots; `db_actor_open/reserve`, `db_apply_local`, durable reopen | Should prove that it creates distinct durable IDs on disconnected replicas | Should prove that it rotates incarnation after cloned counter rollback | Should prove that it rejects reused actor-counter identity with different bytes |
 | REQ-002 — Compact alias | `setup_replica_fixture` / `check_replica_contract` | Should prove that it resolves a settled u64 under namespace epoch and kind | Should prove that it round-trips a context-elided integer through its versioned header | Should prove that it rejects a bare integer copied without identity context |
 | REQ-003 — Canonical identity preservation | `setup_replica_fixture` / `check_replica_contract` | Should prove that it adds aliases without changing ChangeIdentity or RevisionIdentity | Should prove that it keeps canonical identities stable across compaction and replay | Should prove that it rejects alias-driven renumbering of canonical SCV identities |
 | REQ-004 — Identity map | `setup_replica_fixture` / `check_replica_contract` | Should prove that it commits bidirectional aliases allocator receipt and tombstone atomically | Should prove that it leaves gaps while preserving high-water marks after deletion | Should prove that it rejects reuse or allocation derived from live row count |
@@ -84,10 +90,62 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Design-first acceptance specification. Every checker fails explicitly until it
-# is replaced by a production-owner fixture and durable receipt validation.
+# Acceptance source: REQ-001 uses real actor/local-publication owners. Remaining
+# broad checkers fail explicitly until their complete durable oracles exist.
+# Source presence is not execution evidence or a passing requirement receipt.
 
 use std.spec.*
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional, entity_ref_canonical}
+use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse}
+use app.io.mod (file_read, file_write, file_exists)
+use app.scv.db.offline_actor.{db_actor_open, db_actor_reserve}
+use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
+use app.scv.db.local_store.{db_store_read}
+use test.fixtures.scv.db_apply_fixture.*
+
+# Pure prerequisites only: these assertions do not prove durable REQ-004.
+fn setup_item2_uid(counter: u64) -> EntityUid:
+    EntityUid(database_namespace: "11111111111111111111111111111111", entity_kind: "bug", actor: ActorIncarnation(hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), counter: counter)
+
+describe "Item 2 pure identity-map prerequisites (not durable acceptance)":
+    it "keeps reverse identity and advances past a tombstoned sequence":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val second = setup_item2_uid(2)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        expect(allocated.code).to_equal("allocated")
+        expect(allocated.sequence).to_equal(1)
+        val deleted = identity_map_tombstone(allocated.state, first)
+        val next = identity_map_allocate(deleted.state, second)
+        expect(next.code).to_equal("allocated")
+        expect(next.sequence).to_equal(2)
+        expect(next.state.high_water[0].sequence).to_equal(2)
+        expect(next.state.bindings[0].tombstoned).to_equal(true)
+        expect(identity_map_reverse(next.state, "bug", 1)).to_equal(entity_ref_canonical(entity_ref_provisional(first)))
+
+    it "replays a tombstoned identity without resurrecting it or advancing the allocator":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        val deleted = identity_map_tombstone(allocated.state, first)
+        val replay = identity_map_allocate(deleted.state, first)
+        expect(replay.code).to_equal("tombstoned")
+        expect(replay.sequence).to_equal(1)
+        expect(replay.state.bindings.len()).to_equal(1)
+        expect(replay.state.bindings[0].tombstoned).to_equal(true)
+        expect(replay.state.high_water[0].sequence).to_equal(1)
+
+    it "rejects a foreign namespace without changing candidate bindings or high-water":
+        step("Create offline semantic changes")
+        val first = setup_item2_uid(1)
+        val allocated = identity_map_allocate(identity_map_empty(first.database_namespace, 1), first)
+        val foreign = EntityUid(database_namespace: "22222222222222222222222222222222", entity_kind: first.entity_kind, actor: first.actor, counter: 2)
+        val rejected = identity_map_allocate(allocated.state, foreign)
+        expect(rejected.code).to_equal("SCVDB_NAMESPACE_MISMATCH")
+        expect(rejected.sequence).to_equal(0)
+        expect(rejected.state.bindings.len()).to_equal(1)
+        expect(rejected.state.high_water[0].sequence).to_equal(1)
+        expect(identity_map_reverse(rejected.state, "bug", 1)).to_equal(entity_ref_canonical(entity_ref_provisional(first)))
 
 # @inline
 fn check_replica_contract(requirement: String, oracle: String, failure_sequence: String):
@@ -113,18 +171,51 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-001: Offline identity":
         it "should prove that it creates distinct durable IDs on disconnected replicas":
             step("Create offline semantic changes")
+            val left_root = setup_item2_apply_root()
+            val right_root = setup_item2_apply_root()
+            val namespace = "00112233445566778899aabbccddeeff"
+            val left = db_actor_reserve(db_actor_open(left_root, namespace).unwrap(), "bug").unwrap()
+            val right = db_actor_reserve(db_actor_open(right_root, namespace).unwrap(), "bug").unwrap()
             step("Drive accepted state and inspect its receipt")
-            check_replica_contract("REQ-001", "drive accepted offline identity state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            expect(entity_ref_canonical(entity_ref_provisional(left.uid)) == entity_ref_canonical(entity_ref_provisional(right.uid))).to_be(false)
+            expect(left.uid.counter).to_equal(1u64)
+            expect(right.uid.counter).to_equal(1u64)
+            for reservation in [left, right]:
+                val saved = reservation.session
+                expect(file_read("{saved.root}/.scv/local/actors/{saved.actor.hex}.counter")).to_equal("scv-db/actor/v1\n{namespace}\n{saved.actor.hex}\n1\n")
 
         it "should prove that it rotates incarnation after cloned counter rollback":
             step("Create offline semantic changes")
+            val root = setup_item2_apply_root()
+            val original = db_actor_open(root, "00112233445566778899aabbccddeeff").unwrap()
+            val path = "{root}/.scv/local/actors/{original.actor.hex}.counter"
+            val saved = file_read(path)
+            val first = db_actor_reserve(original, "bug").unwrap()
+            expect(file_write(path, saved)).to_be(true)
+            val restored = db_actor_reserve(original, "bug").unwrap()
             step("Drive the boundary state and inspect preserved invariants")
-            check_replica_contract("REQ-001", "drive boundary offline identity state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            expect(first.uid.counter).to_equal(restored.uid.counter)
+            expect(first.uid.actor == restored.uid.actor).to_be(false)
+            expect(file_exists("{root}/.scv/local/actors/{first.session.actor.hex}.counter")).to_be(true)
+            expect(file_exists("{root}/.scv/local/actors/{restored.session.actor.hex}.counter")).to_be(true)
+            expect(file_read(path).starts_with("scv-db/actor-retired/v1\n")).to_be(true)
 
         it "should prove that it rejects reused actor-counter identity with different bytes":
             step("Create offline semantic changes")
+            val root = setup_item2_apply_root()
+            val first_patch = setup_item2_apply_patch(1, "")
+            val accepted = db_apply_local(root, "", first_patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+            val before = db_store_read(root)
+            var collision = first_patch
+            collision.provenance = "different signed bytes for the same actor and counter"
+            collision = setup_item2_apply_resign(collision)
             step("Inject the failure and inspect fail-closed state")
-            check_replica_contract("REQ-001", "inject unsafe offline identity state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            expect(collision.payload_digest == first_patch.payload_digest).to_be(false)
+            expect(db_apply_local(root, accepted.head, collision, setup_item2_apply_merge(), setup_item2_apply_policy([collision]), 10)).to_equal(Err("SCVDB_ACTOR_COUNTER_COLLISION"))
+            val after = db_store_read(root)
+            expect(after.head).to_equal(before.head)
+            expect(after.state).to_equal(before.state)
+            expect(db_read_local_view(root, setup_item2_apply_policy()).unwrap().image.state.accepted.len()).to_equal(1)
 
     describe "REQ-002: Compact alias":
         it "should prove that it resolves a settled u64 under namespace epoch and kind":
@@ -937,6 +1028,6 @@ The executable now also contains three pure production-map prerequisites:
 2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
 3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
 
-These supplement the existing 153 full-contract fail-fast scenarios. They establish no disk, process-crash, replica, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
+These pure prerequisites supplement 153 full-contract scenarios. Three REQ-001 scenarios now use real filesystem and authenticated mutation owners; the other 150 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
 
 Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.
