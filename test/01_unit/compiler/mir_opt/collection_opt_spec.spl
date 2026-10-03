@@ -199,6 +199,53 @@ fn _co_count_bitcast(block: MirBlock) -> i64:
     count
 
 describe "MIR Collection Optimization":
+    it "REQ-MIR-COLLOPT-046 does not skip a length consumer that redefines the receiver":
+        val first = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val second = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val redefine = MirInst(kind: MirInstKind.BinOp(_co_lid(1), MirBinOp.Add, _co_copy(11), _co_int(1)), span: nil)
+        val third = MirInst(kind: MirInstKind.Call(_co_lid(12), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        var opt = _co_admitted_pass()
+        val block = opt.canonicalize_collection_len_queries_block(_co_block([first, second, redefine, third]))
+        expect(_co_count_rt_array_len(block)).to_equal(2)
+        expect(_co_count_binop(block, MirBinOp.Add)).to_equal(1)
+        expect(opt.len_queries_reused).to_equal(1)
+
+    it "REQ-MIR-COLLOPT-047 handles length destinations that overwrite their receiver":
+        val first = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val second = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        var opt = _co_admitted_pass()
+        val block = opt.canonicalize_collection_len_queries_block(_co_block([first, second]))
+        expect(_co_count_rt_array_len(block)).to_equal(2)
+        expect(opt.len_queries_reused).to_equal(0)
+
+    it "REQ-MIR-COLLOPT-048 fences reads across unknown intrinsics and drops":
+        val barriers = [MirInst(kind: MirInstKind.Intrinsic(nil, "unknown_effect", [_co_copy(1)]), span: nil),
+            MirInst(kind: MirInstKind.Drop(_co_lid(1)), span: nil)]
+        for barrier in barriers:
+            var opt = _co_admitted_pass()
+            val block = opt.canonicalize_collection_pure_queries_block(_co_block([
+                _co_query(10, [_co_copy(1), _co_copy(2)]), barrier,
+                _co_query(11, [_co_copy(1), _co_copy(2)])]))
+            expect(_co_count_named_call(block, "rt_array_get")).to_equal(2)
+            expect(opt.pure_queries_reused).to_equal(0)
+
+    it "REQ-MIR-COLLOPT-049 does not use formatted float text as exact constant identity":
+        val positive = MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(0.0), MirType(kind: MirTypeKind.F64)))
+        val negative = MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(-0.0), MirType(kind: MirTypeKind.F64)))
+        var opt = _co_admitted_pass()
+        val block = opt.canonicalize_collection_pure_queries_block(_co_block([
+            _co_query(10, [_co_copy(1), positive]), _co_query(11, [_co_copy(1), negative])]))
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(2)
+        expect(opt.pure_queries_reused).to_equal(0)
+
+    it "REQ-MIR-COLLOPT-050 rejects argument-vector arity collisions":
+        var opt = _co_admitted_pass()
+        val block = opt.canonicalize_collection_pure_queries_block(_co_block([
+            _co_query(10, [_co_string("a:const:str:b")]),
+            _co_query(11, [_co_string("a"), _co_string("b")])]))
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(2)
+        expect(opt.pure_queries_reused).to_equal(0)
+
     it "REQ-MIR-COLLOPT-044 does not infer runtime authority from an rt name":
         var opt = create_collection_opt_pass()
         val reads = opt.canonicalize_collection_pure_queries_block(_co_block([
