@@ -17,9 +17,14 @@ types. The module-analysis increment adds six scenarios:
 | Argument-owned region | Both the outer chain and nested argument region survive traversal. |
 | Invalid registry | No admitted regions and one explicit registry blocker. |
 | Empty registry | No invented operations or plans. |
+| User-produced collection source | Outer map/filter is extracted; the whole source call remains opaque. |
+| Unresolved typed source call | Only the resolved outer operation is admitted; source effects remain unknown. |
+| Untyped opaque source | Extraction fails instead of inventing a source type. |
 
 Analysis uses the existing typed diagnostic scan plus an iterative region scan.
 Successful receiver chains are pruned while their source and call arguments
 remain visited. Extraction is bounded by the existing 128-call chain limit.
 Facts do not confer callback, alias, memory, profitability or rewrite proofs.
+An unregistered receiver call terminates an already admitted chain. This does
+not classify that source call as a collection operation or execute it twice.
 All scenarios remain authored but unexecuted.
