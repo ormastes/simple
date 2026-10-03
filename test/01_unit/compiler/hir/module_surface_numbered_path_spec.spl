@@ -1,0 +1,105 @@
+# Regression for numbered source directories and frozen HIR module surfaces.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, module_surface_canonical_path}
+
+describe "numbered editor module surface identity":
+    it "uses the same logical name for numbered and plain editor directories":
+        # @req REQ-COMPILER-HIR-001
+        step("Compare editor path spellings with the shared module-name rule")
+        expect(module_logical_name_from_path("src/lib/editor/00.common/types.spl")).to_equal(
+            "lib.editor.common.types")
+        expect(module_logical_name_from_path("src/lib/editor/common/types.spl")).to_equal(
+            "lib.editor.common.types")
+        expect(module_logical_name_from_path("C:\\repo\\src\\lib\\editor\\00.common\\types.spl")).to_equal(
+            "lib.editor.common.types")
+
+    it "strips only one-to-three digit directory prefixes":
+        # @req REQ-COMPILER-HIR-001
+        step("Preserve numeric file names and unsupported four-digit directory prefixes")
+        val numeric_file = "src/lib/editor/common/00.foo.bar.spl"
+        expect(module_logical_name_from_path(numeric_file)).to_equal(
+            "lib.editor.common.00.foo.bar")
+        expect(module_logical_name_from_path("src/lib/editor/0000.common/types.spl")).to_equal(
+            "lib.editor.0000.common.types")
+        val body = "class NumericFileProbe:\n    value: i64\n"
+        val numeric_module = parse_and_build_module(body, numeric_file)
+        var numeric_builder = ModuleSurfaceBuilder.new()
+        expect(numeric_builder.add_parsed(numeric_module,
+            SourceFile(path: numeric_file, content: body,
+                module_name: "lib.editor.common.00.foo.bar"), 0).is_ok()).to_equal(true)
+        expect(numeric_builder.surfaces[0].canonical_name).to_equal(
+            "lib.editor.common.00.foo.bar")
+        val numeric_result = numeric_builder.finish()
+        expect(numeric_result.is_ok()).to_equal(true)
+        val numeric_frozen = numeric_result.unwrap()
+        expect(numeric_frozen.surfaces[0].canonical_name).to_equal(
+            "lib.editor.common.00.foo.bar")
+        expect(numeric_frozen.index_by_name["lib.editor.common.00.foo.bar"]).to_equal(0)
+        val wide_dir = "src/lib/editor/0000.common/types.spl"
+        val wide_module = parse_and_build_module(body, wide_dir)
+        var wide_builder = ModuleSurfaceBuilder.new()
+        expect(wide_builder.add_parsed(wide_module,
+            SourceFile(path: wide_dir, content: body,
+                module_name: "lib.editor.0000.common.types"), 0).is_ok()).to_equal(true)
+        val wide_result = wide_builder.finish()
+        expect(wide_result.is_ok()).to_equal(true)
+        val wide_frozen = wide_result.unwrap()
+        expect(wide_frozen.surfaces[0].canonical_name).to_equal(
+            "lib.editor.0000.common.types")
+        expect(wide_frozen.index_by_name["lib.editor.0000.common.types"]).to_equal(0)
+
+    it "keeps one physical editor owner through construction and freeze":
+        # @req REQ-COMPILER-HIR-001
+        step("Inspect physical path, logical name, canonical name, package, and std alias")
+        val path = "src/lib/editor/00.common/types.spl"
+        val body = "class EditorBufferId:\n    value: i64\n"
+        val module = parse_and_build_module(body, path)
+        val owner = SourceFile(path: path, content: body,
+            module_name: "lib.editor.common.types")
+        val std_alias = SourceFile(path: path, content: body,
+            module_name: "std.editor.common.types")
+        val alternate_std_alias = SourceFile(path: path, content: body,
+            module_name: "std.editor.alias_types")
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_parsed(module, owner, 0).is_ok()).to_equal(true)
+        expect(builder.surfaces[0].canonical_path).to_equal(
+            module_surface_canonical_path(path))
+        expect(builder.surfaces[0].logical_name).to_equal("lib.editor.common.types")
+        expect(builder.surfaces[0].canonical_name).to_equal("lib.editor.common.types")
+        expect(builder.surfaces[0].package_name).to_equal("lib.editor.common")
+        expect(builder.add_alias(std_alias).is_ok()).to_equal(true)
+        expect(builder.add_alias(alternate_std_alias).is_ok()).to_equal(true)
+        val result = builder.finish()
+        expect(result.is_ok()).to_equal(true)
+        val frozen = result.unwrap()
+        expect(frozen.surfaces.len()).to_equal(1)
+        expect(frozen.index_by_name["lib.editor.common.types"]).to_equal(0)
+        expect(frozen.index_by_name["std.editor.common.types"]).to_equal(0)
+        expect(frozen.index_by_name["std.editor.alias_types"]).to_equal(0)
+        expect(frozen.index_by_name["lib.editor.alias_types"]).to_equal(0)
+        expect(frozen.surfaces[0].canonical_path).to_equal(
+            module_surface_canonical_path(path))
+        expect(frozen.surfaces[0].logical_name).to_equal("lib.editor.common.types")
+        expect(frozen.surfaces[0].canonical_name).to_equal("lib.editor.common.types")
+        expect(frozen.surfaces[0].package_name).to_equal("lib.editor.common")
+        expect(frozen.surfaces[0].composite_names).to_contain("EditorBufferId")
+
+    it "rejects a second physical source claiming the same logical editor name":
+        # @req REQ-COMPILER-HIR-001
+        step("Register a numbered owner before a distinct plain owner")
+        val body = "class EditorBufferId:\n    value: i64\n"
+        val numbered_path = "src/lib/editor/00.common/types.spl"
+        val plain_path = "src/lib/editor/common/types.spl"
+        val numbered = parse_and_build_module(body, numbered_path)
+        val plain = parse_and_build_module(body, plain_path)
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_parsed(numbered,
+            SourceFile(path: numbered_path, content: body,
+                module_name: "lib.editor.common.types"), 0).is_ok()).to_equal(true)
+        expect(builder.add_parsed(plain,
+            SourceFile(path: plain_path, content: body,
+                module_name: "lib.editor.common.types"), 1).is_err()).to_equal(true)
