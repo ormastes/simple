@@ -6,7 +6,7 @@ use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurface
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error, module_surfaces_validate_index_alignment}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_canonical_module_name, module_surface_declaration_matches}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_fold_std_alias, module_surface_declaration_matches}
 
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_heap_promote(value: Any) -> bool
@@ -69,7 +69,7 @@ impl ModuleSurfaceBuilder:
         Ok(())
 
     me add_indexed_canonical_identity(
-        name: text, surface_index: i64
+        name: text, surface_index: i64, physical_canonical_name: text
     ) -> Result<(), text>:
         """Register one resolver spelling and its logical identity once.
 
@@ -82,10 +82,16 @@ impl ModuleSurfaceBuilder:
         val name_result = self.add_indexed_name(name, surface_index)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
-        val canonical_name = module_surface_canonical_module_name(name)
-        if canonical_name != name:
+        val std_folded_name = module_surface_fold_std_alias(name)
+        if std_folded_name != name:
+            val folded_result = self.add_indexed_name(
+                std_folded_name, surface_index)
+            if folded_result.is_err():
+                return Err(folded_result.unwrap_err())
+        if physical_canonical_name != name and
+           physical_canonical_name != std_folded_name:
             val canonical_result = self.add_indexed_name(
-                canonical_name, surface_index)
+                physical_canonical_name, surface_index)
             if canonical_result.is_err():
                 return Err(canonical_result.unwrap_err())
         Ok(())
@@ -132,7 +138,7 @@ impl ModuleSurfaceBuilder:
             return Err("module surface already exists for physical source: {canonical_path}")
         val surface_index = self.surfaces.len()
         val name_result = self.add_indexed_canonical_identity(
-            module_name, surface_index)
+            module_name, surface_index, surface.canonical_name)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
         self.surfaces = self.surfaces.push(surface)
@@ -163,7 +169,7 @@ impl ModuleSurfaceBuilder:
             surface.content_hash != rt_hash_text(content)):
             return Err("conflicting physical source: {canonical_path}")
         val name_result = self.add_indexed_canonical_identity(
-            module_name, surface_index)
+            module_name, surface_index, surface.canonical_name)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
         Ok(())
@@ -283,8 +289,10 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
         # physical modules may expose the same API.
         val parsed_path = module_surface_canonical_path(module.name)
         if builder.index_by_path.contains_key(parsed_path):
+            val physical_index = builder.index_by_path[parsed_path]
             val canonical_result = builder.add_indexed_canonical_identity(
-                alias, builder.index_by_path[parsed_path])
+                alias, physical_index,
+                builder.surfaces[physical_index].canonical_name)
             if canonical_result.is_err():
                 return Err(canonical_result.unwrap_err())
             continue
@@ -299,7 +307,8 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
         if matching_index < 0:
             return Err("parsed module has no source surface: {alias}")
         val alias_result = builder.add_indexed_canonical_identity(
-            alias, matching_index)
+            alias, matching_index,
+            builder.surfaces[matching_index].canonical_name)
         if alias_result.is_err():
             return Err(alias_result.unwrap_err())
     val origin_result = builder.resolve_export_origins()
