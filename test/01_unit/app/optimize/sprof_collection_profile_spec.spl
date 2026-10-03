@@ -28,7 +28,7 @@ use app.optimize.sprof_collection_profile.{
 }
 use app.optimize.collection_plan_profile_bridge.{collection_plan_select_with_profile, collection_plan_select_with_prepared_profile, collection_plan_explain_with_prepared_profile, collection_plan_select_with_prepared_metrics, collection_plan_explain_with_prepared_metrics}
 use compiler.mir_opt.mir_opt.collection_plan_selection.{
-    CollectionPlanAlgorithm, collection_plan_unproven_facts
+    CollectionPlanAlgorithm, CollectionPlanFacts, collection_plan_unproven_facts
 }
 use compiler.core.parser.{parser_init, parser_skip_newlines, parser_has_errors}
 use compiler.core.parser_stmts.{parse_statement}
@@ -45,6 +45,29 @@ use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
 use std.io_runtime.{cwd_process}
 
 extern fn rt_getpid() -> i64
+
+fn collection_profile_memory_facts() -> CollectionPlanFacts:
+    var facts = collection_plan_unproven_facts()
+    facts.collection_kind = "set"
+    facts.equality_pure = true
+    facts.duplicate_semantics_preserved = true
+    facts.order_insensitive = true
+    facts.mutation_epoch_stable = true
+    facts.key_hashable = true
+    facts.key_orderable = true
+    facts.target_has_hash = true
+    facts.target_has_ordered = true
+    facts.ordered_update_bound_proven = true
+    facts.p0_correctness_ready = true
+    facts.static_size = 100
+    facts.static_lookups = 1000
+    facts.hard_size_bound = 100
+    # Supplied upper bounds cover this site's entire population, not its p95.
+    facts.memory_budget_bytes = 512
+    facts.linear_extra_memory_bytes = 32
+    facts.hash_extra_memory_bytes = 512
+    facts.ordered_extra_memory_bytes = 768
+    facts
 
 describe "sprof v2 collection feedback":
     it "computes source identity without changing an active parser":
@@ -356,6 +379,11 @@ describe "sprof v2 collection feedback":
         facts.target_has_ordered = true
         facts.ordered_update_bound_proven = true
         facts.p0_correctness_ready = true
+        # Independent supplied memory bounds, never derived from profile p95.
+        facts.memory_budget_bytes = 4096
+        facts.linear_extra_memory_bytes = 128
+        facts.hash_extra_memory_bytes = 2048
+        facts.ordered_extra_memory_bytes = 3072
         val matched = collection_plan_select_with_profile(facts, loaded, "ast://module/lookup#stable", "x86_64-v3")
         expect(matched.selected).to_equal(CollectionPlanAlgorithm.Hash)
         expect(matched.evidence).to_equal("admitted-profile")
@@ -421,6 +449,11 @@ describe "sprof v2 collection feedback":
         facts.target_has_ordered = true
         facts.ordered_update_bound_proven = true
         facts.p0_correctness_ready = true
+        # These finite bounds apply across the fixture's collection population.
+        facts.memory_budget_bytes = 4096
+        facts.linear_extra_memory_bytes = 128
+        facts.hash_extra_memory_bytes = 2048
+        facts.ordered_extra_memory_bytes = 3072
         val decision = collection_plan_select_with_prepared_metrics(
             facts, collection_index, metric_index, site, target)
         expect(decision.selected).to_equal(CollectionPlanAlgorithm.Ordered)
@@ -451,6 +484,96 @@ describe "sprof v2 collection feedback":
         expect(unpaired_decision.reason).to_equal("invalid-profile-hash-facts")
         expect(collection_plan_select_with_profile(
             facts, unpaired, site, target).reason).to_equal("invalid-profile-hash-facts")
+
+    it "admitted feedback cannot supply an unknown memory budget through any bridge":
+        val site = "ast://module/memory#stable"
+        val target = "x86_64-v3"
+        val sample = AdaptiveSetWorkloadProfile(site_id: site, target_profile_id: target,
+            sample_count: 1, size_p95: 100, lookup_count_p95: 1000,
+            hit_count_p95: 500, miss_count_p95: 500)
+        val body = sprof_serialize_collection_profile("memory-module", "memory-workload", [], [sample])
+        val loaded = sprof_load_collection_profile_text(body, "memory-module", "memory-workload")
+        expect(loaded.status).to_equal("loaded")
+        val index = sprof_build_collection_set_index(loaded)
+        val metrics = sprof_build_collection_metric_index(loaded)
+        var facts = collection_profile_memory_facts()
+        facts.memory_budget_bytes = -1
+        val one_off = collection_plan_select_with_profile(facts, loaded, site, target)
+        val prepared = collection_plan_select_with_prepared_profile(facts, index, site, target)
+        val with_metrics = collection_plan_select_with_prepared_metrics(facts, index, metrics, site, target)
+        expect(one_off.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(prepared.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(with_metrics.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(one_off.reason).to_equal("memory-budget-unproven")
+        expect(prepared.reason).to_equal("memory-budget-unproven")
+        expect(with_metrics.reason).to_equal("memory-budget-unproven")
+
+    it "profile selection preserves exact supplied memory bounds and rejects one byte over":
+        val site = "ast://module/memory#stable"
+        val target = "x86_64-v3"
+        val sample = AdaptiveSetWorkloadProfile(site_id: site, target_profile_id: target,
+            sample_count: 1, size_p95: 100, lookup_count_p95: 1000,
+            hit_count_p95: 500, miss_count_p95: 500)
+        val body = sprof_serialize_collection_profile("memory-module", "memory-workload", [], [sample])
+        val loaded = sprof_load_collection_profile_text(body, "memory-module", "memory-workload")
+        expect(loaded.status).to_equal("loaded")
+        val index = sprof_build_collection_set_index(loaded)
+        val metrics = sprof_build_collection_metric_index(loaded)
+        var facts = collection_profile_memory_facts()
+        val static_only = collection_plan_select_with_profile(facts, loaded, site, "other-target")
+        expect(static_only.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(static_only.evidence).to_equal("static")
+        val automatic = collection_plan_select_with_profile(facts, loaded, site, target)
+        expect(automatic.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(automatic.evidence).to_equal("admitted-profile")
+        facts.attribute = "hash"
+        val exact = collection_plan_select_with_profile(facts, loaded, site, target)
+        expect(exact.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(collection_plan_select_with_prepared_profile(facts, index, site, target).selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(collection_plan_select_with_prepared_metrics(facts, index, metrics, site, target).selected).to_equal(CollectionPlanAlgorithm.Hash)
+        facts.memory_budget_bytes = 511
+        val over = collection_plan_select_with_profile(facts, loaded, site, target)
+        val prepared_over = collection_plan_select_with_prepared_profile(facts, index, site, target)
+        val metrics_over = collection_plan_select_with_prepared_metrics(facts, index, metrics, site, target)
+        expect(over.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(prepared_over.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(metrics_over.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(over.hash_rejection).to_equal("memory-budget-exceeded")
+        expect(prepared_over.hash_rejection).to_equal("memory-budget-exceeded")
+        expect(metrics_over.hash_rejection).to_equal("memory-budget-exceeded")
+        facts.attribute = "auto"
+        val automatic_over = collection_plan_select_with_profile(facts, loaded, site, target)
+        expect(automatic_over.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(automatic_over.hash_rejection).to_equal("memory-budget-exceeded")
+        expect(automatic_over.ordered_rejection).to_equal("memory-budget-exceeded")
+
+    it "hot feedback cannot invent a candidate memory estimate or repair invalid memory facts":
+        val site = "ast://module/memory#stable"
+        val target = "x86_64-v3"
+        val sample = AdaptiveSetWorkloadProfile(site_id: site, target_profile_id: target,
+            sample_count: 1, size_p95: 100, lookup_count_p95: 1000,
+            hit_count_p95: 500, miss_count_p95: 500)
+        val body = sprof_serialize_collection_profile("memory-module", "memory-workload", [], [sample])
+        val loaded = sprof_load_collection_profile_text(body, "memory-module", "memory-workload")
+        expect(loaded.status).to_equal("loaded")
+        val index = sprof_build_collection_set_index(loaded)
+        val metrics = sprof_build_collection_metric_index(loaded)
+        var facts = collection_profile_memory_facts()
+        facts.attribute = "hash"
+        facts.hash_extra_memory_bytes = -1
+        val unknown = collection_plan_select_with_profile(facts, loaded, site, target)
+        val prepared_unknown = collection_plan_select_with_prepared_profile(facts, index, site, target)
+        val metrics_unknown = collection_plan_select_with_prepared_metrics(facts, index, metrics, site, target)
+        expect(unknown.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(prepared_unknown.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(metrics_unknown.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(unknown.hash_rejection).to_equal("memory-estimate-unproven")
+        expect(prepared_unknown.hash_rejection).to_equal("memory-estimate-unproven")
+        expect(metrics_unknown.hash_rejection).to_equal("memory-estimate-unproven")
+        facts.hash_extra_memory_bytes = -2
+        val invalid = collection_plan_select_with_profile(facts, loaded, site, target)
+        expect(invalid.selected).to_equal(CollectionPlanAlgorithm.Original)
+        expect(invalid.reason).to_equal("invalid-memory-facts")
 
     it "persists named P6 samples and summarizes their distribution":
         var metrics: [SprofCollectionMetric] = []
