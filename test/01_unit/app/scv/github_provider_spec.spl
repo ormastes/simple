@@ -1,0 +1,164 @@
+# REQ-023..026. Injected IO contract tests; live IO is separately opt-in.
+use std.spec.*
+use app.io.mod.{env_get}
+use std.common.json.types.{json_object, json_array, json_number, json_string, json_null}
+use std.common.json.serializer.{json_stringify}
+use app.scv.db.github_provider.*
+
+fn setup_item2_github_source() -> DbGithubSource:
+    DbGithubSource(host: "github.com", owner: "owner", repository: "repo", repository_id: "42", created_since: "2026-10-01", tracked_run_ids: [], per_page: 1u64, maximum_pages: 4u64, maximum_requests: 12u64, timeout_ms: 1000, maximum_response_bytes: 16384)
+
+fn setup_item2_github_no_lease() -> bool:
+    false
+
+fn setup_item2_github_held_lease() -> bool:
+    true
+
+fn setup_item2_github_run(run_id: f64, attempt: f64, head_repository_id: f64) -> any:
+    json_object({"id": json_number(run_id), "run_attempt": json_number(attempt), "head_sha": json_string("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "status": json_string("completed"), "conclusion": json_string("success"), "repository": json_object({"id": json_number(42)}), "head_repository": json_object({"id": json_number(head_repository_id)})})
+
+fn setup_item2_github_job(job_id: f64, run_id: f64) -> any:
+    json_object({"id": json_number(job_id), "run_id": json_number(run_id), "head_sha": json_string("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "status": json_string("completed"), "conclusion": json_string("failure")})
+
+fn setup_item2_github_reply(value: any) -> DbGithubProcessReply:
+    DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n" + json_stringify(value), stderr: "", exit_code: 0)
+
+fn setup_item2_github_pages(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    expect(args[0]).to_equal("api")
+    expect(args[4]).to_equal("GET")
+    expect(args[2]).to_equal("github.com")
+    expect(timeout_ms).to_equal(1000)
+    expect(maximum_bytes).to_equal(16384)
+    val endpoint = args[args.len() - 1]
+    if endpoint == "repos/owner/repo/actions/runs?per_page=1&page=1&created=%3E%3D2026-10-01":
+        return setup_item2_github_reply(json_object({"total_count": json_number(1), "workflow_runs": json_array([setup_item2_github_run(77, 2, 42)])}))
+    if endpoint == "repos/owner/repo/actions/runs?per_page=1&page=2&created=%3E%3D2026-10-01":
+        return setup_item2_github_reply(json_object({"total_count": json_number(1), "workflow_runs": json_array([])}))
+    if endpoint == "repos/owner/repo/actions/runs/77/attempts/2/jobs?per_page=1&page=1":
+        return setup_item2_github_reply(json_object({"total_count": json_number(1), "jobs": json_array([setup_item2_github_job(88, 77)])}))
+    if endpoint == "repos/owner/repo/actions/runs/77/attempts/2/jobs?per_page=1&page=2":
+        return setup_item2_github_reply(json_object({"total_count": json_number(1), "jobs": json_array([])}))
+    fail("Unexpected GitHub endpoint")
+    DbGithubProcessReply(stdout: "", stderr: "", exit_code: 99)
+
+fn setup_item2_github_never_execute(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    fail("Transport must not run while lease held or scope invalid")
+    DbGithubProcessReply(stdout: "", stderr: "", exit_code: 99)
+
+fn setup_item2_github_old_rerun(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    val endpoint = args[args.len() - 1]
+    if endpoint.contains("?per_page=1&page=1&created="):
+        return setup_item2_github_reply(json_object({"total_count": json_number(0), "workflow_runs": json_array([])}))
+    if endpoint == "repos/owner/repo/actions/runs/70":
+        return setup_item2_github_reply(setup_item2_github_run(70, 3, 99))
+    if endpoint == "repos/owner/repo/actions/runs/70/attempts/3/jobs?per_page=1&page=1":
+        return setup_item2_github_reply(json_object({"total_count": json_number(1), "jobs": json_array([setup_item2_github_job(80, 70)])}))
+    if endpoint == "repos/owner/repo/actions/runs/70/attempts/3/jobs?per_page=1&page=2":
+        return setup_item2_github_reply(json_object({"total_count": json_number(1), "jobs": json_array([])}))
+    fail("Unexpected tracked rerun endpoint")
+    DbGithubProcessReply(stdout: "", stderr: "", exit_code: 99)
+
+fn setup_item2_github_precision_loss(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    setup_item2_github_reply(json_object({"total_count": json_number(1), "workflow_runs": json_array([setup_item2_github_run(9007199254740992, 1, 42)])}))
+
+fn setup_item2_github_truncated_window(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    setup_item2_github_reply(json_object({"total_count": json_number(1001), "workflow_runs": json_array([])}))
+
+fn setup_item2_github_cross_run_job(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    if args[args.len() - 1].contains("/attempts/2/jobs"):
+        return setup_item2_github_reply(json_object({"total_count": json_number(1), "jobs": json_array([setup_item2_github_job(88, 999)])}))
+    setup_item2_github_pages(args, timeout_ms, maximum_bytes)
+
+describe "read-only GitHub Actions provider effect adapter":
+    it "paginates runs and attempt-specific jobs into provider-neutral identities":
+        val transport = DbGithubTransport(execute: setup_item2_github_pages, lease_held: setup_item2_github_no_lease)
+        match db_github_discover(setup_item2_github_source(), transport):
+            Ok(discovery):
+                expect(discovery.requests).to_equal(4u64)
+                expect(discovery.runs.len()).to_equal(1)
+                expect(discovery.jobs.len()).to_equal(1)
+                expect(discovery.jobs[0].identity.instance).to_equal("github.com")
+                expect(discovery.jobs[0].identity.project).to_equal("42")
+                expect(discovery.jobs[0].identity.run).to_equal("77")
+                expect(discovery.jobs[0].identity.job).to_equal("88")
+                expect(discovery.jobs[0].identity.attempt).to_equal(2u64)
+                expect(discovery.jobs[0].conclusion).to_equal("failure")
+            Err(reason): fail(reason)
+
+    it "refreshes tracked old reruns outside creation overlap and preserves fork distrust":
+        var source = setup_item2_github_source()
+        source.tracked_run_ids = ["70", "70"]
+        val transport = DbGithubTransport(execute: setup_item2_github_old_rerun, lease_held: setup_item2_github_no_lease)
+        match db_github_discover(source, transport):
+            Ok(discovery):
+                expect(discovery.requests).to_equal(4u64)
+                expect(discovery.jobs[0].identity.attempt).to_equal(3u64)
+                expect(discovery.jobs[0].untrusted_fork).to_equal(true)
+            Err(reason): fail(reason)
+
+    it "never invokes transport under the SJ lease":
+        val transport = DbGithubTransport(execute: setup_item2_github_never_execute, lease_held: setup_item2_github_held_lease)
+        expect(db_github_discover(setup_item2_github_source(), transport)).to_equal(Err("GithubNetworkForbiddenUnderLease"))
+
+    it "rejects scope and query injection before transport":
+        val transport = DbGithubTransport(execute: setup_item2_github_never_execute, lease_held: setup_item2_github_no_lease)
+        var source = setup_item2_github_source()
+        source.owner = "owner/../../secrets"
+        expect(db_github_discover(source, transport)).to_equal(Err("GithubInvalidScope"))
+        source = setup_item2_github_source()
+        source.created_since = "2026-10-01&per_page=10000"
+        expect(db_github_discover(source, transport)).to_equal(Err("GithubInvalidOverlapWindow"))
+
+    it "classifies permissions rate limits and transient errors without leaking response bodies":
+        for status in ["401 Unauthorized", "403 Forbidden"]:
+            val reply = DbGithubProcessReply(stdout: "HTTP/2.0 {status}\n\nsecret-token", stderr: "secret-token", exit_code: 1)
+            expect(db_github_response(reply, 16384)).to_equal(Err("GithubPermissionDenied"))
+        val rate = DbGithubProcessReply(stdout: "HTTP/2.0 403 Forbidden\nX-RateLimit-Remaining: 0\n\nsecret-token", stderr: "", exit_code: 1)
+        expect(db_github_response(rate, 16384)).to_equal(Err("GithubRateLimitedRetryable"))
+        val unavailable = DbGithubProcessReply(stdout: "HTTP/2.0 404 Not Found\n\nprivate-repo", stderr: "", exit_code: 1)
+        expect(db_github_response(unavailable, 16384)).to_equal(Err("GithubUnavailableOrHidden"))
+        val server = DbGithubProcessReply(stdout: "HTTP/2.0 503 Unavailable\n\ninternal-details", stderr: "", exit_code: 1)
+        expect(db_github_response(server, 16384)).to_equal(Err("GithubServerRetryable"))
+
+    it "enforces timeout depth and response limits":
+        val timeout = DbGithubProcessReply(stdout: "", stderr: "private-data\nTIMEOUT\n", exit_code: -1)
+        expect(db_github_response(timeout, 16384)).to_equal(Err("GithubTimeoutRetryable"))
+        val reply = setup_item2_github_reply(json_object({"jobs": json_array([])}))
+        expect(db_github_response(reply, 10)).to_equal(Err("GithubResponseBoundExceeded"))
+        var nested = "0"
+        for i in 0..25:
+            nested = "[" + nested + "]"
+        val deep = DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + nested, stderr: "", exit_code: 0)
+        expect(db_github_response(deep, 16384)).to_equal(Err("GithubJsonDepthExceeded"))
+
+    it "fails bounded pagination without treating partial discovery as complete":
+        var source = setup_item2_github_source()
+        source.maximum_pages = 1u64
+        val transport = DbGithubTransport(execute: setup_item2_github_pages, lease_held: setup_item2_github_no_lease)
+        expect(db_github_discover(source, transport)).to_equal(Err("GithubPageBudgetExceeded"))
+        source = setup_item2_github_source()
+        source.maximum_requests = 1u64
+        expect(db_github_discover(source, transport)).to_equal(Err("GithubRequestBudgetExceeded"))
+
+    it "rejects precision-losing IDs and GitHub thousand-result truncation":
+        val precision = DbGithubTransport(execute: setup_item2_github_precision_loss, lease_held: setup_item2_github_no_lease)
+        expect(db_github_discover(setup_item2_github_source(), precision)).to_equal(Err("GithubUnsafeNumericIdentity"))
+        val truncated = DbGithubTransport(execute: setup_item2_github_truncated_window, lease_held: setup_item2_github_no_lease)
+        expect(db_github_discover(setup_item2_github_source(), truncated)).to_equal(Err("GithubOverlapWindowMustNarrow"))
+
+    it "rejects jobs belonging to a different run":
+        val transport = DbGithubTransport(execute: setup_item2_github_cross_run_job, lease_held: setup_item2_github_no_lease)
+        expect(db_github_discover(setup_item2_github_source(), transport)).to_equal(Err("GithubJobRunMismatch"))
+
+# No test is registered when disabled: absence of a live test is not a PASS.
+# Opt in with repository-scoped gh credentials and all four scope/window vars.
+if env_get("SIMPLE_SCV_GITHUB_LIVE") == "1":
+    describe "opt-in real GitHub Actions read-only discovery":
+        it "reads actual API pages and preserves configured repository identity":
+            val source = DbGithubSource(host: "github.com", owner: env_get("SIMPLE_SCV_GITHUB_OWNER"), repository: env_get("SIMPLE_SCV_GITHUB_REPO"), repository_id: env_get("SIMPLE_SCV_GITHUB_REPO_ID"), created_since: env_get("SIMPLE_SCV_GITHUB_SINCE"), tracked_run_ids: [], per_page: 100u64, maximum_pages: 3u64, maximum_requests: 20u64, timeout_ms: 10000, maximum_response_bytes: 2097152)
+            match db_github_discover_live(source, setup_item2_github_no_lease):
+                Ok(discovery):
+                    expect(discovery.requests).to_be_greater_than(0u64)
+                    for job in discovery.jobs:
+                        expect(job.identity.project).to_equal(source.repository_id)
+                Err(reason): fail(reason)
