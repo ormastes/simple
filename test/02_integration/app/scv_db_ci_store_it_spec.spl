@@ -9,10 +9,11 @@ use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign
 use std.scv.distributed_identity.*
 use std.scv.db_evidence.{DbEvidenceRevision}
 use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
-use std.scv.db_ci_ingest.{DbDiscoveryItem, DbDiscoveryPage}
+use std.scv.db_ci_ingest.{DbCiCursor, DbDiscoveryItem, DbDiscoveryPage}
 use std.scv.db_receipt.*
 use std.scv.db_receipt_codec.*
 use app.scv.db.ci_state_codec.*
+use app.scv.db.ci_registry_codec.*
 use app.scv.db.ci_store.*
 use app.scv.db.evidence_store.*
 
@@ -112,3 +113,44 @@ describe "REQ-025 durable CI discovery with authenticated canonical readback":
         val (seed, public_key) = pure_ed25519_keypair_from_seed([7u8;32])
         wrong_tree.signature = pure_ed25519_sign(seed, public_key, db_receipt_signing_bytes(wrong_tree).unwrap())
         expect(db_ci_advance_durable(fixture.source, fixture.scratch, fixture.evidence_parent, durable.head, setup_item2_ci_page(fixture), [wrong_tree], fixture.authority, 30, setup_item2_ci_quota())).to_equal(Err("SCVDB_CI_RECEIPT_TREE"))
+
+    it "isolates two provider projects and preserves the other lane when advancing one cursor":
+        step("Durably discover two provider projects sharing the same run ID")
+        val fixture = setup_item2_ci_fixture()
+        val first = db_ci_discover(fixture.source, "", fixture.manifest).unwrap()
+        var second_manifest = fixture.manifest
+        second_manifest.provider_instance = "gitlab.example"
+        second_manifest.project = "project-2"
+        second_manifest.manifest = DbEvidenceRevision(entity: entity_ref_provisional(EntityUid(database_namespace: fixture.authority.namespace, entity_kind: "run_manifest", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 2)), revision: fixture.manifest.manifest.revision)
+        val second = db_ci_discover(fixture.source, first.head, second_manifest).unwrap()
+        val before = db_ci_store_read(fixture.source, second_manifest.provider_instance, second_manifest.project).unwrap()
+        expect(before.state.tracked_run_ids).to_equal(["run-1"])
+        expect(before.state.manifests[0]).to_equal(second_manifest)
+        expect(db_ci_advance_durable(fixture.source, fixture.scratch, fixture.evidence_parent, first.head, setup_item2_ci_page(fixture), [fixture.receipt], fixture.authority, 30, setup_item2_ci_quota())).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+        step("Commit the first provider's verified cursor while retaining the second lane byte-for-byte")
+        val advanced = db_ci_advance_durable(fixture.source, fixture.scratch, fixture.evidence_parent, second.head, setup_item2_ci_page(fixture), [fixture.receipt], fixture.authority, 30, setup_item2_ci_quota()).unwrap()
+        expect(advanced.state.cursor.opaque_position).to_equal("page-2")
+        val after = db_ci_store_read(fixture.source, second_manifest.provider_instance, second_manifest.project).unwrap()
+        expect(after.head).to_equal(advanced.head)
+        expect(db_ci_state_encode(after.state)).to_equal(db_ci_state_encode(before.state))
+        expect(after.state.cursor.opaque_position).to_equal("")
+        expect(after.state.last_receipt).to_be_nil()
+        val cross_scope = db_ci_store_read(fixture.source, fixture.manifest.provider_instance, second_manifest.project).unwrap()
+        expect(cross_scope.state.manifests.len()).to_equal(0)
+
+    it "canonically sorts framed lane keys and rejects duplicate or excessive lanes":
+        step("Keep scoped keys distinct even when human delimiters would collide")
+        val a = DbCiState(cursor: DbCiCursor(provider_instance: "a:b", project: "c", opaque_position: "one", high_water_seconds: 0, overlap_from_seconds: 0), tracked_run_ids: [], manifests: [], last_receipt: nil)
+        val b = DbCiState(cursor: DbCiCursor(provider_instance: "a", project: "b:c", opaque_position: "two", high_water_seconds: 0, overlap_from_seconds: 0), tracked_run_ids: [], manifests: [], last_receipt: nil)
+        val forward = db_ci_registry_encode(DbCiRegistry(lanes: [a,b])).unwrap()
+        expect(db_ci_registry_encode(DbCiRegistry(lanes: [b,a]))).to_equal(Ok(forward))
+        expect(db_ci_registry_decode(forward).unwrap().lanes.len()).to_equal(2)
+        expect(db_ci_registry_encode(DbCiRegistry(lanes: [a,a]))).to_equal(Err("SCVDB_DUPLICATE_KEY"))
+        var excessive: [DbCiState] = []
+        for index in 0..257: excessive.push(a)
+        expect(db_ci_registry_encode(DbCiRegistry(lanes: excessive))).to_equal(Err("SCVDB_CI_LANE_QUOTA"))
+        step("Retain an existing single-lane image when migrating to the registry")
+        val legacy = db_ci_state_encode(a).unwrap()
+        val migrated = db_ci_registry_decode(legacy).unwrap()
+        expect(migrated.lanes.len()).to_equal(1)
+        expect(db_ci_state_encode(migrated.lanes[0])).to_equal(Ok(legacy))

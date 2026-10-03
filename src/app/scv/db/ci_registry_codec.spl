@@ -1,0 +1,61 @@
+# One SJ-owned CI image multiplexes provider/project lanes. Canonical framed
+# scope keys cannot collide through delimiters or a shared run identifier.
+use app.scv.db.ci_state_codec.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_text}
+
+struct DbCiRegistry:
+    lanes: [DbCiState]
+
+fn _ci_scope_key(instance: text, project: text) -> Result<[u8], text>:
+    Ok(db_frame(94u8, db_snapshot_text(instance)? + db_snapshot_text(project)?))
+
+fn db_ci_registry_encode(registry: DbCiRegistry) -> Result<text, text>:
+    if registry.lanes.len() > 256: return Err("SCVDB_CI_LANE_QUOTA")
+    var entries: [DbCanonicalEntry] = []
+    var bytes = 0
+    for lane in registry.lanes:
+        val state = db_ci_state_encode(lane)?
+        val key = _ci_scope_key(lane.cursor.provider_instance, lane.cursor.project)?
+        val value = db_snapshot_text(state)?
+        if key.len() + value.len() > 16777216 - bytes: return Err("SCVDB_CI_REGISTRY_QUOTA")
+        bytes = bytes + key.len() + value.len()
+        entries.push(DbCanonicalEntry(key: key, value: value))
+    val encoded = db_frame(93u8, db_canonical_map(entries)?)
+    if encoded.len() > 16777216: return Err("SCVDB_CI_REGISTRY_QUOTA")
+    Ok("SCVDB-CI-REGISTRY-v1\n" + db_snapshot_hex(encoded) + "\n")
+
+fn db_ci_registry_decode(encoded: text) -> Result<DbCiRegistry, text>:
+    # Preserve an already-durable single-lane image on its first multiplexed
+    # write. New writes always use the scoped registry representation.
+    if encoded.starts_with("SCVDB-CI-STATE-v1\n"):
+        return Ok(DbCiRegistry(lanes: [db_ci_state_decode(encoded)?]))
+    val prefix = "SCVDB-CI-REGISTRY-v1\n"
+    if encoded.len() > 33554500 or encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_CI_REGISTRY_ENCODING")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val root = db_read_frame(bytes, 0)?
+    if root.tag != 93u8 or root.next_offset != bytes.len(): return Err("SCVDB_CI_REGISTRY_ENCODING")
+    val map = db_read_frame(root.payload, 0)?
+    if map.tag != 8u8 or map.next_offset != root.payload.len(): return Err("SCVDB_CI_REGISTRY_ENCODING")
+    val fields = db_read_children(map.payload)?
+    if fields.len() % 2 != 0: return Err("SCVDB_CI_REGISTRY_ENCODING")
+    if fields.len() > 512: return Err("SCVDB_CI_LANE_QUOTA")
+    var lanes: [DbCiState] = []
+    var index = 0
+    while index < fields.len():
+        if fields[index].tag != 94u8: return Err("SCVDB_CI_SCOPE_KEY")
+        val scope = db_read_children(fields[index].payload)?
+        if scope.len() != 2: return Err("SCVDB_CI_SCOPE_KEY")
+        val instance = db_read_text(scope[0])?
+        val project = db_read_text(scope[1])?
+        val lane = db_ci_state_decode(db_read_text(fields[index + 1])?)?
+        if lane.cursor.provider_instance != instance or lane.cursor.project != project: return Err("SCVDB_CI_SCOPE_KEY")
+        lanes.push(lane)
+        index = index + 2
+    val registry = DbCiRegistry(lanes: lanes)
+    # Re-encoding rejects duplicate keys, unsorted maps, and nonminimal framing.
+    if db_ci_registry_encode(registry)? != encoded: return Err("SCVDB_CI_REGISTRY_NONCANONICAL")
+    Ok(registry)
+
+export DbCiRegistry, db_ci_registry_encode, db_ci_registry_decode

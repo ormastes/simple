@@ -3,6 +3,7 @@
 # Network/CAS checks precede the short SJ commit lease; HEAD CAS detects races.
 use app.scv.db.local_store.{DbStoreView, db_store_read, db_store_commit}
 use app.scv.db.ci_state_codec.*
+use app.scv.db.ci_registry_codec.*
 use app.scv.db.ci_readback.{db_ci_git_manifest_readback, db_ci_git_receipt_readback}
 use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get}
 use std.scv.db_ci_ingest.{DbCiCursor, DbDiscoveryPage, DbEvidenceReceipt, db_ci_advance}
@@ -15,23 +16,34 @@ struct DbCiStoreView:
     head: text
     state: DbCiState
 
-fn _ci_read(root: text, instance: text, project: text) -> Result<(DbStoreView, DbCiState), text>:
+fn _ci_read(root: text, instance: text, project: text) -> Result<(DbStoreView, DbCiState, DbCiRegistry), text>:
+    if instance == "" or project == "": return Err("SCVDB_CI_SCOPE")
     val stored = db_store_read(root, "ci")
+    var registry = DbCiRegistry(lanes: [])
     if stored.code == "empty":
-        if instance == "" or project == "": return Err("SCVDB_CI_SCOPE")
         val cursor = DbCiCursor(provider_instance: instance, project: project, opaque_position: "", high_water_seconds: 0, overlap_from_seconds: 0)
-        return Ok((stored, DbCiState(cursor: cursor, tracked_run_ids: [], manifests: [], last_receipt: nil)))
+        return Ok((stored, DbCiState(cursor: cursor, tracked_run_ids: [], manifests: [], last_receipt: nil), registry))
     if stored.code != "ok": return Err(stored.code)
-    val state = db_ci_state_decode(stored.state)?
-    if state.cursor.provider_instance != instance or state.cursor.project != project: return Err("SCVDB_CI_SCOPE")
-    Ok((stored, state))
+    registry = db_ci_registry_decode(stored.state)?
+    for state in registry.lanes:
+        if state.cursor.provider_instance == instance and state.cursor.project == project: return Ok((stored, state, registry))
+    val cursor = DbCiCursor(provider_instance: instance, project: project, opaque_position: "", high_water_seconds: 0, overlap_from_seconds: 0)
+    Ok((stored, DbCiState(cursor: cursor, tracked_run_ids: [], manifests: [], last_receipt: nil), registry))
 
 fn db_ci_store_read(root: text, instance: text, project: text) -> Result<DbCiStoreView, text>:
-    val (stored, state) = _ci_read(root, instance, project)?
+    val (stored, state, registry) = _ci_read(root, instance, project)?
     Ok(DbCiStoreView(head: stored.head, state: state))
 
-fn _ci_commit(root: text, current: DbStoreView, state: DbCiState) -> Result<DbCiStoreView, text>:
-    val encoded = db_ci_state_encode(state)?
+fn _ci_commit(root: text, current: DbStoreView, state: DbCiState, registry: DbCiRegistry) -> Result<DbCiStoreView, text>:
+    var lanes: [DbCiState] = []
+    var replaced = false
+    for lane in registry.lanes:
+        if lane.cursor.provider_instance == state.cursor.provider_instance and lane.cursor.project == state.cursor.project:
+            lanes.push(state)
+            replaced = true
+        else: lanes.push(lane)
+    if not replaced: lanes.push(state)
+    val encoded = db_ci_registry_encode(DbCiRegistry(lanes: lanes))?
     var published = current
     if encoded == current.state:
         # Same generation retry resynchronizes the original immutable image.
@@ -44,17 +56,17 @@ fn _ci_commit(root: text, current: DbStoreView, state: DbCiState) -> Result<DbCi
 fn db_ci_discover(root: text, expected_head: text, manifest: DbCiDurableManifest) -> Result<DbCiStoreView, text>:
     """Return only after immutable discovery and run tracking are durable; cursor stays put."""
     val encoded = db_ci_manifest_encode(manifest)?
-    val (stored, loaded) = _ci_read(root, manifest.provider_instance, manifest.project)?
+    val (stored, loaded, registry) = _ci_read(root, manifest.provider_instance, manifest.project)?
     var state = loaded
     for previous in state.manifests:
         if db_evidence_same_ref(previous.manifest, manifest.manifest):
             if db_ci_manifest_encode(previous)? != encoded: return Err("SCVDB_CI_MANIFEST_COLLISION")
-            return _ci_commit(root, stored, state)
+            return _ci_commit(root, stored, state, registry)
     if expected_head != stored.head: return Err("SCVDB_STORE_HEAD_ADVANCED")
     if state.manifests.len() >= 10000 or state.tracked_run_ids.len() >= 10000: return Err("SCVDB_CI_BACKPRESSURE")
     state.manifests.push(manifest)
     if not state.tracked_run_ids.contains(manifest.run_id): state.tracked_run_ids.push(manifest.run_id)
-    _ci_commit(root, stored, state)
+    _ci_commit(root, stored, state, registry)
 
 fn _ci_verify_cas(root: text, external_parent: text, digest: text, quota: DbEvidenceStoreQuota) -> Result<text, text>:
     if not db_evidence_digest_valid(digest): return Err("SCVDB_CI_BUNDLE_DIGEST")
@@ -98,7 +110,7 @@ fn _ci_verify_chain(state: DbCiState, chain: [DbSettlementReceipt], authority: D
 
 fn db_ci_advance_durable(root: text, scratch_parent: text, evidence_parent: text, expected_head: text, page: DbDiscoveryPage, chain: [DbSettlementReceipt], authority: DbReceiptAuthority, overlap_seconds: u64, quota: DbEvidenceStoreQuota) -> Result<DbCiStoreView, text>:
     """Reverify every proof at the effect boundary; caller receipt-shaped values grant nothing."""
-    val (stored, loaded) = _ci_read(root, page.provider_instance, page.project)?
+    val (stored, loaded, registry) = _ci_read(root, page.provider_instance, page.project)?
     if stored.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
     if page.items.len() > 128: return Err("SCVDB_CI_PAGE_QUOTA")
     val receipts = _ci_verify_chain(loaded, chain, authority)?
@@ -126,6 +138,6 @@ fn db_ci_advance_durable(root: text, scratch_parent: text, evidence_parent: text
     var next = loaded
     next.cursor = db_ci_advance(loaded.cursor, page, verified, overlap_seconds)?
     next.last_receipt = Some(receipts[receipts.len() - 1])
-    _ci_commit(root, stored, next)
+    _ci_commit(root, stored, next, registry)
 
 export DbCiStoreView, db_ci_store_read, db_ci_discover, db_ci_advance_durable
