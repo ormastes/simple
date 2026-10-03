@@ -1,148 +1,106 @@
-# Contract spec: test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl
+# Leak check owner imports
 
-> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+- Executable spec: `test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl`
+- Source SHA-256: `a540fb3f52bf92b47ec0f664a45644b1fc587c5618c8b8c6ff987a6aa084ca9a`
+- Manual status: hand-maintained source mirror; no test-run receipt is asserted.
+- Scenarios: 4 active, 0 skipped, 0 pending.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+## Scope
 
-<details>
-<summary>Full Scenario Manual</summary>
+These scenarios inspect the checked-in leak-check owner and runner sources. They assert import and file-read contracts; they do not execute a leak-check run.
 
-# Contract spec: test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl
+## Shared setup
 
-Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+The following imports and helpers are part of the executable spec. Each scenario below reproduces its source block exactly.
 
-## At a Glance
+```simple
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl` |
-| Updated | 2026-08-27 |
-| Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and Audience
 
-Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
-contracts red-visible, so a regression in the owned code fails this spec
-instead of shipping silently.
 
-## Scope and Preconditions
+"""
+# Leak Check Owner Imports Contract
 
-Precondition: the repository working tree holds the subject code under test.
-Each scenario exercises the subject and asserts its observable contract; no
-behavior outside the named subject is claimed.
+The Stage4 closure must resolve leak-check runtime types and driver calls from
+their concrete owner modules rather than through multi-hop facades; the runtime
+observable of that contract is that the tracker operations and entry type,
+imported from those owners, work end to end.
+"""
 
-## Primary Workflow
+use std.spec.step
 
-Run the scenarios; each one drives the subject through its pinned contract
-and asserts the expected observable outcome with an executed oracle.
-
-## Unsupported / Limitations
-
-Only the pinned contracts are asserted here; end-to-end and integration
-behavior of the surrounding system is covered by companion specs.
-
-## Verification and Recovery
-
-A red scenario names the contract that regressed. Recover by restoring the
-pinned behavior in the subject; verify with
-`bin/simple test test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl` and a green Results line.
+extern fn rt_file_read_text(path: text) -> text?
+```
 
 ## Scenarios
 
-### leak check owner imports
+### 1. imports the interpreter call and result type from concrete owners
 
-#### tracker operations from concrete owners run end to end
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- imports the interpreter call and result type from concrete owners
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Pins the interpreter bridge and CompileResult imports to their concrete owners.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("imports the interpreter call and result type from concrete owners")
-val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
-expect(source).to_contain("use compiler.driver.driver_public_interpret_bridge.\{interpret_file\}")
-expect(source).to_contain("use compiler.common.driver_core_types.\{CompileResult\}")
-expect(source).to_not_contain("use compiler.driver.\{interpret_file, CompileResult\}")
+    it "imports the interpreter call and result type from concrete owners":
+        # @req REQ-SSPEC-COMPILER
+        step("imports the interpreter call and result type from concrete owners")
+        val source = rt_file_read_text("src/compiler/90.tools/leak_check/main.spl") ?? ""
+        expect(source).to_contain("use compiler.driver.driver_public_interpret_bridge.\{interpret_file\}")
+        expect(source).to_contain("use compiler.common.driver_core_types.\{CompileResult\}")
+        expect(source).to_not_contain("use compiler.driver.\{interpret_file, CompileResult\}")
 ```
 
-</details>
+### 2. imports MemLeakEntry directly while retaining adjacent tracker operations
 
-#### MemLeakEntry from its concrete owner carries the pinned fields
-
-- imports MemLeakEntry directly while retaining adjacent tracker operations
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Pins MemLeakEntry to the synchronous tracker type while keeping tracker operations separate.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("imports MemLeakEntry directly while retaining adjacent tracker operations")
-val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
-expect(source).to_contain("use std.mem_tracker.types.\{MemLeakEntry\}")
-expect(source).to_contain("mem_enable, mem_disable, mem_snapshot, mem_dump_leaks, parse_leak_dump")
-expect(source).to_not_contain("parse_leak_dump, MemLeakEntry")
+    it "imports MemLeakEntry directly while retaining adjacent tracker operations":
+        # @req REQ-SSPEC-COMPILER
+        step("imports MemLeakEntry directly while retaining adjacent tracker operations")
+        val source = rt_file_read_text("src/compiler/90.tools/leak_check/main.spl") ?? ""
+        expect(source).to_contain("use std.nogc_sync_mut.mem_tracker.types.\{MemLeakEntry\}")
+        expect(source).to_contain("mem_enable, mem_disable, mem_snapshot, mem_dump_leaks, parse_leak_dump")
+        expect(source.contains("parse_leak_dump, MemLeakEntry")).to_equal(false)
 ```
 
-</details>
+### 3. routes runner file reads through the canonical runtime facade
 
-## Scenario Summary
+Checks that four runner files use the canonical I/O facade and omit direct file externs.
 
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+```simple
+    it "routes runner file reads through the canonical runtime facade":
+        val growth = read_file_text("src/compiler/90.tools/leak_check/growth_runner.spl")
+        val static_runner = read_file_text("src/compiler/90.tools/leak_check/static_runner.spl")
+        val internal = read_file_text("src/compiler/90.tools/leak_check/internal_runner.spl")
+        val external = read_file_text("src/compiler/90.tools/leak_check/external_runner.spl")
 
+        expect(growth).to_contain(r"use std.io_runtime.{file_exists, read_file_text}")
+        expect(static_runner).to_contain(r"use std.io_runtime.{file_exists, read_file_text}")
+        expect(internal).to_contain(r"use std.io_runtime.{file_exists, read_file_text}")
+        expect(external).to_contain(r"use std.io_runtime.{file_exists}")
+        expect(growth.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(growth.contains("extern fn rt_file_read_text")).to_equal(false)
+        expect(static_runner.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(static_runner.contains("extern fn rt_file_read_text")).to_equal(false)
+        expect(internal.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(internal.contains("extern fn rt_file_read_text")).to_equal(false)
+        expect(external.contains("extern fn rt_file_exists")).to_equal(false)
+        expect(external.contains("extern fn rt_file_read_text")).to_equal(false)
+```
 
-</details>
+### 4. preserves facade file-existence and text-read behavior
 
-<!-- sspec-maintain:provenance:start -->
-## Generation history
+Checks the named runner fixture exists and its text can be read through the facade.
 
-- Canonical SPipe generation for source `ed99f9476a89af7f2f29e430207b28a792d5aae19741e0ad89d20662bf5077c9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+```simple
+    it "preserves facade file-existence and text-read behavior":
+        val path = "src/compiler/90.tools/leak_check/growth_runner.spl"
+        expect(file_exists(path)).to_equal(true)
+        expect(read_file_text(path)).to_contain("Leak Check - Growth Runner")
+```
 
-Source SHA-256: `ed99f9476a89af7f2f29e430207b28a792d5aae19741e0ad89d20662bf5077c9`.
-<!-- sspec-maintain:provenance:end -->
+## Verification
 
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ed99f9476a89af7f2f29e430207b28a792d5aae19741e0ad89d20662bf5077c9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
-
-SSpec documentization score: 97/100
-source: test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl
-mirror: doc/06_spec/01_unit/compiler/driver/leak_check_owner_imports_spec.md (current)
-findings: 2 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=80 coverage=100 maintainability=100
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports the interpreter call and result type from concrete owners' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports MemLeakEntry directly while retaining adjacent tracker operations' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+Run `test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl` with the admitted Simple test runner and require an actual nonzero-execution `Results:` receipt. This manual records the source contract only; it does not claim that run has passed.

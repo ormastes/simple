@@ -1,0 +1,158 @@
+# Frozen full-inventory source selection
+
+- Executable spec: `test/01_unit/compiler/driver/native_full_inventory_sources_spec.spl`
+- Source SHA-256: `1a28a526913e7292c76c31a9a4b210f99dca524226ccc4d3d9ca5508abad07ef`
+- Manual status: hand-maintained source mirror; no test-run receipt is asserted.
+- Scenarios: 6 active, 0 skipped, 0 pending.
+
+## Scope
+
+These scenarios call the frozen-inventory selection helpers with in-memory fixtures. They cover path normalization, inventory identity, and explicit rejection cases.
+
+## Shared setup
+
+The following imports and helpers are part of the executable spec. Each scenario below reproduces its source block exactly.
+
+```simple
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.driver_build.native_full_inventory_sources.{
+    NativeFullInventorySourcesV1, native_full_inventory_select_v1,
+    native_full_inventory_requires_cold_index_v1,
+    native_cold_entry_snapshot_path_v1
+}
+
+fn full_source_entry(path: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(path)
+    CompileSourceInventoryEntryV1(
+        path, digest, digest, digest, digest, digest, 8)
+
+fn full_source_inventory() -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 3, [
+        full_source_entry("src/compiler/10.frontend/treesitter/parser.spl"),
+        full_source_entry("src/os/boot.spl"),
+        full_source_entry("src/runtime/runtime.spl")])
+
+fn full_snapshot_rows() -> text:
+    var rows: [text] = []
+    val inventory = full_source_inventory()
+    for entry in inventory.entries:
+        rows = rows.push(
+            "{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
+    rows.join("\n")
+
+fn full_select(rows: text, count: i64) -> Result<NativeFullInventorySourcesV1, text>:
+    native_full_inventory_select_v1(
+        "D:/frozen/build/scv/snapshots/revision", rows,
+        full_source_inventory(), sha256_text(rows),
+        compile_source_inventory_digest_v1(full_source_inventory()),
+        sha256_text("scv-receipt"), count)
+```
+
+## Scenarios
+
+### 1. routes a cold entry to the frozen snapshot without losing its identity
+
+Maps accepted cold entry spellings to the frozen snapshot and rejects traversal or outside paths.
+
+```simple
+    it "routes a cold entry to the frozen snapshot without losing its identity":
+        val checkout = "/tmp/checkout"
+        val root = "{checkout}/build/scv/snapshots/revision"
+        val entry = "src/compiler/bootstrap_admission/p2_add.spl"
+        for spelling in [entry, "./{entry}", "{checkout}/{entry}", "{root}/{entry}"]:
+            val selected = native_cold_entry_snapshot_path_v1(root, checkout, spelling)
+            expect(selected.unwrap()).to_equal("{root}/{entry}")
+        val example = "examples/hello.spl"
+        expect(native_cold_entry_snapshot_path_v1(
+            root, checkout, example).unwrap()).to_equal("{root}/{example}")
+        for invalid in ["src/../src/app/main.spl", "{checkout}/../other/main.spl",
+                "/tmp/outside/main.spl", "src/app/main.spl/../escape.spl"]:
+            expect(native_cold_entry_snapshot_path_v1(
+                root, checkout, invalid).is_err()).to_equal(true)
+```
+
+### 2. forces cold index construction even with warm compatibility markers
+
+Requires cold index construction under warm compatibility markers and preserves the false branch.
+
+```simple
+    it "forces cold index construction even with warm compatibility markers":
+        expect(native_full_inventory_requires_cold_index_v1(
+            true, 0, false, true)).to_equal(true)
+        expect(native_full_inventory_requires_cold_index_v1(
+            true, 2, false, true)).to_equal(true)
+        expect(native_full_inventory_requires_cold_index_v1(
+            false, 2, false, true)).to_equal(false)
+```
+
+### 3. keeps treesitter and OS modules as exact frozen inputs
+
+Retains Treesitter and OS source identities and maps the OS module to its frozen path.
+
+```simple
+    it "keeps treesitter and OS modules as exact frozen inputs":
+        val selected = full_select(full_snapshot_rows(), 3)
+        expect(selected.is_ok()).to_equal(true)
+        val sources = selected.unwrap()
+        expect(sources.source_count).to_equal(3)
+        expect(sources.source_identities[0]).to_equal(
+            "src/compiler/10.frontend/treesitter/parser.spl")
+        expect(sources.source_identities[1]).to_equal("src/os/boot.spl")
+        expect(sources.source_paths[1]).to_equal(
+            "D:/frozen/build/scv/snapshots/revision/src/os/boot.spl")
+```
+
+### 4. rejects any omitted frozen source or claimed count drift
+
+Rejects omitted snapshot rows and a claimed source-count mismatch.
+
+```simple
+    it "rejects any omitted frozen source or claimed count drift":
+        val rows = full_snapshot_rows().split("\n")
+        val missing = rows[0] + "\n" + rows[2]
+        expect(full_select(missing, 3).is_err()).to_equal(true)
+        expect(full_select(full_snapshot_rows(), 2).is_err()).to_equal(true)
+```
+
+### 5. rejects a duplicate or changed snapshot identity
+
+Rejects duplicate rows and changed source identities.
+
+```simple
+    it "rejects a duplicate or changed snapshot identity":
+        val repeated = full_snapshot_rows() + "\n" +
+            full_snapshot_rows().split("\n")[1]
+        expect(full_select(repeated, 3).is_err()).to_equal(true)
+        val changed = full_snapshot_rows().replace(
+            "src/os/boot.spl", "src/os/BOOT.spl")
+        expect(full_select(changed, 3).is_err()).to_equal(true)
+```
+
+### 6. refuses a source authority with no frozen OS module
+
+Rejects an inventory without a frozen OS module with its exact error code.
+
+```simple
+    it "refuses a source authority with no frozen OS module":
+        val entries = [
+            full_source_entry("src/compiler/10.frontend/treesitter/parser.spl"),
+            full_source_entry("src/runtime/runtime.spl")]
+        val inventory = CompileSourceInventoryV1(1, 2, entries)
+        val rows = "{entries[0].source_identity}|sha256_{entries[0].content_digest}|8\n" +
+            "{entries[1].source_identity}|sha256_{entries[1].content_digest}|8"
+        val selected = native_full_inventory_select_v1(
+            "D:/frozen/build/scv/snapshots/revision", rows,
+            inventory, sha256_text(rows),
+            compile_source_inventory_digest_v1(inventory),
+            sha256_text("scv-receipt"), 2)
+        expect(selected.unwrap_err()).to_equal("full-inventory-os-source-absent")
+```
+
+## Verification
+
+Run `test/01_unit/compiler/driver/native_full_inventory_sources_spec.spl` with the admitted Simple test runner and require an actual nonzero-execution `Results:` receipt. This manual records the source contract only; it does not claim that run has passed.
