@@ -439,8 +439,10 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
 
     val elf32 = elf_is_32(bytes)
     val shdr_size = if elf32: ELF32_SHDR_SIZE else: ELF64_SHDR_SIZE
-    val table_end = shoff + shnum * shdr_size
-    if table_end > bytes.len():
+    # Subtractive bounds avoid wrapping an untrusted ELF64 offset on addition.
+    if shoff > bytes.len():
+        return Err("Section header table extends beyond file end")
+    if shnum > (bytes.len() - shoff) / shdr_size:
         return Err("Section header table extends beyond file end")
 
     # Collect full section metadata (including sh_offset) directly from raw bytes
@@ -456,6 +458,15 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
         val sh_off = if elf32: elf_read_u32_le(bytes, base + 16) else: elf_read_u64_le(bytes, base + 24)
         val sh_size = if elf32: elf_read_u32_le(bytes, base + 20) else: elf_read_u64_le(bytes, base + 32)
         val sh_info = if elf32: elf_read_u32_le(bytes, base + 28) else: elf_read_u32_le(bytes, base + 44)
+
+        if sh_size < 0:
+            return Err("section {i}: invalid section size")
+        # NOBITS describes memory without file contents; NULL has no payload.
+        if sh_type != SHT_NOBITS and sh_type != SHT_NULL:
+            if sh_off < 0 or sh_off > bytes.len():
+                return Err("section {i}: section data extends beyond file end")
+            if sh_size > bytes.len() - sh_off:
+                return Err("section {i}: section data extends beyond file end")
 
         # We store sh_off in the sh_addr field since ElfSectionHeader has no sh_offset field.
         # All callers in elf_parser use sh_addr as the file offset for data sections.
