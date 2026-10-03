@@ -25,6 +25,14 @@ crash durability, cross-platform qualification, or a measured scale result.
 | Bridge and retention | `db_bridge.spl`, `db_retention.spl` | Separate intent/delivery state, uncertain-effect reconciliation rules, exact retention boundary, closure pins, deduplicated sufficient-statistic rollups, honest resolution and resnapshot invariants |
 | Settlement receipts | `db_receipt.spl` | Actual signed receipt bytes, pinned authority, hash-chain binding and allocator regression checks; Git ancestry remains an independent transport proof |
 | Allocation projection | `db_allocation.spl`, `db_identity_snapshot.spl` | Admission before allocation, preserved canonical UIDs, contextual aliases, recursive typed-reference projection and complete allocator snapshot |
+| Patch interchange | `db_patch_codec.spl` | Strict versioned round-trip of every patch field, operation, structured reference and signature; original digest checked before normalization |
+| Receipt index | `db_receipt_index.spl` | Three identical immutable entry projections, signed successor/history validation and corruption rejection; protected Git publication remains separate |
+| CI persistence | `src/app/scv/db/ci_store.spl`, `ci_readback.spl` | Multiplexed durable discovery and cursor CAS after actual Git tree/blob, signed receipt and external evidence closure checks |
+| Bounded pages | `db_pages.spl`, `src/app/scv/db/page_store.spl` | Immutable hash-bucket pages, canonical manifest, bounded affected-page updates and durable page/manifest publication; paged semantic reducer integration remains open |
+| Host paths | `src/lib/nogc_sync_mut/io/path_identity.spl` | Existing-path kernel resolution on Windows and realpath on POSIX, explicit errors and no lexical fallback; local generation/actor owners consume it |
+| Recovery journal | `src/app/scv/db/settlement_journal.spl` | Signed candidate and exact tree/blob inventory persisted before publication; actual remote ancestry read-back advances only to awaiting-index |
+| Quarantine | `src/app/scv/db/quarantine_store.spl` | Bounded uncompressed patch bundles imported into external CAS; reopening revalidates bytes; promotion preparation checks independent signature/metadata/ACL policy |
+| Trusted configuration and CLI | `db_policy_codec.spl`, `src/app/scv/db/commands.spl` | Independently pinned complete admission/merge policy; local status/apply and explicitly unverified patch inspection through `scv db` |
 
 ## Review findings addressed during coding
 
@@ -47,10 +55,13 @@ crash durability, cross-platform qualification, or a measured scale result.
 ## Remaining integration and execution gates
 
 Finish candidate publication coordination, durable signed receipt/index recovery,
-identity alias resolution through admission, metadata and restricted-evidence
-integration, durable CI cursor/manifests, provider effects/outbox recovery,
-conflict lifecycle and complete resnapshot/catalog orchestration. The added
-modules do not by themselves establish every requirement's end-to-end oracle.
+protected-authority deployment admission, canonical provider-binding follow-up,
+cross-replica delivery admission, paged semantic/query orchestration, complete
+command coverage and retention/resnapshot/catalog effects. Compressed/archive
+bundle formats are explicitly unsupported by the initial quarantine owner.
+Admission/alias resolution, confidentiality, durable CI state, provider outbox
+and local conflict lifecycle now have integrated source and focused tests; their
+full requirement oracles still require execution and broader integration.
 
 Keep broad fail-fast system scenarios until their full oracles are implemented.
 Run new source tests with an admitted pure-Simple runner, then full selected
@@ -58,8 +69,11 @@ acceptance, required runtime/MCP checks, generated-manual validation, host
 qualification and Operating B measurements. Do not describe later regression
 execution as an earlier test-first RED/GREEN cycle.
 
-The current path facade still fails closed on Windows canonical identity;
-supported-host success tests must succeed, not accept that limitation as PASS.
+The new authoritative path facade removes the local store's blanket Windows
+rejection. Candidate, transport, external evidence/key and page owners have also
+been migrated. Unsupported volume
+identity queries fail closed; supported-host success tests must actually run
+and succeed, not accept an unsupported result as PASS.
 SJ's existing stale lease recovery and actual process crash boundaries need
 separate integration evidence. The private work PR remains a draft until those
 release gates are satisfied; no protected branch or release tag is updated.

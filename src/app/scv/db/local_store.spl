@@ -46,7 +46,7 @@ fn db_local_path_scope(root: text, relative_directories: [text]) -> text:
     ""
 
 fn _db_store_scope(root: text, channel: text) -> text:
-    if not ["semantic", "bridge", "ci", "settlement", "pages"].contains(channel): return "SCVDB_STORE_CHANNEL"
+    if not ["semantic", "bridge", "ci", "settlement", "pages", "retention"].contains(channel): return "SCVDB_STORE_CHANNEL"
     db_local_path_scope(root, [".sj", ".scv", _db_store_relative(channel), "{_db_store_relative(channel)}/objects"])
 
 fn _db_store_relative(channel: text) -> text:
@@ -210,16 +210,31 @@ fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text,
 
 # Compare-and-publish under the existing SJ repository writer boundary. Never
 # invoke providers/network here; callers fetch and validate remote state first.
-fn db_store_commit(root: text, expected_head: text, transaction_id: text, state: text, channel: text = "semantic") -> DbStoreView:
+fn _db_store_request_scope(root: text, expected_head: text, transaction_id: text, state: text, channel: text) -> text:
     # Leave room for the fixed storage header within the bounded image read.
     if state.len() < 0 or state.len() > 67108608:
-        return _db_store_error("SCVDB_STORE_QUOTA")
+        return "SCVDB_STORE_QUOTA"
     if not is_dir(root):
-        return _db_store_error("SCVDB_STORE_ROOT")
+        return "SCVDB_STORE_ROOT"
     val scope = _db_store_scope(root, channel)
-    if scope != "": return _db_store_error(scope)
+    if scope != "": return scope
     if (expected_head != "" and not _db_store_digest(expected_head)) or not _db_store_digest(transaction_id):
-        return _db_store_error("SCVDB_STORE_IDENTITY")
+        return "SCVDB_STORE_IDENTITY"
+    ""
+
+# Storage primitive for an owner whose atomic policy check spans multiple local
+# channels/effects. Holder text alone is not proof: inspect the actual SJ lease.
+# This function neither acquires nor releases the caller's existing lease.
+fn db_store_commit_held(root: text, holder: text, expected_head: text, transaction_id: text, state: text, channel: text) -> DbStoreView:
+    val scope = _db_store_request_scope(root, expected_head, transaction_id, state, channel)
+    if scope != "": return _db_store_error(scope)
+    if holder == "" or not scv_sj_lease_is_held(root) or scv_sj_lease_holder(root) != holder:
+        return _db_store_error("SCVDB_STORE_LEASE_IDENTITY")
+    _db_store_commit_owned(root, expected_head, transaction_id, state, channel)
+
+fn db_store_commit(root: text, expected_head: text, transaction_id: text, state: text, channel: text = "semantic") -> DbStoreView:
+    val scope = _db_store_request_scope(root, expected_head, transaction_id, state, channel)
+    if scope != "": return _db_store_error(scope)
     val nonce = random_hex(16) ?? ""
     if nonce.len() != 32:
         return _db_store_error("SCVDB_STORE_ENTROPY")
@@ -235,5 +250,5 @@ fn db_store_commit(root: text, expected_head: text, transaction_id: text, state:
         return DbStoreView(code: "SCVDB_STORE_RELEASE_UNCERTAIN", head: result.head, parent: result.parent, transaction_id: result.transaction_id, state: result.state)
     result
 
-export DbStoreView, db_store_read, db_store_commit
+export DbStoreView, db_store_read, db_store_commit, db_store_commit_held
 export db_local_path_scope, db_local_existing_canonical

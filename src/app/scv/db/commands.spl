@@ -1,0 +1,61 @@
+# One cross-platform command owner. Policy files are explicitly supplied and
+# independently digest-pinned; incoming patches never choose their own policy.
+# These local commands do not claim protected remote settlement or scale gates.
+use app.io.mod (file_read_regular_no_follow_bounded, file_is_regular_no_follow)
+use app.scv.db.local_store.{db_local_existing_canonical}
+use app.scv.db.local_apply.{db_read_local_view, db_apply_local}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_decode}
+use std.scv.db_patch_codec.{db_patch_decode}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+
+fn db_command_help() -> text:
+    "scv db status <policy-file> <policy-digest>\nscv db apply <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db inspect-patch <patch-file>\nPolicy digests must come from the independently reviewed configuration. Apply is local; it does not settle a remote authority."
+
+fn _db_command_input(path: text, limit: i64) -> Result<text, text>:
+    # Absolute, OS-resolved paths prevent an alias from silently selecting a
+    # different policy/patch. Relative paths are resolved explicitly by caller.
+    if not file_is_regular_no_follow(path) or not db_local_existing_canonical(path): return Err("SCVDB_COMMAND_INPUT_SCOPE")
+    file_read_regular_no_follow_bounded(path, limit)
+
+fn _db_command_policy(path: text, digest: text) -> Result<DbPolicyConfig, text>:
+    db_policy_decode(_db_command_input(path, 33554560)?, digest)
+
+fn _db_command_path(root: text, path: text) -> text:
+    val logical = host_path_canonical(path)
+    if logical.starts_with("/") or (logical.len() >= 3 and logical[1:3] == ":/"): return logical
+    "{root}/{logical}"
+
+fn _db_command_run(root: text, args: [text]) -> Result<text, text>:
+    if args.len() == 0: return Ok(db_command_help())
+    if args.len() == 1 and args[0] == "help": return Ok(db_command_help())
+    val observed = path_final_existing(root)?
+    if args[0] == "inspect-patch":
+        if args.len() != 2: return Err("SCVDB_COMMAND_USAGE")
+        val patch = db_patch_decode(_db_command_input(_db_command_path(observed.path, args[1]), 33554560)?)?
+        # No raw metadata or source path is echoed. Parsing is not signature
+        # authorization: that requires an independently reviewed policy.
+        return Ok("OK parsed-unverified digest={patch.payload_digest} operations={patch.operations.len()}")
+    if args[0] != "status" and args[0] != "apply": return Err("SCVDB_COMMAND_USAGE")
+    val expected_count = if args[0] == "status": 3 else: 5
+    if args.len() != expected_count: return Err("SCVDB_COMMAND_USAGE")
+    val config = _db_command_policy(_db_command_path(observed.path, args[1]), args[2])?
+    if args[0] == "status":
+        val current = db_read_local_view(observed.path, config.admission)?
+        val head = if current.head == "": "empty" else: current.head
+        return Ok("OK local head={head} revision={current.image.state.revision} rows={current.image.state.rows.len()} accepted={current.image.state.accepted.len()} conflicts={current.image.catalog.records.len()} resolutions={current.image.catalog.resolutions.len()}")
+    val patch = db_patch_decode(_db_command_input(_db_command_path(observed.path, args[3]), 33554560)?)?
+    val sample = time_sample_unix_micros_or_failure()
+    if sample < 0: return Err("SCVDB_COMMAND_CLOCK")
+    val expected = if args[4] == "empty": "" else: args[4]
+    val result = db_apply_local(observed.path, expected, patch, config.merge, config.admission, (sample / 1000000) as u64)?
+    if result.code != "ok": return Err("SCVDB_COMMAND_CONFLICT")
+    Ok("OK local head={result.head} revision={result.revision} replay={result.replay}")
+
+fn db_command(root: text, args: [text]) -> text:
+    match _db_command_run(root, args):
+        Ok(result): result
+        Err(error): "ERROR {error}"
+
+export db_command, db_command_help

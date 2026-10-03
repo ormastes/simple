@@ -15,6 +15,10 @@ struct DbLocalImage:
     state: MaterializedState
     catalog: DbConflictCatalog
 
+struct DbLocalView:
+    head: text
+    image: DbLocalImage
+
 struct DbApplyResult:
     code: text
     head: text
@@ -39,11 +43,14 @@ fn _db_local_decode(encoded: text, admission: DbAdmissionPolicy) -> Result<DbLoc
 fn _db_empty_local_image() -> DbLocalImage:
     DbLocalImage(state: db_empty_state(), catalog: DbConflictCatalog(records: [], resolutions: []))
 
-fn db_read_local_image(root: text, admission: DbAdmissionPolicy) -> Result<DbLocalImage, text>:
+fn db_read_local_view(root: text, admission: DbAdmissionPolicy) -> Result<DbLocalView, text>:
     val current = db_store_read(root)
-    if current.code == "empty": return Ok(_db_empty_local_image())
+    if current.code == "empty": return Ok(DbLocalView(head: "", image: _db_empty_local_image()))
     if current.code != "ok": return Err(current.code)
-    _db_local_decode(current.state, admission)
+    Ok(DbLocalView(head: current.head, image: _db_local_decode(current.state, admission)?))
+
+fn db_read_local_image(root: text, admission: DbAdmissionPolicy) -> Result<DbLocalImage, text>:
+    Ok(db_read_local_view(root, admission)?.image)
 
 fn db_read_local(root: text, admission: DbAdmissionPolicy) -> Result<MaterializedState, text>:
     Ok(db_read_local_image(root, admission)?.state)
@@ -128,3 +135,4 @@ fn db_resolve_local(root: text, expected_head: text, decision: DbConflictDecisio
     Err("SCVDB_CONFLICT_NOT_FOUND")
 
 export DbLocalImage, DbApplyResult, db_apply_local, db_read_local, db_read_local_image, db_resolve_local
+export DbLocalView, db_read_local_view

@@ -6,6 +6,7 @@ use app.scv.db.local_store.{db_local_path_scope, db_local_existing_canonical}
 use app.scv.db.settlement_journal_codec.*
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains}
 use std.scv.sj_capsule.{scv_sj_lease_is_held}
 
 fn _journal_git(root: text, args: [text], limit: i64) -> Result<text, text>:
@@ -74,16 +75,24 @@ fn _journal_fetch(scratch: text, source: text, journal: DbSettlementJournal, obs
 fn db_settlement_journal_readback(source: text, scratch_parent: text, journal: DbSettlementJournal) -> Result<text, text>:
     if scv_sj_lease_is_held(source): return Err("SCVDB_JOURNAL_NETWORK_UNDER_LEASE")
     if db_local_path_scope(source, []) != "" or db_local_path_scope(scratch_parent, []) != "": return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
-    if scratch_parent == source or scratch_parent.starts_with(source + "/"): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    val source_identity = path_final_existing(source)?
+    val parent_identity = path_final_existing(scratch_parent)?
+    if path_identity_contains(source_identity, parent_identity): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
     val common = _journal_git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096)?
-    if scratch_parent == common.trim() or scratch_parent.starts_with(common.trim() + "/"): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    val common_identity = path_final_existing(common.trim())?
+    if path_identity_contains(common_identity, parent_identity): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
     val observed = db_git_settlement_ref_head(source, journal.receipt.remote)
     if observed.code != "ok": return Err(observed.code)
     if observed.oid == journal.receipt.previous_head: return Err("SCVDB_JOURNAL_NOT_PUBLISHED")
     val scratch = secure_temp_dir_raw(scratch_parent, "scv-journal-readback-")
     if scratch == "" or not scratch.starts_with(scratch_parent + "/scv-journal-readback-") or not dir_is_real_no_follow(scratch) or not db_local_existing_canonical(scratch): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    val scratch_identity = path_final_existing(scratch)?
+    if not path_identity_contains(parent_identity, scratch_identity) or path_identity_contains(source_identity, scratch_identity) or path_identity_contains(common_identity, scratch_identity) or path_identity_contains(scratch_identity, source_identity) or path_identity_contains(scratch_identity, common_identity): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
     val result = _journal_fetch(scratch, source, journal, observed.oid)
     if not dir_is_real_no_follow(scratch) or not db_local_existing_canonical(scratch): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    # Resolved-path identity is not an object ID. The parent must remain trusted
+    # against hostile same-name replacement throughout this synchronous effect.
+    if not path_identity_same(scratch_identity, path_final_existing(scratch)?): return Err("SCVDB_JOURNAL_SCRATCH_CLEANUP")
     if not dir_remove_all(scratch): return Err("SCVDB_JOURNAL_SCRATCH_CLEANUP")
     result
 

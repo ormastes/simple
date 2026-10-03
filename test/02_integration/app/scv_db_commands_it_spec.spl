@@ -1,0 +1,93 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod (file_write, file_exists)
+use app.scv.db.commands.{db_command}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.local_apply.{db_read_local_view}
+use std.scv.db_policy_codec.*
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_admission.{db_admission_policy_digest}
+use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+
+fn setup_item2_command_policy() -> DbPolicyConfig:
+    var admission = setup_item2_apply_policy()
+    var key = admission.keys[0]
+    key.valid_until = 18446744073709551615u64
+    admission.keys = [key]
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    var config = DbPolicyConfig(revision: "", admission: admission, merge: setup_item2_apply_merge())
+    config.revision = db_policy_digest(config).unwrap()
+    config
+
+describe "Distributed database command owner":
+    it "applies a real signed file under an independently pinned policy and reopens exact head/state":
+        step("Write separately reviewed policy and signed patch files")
+        val root = setup_item2_apply_root()
+        val config = setup_item2_command_policy()
+        val patch = setup_item2_apply_patch(1, "")
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        expect(db_command(root, ["status", "{root}/policy", config.revision]).contains("head=empty")).to_be(true)
+        expect(db_command(root, ["inspect-patch", "patch"]).starts_with("OK parsed-unverified")).to_be(true)
+        val applied = db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"])
+        expect(applied.starts_with("OK local head=")).to_be(true)
+        val view = db_read_local_view(root, config.admission).unwrap()
+        expect(view.image.state.accepted[0].batch_id).to_equal(patch.batch_id)
+        expect(view.image.state.rows.len()).to_equal(1)
+        expect(view.head).to_equal(db_store_read(root).head)
+        expect(applied.contains("head={view.head}")).to_be(true)
+        expect(db_command(root, ["status", "{root}/policy", config.revision]).contains("accepted=1")).to_be(true)
+        expect(db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"]).contains("replay=true")).to_be(true)
+
+    it "rejects a changed self-consistent policy when its independent pin is unchanged":
+        val root = setup_item2_apply_root()
+        var config = setup_item2_command_policy()
+        val trusted_pin = config.revision
+        var key = config.admission.keys[0]
+        key.revoked = true
+        var admission = config.admission
+        admission.keys = [key]
+        admission.revision = db_admission_policy_digest(admission).unwrap()
+        config.admission = admission
+        config.revision = db_policy_digest(config).unwrap()
+        expect(config.revision == trusted_pin).to_be(false)
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(db_command(root, ["status", "{root}/policy", trusted_pin]).starts_with("ERROR ")).to_be(true)
+        expect(file_exists("{root}/.scv/db/HEAD")).to_be(false)
+
+    it "never upgrades structurally valid patch inspection into signature authorization":
+        val root = setup_item2_apply_root()
+        val config = setup_item2_command_policy()
+        var patch = setup_item2_apply_patch(1, "")
+        patch.signature[0] = patch.signature[0] ^ 1u8
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        expect(db_command(root, ["inspect-patch", "{root}/patch"]).starts_with("OK parsed-unverified")).to_be(true)
+        expect(db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"])).to_equal("ERROR SCVDB_SIGNATURE_INVALID")
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "checks actual host time against the signing key window":
+        val root = setup_item2_apply_root()
+        var config = setup_item2_command_policy()
+        var key = config.admission.keys[0]
+        key.valid_until = 1
+        var admission = config.admission
+        admission.keys = [key]
+        admission.revision = db_admission_policy_digest(admission).unwrap()
+        config.admission = admission
+        config.revision = db_policy_digest(config).unwrap()
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(setup_item2_apply_patch(1, "")).unwrap())).to_be(true)
+        expect(db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"])).to_equal("ERROR SCVDB_KEY_TIME")
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "rejects real input links and malformed command shapes before mutation":
+        val root = setup_item2_apply_root()
+        val patch = setup_item2_apply_patch(1, "")
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        expect(setup_item2_filesystem_link(root, "{root}/patch", "{root}/alias", false)).to_equal(0)
+        expect(db_command(root, ["inspect-patch", "{root}/alias"])).to_equal("ERROR SCVDB_COMMAND_INPUT_SCOPE")
+        expect(db_command(root, ["apply"])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_command(root, ["unknown"])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_command(root, ["help"]).contains("independently reviewed")).to_be(true)
+        expect(db_store_read(root).code).to_equal("empty")

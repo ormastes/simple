@@ -928,3 +928,46 @@ Operating B: the [tracked capacity issue](../08_tracking/bug/item2_operating_b_s
 requires immutable bounded pages, indexed manifests and affected-page updates,
 followed by unchanged million-row resource measurements. No quota increase or
 source-only implementation may be reported as that measurement.
+
+### 19.1 Receipt signature refinement during implementation
+
+The implemented `DbSettlementReceipt` refines the two-signature sketches in
+sections 7.1–7.3. Once the complete candidate commit has been constructed, its
+OID, tree, sole parent, authority context, previous receipt, allocator marks and
+batch digests are all known. One Ed25519 signature covers those fields before
+publication. The receipt remains outside its own candidate tree, avoiding a
+self-reference. A second signature over the same known fields is unnecessary.
+
+This signature proves authorization of a candidate, **not acceptance**. Actual
+settled ancestry/tree read-back and protected receipt-index publication/read-back
+remain independent mandatory proofs before acknowledgement. An unpublished but
+valid signed receipt must remain pending. The recovery journal records the
+signed candidate before network effects; no caller-supplied boolean substitutes
+for those proofs.
+
+`db_receipt_index.spl` implements strict entry/cursor codecs and immutable
+`entries/<receipt-digest>`, `by-commit/<accepted-head>` and 20-digit sequence
+projections. All three must contain identical canonical entry bytes. Existing
+partial/disagreeing records are corruption. Older idempotent replay requires an
+actual signed successor chain to the cursor, bounded to 64 receipts per request;
+missing history is an explicit result, not implicit acceptance. The protected
+Git index effect owner and authority deployment admission remain open gates.
+
+### 19.2 Authoritative path identities and bounded pages
+
+The shared existing-path owner resolves Windows paths through one kernel handle
+and obtains a local-volume identity; POSIX uses realpath without lexical fallback.
+Consumers verify no-follow types and existing parents before creating leaves.
+Cleanup compares the observed path identity again. These are resolved path
+identities, not retained handles or filesystem object IDs: roots must remain
+trusted and stable against hostile concurrent replacement. Missing or unsupported
+identity resolution is an error. Actual host/durability tests remain required.
+
+Immutable storage now has 65,536 fixed hash buckets, per-page byte/record bounds,
+an authenticated directory manifest, binary lookup and affected-page updates.
+Alias/accepted records are immutable, tombstones cannot resurrect and allocator
+marks cannot regress. The durable owner fsyncs immutable pages before CAS of the
+manifest generation; a failed CAS may leave safe orphan pages. This does not yet
+replace the reference whole-state reducer/apply path or prove the selected
+million-row Operating B targets. Bucket skew fails explicitly rather than
+silently raising memory limits.

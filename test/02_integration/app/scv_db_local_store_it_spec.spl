@@ -5,7 +5,7 @@ use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 # separate gates; source presence alone is not a durability acceptance receipt.
 use std.spec.{describe, it, expect, step}
 use app.io.mod (cwd, dir_create, file_read, file_write, file_exists, file_delete)
-use app.scv.db.local_store.{db_store_read, db_store_commit, db_local_path_scope}
+use app.scv.db.local_store.{db_store_read, db_store_commit, db_store_commit_held, db_local_path_scope}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
@@ -15,9 +15,21 @@ fn setup_item2_store() -> text:
     expect(nonce.len()).to_equal(16)
     val root = "{cwd()}/build/test-artifacts/item2-store-{nonce}"
     expect(dir_create(root, true)).to_be(true)
-    root
+    path_final_existing(root).unwrap().path
 
 describe "SJ-owned distributed database local generation store":
+    it "requires the actual held lease for compound writes and leaves its ownership intact":
+        val root = setup_item2_store()
+        val transaction = sha256_text("held-retention")
+        expect(db_store_commit_held(root, "owner", "", transaction, "pending", "retention").code).to_equal("SCVDB_STORE_LEASE_IDENTITY")
+        expect(scv_sj_lease_acquire(root, "owner").starts_with("ok:")).to_be(true)
+        expect(db_store_commit_held(root, "forged", "", transaction, "pending", "retention").code).to_equal("SCVDB_STORE_LEASE_IDENTITY")
+        val written = db_store_commit_held(root, "owner", "", transaction, "pending", "retention")
+        expect(written.code).to_equal("ok")
+        expect(db_store_read(root, "retention").state).to_equal("pending")
+        expect(scv_sj_lease_is_held(root)).to_be(true)
+        expect(scv_sj_lease_release(root, "owner").starts_with("ok:")).to_be(true)
+
     it "admits an OS-resolved root and rejects missing, traversal and noncanonical scopes":
         val root = setup_item2_store()
         expect(db_local_path_scope(root, [".sj", ".scv"])).to_equal("")

@@ -1,6 +1,6 @@
 # External immutable evidence CAS. Input is bytes, never an archive extraction
 # or executable reproduction. Authorization/encryption are separate owners.
-use app.io.mod.{is_dir, dir_create, dir_remove_all, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_exists, file_fsync, directory_fsync, process_run_timeout, env_get}
+use app.io.mod.{is_dir, dir_create, dir_remove_all, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_exists, file_fsync, directory_fsync, process_run_bounded, env_get}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
@@ -37,9 +37,9 @@ fn db_evidence_external_scope(checkout: text, external_parent: text, leaf: text)
     if source.path != checkout or parent.path != external_parent: return Err("SCVDB_STORE_SCOPE")
     for key in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH"]:
         if env_get(key).len() > 0: return Err("SCVDB_STORE_GIT_ENV")
-    val (top, _top_error, top_code) = process_run_timeout("git", ["--no-replace-objects", "-C", source.path, "rev-parse", "--show-toplevel"], 30000)
-    val (common, _common_error, common_code) = process_run_timeout("git", ["--no-replace-objects", "-C", source.path, "rev-parse", "--path-format=absolute", "--git-common-dir"], 30000)
-    if top_code != 0 or common_code != 0 or top.len() > 4096 or common.len() > 4096:
+    val (top, _top_error, top_code) = process_run_bounded("git", ["--no-replace-objects", "-C", source.path, "rev-parse", "--show-toplevel"], 30000, 4096)
+    val (common, _common_error, common_code) = process_run_bounded("git", ["--no-replace-objects", "-C", source.path, "rev-parse", "--path-format=absolute", "--git-common-dir"], 30000, 4096)
+    if top_code != 0 or common_code != 0 or top.len() >= 4096 or common.len() >= 4096:
         return Err("SCVDB_STORE_REPOSITORY")
     if not path_identity_same(path_final_existing(top.trim())?, source): return Err("SCVDB_STORE_REPOSITORY")
     val common_identity = path_final_existing(common.trim())?
