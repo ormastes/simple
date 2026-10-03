@@ -30,7 +30,8 @@ use std.common.crypto.sha256.{sha256_text}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
 use test.fixtures.scv.db_checkpoint_fixture.*
 use test.fixtures.scv.db_apply_fixture.*
-use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create}
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_repin}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
 use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
 
 fn setup_item2_checkpoint_files() -> (text, DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
@@ -205,8 +206,18 @@ describe "Same-epoch checkpoint installation and immutable pending work":
 describe "Checkpoint operation-wide reader budgets":
     it "prepares and resumes a real tiny paged checkpoint with an unchanged signed create waiting on absent buckets":
         val (root, original, original_authority, source) = setup_item2_checkpoint_files()
-        val policy = setup_item2_paged_policy()
+        var policy = setup_item2_paged_policy()
         val genesis = db_paged_genesis(policy).unwrap()
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.revision, 1u64)
+        # Explicit fixture review includes envelope metadata. Preserve the
+        # original signed patch and genesis; admission rotation is independent
+        # of the manifest's unchanged structural policy pin.
+        var config = policy.config
+        var admission = config.admission
+        admission.metadata = setup_item2_reviewed_metadata([patch])
+        config.admission = admission
+        policy.config = config
+        policy = setup_item2_paged_repin(policy)
         var checkpoint = original
         checkpoint.reducer_revision = policy.config.admission.reducer_revision
         checkpoint.policy_revision = policy.config.revision
@@ -225,7 +236,6 @@ describe "Checkpoint operation-wide reader budgets":
         authority.paged_policy = Some(policy)
         for page in build.pages:
             expect(file_write_bytes(source.external_parent + "/scv-checkpoint-pages-v1/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_be(true)
-        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.revision, 1u64)
         db_settlement_enqueue(root, "", patch, policy.config.admission).unwrap()
         val pending = db_store_read(root, "settlement-work")
         val active = db_store_read(root, "paged")
