@@ -2,7 +2,7 @@
 
 Authored manual, 2026-10-03; not generated execution evidence. Source:
 `test/01_unit/compiler/semantics/collection_plan_loop_spec.spl`.
-Nine scenarios exercise partial REQ-007. None has been executed in this session.
+Ten scenarios exercise partial REQ-007. None has been executed in this session.
 
 | Case | Assertion |
 |---|---|
@@ -14,6 +14,7 @@ Nine scenarios exercise partial REQ-007. None has been executed in this session.
 | Induction type | Forged source boolean array with integer induction mapping rejects extraction. |
 | Original body | Replacing only the origin mapping with a typed constant rejects validation. |
 | Structural types | Equivalent array types at different source spans remain admissible. |
+| Source output type | A mutated source-node output type cannot disagree with its retained original expression. |
 | Shared collector | An accepted block produces one region and no blocker; append shell is not rediscovered. |
 
 The supported region has a fresh empty array local, one unlabelled for-loop,
