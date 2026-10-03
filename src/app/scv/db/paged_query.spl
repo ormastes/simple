@@ -2,11 +2,11 @@
 # checks actual bounded page bytes against its descriptor, without rehashing the
 # entire directory for each key. These data views convey no write authority.
 use app.scv.db.paged_store.{DbPagedView, db_paged_open}
-use app.scv.db.page_store.{DbStoredPages, db_page_store_lookup}
+use app.scv.db.page_store.{db_page_store_load_pages}
 use std.scv.db_paged_model.{DbPagedPolicy}
 use std.scv.db_paged_indexes.{db_paged_index_key, db_paged_index_value, db_paged_unique_keys}
 use std.scv.db_page_records.*
-use std.scv.db_pages.{DbPageRecord}
+use std.scv.db_pages.{DbPageRecord, db_pages_bucket}
 use std.scv.db_canonical.*
 use std.scv.db_patch.*
 use std.scv.db_reducer.{DbRow, db_field_value}
@@ -16,12 +16,58 @@ struct DbPagedQuery:
     root: text
     view: DbPagedView
     policy: DbPagedPolicy
+    buckets: {text: bool}
+    records: {text: DbPageRecord}
+    requested: {text: bool}
+    bytes_read: u64
+    keys_read: u64
 
 fn db_paged_query_open(root: text, policy: DbPagedPolicy) -> Result<DbPagedQuery, text>:
-    Ok(DbPagedQuery(root: root, view: db_paged_open(root, policy)?, policy: policy))
+    Ok(DbPagedQuery(root: root, view: db_paged_open(root, policy)?, policy: policy, buckets: {}, records: {}, requested: {}, bytes_read: 0u64, keys_read: 0u64))
+
+# Explicit value threading: callers MUST retain the returned query. No closure
+# mutation or caller boolean stands in for loaded content. All reads in one
+# owner operation share this cumulative budget, including absent buckets.
+fn db_paged_query_require(query: DbPagedQuery, keys: [text]) -> Result<DbPagedQuery, text>:
+    var next = query
+    var representatives: [text] = []
+    var selected: {text: bool} = {}
+    for key in keys:
+        val bucket = db_pages_bucket(key)?
+        if not next.requested.contains_key(key):
+            if next.keys_read >= next.policy.max_read_keys: return Err("SCVDB_PAGED_READ_QUOTA")
+            next.requested[key] = true
+            next.keys_read = next.keys_read + 1u64
+        if not next.buckets.contains_key(bucket) and not selected.contains_key(bucket):
+            selected[bucket] = true
+            representatives.push(key)
+    if representatives.len() == 0: return Ok(next)
+    if next.bytes_read > next.policy.max_read_bytes: return Err("SCVDB_PAGED_READ_QUOTA")
+    val loaded = db_page_store_load_pages(next.root, next.view.manifest.pages, representatives, next.policy.max_read_bytes - next.bytes_read)?
+    for result in loaded:
+        next.bytes_read = next.bytes_read + result.byte_count
+        next.buckets[db_pages_bucket(result.key)?] = true
+        if val page = result.page:
+            for record in page.records: next.records[record.key] = record
+    Ok(next)
+
+fn db_paged_query_aliases(query: DbPagedQuery, entities: [EntityRef]) -> Result<DbPagedQuery, text>:
+    var keys: [text] = []
+    for entity in entities:
+        if not db_ref_context(entity, query.view.manifest.context.namespace, query.view.manifest.context.epoch): return Err("SCVDB_ALIAS_CONTEXT")
+        if val alias = entity.settled: keys.push(db_page_alias_key(alias)?)
+    db_paged_query_require(query, keys)
+
+fn db_paged_query_rows(query: DbPagedQuery, entities: [EntityRef]) -> Result<DbPagedQuery, text>:
+    val next = db_paged_query_aliases(query, entities)?
+    var keys: [text] = []
+    for entity in entities: keys.push(db_page_row_key(db_paged_resolve_at(next, entity)?)?)
+    db_paged_query_require(next, keys)
 
 fn db_paged_query_record(query: DbPagedQuery, key: text) -> Result<DbPageRecord?, text>:
-    db_page_store_lookup(query.root, DbStoredPages(head: query.view.head, manifest: query.view.manifest.pages), key)
+    if not query.buckets.contains_key(db_pages_bucket(key)?): return Err("SCVDB_PAGED_PROOF_REQUIRED")
+    if query.records.contains_key(key): return Ok(Some(query.records[key]))
+    Ok(nil)
 
 fn db_paged_resolve_at(query: DbPagedQuery, entity: EntityRef) -> Result<EntityRef, text>:
     val context = query.view.manifest.context
@@ -42,7 +88,7 @@ fn db_paged_row_at(query: DbPagedQuery, entity: EntityRef) -> Result<DbRow?, tex
         _: Err("SCVDB_PAGED_INDEX_CORRUPT")
 
 # fields is either one declared unique field, or the exact ordered compound key.
-fn db_paged_unique_at(query: DbPagedQuery, kind: text, fields: [DbField]) -> Result<DbRow?, text>:
+fn _paged_unique_key(query: DbPagedQuery, kind: text, fields: [DbField]) -> Result<text, text>:
     var names: [text] = []
     var name_bytes: [[u8]] = []
     var value_bytes: [[u8]] = []
@@ -59,6 +105,20 @@ fn db_paged_unique_at(query: DbPagedQuery, kind: text, fields: [DbField]) -> Res
         elif fields.len() > 0 and constraint.key_fields == names:
             key = db_paged_index_key("natural", db_canonical_text(kind)? + db_canonical_list(name_bytes) + db_canonical_list(value_bytes))?
     if key == "": return Err("SCVDB_PAGED_UNIQUE_INDEX_REQUIRED")
+    Ok(key)
+
+fn db_paged_query_unique(query: DbPagedQuery, kind: text, fields: [DbField]) -> Result<DbPagedQuery, text>:
+    val key = _paged_unique_key(query, kind, fields)?
+    val next = db_paged_query_require(query, [key])?
+    if val record = db_paged_query_record(next, key)?:
+        match db_paged_index_value(record, 170u8)?:
+            Reference(entity): return db_paged_query_rows(next, [entity])
+            Absent: ()
+            _: return Err("SCVDB_PAGED_INDEX_CORRUPT")
+    Ok(next)
+
+fn db_paged_unique_at(query: DbPagedQuery, kind: text, fields: [DbField]) -> Result<DbRow?, text>:
+    val key = _paged_unique_key(query, kind, fields)?
     val record = db_paged_query_record(query, key)?
     if record == nil: return Ok(nil)
     match db_paged_index_value(record.unwrap(), 170u8)?:
@@ -72,3 +132,4 @@ fn db_paged_unique_at(query: DbPagedQuery, kind: text, fields: [DbField]) -> Res
 
 export DbPagedQuery, db_paged_query_open, db_paged_query_record
 export db_paged_resolve_at, db_paged_row_at, db_paged_unique_at
+export db_paged_query_require, db_paged_query_aliases, db_paged_query_rows, db_paged_query_unique

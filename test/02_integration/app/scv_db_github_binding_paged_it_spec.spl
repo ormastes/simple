@@ -1,4 +1,8 @@
 use std.spec.*
+use app.io.mod.{file_write_bytes}
+use app.scv.db.page_store.{db_page_store_load_page}
+use std.scv.db_pages.{db_page_encode, db_pages_bucket, db_pages_entry}
+use std.scv.db_page_records.{db_page_batch_key, db_page_row_key}
 use std.scv.db_patch.*
 use std.scv.db_reducer.{db_field_value}
 use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
@@ -8,8 +12,49 @@ use app.scv.db.bridge_store.{db_bridge_store_enqueue_paged}
 use app.scv.db.github_binding_core.{DbGithubBindingTarget}
 use app.scv.db.github_binding_paged_owner.*
 use test.fixtures.scv.db_paged_binding_fixture.*
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_repin}
 
 describe "Authenticated indexed GitHub binding owner":
+    it "charges distinct buckets cumulatively and reuses captured proof after backing bytes change":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val view = db_paged_open(fixture.root, fixture.policy).unwrap()
+        val batch_key = db_page_batch_key(fixture.intent_patch.batch_id).unwrap()
+        val row_key = db_page_row_key(setup_item2_paged_binding_ref("bug", 1u64)).unwrap()
+        expect(db_pages_bucket(batch_key).unwrap() == db_pages_bucket(row_key).unwrap()).to_be(false)
+        val page = db_page_store_load_page(fixture.root, view.manifest.pages, batch_key).unwrap().unwrap()
+        val budget = db_page_encode(page, fixture.policy.quota).unwrap().len() as u64
+        var policy = fixture.policy
+        policy.max_read_bytes = budget
+        policy = setup_item2_paged_repin(policy)
+        val empty = db_paged_query_open(fixture.root, policy).unwrap()
+        expect(db_paged_query_record(empty, batch_key)).to_equal(Err("SCVDB_PAGED_PROOF_REQUIRED"))
+        val captured = db_paged_query_require(empty, [batch_key,batch_key]).unwrap()
+        expect(captured.bytes_read).to_equal(budget)
+        expect(captured.keys_read).to_equal(1u64)
+        val expected = db_paged_query_record(captured, batch_key).unwrap()
+        val entry = db_pages_entry(view.manifest.pages, batch_key).unwrap().unwrap()
+        expect(file_write_bytes("{fixture.root}/.scv/db-pages/pages/{entry.digest}.scvp", [0u8])).to_be(true)
+        val cached = db_paged_query_require(captured, [batch_key,batch_key]).unwrap()
+        expect(db_paged_query_record(cached, batch_key).unwrap()).to_equal(expected)
+        expect(cached.bytes_read).to_equal(budget)
+        expect(cached.keys_read).to_equal(1u64)
+        expect(db_page_store_load_page(fixture.root, view.manifest.pages, batch_key).is_err()).to_be(true)
+        expect(db_paged_query_require(cached, [row_key])).to_equal(Err("SCVDB_PAGE_BATCH_QUOTA"))
+
+    it "shares the dependency budget with all later binding context reads before GET":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val plan = db_github_binding_paged_plan(fixture.root, fixture.policy, fixture.request, fixture.target, setup_item2_paged_binding_transport).unwrap()
+        val patch = setup_item2_paged_binding_patch(plan.operations, plan.base_revision, 2u64, plan.provenance, [fixture.intent_patch.batch_id])
+        var policy = setup_item2_paged_binding_review(fixture, [patch])
+        val view = db_paged_open(fixture.root, policy).unwrap()
+        val page = db_page_store_load_page(fixture.root, view.manifest.pages, db_page_batch_key(fixture.intent_patch.batch_id).unwrap()).unwrap().unwrap()
+        policy.max_read_bytes = db_page_encode(page, policy.quota).unwrap().len() as u64
+        policy = setup_item2_paged_repin(policy)
+        val calls = check_item2_paged_binding_calls()
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport).is_err()).to_be(true)
+        expect(check_item2_paged_binding_calls()).to_equal(calls)
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(plan.head)
+
     it "publishes exact signed binding and common state after durable ACK and fresh GET":
         val fixture = setup_item2_paged_binding_fixture(true, true)
         val plan = db_github_binding_paged_plan(fixture.root, fixture.policy, fixture.request, fixture.target, setup_item2_paged_binding_transport).unwrap()
@@ -17,7 +62,7 @@ describe "Authenticated indexed GitHub binding owner":
         val policy = setup_item2_paged_binding_review(fixture, [patch])
         val applied = db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport).unwrap()
         expect(applied.replay).to_be(false)
-        val query = db_paged_query_open(fixture.root, policy).unwrap()
+        val query = db_paged_query_rows(db_paged_query_open(fixture.root, policy).unwrap(), [fixture.target.binding, fixture.target.common_state, setup_item2_paged_binding_ref("bridge_policy", 2u64)]).unwrap()
         val binding = db_paged_row_at(query, fixture.target.binding).unwrap().unwrap()
         expect(db_field_value(binding.fields, "last_common_state")).to_equal(DbValue.Reference(fixture.target.common_state))
         expect(db_paged_row_at(query, fixture.target.common_state).unwrap().unwrap().revision).to_equal(patch.batch_id)
@@ -68,7 +113,7 @@ describe "Authenticated indexed GitHub binding owner":
         val policy = setup_item2_paged_binding_review(fixture, [patch,race])
         setup_item2_paged_binding_race(plan.head, race, policy)
         expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
-        val query = db_paged_query_open(fixture.root, policy).unwrap()
+        val query = db_paged_query_rows(db_paged_query_open(fixture.root, policy).unwrap(), [fixture.target.binding, fixture.target.common_state, setup_item2_paged_binding_ref("bridge_policy", 2u64)]).unwrap()
         expect(db_paged_row_at(query, setup_item2_paged_binding_ref("bridge_policy", 2u64)).unwrap().unwrap().revision).to_equal(race.batch_id)
         expect(db_paged_row_at(query, fixture.target.binding).unwrap()).to_be_nil()
 

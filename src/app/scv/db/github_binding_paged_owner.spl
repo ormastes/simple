@@ -7,7 +7,7 @@ use app.scv.db.github_provider.{DbGithubProcessReply}
 use app.scv.db.paged_query.*
 use app.scv.db.paged_transition.{DbPagedApplyResult, db_paged_apply_transition}
 use std.scv.db_paged_model.{DbPagedPolicy}
-use std.scv.db_paged_resolve.{db_paged_map_operations}
+use std.scv.db_paged_resolve.{db_paged_map_operations, db_paged_operation_references}
 use std.scv.db_page_records.*
 use std.scv.db_patch.*
 use std.scv.db_reducer.{DbRow, db_field_value}
@@ -37,16 +37,24 @@ fn _paged_binding_reference(query: DbPagedQuery, field: DbField, revision: text)
             Ok(true)
         _: Err("SCVDB_BINDING_INTENT_CONTEXT_MISSING")
 
-fn _paged_binding_context(query: DbPagedQuery, request: DbGithubBridgeRequest, target: DbGithubBindingTarget, original: DbPatch? = nil) -> Result<DbGithubBindingContext, text>:
+fn _paged_binding_context(captured: DbPagedQuery, request: DbGithubBridgeRequest, target: DbGithubBindingTarget, original: DbPatch? = nil) -> Result<DbGithubBindingContext, text>:
+    var query = captured
     _paged_binding_schema(query.policy)?
     val scoped = db_binding_delivery(query.root, query.policy.config.admission, request, target)?
     var fields: [DbField] = []
     if val historical = original:
         fields = db_binding_original_fields(historical)?
     else:
+        query = db_paged_query_unique(query, "bridge_intent", [DbField(name: "intent_revision", value: DbValue.Text(scoped.delivery.intent.revision))])?
         val intent = db_paged_unique_at(query, "bridge_intent", [DbField(name: "intent_revision", value: DbValue.Text(scoped.delivery.intent.revision))])?
         if intent == nil: return Err("SCVDB_BINDING_INTENT_NOT_COMMITTED")
         fields = intent.unwrap().fields
+        var references: [EntityRef] = []
+        for name in ["local_entity", "authority_policy"]:
+            match db_binding_required(fields, name, true)?.value:
+                Reference(entity): references.push(entity)
+                _: return Err("SCVDB_BINDING_INTENT_CONTEXT_MISSING")
+        query = db_paged_query_rows(query, references)?
         _paged_binding_reference(query, db_binding_required(fields, "local_entity", true)?, "")?
         _paged_binding_reference(query, db_binding_required(fields, "authority_policy", true)?, scoped.policy.revision)?
     var context = db_binding_context_make(query.view.head, query.view.manifest.revision, [], query.policy.config.admission, scoped, target, fields)?
@@ -54,16 +62,19 @@ fn _paged_binding_context(query: DbPagedQuery, request: DbGithubBridgeRequest, t
     # Only these exact rows participate in the shared local operation builder;
     # global constraints are enforced independently by the indexed reducer.
     var rows: [DbRow] = []
+    query = db_paged_query_rows(query, [target.binding, target.common_state])?
     for entity in [target.binding, target.common_state]:
         if val row = db_paged_row_at(query, entity)?: rows.push(row)
     var tuple: [DbField] = []
     for name in ["provider_instance", "project", "remote_kind", "remote_id"]:
         tuple.push(DbField(name: name, value: db_field_value(context.binding_fields, name)))
+    query = db_paged_query_unique(query, "provider_binding", tuple)?
     if val duplicate = db_paged_unique_at(query, "provider_binding", tuple)?:
         if duplicate.entity != entity_ref_canonical(target.binding): return Err("SCVDB_BINDING_DUPLICATE_REMOTE")
     if val binding = db_paged_row_at(query, target.binding)?:
         match db_field_value(binding.fields, "last_common_state"):
             Reference(entity):
+                query = db_paged_query_rows(query, [entity])?
                 if val common = db_paged_row_at(query, entity)?: rows.push(common)
             _: ()
     context.rows = rows
@@ -71,10 +82,14 @@ fn _paged_binding_context(query: DbPagedQuery, request: DbGithubBridgeRequest, t
 
 # Original authentication precedes attacker-selected registry IO. Signed
 # dependency names in phase one are not membership evidence; phase two reads it.
-fn _paged_binding_accepted(query: DbPagedQuery, patch: DbPatch, now: u64) -> Result<bool, text>:
+fn _paged_binding_accepted(captured: DbPagedQuery, patch: DbPatch, now: u64) -> Result<(DbPagedQuery, bool), text>:
+    var query = captured
     if patch.operations.len() != 2 or patch.causal_dependencies.len() > 256: return Err("SCVDB_BINDING_PATCH_MISMATCH")
     val digest = db_patch_validate(patch)?
     db_authorize_patch(patch, query.policy.config.admission, patch.causal_dependencies, now)?
+    var keys = [db_page_batch_key(patch.batch_id)?, db_page_actor_counter_key(patch.actor, patch.actor_counter)?]
+    for dependency in patch.causal_dependencies: keys.push(db_page_batch_key(dependency)?)
+    query = db_paged_query_require(query, keys)?
     for dependency in patch.causal_dependencies:
         val record = db_paged_query_record(query, db_page_batch_key(dependency)?)?
         if record == nil: return Err("SCVDB_MISSING_DEPENDENCY")
@@ -82,7 +97,7 @@ fn _paged_binding_accepted(query: DbPagedQuery, patch: DbPatch, now: u64) -> Res
             Accepted(_): ()
             _: return Err("SCVDB_PAGED_INDEX_CORRUPT")
     val record = db_paged_query_record(query, db_page_batch_key(patch.batch_id)?)?
-    if record == nil: return Ok(false)
+    if record == nil: return Ok((query, false))
     val counter = db_paged_query_record(query, db_page_actor_counter_key(patch.actor, patch.actor_counter)?)?
     if counter == nil: return Err("SCVDB_BATCH_IDENTITY_COLLISION")
     match db_typed_page_record_decode(record.unwrap())?:
@@ -90,12 +105,12 @@ fn _paged_binding_accepted(query: DbPagedQuery, patch: DbPatch, now: u64) -> Res
             match db_typed_page_record_decode(counter.unwrap())?:
                 ActorCounter(prior):
                     if prior != batch or batch.canonical_digest != digest: return Err("SCVDB_BATCH_IDENTITY_COLLISION")
-                    Ok(true)
+                    Ok((query, true))
                 _: Err("SCVDB_PAGED_INDEX_CORRUPT")
         _: Err("SCVDB_PAGED_INDEX_CORRUPT")
 
 fn db_github_binding_paged_plan(root: text, policy: DbPagedPolicy, request: DbGithubBridgeRequest, target: DbGithubBindingTarget, execute: fn([text], i64, i64) -> DbGithubProcessReply) -> Result<DbGithubBindingPlan, text>:
-    val query = db_paged_query_open(root, policy)?
+    val query = db_paged_query_aliases(db_paged_query_open(root, policy)?, [target.binding, target.common_state])?
     val canonical_target = _paged_binding_target(query, target)?
     val context = _paged_binding_context(query, request, canonical_target)?
     val operations = db_binding_operations(context, canonical_target)?
@@ -105,8 +120,9 @@ fn db_github_binding_paged_plan(root: text, policy: DbPagedPolicy, request: DbGi
 fn db_github_binding_paged_apply(root: text, expected_head: text, policy: DbPagedPolicy, request: DbGithubBridgeRequest, target: DbGithubBindingTarget, patch: DbPatch, execute: fn([text], i64, i64) -> DbGithubProcessReply) -> Result<DbPagedApplyResult, text>:
     val sample = time_sample_unix_micros_or_failure()
     if sample < 0: return Err("SCVDB_COMMAND_CLOCK")
-    val query = db_paged_query_open(root, policy)?
-    val accepted = _paged_binding_accepted(query, patch, (sample / 1000000) as u64)?
+    val captured = db_paged_query_open(root, policy)?
+    val (authenticated, accepted) = _paged_binding_accepted(captured, patch, (sample / 1000000) as u64)?
+    val query = db_paged_query_aliases(authenticated, [target.binding, target.common_state] + db_paged_operation_references(patch.operations)?)?
     val canonical_target = _paged_binding_target(query, target)?
     # Comparison only: retain original signed patch for admission/publication.
     var comparison = patch
