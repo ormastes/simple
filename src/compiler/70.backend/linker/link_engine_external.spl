@@ -39,14 +39,10 @@ use std.log.{debug}
 # the facade (`link_to_native` per the original A3 plan row; `internal_link_native`
 # is lane B3's shared SIMPLE_LINKER=internal implementation, reused here
 # instead of duplicated).
-use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, native_linker_abi_for_target, internal_link_native}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native_with_engine, native_linker_abi_for_target, internal_link_native}
 
-# `find_linker_path`/`linker_type_for_path`/`LinkerType` are read directly
-# from `mold.spl` (not re-imported through the facade) purely to report
-# which engine a SUCCESSFUL link actually used -- this is new reporting
-# logic that lives in this file, not a modification of anything owned by
-# another lane.
-use compiler.backend.linker.mold.{find_linker_path, linker_type_for_path, LinkerType, requested_linker_override}
+# Override selection only; successful identity comes from the execution result.
+use compiler.backend.linker.mold.{requested_linker_override}
 
 # Internal engine (lane A7/B3): `internal_link_native` (defined in
 # `_LinkerWrapper/native_linking.spl`, lane B3) owns the actual
@@ -267,32 +263,6 @@ fn engine_id_for_outcome(outcome: LinkOutcomeV1) -> text:
         case UnsupportedFeature: "internal:elf"
         case _("every other failure outcome never resolved an engine at all"): "none"
 
-fn resolve_engine_id_for_success() -> text:
-    """Name the engine that a SUCCESSFUL link actually used.
-
-    KNOWN RC1 LIMIT: when find_linker_path resolves mold/ld.lld/ld but the link
-    then falls back to cc (missing CRT files or a failed direct link; the adapter
-    sets allow_cc_fallback), this reports the resolved linker, not cc. Receipts are
-    therefore always NotCertified. G2 threads the actual engine out of
-    link_native_unix.
-
-    `find_linker_path` reports the direct linker (mold/ld.lld/ld) when one
-    resolves; when it does NOT resolve but the overall link still succeeded,
-    `native_linking.link_native_unix`/`link_native_windows` can only have
-    reached success through the compiler-driver (cc) or MSVC (link.exe)
-    fallback -- this is the same fallback condition those functions branch
-    on themselves, re-derived here without editing them."""
-    val linker_result = find_linker_path()
-    if linker_result.is_ok():
-        val kind = linker_type_for_path(linker_result.unwrap())
-        return match kind:
-            case Mold: "mold"
-            case Lld: "ld.lld"
-            case Ld: "ld"
-    if host_os() == "windows":
-        return "link.exe"
-    "cc"
-
 # ============================================================================
 # Internal engine (SIMPLE_LINKER=internal)
 # ============================================================================
@@ -386,9 +356,9 @@ pub fn link_request_to_native(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
         return link_request_internal(req, policy, object_files, output)
 
     val config = link_request_to_native_config(req, policy)
-    val link_result = link_to_native(object_files, output, config)
+    val link_result = link_to_native_with_engine(object_files, output, config)
     if link_result.is_ok():
-        return base_receipt(req, policy, resolve_engine_id_for_success(), LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
+        return base_receipt(req, policy, link_result.unwrap().engine_id, LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
 
     val message = link_result.unwrap_err()
     val outcome = classify_link_error(message)

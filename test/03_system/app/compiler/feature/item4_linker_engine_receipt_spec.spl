@@ -1,0 +1,120 @@
+"""
+# ITEM4-REQ-002: successful native links carry the executed route identity
+
+NOT RUN: requires an admitted self-hosted runtime. The Linux integration case
+requires host-matching ELF fixtures, discovered direct linker/CRT and a C
+driver supporting the production -fuse-ld=lld default, with LLD installed.
+Missing prerequisites fail explicitly; they do not produce skipped
+PASS evidence. -Wl,-e,_start is C-driver syntax rejected by direct ELF linkers.
+No shell fixture, compiler re-probe after success, or native execution claim.
+The fallback integration exercises the native route, not LinkRequestV1's
+receipt adapter: that request schema currently has no extra-flags field to
+force this failure. Adapter receipt execution remains a separate open gate.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{host_os, host_arch, file_exists, dir_create_all, file_read_bytes, remove_file_if_exists}
+use std.nogc_sync_mut.io_runtime.{env_get}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
+use compiler.backend.linker.native_link_result.{
+    native_link_success_v1, native_link_output_v1,
+    native_link_engine_id_for_path_v1}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_native_unix_with_engine}
+use compiler.backend.linker.crt_discovery.{find_crt_files}
+use compiler.backend.linker.mold.{find_linker_path, find_requested_linker, requested_linker_override}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+
+describe "ITEM4-REQ-002 native link result identity":
+    it "preserves the actual driver route through output compatibility projection":
+        # @req ITEM4-REQ-002
+        step("Project a successful driver output into the typed route result")
+        val result = native_link_success_v1(Ok("linked.exe"), "cc")
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        step("Check route identity and the legacy output-only projection")
+        expect(result.unwrap().engine_id).to_equal("cc")
+        expect(result.unwrap().output).to_equal("linked.exe")
+        expect(native_link_output_v1(result).unwrap()).to_equal("linked.exe")
+
+    it "preserves errors without fabricating a successful engine result":
+        # @req ITEM4-REQ-002
+        step("Carry a failed linker result through both compatibility boundaries")
+        val result = native_link_success_v1(Err("link failed: unresolved entry"), "mold")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        step("Require the original diagnostic after the output-only projection")
+        val projected = native_link_output_v1(result)
+        expect(projected.is_err()).to_equal(true)
+        if projected.is_ok(): return
+        expect(projected.unwrap_err()).to_equal("link failed: unresolved entry")
+
+    it "names the selected executable without guessing unknown programs are lld":
+        # @req ITEM4-REQ-002
+        step("Classify the exact executable selected by each successful dispatch")
+        expect(native_link_engine_id_for_path_v1("/tool/bin/mold")).to_equal("mold")
+        expect(native_link_engine_id_for_path_v1("/tool/bin/ld.lld")).to_equal("ld.lld")
+        expect(native_link_engine_id_for_path_v1("C:\\tool\\lld-link.exe")).to_equal("lld-link")
+        expect(native_link_engine_id_for_path_v1("C:\\tool\\LINK.EXE")).to_equal("link.exe")
+        expect(native_link_engine_id_for_path_v1("/tool/bin/ld")).to_equal("ld")
+        step("Retain an unrecognized executed path as its actual identity")
+        expect(native_link_engine_id_for_path_v1("/custom/link-driver")).to_equal("/custom/link-driver")
+
+    it "reports cc after a real direct-link failure falls back to the C driver":
+        # @req ITEM4-REQ-002
+        step("Require Linux, host-matching objects, direct linker and CRT before linking")
+        val os = host_os()
+        val arch = host_arch()
+        val supported = os == "linux" and (arch == "x86_64" or arch == "aarch64")
+        expect(supported).to_equal(true)
+        if not supported: return
+        expect(requested_linker_override()).to_equal("")
+        if requested_linker_override() != "": return
+        expect(native_tool_strict_requested_v1()).to_equal(false)
+        if native_tool_strict_requested_v1(): return
+        val cross_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        expect(cross_target).to_equal("")
+        if cross_target != "": return
+        val reproduce = env_get("SIMPLE_NATIVE_LINK_REPRODUCE_PATH") ?? ""
+        expect(reproduce).to_equal("")
+        if reproduce != "": return
+        val direct = find_linker_path()
+        expect(direct.is_ok()).to_equal(true)
+        if direct.is_err(): return
+        val fallback_linker = find_requested_linker("lld")
+        expect(fallback_linker.is_ok()).to_equal(true)
+        if fallback_linker.is_err(): return
+        val crt = find_crt_files(false, false)
+        expect(crt.found).to_equal(true)
+        if not crt.found: return
+        val fixture_arch = if arch == "x86_64": "x64" else: "a64"
+        val objects = ["test/fixtures/linker/elf/start_{fixture_arch}.o", "test/fixtures/linker/elf/lib_{fixture_arch}.o"]
+        for object in objects:
+            expect(file_exists(object)).to_equal(true)
+            if not file_exists(object): return
+        val directory = "build/item4_linker_engine_receipt"
+        val created = dir_create_all(directory)
+        expect(created).to_equal(true)
+        if not created: return
+        val output = directory + "/cc_fallback"
+        val removed = remove_file_if_exists(output)
+        expect(removed).to_equal(true)
+        if not removed: return
+        var config = NativeLinkConfig.default()
+        config.runtime_path = "none"
+        config.pie = false
+        config.allow_cc_fallback = true
+        config.extra_flags = ["-nostdlib", "-no-pie", "-Wl,-e,_start"]
+        step("Send driver-only -Wl syntax through the real direct-then-fallback route")
+        val result = link_native_unix_with_engine(objects, output, config)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        step("Require cc identity and a constructed host ELF executable")
+        expect(result.unwrap().engine_id).to_equal("cc")
+        expect(result.unwrap().output).to_equal(output)
+        expect(file_exists(output)).to_equal(true)
+        if not file_exists(output): return
+        val image = elf_parse_object(file_read_bytes(output))
+        expect(image.is_ok()).to_equal(true)
+        if image.is_err(): return
+        expect(image.unwrap().header.e_type).to_equal(2)
+        expect(image.unwrap().header.e_machine).to_equal(if arch == "x86_64": 62 else: 183)
