@@ -41,3 +41,30 @@ All paths below are relative to the frozen workspace; no cache was deleted:
 - `build/bootstrap/item7-qualified-cranelift-20261003/stage3/x86_64-unknown-linux-gnu/stage2-native-cache` (frontend/HIR/native state; reuse counts not established).
 
 Repair and test controller-to-watchdog cancellation before another bounded build. Preserve and validate the cached lineage against the next explicit source freeze. Supply a genuinely admitted LLVM 23 shared provider for the mandatory LLVM scenarios. Do not substitute Rust-seed execution, a compile-only binary, or Cranelift results for qualified interpreter/LLVM acceptance. No fourth attempt was started.
+
+## Focused cancellation repair (no bootstrap rerun)
+
+The POSIX watchdog now pins its launching parent PID and detects reparenting.
+Loss of a controller cancels a live workload through the existing TERM/grace
+and verified quiescence path, with `status=controller-exited` and exit 143.
+An already completed workload keeps its original result. The Windows Job
+Object path is unchanged; this focused evidence is from Ubuntu WSL.
+
+Actual RED: `process_tree_rss_controller_exit_test.shs` exited 1 in 8.9 seconds
+before the repair: `controller exited but watchdog left workload running without a receipt`.
+The test cleaned up its disposable processes.
+
+Actual GREEN after the repair: the same regression passed three real process
+cases in 5.1 seconds: killing only the controller stops an isolated shell and
+sleep child; a live controller permits normal completion; pausing observation,
+letting the workload finish, then killing the controller preserves exit 0.
+The existing `process_tree_rss_deadline_test.shs` also passed its sampling,
+timeout/grace, hung-sampler and cold-admission cases once. Perl syntax and
+`git diff --check` passed. No previously green execution was repeated.
+
+This repairs the demonstrated POSIX cancellation gap. It does not qualify a
+compiler, establish feature RED/GREEN, remove the missing LLVM provider, or
+authorize a release merge. Bootstrap and item 7 runtime acceptance remain pending.
+The repaired helper exists only in the acceptance worktree/commit; it was not
+copied into the frozen `109c4017820` bootstrap workspace. That workspace retains
+its original helper and source lineage. No new bootstrap was performed.
