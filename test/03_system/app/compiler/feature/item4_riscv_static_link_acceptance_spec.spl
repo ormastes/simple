@@ -235,3 +235,55 @@ describe "RV64 real static ELF link":
         if dynamic.is_ok() or rv32.is_ok(): return
         expect(dynamic.unwrap_err()).to_contain("RISC-V static ET_EXEC")
         expect(rv32.unwrap_err()).to_contain("RV32")
+
+    it "rejects overflow and odd targets for every retained branch encoding":
+        # @req ITEM4-REQ-004
+        step("Mutate one real branch addend at a time while preserving the instruction")
+        for kind in [16, 17, 44, 45]:
+            for addend in [1, 4194304]:
+                val start = item4_rv_mutate(kind, 16, addend)
+                step("Link the malformed branch through section placement and relocation")
+                val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+                step("Require a named branch range or alignment error")
+                expect(result.is_err()).to_equal(true)
+                if result.is_ok(): return
+                expect(result.unwrap_err()).to_contain("branch relocation {kind}")
+
+    it "rejects a PCREL low label from a different input section":
+        # @req ITEM4-REQ-004
+        step("Reference the undefined zero symbol from a retained low relocation")
+        val start = item4_rv_mutate(24, 8, 24)
+        step("Link with the label section mismatch")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require the same-input-section pairing diagnostic")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("same input section")
+
+    it "rejects nonzero GOT high addends":
+        # @req ITEM4-REQ-004
+        step("Change only the real GOT_HI20 addend")
+        val start = item4_rv_mutate(20, 16, 1)
+        step("Link the invalid GOT reference")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require the psABI zero-addend diagnostic")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("GOT_HI20 addend must be zero")
+
+    it "rejects incompatible floating-point ABI objects before output construction":
+        # @req ITEM4-REQ-006
+        step("Change only the provider ELF flags from soft-float to double-float")
+        val start = item4_rv_load("start.o")
+        var provider = item4_rv_load("provider.o")
+        expect(provider.len()).to_be_greater_than(63)
+        if provider.len() < 64: return
+        expect(provider[48]).to_equal(1)
+        if provider[48] != 1: return
+        provider[48] = 5
+        step("Link the incompatible ABI pair")
+        val result = elf_static_link([start, provider], [], "_start", RelocArch.Riscv64)
+        step("Require a named floating-point ABI rejection")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("incompatible floating-point ABI")
