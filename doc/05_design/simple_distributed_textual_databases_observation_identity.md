@@ -197,3 +197,17 @@ checkout-internal destinations, and observe busy SJ refusal followed by retry.
 Use populated accepted state when asserting no acceptance or retention mutation.
 These tests establish storage preparation only; crash recovery of a canonical
 quarantine decision, index fencing and mixed-batch atomicity remain separate gates.
+
+## Coordinated format rollout
+
+The [atomic integration plan](../03_plan/agent_tasks/simple_distributed_textual_databases_identity_atomic.md)
+defines the shared version boundary for policy, Reference images, Paged indexes,
+Git settlement and checkpoints. It also defines the seven reopened-state
+acceptance flows required on each backend. A schema helper cannot satisfy those
+effect gates by itself.
+
+The first dependency is the explicit POLICY-v2 envelope with a pinned provider
+scope map, independent identity-set digest and fail-closed scope selection. Its
+unit tests distinguish ordinary signing-policy rotation from identity-policy
+migration. It remains unavailable to legacy transition owners until the complete
+versioned rollout; dropping the map and forwarding only the v1 base is forbidden.

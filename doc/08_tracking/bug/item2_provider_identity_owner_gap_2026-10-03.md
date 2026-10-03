@@ -44,3 +44,11 @@ The regression now compares actual Reference rows/accepted/conflict data and
 verified Paged old/new batch/counter, row, high-water and reverse-index records,
 plus retention. It does not require a frozen canonical HEAD. Full rejected-wire
 readback and same-generation quarantine receipt/recovery remain missing.
+
+The [atomic rollout plan](../../03_plan/agent_tasks/simple_distributed_textual_databases_identity_atomic.md)
+now traces the required policy, local image, Paged index, settlement and
+checkpoint upgrades together. The POLICY-v2 schema dependency defines a pinned
+provider map with fail-closed selection and a structural identity-set digest.
+It intentionally does not activate indexed admission or migrate stored rows;
+this defect remains OPEN until the actual-owner regression and complete durable
+quarantine, mixed-batch, migration and recovery oracles pass on both backends.

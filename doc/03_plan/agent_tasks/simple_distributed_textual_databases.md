@@ -436,3 +436,14 @@ reviews exact-wire identity, quotas, lease scope and test prerequisites. Root
 owns architecture/design/guide consistency and integration. Storage preparation
 is complete only at source level here; canonical decision and recovery gates
 remain separately required. No system placeholder is replaced by a CAS handle.
+
+### Atomic identity rollout and POLICY-v2 lanes
+
+The [coordinated integration plan](simple_distributed_textual_databases_identity_atomic.md)
+records all versioned readers, writers, migration and provenance dependencies.
+All three isolated lanes start at 65f8e0173b8. Evidence owns the new independent
+POLICY-v2 unit fixtures/spec and authors them before implementation. Core owns
+only `db_identity_policy_config.spl`; research reviews the contract and both
+source lanes. Root owns shared design/plan changes and integration. The schema
+is a dependency, not activation of indexed writes. Actual-owner tests, all
+selected acceptance gates, runtime qualification and final merge remain open.

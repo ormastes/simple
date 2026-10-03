@@ -231,3 +231,23 @@ it. Malformed/over-quota input, checkout-internal scope and held leases must not
 produce candidate storage or accepted/retention mutations. Retry only after
 releasing the explicitly owned test lease. This gate prepares bytes; it is not
 the still-missing canonical identity-quarantine decision or its recovery proof.
+
+### POLICY-v2 scope-map tests
+
+Before atomic owner integration, exercise a two-provider round trip and exact
+scope selection; duplicate, unordered, foreign-context and unknown scopes;
+outer/base/provider pin tampering; and canonical shape, trailing data and quotas.
+Test aggregate encoding overflow with individually valid sealed policies as
+well as oversized decode input; one direction does not prove the other. Decode
+must bound the number of scope children before processing a 65th child.
+Assert that a transport capability change changes the identity-set pin, while
+ordinary signing-key or metadata rotation changes only the full configuration
+pin. Legacy readers must reject the new header. These are schema tests, not
+provider-index or quarantine acceptance. The seven real-owner flows remain in
+the [atomic plan](../agent_tasks/simple_distributed_textual_databases_identity_atomic.md).
+
+Source: `test/01_unit/lib/scv/db_identity_policy_config_spec.spl`, fourteen
+test-first cases. Implementation: `src/lib/scv/db_identity_policy_config.spl`.
+Independent source review covers the contract and thirteen initial cases; root
+also reviewed the final aggregate-size case. Runtime execution, RED/GREEN,
+coverage, doctests and the required core/MCP checks remain UNEXECUTED.
