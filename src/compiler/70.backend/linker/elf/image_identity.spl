@@ -1,0 +1,45 @@
+"""Reseal the canonical SHA1 build-id after target-specific header changes."""
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name, elf_read_u32_le}
+use std.common.crypto.sha1.{sha1_bytes}
+
+fn elf_reseal_build_id(image: [i64]) -> Result<[i64], text>:
+    var raw: [u8] = []
+    for byte in image:
+        if byte < 0 or byte > 255: return Err("ELF identity input contains a non-byte value")
+        raw.push(byte as u8)
+    val parsed = elf_parse_object(raw)?
+    val object = parsed
+    if raw.len() < 64 or raw[4] != 2 or raw[5] != 1:
+        return Err("ELF identity requires little-endian ELF64")
+    if object.header.e_type != 2 and object.header.e_type != 3:
+        return Err("ELF identity requires an executable or shared image")
+    var offset: i64 = -1
+    var index: i64 = 0
+    while index < object.sections.len():
+        if elf_section_name(object, index) == ".note.gnu.build-id":
+            if offset != -1: return Err("ELF identity has duplicate build-id notes")
+            val section = object.sections[index]
+            if section.sh_type != 7 or section.sh_size != 36:
+                return Err("ELF identity requires the canonical SHA1 build-id note")
+            offset = section.sh_addr
+        index = index + 1
+    if offset < 0 or offset > image.len() or 36 > image.len() - offset:
+        return Err("ELF identity build-id note is missing or truncated")
+    if elf_read_u32_le(raw, offset) != 4 or elf_read_u32_le(raw, offset + 4) != 20 or
+            elf_read_u32_le(raw, offset + 8) != 3 or
+            raw[offset + 12] != 71 or raw[offset + 13] != 78 or
+            raw[offset + 14] != 85 or raw[offset + 15] != 0:
+        return Err("ELF identity build-id payload is not GNU SHA1")
+    var sealed = image
+    index = 0
+    while index < 20:
+        sealed[offset + 16 + index] = 0
+        index = index + 1
+    val digest = sha1_bytes(sealed)
+    index = 0
+    while index < 20:
+        sealed[offset + 16 + index] = digest.get(index)
+        index = index + 1
+    Ok(sealed)
+
+export elf_reseal_build_id

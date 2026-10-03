@@ -1,0 +1,58 @@
+"""FreeBSD hosted ELF startup inputs, separate from Linux/glibc discovery.
+
+Startup ordering follows Clang's FreeBSD toolchain. The root parameter names
+the input filesystem; PT_INTERP always names the target's loader path.
+"""
+use std.io_runtime.{file_exists}
+use compiler.backend.linker.elf.image_identity.{elf_reseal_build_id}
+
+struct FreebsdHostedInputs:
+    before: [text]
+    after: [text]
+    shared: [text]
+    archives: [text]
+    library_paths: [text]
+    interpreter: text
+
+fn freebsd_hosted_inputs(root: text, pie: bool) -> Result<FreebsdHostedInputs, text>:
+    if root.contains("\0"): return Err("FreeBSD sysroot contains NUL")
+    var prefix = root
+    while prefix.ends_with("/"):
+        prefix = prefix.substring(0, prefix.len() - 1)
+    val lib = prefix + "/usr/lib"
+    val before = [lib + (if pie: "/Scrt1.o" else: "/crt1.o"),
+        lib + "/crti.o", lib + (if pie: "/crtbeginS.o" else: "/crtbegin.o")]
+    val after = [lib + (if pie: "/crtendS.o" else: "/crtend.o"), lib + "/crtn.o"]
+    for path in before + after:
+        if not file_exists(path): return Err("FreeBSD startup input cannot be read: {path}")
+    val loader = prefix + "/libexec/ld-elf.so.1"
+    val libc = prefix + "/lib/libc.so.7"
+    if not file_exists(loader): return Err("FreeBSD interpreter cannot be read: {loader}")
+    if not file_exists(libc): return Err("FreeBSD libc cannot be read: {libc}")
+    var shared: [text] = [libc]
+    # New FreeBSD releases split low-level system interfaces into libsys;
+    # older releases provide them through libc. Only admit a present provider.
+    for name in ["/lib/libsys.so.7", "/lib/libgcc_s.so.1"]:
+        val path = prefix + name
+        if file_exists(path): shared.push(path)
+    var archives: [text] = []
+    if file_exists(lib + "/libcompiler_rt.a"):
+        archives.push(lib + "/libcompiler_rt.a")
+    elif file_exists(lib + "/libgcc.a"):
+        archives.push(lib + "/libgcc.a")
+    Ok(FreebsdHostedInputs(before: before, after: after, shared: shared,
+        archives: archives,
+        library_paths: [lib, prefix + "/lib", prefix + "/usr/local/lib"],
+        interpreter: "/libexec/ld-elf.so.1"))
+
+fn freebsd_brand_image(image: [i64]) -> Result<[i64], text>:
+    if image.len() < 64: return Err("FreeBSD image header is truncated")
+    if image[4] != 2 or image[5] != 1:
+        return Err("FreeBSD hosted image requires little-endian ELF64")
+    if image[7] != 0 and image[7] != 9:
+        return Err("FreeBSD image has a conflicting ELF OSABI")
+    var branded = image
+    branded[7] = 9
+    elf_reseal_build_id(branded)
+
+export FreebsdHostedInputs, freebsd_hosted_inputs, freebsd_brand_image
