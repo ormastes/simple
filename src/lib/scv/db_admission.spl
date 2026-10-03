@@ -134,8 +134,12 @@ fn _db_operation_scope(operation: DbOperation, key: DbSignerKey, policy: DbAdmis
 fn db_authorize_patch(patch: DbPatch, policy: DbAdmissionPolicy, accepted_ids: [text], now: u64) -> Result<AuthorizedPatch, text>:
     if db_admission_policy_digest(policy)? != policy.revision:
         return Err("SCVDB_POLICY_REVISION")
-    if db_canonical_text(patch.repository)? != db_canonical_text(policy.repository)? or patch.namespace != policy.namespace or patch.epoch != policy.epoch:
+    if db_canonical_text(patch.repository)? != db_canonical_text(policy.repository)? or patch.namespace != policy.namespace:
         return Err("SCVDB_AUTHORITY_CONTEXT")
+    # Stale same-authority input needs an explicit resnapshot; it must never
+    # be heuristically rebased into the new allocator epoch.
+    if patch.epoch < policy.epoch: return Err("SCVDB_RESNAPSHOT_REQUIRED")
+    if patch.epoch > policy.epoch: return Err("SCVDB_AUTHORITY_CONTEXT")
     if patch.schema_revision != policy.schema_revision or patch.reducer_revision != policy.reducer_revision:
         return Err("SCVDB_VERSION")
     val message = db_patch_signing_bytes(patch)?

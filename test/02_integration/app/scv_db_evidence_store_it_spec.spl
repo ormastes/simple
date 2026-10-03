@@ -8,6 +8,10 @@ use app.io.env_ops.{host_os}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
 use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
 use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_put, db_evidence_store_get}
+use app.scv.db.evidence_delete.{db_evidence_delete_held}
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
 
 fn setup_item2_store_paths() -> (text, text):
     var root = ""
@@ -61,6 +65,31 @@ fn check_item2_store_read_bytes(path: text) -> [u8]:
     fail("fixture read failed")
 
 describe "SCV external evidence CAS real file publication":
+    it "deletes verified owned bytes only under the held writer and distinguishes an absent retry":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([1, 2, 3], [])
+        check_item2_store_put(source, external, node)
+        expect(db_evidence_delete_held(source, external, node.digest, 10, setup_item2_store_quota(), "owner")).to_equal(Err("SCVDB_DELETE_LEASE"))
+        expect(scv_sj_lease_acquire(source, "owner").starts_with("ok:")).to_be(true)
+        expect(db_evidence_delete_held(source, external, node.digest, 10, setup_item2_store_quota(), "forged")).to_equal(Err("SCVDB_DELETE_LEASE"))
+        expect(db_evidence_delete_held(source, external, node.digest, 10, setup_item2_store_quota(), "owner").unwrap().status).to_equal("unlinked")
+        expect(path_entry_present("{external}/scv-evidence-v1/{node.digest}.scve").unwrap()).to_be(false)
+        expect(db_evidence_delete_held(source, external, node.digest, 10, setup_item2_store_quota(), "owner").unwrap().status).to_equal("already_absent_synced")
+        expect(scv_sj_lease_is_held(source)).to_be(true)
+        expect(scv_sj_lease_release(source, "owner").starts_with("ok:")).to_be(true)
+
+    it "never reports a dangling evidence link as an already absent deletion":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([7, 8], [])
+        check_item2_store_put(source, external, node)
+        val path = "{external}/scv-evidence-v1/{node.digest}.scve"
+        expect(file_delete(path)).to_be(true)
+        expect(setup_item2_filesystem_link(source, "{external}/missing-target", path, false)).to_equal(0)
+        expect(scv_sj_lease_acquire(source, "owner").starts_with("ok:")).to_be(true)
+        expect(db_evidence_delete_held(source, external, node.digest, 10, setup_item2_store_quota(), "owner")).to_equal(Err("SCVDB_EVIDENCE_UNAVAILABLE"))
+        expect(path_entry_present(path).unwrap()).to_be(true)
+        expect(scv_sj_lease_release(source, "owner").starts_with("ok:")).to_be(true)
+
     it "publishes immutable binary bytes and dependency edges then reads them back":
         step("Persist an evidence envelope outside the canonical checkout")
         val (source, external) = setup_item2_store_paths()

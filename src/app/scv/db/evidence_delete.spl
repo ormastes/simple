@@ -1,0 +1,44 @@
+# Low-level owned-storage effect, NOT retention authorization. The catalog
+# owner must persist deletion intent and prove current pins/rollup coverage
+# under the SAME SJ lease before calling. No remote/clone erasure is claimed.
+use app.io.mod (file_delete, directory_fsync)
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_external_scope, db_evidence_store_get}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_entry_present}
+use std.scv.sj_capsule.{scv_sj_lease_is_held, scv_sj_lease_holder}
+
+struct DbEvidenceDeletionReceipt:
+    digest: text
+    status: text
+
+fn _db_delete_held(checkout: text, holder: text) -> bool:
+    holder != "" and scv_sj_lease_is_held(checkout) and scv_sj_lease_holder(checkout) == holder
+
+fn db_evidence_delete_held(checkout: text, external_parent: text, digest: text, created_day: u64, quota: DbEvidenceStoreQuota, holder: text) -> Result<DbEvidenceDeletionReceipt, text>:
+    if not _db_delete_held(checkout, holder): return Err("SCVDB_DELETE_LEASE")
+    if digest.len() != 64: return Err("SCVDB_EVIDENCE_DIGEST")
+    for index in 0..digest.len():
+        val code = digest.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return Err("SCVDB_EVIDENCE_DIGEST")
+    if quota.max_content_bytes < 0 or quota.max_content_bytes > 1073741824 or quota.max_envelope_bytes < 21 or quota.max_envelope_bytes > 2147483647 or quota.max_dependencies < 0 or quota.max_dependencies > 65536: return Err("SCVDB_EVIDENCE_QUOTA")
+    val root = db_evidence_external_scope(checkout, external_parent, "scv-evidence-v1")?
+    if not dir_is_real_no_follow(root): return Err("SCVDB_STORE_UNAVAILABLE")
+    val identity = path_final_existing(root)?
+    if identity.path != root: return Err("SCVDB_STORE_SCOPE")
+    val destination = "{root}/{digest}.scve"
+    var status = "already_absent_synced"
+    if path_entry_present(destination)?:
+        # Existing links, special files, corrupt bytes and unavailable reads are
+        # errors. They must never be reclassified as successful prior deletion.
+        val verified = db_evidence_store_get(checkout, external_parent, digest, created_day, quota)?
+        if verified.digest != digest: return Err("SCVDB_EVIDENCE_DIGEST")
+        if not _db_delete_held(checkout, holder): return Err("SCVDB_DELETE_LEASE")
+        if not file_delete(destination): return Err("SCVDB_DELETE_UNLINK")
+        status = "unlinked"
+    if path_entry_present(destination)?: return Err("SCVDB_DELETE_READBACK")
+    if not path_identity_same(identity, path_final_existing(root)?): return Err("SCVDB_STORE_SCOPE")
+    if not directory_fsync(root) or not directory_fsync(external_parent): return Err("SCVDB_DELETE_DURABILITY_UNCERTAIN")
+    if path_entry_present(destination)?: return Err("SCVDB_DELETE_READBACK")
+    Ok(DbEvidenceDeletionReceipt(digest: digest, status: status))
+
+export DbEvidenceDeletionReceipt, db_evidence_delete_held
