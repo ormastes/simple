@@ -12,6 +12,8 @@ enum FieldMergeRule:
     OrderedListConflict
     Derived
     ObservedRemoveSet
+    AddWinsSet
+    AuthorityWins(signer: text)
 
 struct DbFieldSchema:
     kind: text
@@ -87,6 +89,30 @@ fn db_schema_rule(policy: MergePolicy, kind: text, field: text) -> Result<FieldM
         if schema.kind == kind and db_normalize_text(schema.field)? == field: return Ok(schema.rule)
     Err("SCVDB_UNKNOWN_FIELD")
 
+fn db_rule_accepts_value(rule: FieldMergeRule, value: DbValue) -> Result<text, text>:
+    match rule:
+        OrderedListConflict:
+            match value:
+                List(_): Ok("list")
+                _: Err("SCVDB_LIST_TYPE")
+        Derived: Err("SCVDB_DERIVED_WRITE")
+        ObservedRemoveSet:
+            match value:
+                ObservedSet(_): Ok("set")
+                Absent: Ok("empty-set")
+                _: Err("SCVDB_SET_TYPE")
+        AddWinsSet:
+            match value:
+                ObservedSet(_): Ok("set")
+                Absent: Ok("empty-set")
+                _: Err("SCVDB_SET_TYPE")
+        _: Ok("value")
+
+fn db_field_authority(rule: FieldMergeRule, signer: text) -> bool:
+    match rule:
+        AuthorityWins(authority): authority != "" and authority == signer
+        _: false
+
 fn db_row_index(rows: [DbRow], entity: text) -> i64:
     var index = 0
     while index < rows.len():
@@ -161,6 +187,10 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
     var schema_names: [[u8]] = []
     for field in policy.fields:
         schema_names.push(db_frame(9u8, db_canonical_text(field.kind)? + db_canonical_text(field.field)?))
+        match field.rule:
+            AuthorityWins(authority):
+                if authority == "": return Err("SCVDB_FIELD_AUTHORITY")
+            _: ()
     val unique_schema = db_canonical_set(schema_names)?
     if patch.repository != policy.repository or patch.namespace != policy.namespace or patch.epoch != policy.epoch:
         return Err("SCVDB_RESNAPSHOT_REQUIRED")
@@ -193,9 +223,7 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                 else:
                     for field in fields:
                         val rule = db_schema_rule(policy, kind, field.name)?
-                        match rule:
-                            Derived: return Err("SCVDB_DERIVED_WRITE")
-                            _: ()
+                        val typed = db_rule_accepts_value(rule, field.value)?
                     rows.push(DbRow(entity: entity, kind: kind, fields: fields, revision: patch.batch_id, tombstoned: false))
             UpdateFields(ref, edits, condition):
                 val entity = entity_ref_canonical(ref)
@@ -213,9 +241,11 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                         match rule:
                             Derived: return Err("SCVDB_DERIVED_WRITE")
                             ObservedRemoveSet: return Err("SCVDB_SET_REQUIRES_DOTS")
+                            AddWinsSet: return Err("SCVDB_SET_REQUIRES_DOTS")
                             _: ()
+                        val typed = db_rule_accepts_value(rule, edit.after)?
                         val current = db_field_value(row.fields, edit.field)
-                        if db_values_equal(current, edit.before)? or db_values_equal(current, edit.after)?:
+                        if db_values_equal(current, edit.before)? or db_values_equal(current, edit.after)? or db_field_authority(rule, patch.signer):
                             row.fields = db_set_field(row.fields, edit.field, edit.after)
                         else:
                             conflicts.push(DbConflict(entity: entity, field: edit.field, code: "SCVDB_CONCURRENT_FIELD"))
@@ -242,6 +272,7 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                 else:
                     match db_schema_rule(policy, row.kind, field)?:
                         ObservedRemoveSet: ()
+                        AddWinsSet: ()
                         _: return Err("SCVDB_SET_POLICY")
                     val updated = db_set_add(db_field_value(row.fields, field), member, dot)?
                     row.fields = db_set_field(row.fields, field, updated)
@@ -257,6 +288,7 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                 else:
                     match db_schema_rule(policy, row.kind, field)?:
                         ObservedRemoveSet: ()
+                        AddWinsSet: ()
                         _: return Err("SCVDB_SET_POLICY")
                     row.fields = db_set_field(row.fields, field, db_set_remove(db_field_value(row.fields, field), observed)?)
                     row.revision = patch.batch_id
@@ -266,9 +298,7 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                 val index = db_row_index(rows, entity)
                 for field in fields:
                     val rule = db_schema_rule(policy, kind, field.name)?
-                    match rule:
-                        Derived: return Err("SCVDB_DERIVED_WRITE")
-                        _: ()
+                    val typed = db_rule_accepts_value(rule, field.value)?
                 if index < 0:
                     rows.push(DbRow(entity: entity, kind: kind, fields: fields, revision: patch.batch_id, tombstoned: false))
                 elif rows[index].tombstoned or rows[index].kind != kind or db_fields_bytes(rows[index].fields)? != db_fields_bytes(fields)?:

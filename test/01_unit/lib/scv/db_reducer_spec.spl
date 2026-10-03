@@ -137,3 +137,31 @@ describe "REQ-012 REQ-013 REQ-015 pure reducer previews":
         expect(db_plan_patch(next, historical, setup_item2_policy()).unwrap().conflicts.len()).to_equal(0)
         val genesis = setup_item2_update("status", "open", "closed", 4)
         expect(db_plan_patch(next, genesis, setup_item2_policy()).unwrap().conflicts.len()).to_equal(0)
+
+    it "permits only the policy authority to resolve an incompatible field edit":
+        step("Bind conflict selection to the signer checked by the admission owner")
+        var policy = setup_item2_policy()
+        policy.fields = [DbFieldSchema(kind: "bug", field: "title", rule: FieldMergeRule.AuthorityWins("reviewer")), DbFieldSchema(kind: "bug", field: "status", rule: FieldMergeRule.ScalarConflict)]
+        val initial = db_plan_patch(db_empty_state(), setup_item2_create(), policy).unwrap().proposed
+        val changed = db_plan_patch(initial, setup_item2_update("title", "first", "second", 2), policy).unwrap().proposed
+        val other = setup_item2_update("title", "first", "third", 3)
+        expect(db_plan_patch(changed, other, policy).unwrap().conflicts[0].code).to_equal("SCVDB_CONCURRENT_FIELD")
+        var authority = other
+        authority.signer = "reviewer"
+        authority = db_patch_seal(authority).unwrap()
+        val plan = db_plan_patch(changed, authority, policy).unwrap()
+        expect(plan.conflicts.len()).to_equal(0)
+        expect(db_field_value(plan.proposed.rows[0].fields, "title")).to_equal(DbValue.Text("third"))
+        expect(plan.authorization_status).to_equal("UNVERIFIED_PREVIEW")
+
+    it "requires ordered list values and refuses scalar replacement of causal sets":
+        step("Enforce schema value shape before retaining any accepted batch")
+        var list_policy = setup_item2_policy()
+        list_policy.fields = [DbFieldSchema(kind: "bug", field: "title", rule: FieldMergeRule.OrderedListConflict), DbFieldSchema(kind: "bug", field: "status", rule: FieldMergeRule.ScalarConflict)]
+        expect(db_plan_patch(db_empty_state(), setup_item2_create(), list_policy)).to_equal(Err("SCVDB_LIST_TYPE"))
+        var set_policy = setup_item2_policy()
+        set_policy.fields = [DbFieldSchema(kind: "bug", field: "title", rule: FieldMergeRule.AddWinsSet), DbFieldSchema(kind: "bug", field: "status", rule: FieldMergeRule.ScalarConflict)]
+        val create = setup_item2_reducer_patch([DbOperation.Create(setup_item2_ref(1), "bug", [])], 1)
+        val initial = db_plan_patch(db_empty_state(), create, set_policy).unwrap().proposed
+        val edit = setup_item2_update("title", "first", "second", 2)
+        expect(db_plan_patch(initial, edit, set_policy)).to_equal(Err("SCVDB_SET_REQUIRES_DOTS"))
