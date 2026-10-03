@@ -1,5 +1,31 @@
 # Profile-switchable container detail design
 
+## Concrete typed integration and TDD contract (2026-10-03)
+
+The [architecture acceptance matrix](../../04_architecture/compiler/profile_switchable_container_algorithms.md#completion-contract-supplement-2026-10-03) binds PSC-AC-001..008 to REQ-PSC-001..008. Existing unary typed extraction must be extended, not replaced with source-name matching.
+
+### Extraction and proof adapter
+
+Carry declaration identity, explicit algorithm, policy and instantiated container/key/value types from the attributed declaration into typed HIR. Validate factory result types there. Use resolved operation symbols from the collection registry; identical method spellings on unrelated types are negative cases. Keep the original expression/block and evaluation order in the logical plan so rejection is lossless.
+
+The adapter between logical and physical facts starts from `collection_plan_unproven_facts()`. Fill each boolean only from its owning analysis: equality/hash/order capability from resolved typed operations, purity from effect summaries, duplicate/order equivalence from operation semantics, epoch stability from alias/mutation analysis, target availability from backend capabilities, and bounded updates from the implementation plus allocation policy. A known cardinality estimate or admitted p95 never supplies `hard_size_bound`. Memory estimates describe peak extra live storage during construction and transition, including simultaneous old/new storage. Unknown memory remains `-1`.
+
+Use explicit imports or qualified names for the distinct logical and physical `CollectionPlanFacts`. Bind the adapter result to site, instantiated types, body hash, callee-summary versions, target, policy/registry version and admitted profile digest. Invalidating any input invalidates the decision. Prepare profile indexes once per admitted immutable module/dependency snapshot; no per-node file reads, sorts or full-profile scans.
+
+### Lowering and fallback
+
+Lower only a decision whose proof receipt still matches the typed node. Original emits the preserved logical expression. Other decisions emit the selected storage/operation and explicit runtime guards before any observable callback is evaluated. A failed guard executes Original with the same source values and callback evaluation count. Reuse an index only when both collection identity and mutation epoch match; clear, remove, replacement and insertion invalidate affected indexes. Do not key reuse by pointer alone.
+
+Join extension must represent both inputs, key functions, output projection, duplicate multiplicity and required output order. Nested is the semantic baseline. Hash needs proved compatible equality/hash and order reconstruction where required; merge needs proved ordering on both inputs or an explicit costed sort that preserves the logical contract. Unique-key assumptions cannot erase duplicate cross-products. Short-circuit operations must preserve the first observable result and callback trace. P0 correctness evidence is a prerequisite to enabling these lowering choices, not a flag set by the extractor.
+
+### Executable acceptance sequence
+
+For each matrix row, first add a focused failing SSpec invoking the actual typed/compiler/runtime boundary. Reuse existing manual `step` and setup/checker helper names. A deliberately incomplete scenario fails with `assert(false)` or `fail(...)`; it cannot pass through a TODO marker, source substring assertion or fixed expected transcript. Record the initial failure, implement the behavior, and execute the focused check once after the fix. Complete at most three fix/verification cycles per feature session.
+
+The representation trace corpus includes empty containers, repeated equal keys, replacement retaining correct payload, present nil payload versus absent key, removals at each tree position, clear/reuse and all six directed representation transitions. Typed negative fixtures cover same-spelling unrelated methods, missing capabilities, effectful equality/callbacks, escaping references, stale mutation epochs, wrong target, and unproved hard bounds. Join fixtures include duplicate keys on both sides, empty sides and order-sensitive projections.
+
+Capture deterministic operation results, selected algorithm and measured counters as structured execution artifacts. Generate the SSpec manual from the executed scenarios; keep executable specs under `test/`, never `doc/06_spec/`. Interpreter and native receipts must identify the admitted self-hosted executable and tested source revision. Geometric performance cases compare build and query phases separately and record peak temporary bytes/RSS; a green semantic fixture cannot prove scaling or memory bounds. Pending backend or metric coverage remains a release blocker.
+
 **Architecture:** [profile-switchable container algorithms](../../04_architecture/compiler/profile_switchable_container_algorithms.md). **Requirements:** [feature](../../02_requirements/feature/profile_switchable_container_algorithms.md), [NFR](../../02_requirements/nfr/profile_switchable_container_algorithms.md).
 
 ## Source and type contract
